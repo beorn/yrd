@@ -7018,10 +7018,10 @@ describe("runYrd", () => {
       }),
     )
     const rows = rendered.split("\n").filter(Boolean)
-    const header = rows.find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("PR"))
+    const header = rows.find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("CHANGES"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "STATUS", "RUN", "PR", "BY", "AGE"]) expect(header).toContain(label)
-    // STEP folded into the PR cell (item Q), so it is no longer a header column.
+    for (const label of ["TIME", "STATUS", "RUN", "CHANGES", "BY", "AGE"]) expect(header).toContain(label)
+    // STEP folded into the CHANGES cell (item Q), so it is no longer a header column.
     for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) {
       expect(header).not.toContain(removed)
     }
@@ -8282,7 +8282,7 @@ describe("runYrd", () => {
       expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
       expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
-      const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
+      const header = rows.find((row) => row.includes("TIME") && row.includes("CHANGES"))
       expect(header).not.toContain("STEP")
       expect(header).toContain("AGE")
       expect(header?.trimEnd()).toMatch(/RUN$/u)

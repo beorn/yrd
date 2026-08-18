@@ -281,7 +281,12 @@ describe("watch detail composite header + status notice", () => {
       expect(rows[noticeY]).toContain("×")
       expect(app.cell(rows[noticeY]?.indexOf("failed") ?? -1, noticeY).bold).toBe(true)
       const topBorderY = rows.findLastIndex((line, index) => index < noticeY && line.includes("╭"))
-      const borderX = rows[topBorderY]?.indexOf("╭") ?? -1
+      // `lastIndexOf`, not `indexOf`: the status box's border now carries the
+      // RUN identity right in its top border (operator spec item 1), so on a
+      // narrow pane that border can land on the SAME row as the split-pane's
+      // list-side RUNNER box border. The detail pane is always the rightmost
+      // region, so its own "╭" is the last one on a shared row.
+      const borderX = rows[topBorderY]?.lastIndexOf("╭") ?? -1
       expect(topBorderY, "notice has an outline").toBeGreaterThanOrEqual(0)
       expect(app.cell(borderX, topBorderY).fg, "border and headline use the same status tone").toEqual(
         app.cell(rows[noticeY]?.indexOf("failed") ?? -1, noticeY).fg,

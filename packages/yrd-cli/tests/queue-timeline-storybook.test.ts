@@ -202,7 +202,7 @@ describe("queue timeline storybook", () => {
       term.screen
         .getText()
         .split("\n")
-        .find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("PR"))
+        .find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("CHANGES"))
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
@@ -440,7 +440,7 @@ describe("queue timeline storybook", () => {
   it("surfaces the latest revision submitter in the wide BY column and hides it on the narrow tier", async () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
-      frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
+      frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("CHANGES"))
     // Height fits the STATS panel; the standalone
     // QueueTimelineView has no fillHeight list-scroll, so a fixed box tuned to the
     // old short metrics box would clip the header. Production (QueueWatchFrame) keeps
@@ -611,7 +611,7 @@ describe("queue timeline storybook", () => {
     )
     try {
       await right.waitForLayoutStable()
-      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("PR"))
+      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("CHANGES"))
       expect(header).toContain("STATUS")
       expect(header).not.toContain("BY")
       expect(right.text).toContain("pr#42.1")

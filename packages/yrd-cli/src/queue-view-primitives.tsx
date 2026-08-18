@@ -29,7 +29,7 @@ export function timelineMetric(value: number | null): string {
  * border with a left title and optional right label punched into the top edge.
  */
 export function TitledBox({
-  title,
+  title = "",
   titleRight,
   borderColor,
   padding,
@@ -38,7 +38,10 @@ export function TitledBox({
   flushTop = false,
   children,
 }: Readonly<{
-  title: string
+  /** Left-anchored border title. Omit or pass "" for a box whose border
+   * carries no left text — a bare "╭" leads straight into the horizontal
+   * line, leaving `titleRight` (if given) as the border's only label. */
+  title?: string
   titleRight?: string
   borderColor?: string
   padding?: number
@@ -67,15 +70,23 @@ export function TitledBox({
       userSelect="contain"
     >
       <Box flexDirection="row" width="100%" flexShrink={0} minWidth={0}>
-        <Text color={border} flexShrink={0}>
-          {"╭─ "}
-        </Text>
-        <Text color={border} bold flexShrink={0}>
-          {title}
-        </Text>
-        <Text color={border} flexShrink={0}>
-          {" "}
-        </Text>
+        {title === "" ? (
+          <Text color={border} flexShrink={0}>
+            {"╭"}
+          </Text>
+        ) : (
+          <>
+            <Text color={border} flexShrink={0}>
+              {"╭─ "}
+            </Text>
+            <Text color={border} bold flexShrink={0}>
+              {title}
+            </Text>
+            <Text color={border} flexShrink={0}>
+              {" "}
+            </Text>
+          </>
+        )}
         <Box
           height={1}
           flexGrow={1}

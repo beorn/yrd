@@ -162,13 +162,13 @@ describe("queue timeline chrome 21106", () => {
           expect(box?.x, `column '${cell}' row ${index} x-offset`).toBe(header?.x)
         }
       }
-      // Split header labels: RUN and PR are separate labels, each over its
-      // own column — no merged RUN·PR header.
-      expect(app.text).not.toContain("RUN·PR")
+      // Split header labels: RUN and CHANGES are separate labels, each over
+      // its own column — no merged RUN·CHANGES header.
+      expect(app.text).not.toContain("RUN·CHANGES")
       const headerY = rowIndexOf(app.text, "TIME")
       const headerLine = rowAt(app.text, headerY)
       expect(headerLine).toContain("RUN")
-      expect(headerLine).toContain("PR")
+      expect(headerLine).toContain("CHANGES")
 
       // One renderer, two modes (user contract 2026-07-16): the one-shot
       // (nav off) render must be layout-identical to the live (nav on)

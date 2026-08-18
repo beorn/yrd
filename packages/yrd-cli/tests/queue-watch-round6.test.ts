@@ -42,12 +42,14 @@ function pointOf(text: string, needle: string): readonly [number, number] {
   return [rows[y]?.indexOf(needle) ?? -1, y]
 }
 
+// Renamed from the "PR" tab (operator spec item 3: the first tab is now
+// "Changes").
 async function selectPrTab(app: ReturnType<ReturnType<typeof createRenderer>>): Promise<void> {
   const rows = app.text.split("\n")
-  const y = rows.findIndex((row) => row.includes("PR") && row.includes("1: prepare"))
+  const y = rows.findIndex((row) => row.includes("Changes") && row.includes("1: prepare"))
   const divider = rows[y]?.indexOf("│") ?? -1
-  const x = rows[y]?.indexOf("PR", divider + 1) ?? -1
-  if (x < 0 || y < 0) throw new Error(`missing PR tab in rendered frame:\n${app.text}`)
+  const x = rows[y]?.indexOf("Changes", divider + 1) ?? -1
+  if (x < 0 || y < 0) throw new Error(`missing Changes tab in rendered frame:\n${app.text}`)
   await app.click(x, y)
   await app.waitForLayoutStable()
 }
@@ -338,8 +340,8 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
 
       const initialRows = app.text.split("\n")
-      const tabsY = initialRows.findIndex((row) => row.includes("PR") && row.includes("1: merge"))
-      const prTabX = initialRows[tabsY]?.indexOf("PR") ?? -1
+      const tabsY = initialRows.findIndex((row) => row.includes("Changes") && row.includes("1: merge"))
+      const prTabX = initialRows[tabsY]?.indexOf("Changes") ?? -1
       expect(tabsY, "detail tab bar renders").toBeGreaterThanOrEqual(0)
       await app.click(prTabX, tabsY)
       await app.waitForLayoutStable()
@@ -359,17 +361,27 @@ describe("queue watch user round 6", () => {
       expect(app.text).not.toMatch(/[▸•]\s+PRS\b/u)
       expect(app.text).not.toContain("TIMELINE")
       expect(app.text).not.toContain("LANDING")
-      expect(app.text).not.toContain("ISSUE")
+      // ISSUE now legitimately renders as a KEY/value fact (operator spec item
+      // 4.a moved it off the identity row) — see the ISSUE assertions below,
+      // which pin its new uppercase KEY/value form for both batch members.
       expect(app.text).toContain("1: merge")
-      // The PR tab is scoped to the selected member. Run membership and timing
-      // belong to the real workflow-step tabs below it.
+      // Run membership/timing still belongs to the real workflow-step tabs (the
+      // "PRs pr#60.4...pr#61.1" summary line), not this tab. But the Changes tab
+      // itself now lists EVERY batched member, each in its own box (operator spec
+      // item 4) — not just the cursor's selected PR, as it did before.
       expect(app.text).not.toMatch(/PRs\s+pr#60\.4.*pr#61\.1/u)
       expect(app.text).not.toContain(`Committed as ${commit} on main`)
       expect(app.text).not.toMatch(/Started \d{2}:\d{2}:\d{2}, ended/u)
       expect(app.text).toContain("pr#60.4")
-      expect(rows.map((row) => row.slice(detailX)).join("\n")).not.toContain("pr#61.1")
+      const changesText = rows.map((row) => row.slice(detailX)).join("\n")
+      expect(changesText, "the batch's other member gets its own box too").toContain("pr#61.1")
+      expect(changesText).toContain(`${BRANCH_GLYPH} topic/pr61`)
+      expect(changesText).toMatch(/ISSUE\s+@yrd\/core\/21525-queue-watch/u)
       expect(app.text).not.toContain("PR60.4")
-      expect(app.text).toContain("pr#60.4 @yrd/core/21514-detail-pane")
+      // The cursor's own PR (pr#60.4) skips repeating its id — the pane title
+      // above already owns it — so its ISSUE now renders as a KEY/value fact
+      // instead of riding the old identity+issue row.
+      expect(app.text).toMatch(/ISSUE\s+@yrd\/core\/21514-detail-pane/u)
       expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr60`)
       expect(app.text).not.toContain(`${BRANCH_GLYPH} topic/pr60 - @yrd/core/21514-detail-pane`)
       // Subject has no "- " prefix; description rows have no 2-space indent.
@@ -389,7 +401,21 @@ describe("queue watch user round 6", () => {
       expect(app.text).toMatch(/\d{2}:\d{2} r2 rejected \(err=visual-rejected — round-2 hierarchy was rejected\)/u)
       expect(app.text).toMatch(/\d{2}:\d{2} r1 rejected \(err=mock-mismatch — round-1 detail layout was rejected\)/u)
       expect(app.text).toMatch(/\d{2}:\d{2} submitted by @ci/u)
-      expect(app.text).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
+      // Newest first (operator spec item 4: "reverse-chronological history").
+      // "submitted by @ci" is r4's OWN submit event (10:30), which falls
+      // between r4's 10:41 integration and r3's rejection the day before — so
+      // by clock time the order is r4, submitted, r3, r2, r1, not r4..r1 then
+      // submitted last.
+      const r4Y = rows.findIndex((line) => line.includes("r4 integrated"))
+      const submittedY = rows.findIndex((line) => line.includes("submitted by @ci"))
+      const r3Y = rows.findIndex((line) => line.includes("r3 rejected"))
+      const r2Y = rows.findIndex((line) => line.includes("r2 rejected"))
+      const r1Y = rows.findIndex((line) => line.includes("r1 rejected"))
+      expect(r4Y, "every history entry renders").toBeGreaterThanOrEqual(0)
+      expect([r4Y, submittedY, r3Y, r2Y, r1Y], "history renders newest clock time first").toEqual(
+        [r4Y, submittedY, r3Y, r2Y, r1Y].toSorted((left, right) => left - right),
+      )
+      expect(app.text).toContain(`▶️ Diff +324 / -323 ${["li", "nes"].join("")}`)
       expect(app.text).not.toContain("src/detail-pane.tsx")
       expect(app.text).not.toContain("click to expand")
 
@@ -403,7 +429,12 @@ describe("queue watch user round 6", () => {
 
       const prY = rows.findIndex((row) => row.slice(detailX).includes("pr#60.4"))
       const prX = rows[prY]?.indexOf("pr#60.4") ?? -1
-      const titleBlockY = rows.findIndex((row) => row.slice(detailX).includes("Lead title may wrap"))
+      // Skip the item-2 PR-list row above the tabs — it ALSO shows this bold
+      // title (next to "pr#60.4"), so anchor on the per-change box's own
+      // title-only line instead (nothing else shares that row).
+      const titleBlockY = rows.findIndex(
+        (row) => row.slice(detailX).includes("Lead title may wrap") && !row.includes("pr#60.4"),
+      )
       const titleX = rows[titleBlockY]?.indexOf("Lead title") ?? -1
       const bodyY = rows.findIndex((row) => row.slice(detailX).includes("First description row"))
       const bodyX = rows[bodyY]?.indexOf("First description row") ?? -1
@@ -416,8 +447,14 @@ describe("queue watch user round 6", () => {
 
       const diff = pointOf(app.text, `Diff +324 / -323 ${["li", "nes"].join("")}`)
       const collapsedRows = app.text.split("\n")
-      expect(collapsedRows[diff[1] - 1]?.slice(detailX).trim(), "blank row above the diff summary").toBe("")
-      expect(collapsedRows[diff[1] + 1]?.slice(detailX).trim(), "blank row below the diff summary").toBe("")
+      // Each change now sits inside its own box (operator spec item 4), so the
+      // rows immediately above/below the diff summary carry that box's own
+      // left/right border ("│") at the detailX offset — strip border chars
+      // too, not just whitespace, to check for "no content" rather than "no
+      // characters at all".
+      const blank = (row: string | undefined) => (row?.slice(detailX) ?? "").replace(/[│\s]/gu, "")
+      expect(blank(collapsedRows[diff[1] - 1]), "blank row above the diff summary").toBe("")
+      expect(blank(collapsedRows[diff[1] + 1]), "blank row below the diff summary").toBe("")
       expect(
         collapsedRows.slice(diff[1] + 1, diff[1] + 4).some((row) => row.slice(detailX).includes("─")),
         "a horizontal divider terminates the PR diff section",
@@ -426,6 +463,9 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
       expect(app.text).toContain("src/detail-pane.tsx")
       expect(app.text).toContain("+new detail")
+      // The fold marker flips collapsed->expanded (▶->▼) in place.
+      expect(app.text).toContain(`▼ Diff +324 / -323 ${["li", "nes"].join("")}`)
+      expect(app.text).not.toContain(`▶️ Diff +324 / -323 ${["li", "nes"].join("")}`)
 
       const expandedPatch = pointOf(app.text, "+new detail")
       await app.click(expandedPatch[0], expandedPatch[1])
@@ -576,21 +616,21 @@ describe("queue watch user round 6", () => {
     const diffs = snapshot.diffs?.map((diff, index) =>
       index === 0 ? { pr: diff.pr, revision: diff.revision, unavailable: "git-error" as const } : diff,
     )
-    const app = createRenderer({ cols: 200, rows: 50 })(h(QueueWatchFrame, { snapshot: { ...snapshot, diffs } }))
+    // Tall enough that both batch members' full boxes (facts + diff) render
+    // without scrolling — the Changes tab now lists every member (operator
+    // spec item 4), not just the cursor's, so both reasons show at once.
+    const app = createRenderer({ cols: 200, rows: 90 })(h(QueueWatchFrame, { snapshot: { ...snapshot, diffs } }))
     try {
       await app.waitForLayoutStable()
       // The running `check` step is selected initially. Move left through
-      // `prepare` to the PR overview before asserting its diff reason.
+      // `prepare` to the Changes tab before asserting the diff reasons.
       await app.press("h")
       await app.press("h")
       await app.waitForLayoutStable()
-      // The detail shows only the cursor PR's diff, so each member PR's
-      // unavailable reason is read from that PR's own row: git error on the first
-      // member, pruned refs on the second.
+      // Each member's unavailable reason is read from that member's own box:
+      // git error on the first member, pruned refs on the second — both
+      // visible together now that every batch member gets its own box.
       expect(app.text).toContain("diff unavailable (git error)")
-      await app.press("j")
-      await app.waitForLayoutStable()
-      await selectPrTab(app)
       expect(app.text).toContain("diff unavailable (refs pruned)")
     } finally {
       app.unmount()
