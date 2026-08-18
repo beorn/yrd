@@ -7214,11 +7214,13 @@ describe("runYrd", () => {
     const lockAcquired = Promise.withResolvers<void>()
     let lock: Promise<void> | undefined
     try {
-      const absent = outputIO({ cwd: repo, healthServiceName: "yrd-runner-pm" })
+      // Never the "yrd-runner" default from run.ts: an identity equal to the fallback
+      // passes even with the health plumbing removed.
+      const absent = outputIO({ cwd: repo, healthServiceName: "yrd-runner-under-test" })
       expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), absent.io, services)).toBe(1)
       expect(JSON.parse(absent.stdout())).toMatchObject({
         schema: "hab-service-health/1",
-        service: "yrd-runner-pm",
+        service: "yrd-runner-under-test",
         state: "absent",
         running: false,
         facts: { lease: "free", git: { dirty: true, baselines: [{ base: "main", ahead: 1, behind: 0 }] } },

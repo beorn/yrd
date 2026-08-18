@@ -15,16 +15,11 @@ describe("Yrd Hab runner declarations", () => {
   it("keeps repository and queue identity explicit in data and generated argv", () => {
     expect(yrdQueueRunnerDeclarations).toEqual([
       { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" } },
-      { serviceName: "yrd-runner-pm", repository: { name: "pm", path: "pm" }, queue: { base: "main" } },
     ])
     expect(hab.services).toMatchObject({
       "yrd-runner": {
         command: "tools/installed/yrd queue run code",
         health: { command: "tools/installed/yrd queue code --check --json" },
-      },
-      "yrd-runner-pm": {
-        command: "tools/installed/yrd queue run pm",
-        health: { command: "tools/installed/yrd queue pm --check --json" },
       },
     })
   })
@@ -47,7 +42,7 @@ describe("Yrd Hab runner declarations", () => {
     expect(() =>
       defineYrdQueueRunnerDeclarations([
         { serviceName: "yrd-code", repository: { name: "code", path: "." }, queue: { base: "main" } },
-        { serviceName: "yrd-code-2", repository: { name: "code", path: "pm" }, queue: { base: "main" } },
+        { serviceName: "yrd-code-2", repository: { name: "code", path: "elsewhere" }, queue: { base: "main" } },
       ]),
     ).toThrow("duplicate repository name 'code'")
     expect(() =>
