@@ -3856,7 +3856,17 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
-async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
+/**
+ * Exported for characterization: this gate had NO behavioural test while carrying the
+ * authored-gitlink refusal that the shaset model replaces, and three suites use that
+ * refusal's code as a fixture label, so they stay green through a behaviour change.
+ * See tests/authored-gitlink-admission.test.ts and @i/10-merge-queue/shaset-model.
+ */
+export async function requireQueueableSubmodulePins(
+  pr: PR,
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<void> {
   if (services.process === undefined) return
   const repo = io.cwd ?? process.cwd()
   const headSha = prHead(pr)
