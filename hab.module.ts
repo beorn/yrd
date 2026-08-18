@@ -37,7 +37,6 @@ export function defineYrdQueueRunnerDeclarations<const Rows extends readonly Yrd
 
 export const yrdQueueRunnerDeclarations = defineYrdQueueRunnerDeclarations([
   { serviceName: "yrd-runner", repository: { name: "code", path: "." }, queue: { base: "main" } },
-  { serviceName: "yrd-runner-pm", repository: { name: "pm", path: "pm" }, queue: { base: "main" } },
 ] as const)
 
 /**
