@@ -371,13 +371,16 @@ describe("drainYrdSettlementNotices", () => {
 
   it("delivers a prior worker's failure once and then removes it", () => {
     const dir = temporaryDir("yrd-notices-deliver-")
+    const failedAt = new Date(Date.now() - 300_000).toISOString()
     writeFileSync(
       join(dir, "1.json"),
-      `${JSON.stringify({ version: 1, owner: "@seat/1", commandCwd: "/repo", error: "boom" })}\n`,
+      `${JSON.stringify({ version: 1, owner: "@seat/1", commandCwd: "/repo", failedAt, error: "boom" })}\n`,
     )
     const first: string[] = []
     drainYrdSettlementNotices(dir, (text) => first.push(text))
-    expect(first).toEqual(["warning: background work from a previous Yrd command for @seat/1 failed in /repo: boom\n"])
+    expect(first).toEqual([
+      `warning: background work from a previous Yrd command for @seat/1 failed in /repo 5m ago (${failedAt}): boom\n`,
+    ])
     const second: string[] = []
     drainYrdSettlementNotices(dir, (text) => second.push(text))
     expect(second).toEqual([])
@@ -392,5 +395,45 @@ describe("drainYrdSettlementNotices", () => {
     const quarantined = readdirSync(join(dir, "invalid"))
     expect(quarantined).toHaveLength(1)
     expect(readFileSync(join(dir, "invalid", quarantined[0] ?? ""), "utf8")).toBe("{ not json")
+  })
+
+  it("dates the warning, so a three-day-old failure cannot read as current", () => {
+    const dir = temporaryDir("yrd-notices-age-")
+    const failedAt = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    writeFileSync(
+      join(dir, "1.json"),
+      `${JSON.stringify({ version: 1, owner: "@seat/1", commandCwd: "/repo", failedAt, error: "boom" })}\n`,
+    )
+    const lines: string[] = []
+    drainYrdSettlementNotices(dir, (text) => lines.push(text))
+    expect(lines).toEqual([
+      `warning: background work from a previous Yrd command for @seat/1 failed in /repo 3d ago (${failedAt}): boom\n`,
+    ])
+  })
+
+  it("quarantines an undated receipt rather than printing an ageless warning", () => {
+    const dir = temporaryDir("yrd-notices-undated-")
+    const body = `${JSON.stringify({ version: 1, owner: "@seat/1", commandCwd: "/repo", error: "boom" })}\n`
+    writeFileSync(join(dir, "undated.json"), body)
+    const lines: string[] = []
+    drainYrdSettlementNotices(dir, (text) => lines.push(text))
+    expect(lines.join("")).toContain("invalid prior settlement warning")
+    expect(lines.join("")).not.toContain("background work from a previous Yrd command")
+    const quarantined = readdirSync(join(dir, "invalid"))
+    expect(quarantined).toHaveLength(1)
+    expect(readFileSync(join(dir, "invalid", quarantined[0] ?? ""), "utf8")).toBe(body)
+  })
+
+  it("quarantines a failedAt that does not parse, rather than rendering its age as NaN", () => {
+    const dir = temporaryDir("yrd-notices-unparsable-")
+    writeFileSync(
+      join(dir, "skewed.json"),
+      `${JSON.stringify({ version: 1, commandCwd: "/repo", failedAt: "last tuesday", error: "boom" })}\n`,
+    )
+    const lines: string[] = []
+    drainYrdSettlementNotices(dir, (text) => lines.push(text))
+    expect(lines.join("")).toContain("invalid prior settlement warning")
+    expect(lines.join("")).not.toContain("NaN")
+    expect(readdirSync(join(dir, "invalid"))).toHaveLength(1)
   })
 })
