@@ -7,6 +7,7 @@ import { CorrelationSchema, type Correlation } from "@yrd/bay"
 import { parseJournalFrame, type Journal } from "@yrd/core"
 import { createExclusive, createReadOnlyJournal } from "@yrd/persistence"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
+import { formatDuration } from "./runner-timeline.ts"
 
 /**
  * Background settlement of terminal delivery facts.
@@ -566,10 +567,17 @@ export function drainYrdSettlementNotices(noticeDir: string, write: (text: strin
       let receipt: Record<string, unknown>
       try {
         receipt = JSON.parse(readFileSync(claimed, "utf8")) as Record<string, unknown>
+        // `failedAt` is required, not optional: a warning that cannot say how
+        // old it is reads as current, and operators act on stale ones. Both
+        // writers stamp it, so an undated or unparsable receipt is a legacy
+        // artifact — quarantined with the rest of the unreadable evidence
+        // rather than printed bare or rendered with a NaN age.
         if (
           receipt?.["version"] !== 1 ||
           typeof receipt["error"] !== "string" ||
-          typeof receipt["commandCwd"] !== "string"
+          typeof receipt["commandCwd"] !== "string" ||
+          typeof receipt["failedAt"] !== "string" ||
+          !Number.isFinite(Date.parse(receipt["failedAt"]))
         ) {
           throw new Error("invalid receipt shape")
         }
@@ -585,9 +593,11 @@ export function drainYrdSettlementNotices(noticeDir: string, write: (text: strin
         continue
       }
       const owner = typeof receipt["owner"] === "string" && receipt["owner"] !== "" ? ` for ${receipt["owner"]}` : ""
+      const failedAt = receipt["failedAt"] as string
       write(
         `warning: background work from a previous Yrd command${owner} failed in ` +
-          `${receipt["commandCwd"] as string}: ${receipt["error"] as string}\n`,
+          `${receipt["commandCwd"] as string} ${formatDuration(Date.now() - Date.parse(failedAt))} ago ` +
+          `(${failedAt}): ${receipt["error"] as string}\n`,
       )
       try {
         rmSync(claimed, { force: true })
