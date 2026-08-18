@@ -3,12 +3,15 @@
  *          suites naming `authored-gitlink` use it as a fixture label for refusal machinery and
  *          stay green through a behaviour change.
  * @level l1
- * @consumer @i/10-merge-queue/shaset-model step (a) — min-commit admission
+ * @consumer @i/10-merge-queue/shaset-model step (a) — min-commit admission;
+ *           @i/10-merge-queue/intent-deletion-radius step (d) — the admission flip
  *
- * CHARACTERIZATION, not specification. Every assertion below pins what the gate does TODAY, so
- * that when step (a) replaces the authored-gitlink refusal with derivation, the edit to this file
- * IS the record of the behaviour change. Do not "fix" these expectations to match the new model
- * without changing the model — change them deliberately, in the same commit as the code.
+ * CHARACTERIZATION, not specification. The first describe block below is what step (a) left
+ * standing deliberately ("the backstop survives untouched, per the coupling: its deletion
+ * ships with the provisioner lift or not at all" — shaset-model.md). Step (d) is that
+ * shipment: the provisioner lift landed in step (b), so a published, on-main, single-update
+ * authored gitlink is now ADMITTED here — this file's edit IS the record of that change, per
+ * its own prior instruction not to "fix" these expectations without changing the model.
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -98,6 +101,39 @@ async function superprojectWithHandBumpedPin(): Promise<{
   }
 }
 
+/**
+ * A superproject on `main` with NO component recorded at all, plus a branch that adds one by
+ * hand — the shape a min-commit admission must still refuse: the shaset-commit writer
+ * (`synthesizeGitlinkWrapper`) is update-only, so an added gitlink can never be filled in from
+ * a submodule's main the way an existing one can, no matter how published its target is.
+ */
+async function superprojectWithHandAddedPin(): Promise<{ root: string; headSha: string }> {
+  const fixture = await mkdtemp(join(tmpdir(), "yrd-authored-gitlink-added-"))
+  roots.push(fixture)
+  const component = join(fixture, "component")
+  const componentRemote = join(fixture, "component.git")
+  const root = join(fixture, "root")
+
+  await repository(component)
+  await writeFile(join(component, "component.txt"), "one\n")
+  await git(component, ["add", "component.txt"])
+  await git(component, ["commit", "-qm", "component one"])
+  await git(fixture, ["init", "-q", "--bare", "-b", "main", componentRemote])
+  await git(component, ["remote", "add", "origin", componentRemote])
+  await git(component, ["push", "-q", "-u", "origin", "main"])
+
+  await repository(root)
+  await writeFile(join(root, "root.txt"), "root\n")
+  await git(root, ["add", "root.txt"])
+  await git(root, ["commit", "-qm", "root, no component yet"])
+
+  await git(root, ["checkout", "-q", "-b", "task/hand-add"])
+  await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep"])
+  await git(root, ["commit", "-qm", "add dep by hand"])
+  const headSha = await git(root, ["rev-parse", "HEAD"])
+  return { root, headSha }
+}
+
 type GateArgs = Parameters<typeof requireQueueableSubmodulePins>
 
 // Only the fields this gate actually reads. Cast at the boundary rather than building a whole PR:
@@ -118,7 +154,10 @@ function prFixture(headSha: string): GateArgs[0] {
   } as unknown as GateArgs[0]
 }
 
-async function refusalFrom(root: string, headSha: string): Promise<{ kind: string; code: string; message: string }> {
+async function admissionOutcome(
+  root: string,
+  headSha: string,
+): Promise<{ outcome: "admitted" } | { outcome: "refused"; kind: string; code: string; message: string }> {
   await using process = createProcess()
   const services = { process } as unknown as GateArgs[1]
   const io = { cwd: root } as unknown as GateArgs[2]
@@ -127,71 +166,67 @@ async function refusalFrom(root: string, headSha: string): Promise<{ kind: strin
   } catch (error) {
     const fact = failureFact(error)
     if (fact === undefined) throw error
-    return { kind: fact.kind, code: fact.code, message: fact.message }
+    return { outcome: "refused", kind: fact.kind, code: fact.code, message: fact.message }
   }
-  throw new Error("the gate admitted a hand-bumped gitlink; that is the step-(a) behaviour, not today's")
+  return { outcome: "admitted" }
 }
 
-describe("pre-admission gate for hand-written gitlinks — behaviour as of the shaset build's start", () => {
-  it("refuses a hand-bumped gitlink even when the component commit IS published", async () => {
+async function refusalFrom(root: string, headSha: string): Promise<{ kind: string; code: string; message: string }> {
+  const result = await admissionOutcome(root, headSha)
+  if (result.outcome === "admitted") throw new Error("expected a refusal; the gate admitted the branch")
+  return result
+}
+
+describe("pre-admission gate for hand-written gitlinks — step (d)'s admission flip", () => {
+  it("admits a hand-bumped gitlink once the component commit is published on its main", async () => {
     const { root, headSha, publish } = await superprojectWithHandBumpedPin()
     await publish()
 
-    const refusal = await refusalFrom(root, headSha)
-
-    // The whole point of step (a): being published is NOT currently enough to be admitted.
-    expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })
-    expect(refusal.message).toContain("authored gitlinks are never admitted")
-    expect(refusal.message).toContain("dep")
-
-    // CROSS-STEP COUPLING, pinned deliberately. The remedy tells the author to run
-    // `yrd intent submit`, and step (d) DELETES that verb along with the PinIntent kind.
-    // `actionable-errors.test.ts` separately asserts this same remedy and will keep passing
-    // after the verb is gone, so this is the one place that fails and names the dependency.
-    // If you are here because this broke: the remedy must change in the same commit as the
-    // verb, not afterwards.
-    expect(refusal.message).toContain("yrd intent submit")
+    // The whole point of step (d): being published and on-main is now enough to be admitted.
+    // The queue's own composition-time fill (`fillAuthoredGitlinksFromMain`, unchanged by this
+    // step) derives the shaset value from the submodule's main; this gate only needed to stop
+    // refusing what that machinery can now safely process.
+    await expect(admissionOutcome(root, headSha)).resolves.toEqual({ outcome: "admitted" })
   })
 
-  it("checks publication BEFORE the authored-gitlink refusal, and the model keeps that order", async () => {
+  it("checks publication BEFORE the authored-gitlink question, and the model keeps that order", async () => {
     const { root, headSha } = await superprojectWithHandBumpedPin()
     // Deliberately not published.
 
     const refusal = await refusalFrom(root, headSha)
 
-    // submodule-main-first wins the race. Step (a) turns this refusal into a park; it must not
-    // turn it into an admission, and it must keep beating the authored-gitlink branch.
+    // submodule-main-first still wins the race — an unpublished pin is refused before the
+    // gate ever asks whether the change is an update it could otherwise admit.
     expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
-    // The message names the QUESTION the oracle now asks — main-ancestry, with main's sha —
-    // not the old any-branch phrasing ("is on zero refs fetched from origin"), which became
-    // false the moment the oracle tightened: a side-branch pin IS on a ref, just not on main.
+    // The message names the QUESTION the oracle asks — main-ancestry, with main's sha — not
+    // the old any-branch phrasing ("is on zero refs fetched from origin").
     expect(refusal.message).toContain("is not on that component's main")
+    // The remedy no longer names a verb step (d) deletes.
+    expect(refusal.message).not.toContain("yrd intent submit")
+    expect(refusal.message).toContain("ordinary merge request")
   })
 
-  /**
-   * THE GAP STEP (a) HAD TO CLOSE — flipped deliberately, in the same commit as the oracle.
-   *
-   * The shaset model says a min commit is satisfied by "the newest commit on that submodule's
-   * MAIN", and calls the rule submodule-main-first. The old oracle did not ask that question:
-   * it passed git-super `refPrefixes: ["refs/heads/"]`, which is EVERY branch, so a commit on
-   * someone's unmerged side branch counted as published and only the authored-gitlink backstop
-   * stopped it. The oracle now asks the merge path's own question — fetch the component's main
-   * into the shared probe ref, then ancestry — so the side-branch pin is refused by the
-   * publication check itself, before the backstop.
-   *
-   * The characterization above said "when this flips, it must flip to a park, never to an
-   * admission". A refusal is not an admission; the park CONVERSION arrives with the queue-side
-   * derivation set, which ships together with the backstop's deletion — not with the oracle.
-   */
   it("refuses a pin that is on a side branch and NOT on the component's main", async () => {
     const { root, headSha, publishToSideBranchOnly } = await superprojectWithHandBumpedPin()
     await publishToSideBranchOnly()
 
     const refusal = await refusalFrom(root, headSha)
 
-    // The oracle itself stops it now — reaching `authored-gitlink` here would mean the
-    // publication check waved through a pin the component's main never accepted.
+    // The publication oracle stops it, same as before the admission flip: this case never
+    // reaches the authored-gitlink question at all.
     expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
     expect(refusal.message).toContain("is not on that component's main")
+  })
+
+  it("still refuses a hand-ADDED gitlink, even when its target is published on the component's main", async () => {
+    const { root, headSha } = await superprojectWithHandAddedPin()
+
+    const refusal = await refusalFrom(root, headSha)
+
+    // An addition is not a min commit on an existing component — the shaset-commit writer
+    // cannot fill it in, so the admission flip must not reach a new path. If this ever starts
+    // returning "admitted", composition will refuse what the gate just admitted.
+    expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })
+    expect(refusal.message).toContain("dep")
   })
 })

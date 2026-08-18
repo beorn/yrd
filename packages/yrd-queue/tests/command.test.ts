@@ -43,7 +43,6 @@ import {
   gitMergeStep,
   gitMergeRecorder,
   inspectGitQueueTarget,
-  synthesizePinIntentCarrier,
   PRSnapshotSchema,
   Queues,
   withQueue,
@@ -1577,7 +1576,7 @@ describe("Queue command adapters", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message: expect.stringMatching(
-            new RegExp(`${fixture.gitlinkAdd.sha}.*new component.*yrd intent submit`, "su"),
+            new RegExp(`${fixture.gitlinkAdd.sha}.*new component.*can only bump an existing component`, "su"),
           ),
         },
         mutations: [],
@@ -1588,7 +1587,7 @@ describe("Queue command adapters", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message: expect.stringMatching(
-            new RegExp(`${fixture.gitlinkModify.sha}.*'yrd intent submit --component .* --target [0-9a-f]{40}`, "su"),
+            new RegExp(`${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary merge request`, "su"),
           ),
         },
         mutations: [],
@@ -1599,7 +1598,7 @@ describe("Queue command adapters", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message: expect.stringMatching(
-            new RegExp(`${fixture.gitlinkDelete.sha}.*deleted.*yrd intent submit cannot express deletion`, "su"),
+            new RegExp(`${fixture.gitlinkDelete.sha}.*deleted.*can only bump an existing.*never remove one`, "su"),
           ),
         },
         mutations: [],
@@ -2433,7 +2432,7 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "merge-tip-carrier",
-        message: expect.stringContaining("yrd intent submit --component <path>"),
+        message: expect.stringContaining("submit each component advance as its own ordinary merge request"),
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
@@ -3117,7 +3116,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "authored-gitlink",
-        message: expect.stringMatching(/yrd intent submit --component dep --target [0-9a-f]{40} --issue/iu),
+        message: expect.stringMatching(/'dep''s own main, then submit an ordinary merge request/u),
       },
     })
     expect(run.error?.message).not.toContain("yrd pr recut")
@@ -3137,49 +3136,6 @@ describe("Queue command adapters", () => {
     expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
   })
 
-  it("synthesizes one byte-stable pin carrier from current base without moving a ref", async () => {
-    const fixture = await hookedSubmoduleRepository({
-      baseVersion: "base",
-      candidateVersion: "candidate",
-      requiredVersion: "candidate",
-    })
-    await using process = createProcess()
-    const input = {
-      inject: { process },
-      repo: fixture.repo,
-      baseSha: fixture.baseSha,
-      component: "dep",
-      target: fixture.moduleSha,
-      issue: "@yrd/core/21679-integration-model-v2/22668-admit-intents",
-    } as const
-
-    const utc = await synthesizePinIntentCarrier({
-      ...input,
-      env: { ...globalThis.process.env, TZ: "UTC" },
-    })
-    const pacific = await synthesizePinIntentCarrier({
-      ...input,
-      env: { ...globalThis.process.env, TZ: "Pacific/Honolulu" },
-    })
-
-    expect(pacific).toEqual(utc)
-    expect(utc).toMatchObject({
-      component: "dep",
-      priorPin: expect.stringMatching(/^[0-9a-f]{40}$/u),
-      target: fixture.moduleSha,
-      baseSha: fixture.baseSha,
-      commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
-      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
-    })
-    expect(await git(fixture.repo, ["rev-parse", `${utc.commit}^`])).toBe(fixture.baseSha)
-    expect(await git(fixture.repo, ["ls-tree", utc.commit, "dep"])).toContain(fixture.moduleSha)
-    expect(await git(fixture.repo, ["show", "-s", "--format=%B", utc.commit])).toBe(
-      `chore(dep): advance pin to ${fixture.moduleSha.slice(0, 12)} [${input.issue}]\n\n` +
-        `Substrate-Pair: [[${input.issue}]]`,
-    )
-    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.baseSha)
-  })
-
   it("lands an intent through the ordinary Queue and journals lineage in the settlement frame", async () => {
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -3197,14 +3153,6 @@ describe("Queue command adapters", () => {
       target: fixture.moduleSha,
       submitter: "@dev/5",
     })
-    const materialized = await synthesizePinIntentCarrier({
-      inject: { process },
-      repo: fixture.repo,
-      baseSha: fixture.baseSha,
-      component: intent.component,
-      target: fixture.moduleSha,
-      issue: intent.issue.id,
-    })
 
     const run = (await app.queue.run({}, runtime))[0]
     if (run === undefined) throw new Error("expected intent Queue run")
@@ -3213,6 +3161,11 @@ describe("Queue command adapters", () => {
     expect(run).toMatchObject({ status: "completed", prs: [{ id: intent.id }] })
     expect(Object.keys(app.state().bays.prs)).toEqual([])
     expect(app.queue.audit().findings).toEqual([])
+    // commit/treeSha are shape-checked, not cross-derived against a second computation: the
+    // intent no longer has a CLI-facing `materialize` counterpart to independently re-derive
+    // them from, and this test's job is the Queue's OWN landing and journaling, not a
+    // byte-stability proof (that lives in tests/gitlink-wrapper.test.ts, per synthesizeGitlinkWrapper's
+    // own characterization).
     expect(app.intents.get(intent.id)).toMatchObject({
       status: "integrated",
       integration: {
@@ -3222,8 +3175,8 @@ describe("Queue command adapters", () => {
           candidate: run.candidateId,
           run: run.id,
           baseSha: fixture.baseSha,
-          commit: materialized.commit,
-          treeSha: materialized.treeSha,
+          commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
+          treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
           componentPin: fixture.moduleSha,
         },
       },
@@ -4086,7 +4039,7 @@ describe("Queue command adapters", () => {
         failure: {
           kind: "refusal",
           code: "authored-gitlink",
-          message: expect.stringMatching(/yrd intent submit --component dep --target [0-9a-f]{40} --issue/iu),
+          message: expect.stringMatching(/dep''s own main, then submit an ordinary merge request/iu),
         },
       },
     })
@@ -4095,7 +4048,7 @@ describe("Queue command adapters", () => {
         failure: {
           kind: "refusal",
           code: "merge-tip-carrier",
-          message: expect.stringMatching(/yrd intent submit --component <path>.*Queue owns the root carrier/iu),
+          message: expect.stringMatching(/submit each component advance.*Queue owns the root carrier/iu),
         },
       },
     })

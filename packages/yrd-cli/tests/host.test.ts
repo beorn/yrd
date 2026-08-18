@@ -2197,7 +2197,6 @@ checks: [{check: {run: "true"}}]
     ).toEqual([
       "mr|pr",
       "bay",
-      "intent",
       "issue",
       "contest",
       "queue",
@@ -3247,7 +3246,7 @@ checks: [{check: {run: "true"}}]
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
-    expect(stderr).toContain(`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`)
+    expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
 
     let listed = ""
     expect(
@@ -3263,74 +3262,11 @@ checks: [{check: {run: "true"}}]
       prs: [{ branch, checkRequests: [] }],
     })
 
-    // To the component's MAIN: the publication oracle is submodule-main-first, so a side-branch
-    // push no longer counts as published — this phase tests the backstop AFTER publication.
-    await git(component, "push", "-q", "origin", `${pin}:refs/heads/main`)
-    stdout = ""
-    stderr = ""
-    const publishedExit = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"],
-      {
-        cwd: repo,
-        stdout: (text) => {
-          stdout += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-      },
-    )
-    expect(publishedExit, stderr).toBe(1)
-    expect(stdout).toBe("")
-    expect(JSON.parse(stderr)).toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "authored-gitlink",
-        resolution: [`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`],
-      },
-    })
-    expect(stderr).toContain("dep")
-
-    listed = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          listed += text
-        },
-        stderr: () => undefined,
-      }),
-    ).toBe(0)
-    expect(JSON.parse(listed)).toMatchObject({
-      prs: [{ branch, status: "pushed", checkRequests: [] }],
-    })
-    expect(
-      (await journalEnvelope(repo))
-        .flatMap(({ values }) => values)
-        .flatMap((value) => parseJournalFrame(value).events)
-        .filter(({ name }) => name === "pr/submitted"),
-    ).toEqual([])
-
-    await git(repo, "push", "-q", "origin", `${branch}:${branch}`)
-    for (const remedy of [
-      ["pr", "create", branch, "--json"],
-      ["pr", "recut", "PR1", "--preflight", "--queue", "--json"],
-    ]) {
-      stdout = ""
-      stderr = ""
-      expect(
-        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, ...remedy], {
-          cwd: repo,
-          stdout: (text) => {
-            stdout += text
-          },
-          stderr: (text) => {
-            stderr += text
-          },
-        }),
-        stderr,
-      ).toBe(0)
-    }
+    // Once the pin lands on the component's own MAIN, the backstop this test used to hit here
+    // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
+    // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
+    // covers that admission directly; composition-fill-in.test.ts in @yrd/queue covers the
+    // derived shaset value it produces). This test stays scoped to the still-refusing case.
   })
 
   it("admits a branch whose only gitlink drift is base movement it never authored", async () => {
@@ -3522,7 +3458,7 @@ checks: [{check: {run: "true"}}]
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
-    expect(stderr).toContain(`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`)
+    expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
 
     let listed = ""
     expect(
@@ -3538,45 +3474,10 @@ checks: [{check: {run: "true"}}]
       prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
     })
 
-    // To the component's MAIN: the publication oracle is submodule-main-first, so a side-branch
-    // push no longer counts as published — this phase tests the backstop AFTER publication.
-    await git(component, "push", "-q", "origin", `${pin}:refs/heads/main`)
-    stdout = ""
-    stderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "ready", "PR1", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          stdout += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-      }),
-      stderr,
-    ).toBe(1)
-    expect(stdout).toBe("")
-    expect(JSON.parse(stderr)).toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "authored-gitlink",
-        resolution: [`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`],
-      },
-    })
-
-    listed = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          listed += text
-        },
-        stderr: () => undefined,
-      }),
-    ).toBe(0)
-    expect(JSON.parse(listed)).toMatchObject({
-      prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
-    })
+    // Once the pin lands on the component's own MAIN, the backstop this test used to hit here
+    // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
+    // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
+    // covers that admission directly). This test stays scoped to the still-refusing case.
   })
 
   it("refuses pr recut --queue when the recut revision retains an unpublished changed submodule pin", async () => {
@@ -3638,7 +3539,7 @@ checks: [{check: {run: "true"}}]
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
-    expect(stderr).toContain(`yrd intent submit --component dep --target ${pin} --issue <issue-ref>`)
+    expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
 
     let listed = ""
     expect(

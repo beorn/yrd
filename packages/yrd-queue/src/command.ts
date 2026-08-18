@@ -11,7 +11,6 @@ import {
   type YrdFailure,
 } from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
-import { ComponentPathSchema } from "@yrd/intent"
 import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { ensureCommitObject } from "git-super/objects"
@@ -4050,24 +4049,27 @@ async function intentSubmissionWorkflow(
       const target = await readGitlink(git, repo, headSha, component)
       if (previous === undefined) {
         return (
-          `component '${component}' is a new component; pin intents advance existing components only; ` +
-          "authorize the component-model addition before using yrd intent submit"
+          `component '${component}' is a new component; a merge request's gitlink diff can only bump an ` +
+          "existing component, never add one; authorize the component-model addition as an ordinary code change"
         )
       }
       if (target === undefined) {
         return (
-          `component '${component}' is deleted; pin intents advance existing components only; ` +
-          "restore it or authorize the component-model deletion separately; yrd intent submit cannot express deletion"
+          `component '${component}' is deleted; a merge request's gitlink diff can only bump an existing ` +
+          "component, never remove one; restore it, or authorize the component-model deletion as an ordinary code change"
         )
       }
-      return `submit pin work as 'yrd intent submit --component ${component} --target ${target} --issue ${issue}'`
+      return (
+        `get commit '${target}' onto '${component}''s own main, then submit an ordinary merge request whose ` +
+        `diff is the gitlink bump (issue ${issue})`
+      )
     }),
   )
   return steps.join("; ")
 }
 
 function componentIntentWorkflow(): string {
-  return "submit each component advance with 'yrd intent submit --component <path> --target <sha> --issue <issue-ref>'; Queue owns the root carrier"
+  return "submit each component advance as its own ordinary merge request whose diff is only the gitlink bump; Queue owns the root carrier"
 }
 
 type BaseContainment =
@@ -4628,90 +4630,6 @@ export async function synthesizeGitlinkWrapper(
     }
   }
   return { status: "passed", output: { commit, treeSha, generatedPaths: provisionedPaths } }
-}
-
-const PinIntentCarrierSynthesisInputSchema = z
-  .object({
-    baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
-    component: ComponentPathSchema,
-    target: z.string().regex(/^[0-9a-f]{40,64}$/iu),
-    issue: z
-      .string()
-      .trim()
-      .min(1)
-      .refine((value) => !/[\r\n]/u.test(value), "issue must occupy one line"),
-  })
-  .strict()
-
-export type PinIntentCarrierSynthesis = Readonly<{
-  component: string
-  priorPin: string
-  target: string
-  baseSha: string
-  commit: string
-  treeSha: string
-}>
-
-/** Materialize a PinIntent against one exact root base without moving any
- * authoritative ref. Queue and `yrd intent materialize` both call this. */
-export async function synthesizePinIntentCarrier(options: {
-  inject: Readonly<{ process: Pick<Process, "run"> }>
-  repo: string
-  baseSha: string
-  component: string
-  target: string
-  issue: string
-  checkoutParent?: string
-  env?: NodeJS.ProcessEnv
-}): Promise<PinIntentCarrierSynthesis> {
-  const input = PinIntentCarrierSynthesisInputSchema.parse({
-    baseSha: options.baseSha,
-    component: options.component,
-    target: options.target,
-    issue: options.issue,
-  })
-  const repo = resolve(options.repo)
-  const git = createGit(options.inject.process, options.env)
-  const outcome = await withScratch<PinIntentCarrierSynthesis>(
-    git,
-    repo,
-    input.baseSha,
-    options.checkoutParent,
-    async (path) => {
-      const priorPin = await readGitlink(git, path, "HEAD", input.component)
-      if (priorPin === undefined) {
-        throw createFailure({
-          kind: "refusal",
-          code: "intent-component-unknown",
-          message: `yrd: intent component '${input.component}' is not a gitlink at root base '${input.baseSha}'`,
-        })
-      }
-      const synthesized = await synthesizeGitlinkWrapper(
-        git,
-        path,
-        input.baseSha,
-        priorPin === input.target ? [] : [{ path: input.component, sha: input.target }],
-        pinIntentCommitMessage(input.component, input.target, input.issue),
-      )
-      if (synthesized.status === "failed") {
-        throw createFailure({ kind: "refusal", code: synthesized.error.code, message: synthesized.error.message })
-      }
-      return {
-        status: "completed",
-        conclusion: "success",
-        output: {
-          component: input.component,
-          priorPin,
-          target: input.target,
-          baseSha: input.baseSha,
-          commit: synthesized.output.commit,
-          treeSha: synthesized.output.treeSha,
-        },
-      }
-    },
-  )
-  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
-  throw new Error("yrd: pin-intent branch synthesis did not complete")
 }
 
 function pinIntentCommitMessage(component: string, target: string, issue: string): string {
