@@ -10623,11 +10623,46 @@ async function explainLanding(
   if (services.mergeRecords !== undefined) {
     const proof = await services.mergeRecords.find(selector)
     if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
+      // The refusal is correct — a single answer must not come from a partially
+      // verified estate — but it was indistinguishable from "your landing is
+      // broken", and for two days it was the SAME text for every selector. So say
+      // the one thing that separates those: whether THIS selector's own record
+      // verified, and how many records the estate could not prove.
+      const isolated = await services.mergeRecords.all()
+      const own =
+        isolated.status === "proven"
+          ? isolated.records.some((entry) =>
+              entry.record.changes.some((change) => change.pr === selector || entry.record.merge.id === selector),
+            )
+          : undefined
+      const unprovable = isolated.status === "proven" ? isolated.unverifiable.length : undefined
       await printResult(
         io,
         jsonEnabled(options),
-        { command: "why", selector, verdict: proof.status, reason: proof.reason, repaired: false },
-        `${proof.status.toUpperCase()} — ${selector}: ${proof.reason}`,
+        {
+          command: "why",
+          selector,
+          verdict: proof.status,
+          reason: proof.reason,
+          repaired: false,
+          ...(own === undefined ? {} : { selectorRecordVerified: own }),
+          ...(unprovable === undefined ? {} : { unprovableRecords: unprovable }),
+        },
+        [
+          `${proof.status.toUpperCase()} — ${selector}: ${proof.reason}`,
+          own === undefined
+            ? "  the estate could not be enumerated, so this selector's own record is unknown"
+            : own
+              ? `  this selector's OWN record verified — the refusal is the estate's, not this landing's`
+              : `  this selector's own record did not verify either`,
+          unprovable === undefined
+            ? ""
+            : `  ${String(unprovable)} record(s) in the estate cannot prove themselves; ` +
+              "a single answer is not given from a partially verified estate — " +
+              "run `yrd doctor --retract-unprovable` to see them by cause",
+        ]
+          .filter((line) => line !== "")
+          .join("\n"),
       )
       return 2
     }
