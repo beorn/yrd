@@ -13,6 +13,18 @@ import {
 import { pushRefUpdates } from "git-super/push"
 import type { GitSuperResult } from "git-super/result"
 
+/**
+ * The ref a component's main is read from — ONE definition, because more than one drifts.
+ *
+ * The merge path fetches this ref to decide what a submodule's main currently is, and the
+ * shaset model's submodule-main-first rule asks the same question at admission time. Those
+ * two stages disagreed while each spelled the ref itself: merge asked for `refs/heads/main`
+ * and admission accepted any branch, so a pin on someone's side branch passed admission and
+ * only failed later. Naming it once is the seam that lets admission ask the merge path's
+ * question instead of a weaker one of its own.
+ */
+export const COMPONENT_MAIN_REF = "refs/heads/main"
+
 export type QueueConflictStage = SubmoduleConflictStage
 export type QueueTreeConflict = SubmoduleTreeConflict
 export type QueueSubmodulePinResolution = SubmodulePinResolution

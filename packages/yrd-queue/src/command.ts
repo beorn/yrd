@@ -60,6 +60,7 @@ import type {
   StepRunner,
 } from "./queue.ts"
 import {
+  COMPONENT_MAIN_REF,
   executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
   type QueueConflictStage,
@@ -5844,7 +5845,7 @@ async function fetchComponentMain(
   const ref = "refs/yrd/component-main"
   const fetched = await git.run(
     repository,
-    ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", origin, `+refs/heads/main:${ref}`],
+    ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", origin, `+${COMPONENT_MAIN_REF}:${ref}`],
     true,
   )
   if (fetched.code !== 0) {
@@ -6156,7 +6157,7 @@ async function applyComponentMainPromotions(
       repository: promotion.repository,
       remote: promotion.origin,
       source: promotion.targetSha,
-      destination: "refs/heads/main",
+      destination: COMPONENT_MAIN_REF,
       expectedDestination: { state: "oid", oid: promotion.mainSha } as const,
     }
     let pushed = await pushRefUpdates({
