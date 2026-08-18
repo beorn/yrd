@@ -63,6 +63,7 @@ import {
   COMPONENT_MAIN_REF,
   executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
+  resolveComponentMain,
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition-policy.ts"
@@ -5842,22 +5843,18 @@ async function fetchComponentMain(
 ): Promise<
   Readonly<{ status: "passed"; sha: string }> | Readonly<{ status: "failed"; error: ComponentMainPromotionFailure }>
 > {
-  const ref = "refs/yrd/component-main"
-  const fetched = await git.run(
-    repository,
-    ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", origin, `+${COMPONENT_MAIN_REF}:${ref}`],
-    true,
-  )
-  if (fetched.code !== 0) {
+  // The probe lives beside COMPONENT_MAIN_REF so admission can ask it too. Resolving the
+  // fetched ref used to go through the throwing rev-parse helper; a gate cannot afford a throw
+  // from inside a probe, and this file's own git wrapper already promises tolerant callers a
+  // result to classify. Same information, now survivable.
+  const resolved = await resolveComponentMain((repo, args) => git.run(repo, args, true), repository, origin)
+  if (resolved.status === "unavailable") {
     return {
       status: "failed",
-      error: componentMainFailure(
-        "component-main-inspection-failed",
-        `could not refresh component main from '${origin}': ${fetched.stderr || fetched.stdout || "git fetch failed"}`,
-      ),
+      error: componentMainFailure("component-main-inspection-failed", resolved.message),
     }
   }
-  return { status: "passed", sha: await git.commit(repository, ref) }
+  return { status: "passed", sha: resolved.sha }
 }
 
 async function fetchComponentPin(

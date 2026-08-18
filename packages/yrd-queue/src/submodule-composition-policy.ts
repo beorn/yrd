@@ -25,6 +25,78 @@ import type { GitSuperResult } from "git-super/result"
  */
 export const COMPONENT_MAIN_REF = "refs/heads/main"
 
+/**
+ * The private ref a component's main is fetched into before anything asks it a question.
+ *
+ * Never a caller-supplied name: the whole point is that both stages probe the same place,
+ * and a ref the caller chooses is a ref two callers can choose differently.
+ */
+export const COMPONENT_MAIN_PROBE_REF = "refs/yrd/component-main"
+
+/** The one git call shape this probe needs, so both stages can supply their own runner. */
+export type ComponentMainGit = (
+  repository: string,
+  args: readonly string[],
+) => Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
+
+export type ComponentMainResolution =
+  | Readonly<{ status: "resolved"; sha: string }>
+  | Readonly<{ status: "unavailable"; message: string }>
+
+/**
+ * Fetch a component's main into the probe ref and resolve it — the ONE way either stage
+ * learns what a submodule's main currently is.
+ *
+ * This exists because asking the question two ways produced two answers. Merge fetched
+ * exactly `refs/heads/main` and tested ancestry against it; admission asked git-super
+ * whether the pin sat under any `refs/heads/` tip, so a pin pushed to a side branch
+ * passed admission and was only caught later, after the PR had a carrier. The fix is not
+ * a tighter prefix — `refPrefixes` matches with `startsWith`, so `refs/heads/main` would
+ * silently also accept `refs/heads/maintenance` and widen the check inside a change meant
+ * to narrow it. Exactness is only expressible by fetching one ref and naming its sha.
+ *
+ * Returns a RESULT rather than throwing: both callers are probes that must classify a
+ * missing origin loudly, and neither can afford a throw from inside a gate.
+ */
+export async function resolveComponentMain(
+  run: ComponentMainGit,
+  repository: string,
+  origin: string,
+): Promise<ComponentMainResolution> {
+  const fetched = await run(repository, [
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-recurse-submodules",
+    origin,
+    `+${COMPONENT_MAIN_REF}:${COMPONENT_MAIN_PROBE_REF}`,
+  ])
+  if (fetched.code !== 0) {
+    return {
+      status: "unavailable",
+      message:
+        `could not refresh component main from '${origin}': ` +
+        `${fetched.stderr.trim() || fetched.stdout.trim() || "git fetch failed"}`,
+    }
+  }
+  const resolved = await run(repository, [
+    "rev-parse",
+    "--verify",
+    "--end-of-options",
+    `${COMPONENT_MAIN_PROBE_REF}^{commit}`,
+  ])
+  const sha = resolved.stdout.trim()
+  if (resolved.code !== 0 || sha === "") {
+    return {
+      status: "unavailable",
+      message:
+        `fetched '${COMPONENT_MAIN_REF}' from '${origin}' but could not resolve it: ` +
+        `${resolved.stderr.trim() || resolved.stdout.trim() || "git rev-parse failed"}`,
+    }
+  }
+  return { status: "resolved", sha }
+}
+
 export type QueueConflictStage = SubmoduleConflictStage
 export type QueueTreeConflict = SubmoduleTreeConflict
 export type QueueSubmodulePinResolution = SubmodulePinResolution
