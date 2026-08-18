@@ -1832,7 +1832,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const previousServiceName = process.env.HAB_SERVICE_NAME
     const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
-    process.env.HAB_SERVICE_NAME = "yrd-runner-pm"
+    // Never the "yrd-runner" default from run.ts: an identity equal to the fallback
+    // passes even with the Hab plumbing removed.
+    process.env.HAB_SERVICE_NAME = "yrd-runner-under-test"
     try {
       expect(
         await runYrdProcess([
@@ -1848,7 +1850,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       ).toBe(1)
       expect(JSON.parse(stdout.mock.calls.map(([chunk]) => String(chunk)).join(""))).toMatchObject({
         schema: "hab-service-health/1",
-        service: "yrd-runner-pm",
+        service: "yrd-runner-under-test",
       })
       expect(stderr.mock.calls).toEqual([])
     } finally {
