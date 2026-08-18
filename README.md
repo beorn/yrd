@@ -39,9 +39,9 @@ A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstr
 
 **Assemble → test → merge → roll** — the queue is the only merger.
 
-### Vocabulary: the shaset model
+### Vocabulary
 
-The **shaset** is the set of submodule commits a superproject commit records; every merge writes a new one. The whole model in one paragraph:
+The **shaset** is the set of submodule commits a superproject commit records; every merge writes a new one. In one paragraph:
 
 > A merge request's gitlinks are **min commits** — *at least this commit*. Before queueing, the queue checks each min commit is **on that submodule's main**; if not, the request **parks** until the submodule lands it. At merge, the queue **fills in** each submodule's final commit from its main and writes the **shaset** — authored gitlinks never land as-is. Nothing to merge = **nothing new**.
 
@@ -808,10 +808,9 @@ advance intents and remain refused. Queue owns the generated root carrier and
 writes it deterministically from the exact base and accepted intents.
 
 > **Legacy rail.** This whole passage speaks the killed vocabulary — see
-> [Vocabulary: the shaset model](#vocabulary-the-shaset-model). Under the
-> ratified model an authored gitlink is a **min commit**, checked against the
-> submodule's main before queueing, and this `yrd intent` rail is scheduled
-> for deletion once the queue fills in submodule values itself.
+> [Vocabulary](#vocabulary). An authored gitlink is a **min commit**, checked
+> against the submodule's main before queueing, and this `yrd intent` rail is
+> scheduled for deletion once the queue fills in submodule values itself.
 
 #### Resolving Divergent Gitlink Pins
 
