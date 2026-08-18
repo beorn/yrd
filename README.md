@@ -49,7 +49,27 @@ Standard git words — **submodule · gitlink · superproject** — mean exactly
 
 ### Content commits and shaset commits
 
-A merge request's history separates into two commit species. **Content commits** carry the superproject's own tree changes and never touch a gitlink. **Shaset commits** are queue-authored: their diff is gitlink updates plus the regenerated lockfile, nothing else. Each time the queue moves a request's shaset up — a submodule's main advanced, the base moved — it writes a new shaset commit rather than rewriting history invisibly, keeping only the versions checks actually ran against. So plain `git log` answers *which shaset did this run prove?* with a commit ref, human review reads content diffs with no gitlink noise, and a pure pin advance is simply a merge request containing **one shaset commit and nothing else**.
+A merge request's history holds exactly two commit species:
+
+| | **Content commit** | **Shaset commit** |
+|---|---|---|
+| Diff contains | superproject tree changes only | gitlink updates + regenerated lockfile, nothing else |
+| Written by | the author | the queue |
+| Gitlinks | never | always |
+
+```text
+merge request
+├─ content commit   "add feature"                     (author)
+├─ content commit   "fix tests"                       (author)
+└─ shaset commit    gitlinks + lock — the version     (queue)
+                    checks ran against
+
+pure pin advance = a merge request with exactly one shaset commit
+```
+
+- Each time the queue moves the request's shaset up — a submodule's main advanced, the base moved — it writes a **new shaset commit**; no invisible rebase.
+- Only versions **checks actually ran against** are kept; superseded ones are pruned.
+- Payoffs: `git log` answers *which shaset did this run prove?* with a commit ref · review reads content diffs with zero gitlink noise · the machine half is machine-checkable.
 
 **Killed vocabulary** (operator-ratified 2026-08-18). These words still appear in older prose, refusal codes, and the `yrd intent` rail until the rename carrier lands; new writing must not use them:
 
