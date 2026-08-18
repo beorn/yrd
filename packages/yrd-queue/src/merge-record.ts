@@ -74,6 +74,32 @@ export const MergeRecordBodySchema = z
   })
 export type MergeRecordBody = Readonly<z.infer<typeof MergeRecordBodySchema>>
 
+/**
+ * The contradiction that poisoned the estate: a landing that says it MERGED,
+ * whose recorded result did not move the base, while still naming generated
+ * commits it supposedly put on history. Nothing joined history, so no generated
+ * commit can be reachable from the result, and the record can never prove itself.
+ *
+ * Deliberately a PREDICATE and not a schema refinement. A validation that refuses
+ * to PARSE such a record would make the estate unrepairable — the repair path has
+ * to read exactly the records that violate this to retract them. So the invariant
+ * is enforced where records are WRITTEN, and merely reported where they are read.
+ *
+ * Returns the human-readable contradiction, or undefined when the record is sound.
+ */
+export function unprovableMergeRecordClaim(record: MergeRecordBody): string | undefined {
+  if (record.merge.result !== "merged") return undefined
+  const { mergedCommit, baseSha } = record.merge
+  if (mergedCommit === undefined || mergedCommit !== baseSha) return undefined
+  const claimed = record.changes.filter((change) => change.generatedCommit !== undefined)
+  if (claimed.length === 0) return undefined
+  return (
+    `merge '${record.merge.id}' recorded mergedCommit '${mergedCommit}' equal to its own baseSha, so it ` +
+    `joined nothing to landed history, yet claims generated commit(s) for ` +
+    claimed.map((change) => `${change.pr} (${String(change.generatedCommit)})`).join(", ")
+  )
+}
+
 export const MergeRecordEnvelopeSchema = z
   .object({
     schema: z.literal("yrd/merge-record/v1"),

@@ -76,6 +76,7 @@ import {
   MERGE_RECORD_NOTES_NAME,
   MERGE_RECORD_REF,
   createMergeRecord,
+  unprovableMergeRecordClaim,
   parseMergeRecord,
   type MergeRecordBody,
   type MergeRecordPointer,
@@ -1332,6 +1333,14 @@ function mergeRecordBody(run: Run, candidate: Candidate, pins: MergeRecordBody["
         (result === "canceled"
           ? { code: "run-canceled", message: run.cancelReason ?? "Merge canceled" }
           : { code: "merge-failed", message: "Merge failed without a more specific reason" }))
+  const mergedCommit = run.integration?.commit
+  // A landing whose result IS its own base joined nothing to history. Recording a
+  // generated commit for it is not an approximation, it is a false claim: nothing
+  // is reachable from a commit that was never created, so the record can never
+  // prove itself and poisons every later verification of the estate. Claiming no
+  // commits is the TRUE fact about such a landing, not a fallback — this is the
+  // shape the shaset model makes a first-class outcome.
+  const joinedHistory = !(result === "merged" && mergedCommit !== undefined && mergedCommit === candidate.baseSha)
   return {
     merge: {
       id: run.id,
@@ -1339,7 +1348,7 @@ function mergeRecordBody(run: Run, candidate: Candidate, pins: MergeRecordBody["
       baseSha: candidate.baseSha,
       candidate: run.candidateId,
       result,
-      ...(run.integration?.commit === undefined ? {} : { mergedCommit: run.integration.commit }),
+      ...(mergedCommit === undefined ? {} : { mergedCommit }),
       startedAt: run.startedAt,
       finishedAt: run.finishedAt,
     },
@@ -1352,7 +1361,7 @@ function mergeRecordBody(run: Run, candidate: Candidate, pins: MergeRecordBody["
         pr: change.id,
         revision: change.revision,
         submittedHead: change.headSha,
-        ...(generated === undefined ? {} : { generatedCommit: generated.generatedCommit }),
+        ...(generated === undefined || !joinedHistory ? {} : { generatedCommit: generated.generatedCommit }),
       }
     }),
     ...(reason === undefined ? {} : { reason }),
@@ -1491,6 +1500,19 @@ export function gitMergeRecorder(options: {
     )
     const body = mergeRecordBody(run, candidate, pins)
     if (body === undefined) return
+    // Backstop, not the fix. `mergeRecordBody` cannot construct this contradiction
+    // any more, so this can only fire if someone reintroduces it — and a merge
+    // record is IMMUTABLE once written, so a false claim that escapes here is
+    // permanent and wedges every later verification of the estate. Refuse to write
+    // it rather than discover it years later from a `why` that answers nothing.
+    const unprovable = unprovableMergeRecordClaim(body)
+    if (unprovable !== undefined) {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "merge-record-unprovable-claim",
+        message: `yrd: refusing to record ${unprovable}`,
+      })
+    }
     const remote = await synchronizeMergeRecordRef(git, options.repo, run.id)
     const record = createMergeRecord(body)
     const target = (await git.input(options.repo, ["hash-object", "-w", "--stdin"], `yrd merge ${run.id}\n`)).stdout
@@ -1606,18 +1628,39 @@ export async function findRepositoryMergeRecords(
       }
       for (const change of parsed.record.changes) {
         if (change.generatedCommit === undefined || change.changeId === undefined) continue
+        // TWO independent claims, diagnosed separately. Collapsing them into one
+        // refusal produced a message that named the Change-Id — which is the half
+        // that VERIFIES whenever reachability is what broke — and so pointed every
+        // reader at the wrong cause. A refusal must name the half that failed.
         const reachable = await git.run(
           options.repo,
           ["merge-base", "--is-ancestor", change.generatedCommit, merged],
           true,
         )
+        if (reachable.code !== 0) {
+          return corrupt(
+            `merge-record '${note}' cannot prove REACHABILITY for ${change.pr}: generated commit ` +
+              `'${change.generatedCommit}' is not contained by recorded mergedCommit '${merged}' ` +
+              `(the Change-Id trailer was not the problem). Change-Id ${change.changeId}`,
+          )
+        }
         const trailers = await git.run(
           options.repo,
           ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", change.generatedCommit],
           true,
         )
-        if (reachable.code !== 0 || trailers.code !== 0 || trailers.stdout !== change.changeId) {
-          return corrupt(`merge-record '${note}' cannot prove ${change.changeId}`)
+        if (trailers.code !== 0) {
+          return corrupt(
+            `merge-record '${note}' cannot READ the Change-Id trailer of generated commit ` +
+              `'${change.generatedCommit}' for ${change.pr}: ${trailers.stderr || trailers.stdout}`,
+          )
+        }
+        if (trailers.stdout !== change.changeId) {
+          return corrupt(
+            `merge-record '${note}' cannot prove the CHANGE-ID for ${change.pr}: generated commit ` +
+              `'${change.generatedCommit}' carries '${trailers.stdout || "<no trailer>"}', ` +
+              `record claims '${change.changeId}' (reachability verified)`,
+          )
         }
       }
       for (const pin of parsed.record.pins) {
