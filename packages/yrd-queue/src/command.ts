@@ -3022,6 +3022,30 @@ export type PinIntentProvisioner = (
   input: PinIntentProvisionInput,
 ) => Promise<Readonly<{ generatedPaths: readonly string[] }>>
 
+type CandidatePreparation =
+  | Readonly<{
+      status: "passed"
+      output: Readonly<{
+        sha: string
+        changes: readonly CandidateChange[]
+        sourceRewrites: readonly SourceRewrite[]
+        submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
+      }>
+    }>
+  | CandidateFailure
+
+/**
+ * Prepare a candidate, naming the member that refused it.
+ *
+ * The preparation walks members in order and every refusal path returns from
+ * inside that walk, so the guilty member is known exactly at the moment of
+ * return and nowhere afterwards. Recording it in one cell at the top of each
+ * iteration, and stamping it here, means a new refusal path added later is
+ * attributed automatically — the alternative, editing every `return` site,
+ * silently loses attribution the first time someone adds one.
+ *
+ * A refusal that already names a member keeps its own attribution.
+ */
 async function prepareCandidate(
   git: Git,
   repo: string,
@@ -3032,18 +3056,36 @@ async function prepareCandidate(
   artifactRoot: string,
   refuse?: RefusePathsPolicy,
   provisionPinIntent?: PinIntentProvisioner,
-): Promise<
-  | Readonly<{
-      status: "passed"
-      output: Readonly<{
-        sha: string
-        changes: readonly CandidateChange[]
-        sourceRewrites: readonly SourceRewrite[]
-        submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
-      }>
-    }>
-  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: GitCheckFailureEvidence }>
-> {
+): Promise<CandidatePreparation> {
+  const guilty: { id?: string } = {}
+  const prepared = await prepareCandidateMembers(
+    guilty,
+    git,
+    repo,
+    path,
+    authoritativeBase,
+    input,
+    attempt,
+    artifactRoot,
+    refuse,
+    provisionPinIntent,
+  )
+  if (prepared.status !== "failed" || guilty.id === undefined || prepared.error.pr !== undefined) return prepared
+  return { ...prepared, error: { ...prepared.error, pr: guilty.id } }
+}
+
+async function prepareCandidateMembers(
+  guilty: { id?: string },
+  git: Git,
+  repo: string,
+  path: string,
+  authoritativeBase: string,
+  input: StepExecution,
+  attempt: number,
+  artifactRoot: string,
+  refuse?: RefusePathsPolicy,
+  provisionPinIntent?: PinIntentProvisioner,
+): Promise<CandidatePreparation> {
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   const changes: CandidateChange[] = []
@@ -3060,6 +3102,8 @@ async function prepareCandidate(
     )
   }
   for (const pr of input.prs) {
+    // The single write that makes every refusal below attributable.
+    guilty.id = pr.id
     if (pr.intent !== undefined) {
       if (input.prs.length !== 1) {
         return candidateFailure("intent-batch-refused", "yrd: pin intents are serial Queue members, never a batch")
@@ -3313,6 +3357,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
           kind: "refusal",
           code: candidate.error.code,
           message: candidate.error.message,
+          ...(candidate.error.pr === undefined ? {} : { pr: candidate.error.pr }),
         })
       }
       await proveCandidateSubmoduleReachability(
@@ -3626,7 +3671,13 @@ async function verifyComposedRecutCertificate(
 
 type CandidateFailure = Readonly<{
   status: "failed"
-  error: Readonly<{ code: string; message: string }>
+  /**
+   * `pr` names the ONE member this failure is attributable to, when one is.
+   * Stamped at the `prepareCandidate` loop boundary rather than at each return
+   * site, so no failure path can forget it. Absent means the failure belongs to
+   * the candidate as a whole and every member shares it.
+   */
+  error: Readonly<{ code: string; message: string; pr?: string }>
   output: GitCheckFailureEvidence
 }>
 

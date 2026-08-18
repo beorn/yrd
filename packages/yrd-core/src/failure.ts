@@ -8,6 +8,17 @@ export const FailureFactSchema = z
     kind: FailureKindSchema,
     code: z.string().regex(/^[a-z][a-z0-9._-]*$/u),
     message: z.string().min(1),
+    /**
+     * The single member a failure is attributable to, when one is.
+     *
+     * A batch operation that fails because of ONE member must be able to say
+     * which, structurally. Without this the id survives only inside `message`,
+     * so every consumer that needs to act on the guilty member has to parse
+     * prose — and a consumer that cannot parse it punishes the whole batch
+     * instead. Absent means "not attributable to a single member", which is a
+     * different fact from "attributable to a member we did not name".
+     */
+    pr: z.string().min(1).optional(),
   })
   .strict()
 export type FailureFact = Readonly<z.infer<typeof FailureFactSchema>>

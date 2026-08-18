@@ -429,6 +429,24 @@ const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-confli
  * age is measured from the LATEST revision's push. */
 const DRAFT_STRANDED_GRACE_MS = 15 * 60 * 1000
 
+/**
+ * The one member a failure blames — but only if that member is actually here.
+ *
+ * A fact carrying a `pr` this partition does not contain is not attribution; it
+ * is a fact about somewhere else, and acting on it would eject an innocent while
+ * leaving the real refuser in place. Membership is checked, never assumed, so an
+ * unrecognised id degrades to "unattributable" and the partition shares the
+ * refusal exactly as it did before member isolation existed.
+ */
+function attributableMember(
+  fact: Readonly<{ pr?: string }>,
+  members: readonly Readonly<{ id: string }>[],
+): string | undefined {
+  const { pr } = fact
+  if (pr === undefined) return undefined
+  return members.some((member) => member.id === pr) ? pr : undefined
+}
+
 function structurallyPermanentAdmissionRefusal(code: string): boolean {
   return STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)
 }
@@ -2734,36 +2752,82 @@ function createQueue<Shape extends PRShape>(
             // prepare, start, settle) so a recut-certificate / command-refused /
             // candidate-ref-refused on ONE partition cannot exit the selectorless
             // drain. Explicit PR targeting still fails loud.
+            // The members still in this partition. A refusal attributable to ONE
+            // member ejects that member and retries the survivors rather than
+            // failing the whole partition: an 8-PR candidate must not be zeroed
+            // by one poisoned carrier, and the seven innocents must not inherit
+            // its refusal record — that record is what `queue audit` reads, so a
+            // stain replays as a finding every cycle until someone reads the
+            // carrier by hand.
+            let members = candidate
             try {
               warnFlowDrift(candidate.map((pr) => pr.flow))
               const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
               let facts: z.infer<typeof CandidateCreatedSchema> | undefined
-              try {
-                facts = await candidateFacts(candidate, baseSha)
-              } catch (error) {
-                const fact = failureFact(error)
-                if (
-                  !selectorless ||
-                  fact === undefined ||
-                  (fact.kind !== "refusal" && fact.kind !== "infrastructure")
-                ) {
-                  throw error
+              let prepared = false
+              let abandoned = false
+              // Bounded by construction: every pass either settles, abandons, or
+              // removes at least one member, so it cannot outlive the partition.
+              for (let pass = 0; pass < candidate.length; pass += 1) {
+                try {
+                  facts = await candidateFacts(members, baseSha)
+                  prepared = true
+                  break
+                } catch (error) {
+                  const fact = failureFact(error)
+                  if (
+                    !selectorless ||
+                    fact === undefined ||
+                    (fact.kind !== "refusal" && fact.kind !== "infrastructure")
+                  ) {
+                    throw error
+                  }
+                  const guilty = attributableMember(fact, members)
+                  if (guilty === undefined || members.length === 1) {
+                    // Unattributable, or nothing left to isolate: the refusal is
+                    // the partition's, exactly as it was before isolation.
+                    log.warn?.("queue compose skipped a Candidate that could not be prepared", {
+                      action: "compose-candidate-skip",
+                      ...(members.length === 1 ? { pr: members[0]?.id } : { prs: members.map((pr) => pr.id) }),
+                      code: fact.code,
+                      kind: fact.kind,
+                      reason: fact.message,
+                    })
+                    await noteCandidateRefusal(
+                      members.map((pr) => pr.id),
+                      { code: fact.code, kind: fact.kind, reason: fact.message },
+                    )
+                    abandoned = true
+                    break
+                  }
+                  log.warn?.("queue compose ejected the member that refused Candidate preparation", {
+                    action: "compose-candidate-skip",
+                    pr: guilty,
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                    remedy: `yrd pr recut ${guilty} --preflight --queue --apply`,
+                  })
+                  // Only the member that actually refused earns the durable record.
+                  await noteCandidateRefusal([guilty], {
+                    code: fact.code,
+                    kind: fact.kind,
+                    reason: fact.message,
+                  })
+                  members = members.filter((pr) => pr.id !== guilty)
                 }
-                log.warn?.("queue compose skipped a Candidate that could not be prepared", {
-                  action: "compose-candidate-skip",
-                  ...(candidate.length === 1 ? { pr: candidate[0]?.id } : { prs: candidate.map((pr) => pr.id) }),
-                  code: fact.code,
-                  kind: fact.kind,
-                  reason: fact.message,
-                })
-                await noteCandidateRefusal(
-                  candidate.map((pr) => pr.id),
-                  { code: fact.code, kind: fact.kind, reason: fact.message },
+              }
+              if (abandoned) continue
+              // Never proceed on an unsettled preparation: `facts` is legitimately
+              // undefined when no preparer is installed, so absence alone cannot
+              // stand in for success.
+              if (!prepared) {
+                throw new Error(
+                  `yrd: Candidate preparation did not settle for '${members.map((pr) => pr.id).join(", ")}'`,
                 )
-                continue
               }
               const started = await actions.run({
-                prs: candidate.map((pr) => pr.id),
+                prs: members.map((pr) => pr.id),
                 ...(args.steps === undefined ? {} : { steps: args.steps }),
                 baseSha,
                 ...(facts === undefined ? {} : { candidate: facts }),
@@ -2804,17 +2868,19 @@ function createQueue<Shape extends PRShape>(
               if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
                 throw error
               }
+              // Same attribution rule as preparation: a failure that names one
+              // member is that member's alone. `members`, not `candidate`, so a
+              // member already ejected above is not stained a second time.
+              const guilty = attributableMember(fact, members)
+              const blamed = guilty === undefined ? members.map((pr) => pr.id) : [guilty]
               log.warn?.("queue compose skipped a candidate lost to a losable failure", {
                 action: "compose-candidate-skip",
-                ...(candidate.length === 1 ? { pr: candidate[0]?.id } : { prs: candidate.map((pr) => pr.id) }),
+                ...(blamed.length === 1 ? { pr: blamed[0] } : { prs: blamed }),
                 code: fact.code,
                 kind: fact.kind,
                 reason: fact.message,
               })
-              await noteCandidateRefusal(
-                candidate.map((pr) => pr.id),
-                { code: fact.code, kind: fact.kind, reason: fact.message },
-              )
+              await noteCandidateRefusal(blamed, { code: fact.code, kind: fact.kind, reason: fact.message })
             }
           }
           const final = runtime()

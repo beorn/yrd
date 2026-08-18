@@ -56,6 +56,7 @@ function mergeDeployPlugin(
     output: { commit: MERGED, baseSha: BASE },
   }),
   prepareCandidate?: CandidatePreparer,
+  batch: false | number = false,
 ) {
   const merge = withMerge(mergeRun, { revision: "merge-v1" })
   const deploy = withStep(
@@ -69,7 +70,7 @@ function mergeDeployPlugin(
   )
   return withQueue({
     steps: [merge, deploy] as const,
-    batch: false,
+    batch,
     defaultSteps: ["merge", "deploy"],
     ...(prepareCandidate === undefined ? {} : { prepareCandidate }),
   })
@@ -82,9 +83,10 @@ async function createApp(
   log?: ReturnType<typeof createLogger>,
   mergeRun?: () => JobResult<{ commit: string; baseSha: string }>,
   prepareCandidate?: CandidatePreparer,
+  batch: false | number = false,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = mergeDeployPlugin(deployRevision, mergeRun, prepareCandidate)
+  const queue = mergeDeployPlugin(deployRevision, mergeRun, prepareCandidate, batch)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: {
@@ -287,5 +289,204 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
     await expect(replayed.dispatch(replayed.commands.queue.advance, { run: "R1" })).rejects.toThrow(
       "does not match installed revision",
     )
+  })
+})
+
+/**
+ * @failure One member that refuses Candidate preparation zeroes its ENTIRE partition and stains every
+ * innocent peer with the guilty member's refusal record, so `queue audit` replays the stain each cycle.
+ * @level l2
+ * @consumer @yrd/queue
+ */
+describe("compose member isolation — one refusing member never zeroes its whole partition", () => {
+  const BATCH = 8
+
+  /**
+   * A preparer that refuses whichever members are poisoned, naming the guilty
+   * member STRUCTURALLY — the attribution `prepareCandidate` stamps at its loop
+   * boundary in the real pipeline. Without the `pr` field the drain cannot tell
+   * which member refused and must punish all of them, which is the defect.
+   */
+  function poisonedPreparer(poisoned: readonly string[]): CandidatePreparer {
+    return (input) => {
+      const guilty = input.prs.find((pr) => poisoned.includes(pr.id))
+      if (guilty !== undefined) {
+        throw createFailure({
+          kind: "refusal",
+          code: "recut-certificate",
+          message: `PR '${guilty.id}' recomposed change did not survive the advanced base`,
+          pr: guilty.id,
+        })
+      }
+      const { prs: _prs, ...candidate } = input
+      return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
+    }
+  }
+
+  it("ejects the recut-poisoned member and integrates BOTH healthy peers in one drain", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const poisoned: string[] = []
+    await using app = await createApp(
+      "deploy-v1",
+      createMemoryJournal(),
+      ids(),
+      log,
+      undefined,
+      poisonedPreparer(poisoned),
+      BATCH,
+    )
+    const guilty = await submitBranch(app, "issue/recut-poisoned")
+    poisoned.push(guilty.id)
+    const firstHealthy = await submitBranch(app, "issue/healthy-one")
+    const secondHealthy = await submitBranch(app, "issue/healthy-two")
+
+    // ONE drain. The whole point: the survivors must not wait for a later cycle.
+    const drained = await app.queue.run({}, runtime)
+
+    expect(drained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conclusion: "success",
+          prs: expect.arrayContaining([
+            expect.objectContaining({ id: firstHealthy.id }),
+            expect.objectContaining({ id: secondHealthy.id }),
+          ]),
+        }),
+      ]),
+    )
+    expect(app.state().bays.prs[guilty.id]?.integration).toBeUndefined()
+
+    const ejection = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" &&
+        event.level === "warn" &&
+        event.namespace === "yrd:queue" &&
+        event.props?.action === "compose-candidate-skip",
+    )
+    expect(ejection?.props).toMatchObject({
+      action: "compose-candidate-skip",
+      code: "recut-certificate",
+      pr: guilty.id,
+      remedy: `yrd pr recut ${guilty.id} --preflight --queue --apply`,
+    })
+    // The warn names the guilty member ALONE — never the partition.
+    expect(ejection?.props?.prs).toBeUndefined()
+    log.end()
+  })
+
+  it("records the refusal against the guilty member ONLY, leaving innocents unstained", async () => {
+    const poisoned: string[] = []
+    await using app = await createApp(
+      "deploy-v1",
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      poisonedPreparer(poisoned),
+      BATCH,
+    )
+    const guilty = await submitBranch(app, "issue/recut-poisoned")
+    poisoned.push(guilty.id)
+    const firstHealthy = await submitBranch(app, "issue/healthy-one")
+    const secondHealthy = await submitBranch(app, "issue/healthy-two")
+
+    await app.queue.run({}, runtime)
+
+    // This record is what `queue audit` reads. A stain here replays as a finding
+    // against an innocent carrier every cycle until a human reads the carrier.
+    const refusals = app.state().queues.admissionRefusals
+    expect(refusals[guilty.id]).toBeDefined()
+    expect(refusals[firstHealthy.id]).toBeUndefined()
+    expect(refusals[secondHealthy.id]).toBeUndefined()
+  })
+
+  it("ejects TWO poisoned members in one bounded drain and still lands the survivors", async () => {
+    const poisoned: string[] = []
+    await using app = await createApp(
+      "deploy-v1",
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      poisonedPreparer(poisoned),
+      BATCH,
+    )
+    const firstGuilty = await submitBranch(app, "issue/poisoned-one")
+    poisoned.push(firstGuilty.id)
+    const firstHealthy = await submitBranch(app, "issue/healthy-one")
+    const secondGuilty = await submitBranch(app, "issue/poisoned-two")
+    poisoned.push(secondGuilty.id)
+    const secondHealthy = await submitBranch(app, "issue/healthy-two")
+
+    const drained = await app.queue.run({}, runtime)
+
+    expect(drained).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          conclusion: "success",
+          prs: expect.arrayContaining([
+            expect.objectContaining({ id: firstHealthy.id }),
+            expect.objectContaining({ id: secondHealthy.id }),
+          ]),
+        }),
+      ]),
+    )
+    const refusals = app.state().queues.admissionRefusals
+    expect(refusals[firstGuilty.id]).toBeDefined()
+    expect(refusals[secondGuilty.id]).toBeDefined()
+    expect(refusals[firstHealthy.id]).toBeUndefined()
+    expect(refusals[secondHealthy.id]).toBeUndefined()
+  })
+
+  it("keeps a whole-partition refusal shared when the fact names no member", async () => {
+    const unattributable: CandidatePreparer = () => {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "candidate-ref-refused",
+        message: `yrd: Candidate ref '${candidateRefFor(MERGED)}' could not be created`,
+      })
+    }
+    await using app = await createApp(
+      "deploy-v1",
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      unattributable,
+      BATCH,
+    )
+    const first = await submitBranch(app, "issue/one")
+    const second = await submitBranch(app, "issue/two")
+
+    await app.queue.run({}, runtime)
+
+    // Unattributable means unattributable: isolation must not invent a culprit,
+    // so the pre-existing whole-partition behaviour stands.
+    const refusals = app.state().queues.admissionRefusals
+    expect(refusals[first.id]).toBeDefined()
+    expect(refusals[second.id]).toBeDefined()
+  })
+
+  it("ignores attribution naming a member this partition does not contain", async () => {
+    const foreign: CandidatePreparer = () => {
+      throw createFailure({
+        kind: "refusal",
+        code: "recut-certificate",
+        message: "PR 'PR999' recomposed change did not survive the advanced base",
+        pr: "PR999",
+      })
+    }
+    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), undefined, undefined, foreign, BATCH)
+    const first = await submitBranch(app, "issue/one")
+    const second = await submitBranch(app, "issue/two")
+
+    await app.queue.run({}, runtime)
+
+    // A `pr` from somewhere else is not attribution. Acting on it would eject an
+    // innocent and leave the real refuser in place, so it degrades to shared.
+    const refusals = app.state().queues.admissionRefusals
+    expect(refusals[first.id]).toBeDefined()
+    expect(refusals[second.id]).toBeDefined()
   })
 })
