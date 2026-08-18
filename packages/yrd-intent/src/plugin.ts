@@ -1,6 +1,7 @@
 import {
   command,
   event,
+  JsonSchema,
   journalEvent,
   raiseFailure,
   resolveSelector,
@@ -41,6 +42,7 @@ import {
   type IntentParkArgs,
   type PinTombstone,
   type PinTombstoneArgs,
+  type UnreadableIntentRecord,
 } from "./types.ts"
 
 const AdmittedSchema = PinIntentSchema.omit({ submittedAt: true, status: true }).strict()
@@ -60,7 +62,7 @@ export type IntentCommands = Readonly<{
   }>
 }>
 
-const INITIAL_STATE: IntentsState = { records: {}, order: [], tombstoneRecords: {}, tombstoneOrder: [] }
+const INITIAL_STATE: IntentsState = { records: {}, order: [], tombstoneRecords: {}, tombstoneOrder: [], unreadable: [] }
 
 /**
  * PinIntentV1 records: "advance component X to S for issue I", declared instead
@@ -87,6 +89,20 @@ export function withIntents() {
         "intent/pin-tombstoned": journalEvent(1, TombstonedSchema),
         "intent/integrated": journalEvent(1, PinIntentIntegratedFactSchema),
         "intent/evaluation-recorded": journalEvent(1, PinIntentEvaluationFactSchema),
+      },
+      // The two PERSISTED kinds (`yrd.intent.pin-advance.v1`, `yrd.intent.pin-tombstone.v1`)
+      // get the maximally permissive schema for REPLAY specifically — `JsonSchema` never
+      // refuses to parse. `canonicalEvent` (app.ts) runs this BEFORE `project` ever sees the
+      // event, and it throws uncaught if neither the current schema nor a `replayEvents`
+      // entry accepts the payload — crashing the WHOLE app's replay over one intent record,
+      // the PR1128 shape. Real structural validation still happens, strictly, one layer down
+      // in `projectIntents`'s own try/catch below; this entry only keeps that layer reachable.
+      // APPEND is untouched: `canonicalEvent` only consults `replayEvents` when
+      // `source === "replay"`, so a freshly submitted record is validated by the full
+      // `.strict()` schema exactly as before — writers stay strict, only reads become tolerant.
+      replayEvents: {
+        "intent/submitted": JsonSchema,
+        "intent/pin-tombstoned": JsonSchema,
       },
       projectionVersion: "intents-v2",
       project: projectIntents,
@@ -151,6 +167,7 @@ export function withIntents() {
           queued: () => ordered(state()).filter((record) => !TERMINAL_INTENT_STATUSES.has(record.status)),
           tombstones: (component) =>
             orderedTombstones(state()).filter((record) => component === undefined || record.component === component),
+          unreadable: () => state().unreadable,
         }
         return { intents } satisfies HasIntents
       },
@@ -331,20 +348,53 @@ function buildWithdrawCommand() {
   })
 }
 
+/**
+ * One `intent/submitted` or `intent/pin-tombstoned` event this schema could not fold, kept
+ * beside the state untouched rather than thrown — the PR1128 class applied to the two
+ * PERSISTED kinds (`yrd.intent.pin-advance.v1`, `yrd.intent.pin-tombstone.v1`): a strict
+ * `.parse()` inside `project` throws out through the WHOLE replay fold (app.ts `fold`), so
+ * one unreadable intent record would have made every OTHER feature's state unrebuildable —
+ * not just this one's. `withIntents()`'s `replayEvents: { "intent/submitted": JsonSchema,
+ * "intent/pin-tombstoned": JsonSchema }` keeps replay from throwing one layer up in
+ * `canonicalEvent`, so this strict parse is the ACTUAL structural check, and this catch is
+ * where an unreadable record turns into a named row instead of a crash.
+ */
+function quarantineIntentEvent(state: DeepReadonly<IntentState>, applied: Event, cause: unknown): IntentState {
+  const reason = cause instanceof Error ? cause.message : String(cause)
+  const entry: UnreadableIntentRecord = { id: applied.id, name: applied.name, reason }
+  return {
+    intents: {
+      records: { ...(state.intents.records as Record<string, PinIntent>) },
+      order: [...state.intents.order],
+      tombstoneRecords: { ...(state.intents.tombstoneRecords as Record<string, PinTombstone>) },
+      tombstoneOrder: [...state.intents.tombstoneOrder],
+      unreadable: [...state.intents.unreadable, entry],
+    },
+  }
+}
+
 function projectIntents(state: DeepReadonly<IntentState>, applied: Event): IntentState {
   if (applied.name === "intent/submitted") {
-    const admitted = AdmittedSchema.parse(applied.data)
-    if (state.intents.records[admitted.id] !== undefined) {
-      throw new Error(`yrd: duplicate intent '${admitted.id}'`)
-    }
-    const record = PinIntentSchema.parse({ ...admitted, submittedAt: applied.ts, status: "open" })
-    return {
-      intents: {
-        records: { ...(state.intents.records as Record<string, PinIntent>), [record.id]: record },
-        order: [...state.intents.order, record.id],
-        tombstoneRecords: { ...(state.intents.tombstoneRecords as Record<string, PinTombstone>) },
-        tombstoneOrder: [...state.intents.tombstoneOrder],
-      },
+    try {
+      const admitted = AdmittedSchema.parse(applied.data)
+      if (state.intents.records[admitted.id] !== undefined) {
+        throw new Error(`yrd: duplicate intent '${admitted.id}'`)
+      }
+      const record = PinIntentSchema.parse({ ...admitted, submittedAt: applied.ts, status: "open" })
+      return {
+        intents: {
+          records: { ...(state.intents.records as Record<string, PinIntent>), [record.id]: record },
+          order: [...state.intents.order, record.id],
+          tombstoneRecords: { ...(state.intents.tombstoneRecords as Record<string, PinTombstone>) },
+          tombstoneOrder: [...state.intents.tombstoneOrder],
+          unreadable: state.intents.unreadable,
+        },
+      }
+    } catch (cause) {
+      // silent-fallback-allow: the quarantine preserves the exact refusal, and every caller
+      // reports it via `intents.unreadable()` — this replaces a whole-replay veto with a
+      // named row, not with silence. Mirrors `createTolerantQueueReader` in @yrd/queue.
+      return quarantineIntentEvent(state, applied, cause)
     }
   }
   if (applied.name === "intent/superseded") {
@@ -392,21 +442,27 @@ function projectIntents(state: DeepReadonly<IntentState>, applied: Event): Inten
     })
   }
   if (applied.name === "intent/pin-tombstoned") {
-    const tombstoned = TombstonedSchema.parse(applied.data)
-    if (state.intents.tombstoneRecords[tombstoned.id] !== undefined) {
-      throw new Error(`yrd: duplicate pin tombstone '${tombstoned.id}'`)
-    }
-    const record = PinTombstoneSchema.parse({ ...tombstoned, recordedAt: applied.ts })
-    return {
-      intents: {
-        records: { ...(state.intents.records as Record<string, PinIntent>) },
-        order: [...state.intents.order],
-        tombstoneRecords: {
-          ...(state.intents.tombstoneRecords as Record<string, PinTombstone>),
-          [record.id]: record,
+    try {
+      const tombstoned = TombstonedSchema.parse(applied.data)
+      if (state.intents.tombstoneRecords[tombstoned.id] !== undefined) {
+        throw new Error(`yrd: duplicate pin tombstone '${tombstoned.id}'`)
+      }
+      const record = PinTombstoneSchema.parse({ ...tombstoned, recordedAt: applied.ts })
+      return {
+        intents: {
+          records: { ...(state.intents.records as Record<string, PinIntent>) },
+          order: [...state.intents.order],
+          tombstoneRecords: {
+            ...(state.intents.tombstoneRecords as Record<string, PinTombstone>),
+            [record.id]: record,
+          },
+          tombstoneOrder: [...state.intents.tombstoneOrder, record.id],
+          unreadable: state.intents.unreadable,
         },
-        tombstoneOrder: [...state.intents.tombstoneOrder, record.id],
-      },
+      }
+    } catch (cause) {
+      // silent-fallback-allow: see the matching comment on the `intent/submitted` branch.
+      return quarantineIntentEvent(state, applied, cause)
     }
   }
   if (applied.name === "intent/integrated") {
@@ -475,6 +531,7 @@ function replaceIntent(state: DeepReadonly<IntentState>, record: PinIntent): Int
       order: [...state.intents.order],
       tombstoneRecords: { ...(state.intents.tombstoneRecords as Record<string, PinTombstone>) },
       tombstoneOrder: [...state.intents.tombstoneOrder],
+      unreadable: state.intents.unreadable,
     },
   }
 }

@@ -559,12 +559,27 @@ export type PinTombstone = z.infer<typeof PinTombstoneSchema>
 export const PinTombstoneArgsSchema = PinTombstoneSchema.omit({ schema: true, id: true, recordedAt: true }).strict()
 export type PinTombstoneArgs = z.infer<typeof PinTombstoneArgsSchema>
 
+/**
+ * One `intent/submitted` or `intent/pin-tombstoned` journal event this schema could not
+ * read, and the exact refusal that says why.
+ *
+ * Mirrors `UnreadableQueueRun` in `@yrd/queue`: both fields are load-bearing, because a
+ * quarantined row that reports only its own existence tells an operator nothing they can
+ * act on. `id` is the journal EVENT's own id — always present, since it is validated by the
+ * envelope schema before this record's own (possibly-failing) payload schema ever runs —
+ * and `name` is which of the two persisted kinds it was.
+ */
+export type UnreadableIntentRecord = Readonly<{ id: string; name: string; reason: string }>
+
 export type IntentsState = Readonly<{
   records: Readonly<Record<string, PinIntent>>
   /** Submission order — the FIFO position the queue reads. */
   order: readonly string[]
   tombstoneRecords: Readonly<Record<string, PinTombstone>>
   tombstoneOrder: readonly string[]
+  /** Every intent-family event this checkout's schema could not read, in encounter order.
+   * Never silently dropped — see {@link UnreadableIntentRecord}. */
+  unreadable: readonly UnreadableIntentRecord[]
 }>
 
 export type Intents = Readonly<{
@@ -582,6 +597,10 @@ export type Intents = Readonly<{
   queued(): readonly PinIntent[]
   /** Rollback invalidations, optionally narrowed to one component. */
   tombstones(component?: string): readonly PinTombstone[]
+  /** Every intent-family event this checkout's schema could not read. Always check this
+   * before treating an empty {@link list} as "no intents": the two answers look identical
+   * unless a caller asks. */
+  unreadable(): readonly UnreadableIntentRecord[]
 }>
 
 export type HasIntents = Readonly<{ intents: Intents }>
