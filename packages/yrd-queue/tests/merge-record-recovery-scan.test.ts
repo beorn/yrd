@@ -7,9 +7,11 @@
  * @level l2
  * @consumer yrd doctor --rebuild-index-from-repo
  */
+import { createHash } from "node:crypto"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import canonicalize from "canonicalize"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createMergeRecord, findRepositoryMergeRecords, MERGE_RECORD_NOTES_NAME } from "@yrd/queue"
@@ -172,5 +174,54 @@ describe("bulk merge-record scan over a damaged estate", () => {
     await expect(findRepositoryMergeRecords({ inject: { process }, repo, baseSha })).resolves.toMatchObject({
       status: "repository-corrupt",
     })
+  })
+})
+
+/** Publish a note shaped as a NEWER writer would produce it: one field the current schema
+ * does not recognize, checksummed the way {@link createMergeRecord} always has — over the
+ * canonical JSON of the record exactly as written, unknown field included. Deliberately
+ * bypasses `createMergeRecord` (whose `MergeRecordBodySchema.parse` would refuse the extra
+ * field before a checksum is even computed): this is standing in for a FUTURE checkout, not
+ * exercising this one's writer. */
+async function publishWithUnknownField(repo: string, record: MergeRecordBody): Promise<void> {
+  const withExtra = { ...record, futureField: "the next writer added this" }
+  const encoded = canonicalize(withExtra)
+  if (encoded === undefined) throw new TypeError("test setup: record must be canonical JSON data")
+  const checksum = createHash("sha256").update(encoded).digest("hex")
+  const envelope = { schema: "yrd/merge-record/v1", record: withExtra, checksum }
+  const canonicalEnvelope = canonicalize(envelope)
+  if (canonicalEnvelope === undefined) throw new TypeError("test setup: envelope must be canonical JSON data")
+  const anchor = await git(repo, ["hash-object", "-w", "--stdin"], `yrd merge ${record.merge.id}\n`)
+  const blob = await git(repo, ["hash-object", "-w", "--stdin"], canonicalEnvelope)
+  await git(repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "add", "-C", blob, anchor])
+}
+
+describe("the bulk scan tolerates a record from a newer writer instead of misreading it as corrupt", () => {
+  it("verifies a checksum-authentic record even though it carries an unrecognized field", async () => {
+    const { repo, baseSha } = await unmaterializedComponentRepository()
+    await publishWithUnknownField(repo, mergedRecord("R-newer", "PR1", baseSha))
+    await using process = createProcess()
+
+    // The all-or-nothing single-selector read: NOT corrupt. Misclassifying an authentic
+    // newer record as corrupt here is exactly the checksum trap `yrd why` would hit.
+    const proven = await findRepositoryMergeRecords({ inject: { process }, repo, baseSha })
+    expect(proven).toMatchObject({ status: "proven", records: [{ record: { merge: { id: "R-newer" } } }] })
+  })
+
+  it("surfaces the unknown field on the record instead of dropping it silently", async () => {
+    const { repo, baseSha } = await unmaterializedComponentRepository()
+    await publishWithUnknownField(repo, mergedRecord("R-newer", "PR1", baseSha))
+    await using process = createProcess()
+
+    const isolated = await findRepositoryMergeRecords({
+      inject: { process },
+      repo,
+      baseSha,
+      isolateUnverifiable: true,
+    })
+    expect(isolated).toMatchObject({ status: "proven", unverifiable: [] })
+    if (isolated.status !== "proven") throw new Error("expected the scan to complete")
+    expect(isolated.records).toHaveLength(1)
+    expect(isolated.records[0]?.unknownFields).toContain("futureField")
   })
 })
