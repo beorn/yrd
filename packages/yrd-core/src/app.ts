@@ -113,6 +113,28 @@ const PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES = 512
 const RECEIPT_CACHE_FRAMES = 4_096
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+/** One unregistered event NAME the replay quarantined, aggregated. The
+ * journal can carry names this composed definition does not register —
+ * written by newer code, or by older code whose events were since retired.
+ * Crashing the whole replay over one frame is the PR1128 shape; instead the
+ * fold skips the frame and keeps this report, because a skip nobody can see
+ * is a silent error. `sampleId` is one event id for forensics. */
+export type UnknownEventNameSummary = Readonly<{
+  name: string
+  count: number
+  firstTs: string
+  lastTs: string
+  sampleId: string
+}>
+const UnknownEventNameSummarySchema = z
+  .object({
+    name: z.string().min(1),
+    count: z.number().int().positive(),
+    firstTs: z.string(),
+    lastTs: z.string(),
+    sampleId: z.string(),
+  })
+  .strict()
 const ProjectionCheckpointSchema = z
   .object({
     v: z.literal(PROJECTION_CHECKPOINT_VERSION),
@@ -121,6 +143,11 @@ const ProjectionCheckpointSchema = z
     receipts: z.array(z.unknown()),
     causeIds: z.array(z.string()),
     eventIds: z.array(z.string()),
+    // Optional and OMITTED while empty: a checkpoint written by this code
+    // with nothing quarantined stays readable by predecessors whose strict
+    // schema predates the field. Once a quarantine exists, an older reader
+    // falls back to its documented rebuild-from-journal path.
+    unknownEvents: z.array(UnknownEventNameSummarySchema).optional(),
   })
   .strict()
 
@@ -157,7 +184,17 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
     checkpoint?: Readonly<{ identity: string; cursor: Cursor }>
   }>
   dispatch: Dispatch
-  events(after?: Cursor, before?: Cursor): AsyncIterable<Event>
+  /** Replay's unknown-name quarantine report, aggregated by event name and
+   * sorted; empty when every journal name is registered. See
+   * {@link UnknownEventNameSummary}. */
+  unknownEventNames(): readonly UnknownEventNameSummary[]
+  /** `unknownNames: "skip"` (default) omits quarantined frames from the
+   * stream; `"raw"` yields their stored envelopes for diagnostic surfaces. */
+  events(
+    after?: Cursor,
+    before?: Cursor,
+    options?: Readonly<{ unknownNames?: "skip" | "raw" }>,
+  ): AsyncIterable<Event>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 }>
@@ -575,6 +612,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
     receiptsByKey: ReadonlyMap<string, JournalFrame>
     causeIds: ReadonlySet<string>
     eventIds: ReadonlySet<string>
+    /** Replay's unknown-name quarantine report, keyed by event name. */
+    unknownEvents: ReadonlyMap<string, UnknownEventNameSummary>
   }>
 
   const emptyProjection = (): Projection => ({
@@ -585,6 +624,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     receiptsByKey: new Map(),
     causeIds: new Set(),
     eventIds: new Set(),
+    unknownEvents: new Map(),
   })
   let projection = emptyProjection()
   let closing = false
@@ -611,9 +651,17 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
   }
 
-  const canonicalEvent = (applied: Event, source: "append" | "replay"): Event => {
+  const canonicalEvent = (applied: Event, source: "append" | "replay"): Event | undefined => {
     const currentDefinition = definition.events[applied.name]
-    if (currentDefinition === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+    if (currentDefinition === undefined) {
+      // Replay-only quarantine: writers stay strict (append still throws),
+      // readers skip the frame and record it in the projection's
+      // unknown-name report — see UnknownEventNameSummary. Every replay
+      // caller handles `undefined`; which surfaces skip and which render
+      // the raw envelope is each caller's explicit choice.
+      if (source === "append") throw new Error(`yrd: no event definition for '${applied.name}'`)
+      return undefined
+    }
     const currentSchema = currentDefinition.schema
     const current = currentSchema.safeParse(applied.data)
     const data = current.success
@@ -683,10 +731,22 @@ export async function createYrd<State extends object, Commands extends CommandTr
     causeIds.add(frame.cause.id)
     const eventIds = new Set(base.eventIds)
     let nextState = base.state
+    let unknownEvents: Map<string, UnknownEventNameSummary> | undefined
     for (const applied of frame.events) {
       if (eventIds.has(applied.id)) throw new Error(`yrd: journal contains duplicate event id '${applied.id}'`)
       eventIds.add(applied.id)
       const validated = canonicalEvent(applied, source)
+      if (validated === undefined) {
+        unknownEvents ??= new Map(base.unknownEvents)
+        const previous = unknownEvents.get(applied.name)
+        unknownEvents.set(
+          applied.name,
+          previous === undefined
+            ? { name: applied.name, count: 1, firstTs: applied.ts, lastTs: applied.ts, sampleId: applied.id }
+            : { ...previous, count: previous.count + 1, lastTs: applied.ts },
+        )
+        continue
+      }
       const projected = definition.project(nextState, validated, frame.cause)
       nextState = freeze(projected) as DeepReadonly<State>
     }
@@ -708,6 +768,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       receiptsByKey,
       causeIds,
       eventIds,
+      ...(unknownEvents === undefined ? {} : { unknownEvents }),
       ...(at === undefined ? {} : { at }),
     }
   }
@@ -798,6 +859,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       receiptsByKey,
       causeIds,
       eventIds,
+      unknownEvents: new Map((parsed.unknownEvents ?? []).map((summary) => [summary.name, summary])),
     }
   }
 
@@ -878,6 +940,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
           receipts: [...next.receiptsById.values()],
           causeIds: [...next.causeIds],
           eventIds: [...next.eventIds],
+          ...(next.unknownEvents.size === 0
+            ? {}
+            : { unknownEvents: [...next.unknownEvents.values()].toSorted((a, b) => a.name.localeCompare(b.name)) }),
         },
       })
       if (saved) checkpointCursor = next.cursor
@@ -1033,6 +1098,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
         const frame = parseJournalFrame(value)
         for (const applied of frame.events) {
           const validated = canonicalEvent(applied, "replay")
+          if (validated === undefined) continue
           historical = freeze(definition.project(historical, validated, frame.cause)) as DeepReadonly<State>
           at = validated.ts
         }
@@ -1223,6 +1289,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
         ? {}
         : { checkpoint: { identity: checkpointIdentity, cursor: checkpointCursor } }),
     }),
+    unknownEventNames: () =>
+      [...projection.unknownEvents.values()].toSorted((a, b) => a.name.localeCompare(b.name)),
     dispatch,
     /**
      * Yield the journal's events in cursor order, `after` through `before`.
@@ -1234,12 +1302,24 @@ export async function createYrd<State extends object, Commands extends CommandTr
      * the read is the only thing that makes an early-stopping caller cheap.
      * Both arguments carry `Journal.read`'s own defaults: the whole journal.
      */
-    async *events(after?: Cursor, before?: Cursor) {
+    async *events(after?: Cursor, before?: Cursor, options?: Readonly<{ unknownNames?: "skip" | "raw" }>) {
       await refresh()
+      const unknownNames = options?.unknownNames ?? "skip"
       for await (const batch of journal.read(after, before)) {
         for (const value of batch.values) {
           assertJournalReaderCompatibility(value)
-          for (const applied of journalFrameEvents(value)) yield canonicalEvent(applied, "replay")
+          for (const applied of journalFrameEvents(value)) {
+            const validated = canonicalEvent(applied, "replay")
+            if (validated !== undefined) {
+              yield validated
+              continue
+            }
+            // "skip" keeps the stream's shape for existing consumers; the
+            // quarantine stays visible via unknownEventNames(). "raw" hands
+            // diagnostic surfaces (`yrd log --all` and friends) the envelope
+            // exactly as stored — the envelope schema is name-agnostic.
+            if (unknownNames === "raw") yield freeze(EventSchema.parse(applied)) as Event
+          }
         }
       }
     },
@@ -1261,6 +1341,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
       }
     }
     state(projection.state)
+    if (projection.unknownEvents.size > 0) {
+      coreLog.info?.("Journal carries events with unregistered names; replay quarantined them (unknownEventNames()).", {
+        names: [...projection.unknownEvents.keys()].toSorted(),
+      })
+    }
     if (await saveProjection(projection)) checkpointRevision = projection.revision
     const features = definition.create(core)
     return mergeFields(core, features, "feature")

@@ -943,9 +943,15 @@ describe("Yrd domain objects", () => {
         },
       ],
     }
-    await expect(createYrd(createYrdDef(), { inject: { journal: createMemoryJournal([unknown]) } })).rejects.toThrow(
-      "no event definition",
-    )
+    // An unregistered NAME in the journal no longer takes replay down — it is
+    // quarantined with a report (writers still refuse on append). The crash
+    // contract this replaced was the PR1128 shape.
+    const tolerant = await createYrd(createYrdDef(), { inject: { journal: createMemoryJournal([unknown]) } })
+    try {
+      expect(tolerant.unknownEventNames()).toMatchObject([{ name: "unknown/event", count: 1 }])
+    } finally {
+      await tolerant.close()
+    }
   })
 })
 
