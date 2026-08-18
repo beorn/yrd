@@ -376,7 +376,7 @@ describe("pinned-submodule warning surface", () => {
       note: "c".repeat(40),
       checksum: "d".repeat(64),
     }
-    const proven = { status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }
+    const proven = { status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }
     const out = outputIO({ cwd: root })
 
     expect(

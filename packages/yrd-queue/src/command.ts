@@ -75,11 +75,14 @@ import { deterministicParentDate } from "./deterministic-parent-date.ts"
 import {
   MERGE_RECORD_NOTES_NAME,
   MERGE_RECORD_REF,
+  MERGE_RECORD_RETRACTION_NOTES_NAME,
   createMergeRecord,
   unprovableMergeRecordClaim,
   parseMergeRecord,
+  parseMergeRecordRetraction,
   type MergeRecordBody,
   type MergeRecordPointer,
+  type MergeRecordRetraction,
 } from "./merge-record.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
@@ -1550,12 +1553,21 @@ export type UnverifiableMergeRecord = Readonly<{
   status: "repository-incomplete" | "repository-corrupt"
   reason: string
 }>
+/** A record that could not prove itself AND has an appended retraction confessing it.
+ * Reported, never hidden: the estate stays honest about what it gave up on. */
+export type RetractedMergeRecord = Readonly<{
+  note: string
+  reason: string
+  retraction: MergeRecordRetraction
+}>
 export type RepositoryMergeRecordSearchResult =
   | Readonly<{
       status: "proven"
       records: readonly RepositoryMergeRecord[]
       /** Always empty unless the caller asked for per-record isolation. */
       unverifiable: readonly UnverifiableMergeRecord[]
+      /** Records excused by an appended retraction. Never silently dropped. */
+      retracted: readonly RetractedMergeRecord[]
     }>
   | Readonly<{ status: "not-proven"; reason: "merge-record-missing" }>
   | Readonly<{ status: "repository-incomplete"; reason: string }>
@@ -1577,6 +1589,37 @@ type VerifiedListing =
  * partially verified estate would be answering it from unproven truth, while a scan rebuilding a
  * lost index over a damaged estate must not let one bad note hide every good one behind it.
  */
+/**
+ * Read the appended retractions, keyed by the note blob they retract.
+ *
+ * Keying on the note BLOB sha is what makes a retraction unforgeable: a blob sha
+ * is a content hash, so a retraction can only ever excuse the exact bytes it
+ * names. It also keeps working for a record too damaged to parse, which is
+ * precisely the record most likely to need retracting.
+ *
+ * An absent or unreadable retraction ref is not an error — an estate that has
+ * never been repaired simply has none — but a retraction note that exists and
+ * cannot be parsed IS reported, because silently ignoring it would let a broken
+ * repair look like a healthy estate.
+ */
+async function readMergeRecordRetractions(
+  git: ReturnType<typeof createGit>,
+  repo: string,
+): Promise<ReadonlyMap<string, MergeRecordRetraction>> {
+  const listed = await git.run(repo, ["notes", `--ref=${MERGE_RECORD_RETRACTION_NOTES_NAME}`, "list"], true)
+  const retractions = new Map<string, MergeRecordRetraction>()
+  if (listed.code !== 0 || listed.stdout === "") return retractions
+  for (const line of listed.stdout.split("\n")) {
+    const [, target] = line.split(/\s+/u)
+    if (target === undefined) continue
+    const shown = await git.run(repo, ["notes", `--ref=${MERGE_RECORD_RETRACTION_NOTES_NAME}`, "show", target], true)
+    if (shown.code !== 0) continue
+    const retraction = parseMergeRecordRetraction(shown.stdout)
+    retractions.set(retraction.note, retraction)
+  }
+  return retractions
+}
+
 export async function findRepositoryMergeRecords(
   options: Readonly<{
     inject: Readonly<{ process: Pick<Process, "run"> }>
@@ -1704,6 +1747,8 @@ export async function findRepositoryMergeRecords(
 
   const records: RepositoryMergeRecord[] = []
   const unverifiable: UnverifiableMergeRecord[] = []
+  const retracted: RetractedMergeRecord[] = []
+  const retractions = await readMergeRecordRetractions(git, options.repo)
   for (const line of listed.stdout === "" ? [] : listed.stdout.split("\n")) {
     const listing = await verifyListing(line)
     if (listing.outcome === "verified") {
@@ -1711,16 +1756,25 @@ export async function findRepositoryMergeRecords(
       continue
     }
     if (listing.outcome === "filtered") continue
+    // TAUGHT, NOT RELAXED. A record with an appended retraction no longer makes the
+    // estate unprovable — but it does not become proven truth either. It is excused
+    // and REPORTED. The all-or-nothing contract is untouched for everything else:
+    // one unretracted bad record still refuses the whole single-selector verdict.
+    const retraction = retractions.get(listing.note)
+    if (retraction !== undefined) {
+      retracted.push({ note: listing.note, reason: listing.reason, retraction })
+      continue
+    }
     if (options.isolateUnverifiable !== true) return { status: listing.status, reason: listing.reason }
     unverifiable.push({ note: listing.note, status: listing.status, reason: listing.reason })
   }
   // Records that exist but could not be verified are never "missing": reporting them as an empty
   // estate would hand the caller a clean-looking zero for a repository that just failed to prove
-  // itself.
-  if (records.length === 0 && unverifiable.length === 0) {
+  // itself. A retracted record counts as existing for the same reason.
+  if (records.length === 0 && unverifiable.length === 0 && retracted.length === 0) {
     return { status: "not-proven", reason: "merge-record-missing" }
   }
-  return { status: "proven", records, unverifiable }
+  return { status: "proven", records, unverifiable, retracted }
 }
 
 export const RepositoryChangeIdentitySchema = z

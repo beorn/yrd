@@ -8,6 +8,16 @@ import * as z from "zod"
 export const MERGE_RECORD_REF = "refs/notes/yrd/merge-records" as const
 export const MERGE_RECORD_NOTES_NAME = "yrd/merge-records" as const
 
+/**
+ * Retractions live on their OWN notes ref, never by editing the record they
+ * retract. A merge record is immutable history: the estate's credibility rests on
+ * nobody being able to rewrite what a landing claimed after the fact. So a repair
+ * APPENDS a confession beside the record and leaves the original byte-identical,
+ * which also makes the repair itself auditable and reversible.
+ */
+export const MERGE_RECORD_RETRACTION_REF = "refs/notes/yrd/merge-record-retractions" as const
+export const MERGE_RECORD_RETRACTION_NOTES_NAME = "yrd/merge-record-retractions" as const
+
 export const MergeRecordChangeSchema = z
   .object({
     changeId: ChangeIdSchema.optional(),
@@ -152,4 +162,42 @@ export function createMergeRecord(record: MergeRecordBody): Readonly<{
 
 export function parseMergeRecord(value: string): MergeRecordEnvelope {
   return MergeRecordEnvelopeSchema.parse(JSON.parse(value) as unknown)
+}
+
+
+/**
+ * A confession that one merge record cannot prove itself, appended beside it.
+ *
+ * `note` and `checksum` together bind the retraction to EXACTLY the record it
+ * names. Without both, a retraction written for one record could silence a
+ * different record that later occupied the same anchor — which would turn the
+ * repair verb into a way of hiding real corruption, the opposite of its purpose.
+ */
+export const MergeRecordRetractionSchema = z
+  .object({
+    schema: z.literal("yrd/merge-record-retraction/v1"),
+    /** Blob sha of the retracted note, as `git notes list` reports it. */
+    note: GitShaSchema,
+    /** Checksum of the retracted record body — binds this to that exact content. */
+    checksum: z.string().regex(/^[0-9a-f]{64}$/u),
+    /** The merge id the retracted record claimed. */
+    merge: z.string().trim().min(1),
+    /** Why it cannot prove itself, in the verifier's own words. */
+    reason: z.string().trim().min(1),
+    /** Which producer class this record came from, when it is known. */
+    classification: z.enum(["unreachable-generated-commit", "change-id-mismatch", "unreadable", "other"]),
+    retractedAt: z.iso.datetime({ offset: true }),
+  })
+  .strict()
+export type MergeRecordRetraction = Readonly<z.infer<typeof MergeRecordRetractionSchema>>
+
+export function createMergeRecordRetraction(
+  retraction: MergeRecordRetraction,
+): Readonly<{ retraction: MergeRecordRetraction; canonical: string }> {
+  const parsed = MergeRecordRetractionSchema.parse(retraction)
+  return { retraction: parsed, canonical: canonicalJson(parsed) }
+}
+
+export function parseMergeRecordRetraction(value: string): MergeRecordRetraction {
+  return MergeRecordRetractionSchema.parse(JSON.parse(value) as unknown)
 }

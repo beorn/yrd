@@ -11850,8 +11850,8 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
         },
       } as YrdCliServices),
       output.stderr(),
@@ -11909,8 +11909,8 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
         },
       } as YrdCliServices),
       output.stderr(),
@@ -11964,8 +11964,8 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
       },
     } as YrdCliServices)
 
@@ -12009,8 +12009,8 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [] }),
+        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
       },
     } as YrdCliServices)
 
@@ -14864,8 +14864,8 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       ({
         config: doctorConfig(),
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records, unverifiable: [] }),
-          all: async () => ({ status: "proven" as const, records, unverifiable: [] }),
+          find: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
+          all: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
         },
       }) as YrdCliServices
 
@@ -15215,8 +15215,8 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const services = {
         config: doctorConfig(),
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [], unverifiable: [] }),
-          all: async () => ({ status: "proven" as const, records: [], unverifiable }),
+          find: async () => ({ status: "proven" as const, records: [], unverifiable: [], retracted: [] }),
+          all: async () => ({ status: "proven" as const, records: [], unverifiable, retracted: [] }),
         },
       } as YrdCliServices
 
