@@ -2,7 +2,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path"
 import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
 import { adaptProcessGit, type Process, type ProcessResult } from "@yrd/process"
 import { resolveComponentMain, type ComponentMainGit } from "@yrd/queue"
-import { changedCommitGitlinks } from "git-super/commit-graph"
+import { changedCommitGitlinks, readCommitGitlinks } from "git-super/commit-graph"
 import { remoteContainsCommit } from "git-super/push"
 import { cleanGitEnvironment } from "./git-environment.ts"
 
@@ -185,4 +185,31 @@ export async function changedSubmodulePins(options: {
       )
       .sort((left, right) => left.path.localeCompare(right.path)),
   )
+}
+
+/**
+ * Which of a set of changed gitlinks are NEW paths — added by `headSha`, absent at `baseSha`
+ * — as opposed to an existing gitlink's value moving.
+ *
+ * `changedCommitGitlinks` (git-super) is structurally blind to a THIRD case, deletion: it
+ * diffs by reading `headSha`'s own gitlinks and keeping the ones whose value differs from
+ * `baseSha`, so a path present at `baseSha` and absent at `headSha` never appears in either
+ * function's output at all — a pre-existing gap this function does not attempt to close.
+ *
+ * Distinguishing an addition matters because a min commit is a floor on an EXISTING
+ * component: the shaset-commit writer (`synthesizeGitlinkWrapper`) is update-only (comma-form
+ * `--cacheinfo` cannot add a path), so admitting an added gitlink here would let a request
+ * through that composition can never actually satisfy.
+ */
+export async function addedSubmodulePins(options: {
+  process: Pick<Process, "run">
+  repo: string
+  baseSha: string
+  pins: readonly UnpublishedSubmodulePin[]
+}): Promise<readonly UnpublishedSubmodulePin[]> {
+  if (options.pins.length === 0) return Object.freeze([])
+  const repo = resolve(options.repo)
+  const git = adaptProcessGit(options.process, { timeoutMs: GIT_TIMEOUT_MS })
+  const atBase = new Set((await readCommitGitlinks(git, repo, options.baseSha)).map((entry) => entry.path))
+  return Object.freeze(options.pins.filter((pin) => !atBase.has(pin.path)))
 }

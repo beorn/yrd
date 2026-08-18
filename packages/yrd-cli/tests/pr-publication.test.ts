@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { afterEach, describe, expect, it } from "vitest"
 import { createPrPublicationService } from "../src/pr-publication.ts"
-import { changedSubmodulePins, submodulePinPublications } from "../src/pr-submodule-publication.ts"
+import { addedSubmodulePins, changedSubmodulePins, submodulePinPublications } from "../src/pr-submodule-publication.ts"
 
 const roots: string[] = []
 
@@ -194,5 +194,78 @@ describe("PR publication Git transport", () => {
     expect(pushes).toEqual([join(rootSource, "dep"), rootSource])
     expect(await git(componentRemote, ["rev-parse", "refs/heads/issue/publication"])).toBe(componentPin)
     expect(await git(rootRemote, ["rev-parse", "refs/heads/issue/publication"])).toBe(headSha)
+  })
+})
+
+describe("addedSubmodulePins", () => {
+  it("names a newly added gitlink, distinct from an existing one whose value moved", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-added-"))
+    roots.push(fixture)
+    const componentA = join(fixture, "component-a")
+    const componentB = join(fixture, "component-b")
+    const root = join(fixture, "root")
+
+    await repository(componentA)
+    await writeFile(join(componentA, "a.txt"), "one\n")
+    await git(componentA, ["add", "a.txt"])
+    await git(componentA, ["commit", "-qm", "a one"])
+
+    await repository(componentB)
+    await writeFile(join(componentB, "b.txt"), "one\n")
+    await git(componentB, ["add", "b.txt"])
+    await git(componentB, ["commit", "-qm", "b one"])
+
+    await repository(root)
+    await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", componentA, "dep-a"])
+    await git(root, ["commit", "-qam", "record component a"])
+    const baseSha = await git(root, ["rev-parse", "HEAD"])
+
+    // Base changes: an EXISTING gitlink (dep-a) advances, and a NEW gitlink (dep-b) is added.
+    await writeFile(join(componentA, "a.txt"), "two\n")
+    await git(componentA, ["commit", "-qam", "a two"])
+    const pinA = await git(componentA, ["rev-parse", "HEAD"])
+    await git(join(root, "dep-a"), ["fetch", "-q", componentA, pinA])
+    await git(join(root, "dep-a"), ["checkout", "-q", pinA])
+    await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", componentB, "dep-b"])
+    await git(root, ["add", "dep-a"])
+    await git(root, ["commit", "-qam", "advance dep-a, add dep-b"])
+    const headSha = await git(root, ["rev-parse", "HEAD"])
+
+    await using process = createProcess()
+    const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
+    expect(changed.map((pin) => pin.path)).toEqual(["dep-a", "dep-b"])
+
+    const added = await addedSubmodulePins({ process, repo: root, baseSha, pins: changed })
+    expect(added.map((pin) => pin.path)).toEqual(["dep-b"])
+  })
+
+  it("reports nothing added when every changed pin already existed at the base", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-added-none-"))
+    roots.push(fixture)
+    const component = join(fixture, "component")
+    const root = join(fixture, "root")
+
+    await repository(component)
+    await writeFile(join(component, "c.txt"), "one\n")
+    await git(component, ["add", "c.txt"])
+    await git(component, ["commit", "-qm", "c one"])
+
+    await repository(root)
+    await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep"])
+    await git(root, ["commit", "-qam", "record component"])
+    const baseSha = await git(root, ["rev-parse", "HEAD"])
+
+    await writeFile(join(component, "c.txt"), "two\n")
+    await git(component, ["commit", "-qam", "c two"])
+    const pin = await git(component, ["rev-parse", "HEAD"])
+    await git(join(root, "dep"), ["fetch", "-q", component, pin])
+    await git(join(root, "dep"), ["checkout", "-q", pin])
+    await git(root, ["add", "dep"])
+    await git(root, ["commit", "-qm", "advance dep"])
+    const headSha = await git(root, ["rev-parse", "HEAD"])
+
+    await using process = createProcess()
+    const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
+    await expect(addedSubmodulePins({ process, repo: root, baseSha, pins: changed })).resolves.toEqual([])
   })
 })
