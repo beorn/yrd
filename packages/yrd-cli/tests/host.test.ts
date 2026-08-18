@@ -5451,4 +5451,34 @@ describe("targetImplementationEntrypoint", () => {
       join(bayImplementation, "bin", "yrd.ts"),
     )
   })
+
+  it("maps a linked-worktree implementation by its own working tree, never the assembly root", async () => {
+    // 2026-08-18: the resident runner executed Yrd from a linked git worktree
+    // of the repository. Stripping the assembly root left the worktrees
+    // directory prefixed onto the Candidate path —
+    // <bay>/worktree/.worktrees/<runner-worktree>/…/bin/yrd.ts, a path no
+    // Candidate tree can contain — and every new-PR check refused with Module
+    // not found. The implementation's enclosing working tree is the base.
+    const { targetImplementationEntrypoint } = await import("../src/host.ts")
+    const workTree = join(repo, ".worktrees", "wt1")
+    const linked = join(workTree, "vendor", "yrd")
+    expect(targetImplementationEntrypoint(repo, linked, candidate, baysRoot, workTree)).toBe(
+      join(candidate, "vendor", "yrd", "bin", "yrd.ts"),
+    )
+  })
+
+  it("keeps the implementation fixed when its declared working tree does not contain it", async () => {
+    const { targetImplementationEntrypoint } = await import("../src/host.ts")
+    const unrelated = join(sep, "srv", "elsewhere")
+    expect(targetImplementationEntrypoint(repo, join(repo, "vendor", "yrd"), candidate, baysRoot, unrelated)).toBe(
+      join(repo, "vendor", "yrd", "bin", "yrd.ts"),
+    )
+  })
+
+  it("maps a primary-root implementation identically with and without its working tree", async () => {
+    const { targetImplementationEntrypoint } = await import("../src/host.ts")
+    expect(targetImplementationEntrypoint(repo, join(repo, "vendor", "yrd"), candidate, baysRoot, repo)).toBe(
+      join(candidate, "vendor", "yrd", "bin", "yrd.ts"),
+    )
+  })
 })

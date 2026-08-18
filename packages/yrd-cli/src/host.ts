@@ -1692,8 +1692,20 @@ export function targetImplementationEntrypoint(
   implementationRoot: string,
   candidateRoot: string,
   baysRoot?: string,
+  implementationWorkTree?: string,
 ): string {
-  const implementationPath = relative(resolve(assemblyRoot), resolve(implementationRoot))
+  // A vendored implementation's Candidate-relative location is its path inside
+  // the working tree the runner actually executes from — which may be a LINKED
+  // git worktree of the repository, not the primary root. Linked worktrees
+  // live under an untracked directory of the primary root, so stripping the
+  // assembly root leaves that directory prefixed onto the mapped path
+  // (2026-08-18: every new-PR check refused with Module not found
+  // <bay>/worktree/.worktrees/<runner-worktree>/…/bin/yrd.ts). The caller
+  // resolves the enclosing working tree from the implementation itself; the
+  // assembly root stays the base when none exists.
+  const mappingBase =
+    implementationWorkTree === undefined || implementationWorkTree === "" ? assemblyRoot : implementationWorkTree
+  const implementationPath = relative(resolve(mappingBase), resolve(implementationRoot))
   const outsideAssembly = implementationPath === ".." || implementationPath.startsWith(`..${sep}`)
   const bayPath = baysRoot === undefined ? undefined : relative(resolve(baysRoot), resolve(implementationRoot))
   const insideBays = bayPath !== undefined && bayPath !== ".." && !bayPath.startsWith(`..${sep}`)
@@ -1717,7 +1729,44 @@ function targetCheckpointMigrationAttestor(
   const implementationRoot = options.implementationRoot
   if (implementationRoot === undefined) return undefined
   return async ({ path }) => {
-    const entrypoint = targetImplementationEntrypoint(options.repo, implementationRoot, path, options.baysRoot)
+    // The runner may execute from a linked worktree of the repository; the
+    // implementation's own superproject working tree — not the assembly root —
+    // is then the base its Candidate-relative path strips from. That base is
+    // only valid when the enclosing working tree is a checkout OF THE ASSEMBLY
+    // REPOSITORY (same git common dir): a runner whose implementation is
+    // vendored in some OTHER repository is a standalone consumer of this
+    // assembly, and mapping its path into the Candidate would compose a
+    // phantom. Empty output means no enclosing superproject; every failure
+    // degrades to the assembly-root base, whose outside-assembly branch keeps
+    // the implementation fixed rather than composing a phantom Candidate path.
+    const gitLine = async (cwd: string, ...args: readonly string[]): Promise<string | undefined> => {
+      const result = await options.process.run({
+        argv: ["git", ...args],
+        cwd,
+        env: cleanGitEnvironment(globalThis.process.env),
+        timeoutMs: CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS,
+      })
+      return result.timedOut || result.exitCode !== 0 ? undefined : result.stdout.trim()
+    }
+    let implementationWorkTree =
+      (await gitLine(implementationRoot, "rev-parse", "--show-superproject-working-tree")) ?? ""
+    if (implementationWorkTree !== "") {
+      const assemblyCommonDir = await gitLine(options.repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+      const workTreeCommonDir = await gitLine(
+        implementationWorkTree,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      )
+      if (assemblyCommonDir === undefined || assemblyCommonDir !== workTreeCommonDir) implementationWorkTree = ""
+    }
+    const entrypoint = targetImplementationEntrypoint(
+      options.repo,
+      implementationRoot,
+      path,
+      options.baysRoot,
+      implementationWorkTree === "" ? undefined : implementationWorkTree,
+    )
     const result = await options.process.run({
       argv: [
         globalThis.process.execPath,
