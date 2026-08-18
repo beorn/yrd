@@ -81,7 +81,7 @@ import {
   createMergeRecord,
   createMergeRecordRetraction,
   unprovableMergeRecordClaim,
-  parseMergeRecord,
+  parseMergeRecordTolerant,
   parseMergeRecordRetraction,
   type MergeRecordBody,
   type MergeRecordPointer,
@@ -1524,9 +1524,25 @@ export function gitMergeRecorder(options: {
     const target = (await git.input(options.repo, ["hash-object", "-w", "--stdin"], `yrd merge ${run.id}\n`)).stdout
     const existing = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
     if (existing.code === 0) {
-      const parsed = parseMergeRecord(existing.stdout)
-      if (createMergeRecord(parsed.record).canonical !== record.canonical) {
-        throw new Error(`yrd: merge '${run.id}' already has a different immutable merge record`)
+      // Tolerant on purpose: the existing note may have been written by a newer checkout.
+      // A record this reader cannot read at all is still refused loudly (below); one that
+      // reads but carries fields this schema does not recognize cannot be proven equivalent
+      // to the record we are about to write, so it is refused too — the all-or-nothing
+      // equivalence check survives unchanged, only the DIAGNOSIS improves.
+      const parsed = parseMergeRecordTolerant(existing.stdout)
+      if (parsed.outcome === "unreadable") {
+        throw new Error(`yrd: merge '${run.id}' has an existing merge record this checkout cannot read: ${parsed.reason}`)
+      }
+      if (
+        parsed.outcome === "ok-with-unknown-fields" ||
+        createMergeRecord(parsed.envelope.record).canonical !== record.canonical
+      ) {
+        const skew =
+          parsed.outcome === "ok-with-unknown-fields"
+            ? ` (equivalence cannot be proven: the existing record carries field(s) this checkout does not ` +
+              `recognize — ${parsed.unknownFields.join(", ")})`
+            : ""
+        throw new Error(`yrd: merge '${run.id}' already has a different immutable merge record${skew}`)
       }
       await publishMergeRecordRef(git, options.repo, run.id, remote)
       return
@@ -1539,7 +1555,13 @@ export function gitMergeRecorder(options: {
     )
     if (added.code !== 0) {
       const raced = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
-      if (raced.code === 0 && createMergeRecord(parseMergeRecord(raced.stdout).record).canonical === record.canonical) {
+      // Only an EXACT read (no unknown fields) is accepted as proof the race already
+      // published this same record — see the equivalence note above.
+      const racedParsed = raced.code === 0 ? parseMergeRecordTolerant(raced.stdout) : undefined
+      if (
+        racedParsed?.outcome === "ok" &&
+        createMergeRecord(racedParsed.envelope.record).canonical === record.canonical
+      ) {
         return
       }
       throw new Error(`yrd: merge record for '${run.id}' could not be published: ${added.stderr || added.stdout}`)
@@ -1548,7 +1570,14 @@ export function gitMergeRecorder(options: {
   }
 }
 
-export type RepositoryMergeRecord = Readonly<{ record: MergeRecordBody; pointer: MergeRecordPointer }>
+export type RepositoryMergeRecord = Readonly<{
+  record: MergeRecordBody
+  pointer: MergeRecordPointer
+  /** Present when this record parsed tolerantly: checksum-authentic, but carrying one or
+   * more fields a newer writer added that this checkout's schema does not recognize (and
+   * therefore does not reflect in `record`). Never silently dropped — this is the report. */
+  unknownFields?: readonly string[]
+}>
 /** One listed note the scan could not turn into verified truth, kept per record so a damaged
  * estate reports what it lost instead of losing the whole scan. */
 export type UnverifiableMergeRecord = Readonly<{
@@ -1676,14 +1705,17 @@ export async function findRepositoryMergeRecords(
     }
     const shown = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
     if (shown.code !== 0) return corrupt(`merge-record '${note}' is unreadable`, { classification: "unreadable" })
-    let parsed
-    try {
-      parsed = parseMergeRecord(shown.stdout)
-    } catch (cause) {
-      return corrupt(`merge-record '${note}' is invalid: ${cause instanceof Error ? cause.message : String(cause)}`, {
-        classification: "unreadable",
-      })
+    // Tolerant on purpose: this is the bulk estate scan the tolerant-loader work exists
+    // for. A note this checkout cannot read at all is still corrupt (below); a note that
+    // is checksum-authentic but carries fields a newer writer added is NOT corrupt, and
+    // misclassifying it as such would have been the checksum trap — see
+    // `parseMergeRecordTolerant`'s doc comment for why re-hashing a stripped copy is wrong.
+    const tolerant = parseMergeRecordTolerant(shown.stdout)
+    if (tolerant.outcome === "unreadable") {
+      return corrupt(`merge-record '${note}' is invalid: ${tolerant.reason}`, { classification: "unreadable" })
     }
+    const parsed = tolerant.envelope
+    const unknownFields = tolerant.outcome === "ok-with-unknown-fields" ? tolerant.unknownFields : undefined
     const expectedTarget = (
       await git.input(options.repo, ["hash-object", "--stdin"], `yrd merge ${parsed.record.merge.id}\n`)
     ).stdout
@@ -1796,6 +1828,7 @@ export async function findRepositoryMergeRecords(
       record: {
         record: parsed.record,
         pointer: { ref: MERGE_RECORD_REF, target, note, checksum: parsed.checksum },
+        ...(unknownFields === undefined ? {} : { unknownFields }),
       },
     }
   }
