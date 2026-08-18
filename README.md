@@ -39,6 +39,23 @@ A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstr
 
 **Assemble → test → merge → roll** — the queue is the only merger.
 
+### Vocabulary: the shaset model
+
+The **shaset** is the set of submodule commits a superproject commit records; every merge writes a new one. The whole model in one paragraph:
+
+> A merge request's gitlinks are **min commits** — *at least this commit*. Before queueing, the queue checks each min commit is **on that submodule's main**; if not, the request **parks** until the submodule lands it. At merge, the queue **fills in** each submodule's final commit from its main and writes the **shaset** — authored gitlinks never land as-is. Nothing to merge = **nothing new**.
+
+Standard git words — **submodule · gitlink · superproject** — mean exactly what git means by them; **shaset** is the one coined term.
+
+**Killed vocabulary** (operator-ratified 2026-08-18). These words still appear in older prose, refusal codes, and the `yrd intent` rail until the rename carrier lands; new writing must not use them:
+
+| Killed | Say instead |
+|---|---|
+| ~~admission~~ | the queue **checks before queueing** — no noun needed |
+| ~~derivation / derived~~ | the queue **fills in** the values and **writes the shaset** |
+| ~~demand~~ | **min commit** |
+| ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **merge request whose diff is min commits**; deleting this rail is scheduled work |
+
 ## The model — five objects, one pipeline
 
 ```text
@@ -789,6 +806,12 @@ component advance with `yrd intent submit --component <path> --target <sha> --is
 there is no intake bypass. Added and deleted gitlinks are not
 advance intents and remain refused. Queue owns the generated root carrier and
 writes it deterministically from the exact base and accepted intents.
+
+> **Legacy rail.** This whole passage speaks the killed vocabulary — see
+> [Vocabulary: the shaset model](#vocabulary-the-shaset-model). Under the
+> ratified model an authored gitlink is a **min commit**, checked against the
+> submodule's main before queueing, and this `yrd intent` rail is scheduled
+> for deletion once the queue fills in submodule values itself.
 
 #### Resolving Divergent Gitlink Pins
 
