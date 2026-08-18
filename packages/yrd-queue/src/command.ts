@@ -4473,9 +4473,16 @@ type SynthesizedGitlinkWrapper = Readonly<{ commit: string; treeSha: string }>
  * The ONE generated-root implementation shared by composed PRs, pin intents,
  * and the materialize escape hatch. It stages only gitlink entries and writes
  * a byte-stable commit through Git.commitTree's pinned identity and timestamp.
+ *
+ * Exported for characterization, the (a) precedent applied to (b)'s entry seam:
+ * this writer had NO behavioural test while being what the shaset-commit species
+ * names, and the provisioner lift changes its contract. The param is narrowed to
+ * the two members it uses so the characterization can supply a real-repo adapter
+ * without reconstructing the whole runtime git. See tests/gitlink-wrapper.test.ts
+ * and @i/10-merge-queue/b-derivation-sites.
  */
-async function synthesizeGitlinkWrapper(
-  git: Git,
+export async function synthesizeGitlinkWrapper(
+  git: Pick<Git, "run" | "commitTree">,
   path: string,
   parent: string,
   updates: readonly GitlinkUpdate[],
@@ -5575,7 +5582,7 @@ async function matchesExpectedUnionMerge(
   })
 }
 
-async function stagedPaths(git: Git, repo: string): Promise<string[]> {
+async function stagedPaths(git: Pick<Git, "run">, repo: string): Promise<string[]> {
   const result = await git.run(repo, ["diff", "--cached", "--name-only", "--no-renames", "-z", "--"])
   return nulPaths(result.stdout)
 }
