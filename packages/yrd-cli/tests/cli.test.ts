@@ -11875,6 +11875,68 @@ describe("runYrd", () => {
     })
   })
 
+  it("names a merge that joined nothing as already up to date, first-class", async () => {
+    await using app = await createApp()
+    const output = outputIO()
+    const changeId = `I${"e".repeat(40)}`
+    // The nothing-new shape: a merged result that IS its own base. The record
+    // stores only the facts; the outcome is derived, and it is a SUCCESS.
+    const record = {
+      merge: {
+        id: "R-nothing-new",
+        base: "main",
+        baseSha: BASE_SHA,
+        candidate: "candidate:R-nothing-new",
+        result: "merged" as const,
+        mergedCommit: BASE_SHA,
+        startedAt: "2026-08-12T20:00:00.000Z",
+        finishedAt: "2026-08-12T20:01:00.000Z",
+      },
+      changes: [{ changeId, pr: "PR1", revision: 1, submittedHead: HEAD_SHA }],
+      evidence: { jobs: [] },
+      pins: [],
+    }
+    const pointer = {
+      ref: "refs/notes/yrd/merge-records" as const,
+      target: "2".repeat(40),
+      note: "3".repeat(40),
+      checksum: "4".repeat(64),
+    }
+
+    expect(
+      await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
+        mergeRecords: {
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
+        },
+      } as YrdCliServices),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "why",
+      selector: "PR1",
+      verdict: "merged",
+      nothingNew: true,
+      record: { merge: { id: "R-nothing-new", mergedCommit: BASE_SHA } },
+    })
+
+    const human = outputIO()
+    expect(
+      await runYrd(app, yrd("why", "PR1"), human.io, {
+        mergeRecords: {
+          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
+        },
+      } as YrdCliServices),
+      human.stderr(),
+    ).toBe(0)
+    expect(human.stdout()).toContain("already up to date — joined nothing new to 'main'")
+    // The line must not read as a fresh landing: no bare "at <commit>" claim.
+    expect(human.stdout()).not.toContain(`at ${BASE_SHA}\n`)
+  })
+
   it("repairs a repository-proven merge whose Journal index row is missing", async () => {
     await using app = await createApp()
     await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })

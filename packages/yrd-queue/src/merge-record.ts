@@ -97,6 +97,27 @@ export type MergeRecordBody = Readonly<z.infer<typeof MergeRecordBodySchema>>
  *
  * Returns the human-readable contradiction, or undefined when the record is sound.
  */
+/**
+ * The nothing-new outcome: a merged result that IS its own base joined nothing
+ * to history — the change was already contained, and being up to date is a
+ * success, not a defect.
+ *
+ * Deliberately a PROJECTION over facts the record already stores (result,
+ * mergedCommit, baseSha), never a stored field: the body schema is `.strict()`,
+ * so a new key would make every record written by a newer tree unreadable to
+ * older checkouts — the exact whole-loader failure the tolerant-reader work
+ * exists to prevent. Readers that want to SAY "Already up to date." ask this
+ * predicate; the writer half (claiming no generated commits for such a landing)
+ * is enforced where records are written.
+ */
+export function mergeJoinedNothing(record: MergeRecordBody): boolean {
+  return (
+    record.merge.result === "merged" &&
+    record.merge.mergedCommit !== undefined &&
+    record.merge.mergedCommit === record.merge.baseSha
+  )
+}
+
 export function unprovableMergeRecordClaim(record: MergeRecordBody): string | undefined {
   if (record.merge.result !== "merged") return undefined
   const { mergedCommit, baseSha } = record.merge

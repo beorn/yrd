@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { mergeRecordToStatement } from "../src/merge-record-statement.ts"
-import { MergeRecordBodySchema, type MergeRecordBody } from "../src/merge-record.ts"
+import { mergeJoinedNothing, MergeRecordBodySchema, type MergeRecordBody } from "../src/merge-record.ts"
 
 const SHA_LANDED = "a".repeat(40)
 const SHA_SUBMITTED = "b".repeat(40)
@@ -107,5 +107,46 @@ describe("mergeRecordToStatement", () => {
       reason: { code: "merge-failed", message: "candidate did not apply" },
     })
     expect(mergeRecordToStatement(failed, "queue:main")).toBeUndefined()
+  })
+})
+
+describe("mergeJoinedNothing — the nothing-new outcome is a projection over stored facts", () => {
+  const base = {
+    id: "RUN2",
+    base: "main",
+    baseSha: SHA_BASE,
+    candidate: "CANDIDATE2",
+    startedAt: "2026-08-13T00:00:00Z",
+    finishedAt: "2026-08-13T00:01:00Z",
+  }
+  const skeleton = {
+    changes: [{ pr: "PR2", revision: 1, submittedHead: SHA_SUBMITTED }],
+    evidence: { jobs: [] },
+    pins: [],
+  }
+
+  it("is true exactly when a merged result IS its own base", () => {
+    const record = MergeRecordBodySchema.parse({
+      merge: { ...base, result: "merged", mergedCommit: SHA_BASE },
+      ...skeleton,
+    })
+    expect(mergeJoinedNothing(record)).toBe(true)
+  })
+
+  it("is false for an ordinary landing that moved the base", () => {
+    const record = MergeRecordBodySchema.parse({
+      merge: { ...base, result: "merged", mergedCommit: SHA_LANDED },
+      ...skeleton,
+    })
+    expect(mergeJoinedNothing(record)).toBe(false)
+  })
+
+  it("is false for a failed run even when no commit exists — failure is not up to date", () => {
+    const record = MergeRecordBodySchema.parse({
+      merge: { ...base, result: "failed" },
+      ...skeleton,
+      reason: { code: "merge-failed", message: "boom" },
+    })
+    expect(mergeJoinedNothing(record)).toBe(false)
   })
 })

@@ -66,6 +66,7 @@ import {
   CANDIDATE_REF_RETENTION_MS,
   candidateRefDenominator,
   MERGE_RECORD_REF,
+  mergeJoinedNothing,
   mergeRecordToStatement,
   Queues,
   pruneCandidateRefs,
@@ -10748,9 +10749,16 @@ async function explainLanding(
           repaired = true
         }
       }
+      // Nothing-new is a first-class outcome, not a defect: the change was already
+      // contained, so "at <commit>" would print the BASE and read as a fresh landing.
+      // Derived here by predicate — the record stores the facts, never the label.
+      const nothingNew = mergeJoinedNothing(latest.record)
       const human =
         verdict === "merged"
-          ? `MERGED — ${selector} via ${latest.record.merge.id} at ${latest.record.merge.mergedCommit}`
+          ? nothingNew
+            ? `MERGED — ${selector} via ${latest.record.merge.id}: already up to date — ` +
+              `joined nothing new to '${latest.record.merge.base}' at ${latest.record.merge.baseSha}`
+            : `MERGED — ${selector} via ${latest.record.merge.id} at ${latest.record.merge.mergedCommit}`
           : `${verdict.toUpperCase()} — ${latest.record.merge.id}: ${reason?.code ?? "unknown"}: ${reason?.message ?? "no reason recorded"}${fix === undefined ? "" : ` — fix: ${fix}`}`
       await printResult(
         io,
@@ -10759,6 +10767,7 @@ async function explainLanding(
           command: "why",
           selector,
           verdict,
+          ...(nothingNew ? { nothingNew } : {}),
           repaired,
           record: latest.record,
           pointer: latest.pointer,
