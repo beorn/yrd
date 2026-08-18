@@ -9,6 +9,7 @@
   "dependencies": {
     "@silvery/scope": "^0.24.0",
     "git-super": "github:beorn/git-super#176fdb64d31a1303389b0306b1f7dbfc713d35ba",
+    "@yrd/core": "workspace:*",
     "loggily": "^0.10.2"
   }
 }

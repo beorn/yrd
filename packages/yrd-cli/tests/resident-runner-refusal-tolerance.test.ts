@@ -210,6 +210,39 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
       expect(h.stderr.join("")).toBe("")
     },
   )
+
+  it("skips a candidate checkout whose spawn directory is absent without dying (22584)", async () => {
+    // A candidate that adds a nested submodule names paths the base checkout
+    // lacks. Materializing it spawned git in a directory that does not exist;
+    // the bare posix_spawn ENOENT carried no FailureFact, so the classifier
+    // could not contain it and the whole resident exited mid-admission.
+    // The absent directory is always DERIVED from the candidate under
+    // admission — a bay, scratch, or reference checkout — so it is per-PR by
+    // construction and belongs in the same cycle-skip belt.
+    const { createFailure } = await import("@yrd/core")
+    const h = harness([
+      () =>
+        Promise.reject(
+          createFailure({
+            kind: "infrastructure",
+            code: "spawn-cwd-missing",
+            message: "yrd: cannot run 'git cat-file -e' — its working directory '/repo/km/apps/maddoc' does not exist",
+          }),
+        ),
+      () => {
+        h.drain()
+        return Promise.resolve([])
+      },
+    ])
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    expect(h.runCalls()).toBe(2)
+    expect(h.warnings).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ action: "resident-pr-refusal-skip", code: "spawn-cwd-missing" }),
+      }),
+    )
+    expect(h.stderr.join("")).toBe("")
+  })
 })
 
 describe("resident runner — tolerated skips are loggily-only (Defect 3)", () => {

@@ -4287,6 +4287,8 @@ describe("Queue command adapters", () => {
       await git(repo, ["diff", "--no-renames", "--diff-filter=D", "--name-only", authoredBase, carrierHead, "--"]),
     ).toBe("")
 
+
+
     await using process = createProcess()
     const pr = PRSnapshotSchema.parse({
       id: "PR1",
@@ -4352,6 +4354,74 @@ describe("Queue command adapters", () => {
     const tree = await git(repo, ["ls-tree", "-r", "--name-only", sha])
     expect(tree).toContain("README.md")
     expect(tree).not.toContain("doomed.txt")
+  })
+
+  it("refuses one candidate when its source store vanishes mid-landing, never spawning git there", async () => {
+    // The landing-path sibling of the reference-borrow defect: proving a source
+    // candidate ref spawns git in join(repo, <gitlink>). A source store that
+    // disappears after preparation makes that an absent working directory, which
+    // fails inside posix_spawn — an untyped ENOENT no allowFailure can contain,
+    // and the death that took the resident runner down mid-admission. It is one
+    // candidate's condition, so it belongs in this function's per-candidate
+    // refusal, with the root branch left untouched.
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const remote = join(repo, "..", "root-origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/source"])
+    const sourceStore = join(repo, "dep")
+
+    await using process = createProcess()
+    let raced = false
+    const racingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        // Remove the store on the FIRST probe of it, so preparation has already
+        // passed and only the candidate-ref proof meets the absent path.
+        // Publish the source Candidate ref, THEN drop the local store — so the
+        // ref genuinely exists on origin and only the path that proves it is
+        // gone. Preparation has already passed; the candidate-ref proof that
+        // runs next is the first code to meet the absent directory.
+        if (
+          !raced &&
+          request.cwd === sourceStore &&
+          request.argv.some((a) => a.includes(":refs/heads/yrd/candidates/"))
+        ) {
+          raced = true
+          const published = await process.run(request)
+          await rm(sourceStore, { recursive: true, force: true })
+          return published
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(racingProcess, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(raced).toBe(true)
+    expect(existsSync(sourceStore)).toBe(false)
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "source-publish" } })
+    // The refusal names the absent absolute path, not a bare ENOENT.
+    expect(run.error?.message).toContain(sourceStore)
+    expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
   })
 
   /**

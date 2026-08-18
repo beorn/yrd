@@ -164,7 +164,7 @@ import {
   type ResidentRefusalStall,
 } from "./refusal-remedy.ts"
 import { reconcilePrLandings, type PrLanding } from "./pr-landing.ts"
-import { requireImplicitRecutBranchFreshness } from "./recut-branch-freshness.ts"
+import { requireImplicitRecutBranchFreshness, type RecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { lifecycleStatus } from "./status-presentation.ts"
 import {
@@ -8595,6 +8595,13 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   // per-candidate wrap is still a cycle skip, not a resident death. Covers
   // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
   // the needs-author + recut-lineage composition buckets if they bubble out.
+  // 22584 adds spawn-cwd-missing: every spawn directory Yrd derives is candidate
+  // content (bay, scratch, and reference checkouts, down to nested submodule
+  // paths a candidate ADDS but the base lacks), so an absent one is per-candidate
+  // by construction. The resident's OWN root is re-proven by every other command
+  // in the cycle, so a genuinely absent root keeps warning loudly each interval —
+  // and the message names the absolute path, which the bare posix_spawn ENOENT
+  // this replaces never did.
   const fact = failureFact(error)
   if (fact?.kind === "infrastructure" && fact.code === "journal-busy") {
     return {
@@ -8625,7 +8632,8 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       fact.code === "refused-path" ||
       fact.code === "refused-path-inspection" ||
       fact.code === "restack-conflict" ||
-      fact.code === "restack-failed"
+      fact.code === "restack-failed" ||
+      fact.code === "spawn-cwd-missing"
     if (prScoped) {
       return {
         message: "resident runner skipped a cycle lost to a per-PR failure",
@@ -8680,16 +8688,61 @@ function trackedPreflightNeedsPerson(pr: PR, revision: PRRev): boolean {
 }
 
 /**
+ * Codes `freshRemoteBranch` raises while OBSERVING one tracked PR's branch, each
+ * a fact about THAT branch: deleted on origin after landing (the routine `fatal:
+ * couldn't find remote ref`, exit 128), a fetch that timed out, or a refreshed
+ * ref that will not resolve to a commit. Observing one candidate is per-candidate
+ * work, so these defer that candidate and the cycle moves on.
+ *
+ * Deliberately an explicit list read at the observation call rather than a test
+ * on kind:"configuration" — that kind also covers real composition faults
+ * (async-command, missing Git facts) which must keep stopping the runner
+ * fail-loud. `recut-branch-observer-missing` is excluded on purpose: it says no
+ * Git process is installed in THIS process, so it is identical for every
+ * candidate, and deferring it per-PR would silently park the whole tracked set
+ * instead of reporting a misbuilt CLI.
+ */
+const TRACKED_OBSERVATION_CODES: ReadonlySet<string> = new Set([
+  "recut-branch-refresh-failed",
+  "recut-branch-head-missing",
+])
+
+/**
+ * Process-scoped re-observation backoff, keyed by {pr, revision, head}. A branch
+ * that cannot be observed is usually structural (deleted on origin and not
+ * restored), and its observation is a live `git fetch` at the HEAD of the cycle —
+ * a 30s timeout there stalls every other tracked PR. So each consecutive failure
+ * doubles the number of cycles skipped before the next attempt, capped, which
+ * bounds both the wasted fetch and the log noise while still ALWAYS retrying, so
+ * a restored branch resumes without an operator turn. Any new authored revision
+ * is a new key and observes immediately. Mirrors the process-scoped `remedied`
+ * set that `applyRefusalRemedies` owns: a claim about this process, never
+ * durable state.
+ */
+export type TrackedObservationBackoff = Map<string, Readonly<{ failures: number; skipped: number }>>
+
+const MAX_OBSERVATION_SKIP = 32
+
+function trackedObservationKey(pr: PR, revision: Pick<PRRev, "n" | "head">): string {
+  return `${pr.id}:${revision.n}:${revision.head}`
+}
+
+/**
  * Observe opted-in PR branches before the resident's normal base-freshness
  * pass. When a branch moved, certify the exact observed SHA directly as the
  * successor revision. The frozen SHA and expected-current fact flow through
  * preflight together, so an interrupted cycle never leaves a provisional
  * authored revision behind.
+ *
+ * `observation` is the caller's re-observation backoff. The resident owns one for
+ * its lifetime; a one-shot or programmatic caller omits it and observes every
+ * candidate exactly once, which is the whole of its cycle.
  */
 export async function refreshTrackedQueueRevisions(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
+  observation?: TrackedObservationBackoff,
 ): Promise<readonly ResidentTrackedRevisionTransition[]> {
   const candidates = Object.values(stateOf(app).bays.prs)
     .filter((pr) => {
@@ -8701,13 +8754,55 @@ export async function refreshTrackedQueueRevisions(
         baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
     )
   const outcomes: ResidentTrackedRevisionTransition[] = []
+  if (observation !== undefined) {
+    // Drop entries for candidates that moved or left the tracked set: a new
+    // authored revision must observe immediately, not inherit a skip window.
+    const live = new Set(candidates.map((candidate) => trackedObservationKey(candidate, currentPRRev(candidate))))
+    for (const key of [...observation.keys()]) {
+      if (!live.has(key)) observation.delete(key)
+    }
+  }
 
   for (const candidate of candidates) {
     if (io.drainSignal?.aborted === true) break
     const before = currentPRRev(candidate)
+    const observationKey = trackedObservationKey(candidate, before)
+    const backoff = observation?.get(observationKey)
+    if (backoff !== undefined && backoff.skipped < Math.min(2 ** backoff.failures, MAX_OBSERVATION_SKIP)) {
+      observation?.set(observationKey, { ...backoff, skipped: backoff.skipped + 1 })
+      continue
+    }
     let classified: RecutPreflightResult | undefined
+    let freshness: RecutBranchFreshness
     try {
-      const freshness = await requireImplicitRecutBranchFreshness(candidate, before, { queue: true }, services, io)
+      freshness = await requireImplicitRecutBranchFreshness(candidate, before, { queue: true }, services, io)
+      observation?.delete(observationKey)
+    } catch (error) {
+      // Containment is scoped to the OBSERVATION phase by position: only this
+      // await is wrapped, so a failure anywhere after it keeps the existing
+      // refusal-only absorption below.
+      const failure = failureFact(error)
+      if (failure?.kind !== "configuration" || !TRACKED_OBSERVATION_CODES.has(failure.code)) throw error
+      const attempts = (backoff?.failures ?? 0) + 1
+      observation?.set(observationKey, { failures: attempts, skipped: 0 })
+      const outcome: ResidentTrackedRevisionTransition = {
+        status: "deferred",
+        pr: candidate.id,
+        branch: candidate.branch,
+        revision: before.n,
+        headSha: before.head,
+        code: failure.code,
+        message: failure.message,
+      }
+      outcomes.push(outcome)
+      app.log.warn?.(`Could not observe tracked PR ${candidate.id}'s branch; it remains queued for another cycle.`, {
+        action: "queue-track-observation-deferred",
+        attempts,
+        ...outcome,
+      })
+      continue
+    }
+    try {
       const interrupted = !app.bays.checksRequested(candidate.id) && !trackedPreflightNeedsPerson(candidate, before)
       if (freshness.status === "fresh" && !interrupted) continue
 
@@ -9578,13 +9673,14 @@ async function prepareResidentQueueCycle(
   services: YrdCliServices,
   io: YrdCliIO,
   remedied: Set<string>,
+  observation: TrackedObservationBackoff,
 ): Promise<boolean> {
   const beforePublication = stateOf(app)
   const publications = await preparePublicationQueueCycle(app, services, io)
   const publicationChanged = publications.length > 0 || preparationBaselineChanged(beforePublication, stateOf(app))
   if (services.recut === undefined) return publicationChanged
   const beforeTracking = stateOf(app)
-  const tracking = await refreshTrackedQueueRevisions(app, services, io)
+  const tracking = await refreshTrackedQueueRevisions(app, services, io, observation)
   const trackingChanged = preparationBaselineChanged(beforeTracking, stateOf(app))
   const beforeFreshness = stateOf(app)
   const freshness = await refreshAdmittedQueueRevisions(app, services, io)
@@ -9651,6 +9747,9 @@ export async function followQueueRuns(
   // across restarts; this Set only prevents a partially applied mechanical drill
   // from repeating inside the same process before its journal transition clears.
   const remedied = new Set<string>()
+  // Re-observation backoff for tracked branches this process could not observe
+  // (22584). Process-scoped like `remedied`: a claim about THIS runner's cycles.
+  const observation: TrackedObservationBackoff = new Map()
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: ResidentRefusalStall | undefined
@@ -9708,7 +9807,7 @@ export async function followQueueRuns(
       // A mechanical recut may itself take long enough for installed Queue
       // definitions to move. Re-prove the baseline before admitting its fresh
       // revision; never start a Run under the pre-recut gate snapshot.
-      if (await prepareResidentQueueCycle(app, services, io, remedied)) {
+      if (await prepareResidentQueueCycle(app, services, io, remedied, observation)) {
         runRequired = true
         await gate()
       }
