@@ -47,6 +47,10 @@ The **shaset** is the set of submodule commits a superproject commit records; ev
 
 Standard git words — **submodule · gitlink · superproject** — mean exactly what git means by them; **shaset** is the one coined term.
 
+### Content commits and shaset commits
+
+A merge request's history separates into two commit species. **Content commits** carry the superproject's own tree changes and never touch a gitlink. **Shaset commits** are queue-authored: their diff is gitlink updates plus the regenerated lockfile, nothing else. Each time the queue moves a request's shaset up — a submodule's main advanced, the base moved — it writes a new shaset commit rather than rewriting history invisibly, keeping only the versions checks actually ran against. So plain `git log` answers *which shaset did this run prove?* with a commit ref, human review reads content diffs with no gitlink noise, and a pure pin advance is simply a merge request containing **one shaset commit and nothing else**.
+
 **Killed vocabulary** (operator-ratified 2026-08-18). These words still appear in older prose, refusal codes, and the `yrd intent` rail until the rename carrier lands; new writing must not use them:
 
 | Killed | Say instead |
@@ -54,7 +58,8 @@ Standard git words — **submodule · gitlink · superproject** — mean exactly
 | ~~admission~~ | the queue **checks before queueing** — no noun needed |
 | ~~derivation / derived~~ | the queue **fills in** the values and **writes the shaset** |
 | ~~demand~~ | **min commit** |
-| ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **merge request whose diff is min commits**; deleting this rail is scheduled work |
+| ~~component~~ | **submodule** — the git word, everywhere |
+| ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **merge request whose diff is one shaset commit**; deleting this rail is scheduled work |
 
 ## The model — five objects, one pipeline
 
@@ -236,7 +241,7 @@ richer policy belong to the calling coordination system.
 
 When an author intentionally has no Git credentials, `yrd pr publish <PR>
 --queue` records one durable `pr.publish` Job instead of lending credentials to
-the author process. The existing Queue runner publishes the immutable component
+the author process. The existing Queue runner publishes the immutable submodule
 pins and root carrier, then performs the requested recut-and-queue continuation.
 `yrd queue run --once` performs this publication work before its ordinary queue
 pass; resident follow mode uses the same path. If neither runner form is active,
@@ -665,7 +670,7 @@ yrd pr recut <PR> --revision <number> --preflight --queue
 ```
 
 Every new recut revision also persists `recut.sources`: the root source head and
-each rewritten component head mapped to the mechanically equivalent successor.
+each rewritten submodule head mapped to the mechanically equivalent successor.
 This is the durable identity bridge when recomposition intentionally breaks Git
 ancestry. `yrd pr view <PR> --json` exposes it under
 `.detail.pr.revs[].recut.sources`, while the human detail view prints the same

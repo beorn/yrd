@@ -19,6 +19,12 @@ public repository.
 
 ### Bay and PR Intake
 
+- [ ] Shaset commits: the queue authors gitlink+lock commits as the request's
+      shaset moves up (README § Content commits and shaset commits); a pure pin
+      advance becomes a one-shaset-commit merge request and the `yrd intent`
+      rail is deleted (verbs, `PinIntent` kind, remedies, and the two persisted
+      `yrd.intent.*` schemas gain a tolerant reader first).
+
 - [x] Verify open, refresh, direct-branch submit, pushed-revision intake,
       withdraw, and close against real Git repositories.
 - [x] Verify `prs.git` receive hooks recover a crash between receive and event
