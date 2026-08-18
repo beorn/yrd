@@ -107,9 +107,14 @@ async function git(repo: string, args: string[]): Promise<string> {
   return stdout.trim()
 }
 
-async function stablePatchId(repo: string, from: string, to: string): Promise<string> {
+async function stablePatchId(
+  repo: string,
+  from: string,
+  to: string,
+  pathspec: readonly string[] = [],
+): Promise<string> {
   const output =
-    await Bun.$`git -C ${repo} diff --no-ext-diff --no-textconv --ignore-submodules=none --no-renames --full-index --binary ${from} ${to} | git -C ${repo} patch-id --stable`.text()
+    await Bun.$`git -C ${repo} diff --no-ext-diff --no-textconv --ignore-submodules=none --no-renames --full-index --binary ${from} ${to} -- ${pathspec} | git -C ${repo} patch-id --stable`.text()
   const patchId = /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(output.trim())?.[1]
   if (patchId === undefined) throw new Error(`expected stable patch id for ${from}..${to}`)
   return patchId
@@ -1607,6 +1612,362 @@ describe("Queue command adapters", () => {
     ])
   })
 
+  /**
+   * A repository with gitlink "dep" pinned to `initialSha` on `main`, plus
+   * three throwaway commit shas usable as gitlink VALUES. deriveFrozenCodeCarrier
+   * proves gitlink values agree, never that they resolve as real submodule
+   * objects — on-main-ness (ancestry against a real submodule checkout) is
+   * recut-gitlink-ff.test.ts's concern, not this certificate's — so ordinary
+   * throwaway commits from this same repo work fine as pins.
+   */
+  async function gitlinkCertificateRepository(): Promise<{
+    repo: string
+    initialSha: string
+    sourceBaseSha: string
+    floorPin: string
+    advancedPin: string
+    unrelatedPin: string
+  }> {
+    const { repo } = await repository()
+    const initialSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["update-index", "--add", "--cacheinfo", `160000,${initialSha},dep`])
+    await git(repo, ["commit", "-qm", "baseline: add dep gitlink"])
+    const sourceBaseSha = await git(repo, ["rev-parse", "main"])
+    const pin = async (label: string): Promise<string> => {
+      await git(repo, ["switch", "-qc", `pin/${label}`, "main"])
+      await writeFile(join(repo, `${label}.marker`), `${label}\n`)
+      await git(repo, ["add", `${label}.marker`])
+      await git(repo, ["commit", "-qm", `pin ${label}`])
+      const sha = await git(repo, ["rev-parse", "HEAD"])
+      await git(repo, ["switch", "-q", "main"])
+      return sha
+    }
+    return {
+      repo,
+      initialSha,
+      sourceBaseSha,
+      floorPin: await pin("floor"),
+      advancedPin: await pin("advanced"),
+      unrelatedPin: await pin("unrelated"),
+    }
+  }
+
+  it("certifies a recut that preserves an authored gitlink floor verbatim", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    // An independently-produced recut with the identical tree: a real rebase
+    // always mints a new commit sha even when nothing about the content moved.
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut: bump dep to floor + code"])
+    const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    expect(candidateSha).not.toBe(sourceHeadSha)
+
+    await using process = createProcess()
+    const result = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/source",
+        base: "main",
+        revision: 1,
+        headSha: sourceHeadSha,
+        baseSha: fixture.sourceBaseSha,
+      },
+      candidateSha,
+    )
+    expect(result.headSha).toBe(candidateSha)
+    expect(result.baseSha).toBe(fixture.sourceBaseSha)
+  })
+
+  it("certifies a recut that adopts the target's advanced value at the candidate base", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    // main independently advances dep past the floor before the recut lands.
+    await writeFile(join(fixture.repo, "upstream.txt"), "upstream\n")
+    await git(fixture.repo, ["add", "upstream.txt"])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.advancedPin},dep`])
+    await git(fixture.repo, ["commit", "-qm", "main: advance dep past the floor"])
+    const advancedBaseSha = await git(fixture.repo, ["rev-parse", "main"])
+
+    // The recut's own diff carries only the code change: git's fast-forward
+    // conflict resolution kept the target's newer dep value, so dep never
+    // shows up as a "changed" path between advancedBaseSha and candidateSha.
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate", advancedBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut: code only, dep ff-resolved"])
+    const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    const result = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/source",
+        base: "main",
+        revision: 1,
+        headSha: sourceHeadSha,
+        baseSha: fixture.sourceBaseSha,
+      },
+      candidateSha,
+    )
+    expect(result.headSha).toBe(candidateSha)
+    expect(result.baseSha).toBe(advancedBaseSha)
+    expect(await git(fixture.repo, ["ls-tree", "--format=%(objectname)", candidateSha, "--", "dep"])).toBe(
+      fixture.advancedPin,
+    )
+  })
+
+  it("refuses a recut that changes a gitlink to an unrelated value, naming both", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    // The candidate bumps dep to a value that is neither the reviewed floor
+    // nor (main having never moved) the target's own recorded value.
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.unrelatedPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut: bump dep to an unrelated value"])
+    const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    await expect(
+      recutProposedCodeCarrier(
+        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+        {
+          id: "PR1",
+          branch: "issue/source",
+          base: "main",
+          revision: 1,
+          headSha: sourceHeadSha,
+          baseSha: fixture.sourceBaseSha,
+        },
+        candidateSha,
+      ),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "authored-gitlink",
+        message: expect.stringMatching(
+          new RegExp(`'dep' expected '${fixture.floorPin}', actual '${fixture.unrelatedPin}'`),
+        ),
+      },
+    })
+  })
+
+  it("refuses a recut that adds a gitlink bump the source never touched", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "code only, no gitlink touch"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["commit", "-qm", "recut: code + an unreviewed dep bump"])
+    const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    await expect(
+      recutProposedCodeCarrier(
+        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+        {
+          id: "PR1",
+          branch: "issue/source",
+          base: "main",
+          revision: 1,
+          headSha: sourceHeadSha,
+          baseSha: fixture.sourceBaseSha,
+        },
+        candidateSha,
+      ),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "authored-gitlink",
+        message: expect.stringMatching(new RegExp(`'dep' expected 'absent', actual '${fixture.floorPin}'`)),
+      },
+    })
+  })
+
+  it("refuses a recut that drops a gitlink bump the source authored", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    // Candidate carries the code change but silently drops the dep bump; main
+    // never advanced dep either, so there is no target-side value to excuse it.
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut: code only, dep bump dropped"])
+    const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    await using process = createProcess()
+    await expect(
+      recutProposedCodeCarrier(
+        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+        {
+          id: "PR1",
+          branch: "issue/source",
+          base: "main",
+          revision: 1,
+          headSha: sourceHeadSha,
+          baseSha: fixture.sourceBaseSha,
+        },
+        candidateSha,
+      ),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "authored-gitlink",
+        message: expect.stringMatching(new RegExp(`'dep' expected '${fixture.floorPin}', actual '${fixture.initialSha}'`)),
+      },
+    })
+  })
+
+  it("certifies a no-gitlink recut exactly as before (gitlink obligations never engage)", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "code only"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut: code only, independently authored"])
+    const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    expect(candidateSha).not.toBe(sourceHeadSha)
+
+    await using process = createProcess()
+    const result = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      {
+        id: "PR1",
+        branch: "issue/source",
+        base: "main",
+        revision: 1,
+        headSha: sourceHeadSha,
+        baseSha: fixture.sourceBaseSha,
+      },
+      candidateSha,
+    )
+    expect(result.headSha).toBe(candidateSha)
+    // No gitlink pathspec exclusion applies: the certified patch id is
+    // exactly the plain, unfiltered patch id — unchanged from before this
+    // gitlink work existed.
+    const directPatchId = await stablePatchId(fixture.repo, fixture.sourceBaseSha, sourceHeadSha)
+    expect(result.patchId).toBe(directPatchId)
+  })
+
+  it("keeps the certified patch id stable across differing but admissible gitlink values", async () => {
+    const fixture = await gitlinkCertificateRepository()
+    await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
+    const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const input = {
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha: sourceHeadSha,
+      baseSha: fixture.sourceBaseSha,
+    }
+    await using process = createProcess()
+
+    // Candidate a: dep stays exactly the reviewed floor.
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate-verbatim", fixture.sourceBaseSha])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut a: verbatim floor"])
+    const verbatimSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const verbatimResult = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      input,
+      verbatimSha,
+    )
+
+    // Candidate b: main advances dep past the floor first, so this recut's
+    // dep is fast-forward resolved to a DIFFERENT value — but the code
+    // payload is identical.
+    await writeFile(join(fixture.repo, "upstream.txt"), "upstream\n")
+    await git(fixture.repo, ["add", "upstream.txt"])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.advancedPin},dep`])
+    await git(fixture.repo, ["commit", "-qm", "main: advance dep past the floor"])
+    const advancedBaseSha = await git(fixture.repo, ["rev-parse", "main"])
+    await git(fixture.repo, ["switch", "-qc", "issue/candidate-ff", advancedBaseSha])
+    await writeFile(join(fixture.repo, "code.txt"), "code a\n")
+    await git(fixture.repo, ["add", "code.txt"])
+    await git(fixture.repo, ["commit", "-qm", "recut b: code only, dep ff-resolved to the advance"])
+    const ffSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    const ffResult = await recutProposedCodeCarrier(
+      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      input,
+      ffSha,
+    )
+
+    expect(await git(fixture.repo, ["ls-tree", "--format=%(objectname)", ffSha, "--", "dep"])).toBe(
+      fixture.advancedPin,
+    )
+    expect(ffResult.patchId).toBe(verbatimResult.patchId)
+    // Cross-checked independently: the exclusion pathspec this certificate
+    // uses (see excludingGitlinks in command.ts) applied directly.
+    const directPatchId = await stablePatchId(fixture.repo, fixture.sourceBaseSha, sourceHeadSha, [
+      ".",
+      ":(top,literal,exclude)dep",
+    ])
+    expect(verbatimResult.patchId).toBe(directPatchId)
+  })
+
   it("admits an exact frozen code carrier after independently rederiving its durable endpoints", async () => {
     const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
     await writeFile(join(repo, "authority.txt"), "current authority\n")
@@ -1756,15 +2117,20 @@ describe("Queue command adapters", () => {
           sources: [
             {
               repo: ".",
-              fromHeadSha: candidate.sha,
+              // The reviewed source is the plain approved range: no gitlink
+              // ever touched it. Revision 2 (candidate.sha) independently
+              // smuggles one in — exactly the divergence obligations 2/3 in
+              // deriveFrozenCodeCarrier exist to catch, even though the
+              // record still claims certificate "frozen-code-carrier-v1".
+              fromHeadSha: fixture.approvedSha,
               toHeadSha: candidate.sha,
               patchId,
               rangeDiff: "=" as const,
             },
           ],
           baseSha: fixture.currentBaseSha,
-          sourceBaseSha: fixture.currentBaseSha,
-          sourceHeadSha: candidate.sha,
+          sourceBaseSha: fixture.approvedBaseSha,
+          sourceHeadSha: fixture.approvedSha,
         },
       } as unknown as StepExecution["prs"][number]
       await using process = createProcess()
@@ -1822,6 +2188,12 @@ describe("Queue command adapters", () => {
     }
     const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(exactRecut)
     const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(exactRecut)
+    // One commit before approvedBaseSha is the fixture's pre-gitlink root, so
+    // this widened range also picks up the "baseline gitlink" commit — which
+    // adds .gitmodules (an ordinary file the gitlink obligations never touch)
+    // alongside the dep gitlink. dep itself reconciles (candidate's base
+    // already carries the reviewed floor verbatim), so tampering is still
+    // caught, just by the ordinary drop obligation on .gitmodules now.
     const alteredSourceBaseSha = await git(fixture.repo, ["rev-parse", `${fixture.approvedBaseSha}^`])
     const cases = [
       { name: "missing source base", headSha: fixture.exact.sha, recut: withoutSourceBase },
@@ -1882,7 +2254,7 @@ describe("Queue command adapters", () => {
       ).rejects.toMatchObject({
         failure: {
           kind: "refusal",
-          code: candidate.name === "altered source base" ? "authored-gitlink" : "recut-certificate",
+          code: "recut-certificate",
         },
       })
       expect(await git(fixture.repo, ["rev-parse", "main"]), candidate.name).toBe(mainBefore)

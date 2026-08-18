@@ -1488,7 +1488,9 @@ export function gitMergeRecorder(options: {
       .find((result) => result.success)?.data.candidateSha
     const candidateSha = candidate.sha ?? run.integration?.commit ?? checkedCandidate
     const payloadGitlinks =
-      candidateSha === undefined ? [] : (await rawPayload(git, options.repo, candidate.baseSha, candidateSha)).gitlinks
+      candidateSha === undefined
+        ? []
+        : (await rawPayload(git, options.repo, candidate.baseSha, candidateSha)).gitlinks.map((entry) => entry.path)
     const resolutionPins = new Map((candidate.submoduleResolutions ?? []).map((pin) => [pin.path, pin.sha]))
     const paths = [...new Set([...payloadGitlinks, ...resolutionPins.keys()])].toSorted()
     const pins = await Promise.all(
@@ -2230,37 +2232,93 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
 }
 
-type RawPayload = Readonly<{ identity: string; paths: readonly string[]; gitlinks: readonly string[] }>
+type GitlinkEntry = Readonly<{ path: string; from: string; to: string }>
+type RawPayload = Readonly<{ identity: string; paths: readonly string[]; gitlinks: readonly GitlinkEntry[] }>
 
-async function rawPayload(git: Git, repo: string, from: string, to: string): Promise<RawPayload> {
-  const identity = await changedPayloadIdentity(git, repo, from, to)
+async function rawPayload(
+  git: Git,
+  repo: string,
+  from: string,
+  to: string,
+  pathspec?: readonly string[],
+): Promise<RawPayload> {
+  const identity = await changedPayloadIdentity(git, repo, from, to, pathspec)
   const fields = identity.split("\0")
   const paths: string[] = []
-  const gitlinks: string[] = []
+  const gitlinks: GitlinkEntry[] = []
   for (let index = 0; index + 1 < fields.length; index += 2) {
     const header = fields[index]
     const path = fields[index + 1]
     if (header === undefined || header === "" || path === undefined || path === "") continue
-    const match = /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]{40,64} [0-9a-f]{40,64} [A-Z]$/u.exec(header)
-    if (match?.[1] === undefined || match[2] === undefined) {
+    const match = /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) [A-Z]$/u.exec(header)
+    if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined || match[4] === undefined) {
       throw new Error(`yrd: git diff --raw emitted an invalid record '${header}'`)
     }
     paths.push(path)
-    if (match[1] === "160000" || match[2] === "160000") gitlinks.push(path)
+    if (match[1] === "160000" || match[2] === "160000") gitlinks.push({ path, from: match[3], to: match[4] })
   }
-  return { identity, paths: paths.toSorted(), gitlinks: gitlinks.toSorted() }
+  return {
+    identity,
+    paths: paths.toSorted(),
+    gitlinks: gitlinks.toSorted((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
+  }
+}
+
+/** Pathspec that excludes every listed path from a diff/patch-id computation
+ * — `. ':(top,literal,exclude)<path>'` per path, git-super's established
+ * idiom (see certifiedPatchSequence) — so a legitimate gitlink value
+ * difference (obligation 3 below) cannot perturb the ordinary payload
+ * equality obligations, which run over the code payload alone. */
+function excludingGitlinks(paths: readonly string[]): readonly string[] | undefined {
+  return paths.length === 0 ? undefined : [".", ...paths.map((path) => `:(top,literal,exclude)${path}`)]
 }
 
 type FrozenCarrierRange = Readonly<{ baseSha: string; headSha: string }>
+type GitlinkValueMismatch = Readonly<{ path: string; expected: string; actual: string }>
 type FrozenCarrierFailure = Readonly<{
-  kind: "commit-missing" | "lineage" | "gitlinks" | "drop" | "extra" | "identity" | "patch-id" | "tree"
+  kind:
+    | "commit-missing"
+    | "lineage"
+    | "gitlink-drop"
+    | "gitlink-extra"
+    | "gitlink-value"
+    | "drop"
+    | "extra"
+    | "identity"
+    | "patch-id"
+    | "tree"
   range?: "source" | "candidate"
   endpoint?: "base" | "head"
   sha?: string
   paths?: readonly string[]
+  values?: readonly GitlinkValueMismatch[]
 }>
 type FrozenCarrierProof = Readonly<{ treeSha: string; patchId: string }>
 
+/** Render each gitlink obligation-2/3 mismatch as an explicit expected/actual
+ * pair — NO SILENT ERRORS: a bare path list would leave the reader guessing
+ * which value was reviewed and which one the candidate proposes instead. */
+function describeGitlinkMismatches(values: readonly GitlinkValueMismatch[]): string {
+  return values
+    .map((mismatch) => `'${mismatch.path}' expected '${mismatch.expected}', actual '${mismatch.actual}'`)
+    .join("; ")
+}
+
+/**
+ * Certify that a recut candidate replays the reviewed source payload. An
+ * authored gitlink value is a floor ("advance submodule S at least to X"),
+ * not a fixed value pinned for all time, so it is ordinary admissible
+ * payload as long as: (2) the recut can neither add nor remove a gitlink
+ * bump relative to the reviewed source, and (3) each bumped value is either
+ * the source's authored floor verbatim (a rebase that touched nothing about
+ * it) or the target's own recorded value at the candidate's base (a
+ * fast-forward conflict git already resolved, checkable entirely in the root
+ * repo). Every other obligation about the payload — (1) — is certified with
+ * gitlink paths excluded, so an admissible value difference under (3) cannot
+ * perturb identity or patch-id. On-main-ness (is the value actually
+ * reachable from the submodule's own main) is NOT this proof's job: that is
+ * admission's, in fillAuthoredGitlinksFromMain.
+ */
 async function deriveFrozenCodeCarrier(
   git: Git,
   repo: string,
@@ -2281,12 +2339,71 @@ async function deriveFrozenCodeCarrier(
   ] as const) {
     if (!(await isAncestor(git, repo, baseSha, headSha))) return { kind: "lineage", range }
   }
-  const [sourcePayload, candidatePayload] = await Promise.all([
+  const [sourceRaw, candidateRaw] = await Promise.all([
     rawPayload(git, repo, source.baseSha, source.headSha),
     rawPayload(git, repo, candidate.baseSha, candidate.headSha),
   ])
-  const gitlinks = [...new Set([...sourcePayload.gitlinks, ...candidatePayload.gitlinks])].toSorted()
-  if (gitlinks.length > 0) return { kind: "gitlinks", paths: gitlinks }
+
+  // Obligations 2/3, combined: a source gitlink path is admissible when its
+  // candidate value is either (a) an explicit diff entry equal to the
+  // source's own authored floor (rebase preserved it verbatim), or (b)
+  // simply absent from the candidate's own diff — meaning git's
+  // fast-forward conflict resolution kept the target's already-more-advanced
+  // value and the path never shows as "changed" at all. (b) is the ONLY way
+  // an absent path can be legitimate: a real diff entry's "to" can never
+  // equal its own "from", and "from" IS the target's recorded value at the
+  // candidate's base by construction of the diff — so a present candidate
+  // entry can only ever satisfy (a). (b) additionally requires proof the
+  // target actually moved this path since the review started (its value at
+  // candidate.baseSha differs from the source's own starting value);
+  // otherwise "absent" just means the floor was silently dropped, never
+  // applied at all. A path present only in the candidate is never admissible
+  // — a recut can neither add nor remove a gitlink bump relative to review.
+  const sourceGitlinks = new Map(sourceRaw.gitlinks.map((entry) => [entry.path, entry] as const))
+  const candidateGitlinks = new Map(candidateRaw.gitlinks.map((entry) => [entry.path, entry] as const))
+  const extraPaths = [...candidateGitlinks.keys()].filter((path) => !sourceGitlinks.has(path)).toSorted()
+  if (extraPaths.length > 0) {
+    return {
+      kind: "gitlink-extra",
+      paths: extraPaths,
+      values: extraPaths.map((path) => ({ path, expected: "absent", actual: candidateGitlinks.get(path)!.to })),
+    }
+  }
+  const droppedGitlinks: GitlinkValueMismatch[] = []
+  const mismatches: GitlinkValueMismatch[] = []
+  for (const [path, sourceLink] of sourceGitlinks) {
+    const candidateLink = candidateGitlinks.get(path)
+    if (candidateLink !== undefined) {
+      if (candidateLink.to === sourceLink.to) continue // (a) rebase preserved the floor verbatim
+      mismatches.push({ path, expected: sourceLink.to, actual: candidateLink.to })
+      continue
+    }
+    const targetValue = await readGitlink(git, repo, candidate.baseSha, path)
+    if (targetValue !== undefined && targetValue !== sourceLink.from) continue // (b) target's own independent advance
+    droppedGitlinks.push({ path, expected: sourceLink.to, actual: targetValue ?? "absent" })
+  }
+  if (droppedGitlinks.length > 0) {
+    return {
+      kind: "gitlink-drop",
+      paths: droppedGitlinks.map((mismatch) => mismatch.path).toSorted(),
+      values: droppedGitlinks,
+    }
+  }
+  if (mismatches.length > 0) {
+    return { kind: "gitlink-value", paths: mismatches.map((mismatch) => mismatch.path).toSorted(), values: mismatches }
+  }
+
+  // Obligation 1: the ordinary equality obligations run over the payload
+  // EXCLUDING gitlink paths, so the admissible gitlink-value differences
+  // obligation 3 just cleared cannot perturb identity or patch-id.
+  const gitlinkPathspec = excludingGitlinks([...sourceGitlinks.keys()])
+  const [sourcePayload, candidatePayload] =
+    gitlinkPathspec === undefined
+      ? [sourceRaw, candidateRaw]
+      : await Promise.all([
+          rawPayload(git, repo, source.baseSha, source.headSha, gitlinkPathspec),
+          rawPayload(git, repo, candidate.baseSha, candidate.headSha, gitlinkPathspec),
+        ])
   const candidatePaths = new Set(candidatePayload.paths)
   const sourcePaths = new Set(sourcePayload.paths)
   const dropped = sourcePayload.paths.filter((path) => !candidatePaths.has(path))
@@ -2294,7 +2411,7 @@ async function deriveFrozenCodeCarrier(
   const extra = candidatePayload.paths.filter((path) => !sourcePaths.has(path))
   if (extra.length > 0) return { kind: "extra", paths: extra }
   if (sourcePayload.identity !== candidatePayload.identity) return { kind: "identity" }
-  const patchId = await git.stablePatchId(repo, source.baseSha, source.headSha)
+  const patchId = await git.stablePatchId(repo, source.baseSha, source.headSha, gitlinkPathspec)
   if (patchId === undefined) return { kind: "patch-id" }
   const tree = await git.run(repo, ["rev-parse", `${candidate.headSha}^{tree}`], true)
   return tree.code === 0 ? { treeSha: tree.stdout, patchId } : { kind: "tree" }
@@ -2349,11 +2466,12 @@ async function certifyProposedCodeCarrier(
             `PR '${input.id}' source base '${sourceBaseSha}' is not an ancestor of source head '${input.headSha}'`,
           )
     }
-    if (proof.kind === "gitlinks") {
+    if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
       const workflow = await intentSubmissionWorkflow(git, repo, target.sha, proposedHeadSha, paths, input.issue)
+      const detail = describeGitlinkMismatches(proof.values ?? [])
       throw codeCarrierRefusal(
         "authored-gitlink",
-        `PR '${input.id}' proposed commit '${proposedHeadSha}' changes generated-only gitlinks [${paths.join(", ")}]; ${workflow}`,
+        `PR '${input.id}' proposed commit '${proposedHeadSha}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
       )
     }
     if (proof.kind === "drop" || proof.kind === "extra") {
@@ -3933,12 +4051,13 @@ async function verifyFrozenCodeCarrierCertificate(
         `PR '${pr.id}' recut ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
       )
     }
-    if (proof.kind === "gitlinks") {
+    if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
       const paths = proof.paths ?? []
       const workflow = await intentSubmissionWorkflow(git, repo, candidateBaseSha, pr.headSha, paths, pr.issue)
+      const detail = describeGitlinkMismatches(proof.values ?? [])
       return candidateFailure(
         "authored-gitlink",
-        `PR '${pr.id}' changes generated-only gitlinks [${paths.join(", ")}]; ${workflow}`,
+        `PR '${pr.id}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
         ".",
         paths,
       )
