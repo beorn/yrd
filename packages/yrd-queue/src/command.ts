@@ -2153,7 +2153,7 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
     }
     const candidateSha = await git.commit(path, "HEAD")
     const treeSha = (await git.run(path, ["rev-parse", `${candidateSha}^{tree}`])).stdout
-    const rewrites = composed.output
+    const rewrites = composed.output.rewrites
     const byRepo = new Map(rewrites.map((rewrite) => [rewrite.repo, rewrite]))
     const composition = {
       version: 1 as const,
@@ -3287,7 +3287,6 @@ export type PinIntentProvisionInput = Readonly<{
   path: string
   baseSha: string
   provisionalCandidateSha: string
-  component: string
 }>
 
 export type PinIntentProvisioner = (
@@ -3460,11 +3459,18 @@ async function prepareCandidateMembers(
         if (movement.status === "failed") return movement
         baseMoved = movement.moved
       }
-      const composed = await composePR(git, repo, path, pr)
+      const composed = await composePR(git, repo, path, pr, undefined, provisionPinIntent)
       if (composed.status === "failed") return composed
-      const certificate = await verifyComposedRecutCertificate(git, path, pr, composed.output, baseMoved)
+      const certificate = await verifyComposedRecutCertificate(
+        git,
+        path,
+        pr,
+        composed.output.rewrites,
+        baseMoved,
+        composed.output.regenerated.length > 0,
+      )
       if (certificate !== undefined) return certificate
-      sourceRewrites.push(...composed.output)
+      sourceRewrites.push(...composed.output.rewrites)
       recordChange(pr, await git.commit(path, "HEAD"))
       continue
     }
@@ -3916,10 +3922,11 @@ async function verifyComposedRecutCertificate(
   pr: StepExecution["prs"][number],
   rewrites: readonly SourceRewrite[],
   baseMoved: boolean,
+  shasetFilledIn = false,
 ): Promise<CandidateFailure | undefined> {
   if (pr.recut === undefined) return undefined
   const patchId = compositionPatchId(rewrites)
-  if (!baseMoved) {
+  if (!baseMoved && !shasetFilledIn) {
     // Fast path: base unchanged — both the recomposed whole-root tree and the
     // base-independent source-patch identity must replay exactly.
     const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
@@ -3930,9 +3937,11 @@ async function verifyComposedRecutCertificate(
           `PR '${pr.id}' recomposed patch/tree certificate does not match revision ${pr.revision}`,
         )
   }
-  // Base advanced: the whole-root treeSha legitimately differs (the base moved), so certify
-  // the base-independent composite source patch identity instead. composePR already re-derived
-  // the source rewrites onto the current base; their identity must equal the reviewed one.
+  // Base advanced, or the queue filled in the shaset (a regenerated bun.lock, or a
+  // submodule value fresher than the certified one): the whole-root treeSha legitimately
+  // differs, so certify the base-independent composite source patch identity instead.
+  // composePR already re-derived the source rewrites onto the current base; their
+  // identity must equal the reviewed one.
   return patchId === pr.recut.patchId
     ? undefined
     : candidateFailure(
@@ -4467,19 +4476,25 @@ async function stabilizeGeneratedRootWrapper(
 }
 
 type GitlinkUpdate = Readonly<{ path: string; sha: string }>
-type SynthesizedGitlinkWrapper = Readonly<{ commit: string; treeSha: string }>
+type SynthesizedGitlinkWrapper = Readonly<{ commit: string; treeSha: string; generatedPaths: readonly string[] }>
 
 /**
- * The ONE generated-root implementation shared by composed PRs, pin intents,
- * and the materialize escape hatch. It stages only gitlink entries and writes
- * a byte-stable commit through Git.commitTree's pinned identity and timestamp.
+ * The ONE shaset-commit writer shared by composed PRs, pin intents, and the
+ * materialize escape hatch. It stages only gitlink entries and writes a
+ * byte-stable commit through Git.commitTree's pinned identity and timestamp.
+ *
+ * The provisioner runs for EVERY gitlink-bearing call — one shaset commit whose
+ * diff is the gitlink updates plus, when submodule manifests moved dependency
+ * specs across the staged range, the regenerated `bun.lock` in the SAME tree
+ * write. `generatedPaths` reports what the provisioner staged so callers can
+ * tell a tree that carries a regenerated lock from one that certifies by tree
+ * equality alone.
  *
  * Exported for characterization, the (a) precedent applied to (b)'s entry seam:
  * this writer had NO behavioural test while being what the shaset-commit species
- * names, and the provisioner lift changes its contract. The param is narrowed to
- * the two members it uses so the characterization can supply a real-repo adapter
- * without reconstructing the whole runtime git. See tests/gitlink-wrapper.test.ts
- * and @i/10-merge-queue/b-derivation-sites.
+ * names. The param is narrowed to the two members it uses so the characterization
+ * can supply a real-repo adapter without reconstructing the whole runtime git.
+ * See tests/gitlink-wrapper.test.ts and @i/10-merge-queue/b-derivation-sites.
  */
 export async function synthesizeGitlinkWrapper(
   git: Pick<Git, "run" | "commitTree">,
@@ -4501,24 +4516,14 @@ export async function synthesizeGitlinkWrapper(
       )
     }
   }
+  let provisionedPaths: readonly string[] = []
   if (provisionPinIntent !== undefined && updates.length > 0) {
-    if (updates.length !== 1) {
-      return candidateFailure(
-        "wrapper-mismatch",
-        `pin-intent provisioning expected one gitlink update, got [${expectedPaths.join(", ")}]`,
-        ".",
-        expectedPaths,
-      )
-    }
-    const update = updates[0]
-    if (update === undefined) throw new Error("pin-intent provisioning lost its sole gitlink update")
     const provisionalTreeSha = (await git.run(path, ["write-tree"])).stdout
     const provisionalCandidateSha = await git.commitTree(path, provisionalTreeSha, [parent], message)
     const provisioned = await provisionPinIntent({
       path,
       baseSha: parent,
       provisionalCandidateSha,
-      component: update.path,
     })
     const generatedPaths = [...new Set(provisioned.generatedPaths)].toSorted()
     const forbidden = generatedPaths.filter((generatedPath) => generatedPath !== "bun.lock")
@@ -4542,6 +4547,7 @@ export async function synthesizeGitlinkWrapper(
       }
     }
     expectedPaths.push(...generatedPaths)
+    provisionedPaths = generatedPaths
   }
   const materialized = await stagedPaths(git, path)
   if (!samePaths(materialized, expectedPaths)) {
@@ -4563,7 +4569,7 @@ export async function synthesizeGitlinkWrapper(
       )
     }
   }
-  return { status: "passed", output: { commit, treeSha } }
+  return { status: "passed", output: { commit, treeSha, generatedPaths: provisionedPaths } }
 }
 
 const PinIntentCarrierSynthesisInputSchema = z
@@ -4640,7 +4646,8 @@ export async function synthesizePinIntentCarrier(options: {
           priorPin,
           target: input.target,
           baseSha: input.baseSha,
-          ...synthesized.output,
+          commit: synthesized.output.commit,
+          treeSha: synthesized.output.treeSha,
         },
       }
     },
@@ -4672,13 +4679,22 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
   return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
 }
 
+/** What composing one PR wrote into the candidate: the certified source
+ * rewrites, plus the paths the shaset provisioner regenerated (today exactly
+ * `bun.lock`, or nothing) in the same shaset commit. */
+type ComposedPR = Readonly<{
+  rewrites: readonly SourceRewrite[]
+  regenerated: readonly string[]
+}>
+
 async function composePR(
   git: Git,
   repo: string,
   path: string,
   pr: StepExecution["prs"][number],
   localSourceTips?: ReadonlySet<string>,
-): Promise<Readonly<{ status: "passed"; output: readonly SourceRewrite[] }> | CandidateFailure> {
+  provisionPinIntent?: PinIntentProvisioner,
+): Promise<Readonly<{ status: "passed"; output: ComposedPR }> | CandidateFailure> {
   if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
     return candidateFailure(
       "composition-invalid",
@@ -4712,6 +4728,7 @@ async function composePR(
     parent,
     updates,
     candidateChangeCommitMessage("compose", pr),
+    provisionPinIntent,
   )
   if (synthesized.status === "failed") return synthesized
   for (const rewrite of rewrites) {
@@ -4724,7 +4741,7 @@ async function composePR(
       )
     }
   }
-  return { status: "passed", output: rewrites }
+  return { status: "passed", output: { rewrites, regenerated: synthesized.output.generatedPaths } }
 }
 
 async function prepareSource(

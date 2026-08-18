@@ -6,9 +6,10 @@
  * @consumer @i/10-merge-queue/b-derivation-sites — step (b)'s entry seam
  *
  * CHARACTERIZATION, not specification — the (a) pattern applied to (b)'s seam. Every
- * assertion pins what `synthesizeGitlinkWrapper` does TODAY, so the (b) build changes this
- * file DELIBERATELY, in the same commit as the mechanism. The one marked case is the flip
- * target: the single-update provisioner refusal is exactly what the provisioner lift removes.
+ * assertion pins what `synthesizeGitlinkWrapper` does TODAY, so changes to this file land
+ * DELIBERATELY, in the same commit as the mechanism. The (b) provisioner lift flipped the
+ * one marked case here: the single-update provisioner refusal became multi-update support,
+ * and the provisioner now runs for every gitlink-bearing wrapper call.
  */
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -137,12 +138,46 @@ describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of
   })
 
   /**
-   * THE (b) FLIP TARGET. The provisioner leg refuses more than one gitlink update today, so
-   * composed multi-submodule candidates get NO lock regeneration — the gap the provisioner
-   * lift closes. When the lift lands, this refusal becomes support, and this test flips in
-   * the same commit; risk 1 in b-derivation-sites says lift FIRST, then widen.
+   * FLIPPED by the (b) provisioner lift, in the same commit as the mechanism, as this
+   * file's header requires. The refusal this case used to pin ("expected one gitlink
+   * update") was the pin-intent leg's guard, and it left composed multi-submodule
+   * candidates with NO lock regeneration. The lifted contract: the provisioner runs
+   * ONCE over the whole update set, and one shaset commit carries every gitlink update
+   * plus the regenerated bun.lock.
    */
-  it("refuses a provisioner over more than one gitlink update — today's single-update contract", async () => {
+  it("fills in bun.lock across more than one gitlink update in one shaset commit", async () => {
+    const { repo, parent } = await repository(["dep-a", "dep-b"])
+    const provisioned: string[] = []
+    const result = await synthesizeGitlinkWrapper(
+      gitAdapter(),
+      repo,
+      parent,
+      [
+        { path: "dep-a", sha: PIN_A },
+        { path: "dep-b", sha: PIN_B },
+      ],
+      "wrapper",
+      async ({ provisionalCandidateSha }) => {
+        provisioned.push(provisionalCandidateSha)
+        await writeFile(join(repo, "bun.lock"), "regenerated\n")
+        return { generatedPaths: ["bun.lock"] }
+      },
+    )
+
+    expect(result.status).toBe("passed")
+    if (result.status !== "passed") throw new Error("unreachable")
+    // One provisioner run over the whole update set — one shaset commit, one lock write.
+    expect(provisioned).toHaveLength(1)
+    expect(result.output.generatedPaths).toEqual(["bun.lock"])
+    const changed = await sh(repo, ["diff", "--name-only", parent, result.output.commit])
+    expect(changed.stdout.split("\n").toSorted()).toEqual(["bun.lock", "dep-a", "dep-b"])
+    const entryA = await sh(repo, ["ls-tree", result.output.commit, "--", "dep-a"])
+    expect(entryA.stdout).toContain(`160000 commit ${PIN_A}`)
+    const entryB = await sh(repo, ["ls-tree", result.output.commit, "--", "dep-b"])
+    expect(entryB.stdout).toContain(`160000 commit ${PIN_B}`)
+  })
+
+  it("stages a drift-free multi-gitlink update as a gitlinks-only shaset commit", async () => {
     const { repo, parent } = await repository(["dep-a", "dep-b"])
     const result = await synthesizeGitlinkWrapper(
       gitAdapter(),
@@ -153,13 +188,16 @@ describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of
         { path: "dep-b", sha: PIN_B },
       ],
       "wrapper",
+      // No manifest moved dependency specs across the staged range, so the
+      // provisioner generates nothing and the shaset commit is gitlinks only.
       async () => ({ generatedPaths: [] }),
     )
 
-    expect(result.status).toBe("failed")
-    if (result.status !== "failed") throw new Error("unreachable")
-    expect(result.error.code).toBe("wrapper-mismatch")
-    expect(result.error.message).toContain("expected one gitlink update")
+    expect(result.status).toBe("passed")
+    if (result.status !== "passed") throw new Error("unreachable")
+    expect(result.output.generatedPaths).toEqual([])
+    const changed = await sh(repo, ["diff", "--name-only", parent, result.output.commit])
+    expect(changed.stdout.split("\n").toSorted()).toEqual(["dep-a", "dep-b"])
   })
 
   it("refuses a provisioner that generates anything but bun.lock", async () => {

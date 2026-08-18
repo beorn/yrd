@@ -891,7 +891,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       path: repo,
       baseSha,
       provisionalCandidateSha,
-      component: "dep",
     })
 
     expect(result).toEqual({ generatedPaths: ["bun.lock"] })
@@ -924,7 +923,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       materializeSubmodules: () => Promise.resolve(),
     })
 
-    await expect(provision({ path: repo, baseSha, provisionalCandidateSha, component: "dep" })).resolves.toEqual({
+    await expect(provision({ path: repo, baseSha, provisionalCandidateSha })).resolves.toEqual({
       generatedPaths: [],
     })
     await expect(readFile(join(repo, "bun.lock"), "utf8")).resolves.toBe('{"fixture":"1.0.0"}\n')
