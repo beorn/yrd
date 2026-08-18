@@ -3467,10 +3467,11 @@ async function prepareCandidateMembers(
         pr,
         composed.output.rewrites,
         baseMoved,
-        composed.output.regenerated.length > 0,
+        composed.output.regenerated.length > 0 || composed.output.filledPins.length > 0,
       )
       if (certificate !== undefined) return certificate
       sourceRewrites.push(...composed.output.rewrites)
+      submoduleResolutions.push(...composed.output.filledPins)
       recordChange(pr, await git.commit(path, "HEAD"))
       continue
     }
@@ -4680,12 +4681,83 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
 }
 
 /** What composing one PR wrote into the candidate: the certified source
- * rewrites, plus the paths the shaset provisioner regenerated (today exactly
- * `bun.lock`, or nothing) in the same shaset commit. */
+ * rewrites, the submodule values the queue filled in from each submodule's
+ * main where main had moved past the composed floor, and the paths the shaset
+ * provisioner regenerated (today exactly `bun.lock`, or nothing) — all in the
+ * same shaset commit. */
 type ComposedPR = Readonly<{
   rewrites: readonly SourceRewrite[]
+  filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
   regenerated: readonly string[]
 }>
+
+/**
+ * Fill in each changed submodule's value from that submodule's main — the
+ * shaset model's composition-time write, moved forward from the merge-time
+ * promotion loop that used to make this comparison after checks had already
+ * run. The composed value is a floor: when the submodule's main already
+ * contains it and has moved further, the queue writes main's newest commit
+ * instead, so authored values never land as-is. When the composed value is
+ * ahead of main it stays, and the merge-time promotion advances main to it.
+ * Genuinely diverged histories keep the merge path's existing refusal code,
+ * raised at composition time where a re-push can still cure it — and every
+ * failure is a typed candidateFailure, never a throw.
+ */
+async function fillSubmodulePinsFromMain(
+  git: Git,
+  repo: string,
+  prId: string,
+  updates: readonly GitlinkUpdate[],
+): Promise<
+  | Readonly<{
+      status: "passed"
+      output: Readonly<{
+        updates: readonly GitlinkUpdate[]
+        filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
+      }>
+    }>
+  | CandidateFailure
+> {
+  const filledUpdates: GitlinkUpdate[] = []
+  const filledPins: Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[] = []
+  for (const update of updates) {
+    const submoduleRepo = join(repo, update.path)
+    const main = await resolveComponentMain(
+      (repository, args) => git.run(repository, args, true),
+      submoduleRepo,
+      "origin",
+    )
+    if (main.status === "unavailable") {
+      return candidateFailure(
+        "component-main-inspection-failed",
+        `PR '${prId}' could not read submodule '${update.path}' main to fill in the shaset: ${main.message}`,
+        update.path,
+        [update.path],
+      )
+    }
+    if (main.sha === update.sha || (await isAncestor(git, submoduleRepo, main.sha, update.sha))) {
+      // The composed value contains the submodule's main (or is it): it is the
+      // newest value, and the merge-time promotion advances main to it.
+      filledUpdates.push(update)
+      continue
+    }
+    if (await isAncestor(git, submoduleRepo, update.sha, main.sha)) {
+      // Main moved past the composed floor: write main's newest commit, so the
+      // shaset lands with the newest commit on that submodule's main.
+      filledUpdates.push({ path: update.path, sha: main.sha })
+      filledPins.push({ kind: "pin", path: update.path, sha: main.sha })
+      continue
+    }
+    return candidateFailure(
+      "component-main-non-ancestral",
+      `PR '${prId}' submodule '${update.path}' composed value '${update.sha}' and its main '${main.sha}' ` +
+        "diverge; compose the divergent submodule histories before retrying",
+      update.path,
+      [update.path],
+    )
+  }
+  return { status: "passed", output: { updates: filledUpdates, filledPins } }
+}
 
 async function composePR(
   git: Git,
@@ -4721,27 +4793,39 @@ async function composePR(
     updates.push({ path: source.repo, sha: prepared.output.newTipSha })
   }
 
+  const filled = await fillSubmodulePinsFromMain(git, repo, pr.id, updates)
+  if (filled.status === "failed") return filled
+
   const parent = await git.commit(path, "HEAD")
   const synthesized = await synthesizeGitlinkWrapper(
     git,
     path,
     parent,
-    updates,
+    filled.output.updates,
     candidateChangeCommitMessage("compose", pr),
     provisionPinIntent,
   )
   if (synthesized.status === "failed") return synthesized
+  const expectedPins = new Map(filled.output.updates.map((update) => [update.path, update.sha]))
   for (const rewrite of rewrites) {
-    if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {
+    const expected = expectedPins.get(rewrite.repo) ?? rewrite.newTipSha
+    if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== expected) {
       return candidateFailure(
         "wrapper-mismatch",
-        `PR '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${rewrite.newTipSha}'`,
+        `PR '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${expected}'`,
         rewrite.repo,
         [rewrite.repo],
       )
     }
   }
-  return { status: "passed", output: { rewrites, regenerated: synthesized.output.generatedPaths } }
+  return {
+    status: "passed",
+    output: {
+      rewrites,
+      filledPins: filled.output.filledPins,
+      regenerated: synthesized.output.generatedPaths,
+    },
+  }
 }
 
 async function prepareSource(
@@ -7543,7 +7627,14 @@ async function validatePinnedCandidate(
   if (sourceRefError !== undefined) return { error: { code: "invalid-candidate", message: sourceRefError } }
   const finalSources = new Map<string, SourceRewrite>()
   for (const source of pinned.sourceRewrites ?? []) finalSources.set(source.repo, source)
+  const finalResolutions = new Map<string, QueueSubmoduleResolutionEvidence>()
+  for (const resolution of pinned.submoduleResolutions ?? []) finalResolutions.set(resolution.path, resolution)
   for (const source of finalSources.values()) {
+    // A recorded resolution is the LATER, final word for its path: the queue
+    // filled in the submodule's value past the certified source tip (or a
+    // conflict resolution re-authored it), and the resolution loop below holds
+    // that path to its recorded value instead.
+    if (finalResolutions.has(source.repo)) continue
     if ((await readGitlink(git, repo, pinned.candidateSha, source.repo)) !== source.newTipSha) {
       return {
         error: {
@@ -7553,8 +7644,6 @@ async function validatePinnedCandidate(
       }
     }
   }
-  const finalResolutions = new Map<string, QueueSubmoduleResolutionEvidence>()
-  for (const resolution of pinned.submoduleResolutions ?? []) finalResolutions.set(resolution.path, resolution)
   for (const resolution of finalResolutions.values()) {
     if ((await readGitlink(git, repo, pinned.candidateSha, resolution.path)) !== resolution.sha) {
       return {

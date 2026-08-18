@@ -7889,9 +7889,18 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "payload-identity",
     "payload-mismatch",
     "payload-overlap",
+    // The composition-time fill-in found the composed submodule value and that
+    // submodule's main on divergent histories. Same remedy as the merge-time
+    // code it moves forward: compose the divergent submodule histories and
+    // push a new revision — no retry cures it.
+    "component-main-non-ancestral",
   ]),
   "infra-retry": new Set<string>([
     "carrier-inspection",
+    // The composition-time fill-in could not resolve a submodule's main —
+    // a fetch/probe blip, cured by retrying, exactly as the same code is
+    // treated on the merge path's release ladder.
+    "component-main-inspection-failed",
     // The landing floor caught a candidate whose tree predates work already on
     // the base. The submitted branches are blameless — nothing they authored
     // deletes those paths — so this must never present as needs-author; a fresh
@@ -7917,6 +7926,7 @@ function admissionFailureKind(
 
 type InfraRetryCompositionFailure =
   | "carrier-inspection"
+  | "component-main-inspection-failed"
   | "landing-unauthored-deletion"
   | "source-publish"
   | "scratch-cleanup-failed"
