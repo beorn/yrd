@@ -72,7 +72,6 @@ import {
   pruneCandidateRefs,
   sweepCandidateRefs,
   sweepUncarriedRefs,
-  synthesizePinIntentCarrier,
   type CandidateRefSweepResult,
   type QueuesState,
   type InTotoStatement,
@@ -233,9 +232,9 @@ import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
-import { IntentRecordIdSchema, renderRemedyStep } from "@yrd/intent"
-import { admitPinIntent } from "./intent-admission.ts"
+import { IntentRecordIdSchema } from "@yrd/intent"
 import {
+  addedSubmodulePins,
   authoredSubmodulePinBase,
   changedSubmodulePins,
   submodulePinPublications,
@@ -1788,30 +1787,6 @@ type QueueListOptions = Readonly<{
 type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
-type IntentSubmitOptions = JsonOption & {
-  component?: string
-  target?: string
-  issue?: string
-  expectPin?: string
-  allowOffTrunk?: boolean
-  submitter?: string
-  base?: string
-  force?: boolean
-}
-type IntentTombstoneOptions = JsonOption & {
-  component?: string
-  sha?: string
-  issue?: string
-  submitter?: string
-  reason?: string
-}
-type IntentWithdrawOptions = JsonOption & { reason?: string }
-type IntentMaterializeOptions = JsonOption & {
-  target?: string
-  issue?: string
-  base?: string
-  branch?: string
-}
 
 // Flow metrics default to a 24h horizon (median/p90 wait, run durations,
 // rejection rate, throughput) independent of the tighter listing window; an
@@ -3863,9 +3838,14 @@ function shellQuote(value: string): string {
 }
 
 /**
- * Exported for characterization: this gate had NO behavioural test while carrying the
- * authored-gitlink refusal that the shaset model replaces, and three suites use that
- * refusal's code as a fixture label, so they stay green through a behaviour change.
+ * Exported for characterization. Historically this gate refused EVERY authored gitlink change
+ * unconditionally (the pre-shaset behaviour); step (a) tightened the publication oracle
+ * without flipping the backstop, deliberately: "its deletion ships with the provisioner lift
+ * or not at all" (shaset-model.md). The provisioner lift shipped in step (b), so step (d) is
+ * that flip: a published, on-main, single-update authored gitlink is now admitted, and the
+ * queue's own composition-time fill (`fillAuthoredGitlinksFromMain`, unchanged) derives its
+ * shaset value from the submodule's main. An ADDED gitlink still refuses unconditionally —
+ * that machinery is update-only — as does a DELETED, off-main, or unpublished one.
  * See tests/authored-gitlink-admission.test.ts and @i/10-merge-queue/shaset-model.
  */
 export async function requireQueueableSubmodulePins(
@@ -3915,13 +3895,12 @@ export async function requireQueueableSubmodulePins(
   if (queueCarried) {
     const unreachable = await unreachableSubmodulePins({ process: services.process, pins: changed })
     if (unreachable.length > 0) {
-      const issue = pr.issue ?? "<issue-ref>"
       const detail = unreachable
         .map(
           ({ path, pin, repository }) =>
             `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; whoever holds this commit in ` +
-            `'${repository}' must publish it through that component's own git workflow — never as this refusal's ` +
-            `remedy — then submit: 'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`,
+            `'${repository}' must publish it through that component's own git workflow, then get it onto that ` +
+            `submodule's main and submit an ordinary merge request whose diff is the gitlink bump`,
         )
         .join("\n")
       raiseFailure(
@@ -3931,6 +3910,20 @@ export async function requireQueueableSubmodulePins(
       )
     }
     return
+  }
+
+  // A min commit is a floor on an EXISTING component: the shaset-commit writer is
+  // update-only, so an added (or, structurally invisible to changedSubmodulePins today,
+  // deleted) gitlink can never be derived the way an updated one can — always refuse.
+  const added = await addedSubmodulePins({ process: services.process, repo, baseSha, pins: changed })
+  if (added.length > 0) {
+    raiseFailure(
+      "refusal",
+      "authored-gitlink",
+      `yrd: PR '${pr.id}' adds generated-only gitlinks [${added.map(({ path }) => path).join(", ")}]; a merge ` +
+        "request's gitlink diff can only bump an existing component, never add one; authorize the " +
+        "component-model addition as an ordinary code change",
+    )
   }
 
   const publications = await submodulePinPublications({ process: services.process, pins: changed })
@@ -3950,13 +3943,12 @@ export async function requireQueueableSubmodulePins(
   }
   const offMain = publications.filter((entry) => entry.state === "off-component-main")
   if (offMain.length > 0) {
-    const issue = pr.issue ?? "<issue-ref>"
     const detail = offMain
       .map(
         ({ pin: { path, pin, repository }, mainSha }) =>
           `submodule '${path}' pin '${pin}' is not on that component's main ('${mainSha}'); whoever holds this ` +
-          `commit in '${repository}' must publish it through that component's own git workflow — never as this ` +
-          `refusal's remedy — then submit: 'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`,
+          `commit in '${repository}' must publish it through that component's own git workflow, then get it ` +
+          "onto that submodule's main and submit an ordinary merge request whose diff is the gitlink bump",
       )
       .join("\n")
     raiseFailure(
@@ -3965,16 +3957,9 @@ export async function requireQueueableSubmodulePins(
       `yrd: PR '${pr.id}' changes submodule pins that are not on their component's main:\n${detail}`,
     )
   }
-  const issue = pr.issue ?? "<issue-ref>"
-  const intents = changed
-    .map(({ path, pin }) => `'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`)
-    .join(", then ")
-  raiseFailure(
-    "refusal",
-    "authored-gitlink",
-    `yrd: PR '${pr.id}' changes generated-only gitlinks [${changed.map(({ path }) => path).join(", ")}]; ` +
-      `authored gitlinks are never admitted; submit ${intents}`,
-  )
+  // Every remaining pin is a straightforward update, published and on its component's main —
+  // admitted. The queue's own composition-time fill derives the shaset value at merge; this
+  // gate's only job was to stop refusing what that machinery can now safely process.
 }
 
 async function requireQueueableSubmodulePinsForCommand(
@@ -10314,236 +10299,6 @@ async function listContests(app: YrdCliApp, options: JsonOption, io: YrdCliIO): 
   await printResult(io, jsonEnabled(options), { command: "contest.list", contests }, human)
 }
 
-/**
- * Admit a pin-advance intent.
- *
- * Admission is advisory: main moves, so merge-time evaluation re-runs every
- * check and is the only authority. It exists so the submitter fails loud while
- * their context is warm — and so a typo'd component never becomes a queue row.
- */
-async function submitIntent(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  options: IntentSubmitOptions,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  const component = options.component ?? usage("yrd intent submit requires --component <path>")
-  const issueRef = options.issue ?? usage("yrd intent submit requires --issue <ref>")
-  const issue = await app.issues.resolve(app.issues.ref(issueRef))
-  const repo = io.cwd ?? process.cwd()
-  const host = services.process
-  if (host === undefined) {
-    configuration("yrd intent submit requires a process host to inspect the component")
-  }
-  const admission = await admitPinIntent({
-    process: host,
-    repo,
-    base: options.base ?? services.base ?? "main",
-    component,
-    issue: issueRef,
-    ...(options.target === undefined ? {} : { target: options.target }),
-    ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
-    ...(options.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
-    tombstones: app.intents.tombstones(component),
-  })
-  if (!admission.admitted) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      {
-        command: "intent.submit",
-        failure: {
-          code: admission.code,
-          message: admission.message,
-          evidence: admission.evidence,
-          remedy: admission.remedy,
-        },
-      },
-      [admission.message, "", ...admission.remedy.map((step) => `  ${renderRemedyStep(step)}`)].join("\n"),
-    )
-    return 1
-  }
-
-  const intent = await app.intents.submit({
-    intentId: randomUUID(),
-    issue: issue.ref,
-    component,
-    submitter: options.submitter ?? "operator",
-    ...(options.target === undefined ? {} : { target: options.target }),
-    ...(options.expectPin === undefined ? {} : { expectedCurrentPin: options.expectPin }),
-    ...(options.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
-    ...(options.force === true ? { forceSupersede: true } : {}),
-  })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "intent.submit", intent, admission },
-    [
-      `${intent.id} ${intent.component} ${intent.target ?? "<component main tip at landing>"} (${admission.relation}; pin ${admission.currentPin})`,
-      ...(admission.disclosure === undefined ? [] : [admission.disclosure]),
-    ].join("\n"),
-  )
-  return 0
-}
-
-async function tombstoneIntent(app: YrdCliApp, options: IntentTombstoneOptions, io: YrdCliIO): Promise<void> {
-  const component = options.component ?? usage("yrd intent tombstone requires --component <path>")
-  const sha = options.sha ?? usage("yrd intent tombstone requires --sha <commit>")
-  const issueRef = options.issue ?? usage("yrd intent tombstone requires --issue <ref>")
-  const issue = await app.issues.resolve(app.issues.ref(issueRef))
-  const tombstone = await app.intents.tombstone({
-    tombstoneId: randomUUID(),
-    issue: issue.ref,
-    component,
-    sha,
-    submitter: options.submitter ?? "operator",
-    ...(options.reason === undefined ? {} : { reason: options.reason }),
-  })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "intent.tombstone", tombstone },
-    `${tombstone.id} ${tombstone.component} ${tombstone.sha}`,
-  )
-}
-
-async function listIntents(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const intents = app.intents.list()
-  const human =
-    intents.length === 0
-      ? "No intents."
-      : [
-          "INTENT COMPONENT TARGET STATUS ISSUE",
-          ...intents.map((intent) =>
-            [
-              intent.id,
-              intent.component,
-              intent.target ?? "-",
-              intent.status,
-              `${intent.issue.source}:${intent.issue.id}`,
-            ].join(" "),
-          ),
-        ].join("\n")
-  await printResult(io, jsonEnabled(options), { command: "intent.list", intents }, human)
-}
-
-async function showIntent(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  const intent = app.intents.get(selector)
-  if (intent === undefined) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command: "intent.show", failure: { code: "intent-not-found", message: `yrd: no intent '${selector}'` } },
-      `yrd: no intent '${selector}'`,
-    )
-    return 1
-  }
-  const human = [
-    `${intent.id} ${intent.status}`,
-    `component  ${intent.component}`,
-    `target     ${intent.target ?? "<component main tip at landing>"}`,
-    `issue      ${intent.issue.source}:${intent.issue.id}`,
-    `submitter  ${intent.submitter}`,
-    `submitted  ${intent.submittedAt}`,
-    ...(intent.supersededBy === undefined ? [] : [`superseded ${intent.supersededBy}`]),
-    ...(intent.disposition === undefined ? [] : [`disposition ${intent.disposition.code}`]),
-    // A parked record's whole value to its owner is the remedy: the lane has
-    // already moved on, so this page is where they find out what to do. The
-    // park's own first remedy step is `yrd intent show`, which would be a dead
-    // end if this printed nothing.
-    ...(intent.parked === undefined
-      ? []
-      : [
-          `parked     ${intent.parked.attempts}x '${intent.parked.failure.code}' (${intent.parked.fingerprint})`,
-          `failure    ${intent.parked.failure.reason}`,
-          `remedy     ${intent.parked.remedySummary}`,
-          ...intent.parked.remedy.map((step) => `           ${renderRemedyStep(step)}`),
-        ]),
-  ].join("\n")
-  await printResult(io, jsonEnabled(options), { command: "intent.show", intent }, human)
-  return 0
-}
-
-async function withdrawIntent(
-  app: YrdCliApp,
-  selector: string,
-  options: IntentWithdrawOptions,
-  io: YrdCliIO,
-): Promise<void> {
-  const intent = await app.intents.withdraw(selector, options.reason)
-  await printResult(io, jsonEnabled(options), { command: "intent.withdraw", intent }, `${intent.id} ${intent.status}`)
-}
-
-async function materializeIntent(
-  component: string,
-  services: YrdCliServices,
-  options: IntentMaterializeOptions,
-  io: YrdCliIO,
-): Promise<void> {
-  const target = options.target ?? usage("yrd intent materialize requires --target <sha>")
-  const issue = options.issue ?? usage("yrd intent materialize requires --issue <ref>")
-  const host = services.process
-  if (host === undefined) configuration("yrd intent materialize requires a process host")
-  const repo = io.cwd ?? globalThis.process.cwd()
-  const base = options.base ?? services.base ?? "main"
-  const baseSha = (await runQueueGit(host, repo, ["rev-parse", base])).trim()
-  const carrier = await synthesizePinIntentCarrier({
-    inject: { process: host },
-    repo,
-    baseSha,
-    component,
-    target,
-    issue,
-  })
-  const leaf =
-    component
-      .split("/")
-      .at(-1)
-      ?.replaceAll(/[^A-Za-z0-9._-]/gu, "-") || "component"
-  const branch = options.branch ?? `yrd/intent/${leaf}-${carrier.commit.slice(0, 12)}`
-  await runQueueGit(host, repo, ["check-ref-format", "--branch", branch])
-  const ref = `refs/heads/${branch}`
-  const current = await host.run({
-    argv: ["git", "-C", repo, "rev-parse", "--verify", ref],
-    cwd: repo,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (current.timedOut) throw gitTimeoutError(["rev-parse", "--verify", ref])
-  if (current.exitCode === 0 && current.stdout.trim() !== carrier.commit) {
-    refusal(`materialized branch '${branch}' already points at ${current.stdout.trim()}`)
-  }
-  if (current.exitCode !== 0) {
-    await runQueueGit(host, repo, ["update-ref", ref, carrier.commit, "0".repeat(40)])
-  }
-  // A resident runner lands open intents itself — printing the manual-submit
-  // step under one teaches the reader to create a duplicate carrier that gets
-  // terminated as already-landed (@i/23-yrd-vocabulary/intent-rail-hint). The
-  // hint survives only in the no-runner state, and then it names that state.
-  const runner = activeResidentRunner(await residentRunnerStatus(repo))
-  if (runner !== null) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command: "intent.materialize", branch, carrier, runner: "resident" },
-      `${branch} ${carrier.commit}\nresident runner (pid ${runner.pid}) lands open intents — no manual submit needed`,
-    )
-    return
-  }
-  const next = `yrd pr submit ${branch} --issue ${issue}`
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "intent.materialize", branch, carrier, runner: "none", next },
-    `${branch} ${carrier.commit}\nnext (no resident runner): ${next}`,
-  )
-}
-
 async function refusePrMerge(
   app: YrdCliApp,
   selector: string,
@@ -11733,69 +11488,10 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
-  const intent = program.command("intent").description("declare and inspect component pin advances")
-  intent.helpCommand(false)
-  intent
-    .command("_list", { isDefault: true, hidden: true })
-    .option("--json", "emit stable JSON")
-    .action(async (options) => listIntents(installed(), options, io))
-  intent
-    .command("submit")
-    .description("declare that a component pin should advance")
-    .option("--component <path>", "root-relative gitlink path, e.g. components/alpha")
-    .option("--target <sha>", "component commit to advance to; omit for the component main tip at landing")
-    .option("--issue <ref>", "tracker-neutral issue reference")
-    .option("--expect-pin <sha>", "stop unless the current pin is exactly this sha")
-    .option("--allow-off-trunk", "declare a deliberate pin onto a target the component trunk does not contain")
-    .option("--submitter <identity>", "attribution recorded on the intent")
-    .option("--base <branch>", "base branch whose pin the target advances")
-    .option("--force", "explicitly supersede another submitter's live intent")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await submitIntent(installed(), installedServices(), options, io)))
-  intent
-    .command("tombstone")
-    .description("record a rolled-back pin whose descendants must not re-enter")
-    .option("--component <path>", "root-relative gitlink path")
-    .option("--sha <commit>", "rolled-back component commit")
-    .option("--issue <ref>", "rollback or incident issue reference")
-    .option("--submitter <identity>", "attribution recorded on the tombstone")
-    .option("--reason <text>", "why the pin was rolled back")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => tombstoneIntent(installed(), options, io))
-  intent
-    .command("list")
-    .description("all accepted records, in the order they were submitted")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => listIntents(installed(), options, io))
-  intent
-    .command("show <intent>")
-    .description("record, preconditions, and disposition; <intent> is yrdpin#162 or just 162")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await showIntent(installed(), selector, options, io)))
-  intent
-    // `close` is the printed spelling; `withdraw` keeps working for anyone who
-    // learned it, the same way the retired status words still parse.
-    .command("close <intent>")
-    .silentAlias("withdraw")
-    .description("close an open intent; <intent> is yrdpin#162 or just 162")
-    .option("--reason <text>", "why the intent is closed")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => withdrawIntent(installed(), selector, options, io))
-  intent
-    .command("materialize <component>")
-    .description("materialize the queue's deterministic pin branch on a new local branch")
-    .option("--target <sha>", "component commit to advance to")
-    .option("--issue <ref>", "issue identity embedded in the deterministic commit")
-    .option("--base <branch>", "base branch to materialize against")
-    .option("--branch <branch>", "local branch to create; defaults to a deterministic yrd/intent name")
-    .option("--json", "emit stable JSON")
-    .action(async (component, options) => materializeIntent(component, installedServices(), options, io))
-
   const order = new Map(
     [
       "mr",
       "bay",
-      "intent",
       "issue",
       "contest",
       "queue",

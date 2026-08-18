@@ -420,7 +420,7 @@ describe("recut fast-forward gitlink resolution", () => {
       failure: {
         kind: "refusal",
         code: "merge-tip-carrier",
-        message: expect.stringMatching(/yrd intent submit.*Queue owns the root carrier/iu),
+        message: expect.stringMatching(/submit each component advance.*Queue owns the root carrier/iu),
       },
     })
   })
