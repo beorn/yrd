@@ -3,6 +3,7 @@ import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type {
+  MergeRecordEstateRepair,
   GitPRRecutter,
   HasQueue,
   QueueAuditEmission,
@@ -129,6 +130,12 @@ export type YrdCliServices = Readonly<{
     find(selector: string): Promise<RepositoryMergeRecordSearchResult>
     /** Every verified merge record on the configured base, for bulk index reconstruction. */
     all(): Promise<RepositoryMergeRecordSearchResult>
+    /**
+     * Enumerate every record the estate cannot prove and, with `apply`, append a
+     * retraction beside each. `now` is passed in rather than read from a clock so
+     * the caller owns the timestamp and the result stays reproducible.
+     */
+    retractUnprovable(options: Readonly<{ apply: boolean; now: string }>): Promise<MergeRecordEstateRepair>
   }>
   journal?: YrdCliJournalAdministration
   checks?: YrdCliChecks

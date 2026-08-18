@@ -66,6 +66,7 @@ import {
   gitMergeStep,
   gitMergeRecorder,
   findRepositoryMergeRecords,
+  repairMergeRecordEstate,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
   worktreeContexts,
@@ -2594,6 +2595,15 @@ async function createYrdRuntimeHost(
             // The bulk read exists for index reconstruction over an estate that may already be
             // damaged; one unverifiable note must cost that note, not the whole scan.
             isolateUnverifiable: true,
+          })
+        },
+        async retractUnprovable(repairOptions: Readonly<{ apply: boolean; now: string }>) {
+          return repairMergeRecordEstate({
+            inject: { process },
+            repo: repository.repo,
+            baseSha: await mergeRecordBaseSha(),
+            now: repairOptions.now,
+            apply: repairOptions.apply,
           })
         },
       }),

@@ -77,6 +77,7 @@ import {
   MERGE_RECORD_REF,
   MERGE_RECORD_RETRACTION_NOTES_NAME,
   createMergeRecord,
+  createMergeRecordRetraction,
   unprovableMergeRecordClaim,
   parseMergeRecord,
   parseMergeRecordRetraction,
@@ -1552,6 +1553,14 @@ export type UnverifiableMergeRecord = Readonly<{
   note: string
   status: "repository-incomplete" | "repository-corrupt"
   reason: string
+  /** Which producer class this record came from, so a repair can report the estate
+   * by cause instead of as one undifferentiated pile. */
+  classification: MergeRecordRetraction["classification"]
+  /** Present only when the record PARSED. A retraction binds by note blob sha, so
+   * these are for reporting and for the audit trail — a record too damaged to parse
+   * can still be retracted, which is the point of binding on the blob. */
+  merge?: string
+  checksum?: string
 }>
 /** A record that could not prove itself AND has an appended retraction confessing it.
  * Reported, never hidden: the estate stays honest about what it gave up on. */
@@ -1637,29 +1646,50 @@ export async function findRepositoryMergeRecords(
 
   const verifyListing = async (line: string): Promise<VerifiedListing> => {
     const [note, target, extra] = line.split(/\s+/u)
-    const corrupt = (reason: string): VerifiedListing =>
-      ({ outcome: "unverifiable", note: note ?? line, status: "repository-corrupt", reason }) as const
+    const corrupt = (
+      reason: string,
+      detail: Readonly<{
+        classification?: MergeRecordRetraction["classification"]
+        merge?: string
+        checksum?: string
+      }> = {},
+    ): VerifiedListing =>
+      ({
+        outcome: "unverifiable",
+        note: note ?? line,
+        status: "repository-corrupt",
+        reason,
+        classification: detail.classification ?? "other",
+        ...(detail.merge === undefined ? {} : { merge: detail.merge }),
+        ...(detail.checksum === undefined ? {} : { checksum: detail.checksum }),
+      }) as const
     if (note === undefined || target === undefined || extra !== undefined) {
       return {
         outcome: "unverifiable",
         note: line,
         status: "repository-corrupt",
         reason: `malformed merge-record listing: ${line}`,
+        classification: "unreadable",
       }
     }
     const shown = await git.run(options.repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "show", target], true)
-    if (shown.code !== 0) return corrupt(`merge-record '${note}' is unreadable`)
+    if (shown.code !== 0) return corrupt(`merge-record '${note}' is unreadable`, { classification: "unreadable" })
     let parsed
     try {
       parsed = parseMergeRecord(shown.stdout)
     } catch (cause) {
-      return corrupt(`merge-record '${note}' is invalid: ${cause instanceof Error ? cause.message : String(cause)}`)
+      return corrupt(`merge-record '${note}' is invalid: ${cause instanceof Error ? cause.message : String(cause)}`, {
+        classification: "unreadable",
+      })
     }
     const expectedTarget = (
       await git.input(options.repo, ["hash-object", "--stdin"], `yrd merge ${parsed.record.merge.id}\n`)
     ).stdout
     if (target !== expectedTarget) {
-      return corrupt(`merge-record '${note}' has the wrong attempt anchor '${target}'`)
+      return corrupt(`merge-record '${note}' has the wrong attempt anchor '${target}'`, {
+        merge: parsed.record.merge.id,
+        checksum: parsed.checksum,
+      })
     }
     if (parsed.record.merge.result === "merged") {
       const merged = parsed.record.merge.mergedCommit
@@ -1667,7 +1697,10 @@ export async function findRepositoryMergeRecords(
         merged === undefined ||
         (await git.run(options.repo, ["merge-base", "--is-ancestor", merged, options.baseSha], true)).code !== 0
       ) {
-        return corrupt(`merge-record '${note}' does not prove a merge on base`)
+        return corrupt(`merge-record '${note}' does not prove a merge on base`, {
+          merge: parsed.record.merge.id,
+          checksum: parsed.checksum,
+        })
       }
       for (const change of parsed.record.changes) {
         if (change.generatedCommit === undefined || change.changeId === undefined) continue
@@ -1685,6 +1718,11 @@ export async function findRepositoryMergeRecords(
             `merge-record '${note}' cannot prove REACHABILITY for ${change.pr}: generated commit ` +
               `'${change.generatedCommit}' is not contained by recorded mergedCommit '${merged}' ` +
               `(the Change-Id trailer was not the problem). Change-Id ${change.changeId}`,
+            {
+              classification: "unreachable-generated-commit",
+              merge: parsed.record.merge.id,
+              checksum: parsed.checksum,
+            },
           )
         }
         const trailers = await git.run(
@@ -1696,6 +1734,7 @@ export async function findRepositoryMergeRecords(
           return corrupt(
             `merge-record '${note}' cannot READ the Change-Id trailer of generated commit ` +
               `'${change.generatedCommit}' for ${change.pr}: ${trailers.stderr || trailers.stdout}`,
+            { merge: parsed.record.merge.id, checksum: parsed.checksum },
           )
         }
         if (trailers.stdout !== change.changeId) {
@@ -1703,13 +1742,21 @@ export async function findRepositoryMergeRecords(
             `merge-record '${note}' cannot prove the CHANGE-ID for ${change.pr}: generated commit ` +
               `'${change.generatedCommit}' carries '${trailers.stdout || "<no trailer>"}', ` +
               `record claims '${change.changeId}' (reachability verified)`,
+            {
+              classification: "change-id-mismatch",
+              merge: parsed.record.merge.id,
+              checksum: parsed.checksum,
+            },
           )
         }
       }
       for (const pin of parsed.record.pins) {
         const current = await readGitlink(git, options.repo, options.baseSha, pin.path)
         if (current === undefined) {
-          return corrupt(`merge-record '${note}' lost gitlink '${pin.path}'`)
+          return corrupt(`merge-record '${note}' lost gitlink '${pin.path}'`, {
+            merge: parsed.record.merge.id,
+            checksum: parsed.checksum,
+          })
         }
         if (current === pin.after) continue
         const component = await componentCheckout(git, options.repo, pin.path)
@@ -1719,10 +1766,16 @@ export async function findRepositoryMergeRecords(
             note,
             status: "repository-incomplete",
             reason: `merge-record '${note}' cannot inspect component checkout '${pin.path}'`,
+            classification: "other",
+            merge: parsed.record.merge.id,
+            checksum: parsed.checksum,
           }
         }
         if (!(await isAncestor(git, component, pin.after, current))) {
-          return corrupt(`merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`)
+          return corrupt(`merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`, {
+            merge: parsed.record.merge.id,
+            checksum: parsed.checksum,
+          })
         }
       }
     }
@@ -1766,7 +1819,14 @@ export async function findRepositoryMergeRecords(
       continue
     }
     if (options.isolateUnverifiable !== true) return { status: listing.status, reason: listing.reason }
-    unverifiable.push({ note: listing.note, status: listing.status, reason: listing.reason })
+    unverifiable.push({
+      note: listing.note,
+      status: listing.status,
+      reason: listing.reason,
+      classification: listing.classification,
+      ...(listing.merge === undefined ? {} : { merge: listing.merge }),
+      ...(listing.checksum === undefined ? {} : { checksum: listing.checksum }),
+    })
   }
   // Records that exist but could not be verified are never "missing": reporting them as an empty
   // estate would hand the caller a clean-looking zero for a repository that just failed to prove
@@ -1775,6 +1835,119 @@ export async function findRepositoryMergeRecords(
     return { status: "not-proven", reason: "merge-record-missing" }
   }
   return { status: "proven", records, unverifiable, retracted }
+}
+
+/** One record the estate cannot prove, and the retraction that would excuse it. */
+export type MergeRecordRetractionPlan = Readonly<{
+  note: string
+  reason: string
+  classification: MergeRecordRetraction["classification"]
+  merge?: string
+  checksum?: string
+}>
+
+export type MergeRecordEstateRepair = Readonly<{
+  /** Records that verified on their own. */
+  proven: number
+  /** Records already excused by an existing retraction. */
+  alreadyRetracted: number
+  /** Every record that cannot prove itself and is not yet retracted — ALL of them,
+   * never just the first, because the estate holds more than one producer class. */
+  planned: readonly MergeRecordRetractionPlan[]
+  /** Note shas actually written. Empty unless `apply` was set. */
+  applied: readonly string[]
+}>
+
+/**
+ * Enumerate every unprovable merge record, and optionally retract them.
+ *
+ * Read-only by default: planning and applying are separate so an operator can see
+ * the whole estate before changing any of it. Nothing is ever edited — a
+ * retraction is a new note on a separate ref, and the record it excuses stays
+ * byte-identical.
+ *
+ * The enumeration is deliberately EXHAUSTIVE. `yrd why` refuses from a partially
+ * verified estate on purpose, and that contract is untouched; but a repair that
+ * fixed only the first failure would hand back an estate that still refuses, with
+ * no indication that more remained. There are at least two producer classes on
+ * record (an unreachable generated commit, and a missing Change-Id trailer), so
+ * first-failure-only is not a hypothetical shortfall.
+ *
+ * `now` is a parameter rather than a clock read so the caller owns the timestamp
+ * and the result stays reproducible under test.
+ */
+export async function repairMergeRecordEstate(
+  options: Readonly<{
+    inject: Readonly<{ process: Pick<Process, "run"> }>
+    repo: string
+    baseSha: string
+    now: string
+    apply?: boolean
+  }>,
+): Promise<MergeRecordEstateRepair> {
+  const found = await findRepositoryMergeRecords({
+    inject: options.inject,
+    repo: options.repo,
+    baseSha: options.baseSha,
+    isolateUnverifiable: true,
+  })
+  // An estate with no records at all is not a fault; it is a repository that has
+  // never landed anything through the queue.
+  if (found.status === "not-proven") return { proven: 0, alreadyRetracted: 0, planned: [], applied: [] }
+  if (found.status !== "proven") {
+    // `isolateUnverifiable` cannot return a whole-estate refusal, so anything else
+    // is the notes ref itself being unreadable — a different fault, and not one a
+    // retraction can excuse. Say so rather than reporting an empty plan.
+    throw createFailure({
+      kind: "infrastructure",
+      code: "merge-record-estate-unreadable",
+      message: `yrd: cannot enumerate the merge-record estate: ${found.reason}`,
+    })
+  }
+
+  const planned: MergeRecordRetractionPlan[] = found.unverifiable.map((entry) => ({
+    note: entry.note,
+    reason: entry.reason,
+    classification: entry.classification,
+    ...(entry.merge === undefined ? {} : { merge: entry.merge }),
+    ...(entry.checksum === undefined ? {} : { checksum: entry.checksum }),
+  }))
+
+  if (options.apply !== true || planned.length === 0) {
+    return { proven: found.records.length, alreadyRetracted: found.retracted.length, planned, applied: [] }
+  }
+
+  const git = createGit(options.inject.process)
+  const applied: string[] = []
+  for (const plan of planned) {
+    const { canonical } = createMergeRecordRetraction({
+      schema: "yrd/merge-record-retraction/v1",
+      note: plan.note,
+      reason: plan.reason,
+      classification: plan.classification,
+      retractedAt: options.now,
+      ...(plan.merge === undefined ? {} : { merge: plan.merge }),
+      ...(plan.checksum === undefined ? {} : { checksum: plan.checksum }),
+    })
+    // Anchored on the retracted note's own blob sha: always available, unique per
+    // record, and meaningful even when the record is too damaged to name itself.
+    const anchor = await git.input(options.repo, ["hash-object", "-w", "--stdin"], `yrd retract ${plan.note}\n`)
+    const blob = await git.input(options.repo, ["hash-object", "-w", "--stdin"], canonical)
+    const added = await git.run(
+      options.repo,
+      ["notes", `--ref=${MERGE_RECORD_RETRACTION_NOTES_NAME}`, "add", "-f", "-C", blob.stdout, anchor.stdout],
+      true,
+    )
+    if (added.code !== 0) {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "merge-record-retraction-refused",
+        message: `yrd: could not append a retraction for note '${plan.note}': ${added.stderr || added.stdout}`,
+      })
+    }
+    applied.push(plan.note)
+  }
+  return { proven: found.records.length, alreadyRetracted: found.retracted.length, planned, applied }
 }
 
 export const RepositoryChangeIdentitySchema = z

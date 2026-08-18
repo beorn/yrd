@@ -382,7 +382,11 @@ describe("pinned-submodule warning surface", () => {
     expect(
       await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), out.io, {
         config: doctorConfig,
-        mergeRecords: { find: async () => proven, all: async () => proven },
+        mergeRecords: {
+          find: async () => proven,
+          all: async () => proven,
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
+        },
       } as Parameters<typeof runYrd>[3]),
       out.stderr(),
     ).toBe(1)

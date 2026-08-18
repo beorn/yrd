@@ -61,6 +61,7 @@ import type { Job, JobError } from "@yrd/job"
 import { createProcess, pathReapFailure, type Process, type ProcessResult } from "@yrd/process"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import {
+  type MergeRecordEstateRepair,
   isQueueRunningConflict,
   CANDIDATE_REF_RETENTION_MS,
   candidateRefDenominator,
@@ -7799,6 +7800,37 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   }
 }
 
+/**
+ * The estate repair, said plainly and BY CAUSE.
+ *
+ * One undifferentiated count would repeat the mistake this whole bead is about:
+ * the estate holds more than one producer class, and an operator deciding whether
+ * to apply needs to see which. Listing without `--apply` is the default because a
+ * retraction is permanent history, even though it edits nothing.
+ */
+function estateRepairLines(report: MergeRecordEstateRepair, applied: boolean): readonly string[] {
+  if (report.planned.length === 0) {
+    return [
+      `merge-record estate: ${String(report.proven)} proven, ${String(report.alreadyRetracted)} already retracted, ` +
+        "nothing left to retract",
+    ]
+  }
+  const byCause = new Map<string, number>()
+  for (const plan of report.planned) byCause.set(plan.classification, (byCause.get(plan.classification) ?? 0) + 1)
+  const causes = [...byCause.entries()].map(([cause, count]) => `${cause}=${String(count)}`).join(" ")
+  return [
+    `merge-record estate: ${String(report.proven)} proven, ${String(report.alreadyRetracted)} already retracted, ` +
+      `${String(report.planned.length)} UNPROVABLE (${causes})`,
+    ...report.planned.map(
+      (plan) => `  ${applied ? "RETRACTED" : "would retract"} ${plan.merge ?? "<unnamed record>"} note ${plan.note}`,
+    ),
+    ...report.planned.map((plan) => `    ${plan.reason}`),
+    ...(applied
+      ? [`  appended ${String(report.applied.length)} retraction(s); the retracted records are unchanged`]
+      : ["  re-run with --apply to append these retractions"]),
+  ]
+}
+
 function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
   const { records, merged, changes, knownPrs } = report.scanned
   const considered = report.rebuilt.length + report.skipped.length
@@ -8122,7 +8154,14 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
 async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
-  options: JsonOption & Readonly<{ rebuildViews?: boolean; rebuildIndexFromRepo?: boolean }>,
+  options: JsonOption &
+    Readonly<{
+      rebuildViews?: boolean
+      rebuildIndexFromRepo?: boolean
+      retractUnprovable?: boolean
+      apply?: boolean
+      now?: string
+    }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const rebuilt =
@@ -8134,6 +8173,16 @@ async function configDoctor(
   // projection: refresh before it so the read is not stale, and again after so
   // the findings below see what it repaired.
   await app.refresh()
+  // Estate repair runs BEFORE the index rebuild on purpose: the rebuild reads the
+  // merge-record estate, and an estate holding one unprovable record refuses every
+  // read. Repairing after would rebuild from an estate that just refused.
+  const estateRepair =
+    options.retractUnprovable === true
+      ? await (services.mergeRecords?.retractUnprovable({
+          apply: options.apply === true,
+          now: options.now ?? new Date().toISOString(),
+        }) ?? configuration("repository merge-record capability is not installed"))
+      : undefined
   const indexRebuild = options.rebuildIndexFromRepo === true ? await rebuildIndexFromRepo(app, services) : undefined
   const config = services.config
   if (config === undefined) configuration("config doctor capability is not installed")
@@ -8167,19 +8216,27 @@ async function configDoctor(
       ...(candidateRefs.sweep === undefined ? {} : { candidateRefs: candidateRefs.sweep }),
       ...(rebuilt === undefined ? {} : { rebuilt }),
       ...(indexRebuild === undefined ? {} : { indexRebuild }),
+      ...(estateRepair === undefined ? {} : { estateRepair }),
     },
-    indexRebuild === undefined
-      ? [doctorLine, retentionDoctorLine(retention)].join("\n")
-      : [...indexRebuildLines(indexRebuild), doctorLine, retentionDoctorLine(retention)].join("\n"),
+    [
+      ...(estateRepair === undefined ? [] : estateRepairLines(estateRepair, options.apply === true)),
+      ...(indexRebuild === undefined ? [] : indexRebuildLines(indexRebuild)),
+      doctorLine,
+      retentionDoctorLine(retention),
+    ].join("\n"),
     warnings,
   )
   // A landing repo truth proves but the index still cannot carry is a real gap, not a clean run —
   // and so is a note the scan could not verify at all. A pin landing is neither: it has no
   // pr/integrated row to be missing.
   const unrebuilt =
-    indexRebuild !== undefined &&
-    (indexRebuild.skipped.some((entry) => !HEALTHY_SKIP_REASONS.has(entry.reason)) ||
-      indexRebuild.unverifiable.length > 0)
+    (indexRebuild !== undefined &&
+      (indexRebuild.skipped.some((entry) => !HEALTHY_SKIP_REASONS.has(entry.reason)) ||
+        indexRebuild.unverifiable.length > 0)) ||
+    // Records that still cannot prove themselves are a real gap. Reporting them and
+    // exiting 0 would be the same silence that let one poisoned record answer for
+    // the whole estate for two days.
+    (estateRepair !== undefined && estateRepair.planned.length > estateRepair.applied.length)
   // The exit code answers "is anything actually wrong", and only refusal-severity
   // findings and that unrebuilt gap are. `submoduleTrackingWarnings` fires on ANY
   // unbranched submodule, so every run inside a superproject carried at least one
@@ -10826,6 +10883,13 @@ function buildProgram(
       "rebuild missing pr/integrated index rows for PRs the journal already knows, from every proven " +
         "merge record in the repository (cannot recreate a PR entity the journal has never seen)",
     )
+    .option(
+      "--retract-unprovable",
+      "list EVERY merge record the repository cannot prove, by cause; add --apply to append a retraction " +
+        "beside each one so the estate verifies again (records are never edited — a retraction is a new " +
+        "note on its own ref, and the original stays byte-identical)",
+    )
+    .option("--apply", "with --retract-unprovable, actually append the retractions instead of listing them")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
   program

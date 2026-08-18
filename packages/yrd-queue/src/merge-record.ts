@@ -178,10 +178,18 @@ export const MergeRecordRetractionSchema = z
     schema: z.literal("yrd/merge-record-retraction/v1"),
     /** Blob sha of the retracted note, as `git notes list` reports it. */
     note: GitShaSchema,
-    /** Checksum of the retracted record body — binds this to that exact content. */
-    checksum: z.string().regex(/^[0-9a-f]{64}$/u),
-    /** The merge id the retracted record claimed. */
-    merge: z.string().trim().min(1),
+    /**
+     * Checksum and merge id CORROBORATE; the binding is `note` alone.
+     *
+     * Both are absent when the record was too damaged to parse — and that is
+     * exactly the record most in need of retracting, so requiring them would
+     * make the worst case unrepairable. The blob sha already pins the bytes.
+     */
+    checksum: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
+    merge: z.string().trim().min(1).optional(),
     /** Why it cannot prove itself, in the verifier's own words. */
     reason: z.string().trim().min(1),
     /** Which producer class this record came from, when it is known. */

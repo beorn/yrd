@@ -11852,6 +11852,7 @@ describe("runYrd", () => {
         mergeRecords: {
           find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
           all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
       output.stderr(),
@@ -11911,6 +11912,7 @@ describe("runYrd", () => {
         mergeRecords: {
           find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
           all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
       output.stderr(),
@@ -11966,6 +11968,7 @@ describe("runYrd", () => {
       mergeRecords: {
         find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
         all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
       },
     } as YrdCliServices)
 
@@ -12011,6 +12014,7 @@ describe("runYrd", () => {
       mergeRecords: {
         find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
         all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
       },
     } as YrdCliServices)
 
@@ -14866,6 +14870,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         mergeRecords: {
           find: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
           all: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       }) as YrdCliServices
 
@@ -15065,6 +15070,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           mergeRecords: {
             find: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
             all: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
+            retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
           },
         } as YrdCliServices),
       ).toBe(2)
@@ -15210,6 +15216,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           note: "f".repeat(40),
           status: "repository-corrupt" as const,
           reason: "merge-record is invalid: unexpected token",
+          classification: "unreadable" as const,
         },
       ]
       const services = {
@@ -15217,6 +15224,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         mergeRecords: {
           find: async () => ({ status: "proven" as const, records: [], unverifiable: [], retracted: [] }),
           all: async () => ({ status: "proven" as const, records: [], unverifiable, retracted: [] }),
+          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices
 

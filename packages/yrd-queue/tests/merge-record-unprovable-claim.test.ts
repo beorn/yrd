@@ -18,6 +18,7 @@ import {
   MERGE_RECORD_NOTES_NAME,
   MERGE_RECORD_RETRACTION_NOTES_NAME,
   mergeRecordChecksum,
+  repairMergeRecordEstate,
   unprovableMergeRecordClaim,
 } from "@yrd/queue"
 import type { MergeRecordBody } from "@yrd/queue"
@@ -388,5 +389,122 @@ describe("a retracted record stops poisoning the estate without rewriting histor
     expect(isolated.retracted).toHaveLength(1)
     expect(isolated.unverifiable).toHaveLength(1)
     expect(isolated.unverifiable[0]?.reason).toContain("CHANGE-ID")
+  })
+})
+
+
+describe("the estate-repair verb enumerates every producer class, not just the first", () => {
+  const NOW = "2026-08-18T04:00:00.000Z"
+
+  /** Both poisoned records, from the two producer classes actually on record. */
+  async function poisonedEstate() {
+    const fixture = await linearRepository()
+    const unreachable = record("R2504", fixture.predecessor, {
+      changeId: CHANGE_ID,
+      pr: "PR1061",
+      revision: 1,
+      submittedHead: fixture.generated,
+      generatedCommit: fixture.generated,
+    })
+    const badTrailer = record("R2427", fixture.tip, {
+      changeId: OTHER_CHANGE_ID,
+      pr: "PR1019",
+      revision: 1,
+      submittedHead: fixture.generated,
+      generatedCommit: fixture.generated,
+    })
+    await publish(fixture.repo, unreachable)
+    await publish(fixture.repo, badTrailer)
+    return fixture
+  }
+
+  it("plans a retraction for BOTH classes and writes nothing without apply", async () => {
+    const { repo, tip } = await poisonedEstate()
+    await using process = createProcess()
+
+    const planned = await repairMergeRecordEstate({ inject: { process }, repo, baseSha: tip, now: NOW })
+
+    // First-failure-only would have returned one, and left an estate that still
+    // refuses with no sign that more remained.
+    expect(planned.planned).toHaveLength(2)
+    expect(planned.applied).toEqual([])
+    expect(planned.planned.map((entry) => entry.classification).sort()).toEqual([
+      "change-id-mismatch",
+      "unreachable-generated-commit",
+    ])
+    expect(planned.planned.map((entry) => entry.merge).sort()).toEqual(["R2427", "R2504"])
+
+    // Read-only means read-only: the estate still refuses.
+    await expect(findRepositoryMergeRecords({ inject: { process }, repo, baseSha: tip })).resolves.toMatchObject({
+      status: "repository-corrupt",
+    })
+  })
+
+  it("applies both retractions and the estate answers again", async () => {
+    const { repo, tip } = await poisonedEstate()
+    await using process = createProcess()
+
+    const repaired = await repairMergeRecordEstate({
+      inject: { process },
+      repo,
+      baseSha: tip,
+      now: NOW,
+      apply: true,
+    })
+
+    expect(repaired.applied).toHaveLength(2)
+    // The whole point: a selector query stops refusing. This is what unwedges a
+    // pin advance that has been failing on a record nobody can fix.
+    const after = await findRepositoryMergeRecords({ inject: { process }, repo, baseSha: tip })
+    expect(after).toMatchObject({ status: "proven" })
+    if (after.status !== "proven") throw new Error("expected the estate to verify")
+    expect(after.retracted).toHaveLength(2)
+  })
+
+  it("is idempotent — a second run plans nothing and reports what is already excused", async () => {
+    const { repo, tip } = await poisonedEstate()
+    await using process = createProcess()
+    await repairMergeRecordEstate({ inject: { process }, repo, baseSha: tip, now: NOW, apply: true })
+
+    const again = await repairMergeRecordEstate({ inject: { process }, repo, baseSha: tip, now: NOW, apply: true })
+
+    expect(again.planned).toEqual([])
+    expect(again.applied).toEqual([])
+    expect(again.alreadyRetracted).toBe(2)
+  })
+
+  it("retracts a record too damaged to name itself", async () => {
+    const { repo, tip } = await linearRepository()
+    // No merge id, no checksum — the record cannot be parsed at all. This is the
+    // case that would be unrepairable if a retraction had to name the record's
+    // own fields, and it is the case most likely to need repairing.
+    const anchor = await git(repo, ["hash-object", "-w", "--stdin"], "yrd merge R-damaged\n")
+    const blob = await git(repo, ["hash-object", "-w", "--stdin"], "{ this is not a merge record")
+    await git(repo, ["notes", `--ref=${MERGE_RECORD_NOTES_NAME}`, "add", "-C", blob, anchor])
+    await using process = createProcess()
+
+    const repaired = await repairMergeRecordEstate({
+      inject: { process },
+      repo,
+      baseSha: tip,
+      now: NOW,
+      apply: true,
+    })
+
+    expect(repaired.applied).toHaveLength(1)
+    expect(repaired.planned[0]?.classification).toBe("unreadable")
+    expect(repaired.planned[0]?.merge).toBeUndefined()
+    await expect(findRepositoryMergeRecords({ inject: { process }, repo, baseSha: tip })).resolves.toMatchObject({
+      status: "proven",
+    })
+  })
+
+  it("reports an empty estate as empty rather than as a repair", async () => {
+    const { repo, tip } = await linearRepository()
+    await using process = createProcess()
+
+    const repaired = await repairMergeRecordEstate({ inject: { process }, repo, baseSha: tip, now: NOW, apply: true })
+
+    expect(repaired).toMatchObject({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] })
   })
 })
