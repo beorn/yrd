@@ -53,6 +53,7 @@ async function superprojectWithHandBumpedPin(): Promise<{
   headSha: string
   pin: string
   publish: () => Promise<void>
+  publishToSideBranchOnly: () => Promise<void>
 }> {
   const fixture = await mkdtemp(join(tmpdir(), "yrd-authored-gitlink-"))
   roots.push(fixture)

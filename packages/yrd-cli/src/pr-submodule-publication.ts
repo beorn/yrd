@@ -23,16 +23,6 @@ function componentRepository(repo: string, path: string): string {
   return repository
 }
 
-export async function unpublishedChangedSubmodulePins(options: {
-  process: Pick<Process, "run">
-  repo: string
-  baseSha: string
-  headSha: string
-}): Promise<readonly UnpublishedSubmodulePin[]> {
-  const changed = await changedSubmodulePins(options)
-  return unpublishedSubmodulePins({ process: options.process, pins: changed })
-}
-
 export async function unpublishedSubmodulePins(options: {
   process: Pick<Process, "run">
   pins: readonly UnpublishedSubmodulePin[]
