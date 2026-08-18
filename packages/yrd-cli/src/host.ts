@@ -198,12 +198,41 @@ export function createPostureQueueTargetResolver(
 type RuntimeStep = StepDef<PRShape, PRShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
-/** Durable production predecessors: the pre-restore two-check checkpoint and
- * the three-check checkpoint rewritten by the recovery before this protocol shipped. */
+/** Durable production predecessors: the pre-restore two-check checkpoint, the
+ * three-check checkpoint rewritten by the recovery before this protocol
+ * shipped, and the pre-quarantine intent contract (intents-v1, no
+ * `unreadable` report) that live deployments hold until intents-v2 code
+ * first migrates them. */
 const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
   "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
+  "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
 ])
+
+/** Fill state fields a stored checkpoint predates with their initial values.
+ *
+ * Retained predecessors migrate straight to the CURRENT identity, so every
+ * field the state contract gained since the predecessor's writer ran is
+ * simply absent from its checkpoint — and replay resumes AFTER the stored
+ * cursor, so nothing ever rewrites the missing container. Recurses through
+ * plain objects only: a populated container keeps its stored entries (an
+ * empty initial Record contributes no keys), arrays and scalars keep the
+ * stored value, and only a key with no stored value at all takes the
+ * initial one.
+ */
+export function fillMissingStateFromInitial<T>(initial: unknown, stored: T): T {
+  if (stored === undefined) return initial as T
+  if (!isPlainStateObject(initial) || !isPlainStateObject(stored)) return stored
+  const filled: Record<string, unknown> = { ...stored }
+  for (const [key, value] of Object.entries(initial)) {
+    filled[key] = fillMissingStateFromInitial(value, filled[key])
+  }
+  return filled as T
+}
+
+function isPlainStateObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
 const CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS = 60_000
 
 export const CURRENT_JOURNAL_COMPATIBILITY = Object.freeze({
@@ -1637,7 +1666,12 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES.map((from) => ({
       from,
       migrate: (state) => {
-        const compacted = definition.compact(state)
+        // Every retained edge lands on the CURRENT identity, so a stored
+        // checkpoint predates every state field added since its writer ran.
+        // Fill those from initial values BEFORE compacting — compaction and
+        // validation both assume the current contract (2026-08-18: intents-v2
+        // added `unreadable`, absent from every intents-v1 checkpoint).
+        const compacted = definition.compact(fillMissingStateFromInitial(definition.initialState, state))
         return {
           ...compacted,
           queues: {

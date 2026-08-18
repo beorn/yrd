@@ -2320,11 +2320,23 @@ checks: [{check: {run: "true"}}]
 
     expect(exitCode, stderr).toBe(0)
     expect(stdout).toMatch(/^YRD-CHECKPOINT-MIGRATION /u)
-    expect(JSON.parse(stdout.slice("YRD-CHECKPOINT-MIGRATION ".length))).toMatchObject({
+    const attestation = JSON.parse(stdout.slice("YRD-CHECKPOINT-MIGRATION ".length)) as {
+      manifest: { targetIdentity: string; edges: readonly { from: string; to: string }[] }
+    }
+    expect(attestation).toMatchObject({
       version: 1,
       manifest: { version: 1, targetIdentity: expect.stringMatching(/^[0-9a-f]{64}$/u) },
       hash: expect.stringMatching(/^[0-9a-f]{64}$/u),
     })
+    // Every durable production predecessor keeps a declared path to the
+    // CURRENT identity — a dropped edge is the queue's R2732
+    // checkpoint-migration-path-missing refusal (2026-08-18: the intents-v2
+    // identity change shipped without one).
+    expect(attestation.manifest.edges).toEqual([
+      { from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25", to: attestation.manifest.targetIdentity },
+      { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: attestation.manifest.targetIdentity },
+      { from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8", to: attestation.manifest.targetIdentity },
+    ])
     expect(existsSync(join(repo, ".git", "yrd"))).toBe(false)
   })
 
@@ -5416,6 +5428,39 @@ describe("pre-submit checkout isolation and timeout policy (22648)", () => {
     const { resolveCheckoutTimeoutMs } = await import("../src/git-timeouts.ts")
     expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "soon" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
     expect(() => resolveCheckoutTimeoutMs({ YRD_CHECKOUT_TIMEOUT_MS: "-5" })).toThrow(/YRD_CHECKOUT_TIMEOUT_MS/u)
+  })
+})
+
+describe("fillMissingStateFromInitial", () => {
+  it("fills fields the stored checkpoint predates and keeps every stored value", async () => {
+    const { fillMissingStateFromInitial } = await import("../src/host.ts")
+    const initial = {
+      queues: { batchSize: 3, active: [] as string[] },
+      intents: { records: {}, order: [] as string[], unreadable: [] as { id: string }[] },
+    }
+    const stored = {
+      queues: { batchSize: 5, active: ["run-1"] },
+      intents: { records: { "yrdpin#1": { component: "vendor/yrd" } }, order: ["yrdpin#1"] },
+    }
+    expect(fillMissingStateFromInitial(initial, stored)).toEqual({
+      queues: { batchSize: 5, active: ["run-1"] },
+      intents: { records: { "yrdpin#1": { component: "vendor/yrd" } }, order: ["yrdpin#1"], unreadable: [] },
+    })
+  })
+
+  it("keeps populated containers and scalars verbatim when nothing is missing", async () => {
+    const { fillMissingStateFromInitial } = await import("../src/host.ts")
+    const initial = { a: { b: [] as number[], c: 0 }, d: {} }
+    const stored = { a: { b: [1, 2], c: 7 }, d: { kept: true } }
+    expect(fillMissingStateFromInitial(initial, stored)).toEqual(stored)
+  })
+
+  it("takes the initial value only for keys with no stored value at all", async () => {
+    const { fillMissingStateFromInitial } = await import("../src/host.ts")
+    expect(fillMissingStateFromInitial({ a: 1, b: { c: [] as string[] } }, {} as { a?: number })).toEqual({
+      a: 1,
+      b: { c: [] },
+    })
   })
 })
 
