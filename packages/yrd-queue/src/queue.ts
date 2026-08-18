@@ -7889,11 +7889,6 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "payload-identity",
     "payload-mismatch",
     "payload-overlap",
-    // The composition-time fill-in found the composed submodule value and that
-    // submodule's main on divergent histories. Same remedy as the merge-time
-    // code it moves forward: compose the divergent submodule histories and
-    // push a new revision — no retry cures it.
-    "component-main-non-ancestral",
   ]),
   "infra-retry": new Set<string>([
     "carrier-inspection",

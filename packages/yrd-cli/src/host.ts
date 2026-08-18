@@ -964,6 +964,14 @@ function candidateStep(
         command,
         checkoutParent,
         artifactRoot: join(stateDir, "artifacts"),
+        // Candidates this step reconstructs itself (no runner context) still
+        // regenerate the lock inside the shaset commit — the runner-context
+        // path gets the same provisioner through prepareCandidate.
+        provisionPinIntent: createPinIntentProvisioner({
+          process,
+          repo,
+          artifactRoot: join(stateDir, "artifacts"),
+        }),
         purpose: name,
         runner: config.runner,
         mode: stepGateMode(config),
@@ -1142,6 +1150,11 @@ function configuredQueueSteps(
             ? gitMergeStep({
                 inject: { process: options.process },
                 repo: options.repo,
+                provisionPinIntent: createPinIntentProvisioner({
+                  process: options.process,
+                  repo: options.repo,
+                  artifactRoot: join(options.stateDir, "artifacts"),
+                }),
                 ...(options.checkpointMigrationCertification === undefined
                   ? {}
                   : { checkpointIdentity: options.checkpointMigrationCertification.currentIdentity }),
@@ -1151,6 +1164,11 @@ function configuredQueueSteps(
                 repo: options.repo,
                 command: mergeCommand,
                 artifactRoot: join(options.stateDir, "artifacts"),
+                provisionPinIntent: createPinIntentProvisioner({
+                  process: options.process,
+                  repo: options.repo,
+                  artifactRoot: join(options.stateDir, "artifacts"),
+                }),
                 timeoutMs: stepTimeoutMs(config),
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
                 ...(config.env === undefined ? {} : { environmentOverrides: config.env }),

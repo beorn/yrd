@@ -3467,29 +3467,35 @@ async function prepareCandidateMembers(
         pr,
         composed.output.rewrites,
         baseMoved,
-        composed.output.regenerated.length > 0 || composed.output.filledPins.length > 0,
+        composed.output.regenerated.length > 0,
       )
       if (certificate !== undefined) return certificate
       sourceRewrites.push(...composed.output.rewrites)
-      submoduleResolutions.push(...composed.output.filledPins)
       recordChange(pr, await git.commit(path, "HEAD"))
       continue
     }
+    let authoredFill:
+      | Readonly<{
+          updates: readonly GitlinkUpdate[]
+          filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
+        }>
+      | undefined
     if (pr.recut !== undefined && pr.recut.certificate !== "frozen-code-carrier-v1") {
       const certified = await verifyRecutCertificate(git, path, pr)
       if (certified !== undefined) return certified
     } else {
       const inspected = await authoredGitlinkPaths(git, path, pr.id, pr.headSha)
       if (inspected.status === "failed") return inspected
-      const gitlinks = inspected.output
-      if (gitlinks.length > 0) {
-        const workflow = await intentSubmissionWorkflow(git, path, "HEAD", pr.headSha, gitlinks, pr.issue)
-        return candidateFailure(
-          "authored-gitlink",
-          `PR '${pr.id}' changes generated-only gitlinks [${gitlinks.join(", ")}]; ${workflow}`,
-          ".",
-          gitlinks,
-        )
+      if (inspected.output.length > 0) {
+        // Step (b): an authored gitlink is a min commit, a floor. When every
+        // one is on its submodule's main, the carrier composes, and after the
+        // content merge below the queue writes the shaset commit that fills
+        // each value in from that submodule's main. Added or deleted gitlinks
+        // and min commits not on main keep the authored-gitlink refusal,
+        // raised inside the fill helper.
+        const filled = await fillAuthoredGitlinksFromMain(git, repo, path, pr, inspected.output)
+        if (filled.status === "failed") return filled
+        authoredFill = filled.output
       }
     }
     const before = await git.commit(path, "HEAD")
@@ -3542,7 +3548,25 @@ async function prepareCandidateMembers(
     // both parents said.
     const unwitnessed = await droppedContributionFailure(git, path, pr.id, pr.headSha, before, landed)
     if (unwitnessed !== undefined) return unwitnessed
-    recordChange(pr, landed)
+    let generated = landed
+    if (authoredFill !== undefined && authoredFill.updates.length > 0) {
+      // The shaset commit: the queue's own write on top of the content merge,
+      // filling each authored gitlink in from its submodule's main (plus the
+      // regenerated bun.lock when manifests moved). The witnesses above judged
+      // the merge; the wrapper's samePaths proof judges this write.
+      const synthesized = await synthesizeGitlinkWrapper(
+        git,
+        path,
+        landed,
+        authoredFill.updates,
+        candidateChangeCommitMessage("compose", pr),
+        provisionPinIntent,
+      )
+      if (synthesized.status === "failed") return synthesized
+      generated = synthesized.output.commit
+      submoduleResolutions.push(...authoredFill.filledPins)
+    }
+    recordChange(pr, generated)
   }
   return {
     status: "passed",
@@ -4681,33 +4705,38 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
 }
 
 /** What composing one PR wrote into the candidate: the certified source
- * rewrites, the submodule values the queue filled in from each submodule's
- * main where main had moved past the composed floor, and the paths the shaset
- * provisioner regenerated (today exactly `bun.lock`, or nothing) — all in the
- * same shaset commit. */
+ * rewrites, plus the paths the shaset provisioner regenerated (today exactly
+ * `bun.lock`, or nothing) in the same shaset commit. Queue-composed submodule
+ * commits ride VERBATIM: they live on queue-authored refs and are by
+ * construction never on the submodule's main, so nothing here rewrites them —
+ * the fill-in from main belongs to the AUTHORED leg alone
+ * (fillAuthoredGitlinksFromMain). */
 type ComposedPR = Readonly<{
   rewrites: readonly SourceRewrite[]
-  filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
   regenerated: readonly string[]
 }>
 
 /**
- * Fill in each changed submodule's value from that submodule's main — the
- * shaset model's composition-time write, moved forward from the merge-time
- * promotion loop that used to make this comparison after checks had already
- * run. The composed value is a floor: when the submodule's main already
- * contains it and has moved further, the queue writes main's newest commit
- * instead, so authored values never land as-is. When the composed value is
- * ahead of main it stays, and the merge-time promotion advances main to it.
- * Genuinely diverged histories keep the merge path's existing refusal code,
- * raised at composition time where a re-push can still cure it — and every
- * failure is a typed candidateFailure, never a throw.
+ * Fill in an authored gitlink delta from that submodule's main — the shaset
+ * model's composition-time write, moved forward from the merge-time promotion
+ * loop that used to make this comparison after checks had already run. An
+ * authored gitlink is a min commit, a floor: the request queues only when
+ * that submodule's main CONTAINS it (checked before queueing by the
+ * yrd-cli gate; re-derived here), and the queue writes main's newest commit
+ * into the shaset, so authored values never land as-is.
+ *
+ * Only UPDATE deltas fill: the shaset-commit writer is update-only (comma-form
+ * `--cacheinfo` cannot add a path), and added or deleted gitlinks keep the
+ * authored-gitlink refusal, as does a min commit that is not on its
+ * submodule's main — that refusal is the composition-side backstop until step
+ * (d) deletes it. Every failure is a typed candidateFailure, never a throw.
  */
-async function fillSubmodulePinsFromMain(
+async function fillAuthoredGitlinksFromMain(
   git: Git,
   repo: string,
-  prId: string,
-  updates: readonly GitlinkUpdate[],
+  path: string,
+  pr: StepExecution["prs"][number],
+  gitlinks: readonly string[],
 ): Promise<
   | Readonly<{
       status: "passed"
@@ -4718,10 +4747,18 @@ async function fillSubmodulePinsFromMain(
     }>
   | CandidateFailure
 > {
-  const filledUpdates: GitlinkUpdate[] = []
+  const updates: GitlinkUpdate[] = []
   const filledPins: Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[] = []
-  for (const update of updates) {
-    const submoduleRepo = join(repo, update.path)
+  const refused: string[] = []
+  for (const gitlink of gitlinks) {
+    const authored = await readGitlink(git, path, pr.headSha, gitlink)
+    const current = await readGitlink(git, path, "HEAD", gitlink)
+    if (authored === undefined || current === undefined) {
+      // An added or deleted gitlink: outside the update-only shaset write.
+      refused.push(gitlink)
+      continue
+    }
+    const submoduleRepo = join(repo, gitlink)
     const main = await resolveComponentMain(
       (repository, args) => git.run(repository, args, true),
       submoduleRepo,
@@ -4730,33 +4767,34 @@ async function fillSubmodulePinsFromMain(
     if (main.status === "unavailable") {
       return candidateFailure(
         "component-main-inspection-failed",
-        `PR '${prId}' could not read submodule '${update.path}' main to fill in the shaset: ${main.message}`,
-        update.path,
-        [update.path],
+        `PR '${pr.id}' could not read submodule '${gitlink}' main to fill in the shaset: ${main.message}`,
+        gitlink,
+        [gitlink],
       )
     }
-    if (main.sha === update.sha || (await isAncestor(git, submoduleRepo, main.sha, update.sha))) {
-      // The composed value contains the submodule's main (or is it): it is the
-      // newest value, and the merge-time promotion advances main to it.
-      filledUpdates.push(update)
+    if (main.sha !== authored && !(await isAncestor(git, submoduleRepo, authored, main.sha))) {
+      // The min commit is not on its submodule's main (the probe fetch
+      // succeeded, so absence from the fetched history is a fact about main,
+      // not about the network): submodule-main-first parks this before
+      // queueing, and here the existing refusal below stays the backstop.
+      refused.push(gitlink)
       continue
     }
-    if (await isAncestor(git, submoduleRepo, update.sha, main.sha)) {
-      // Main moved past the composed floor: write main's newest commit, so the
-      // shaset lands with the newest commit on that submodule's main.
-      filledUpdates.push({ path: update.path, sha: main.sha })
-      filledPins.push({ kind: "pin", path: update.path, sha: main.sha })
-      continue
-    }
+    if (main.sha === authored) continue
+    // Main moved past the floor: write main's newest commit into the shaset.
+    updates.push({ path: gitlink, sha: main.sha })
+    filledPins.push({ kind: "pin", path: gitlink, sha: main.sha })
+  }
+  if (refused.length > 0) {
+    const workflow = await intentSubmissionWorkflow(git, path, "HEAD", pr.headSha, refused, pr.issue)
     return candidateFailure(
-      "component-main-non-ancestral",
-      `PR '${prId}' submodule '${update.path}' composed value '${update.sha}' and its main '${main.sha}' ` +
-        "diverge; compose the divergent submodule histories before retrying",
-      update.path,
-      [update.path],
+      "authored-gitlink",
+      `PR '${pr.id}' changes generated-only gitlinks [${refused.join(", ")}]; ${workflow}`,
+      ".",
+      refused,
     )
   }
-  return { status: "passed", output: { updates: filledUpdates, filledPins } }
+  return { status: "passed", output: { updates, filledPins } }
 }
 
 async function composePR(
@@ -4793,39 +4831,27 @@ async function composePR(
     updates.push({ path: source.repo, sha: prepared.output.newTipSha })
   }
 
-  const filled = await fillSubmodulePinsFromMain(git, repo, pr.id, updates)
-  if (filled.status === "failed") return filled
-
   const parent = await git.commit(path, "HEAD")
   const synthesized = await synthesizeGitlinkWrapper(
     git,
     path,
     parent,
-    filled.output.updates,
+    updates,
     candidateChangeCommitMessage("compose", pr),
     provisionPinIntent,
   )
   if (synthesized.status === "failed") return synthesized
-  const expectedPins = new Map(filled.output.updates.map((update) => [update.path, update.sha]))
   for (const rewrite of rewrites) {
-    const expected = expectedPins.get(rewrite.repo) ?? rewrite.newTipSha
-    if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== expected) {
+    if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {
       return candidateFailure(
         "wrapper-mismatch",
-        `PR '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${expected}'`,
+        `PR '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${rewrite.newTipSha}'`,
         rewrite.repo,
         [rewrite.repo],
       )
     }
   }
-  return {
-    status: "passed",
-    output: {
-      rewrites,
-      filledPins: filled.output.filledPins,
-      regenerated: synthesized.output.generatedPaths,
-    },
-  }
+  return { status: "passed", output: { rewrites, regenerated: synthesized.output.generatedPaths } }
 }
 
 async function prepareSource(
@@ -6807,6 +6833,12 @@ export type GitCheckOptions = ProcessDependency &
     timeoutMs?: number
     noProgressTimeoutMs?: number
     refuse?: RefusePathsPolicy
+    /** The shaset provisioner for candidates this step RECONSTRUCTS itself
+     * (no runner context). Without it a reconstructed candidate would compose
+     * moved gitlinks with an unregenerated lock and hand that tree to checks —
+     * the runner-context path gets the provisioner through prepareCandidate
+     * instead. */
+    provisionPinIntent?: PinIntentProvisioner
     /** Generate data-only checkpoint migration evidence from the exact target
      * Candidate checkout inside this certified check invocation. */
     checkpointMigration?: (input: {
@@ -6954,6 +6986,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     artifactRoot?: string
     candidatePool?: CandidatePool
     refuse?: RefusePathsPolicy
+    provisionPinIntent?: PinIntentProvisioner
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -6976,6 +7009,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       context.attempt,
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
       options.refuse,
+      options.provisionPinIntent,
     )
     if (candidate.status === "failed") return onFailure(candidate)
     await proveCandidateSubmoduleReachability(
@@ -7020,6 +7054,8 @@ async function withStepCandidate<Output extends JsonValue>(
     checkoutParent?: string
     artifactRoot?: string
     candidatePool?: CandidatePool
+    refuse?: RefusePathsPolicy
+    provisionPinIntent?: PinIntentProvisioner
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -7090,6 +7126,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
           artifactRoot: options.artifactRoot,
           ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+          ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
         },
         (failure) => failed(failure.error.code, failure.error.message, failure.output),
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
@@ -7474,6 +7511,9 @@ export type GitMergeOptions = ProcessDependency &
     env?: NodeJS.ProcessEnv
     refuse?: RefusePathsPolicy
     checkpointIdentity?: string | (() => string)
+    /** The shaset provisioner for candidates the merge step reconstructs
+     * itself (no prior check evidence, no runner context). */
+    provisionPinIntent?: PinIntentProvisioner
   }>
 
 export type ConfiguredMergeOptions = ProcessDependency &
@@ -7488,6 +7528,9 @@ export type ConfiguredMergeOptions = ProcessDependency &
     timeoutMs?: number
     refuse?: RefusePathsPolicy
     checkpointIdentity?: string | (() => string)
+    /** The shaset provisioner for candidates the merge step reconstructs
+     * itself (no prior check evidence, no runner context). */
+    provisionPinIntent?: PinIntentProvisioner
   }>
 
 function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
@@ -7686,6 +7729,7 @@ async function mergeCandidate(
     artifactRoot?: string
     refuse?: RefusePathsPolicy
     checkpointIdentity?: string | (() => string)
+    provisionPinIntent?: PinIntentProvisioner
   }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
@@ -7699,6 +7743,7 @@ async function mergeCandidate(
           {
             artifactRoot: options.artifactRoot,
             ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+            ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
           },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
           (_path, candidate) =>
@@ -8072,6 +8117,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const candidate = await mergeCandidate(git, repo, input, context, {
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
         ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
+        ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
       })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const { base, checked } = candidate
@@ -8339,6 +8385,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         artifactRoot: options.artifactRoot,
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
         ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
+        ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
       })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const alreadyLanded = await alreadyLandedEvidence(git, repo, candidate.base.sha, candidate.checked)

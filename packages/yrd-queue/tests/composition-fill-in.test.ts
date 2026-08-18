@@ -1,17 +1,19 @@
 /**
- * @failure The queue lands a composed submodule value verbatim while that submodule's main
- *          has already moved past it, so the merged root pins a commit that is not the
- *          newest commit on the submodule's main — or the fill-in write silently rewrites
- *          values it has no authority over.
+ * @failure The queue lands an authored gitlink verbatim while that submodule's main has
+ *          already moved past it, so the merged root pins a commit that is not the newest
+ *          commit on the submodule's main — or the fill-in write rewrites values it has no
+ *          authority over (queue-composed submodule commits, intent targets).
  * @level l2
  * @consumer @yrd/queue candidate preparer — step (b)'s composition-time shaset write
  *
- * The shaset model: a composed submodule value is a floor. At candidate composition the
- * queue resolves that submodule's main; when main already contains the composed value and
- * has moved further, the queue fills in main's newest commit, records it as a submodule
- * resolution, and checks judge THAT tree. When the composed value is ahead of main it
- * rides unchanged (the merge-time promotion advances main to it), and genuinely diverged
- * histories refuse at composition time under the merge path's existing code.
+ * The shaset model: an authored gitlink is a min commit, a floor. At candidate composition
+ * the queue resolves that submodule's main; when main contains the floor, the carrier
+ * composes — the content merges as authored, and a queue-written shaset commit on top
+ * fills each submodule value in from its main, recorded as a submodule resolution, so
+ * checks judge THAT tree and authored values never land as-is. A min commit not on its
+ * submodule's main keeps the authored-gitlink refusal (the composition-side backstop until
+ * step (d) deletes it). Queue-composed submodule commits are by construction never on
+ * main and ride verbatim — the fill-in never touches the composed leg.
  */
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -85,85 +87,113 @@ async function moduleCommit(module: string, branch: string, from: string, value:
   return git(module, ["rev-parse", "HEAD"])
 }
 
-/** A source-only composed PR: the root head IS the base, and the whole payload
- * rides as one composition source over `dep`. */
-function composedPreparation(
-  rootBase: string,
-  source: Readonly<{ branch: string; baseSha: string; tipSha: string; payload: readonly string[] }>,
-): CandidatePreparationInput {
+/** Author a carrier commit that bumps `dep` to `minCommit` (the floor) plus a content file. */
+async function authoredCarrier(repo: string, rootBase: string, minCommit: string): Promise<string> {
+  await git(repo, ["switch", "-qc", "issue/feature", rootBase])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${minCommit},dep`])
+  await writeFile(join(repo, "feature.txt"), "feature\n")
+  await git(repo, ["add", "feature.txt"])
+  await git(repo, ["commit", "-qm", "carrier: bump dep + feature"])
+  const head = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["-c", "submodule.recurse=false", "switch", "-q", "main"])
+  return head
+}
+
+function preparation(rootBase: string, headSha: string): CandidatePreparationInput {
   return {
     id: "C1",
     queueId: "refs/heads/main",
     baseSha: rootBase,
-    revs: [{ pr: "PR1", n: 1, head: rootBase }],
+    revs: [{ pr: "PR1", n: 1, head: headSha }],
     prs: [
       {
         id: "PR1",
+        changeId: `I${"a".repeat(40)}`,
         branch: "issue/feature",
         base: "main",
         revision: 1,
-        headSha: rootBase,
+        headSha,
         baseSha: rootBase,
-        composition: { version: 1, sources: [{ repo: "dep", ...source }] },
       },
     ],
   }
 }
 
-describe("composition-time fill-in — the queue writes the shaset from each submodule's main", () => {
-  it("fills in main's newest commit when main moved past the composed floor, and records the resolution", async () => {
+describe("authored-gitlink fill-in — the queue writes the shaset from each submodule's main", () => {
+  it("fills in main's newest commit past the authored floor, as one gitlinks-only shaset commit", async () => {
     const { repo, module, moduleA, rootBase } = await baseRepo()
-    // The composed work landed on the submodule's main, and main moved further.
+    // The floor landed on the submodule's main, and main moved further.
     const moduleB = await moduleCommit(module, "main", moduleA, "b")
     const moduleM = await moduleCommit(module, "main", moduleB, "m")
+    const headSha = await authoredCarrier(repo, rootBase, moduleB)
 
     await using process = createProcess({ cwd: repo })
-    const prepared = await gitCandidatePreparer({ inject: { process }, repo })(
-      composedPreparation(rootBase, { branch: "main", baseSha: moduleA, tipSha: moduleB, payload: ["version.txt"] }),
-    )
+    const prepared = await gitCandidatePreparer({ inject: { process }, repo })(preparation(rootBase, headSha))
 
     expect(prepared.mergeability).toBe("mergeable")
     if (prepared.mergeability !== "mergeable" || prepared.sha === undefined) throw new Error("unreachable")
-    // The candidate pins the newest commit on the submodule's main, not the floor.
+    // The candidate pins the newest commit on the submodule's main, not the floor...
     expect(await gitlinkAt(repo, prepared.sha)).toBe(moduleM)
+    // ...while the authored content rides through the ordinary merge.
+    expect(await git(repo, ["show", `${prepared.sha}:feature.txt`])).toBe("feature")
     // The filled value is recorded as a submodule resolution — the final word the
     // merge-time validator and the merge record both read for this path.
     expect(prepared.submoduleResolutions).toEqual([{ kind: "pin", path: "dep", sha: moduleM }])
-    // The certified source rewrite still names the floor: the payload certificate
-    // is about the reviewed change, the resolution is about the landed value.
-    expect(prepared.sourceRewrites?.[0]).toMatchObject({ repo: "dep", newTipSha: moduleB })
+    // The shaset-commit species invariant: the queue's own write sits on top of
+    // the content merge and its diff is exactly the gitlink it filled in.
+    expect(await git(repo, ["diff", "--name-only", `${prepared.sha}^`, prepared.sha])).toBe("dep")
+    // The recorded change points at the shaset commit, so checks judge that tree.
+    expect(prepared.changes?.[0]?.generatedCommit).toBe(prepared.sha)
   })
 
-  it("keeps a composed value that is ahead of the submodule's main — promotion advances main at merge", async () => {
+  it("composes without a shaset commit when the floor already IS main's newest commit", async () => {
     const { repo, module, moduleA, rootBase } = await baseRepo()
-    const moduleB = await moduleCommit(module, "feature", moduleA, "b")
-    await git(join(repo, "dep"), ["fetch", "-q", "origin", "feature"])
+    const moduleB = await moduleCommit(module, "main", moduleA, "b")
+    const headSha = await authoredCarrier(repo, rootBase, moduleB)
 
     await using process = createProcess({ cwd: repo })
-    const prepared = await gitCandidatePreparer({ inject: { process }, repo })(
-      composedPreparation(rootBase, { branch: "feature", baseSha: moduleA, tipSha: moduleB, payload: ["version.txt"] }),
-    )
+    const prepared = await gitCandidatePreparer({ inject: { process }, repo })(preparation(rootBase, headSha))
 
     expect(prepared.mergeability).toBe("mergeable")
     if (prepared.mergeability !== "mergeable" || prepared.sha === undefined) throw new Error("unreachable")
     expect(await gitlinkAt(repo, prepared.sha)).toBe(moduleB)
-    // Nothing was filled in: no resolution row, so the source certificate alone
-    // holds this path to its value.
+    // Nothing was filled in past the floor: no resolution row, no extra commit.
     expect(prepared.submoduleResolutions).toBeUndefined()
+  })
+
+  it("keeps the authored-gitlink refusal for a min commit that is not on its submodule's main", async () => {
+    const { repo, module, moduleA, rootBase } = await baseRepo()
+    // The floor lives only on a side branch: submodule-main-first is not met.
+    const moduleB = await moduleCommit(module, "feature", moduleA, "b")
+    const headSha = await authoredCarrier(repo, rootBase, moduleB)
+
+    await using process = createProcess({ cwd: repo })
+    const error = await Promise.resolve(
+      gitCandidatePreparer({ inject: { process }, repo })(preparation(rootBase, headSha)),
+    ).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    )
+
+    const fact = failureFact(error)
+    if (fact === undefined) throw new Error(`expected a typed refusal, got ${String(error)}`)
+    // The composition-side backstop until step (d): same code, same shape.
+    expect(fact.code).toBe("authored-gitlink")
+    expect(fact.message).toContain("dep")
   })
 
   it("hands checks the filled tree: the sha a step judges is the shaset commit, never the author head", async () => {
     const { repo, module, moduleA, rootBase } = await baseRepo()
     const moduleB = await moduleCommit(module, "main", moduleA, "b")
     const moduleM = await moduleCommit(module, "main", moduleB, "m")
+    const headSha = await authoredCarrier(repo, rootBase, moduleB)
 
     await using process = createProcess({ cwd: repo })
     const input: StepExecution = {
       run: "R1",
       step: "check",
       index: 0,
-      prs: composedPreparation(rootBase, { branch: "main", baseSha: moduleA, tipSha: moduleB, payload: ["version.txt"] })
-        .prs,
+      prs: preparation(rootBase, headSha).prs,
       shape: { results: {} },
     }
     const outcome = await gitCheckStep({
@@ -184,40 +214,9 @@ describe("composition-time fill-in — the queue writes the shaset from each sub
     if (outcome.status !== "completed" || outcome.conclusion !== "success") throw new Error("unreachable")
     const evidence = GitCheckEvidenceSchema.parse(outcome.output)
     // The judged tree carries the filled submodule value — checks ran against the
-    // shaset the queue wrote, not the floor the author composed...
+    // shaset the queue wrote, not the floor the author committed...
     expect(await gitlinkAt(repo, evidence.candidateSha)).toBe(moduleM)
-    // ...and never against the author head (source-only: the head IS the base).
-    expect(evidence.candidateSha).not.toBe(rootBase)
-  })
-
-  it("refuses at composition when the composed value and the submodule's main diverge", async () => {
-    const { repo, module, moduleA, rootBase } = await baseRepo()
-    const moduleB = await moduleCommit(module, "feature", moduleA, "b")
-    // Main took a different history after the source branched.
-    const moduleC = await moduleCommit(module, "main", moduleA, "c")
-    await git(join(repo, "dep"), ["fetch", "-q", "origin", "feature"])
-
-    await using process = createProcess({ cwd: repo })
-    const error = await Promise.resolve(
-      gitCandidatePreparer({ inject: { process }, repo })(
-        composedPreparation(rootBase, {
-          branch: "feature",
-          baseSha: moduleA,
-          tipSha: moduleB,
-          payload: ["version.txt"],
-        }),
-      ),
-    ).then(
-      () => undefined,
-      (thrown: unknown) => thrown,
-    )
-
-    const fact = failureFact(error)
-    if (fact === undefined) throw new Error(`expected a typed refusal, got ${String(error)}`)
-    expect(fact.code).toBe("component-main-non-ancestral")
-    // The receipt names both sides: the author's next act is recomposing the
-    // submodule history, and they cannot check it without the two shas.
-    expect(fact.message).toContain(moduleB)
-    expect(fact.message).toContain(moduleC)
+    // ...and never against the author head.
+    expect(evidence.candidateSha).not.toBe(headSha)
   })
 })

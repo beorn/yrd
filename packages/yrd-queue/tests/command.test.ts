@@ -152,6 +152,11 @@ async function hookedSubmoduleRepository(options: {
   candidateVersion: string
   requiredVersion: string
   splitCarrier?: boolean
+  /** Put the candidate module commit on a side branch instead of the module's
+   * main. Since the (b) fill-in, an authored gitlink whose floor is ON its
+   * submodule's main COMPOSES (the queue writes the shaset from main), so
+   * refusal-path tests need a floor that is genuinely not on main. */
+  candidateOffMain?: boolean
 }): Promise<{ repo: string; remote: string; baseSha: string; featureSha: string; moduleSha: string }> {
   const { repo } = await repository()
   const module = join(repo, "..", "module")
@@ -166,9 +171,11 @@ async function hookedSubmoduleRepository(options: {
   await git(repo, ["commit", "-qam", "add dependency"])
   const baseSha = await git(repo, ["rev-parse", "HEAD"])
 
+  if (options.candidateOffMain === true) await git(module, ["switch", "-qc", "side"])
   await writeFile(join(module, "version.txt"), `${options.candidateVersion}\n`)
   await git(module, ["commit", "-qam", "candidate"])
   const moduleSha = await git(module, ["rev-parse", "HEAD"])
+  if (options.candidateOffMain === true) await git(module, ["switch", "-q", "main"])
   await git(repo, ["switch", "-qc", "issue/feature"])
   await git(join(repo, "dep"), ["fetch", "-q", "origin"])
   await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
@@ -3087,10 +3094,16 @@ describe("Queue command adapters", () => {
   })
 
   it("rejects an uncertified authored gitlink wrapper with intent-submission guidance", async () => {
+    // Characterization narrowed by the (b) fill-in, in the same change as the
+    // mechanism: a floor ON its submodule's main now composes (covered in
+    // tests/composition-fill-in.test.ts), so the refusal this test pins — and
+    // its needs-author routing — survives exactly for a floor that is NOT on
+    // main, which candidateOffMain arranges.
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
       requiredVersion: "candidate",
+      candidateOffMain: true,
     })
     await git(repo, ["config", "diff.ignoreSubmodules", "all"])
     await using process = createProcess()
@@ -3943,10 +3956,17 @@ describe("Queue command adapters", () => {
   })
 
   it("admits only certified linear pin carriers and regenerates one byte-stable Queue wrapper (22666)", async () => {
+    // Characterization narrowed by the (b) fill-in, in the same change as the
+    // mechanism: an uncertified authored floor ON its submodule's main now
+    // composes (covered in tests/composition-fill-in.test.ts), so the
+    // uncertified-refusal half of this test needs a floor that is NOT on main,
+    // which candidateOffMain arranges; the certified-carrier half never asked
+    // main and is unchanged.
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
       requiredVersion: "candidate",
+      candidateOffMain: true,
     })
     await using process = createProcess()
     const input = (id: string, pr: ReturnType<typeof PRSnapshotSchema.parse>) => ({
