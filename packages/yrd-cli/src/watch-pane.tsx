@@ -2,7 +2,6 @@ import { pathToFileURL } from "node:url"
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Box,
-  Divider,
   Link,
   ListView,
   ModalDialog,
@@ -25,7 +24,7 @@ import {
 import { formatPRRevisionSelector, prRevisionNumber, type BaysState, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
-  QueueDetailRunHeader,
+  QueueDetailPrList,
   QueueDetailRunPrBlocks,
   QueueDetailTitle,
   QueueShowView,
@@ -364,10 +363,12 @@ const COMMAND_OUTPUT_TAIL_LINES = 10
  * Tab 0 is a synthetic PR/submission overview (user directive 2026-07-21,
  * restoring it): PR facts + changed files + diff. The sentinel id has a
  * leading space so it cannot collide with a real step name (step names are
- * bare identifiers like `check`/`merge`, never space-prefixed).
+ * bare identifiers like `check`/`merge`, never space-prefixed). Labeled
+ * "Changes" (operator spec item 3, renamed from "PR"); the id below is
+ * unaffected — nothing outside this file's tab plumbing reads the label text.
  */
 const PR_TAB_ID = "\u0000pr"
-const PR_TAB_LABEL = "PR"
+const PR_TAB_LABEL = "Changes"
 
 function queueDefaultStepTab(data: QueueShowData, outputs: readonly QueueArtifactOutput[]): string {
   const names = queueStepNames(data)
@@ -595,15 +596,19 @@ function syntheticArtifactAttempt(attempt: string | undefined): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1
 }
 
-function QueueSubmitDiff({
-  diff,
-  expanded,
-  onToggle,
-}: {
-  diff: QueuePrDiff | undefined
-  expanded: boolean
-  onToggle: () => void
-}) {
+/**
+ * One change's diff, folded by default (operator spec item 4: "diff lines
+ * fronted by a folding triangle marker (▶ collapsed, ▼ expanded), the way
+ * `ag code` does it"). silvery ships the ▶/▼ disclosure convention itself
+ * (TreeView's expand/collapse); this stays a lighter, purpose-built toggle —
+ * one diff, no tree — rather than reimplementing that primitive for a single
+ * node, but borrows its exact glyphs and its click/Enter/Space activation.
+ * State is owned here (not by the caller) so each change's box in the
+ * Changes tab folds independently of its siblings.
+ */
+function QueueChangeDiff({ diff }: { diff: QueuePrDiff | undefined }) {
+  const [expanded, setExpanded] = useState(false)
+  const onToggle = () => setExpanded((current) => !current)
   const focusId = `queue-submit-diff-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
   const { activeId } = useFocusManager()
   const focused = activeId === focusId
@@ -622,12 +627,11 @@ function QueueSubmitDiff({
             ? "diff unavailable (refs pruned)"
             : "diff unavailable (git error)"}
         </Text>
-        <Box height={1} flexShrink={0} />
-        <Divider />
       </Box>
     )
   }
   const summary = `Diff +${diff.additions} / -${diff.deletions} ${["li", "nes"].join("")}`
+  const fold = expanded ? "▼" : "▶"
   return (
     <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: onToggle } : {})}>
       <Box height={1} flexShrink={0} />
@@ -640,7 +644,7 @@ function QueueSubmitDiff({
         backgroundColor={focused ? "$bg-selected" : undefined}
       >
         <Text wrap="truncate" color={focused ? "$fg-on-selected" : undefined}>
-          {summary}
+          {fold} {summary}
         </Text>
       </Box>
       <Box height={1} flexShrink={0} />
@@ -659,16 +663,17 @@ function QueueSubmitDiff({
           ))}
         </>
       ) : null}
-      <Divider />
     </Box>
   )
 }
 
 /**
- * The PR-scoped header leading the detail body (user directive 2026-07-21):
- * the selected member's branch/subject/timeline/facts block plus its
- * revision-bound source delta. The identity row lives in the pane title
- * (QueueDetailTitle), so the block renders `titleAbove`.
+ * The Changes-tab / pre-run body (user directive 2026-07-21; expanded by
+ * operator spec item 4 from "the selected member only" to every member of
+ * the run): each batched PR gets its own box via QueueDetailRunPrBlocks,
+ * complete with its own diff. Only the member matching the pane's own title
+ * row skips its identity line — every other member still needs one, since
+ * the title above shows just the one PR the cursor is on.
  */
 function QueueDetailPrSection({
   data,
@@ -677,7 +682,6 @@ function QueueDetailPrSection({
   prs,
   runDetails,
   diffs,
-  highlightPr,
   showFacts = true,
   showDiff = true,
 }: {
@@ -687,35 +691,30 @@ function QueueDetailPrSection({
   prs: readonly PR[]
   runDetails: readonly QueueShowData[]
   diffs: readonly QueuePrDiff[]
-  highlightPr?: string
   showFacts?: boolean
   showDiff?: boolean
 }) {
-  const [diffExpanded, setDiffExpanded] = useState(false)
-  const member =
-    data === undefined
-      ? undefined
-      : (data.prs.find((candidate) => candidate.id === (highlightPr ?? row?.pr)) ?? data.prs[0])
-  const diffTarget = member ?? (row === undefined ? undefined : { id: row.pr, revision: row.revision })
-  const diff =
-    diffTarget === undefined
-      ? undefined
-      : diffs.find((candidate) => candidate.pr === diffTarget.id && candidate.revision === diffTarget.revision)
   return (
     <Box flexDirection="column" minWidth={0} flexShrink={0}>
       {showFacts ? (
         <QueueDetailRunPrBlocks
           titleAbove
-          {...(data === undefined || member === undefined ? {} : { data: { ...data, prs: [member] } })}
+          {...(data === undefined ? {} : { data })}
           {...(row === undefined ? {} : { row })}
           rows={rows}
           prs={prs}
           runDetails={runDetails}
           {...(row?.position === undefined ? {} : { position: row.position })}
+          {...(showDiff
+            ? {
+                renderDiff: (member: Readonly<{ id: string; revision: number }>) => (
+                  <QueueChangeDiff
+                    diff={diffs.find((candidate) => candidate.pr === member.id && candidate.revision === member.revision)}
+                  />
+                ),
+              }
+            : {})}
         />
-      ) : null}
-      {showDiff && (data !== undefined || diff !== undefined) ? (
-        <QueueSubmitDiff diff={diff} expanded={diffExpanded} onToggle={() => setDiffExpanded((current) => !current)} />
       ) : null}
     </Box>
   )
@@ -815,13 +814,16 @@ export function QueueWorkflowStepTabs({
     )
   }
   return (
-    // Detail order: one persistent RUN/timing/status header, then the PR
-    // overview tab and real workflow-step tabs. The newest relevant step is
-    // selected automatically; the PR tab remains available for source facts.
+    // Detail order: one persistent status box (RUN identity/timing folded
+    // into its border/body — operator spec item 1), then the run's PR list
+    // (item 2), then the Changes tab and real workflow-step tabs. The newest
+    // relevant step is selected automatically; the Changes tab remains
+    // available for source facts.
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       {data === undefined ? (
         <>
           <QueueStatusNotice {...(row === undefined ? {} : { row })} runDetails={runDetails} live={active} />
+          <QueueDetailPrList data={data} rows={runRows} prs={prs} />
           <QueueDetailPrSection
             {...(row === undefined ? {} : { row })}
             rows={runRows}
@@ -833,13 +835,13 @@ export function QueueWorkflowStepTabs({
         </>
       ) : activeStep === undefined ? null : (
         <>
-          <QueueDetailRunHeader data={data} {...(row === undefined ? {} : { row })} />
           <QueueStatusNotice
             {...(row === undefined ? {} : { row })}
             data={data}
             runDetails={runDetails}
             live={active}
           />
+          <QueueDetailPrList data={data} rows={runRows} prs={prs} />
           <Box height={1} flexShrink={0} />
           <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
             <TabList>

@@ -186,7 +186,10 @@ describe("watch detail completeness — primary PR activity projection", () => {
       }),
     )
     try {
-      expect(app.text).toContain("pr#9.1 @yrd/core/21106-queue-timeline")
+      // ISSUE is a KEY/value fact now (operator spec item 4.a moved it off the
+      // identity row, which instead carries the branch: `pr#id.rev ⎇ branch`).
+      expect(app.text).toContain("pr#9.1")
+      expect(app.text).toMatch(/ISSUE\s+@yrd\/core\/21106-queue-timeline/u)
       expect(app.text).toContain("Wire the queue detail surface")
       expect(app.text).toContain("@yrd/core/21106-queue-timeline")
       expect(app.text).toContain("NOTE")

@@ -4355,32 +4355,14 @@ function queueDetailRunTimingRows(data: QueueShowData, row: QueueTimelineProject
     ...(runtimeMs === null || runtimeMs === undefined ? [] : [`Runtime ${mediaDuration(runtimeMs)}`]),
     ...(queueWaitMs === null ? [] : [`Wait time ${mediaDuration(queueWaitMs)}`]),
   ]
-  return [...(clocks.length === 0 ? [] : [clocks.join(", ")]), ...(metrics.length === 0 ? [] : [metrics.join(", ")])]
-}
-
-export function QueueDetailRunHeader({ data, row }: { data: QueueShowData; row?: QueueTimelineProjectedRow }) {
-  const timingRows = queueDetailRunTimingRows(data, row)
-  return (
-    <Box flexDirection="column" width="100%" minWidth={0} flexShrink={0}>
-      <Box
-        flexDirection="row"
-        width="100%"
-        minWidth={0}
-        flexShrink={0}
-        backgroundColor="$bg-surface-subtle"
-        paddingX={1}
-      >
-        <Text bold wrap="truncate" minWidth={0}>
-          RUN <RunId base={data.base} run={data.run} />
-        </Text>
-      </Box>
-      {timingRows.map((timing) => (
-        <Text key={timing} wrap="truncate">
-          {timing}
-        </Text>
-      ))}
-    </Box>
-  )
+  // The metrics line is the operator's exact composite-header sample (Age ·
+  // Runtime · Wait time); the clocks line above it keeps its historical
+  // comma join — no sample specifies it, and `watch-detail-rework.test.ts`
+  // only pins the substring "Started ", not a separator.
+  return [
+    ...(clocks.length === 0 ? [] : [clocks.join(", ")]),
+    ...(metrics.length === 0 ? [] : [metrics.join(" · ")]),
+  ]
 }
 
 export type StatusNoticeState = StatusPresentationState
@@ -4450,6 +4432,15 @@ function noticeHeadline(
       data?.outcome === "already-landed" || row?.status === "already-landed" ? "merged (already on main)" : "merged"
     return data?.status === "completed" && data.conclusion === "success" ? `passed, ${label}` : label
   }
+  // No Run drives this row (the pre-run band draft/rev/ready, or a terminal
+  // row whose Run detail happens to be unavailable): read the exact word
+  // `timelineStatusCell` gives the list's STATUS column for this row, rather
+  // than falling through to the coarser `state` below — that fallback is the
+  // one-status-not-two bug (a submitted-awaiting-run "ready" row printed
+  // "queued" here). Every `data !== undefined` case is handled above or in
+  // the state checks that follow, so this never overrides a Run-driven
+  // headline.
+  if (data === undefined && row !== undefined) return timelineStatusCell(row).word
   if (state === "running") return "checking"
   if (state === "rejected") return "failed"
   if (state === "needs-author") return "needs author"
@@ -4607,6 +4598,16 @@ export function queueStatusNotice(
   }
 }
 
+/**
+ * The detail pane's top status box (operator spec item 1): one TitledBox
+ * integrating what were two separate elements — the RUN identity/timing
+ * header and the status notice. The border carries no left title, only the
+ * right-aligned `RUN base#run` identity, so the outline itself reads as the
+ * run's label; the body carries the glyph+headline, the explanation, and
+ * (when a Run drives this row) the Age/Runtime/Wait-time line. A pre-run row
+ * (no Run yet) gets the same box with no right-aligned title and no timing
+ * line — one template for pending, running, and terminal rows alike.
+ */
 export function QueueStatusNotice({
   row,
   data,
@@ -4621,17 +4622,10 @@ export function QueueStatusNotice({
   const stepP50Ms = historicalStepP50Ms(runningStepName(row, data), data?.run, runDetails)
   const notice = queueStatusNotice(row, data, { stepP50Ms })
   if (notice === undefined) return null
+  const timingRows = data === undefined ? [] : queueDetailRunTimingRows(data, row)
+  const titleRight = data === undefined ? undefined : `RUN ${formatNounId(data.base, runIdValue(data.run))}`
   return (
-    <Box
-      flexDirection="column"
-      width="100%"
-      minWidth={0}
-      flexShrink={0}
-      borderStyle="round"
-      borderColor={notice.color}
-      color={notice.color}
-      paddingX={1}
-    >
+    <TitledBox title="" {...(titleRight === undefined ? {} : { titleRight })} borderColor={notice.color}>
       <Box flexDirection="row" minWidth={0}>
         {live && notice.state === "running" ? (
           <Pulse
@@ -4658,7 +4652,12 @@ export function QueueStatusNotice({
           {notice.explanation}
         </Text>
       </Box>
-    </Box>
+      {timingRows.map((timing) => (
+        <Text key={timing} wrap="truncate">
+          {timing}
+        </Text>
+      ))}
+    </TitledBox>
   )
 }
 
@@ -4703,7 +4702,13 @@ const TIMELINE_STATUS_WORDS = {
 // `draft`/`rev`/`ready` — so a non-integrated PR is always visible with
 // an explicit label (user directive 2026-07-22, generalizing the 2026-07-21
 // pending→`todo` rule); the coarse filter pills stay todo/running/failed/done.
-function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
+//
+// Exported so the detail pane's headline (`noticeHeadline`) can read the
+// exact word this row's list STATUS cell shows, instead of re-deriving one
+// through the coarser `StatusPresentationState` alias table — that second
+// derivation is what let a submitted-awaiting-run PR print "ready" in the
+// list and "queued" in the detail pane (one status, not two).
+export function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
   const word = TIMELINE_STATUS_WORDS[row.status]
   return { word, color: timelineStatusColor(row) }
 }
@@ -4918,10 +4923,13 @@ function TimelineCells({
   )
 }
 
-// Header: TIME | STATUS | RUN | PR | BY | AGE | RUN — RUN(id) and PR are
-// separate labels, each exactly over its own column; the trailing bare RUN
-// header belongs to the run-duration column. STEP was folded into the PR cell
-// (user directive 2026-07-16, item Q).
+// Header: TIME | STATUS | RUN | CHANGES | BY | AGE | RUN — RUN(id) and
+// CHANGES are separate labels, each exactly over its own column; the
+// trailing bare RUN header belongs to the run-duration column. STEP was
+// folded into the CHANGES cell (user directive 2026-07-16, item Q). The
+// column's internal id stays `pr` (see `id("pr")` in TimelineCells) — only
+// the printed label renamed, matching the detail pane's Changes tab
+// (operator spec: list and detail must not name this two different things).
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   // The column header reads white + bold (user directive 2026-07-16) so it
   // stands out above the muted row cells.
@@ -4936,7 +4944,7 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
       time={label("TIME")}
       status={label("STATUS")}
       run={label("RUN")}
-      pr={label("PR")}
+      pr={label("CHANGES")}
       by={label("BY")}
       age={label("AGE")}
       runDuration={label("RUN")}
@@ -7002,8 +7010,12 @@ function prActivityEntries(
     })
   }
 
+  // Newest first (operator spec item 4: "reverse-chronological history"),
+  // matching prTerminalLineageEntries's own comparator above — the only two
+  // producers QueueDetailRunPrBlocks reads, so both need to agree here rather
+  // than have their shared caller re-sort either one's output.
   return entries.toSorted(
-    (left, right) => left.at.localeCompare(right.at) || left.rank - right.rank || left.text.localeCompare(right.text),
+    (left, right) => right.at.localeCompare(left.at) || right.rank - left.rank || left.text.localeCompare(right.text),
   )
 }
 
@@ -7099,6 +7111,63 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
   return facts
 }
 
+/** Shared by {@link QueueDetailPrList} and {@link QueueDetailRunPrBlocks}: the
+ * one subject-resolution fallback chain, so the summary line and the full
+ * per-change box can never show two different titles for the same PR. */
+function memberSubject(
+  member: Pick<QueueShowData["prs"][number], "id" | "name">,
+  pr: PR | undefined,
+  memberRow: QueueTimelineProjectedRow | undefined,
+): string | undefined {
+  return presentFact(pr?.title) ?? presentFact(member.name) ?? presentFact(pr?.name) ?? memberRow?.subject
+}
+
+/**
+ * Directly under the status box (operator spec item 2): one line per run
+ * member — `· pr#id.rev` then its bold title, ellipsis-truncated to width.
+ * This is the "what's in this run" overview; full per-change detail (branch,
+ * description, history, diff) lives in the Changes tab's boxes below
+ * ({@link QueueDetailRunPrBlocks}), which shares this exact subject fallback.
+ */
+export function QueueDetailPrList({
+  data,
+  rows,
+  prs,
+}: {
+  data?: QueueShowData
+  rows: readonly QueueTimelineProjectedRow[]
+  prs: readonly PR[]
+}) {
+  const members = data?.prs ?? []
+  if (members.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0} flexShrink={0}>
+      {members.map((member) => {
+        const memberRow = rows.find(
+          (candidate) =>
+            candidate.pr === member.id &&
+            candidate.revision === member.revision &&
+            candidate.headSha === member.headSha,
+        )
+        const pr = prs.find((candidate) => candidate.id === member.id)
+        const subject = memberSubject(member, pr, memberRow)
+        return (
+          <Box key={`${member.id}:${member.revision}:${member.headSha}`} flexDirection="row" minWidth={0}>
+            <Text flexShrink={0}>{"· "}</Text>
+            <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" flexShrink={0} />
+            <Text flexShrink={0}> </Text>
+            {subject === undefined ? null : (
+              <Text bold wrap="truncate" minWidth={0} bgConflict="ignore">
+                {subject}
+              </Text>
+            )}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
 /**
  * The PR-scoped detail header (user directive 2026-07-21, supersedes Round-6
  * Revision A v4's run-scoped member blocks): the detail view is FOR a PR, so
@@ -7115,6 +7184,7 @@ export function QueueDetailRunPrBlocks({
   runDetails = [],
   titleAbove = false,
   position,
+  renderDiff,
 }: {
   data?: QueueShowData
   row?: QueueTimelineProjectedRow
@@ -7125,6 +7195,13 @@ export function QueueDetailRunPrBlocks({
   titleAbove?: boolean
   /** Queue position for pending rows, rendered as one more KEY/value fact. */
   position?: number
+  /** Diff slot for one change's box (operator spec item 4: "diff lines fronted
+   * by a folding triangle marker"). Injected rather than owned here: the diff
+   * toggle is a stateful silvery/React component (focus + expand/collapse)
+   * that belongs with watch-pane's own interaction code, not with this
+   * queue-projection file. Callers that have no diffs (both tests using this
+   * block today) simply omit it. */
+  renderDiff?: (member: Readonly<{ id: string; revision: number }>) => React.ReactNode
 }) {
   const members =
     data?.prs ??
@@ -7142,10 +7219,13 @@ export function QueueDetailRunPrBlocks({
             candidate.headSha === member.headSha,
         )
         const pr = prs.find((candidate) => candidate.id === member.id)
-        const subject =
-          presentFact(pr?.title) ?? presentFact(member.name) ?? presentFact(pr?.name) ?? memberRow?.subject
+        const subject = memberSubject(member, pr, memberRow)
         const issue = presentFact(pr?.issue)
         const description = descriptionWithoutDuplicatedIssue(presentFact(pr?.description), issue)
+        // Newest first (operator spec item 4: "reverse-chronological
+        // history") — both prTerminalLineageEntries and prActivityEntries
+        // already sort that way; the one-entry fallback below has nothing to
+        // order.
         const activity =
           pr === undefined
             ? memberRow?.timestamp === null || memberRow?.timestamp === undefined
@@ -7161,32 +7241,36 @@ export function QueueDetailRunPrBlocks({
               ? prTerminalLineageEntries(pr, member.revision, runDetails)
               : prActivityEntries(pr, runDetails, memberRow ?? row)
         const age = prAgeLabel(pr, member.revision, memberRow ?? row)
-        const facts = [
+        // Key:value metadata, all rendered one uniform way (operator spec item
+        // 4.e): every row is an upper-cased padded KEY then its value, `issue`
+        // included — only the value's element differs (a hyperlink instead of
+        // plain text), the same "special value, uniform row" idiom the EVIDENCE
+        // column already uses elsewhere in this file.
+        const facts: readonly Readonly<{ key: string; value: string; render?: () => React.ReactElement }>[] = [
           ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
+          ...(issue === undefined ? [] : [{ key: "issue", value: issue, render: () => <IssueValue issue={issue} /> }]),
           ...(age === undefined ? [] : [{ key: "age", value: age }]),
           ...(pr === undefined ? [] : prDetailFacts(pr, member.revision)),
         ]
         const factKeyWidth = Math.max(0, ...facts.map((fact) => fact.key.length)) + 2
+        // `titleAbove` means the pane's own title (QueueDetailTitle) already
+        // shows ONE pr#id.rev — the one the cursor row names — so only THIS
+        // member skips repeating it. A batched run's other members still
+        // need their own id here: the title never shows more than one.
+        const isTitledMember = titleAbove && row !== undefined && row.pr === member.id && row.revision === member.revision
         return (
-          <Box
-            key={`${member.id}:${member.revision}:${member.headSha}`}
-            flexDirection="column"
-            marginTop={index === 0 ? 0 : 1}
-            minWidth={0}
-          >
-            {titleAbove ? null : (
-              <Box flexDirection="row" minWidth={0} overflow="hidden">
-                <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" />
-                {issue === undefined ? null : (
-                  <>
-                    <Text> </Text>
-                    <IssueValue issue={issue} />
-                  </>
-                )}
-              </Box>
-            )}
+          <TitledBox key={`${member.id}:${member.revision}:${member.headSha}`} title="" marginTop={index === 0 ? 0 : 1}>
+            {/* Header line (operator spec item 4.a): `pr#id.rev ⎇ branch`. */}
             <Box flexDirection="row" minWidth={0}>
-              <Text internal_dim>{TIMELINE_BRANCH_ICON}</Text>
+              {isTitledMember ? null : (
+                <>
+                  <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
+                  <Text flexShrink={0}> </Text>
+                </>
+              )}
+              <Text internal_dim flexShrink={0}>
+                {TIMELINE_BRANCH_ICON}
+              </Text>
               <Text wrap="wrap" minWidth={0}>
                 {` ${member.branch}`}
               </Text>
@@ -7214,14 +7298,19 @@ export function QueueDetailRunPrBlocks({
                     <Text color="$fg-muted" flexShrink={0}>
                       {fact.key.toUpperCase().padEnd(factKeyWidth)}
                     </Text>
-                    <Text wrap="truncate" minWidth={0} bgConflict="ignore">
-                      {fact.value}
-                    </Text>
+                    {fact.render === undefined ? (
+                      <Text wrap="truncate" minWidth={0} bgConflict="ignore">
+                        {fact.value}
+                      </Text>
+                    ) : (
+                      fact.render()
+                    )}
                   </Box>
                 ))}
               </>
             )}
-          </Box>
+            {renderDiff?.(member)}
+          </TitledBox>
         )
       })}
     </Box>

@@ -297,7 +297,7 @@ describe("queue timeline 21106 contract", () => {
     // ACTIVE/WAIT moved out of the per-row columns into the statistics box.
     const header = rows[headerLine]
     if (header === undefined) throw new Error("expected the table header row")
-    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+PR\s+BY\s+AGE\s+RUN$/u)
+    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+CHANGES\s+BY\s+AGE\s+RUN$/u)
     expect(header).not.toContain("ACTIVE")
     expect(header).not.toContain("WAIT")
     expect(header).not.toContain("SUBJECT")
@@ -737,7 +737,7 @@ describe("queue timeline 21106 contract", () => {
     expect(occurrences, `STATUS appears ${occurrences.length} time(s):\n${frame}`).toHaveLength(1)
     // …and the survivor is the column header, not some other rail.
     const header = frame.split("\n").find((row) => /\bSTATUS\b/u.test(row)) ?? ""
-    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+PR\b/u)
+    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+CHANGES\b/u)
   })
 
   it("advances the one temporal-trust cue when the snapshot advances", async () => {
@@ -868,7 +868,11 @@ describe("queue timeline 21106 contract", () => {
       await handle.press("h")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("16:54 r1 submitted by @agent/3")
-      expect(handle.text, "the partner PR's own submit timeline is not shown").not.toContain(
+      // Operator spec item 4 ("list the merge requests, EACH CHANGE IN ITS OWN
+      // BOX") expanded the Changes tab from the lead-only scope above to every
+      // batch member — the partner PR now gets its own box, submit timeline
+      // included.
+      expect(handle.text, "the partner PR's own submit timeline now shows too").toContain(
         "16:56 r1 submitted by @agent/5",
       )
       // The composite RUN/status context persists while the PR activity tab is
