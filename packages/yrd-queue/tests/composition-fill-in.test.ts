@@ -18,8 +18,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { failureFact } from "@yrd/core"
-import { createProcess } from "@yrd/process"
-import { gitCandidatePreparer, type CandidatePreparationInput } from "@yrd/queue"
+import { createProcess, shellCommand } from "@yrd/process"
+import {
+  GitCheckEvidenceSchema,
+  gitCandidatePreparer,
+  gitCheckStep,
+  type CandidatePreparationInput,
+  type StepExecution,
+} from "@yrd/queue"
 
 const roots: string[] = []
 
@@ -144,6 +150,44 @@ describe("composition-time fill-in — the queue writes the shaset from each sub
     // Nothing was filled in: no resolution row, so the source certificate alone
     // holds this path to its value.
     expect(prepared.submoduleResolutions).toBeUndefined()
+  })
+
+  it("hands checks the filled tree: the sha a step judges is the shaset commit, never the author head", async () => {
+    const { repo, module, moduleA, rootBase } = await baseRepo()
+    const moduleB = await moduleCommit(module, "main", moduleA, "b")
+    const moduleM = await moduleCommit(module, "main", moduleB, "m")
+
+    await using process = createProcess({ cwd: repo })
+    const input: StepExecution = {
+      run: "R1",
+      step: "check",
+      index: 0,
+      prs: composedPreparation(rootBase, { branch: "main", baseSha: moduleA, tipSha: moduleB, payload: ["version.txt"] })
+        .prs,
+      shape: { results: {} },
+    }
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      // The step passes only when the sha it is handed IS the tree it stands in,
+      // and the PR-identity variable stays the author head — two different facts,
+      // never conflated: YRD_SHA names the revision, YRD_CANDIDATE_SHA/YRD_TARGET
+      // name the judged tree.
+      command: shellCommand(
+        'test "$YRD_CANDIDATE_SHA" = "$(git rev-parse HEAD)" && ' +
+          'test "$YRD_TARGET" = "$YRD_CANDIDATE_SHA" && ' +
+          'test "$YRD_SHA" != "$YRD_CANDIDATE_SHA"',
+      ),
+    })(input, { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal })
+
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
+    if (outcome.status !== "completed" || outcome.conclusion !== "success") throw new Error("unreachable")
+    const evidence = GitCheckEvidenceSchema.parse(outcome.output)
+    // The judged tree carries the filled submodule value — checks ran against the
+    // shaset the queue wrote, not the floor the author composed...
+    expect(await gitlinkAt(repo, evidence.candidateSha)).toBe(moduleM)
+    // ...and never against the author head (source-only: the head IS the base).
+    expect(evidence.candidateSha).not.toBe(rootBase)
   })
 
   it("refuses at composition when the composed value and the submodule's main diverge", async () => {
