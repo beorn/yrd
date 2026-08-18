@@ -91,6 +91,9 @@ async function superprojectWithHandBumpedPin(): Promise<{
     publish: async () => {
       await git(component, ["push", "-q", "origin", "main"])
     },
+    publishToSideBranchOnly: async () => {
+      await git(component, ["push", "-q", "origin", `${pin}:refs/heads/someones-wip`])
+    },
   }
 }
 
@@ -159,5 +162,31 @@ describe("pre-admission gate for hand-written gitlinks — behaviour as of the s
     // turn it into an admission, and it must keep beating the authored-gitlink branch.
     expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
     expect(refusal.message).toContain("is on zero refs fetched from origin")
+  })
+
+  /**
+   * THE GAP STEP (a) MUST CLOSE, characterized before it bites.
+   *
+   * The shaset model says a min commit is satisfied by "the newest commit on that submodule's
+   * MAIN", and calls the rule submodule-main-first. Today's oracle does not ask that question:
+   * `unpublishedSubmodulePins` passes `refPrefixes: ["refs/heads/"]`, which is EVERY branch.
+   *
+   * So a commit sitting on someone's unmerged side branch counts as published. Today that is
+   * harmless, because the authored-gitlink refusal rejects the request a few lines later either
+   * way. Step (a) removes that backstop — and a naive inversion would then ADMIT a pin that is
+   * on no main at all, composing a candidate against a commit the component never accepted.
+   *
+   * When this test's expectation flips, it must flip to a park, never to an admission.
+   */
+  it("today accepts a pin that is on a side branch and NOT on the component's main", async () => {
+    const { root, headSha, publishToSideBranchOnly } = await superprojectWithHandBumpedPin()
+    await publishToSideBranchOnly()
+
+    const refusal = await refusalFrom(root, headSha)
+
+    // Not `submodule-pin-unpublished`: the publication oracle is satisfied by any branch, so it
+    // waves this through and the authored-gitlink backstop is what actually stops it.
+    expect(refusal.code).not.toBe("submodule-pin-unpublished")
+    expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })
   })
 })
