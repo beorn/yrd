@@ -139,6 +139,14 @@ describe("pre-admission gate for hand-written gitlinks — behaviour as of the s
     expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })
     expect(refusal.message).toContain("authored gitlinks are never admitted")
     expect(refusal.message).toContain("dep")
+
+    // CROSS-STEP COUPLING, pinned deliberately. The remedy tells the author to run
+    // `yrd intent submit`, and step (d) DELETES that verb along with the PinIntent kind.
+    // `actionable-errors.test.ts` separately asserts this same remedy and will keep passing
+    // after the verb is gone, so this is the one place that fails and names the dependency.
+    // If you are here because this broke: the remedy must change in the same commit as the
+    // verb, not afterwards.
+    expect(refusal.message).toContain("yrd intent submit")
   })
 
   it("checks publication BEFORE the authored-gitlink refusal, and the model keeps that order", async () => {
