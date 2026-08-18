@@ -3345,6 +3345,8 @@ describe("runYrd", () => {
 
     expect(recut).toHaveBeenCalled()
     expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: nextHead })
+    // A recut PR is queue-carried, so the gate asks reachability (the mute stub advertises
+    // zero refs → unreachable), never the author-demand main-ancestry question.
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       pr: "PR1",
       revision: 3,

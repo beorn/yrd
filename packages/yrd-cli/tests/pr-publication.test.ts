@@ -10,7 +10,7 @@ import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { afterEach, describe, expect, it } from "vitest"
 import { createPrPublicationService } from "../src/pr-publication.ts"
-import { changedSubmodulePins, unpublishedSubmodulePins } from "../src/pr-submodule-publication.ts"
+import { changedSubmodulePins, submodulePinPublications } from "../src/pr-submodule-publication.ts"
 
 const roots: string[] = []
 
@@ -37,7 +37,7 @@ async function repository(path: string): Promise<void> {
 }
 
 describe("PR publication Git transport", () => {
-  it("delegates changed-pin discovery and remote availability to git-super", async () => {
+  it("discovers changed pins via git-super and judges each against its component's main", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-availability-"))
     roots.push(fixture)
     const component = join(fixture, "component")
@@ -70,10 +70,56 @@ describe("PR publication Git transport", () => {
     await using process = createProcess()
     const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
     expect(changed).toEqual([{ path: "dep", pin, repository: join(root, "dep") }])
-    await expect(unpublishedSubmodulePins({ process, pins: changed })).resolves.toEqual(changed)
+    // Before the component lands the commit on its main: off it, with main's sha named.
+    const mainBefore = await git(componentRemote, ["rev-parse", "refs/heads/main"])
+    await expect(submodulePinPublications({ process, pins: changed })).resolves.toEqual([
+      { state: "off-component-main", pin: changed[0], mainSha: mainBefore },
+    ])
 
     await git(component, ["push", "-q", "origin", "main"])
-    await expect(unpublishedSubmodulePins({ process, pins: changed })).resolves.toEqual([])
+    await expect(submodulePinPublications({ process, pins: changed })).resolves.toEqual([
+      { state: "on-component-main", pin: changed[0] },
+    ])
+  })
+
+  it("reports an unreachable component origin as undetermined, never as off-main", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-undetermined-"))
+    roots.push(fixture)
+    const component = join(fixture, "component")
+    const root = join(fixture, "root")
+
+    await repository(component)
+    await writeFile(join(component, "component.txt"), "one\n")
+    await git(component, ["add", "component.txt"])
+    await git(component, ["commit", "-qm", "component one"])
+
+    await repository(root)
+    await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep"])
+    await git(root, ["commit", "-qam", "record component one"])
+    const baseSha = await git(root, ["rev-parse", "HEAD"])
+
+    await writeFile(join(component, "component.txt"), "two\n")
+    await git(component, ["commit", "-qam", "component two"])
+    const pin = await git(component, ["rev-parse", "HEAD"])
+    await git(join(root, "dep"), ["fetch", "-q", component, pin])
+    await git(join(root, "dep"), ["checkout", "-q", pin])
+    await git(root, ["add", "dep"])
+    await git(root, ["commit", "-qm", "record component two"])
+    const headSha = await git(root, ["rev-parse", "HEAD"])
+
+    // The component's origin stops existing between the author's fetch and the gate's probe.
+    await git(join(root, "dep"), ["remote", "set-url", "origin", join(fixture, "gone.git")])
+
+    await using process = createProcess()
+    const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
+    const publications = await submodulePinPublications({ process, pins: changed })
+
+    // "Could not tell" and "not on main" have opposite remedies — one says land the commit,
+    // the other says the probe never reached the component — so the state must say which.
+    expect(publications).toHaveLength(1)
+    expect(publications[0]).toMatchObject({ state: "undetermined", pin: changed[0] })
+    const undetermined = publications[0] as Extract<(typeof publications)[number], { state: "undetermined" }>
+    expect(undetermined.reason).toContain("could not refresh component main")
   })
 
   it("delegates exact component-first and root-last publication to git-super", async () => {

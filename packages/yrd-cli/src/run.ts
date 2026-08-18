@@ -234,7 +234,12 @@ import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } f
 import { readInstalledBaselines } from "./installed-baseline.ts"
 import { IntentRecordIdSchema, renderRemedyStep } from "@yrd/intent"
 import { admitPinIntent } from "./intent-admission.ts"
-import { authoredSubmodulePinBase, changedSubmodulePins, unpublishedSubmodulePins } from "./pr-submodule-publication.ts"
+import {
+  authoredSubmodulePinBase,
+  changedSubmodulePins,
+  submodulePinPublications,
+  unreachableSubmodulePins,
+} from "./pr-submodule-publication.ts"
 import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
@@ -3890,24 +3895,75 @@ export async function requireQueueableSubmodulePins(
     baseSha,
     headSha,
   })
-  const unpublished = await unpublishedSubmodulePins({ process: services.process, pins: changed })
-  if (unpublished.length > 0) {
+  if (changed.length === 0) return
+
+  // Two kinds of changed gitlink, two questions — and the KIND must be decided first.
+  //
+  // Queue-carried pins (a composition or a recut) are not author demands: the queue's own
+  // publication job pushes the commit to a branch ref, and component main is PROMOTED at
+  // merge. Asking main-ancestry at admission would deadlock that pipeline by construction —
+  // the pin cannot be on main until the very merge being admitted — so the whole question
+  // there is reachability: can the queue fetch this commit from the component's origin?
+  //
+  // Authored pins are the shaset model's demands, and the demand is submodule-main-first:
+  // the component's own workflow must have landed the commit on that component's MAIN.
+  // Reachability was the old oracle for these too, which is exactly the gap it left — a pin
+  // on someone's unmerged side branch counted as published, and only the authored-gitlink
+  // backstop caught it.
+  const queueCarried = prComposition(pr) !== undefined || currentPRRev(pr).recut !== undefined
+  if (queueCarried) {
+    const unreachable = await unreachableSubmodulePins({ process: services.process, pins: changed })
+    if (unreachable.length > 0) {
+      const issue = pr.issue ?? "<issue-ref>"
+      const detail = unreachable
+        .map(
+          ({ path, pin, repository }) =>
+            `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; whoever holds this commit in ` +
+            `'${repository}' must publish it through that component's own git workflow — never as this refusal's ` +
+            `remedy — then submit: 'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`,
+        )
+        .join("\n")
+      raiseFailure(
+        "refusal",
+        "submodule-pin-unpublished",
+        `yrd: PR '${pr.id}' changes unpublished submodule pins:\n${detail}`,
+      )
+    }
+    return
+  }
+
+  const publications = await submodulePinPublications({ process: services.process, pins: changed })
+  // Inspection failures first: the partition below cannot be trusted while any read failed,
+  // and "could not tell" must never surface as "not published" — they have opposite remedies.
+  // The merge path aborts its whole promotion group on the same condition, under the same code.
+  const undetermined = publications.filter((entry) => entry.state === "undetermined")
+  if (undetermined.length > 0) {
+    const detail = undetermined
+      .map(({ pin, reason }) => `submodule '${pin.path}' pin '${pin.pin}': ${reason}`)
+      .join("\n")
+    raiseFailure(
+      "refusal",
+      "component-main-inspection-failed",
+      `yrd: PR '${pr.id}' changes submodule pins whose component main could not be inspected:\n${detail}`,
+    )
+  }
+  const offMain = publications.filter((entry) => entry.state === "off-component-main")
+  if (offMain.length > 0) {
     const issue = pr.issue ?? "<issue-ref>"
-    const detail = unpublished
+    const detail = offMain
       .map(
-        ({ path, pin, repository }) =>
-          `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; whoever holds this commit in ` +
-          `'${repository}' must publish it through that component's own git workflow — never as this refusal's ` +
-          `remedy — then submit: 'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`,
+        ({ pin: { path, pin, repository }, mainSha }) =>
+          `submodule '${path}' pin '${pin}' is not on that component's main ('${mainSha}'); whoever holds this ` +
+          `commit in '${repository}' must publish it through that component's own git workflow — never as this ` +
+          `refusal's remedy — then submit: 'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`,
       )
       .join("\n")
     raiseFailure(
       "refusal",
       "submodule-pin-unpublished",
-      `yrd: PR '${pr.id}' changes unpublished submodule pins:\n${detail}`,
+      `yrd: PR '${pr.id}' changes submodule pins that are not on their component's main:\n${detail}`,
     )
   }
-  if (changed.length === 0 || prComposition(pr) !== undefined || currentPRRev(pr).recut !== undefined) return
   const issue = pr.issue ?? "<issue-ref>"
   const intents = changed
     .map(({ path, pin }) => `'yrd intent submit --component ${path} --target ${pin} --issue ${issue}'`)

@@ -162,32 +162,36 @@ describe("pre-admission gate for hand-written gitlinks — behaviour as of the s
     // submodule-main-first wins the race. Step (a) turns this refusal into a park; it must not
     // turn it into an admission, and it must keep beating the authored-gitlink branch.
     expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
-    expect(refusal.message).toContain("is on zero refs fetched from origin")
+    // The message names the QUESTION the oracle now asks — main-ancestry, with main's sha —
+    // not the old any-branch phrasing ("is on zero refs fetched from origin"), which became
+    // false the moment the oracle tightened: a side-branch pin IS on a ref, just not on main.
+    expect(refusal.message).toContain("is not on that component's main")
   })
 
   /**
-   * THE GAP STEP (a) MUST CLOSE, characterized before it bites.
+   * THE GAP STEP (a) HAD TO CLOSE — flipped deliberately, in the same commit as the oracle.
    *
    * The shaset model says a min commit is satisfied by "the newest commit on that submodule's
-   * MAIN", and calls the rule submodule-main-first. Today's oracle does not ask that question:
-   * `unpublishedSubmodulePins` passes `refPrefixes: ["refs/heads/"]`, which is EVERY branch.
+   * MAIN", and calls the rule submodule-main-first. The old oracle did not ask that question:
+   * it passed git-super `refPrefixes: ["refs/heads/"]`, which is EVERY branch, so a commit on
+   * someone's unmerged side branch counted as published and only the authored-gitlink backstop
+   * stopped it. The oracle now asks the merge path's own question — fetch the component's main
+   * into the shared probe ref, then ancestry — so the side-branch pin is refused by the
+   * publication check itself, before the backstop.
    *
-   * So a commit sitting on someone's unmerged side branch counts as published. Today that is
-   * harmless, because the authored-gitlink refusal rejects the request a few lines later either
-   * way. Step (a) removes that backstop — and a naive inversion would then ADMIT a pin that is
-   * on no main at all, composing a candidate against a commit the component never accepted.
-   *
-   * When this test's expectation flips, it must flip to a park, never to an admission.
+   * The characterization above said "when this flips, it must flip to a park, never to an
+   * admission". A refusal is not an admission; the park CONVERSION arrives with the queue-side
+   * derivation set, which ships together with the backstop's deletion — not with the oracle.
    */
-  it("today accepts a pin that is on a side branch and NOT on the component's main", async () => {
+  it("refuses a pin that is on a side branch and NOT on the component's main", async () => {
     const { root, headSha, publishToSideBranchOnly } = await superprojectWithHandBumpedPin()
     await publishToSideBranchOnly()
 
     const refusal = await refusalFrom(root, headSha)
 
-    // Not `submodule-pin-unpublished`: the publication oracle is satisfied by any branch, so it
-    // waves this through and the authored-gitlink backstop is what actually stops it.
-    expect(refusal.code).not.toBe("submodule-pin-unpublished")
-    expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })
+    // The oracle itself stops it now — reaching `authored-gitlink` here would mean the
+    // publication check waved through a pin the component's main never accepted.
+    expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
+    expect(refusal.message).toContain("is not on that component's main")
   })
 })

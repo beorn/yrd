@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
 import { adaptProcessGit, type Process, type ProcessResult } from "@yrd/process"
+import { resolveComponentMain, type ComponentMainGit } from "@yrd/queue"
 import { changedCommitGitlinks } from "git-super/commit-graph"
 import { remoteContainsCommit } from "git-super/push"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -23,15 +24,27 @@ function componentRepository(repo: string, path: string): string {
   return repository
 }
 
-export async function unpublishedSubmodulePins(options: {
+/**
+ * The pins the queue could NOT fetch from their component's origin — reachability, the
+ * queue-carried question. A composition or recut pin is queue-authored: its commit only
+ * needs to be somewhere the merge path can fetch it from, because component main is
+ * promoted AT merge, not before. This is deliberately the old any-branch oracle under an
+ * honest name; asking main-ancestry here would deadlock the publication pipeline, since a
+ * queue-carried pin cannot be on main until the very merge being admitted.
+ *
+ * Author demands ask a different question — `submodulePinPublications` below — and the two
+ * used to share one word ("unpublished"), which is how a side-branch pin passed as
+ * published for two months.
+ */
+export async function unreachableSubmodulePins(options: {
   process: Pick<Process, "run">
   pins: readonly UnpublishedSubmodulePin[]
 }): Promise<readonly UnpublishedSubmodulePin[]> {
   const git = adaptProcessGit(options.process, { timeoutMs: GIT_TIMEOUT_MS })
-  const unpublished: UnpublishedSubmodulePin[] = []
+  const unreachable: UnpublishedSubmodulePin[] = []
 
   for (const pin of options.pins) {
-    const published = await remoteContainsCommit({
+    const reachable = await remoteContainsCommit({
       repository: pin.repository,
       remote: "origin",
       commit: pin.pin,
@@ -39,10 +52,84 @@ export async function unpublishedSubmodulePins(options: {
       timeoutMs: GIT_TIMEOUT_MS,
       git,
     })
-    if (!published) unpublished.push(pin)
+    if (!reachable) unreachable.push(pin)
   }
 
-  return Object.freeze(unpublished)
+  return Object.freeze(unreachable)
+}
+
+export type SubmodulePinPublication =
+  | Readonly<{ state: "on-component-main"; pin: UnpublishedSubmodulePin }>
+  | Readonly<{ state: "off-component-main"; pin: UnpublishedSubmodulePin; mainSha: string }>
+  | Readonly<{ state: "undetermined"; pin: UnpublishedSubmodulePin; reason: string }>
+
+/**
+ * Where each changed pin sits relative to its own component's MAIN — the shaset model's
+ * submodule-main-first rule, asked with the merge path's mechanism.
+ *
+ * This used to ask git-super whether the commit sat under any tip matching `refs/heads/`,
+ * which is every branch, so a pin pushed only to someone's unmerged side branch counted as
+ * published. That was harmless only while the authored-gitlink refusal rejected the request
+ * a few lines later regardless; the shaset build removes that backstop, and admitting a pin
+ * the component never accepted would compose a candidate against a commit with no home.
+ *
+ * Three states, not two, and the third is the point: "I could not tell" must never collapse
+ * into "not published". They need opposite remedies — one says land your commit on the
+ * component's main, the other says the check could not reach the component's origin at all —
+ * and reporting the second as the first sends someone to merge a branch over a network fault.
+ */
+export async function submodulePinPublications(options: {
+  process: Pick<Process, "run">
+  pins: readonly UnpublishedSubmodulePin[]
+}): Promise<readonly SubmodulePinPublication[]> {
+  const run: ComponentMainGit = async (repository, args) => {
+    const result: ProcessResult = await options.process.run({
+      argv: ["git", "-C", repository, ...args],
+      cwd: repository,
+      env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+    return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+  }
+
+  const publications: SubmodulePinPublication[] = []
+  for (const pin of options.pins) {
+    const main = await resolveComponentMain(run, pin.repository, "origin")
+    if (main.status === "unavailable") {
+      publications.push({ state: "undetermined", pin, reason: main.message })
+      continue
+    }
+    // Ask before comparing, so a pin that is simply absent here is named as absent rather
+    // than surfacing as an unreadable merge-base failure.
+    const present = await run(pin.repository, ["cat-file", "-e", `${pin.pin}^{commit}`])
+    if (present.code !== 0) {
+      publications.push({
+        state: "undetermined",
+        pin,
+        reason: `commit '${pin.pin}' is not present in '${pin.repository}', so it cannot be compared with that component's main`,
+      })
+      continue
+    }
+    const reached = await run(pin.repository, ["merge-base", "--is-ancestor", pin.pin, main.sha])
+    if (reached.code === 0) {
+      publications.push({ state: "on-component-main", pin })
+      continue
+    }
+    if (reached.code === 1) {
+      publications.push({ state: "off-component-main", pin, mainSha: main.sha })
+      continue
+    }
+    publications.push({
+      state: "undetermined",
+      pin,
+      reason:
+        `could not compare '${pin.pin}' with component main '${main.sha}': ` +
+        `${reached.stderr.trim() || reached.stdout.trim() || "git merge-base failed"}`,
+    })
+  }
+
+  return Object.freeze(publications)
 }
 
 /**

@@ -3264,7 +3264,9 @@ checks: [{check: {run: "true"}}]
       prs: [{ branch, checkRequests: [] }],
     })
 
-    await git(component, "push", "-q", "origin", `${pin}:refs/heads/${branch}`)
+    // To the component's MAIN: the publication oracle is submodule-main-first, so a side-branch
+    // push no longer counts as published — this phase tests the backstop AFTER publication.
+    await git(component, "push", "-q", "origin", `${pin}:refs/heads/main`)
     stdout = ""
     stderr = ""
     const publishedExit = await runYrdProcess(
@@ -3537,7 +3539,9 @@ checks: [{check: {run: "true"}}]
       prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
     })
 
-    await git(component, "push", "-q", "origin", `${pin}:refs/heads/${branch}`)
+    // To the component's MAIN: the publication oracle is submodule-main-first, so a side-branch
+    // push no longer counts as published — this phase tests the backstop AFTER publication.
+    await git(component, "push", "-q", "origin", `${pin}:refs/heads/main`)
     stdout = ""
     stderr = ""
     expect(
