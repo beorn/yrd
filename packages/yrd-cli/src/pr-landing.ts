@@ -6,9 +6,9 @@ import type { PruneGitFacts, YrdCliIO } from "./types.ts"
  * revision never reached the base branch. That is a checkable claim, so the
  * surface checks it before printing it. Every other state is a claim about
  * PROCESS (queued, checking, awaiting an author) and needs no ancestry proof. */
-const NOT_LANDED_CLAIMS = new Set(["withdrawn", "canceled"])
+const NOT_MERGED_CLAIMS = new Set(["withdrawn", "canceled"])
 
-export type ChangeLanding = Readonly<{
+export type ChangeMerge = Readonly<{
   /** answers: Which rebuildable-index status did repository proof contradict? tense: historical. */
   recorded: ChangeDeliveryState
   /** Base tip the head was proven to be reachable from. */
@@ -18,24 +18,24 @@ export type ChangeLanding = Readonly<{
   code: string
 }>
 
-export type ChangeLandingReconciliation = Readonly<{
-  landings: ReadonlyMap<string, ChangeLanding>
+export type ChangeMergeReconciliation = Readonly<{
+  merges: ReadonlyMap<string, ChangeMerge>
   /** Bases whose tip or ancestry could not be read. Never swallowed: the caller
    * prints them beside the result so an unverified row is never mistaken for a
    * verified one. */
   warnings: readonly string[]
 }>
 
-const EMPTY: ChangeLandingReconciliation = { landings: new Map(), warnings: [] }
+const EMPTY: ChangeMergeReconciliation = { merges: new Map(), warnings: [] }
 
-async function landedHeads(git: PruneGitFacts, baseSha: string, heads: readonly string[]): Promise<Set<string>> {
-  if (git.landedOnBase !== undefined) return new Set(await git.landedOnBase(baseSha, heads))
-  const landed = new Set<string>()
+async function mergedHeads(git: PruneGitFacts, baseSha: string, heads: readonly string[]): Promise<Set<string>> {
+  if (git.mergedOnBase !== undefined) return new Set(await git.mergedOnBase(baseSha, heads))
+  const merged = new Set<string>()
   for (const head of heads) {
     if ((await git.resolveCommit(head)) === undefined) continue
-    if (await git.isAncestor(head, baseSha)) landed.add(head)
+    if (await git.isAncestor(head, baseSha)) merged.add(head)
   }
-  return landed
+  return merged
 }
 
 function failureText(error: unknown): string {
@@ -52,8 +52,8 @@ function failureText(error: unknown): string {
  *
  * Git is consulted only when there is such a claim to check, and at most twice
  * per distinct base regardless of how many rows the projection carries. */
-export async function reconcileChangeLandings(prs: readonly PR[], io: YrdCliIO): Promise<ChangeLandingReconciliation> {
-  const candidates = prs.filter((pr) => NOT_LANDED_CLAIMS.has(changeDeliveryState(pr)))
+export async function reconcileChangeMerges(prs: readonly PR[], io: YrdCliIO): Promise<ChangeMergeReconciliation> {
+  const candidates = prs.filter((pr) => NOT_MERGED_CLAIMS.has(changeDeliveryState(pr)))
   if (candidates.length === 0) return EMPTY
 
   const cwd = io.cwd ?? process.cwd()
@@ -65,7 +65,7 @@ export async function reconcileChangeLandings(prs: readonly PR[], io: YrdCliIO):
     else grouped.push(pr)
   }
 
-  const landings = new Map<string, ChangeLanding>()
+  const merges = new Map<string, ChangeMerge>()
   const warnings: string[] = []
   for (const [base, members] of byBase) {
     try {
@@ -78,16 +78,16 @@ export async function reconcileChangeLandings(prs: readonly PR[], io: YrdCliIO):
         continue
       }
       const heads = members.map((pr) => currentChangeRev(pr).head)
-      const landed = await landedHeads(git, baseSha, heads)
+      const merged = await mergedHeads(git, baseSha, heads)
       for (const pr of members) {
         const headSha = currentChangeRev(pr).head
-        if (!landed.has(headSha)) continue
+        if (!merged.has(headSha)) continue
         const recorded = changeDeliveryState(pr)
-        landings.set(pr.id, { recorded, baseSha, headSha, code: `${recorded}-after-landing` })
+        merges.set(pr.id, { recorded, baseSha, headSha, code: `${recorded}-after-landing` })
       }
     } catch (error) {
       warnings.push(`yrd: could not check base '${base}' for already-merged content: ${failureText(error)}`)
     }
   }
-  return { landings, warnings }
+  return { merges, warnings }
 }

@@ -165,7 +165,7 @@ import type {
 } from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { queueReadBases } from "./queue-read-boundary.ts"
-import { LandingAuthorityBoundary } from "./landing-authority-boundary.ts"
+import { MergeAuthorityBoundary } from "./merge-authority-boundary.ts"
 import { execYrdProcessInPlace } from "./runtime-reload.ts"
 
 type QueueTargetResolver = NonNullable<YrdCliIO["resolveQueueTarget"]>
@@ -2718,7 +2718,7 @@ async function createYrdRuntimeHost(
         },
       }),
       base: loaded.config.base,
-      [LandingAuthorityBoundary]: loaded.config.landing ?? "expected",
+      [MergeAuthorityBoundary]: loaded.config.merge ?? "expected",
       checks,
       guards,
       journal: Object.freeze({

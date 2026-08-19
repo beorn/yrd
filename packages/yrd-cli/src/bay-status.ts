@@ -68,10 +68,10 @@ export type BayStatusFacts = Readonly<{
   worktreeDirty?: boolean
   worktreeMissing?: boolean
   /** Tip is ancestor of origin/main OR patch-id-equivalent (caller decides). */
-  tipLanded?: boolean
+  tipMerged?: boolean
   /** Ref or equivalence proof that makes the tip durable. */
   tipDurableAt?: string
-  tipLandedUnknown?: boolean
+  tipMergedUnknown?: boolean
   /** Commits not on origin/main (ahead count) when computable. */
   aheadOfOrigin?: number
   /** Commits whose stable patch is absent from origin/main. */
@@ -314,7 +314,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
         evidence: "branch is absent from origin after a fresh pruned fetch and the tip has no unique commits",
       })
     }
-  } else if (facts.tipDurableAt !== undefined && facts.tipLanded !== true) {
+  } else if (facts.tipDurableAt !== undefined && facts.tipMerged !== true) {
     lines.push({
       class: "commits",
       verdict: "PASS",
@@ -323,13 +323,13 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
           ? `tip is pushed to ${facts.tipDurableAt} — not merged, but durable`
           : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — not merged, but durable`,
     })
-  } else if (facts.tipLandedUnknown === true || (facts.tipLanded === undefined && facts.aheadOfOrigin === undefined)) {
+  } else if (facts.tipMergedUnknown === true || (facts.tipMerged === undefined && facts.aheadOfOrigin === undefined)) {
     lines.push({
       class: "commits",
       verdict: "UNKNOWN",
       evidence: "could not prove the tip is merged into origin/main (ancestry/patch-id unavailable)",
     })
-  } else if (facts.tipLanded === true || facts.aheadOfOrigin === 0) {
+  } else if (facts.tipMerged === true || facts.aheadOfOrigin === 0) {
     lines.push({
       class: "commits",
       verdict: "PASS",

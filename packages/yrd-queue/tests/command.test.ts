@@ -33,7 +33,7 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   createGitPRRecutter,
-  findRepositoryChangeLanding,
+  findRepositoryChangeMerge,
   findRepositoryMergeRecords,
   CANDIDATE_REF_NAMESPACE,
   candidateRefFor,
@@ -204,7 +204,7 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
-async function componentMainLandingRepository(
+async function componentMainMergeRepository(
   options: Readonly<{ pushSuccessor?: boolean; nonBareComponentOrigin?: boolean }> = {},
 ): Promise<{
   repo: string
@@ -283,7 +283,7 @@ async function componentMainLandingRepository(
   }
 }
 
-async function multiComponentMainLandingRepository(): Promise<{
+async function multiComponentMainMergeRepository(): Promise<{
   repo: string
   rootRemote: string
   rootBaseSha: string
@@ -896,7 +896,7 @@ async function submitCertifiedCarrier(
   return certified
 }
 
-async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<void> {
+async function expectMerged(repo: string, evidence: GitCheckEvidence): Promise<void> {
   expect(await git(repo, ["rev-parse", "main"])).toBe(evidence.candidateSha)
   expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
 }
@@ -3271,14 +3271,14 @@ describe("Queue command adapters", () => {
       expect.arrayContaining(["range-diff", "--no-color", "--no-dual-color", "--no-patch"]),
     ])
     expectNonInteractiveRebases(rebaseCommands)
-    const landedTree = await git(repo, ["ls-tree", "main", "dep"])
-    const landedPinSha = landedTree.split(/\s+/u)[2]
-    expect(landedPinSha).toBe(evidence.sourceRewrites?.[0]?.newTipSha)
-    expect(await git(join(repo, "dep"), ["diff", "--name-only", newPinSha, landedPinSha!])).toBe("src/candidate.ts")
+    const mergedTree = await git(repo, ["ls-tree", "main", "dep"])
+    const mergedPinSha = mergedTree.split(/\s+/u)[2]
+    expect(mergedPinSha).toBe(evidence.sourceRewrites?.[0]?.newTipSha)
+    expect(await git(join(repo, "dep"), ["diff", "--name-only", newPinSha, mergedPinSha!])).toBe("src/candidate.ts")
     expect(await git(repo, ["rev-parse", "main^"])).toBe(rootBaseSha)
     expect(await git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "main"])).toBe("dep")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
-    expect(await git(join(repo, "dep"), ["rev-parse", "HEAD"])).toBe(landedPinSha)
+    expect(await git(join(repo, "dep"), ["rev-parse", "HEAD"])).toBe(mergedPinSha)
     expect(run.integration?.sourceRewrites).toEqual(evidence.sourceRewrites)
   })
 
@@ -4238,10 +4238,10 @@ describe("Queue command adapters", () => {
 
     const { sha } = prepared
     if (sha === undefined) throw new Error("candidate preparation returned no sha")
-    const landedFeatures = await git(repo, ["show", `${sha}:features.ts`])
-    expect(landedFeatures).toContain(FEATURE_ALPHA)
-    expect(landedFeatures).toContain(FEATURE_BETA)
-    expect(landedFeatures).not.toContain("DOOMED")
+    const mergedFeatures = await git(repo, ["show", `${sha}:features.ts`])
+    expect(mergedFeatures).toContain(FEATURE_ALPHA)
+    expect(mergedFeatures).toContain(FEATURE_BETA)
+    expect(mergedFeatures).not.toContain("DOOMED")
   })
 
   it("lands an ordinary merge that carries both parents' markers into the same file", async () => {
@@ -4284,9 +4284,9 @@ describe("Queue command adapters", () => {
 
     const { sha } = prepared
     if (sha === undefined) throw new Error("candidate preparation returned no sha")
-    const landedFeatures = await git(repo, ["show", `${sha}:features.ts`])
-    expect(landedFeatures).toContain(FEATURE_ALPHA)
-    expect(landedFeatures).toContain(FEATURE_BETA)
+    const mergedFeatures = await git(repo, ["show", `${sha}:features.ts`])
+    expect(mergedFeatures).toContain(FEATURE_ALPHA)
+    expect(mergedFeatures).toContain(FEATURE_BETA)
   })
 
   it("refuses a payload touching configured refuse paths and names them with the configured reason", async () => {
@@ -4528,8 +4528,8 @@ describe("Queue command adapters", () => {
 
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion).toBe("success")
-    const landedPinSha = (await git(repo, ["ls-tree", "main", "dep"])).split(/\s+/u)[2]
-    expect(await git(join(repo, "dep"), ["diff", "--name-status", "--no-renames", newPinSha, landedPinSha!])).toBe(
+    const mergedPinSha = (await git(repo, ["ls-tree", "main", "dep"])).split(/\s+/u)[2]
+    expect(await git(join(repo, "dep"), ["diff", "--name-status", "--no-renames", newPinSha, mergedPinSha!])).toBe(
       "D\tsrc/delete.ts",
     )
   })
@@ -6360,7 +6360,7 @@ describe("Queue command adapters", () => {
     const job = run.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
-    await expectLanded(repo, evidence)
+    await expectMerged(repo, evidence)
     expect(evidence.exitCode).toBe(0)
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("checked\n")
   })
@@ -6385,7 +6385,7 @@ describe("Queue command adapters", () => {
       integration: {
         commit: equivalentBaseSha,
         baseSha: equivalentBaseSha,
-        alreadyLanded: {
+        alreadyMerged: {
           candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
           candidateTreeSha: equivalentTreeSha,
           baseTreeSha: equivalentTreeSha,
@@ -6397,7 +6397,7 @@ describe("Queue command adapters", () => {
       state: "closed",
       merged: true,
       integration: { commit: equivalentBaseSha, baseSha: equivalentBaseSha },
-      alreadyLanded: {
+      alreadyMerged: {
         candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
         candidateTreeSha: equivalentTreeSha,
         baseTreeSha: equivalentTreeSha,
@@ -6473,7 +6473,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(baseSha)
     const job = run.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
-    await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
+    await expectMerged(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
   it("drains from the authoritative queue base without touching dirty behind operator main", async () => {
@@ -6532,10 +6532,10 @@ describe("Queue command adapters", () => {
     for (let index = 1; index < runs.length; index += 1) {
       expect(checks[index]?.baseSha).toBe(runs[index - 1]?.integration?.commit)
     }
-    const finalLanding = runs.at(-1)?.integration?.commit
-    expect(finalLanding).toBeDefined()
-    expect(await git(remote, ["rev-parse", "main"])).toBe(finalLanding)
-    expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(finalLanding)
+    const finalMerge = runs.at(-1)?.integration?.commit
+    expect(finalMerge).toBeDefined()
+    expect(await git(remote, ["rev-parse", "main"])).toBe(finalMerge)
+    expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(finalMerge)
     expect(await operatorSnapshot()).toEqual(operatorBefore)
   }, 15_000)
 
@@ -7234,7 +7234,7 @@ describe("Queue command adapters", () => {
     })
     const job = runs[0]!.steps[0]!.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
-    await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
+    await expectMerged(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
   it("proves a regenerated code landing by Change-Id when the submitted SHA is absent from base ancestry", async () => {
@@ -7257,7 +7257,7 @@ describe("Queue command adapters", () => {
     await expect(git(repo, ["merge-base", "--is-ancestor", submittedHead, landingSha])).rejects.toThrow()
     await using process = createProcess()
     await expect(
-      findRepositoryChangeLanding({
+      findRepositoryChangeMerge({
         inject: { process },
         repo,
         baseSha: landingSha,
@@ -7268,7 +7268,7 @@ describe("Queue command adapters", () => {
       fact: { changeId, submittedHead, landingSha, baseSha: landingSha },
     })
     await expect(
-      findRepositoryChangeLanding({
+      findRepositoryChangeMerge({
         inject: { process },
         repo,
         baseSha: landingSha,
@@ -7363,7 +7363,7 @@ describe("Queue command adapters", () => {
     // The distinct trailer must not widen what the Change-Id ancestry proof sees: one value, still.
     expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", candidateSha])).toBe(changeId)
     await expect(
-      findRepositoryChangeLanding({
+      findRepositoryChangeMerge({
         inject: { process },
         repo,
         baseSha: candidateSha,
@@ -8201,7 +8201,7 @@ describe("Queue command adapters", () => {
   })
 
   it("keeps the submit-time publication carrier after an ordinary task-branch fast-forward", async () => {
-    const fixture = await componentMainLandingRepository({ pushSuccessor: true })
+    const fixture = await componentMainMergeRepository({ pushSuccessor: true })
     const carriers = await git(join(fixture.repo, "dep"), [
       "for-each-ref",
       `--contains=${fixture.pinSha}`,
@@ -8220,7 +8220,7 @@ describe("Queue command adapters", () => {
     async (mode) => {
       // The task branch advances again after publishing the pin, matching the
       // production sequence that made the post-landing actuator necessary.
-      const fixture = await componentMainLandingRepository({ pushSuccessor: true })
+      const fixture = await componentMainMergeRepository({ pushSuccessor: true })
       expect(await git(fixture.componentRemote, ["rev-parse", "main"])).toBe(fixture.componentBaseSha)
 
       await using process = createProcess()
@@ -8286,7 +8286,7 @@ describe("Queue command adapters", () => {
   )
 
   it("refuses a success-looking no-op actuator instead of emitting an empty component outcome set", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
     await using process = createProcess()
     const noOpProcess: Pick<Process, "run"> = {
       run(request) {
@@ -8334,7 +8334,7 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it("fast-forwards a clean checked-out main at a local non-bare component origin", async () => {
-    const fixture = await componentMainLandingRepository({ nonBareComponentOrigin: true })
+    const fixture = await componentMainMergeRepository({ nonBareComponentOrigin: true })
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
     await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
@@ -8350,7 +8350,7 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it("refuses to advance a dirty checked-out main at a local non-bare component origin", async () => {
-    const fixture = await componentMainLandingRepository({ nonBareComponentOrigin: true })
+    const fixture = await componentMainMergeRepository({ nonBareComponentOrigin: true })
     await writeFile(join(fixture.component, "version.txt"), "dirty\n")
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
@@ -8383,7 +8383,7 @@ describe("Queue command adapters", () => {
   it.each(["native", "configured"] as const)(
     "converges a component-main gap left by an earlier root-only landing while landing a later PR (%s)",
     async (mode) => {
-      const fixture = await componentMainLandingRepository()
+      const fixture = await componentMainMergeRepository()
 
       // Preserve the production R2715 residue: the root pin landed, but its
       // component main never advanced. The next carrier does not touch the
@@ -8424,7 +8424,7 @@ describe("Queue command adapters", () => {
   it.each(["native", "configured"] as const)(
     "advances safe component mains while loudly refusing an independent standing divergence (%s)",
     async (mode) => {
-      const fixture = await multiComponentMainLandingRepository()
+      const fixture = await multiComponentMainMergeRepository()
       const [divergentComponent, safeComponent] = fixture.components
       if (divergentComponent === undefined || safeComponent === undefined) {
         throw new Error("missing multi-component fixture")
@@ -8497,7 +8497,7 @@ describe("Queue command adapters", () => {
   )
 
   it("classifies against freshly fetched component main instead of a stale bay tracking ref", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
     const bayComponent = join(fixture.repo, "dep")
     expect(await git(bayComponent, ["rev-parse", "origin/main"])).toBe(fixture.componentBaseSha)
     await git(fixture.component, ["push", "-q", "origin", `${fixture.pinSha}:refs/heads/main`])
@@ -8539,7 +8539,7 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it("refuses a non-ancestral component main without landing or force-pushing", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
     await git(fixture.component, ["switch", "-q", "main"])
     await writeFile(join(fixture.component, "divergent.txt"), "divergent main\n")
     await git(fixture.component, ["add", "divergent.txt"])
@@ -8619,7 +8619,7 @@ describe("Queue command adapters", () => {
    * assertion below reads the pin the run actually wrote.
    */
   it("does not roll the component back for a clean-headed carrier that moves the gitlink backward", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
 
     // Component main absorbs the pinned work, and the root advances its gitlink
     // to match, so the carrier below branches from a base that is fully current.
@@ -8681,7 +8681,7 @@ describe("Queue command adapters", () => {
   })
 
   it("does not tell a spent component pin to rebuild when component main already contains it", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
 
     // The component lands the pinned work and moves on.
     await git(fixture.component, ["switch", "-q", "main"])
@@ -8731,7 +8731,7 @@ describe("Queue command adapters", () => {
    * nothing.
    */
   it("tells a stale-headed gitlink-only carrier to close when the base already carries its pin", async () => {
-    const fixture = await componentMainLandingRepository({ pushSuccessor: true })
+    const fixture = await componentMainMergeRepository({ pushSuccessor: true })
 
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
@@ -8779,7 +8779,7 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it("keeps the rebuild remedy when component main has the work but the base's pin does not", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
 
     // The component lands the pinned work, but nothing promotes root's gitlink —
     // so this carrier is still the one that would deliver it.
@@ -8818,7 +8818,7 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it("refuses a stale resolved component pin and enumerates the component commits it would drop", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
     await git(fixture.component, ["switch", "-q", "main"])
     await writeFile(join(fixture.component, "earlier-landing.txt"), "already resolved\n")
     await git(fixture.component, ["add", "earlier-landing.txt"])
@@ -8871,7 +8871,7 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it("leaves the root landed and converges component main when a transient promotion failure is retried", async () => {
-    const fixture = await componentMainLandingRepository()
+    const fixture = await componentMainMergeRepository()
     await using process = createProcess()
     let failedPromotion = false
     const flakyProcess: Pick<Process, "run"> = {
@@ -8943,7 +8943,7 @@ describe("Queue command adapters", () => {
   }, 30_000)
 
   it("keeps earlier component fast-forwards and converges the remaining origins on retry", async () => {
-    const fixture = await multiComponentMainLandingRepository()
+    const fixture = await multiComponentMainMergeRepository()
     const [firstComponent, secondComponent] = fixture.components
     if (firstComponent === undefined || secondComponent === undefined) {
       throw new Error("missing multi-component fixture")
@@ -9094,9 +9094,9 @@ describe("Queue command adapters", () => {
       status: "rejected",
       reason: expect.objectContaining({ message: expect.stringContaining("queue 'main' is running") }),
     })
-    const landing = await git(remote, ["rev-parse", "main"])
-    const landedPaths = (await git(remote, ["ls-tree", "--name-only", landing])).split("\n")
-    expect(landedPaths.filter((path) => path === "one.txt" || path === "two.txt")).toHaveLength(1)
+    const merge = await git(remote, ["rev-parse", "main"])
+    const mergedPaths = (await git(remote, ["ls-tree", "--name-only", merge])).split("\n")
+    expect(mergedPaths.filter((path) => path === "one.txt" || path === "two.txt")).toHaveLength(1)
     expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
   })
 
@@ -9166,7 +9166,7 @@ describe("Queue command adapters", () => {
       runtime,
     )
     expect(finished.status).toBe("completed")
-    await expectLanded(repo, checkpoint)
+    await expectMerged(repo, checkpoint)
   })
 
   it("refuses merge when the base moves after the checked candidate", async () => {
@@ -9213,7 +9213,7 @@ describe("Queue command adapters", () => {
 
   it.each(["native-worktree", "native-ref", "native-remote", "configured"] as const)(
     "drains canceled or superseded authority at the %s merge side-effect boundary",
-    async (landingMode) => {
+    async (mergeMode) => {
       const { repo, feature: featureSha } = await repository("feature")
       const baseSha = await git(repo, ["rev-parse", "main"])
       await using process = createProcess()
@@ -9229,12 +9229,12 @@ describe("Queue command adapters", () => {
         { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
       )
       if (checked.status !== "completed" || checked.conclusion !== "success") throw new Error("check did not pass")
-      if (landingMode === "native-remote") {
+      if (mergeMode === "native-remote") {
         const remote = join(repo, "..", "origin.git")
         await Bun.$`git init -q --bare ${remote}`
         await git(repo, ["remote", "add", "origin", remote])
         await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
-      } else if (landingMode === "native-ref") {
+      } else if (mergeMode === "native-ref") {
         await git(repo, ["switch", "--detach", "-q", baseSha])
       }
 
@@ -9248,10 +9248,10 @@ describe("Queue command adapters", () => {
           }
           if (
             request.argv[0] === "git" &&
-            ((landingMode === "native-remote" &&
+            ((mergeMode === "native-remote" &&
               request.argv[3] === "config" &&
               request.argv.includes("submodule.alternateLocation")) ||
-              (landingMode !== "native-remote" &&
+              (mergeMode !== "native-remote" &&
                 request.argv[3] === "merge-base" &&
                 request.argv[4] === "--is-ancestor" &&
                 request.argv[5] === featureSha))
@@ -9260,11 +9260,11 @@ describe("Queue command adapters", () => {
           }
           if (
             request.argv[0] === "git" &&
-            ((landingMode === "native-worktree" && request.argv[3] === "merge" && request.argv[4] === "--ff-only") ||
-              (landingMode === "native-ref" &&
+            ((mergeMode === "native-worktree" && request.argv[3] === "merge" && request.argv[4] === "--ff-only") ||
+              (mergeMode === "native-ref" &&
                 request.argv[3] === "update-ref" &&
                 request.argv[4] === "refs/heads/main") ||
-              (landingMode === "native-remote" && request.argv[3] === "push"))
+              (mergeMode === "native-remote" && request.argv[3] === "push"))
           ) {
             mergeRuns += 1
           }
@@ -9272,7 +9272,7 @@ describe("Queue command adapters", () => {
         },
       }
       const merge =
-        landingMode === "configured"
+        mergeMode === "configured"
           ? configuredMergeStep<Checked>({
               inject: { process: authorityProcess },
               repo,
@@ -9292,11 +9292,11 @@ describe("Queue command adapters", () => {
       expect(canceled.signal.aborted).toBe(true)
       expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-canceled" } })
       expect(mergeRuns).toBe(0)
-      const landedSha =
-        landingMode === "native-remote"
+      const mergedSha =
+        mergeMode === "native-remote"
           ? (await git(repo, ["ls-remote", "origin", "refs/heads/main"])).split(/\s/u)[0]
           : await git(repo, ["rev-parse", "main"])
-      expect(landedSha).toBe(baseSha)
+      expect(mergedSha).toBe(baseSha)
     },
   )
 
@@ -9321,16 +9321,16 @@ describe("Queue command adapters", () => {
     if (checked.status !== "completed" || checked.conclusion !== "success") throw new Error("check did not pass")
 
     const canceled = new AbortController()
-    let concurrentLanding = false
+    let concurrentMerge = false
     const authorityProcess: Pick<Process, "run"> = {
       async run(request) {
         if (
-          !concurrentLanding &&
+          !concurrentMerge &&
           request.argv[0] === "git" &&
           request.argv[3] === "config" &&
           request.argv.includes("submodule.alternateLocation")
         ) {
-          concurrentLanding = true
+          concurrentMerge = true
           await git(repo, ["push", "-q", "origin", `${featureSha}:refs/heads/main`])
           canceled.abort()
         }
@@ -9347,7 +9347,7 @@ describe("Queue command adapters", () => {
       { id: "J-merge", attempt: 1, runner: "test", signal: canceled.signal },
     )
 
-    expect(concurrentLanding).toBe(true)
+    expect(concurrentMerge).toBe(true)
     expect(await git(remote, ["rev-parse", "main"])).toBe(featureSha)
     expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-canceled" } })
   })
@@ -9359,13 +9359,13 @@ describe("Queue command adapters", () => {
     await git(repo, ["remote", "add", "origin", remote])
     await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
     await using process = createProcess()
-    let landedSha: string | undefined
+    let mergedSha: string | undefined
     const postPushFailure: Pick<Process, "run"> = {
       async run(request) {
         const result = await process.run(request)
         const refspec = request.argv.find((argument) => argument.endsWith(":refs/heads/main"))
         if (request.argv[0] !== "git" || request.argv[3] !== "push" || refspec === undefined) return result
-        landedSha = refspec.slice(0, refspec.indexOf(":"))
+        mergedSha = refspec.slice(0, refspec.indexOf(":"))
         return { ...result, exitCode: 19, stderr: "transport lost the success acknowledgement" }
       },
     }
@@ -9374,12 +9374,12 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(landedSha).toBeDefined()
-    expect(await git(remote, ["rev-parse", "main"])).toBe(landedSha)
+    expect(mergedSha).toBeDefined()
+    expect(await git(remote, ["rev-parse", "main"])).toBe(mergedSha)
     expect(run, JSON.stringify(run, null, 2)).toMatchObject({
       status: "completed",
       conclusion: "success",
-      integration: { commit: landedSha },
+      integration: { commit: mergedSha },
     })
   })
 
@@ -9418,22 +9418,22 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-    const landing = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
+    const mergedSha = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
 
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "success",
-      integration: { commit: landing, baseSha: landing },
+      integration: { commit: mergedSha, baseSha: mergedSha },
     })
     expect(await git(repo, ["merge-base", "--is-ancestor", run.integration!.commit, "refs/remotes/origin/main"])).toBe(
       "",
     )
-    expect(landing).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
+    expect(mergedSha).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "integrated",
-      integration: { commit: landing, baseSha: landing },
+      integration: { commit: mergedSha, baseSha: mergedSha },
     })
   })
 

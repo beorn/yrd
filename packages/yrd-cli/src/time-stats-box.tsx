@@ -229,7 +229,7 @@ const STATS_ROWS: readonly StatsRow[] = [
     // could have gone to instead of a clean MERGED.
     label: "DUP",
     color: "$fg-muted",
-    value: (bucket) => countCell(bucket, bucket.runs.alreadyLanded),
+    value: (bucket) => countCell(bucket, bucket.runs.alreadyMerged),
   },
   {
     label: "FAILS",

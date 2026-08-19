@@ -117,7 +117,7 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
-import { LandingAuthorityBoundary } from "../src/landing-authority-boundary.ts"
+import { MergeAuthorityBoundary } from "../src/merge-authority-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
 import { YRD_VERSION } from "../src/version.ts"
 import { writeInstalledBaseline } from "../src/installed-baseline.ts"
@@ -489,7 +489,7 @@ async function createApp(
       JobResult<{
         commit: string
         baseSha: string
-        alreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
+        alreadyMerged?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
         sourceRewrites?: readonly SourceRewrite[]
       }>
     > => {
@@ -503,7 +503,7 @@ async function createApp(
         output: {
           commit,
           baseSha: commit,
-          ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyLanded: options.mergeAlreadyLanded }),
+          ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyMerged: options.mergeAlreadyLanded }),
           ...(options.sourceRewrites === undefined ? {} : { sourceRewrites: options.sourceRewrites }),
         },
       }
@@ -998,7 +998,7 @@ describe("runYrd", () => {
       "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
     )
     expect(help.stdout()).toContain(
-      "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
+      "mergedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
     )
     expect(help.stdout()).toContain(
       "--state needs-author — answers: does this PR currently need author action? tense: current",
@@ -1322,14 +1322,14 @@ describe("runYrd", () => {
     // (and every repository that has never heard of the key) is unaffected.
     const repo = mkdtempSync(join(tmpdir(), "yrd-landing-authority-"))
     try {
-      const submitInto = async (yml: string | undefined, authoritativeLanding?: "expected" | "none") => {
+      const submitInto = async (yml: string | undefined, authoritativeMerge?: "expected" | "none") => {
         if (yml === undefined) rmSync(join(repo, ".yrd.yml"), { force: true })
         else writeFileSync(join(repo, ".yrd.yml"), yml)
         const app = await createApp()
         const output = outputIO({ cwd: repo, resolveRevision: async () => HEAD_SHA })
         const services = {
           base: "main",
-          ...(authoritativeLanding === undefined ? {} : { [LandingAuthorityBoundary]: authoritativeLanding }),
+          ...(authoritativeMerge === undefined ? {} : { [MergeAuthorityBoundary]: authoritativeMerge }),
         }
         const code = await runYrd(
           app,
@@ -2015,10 +2015,10 @@ describe("runYrd", () => {
       issue,
     })
     await app.bays.requestChecks({ pr: "PR1" })
-    const landed = outputIO()
+    const merged = outputIO()
     expect(
-      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), landed.io),
-      landed.stderr(),
+      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), merged.io),
+      merged.stderr(),
     ).toBe(0)
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
     expect(app.bays.pr("PR1")).toMatchObject({ state: "closed", merged: true, issue })
@@ -5052,9 +5052,9 @@ describe("runYrd", () => {
       integration: { commit: MERGED_SHA },
     })
 
-    const landed = outputIO()
-    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), landed.io), landed.stderr()).toBe(0)
-    expect(JSON.parse(landed.stdout())).toMatchObject({
+    const merged = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), merged.io), merged.stderr()).toBe(0)
+    expect(JSON.parse(merged.stdout())).toMatchObject({
       command: "pr.view",
       pr: { id: "PR1", state: "closed", merged: true, taskStatus: "done" },
       landing: {
@@ -6492,7 +6492,7 @@ describe("runYrd", () => {
       terminalAttempts: 5,
       outcomes: {
         integrated: 2,
-        alreadyLanded: 1,
+        alreadyMerged: 1,
         passed: 0,
         rejected: 1,
         environmentRefused: 1,
@@ -6553,7 +6553,7 @@ describe("runYrd", () => {
       terminalAttempts: 0,
       outcomes: {
         integrated: 0,
-        alreadyLanded: 0,
+        alreadyMerged: 0,
         passed: 0,
         rejected: 0,
         environmentRefused: 0,
@@ -6580,7 +6580,7 @@ describe("runYrd", () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     // One landed Run that finished 8h ago: outside a 6h listing window, inside 24h.
-    const landed = fakeRun({
+    const merged = fakeRun({
       id: "R1",
       status: "passed",
       pr: { id: "PR1", revision: 1, headSha: "1".repeat(40), baseSha: BASE_SHA },
@@ -6604,7 +6604,7 @@ describe("runYrd", () => {
       admissionOrder: fixtureAdmissionOrder(prs),
       running: [],
       waiting: [],
-      finished: [landed],
+      finished: [merged],
     }
     const submissionTimes = new Map(prs.map((pr) => [queueRevisionKey(currentChangeSnapshot(pr)), pr.submittedAt!]))
     const base = {
@@ -6643,7 +6643,7 @@ describe("runYrd", () => {
     const minute = 60_000
     const hour = 60 * minute
     const now = Date.parse("2026-07-13T12:00:00.000Z")
-    const landing = (id: string, pr: string, sha: string, finishedAt: string) =>
+    const merge = (id: string, pr: string, sha: string, finishedAt: string) =>
       fakeRun({
         id,
         status: "passed",
@@ -6655,8 +6655,8 @@ describe("runYrd", () => {
       })
     // One landing 8h ago (inside the 24h metrics window) and one 3 days ago
     // (outside 24h, inside a week). Both are dropped from the 6h listing rows.
-    const recent = landing("R1", "PR1", "1".repeat(40), "2026-07-13T04:00:00.000Z")
-    const older = landing("R2", "PR2", "2".repeat(40), "2026-07-10T12:00:00.000Z")
+    const recent = merge("R1", "PR1", "1".repeat(40), "2026-07-13T04:00:00.000Z")
+    const older = merge("R2", "PR2", "2".repeat(40), "2026-07-10T12:00:00.000Z")
     const prs = [
       timelineFixturePr("PR1", "integrated", "2026-07-13T03:45:00.000Z", undefined, {
         headSha: "1".repeat(40),
@@ -6705,7 +6705,7 @@ describe("runYrd", () => {
       headSha: "1".repeat(40),
       integratedAt: "2026-07-13T10:00:00.000Z",
     })
-    const landed = (id: string, finishedAt: string) =>
+    const merged = (id: string, finishedAt: string) =>
       fakeRun({
         id,
         status: "passed",
@@ -6715,8 +6715,8 @@ describe("runYrd", () => {
         steps: [],
         integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
       })
-    const older = landed("R-old", "2026-07-13T10:00:00.000Z")
-    const newer = landed("R-new", "2026-07-13T11:00:00.000Z")
+    const older = merged("R-old", "2026-07-13T10:00:00.000Z")
+    const newer = merged("R-new", "2026-07-13T11:00:00.000Z")
     const result: QueueStatusResult = {
       base: "main",
       prs: [pr],
@@ -7206,7 +7206,7 @@ describe("runYrd", () => {
     const driver = {
       queueId: `${repo}#main`,
       epoch: "11111111-1111-4111-8111-111111111111",
-      lastLanded: null,
+      lastMerged: null,
     }
     let findings: QueueAuditEmission["findings"] = []
     const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings }) } }
@@ -7514,7 +7514,7 @@ describe("runYrd", () => {
         residentQueueProgress(app: TestApp, now: string): unknown
       }
     ).residentQueueProgress
-    const noLanding = {
+    const noMerge = {
       code: "queue-progress-stalled",
       message: "Queue 'main' has one required-check PR queued and no landing for 30m",
       pr: "PR1",
@@ -7557,7 +7557,7 @@ describe("runYrd", () => {
       since: "2026-07-09T12:00:00.000Z",
       blockedMs: 600_000,
     }
-    let findings: Array<typeof noLanding | typeof neverStarted | typeof refusalLoop | typeof expiredHold> = []
+    let findings: Array<typeof noMerge | typeof neverStarted | typeof refusalLoop | typeof expiredHold> = []
     const progressApp = {
       state: () => app.state(),
       queue: { audit: () => ({ findings }) },
@@ -7568,11 +7568,11 @@ describe("runYrd", () => {
       observedAt: "2026-07-09T12:10:00.000Z",
     })
 
-    findings = [noLanding]
+    findings = [noMerge]
     expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
       state: "stalled",
       observedAt: "2026-07-09T12:10:00.000Z",
-      findings: [noLanding],
+      findings: [noMerge],
     })
 
     findings = [neverStarted]
@@ -7649,7 +7649,7 @@ describe("runYrd", () => {
         driver: {
           queueId: `${repo}#release/2.0`,
           epoch: "11111111-1111-4111-8111-111111111111",
-          lastLanded: null,
+          lastMerged: null,
         },
       }),
     )
@@ -7692,7 +7692,7 @@ describe("runYrd", () => {
         {
           intervalMs: 60_000,
           queueProgress: (observedAt) => runInternals.residentQueueProgress(app, observedAt),
-          driver: { queueId: `${repo}#main`, lastLanded: () => null },
+          driver: { queueId: `${repo}#main`, lastMerged: () => null },
         },
       )
       try {
@@ -7732,7 +7732,7 @@ describe("runYrd", () => {
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     const implementationSource = "git:35562d1579f140669a453b310340582b8cc1b42f"
-    const landed = {
+    const merged = {
       commit: "a".repeat(40),
       at: "2026-07-13T11:59:00.000Z",
     }
@@ -7746,7 +7746,7 @@ describe("runYrd", () => {
           intervalMs: 5,
           queueProgress: (observedAt) => ({ state: "healthy", observedAt }),
           retention: "disabled",
-          driver: { queueId: `${repo}#main`, lastLanded: () => landed },
+          driver: { queueId: `${repo}#main`, lastMerged: () => merged },
         },
       )
       try {
@@ -7768,7 +7768,7 @@ describe("runYrd", () => {
           driver: {
             queueId: `${repo}#main`,
             epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
-            lastLanded: landed,
+            lastMerged: merged,
           },
         })
         const epoch = (JSON.parse(readFileSync(statusPath, "utf8")) as { driver: { epoch: string } }).driver.epoch
@@ -7778,7 +7778,7 @@ describe("runYrd", () => {
             expect(JSON.parse(readFileSync(statusPath, "utf8"))).toMatchObject({
               pid: process.pid,
               lastTickAt: "2026-07-13T12:00:01.000Z",
-              driver: { queueId: `${repo}#main`, epoch, lastLanded: landed },
+              driver: { queueId: `${repo}#main`, epoch, lastMerged: merged },
             }),
           { timeout: 5_000, interval: 5 },
         )
@@ -7925,7 +7925,7 @@ describe("runYrd", () => {
     ).toEqual(Object.fromEntries(cases.map((entry) => [entry.run, { status: entry.status, glyph: "×" }])))
     expect(projection.metrics.outcomes).toEqual({
       integrated: 0,
-      alreadyLanded: 0,
+      alreadyMerged: 0,
       passed: 0,
       rejected: 2,
       environmentRefused: 1,
@@ -8219,7 +8219,7 @@ describe("runYrd", () => {
         terminalAttempts: 44,
         outcomes: {
           integrated: 39,
-          alreadyLanded: 0,
+          alreadyMerged: 0,
           passed: 0,
           rejected: 5,
           environmentRefused: 0,
@@ -12691,19 +12691,19 @@ describe("typed issue landing bridge", () => {
     const [run] = await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
     if (run === undefined) throw new Error("expected an already-landed Queue run")
 
-    const landedPr = app.bays.pr("PR1")
-    expect(landedPr).toMatchObject({
+    const mergedPr = app.bays.pr("PR1")
+    expect(mergedPr).toMatchObject({
       state: "closed",
       merged: true,
       integration: { commit: BASE_SHA, baseSha: BASE_SHA },
-      alreadyLanded: {
+      alreadyMerged: {
         candidateSha: HEAD_SHA,
         candidateTreeSha: equivalentTreeSha,
         baseTreeSha: equivalentTreeSha,
       },
     })
-    if (landedPr === undefined) throw new Error("expected the already-landed PR")
-    expect(changeDeliveryState(landedPr)).toBe("already-landed")
+    if (mergedPr === undefined) throw new Error("expected the already-landed PR")
+    expect(changeDeliveryState(mergedPr)).toBe("already-landed")
     expect(
       humanQueueProjection(
         {
@@ -12717,7 +12717,7 @@ describe("typed issue landing bridge", () => {
         Date.parse("2026-07-09T12:01:00.000Z"),
         { state: app.state().bays },
       ),
-    ).toMatchObject({ integrated: 0, alreadyLanded: 1 })
+    ).toMatchObject({ integrated: 0, alreadyMerged: 1 })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
@@ -13111,11 +13111,11 @@ describe("typed issue landing bridge", () => {
   it("records a completed escaped regression without rewriting either integration", async () => {
     const originalIssue = "@yrd/core/21090-original"
     const repairIssue = "@yrd/core/21091-repair"
-    const originalLanding = "c".repeat(40)
-    const repairLanding = "d".repeat(40)
+    const originalMerge = "c".repeat(40)
+    const repairMerge = "d".repeat(40)
     const repairHead = "2".repeat(40)
     let now = "2026-07-09T12:00:00.000Z"
-    await using app = await createApp({ mergeCommits: [originalLanding, repairLanding], clock: () => now })
+    await using app = await createApp({ mergeCommits: [originalMerge, repairMerge], clock: () => now })
     await app.bays.submit({ branch: "topic/original", headSha: HEAD_SHA, base: "main", issue: originalIssue })
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
     now = "2026-07-09T14:00:00.000Z"
@@ -13152,7 +13152,7 @@ describe("typed issue landing bridge", () => {
       revision: 1,
       headSha: HEAD_SHA,
       run: "R1",
-      landingSha: originalLanding,
+      landingSha: originalMerge,
       detectedAt: "2026-07-09T13:00:00.000Z",
       severity: "high",
       evidence: "artifact://tty/21091-red",
@@ -13161,7 +13161,7 @@ describe("typed issue landing bridge", () => {
       repairIssueRef: repairIssue,
       repairPr: "PR2",
       repairRun: "R2",
-      repairLandingSha: repairLanding,
+      repairLandingSha: repairMerge,
     }
     for (const impossible of ["2026-07-09T11:59:59.999Z", "2026-07-09T14:00:00.001Z"]) {
       const refusedChronology = outputIO()
@@ -13177,14 +13177,14 @@ describe("typed issue landing bridge", () => {
     expect(app.bays.pr("PR1")).toMatchObject({
       state: "closed",
       merged: true,
-      integration: { commit: originalLanding },
+      integration: { commit: originalMerge },
       regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
     })
     expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
     expect(app.bays.pr("PR2")).toMatchObject({
       state: "closed",
       merged: true,
-      integration: { commit: repairLanding },
+      integration: { commit: repairMerge },
     })
 
     const repeated = outputIO()
@@ -13207,7 +13207,7 @@ describe("typed issue landing bridge", () => {
         issueRef: originalIssue,
         pr: "PR1",
         status: "integrated",
-        landingSha: originalLanding,
+        landingSha: originalMerge,
         regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
       }),
     ])
@@ -13216,11 +13216,11 @@ describe("typed issue landing bridge", () => {
     expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io), human.stderr()).toBe(0)
     for (const visibleFact of [
       "REGRESSION high DETECTED 2026-07-09T13:00:00.000Z RECORDED 2026-07-09T15:00:00.000Z",
-      `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalLanding}`,
+      `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalMerge}`,
       "artifact://tty/21091-red",
       "hab:turn/original-implementation",
       "tribe:verdict/original-review",
-      `REPAIR ${repairIssue} PR2 R2 LANDING ${repairLanding}`,
+      `REPAIR ${repairIssue} PR2 R2 LANDING ${repairMerge}`,
     ]) {
       expect(human.stdout()).toContain(visibleFact)
     }
@@ -13966,7 +13966,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       driver: {
         queueId: `${root}#main`,
         epoch: "11111111-1111-4111-8111-111111111111",
-        lastLanded: null,
+        lastMerged: null,
       },
     }
     const writeRunner = (lastTickAt: string) => writeFileSync(statusPath, JSON.stringify({ ...runner, lastTickAt }))
@@ -14538,7 +14538,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
             pid: process.pid,
             startedAt: "2026-07-09T12:00:00.000Z",
             lastTickAt: "2026-07-09T12:00:58.000Z",
-            driver: { ...driver, lastLanded: null },
+            driver: { ...driver, lastMerged: null },
             ...status,
           }),
         )
@@ -14599,7 +14599,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
             pid: process.pid,
             startedAt: "2026-07-09T12:00:00.000Z",
             lastTickAt: "2026-07-09T12:00:58.000Z",
-            driver: { ...driver, lastLanded: null },
+            driver: { ...driver, lastMerged: null },
           }),
         )
         const output = outputIO({ cwd: repo, stateDir })
@@ -14805,7 +14805,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           stateDir,
           leaseDriver,
           {
-            driver: { queueId: leaseDriver.queueId, epoch: statusEpoch, lastLanded: null },
+            driver: { queueId: leaseDriver.queueId, epoch: statusEpoch, lastMerged: null },
             retention: {
               policy: "disabled",
               source: "mutable-journal",

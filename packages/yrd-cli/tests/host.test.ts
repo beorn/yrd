@@ -1957,12 +1957,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
-    const landing = await git(repo, "rev-parse", "main")
+    const merge = await git(repo, "rev-parse", "main")
 
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "success",
-      integration: { commit: landing, baseSha: landing },
+      integration: { commit: merge, baseSha: merge },
     })
     expect(await Bun.file(join(repo, "delegated-merge.marker")).exists()).toBe(true)
   })
@@ -2120,7 +2120,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(await git(repo, "rev-parse", "main")).toBe(staleLocalMain)
     expect(await git(repo, "rev-parse", "origin/main")).toBe(authoritativeMain)
     await using host = await createYrdHost({ cwd: repo })
-    expect(host.config.landing).toBe("none")
+    expect(host.config.merge).toBe("none")
   })
 
   it("boots doctor --rebuild-views through a stale Journal view registration", async () => {
@@ -4505,7 +4505,7 @@ checks: [{check: {run: "true"}}]
             driver: {
               queueId: `${repo}#main`,
               epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
-              lastLanded: null,
+              lastMerged: null,
             },
             retention: {
               policy: { keepFrames: 500 },
@@ -4576,7 +4576,7 @@ checks: [{check: {run: "true"}}]
             driver: {
               queueId: `${repo}#release/2.0`,
               epoch: expect.stringMatching(/^[0-9a-f-]{36}$/u),
-              lastLanded: null,
+              lastMerged: null,
             },
           }),
         { timeout: 10_000 },
@@ -4940,11 +4940,11 @@ checks: [{check: {run: "true"}}]
       },
     })
     const candidateSha = result.integration.commit
-    const landedPinSha = result.integration.sourceRewrites?.[0]?.newTipSha
-    if (landedPinSha === undefined) throw new Error("expected one source rewrite receipt")
+    const mergedPinSha = result.integration.sourceRewrites?.[0]?.newTipSha
+    if (mergedPinSha === undefined) throw new Error("expected one source rewrite receipt")
     expect(await git(repo, "rev-parse", "main")).toBe(candidateSha)
     expect(await git(repo, "rev-parse", "main^")).toBe(rootBaseSha)
-    expect(await git(join(repo, "dep"), "rev-parse", "HEAD")).toBe(landedPinSha)
+    expect(await git(join(repo, "dep"), "rev-parse", "HEAD")).toBe(mergedPinSha)
     expect(await git(repo, "status", "--porcelain")).toBe("")
   })
 

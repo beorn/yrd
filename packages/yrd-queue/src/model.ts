@@ -340,13 +340,13 @@ export const CandidateSchema = z
   })
   .strict()
 
-export type AlreadyLandedEvidence = Readonly<{
+export type AlreadyMergedEvidence = Readonly<{
   candidateSha: string
   candidateTreeSha: string
   baseTreeSha: string
 }>
 
-export const AlreadyLandedEvidenceSchema = z
+export const AlreadyMergedEvidenceSchema = z
   .object({
     candidateSha: GitShaSchema,
     candidateTreeSha: GitShaSchema,
@@ -356,7 +356,7 @@ export const AlreadyLandedEvidenceSchema = z
   .refine(({ candidateTreeSha, baseTreeSha }) => candidateTreeSha === baseTreeSha, {
     message: "candidateTreeSha must equal baseTreeSha",
     path: ["candidateTreeSha"],
-  }) as z.ZodType<AlreadyLandedEvidence>
+  }) as z.ZodType<AlreadyMergedEvidence>
 
 export type ComponentMainReceipt = Readonly<{
   path: string
@@ -415,7 +415,7 @@ export const ComponentMainOutcomesSchema = z
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
-  alreadyLanded?: AlreadyLandedEvidence
+  alreadyMerged?: AlreadyMergedEvidence
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   componentMains?: readonly ComponentMainReceipt[]
@@ -426,7 +426,7 @@ export const IntegrationProofSchema = z
     commit: GitShaSchema,
     // The base branch tip after integration, not the pre-integration base.
     baseSha: GitShaSchema,
-    alreadyLanded: AlreadyLandedEvidenceSchema.optional(),
+    alreadyMerged: AlreadyMergedEvidenceSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     componentMains: z.array(ComponentMainReceiptSchema).min(1).optional(),

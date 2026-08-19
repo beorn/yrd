@@ -948,8 +948,8 @@ describe("withBays", () => {
     const seededCommand = { id: nextId(), op: "fixture.invalid-regression-tuple" }
     const originalIssue = "@km/all/21091-original"
     const repairIssue = "@km/all/21091-repair"
-    const originalLanding = "c".repeat(40)
-    const repairLanding = "d".repeat(40)
+    const originalMerge = "c".repeat(40)
+    const repairMerge = "d".repeat(40)
     const at = (hour: number) => `2026-01-01T${String(hour).padStart(2, "0")}:00:00.000Z`
     const pushed = (pr: string, branch: string, headSha: string, issue: string, ts: string) => ({
       id: nextId(),
@@ -990,9 +990,9 @@ describe("withBays", () => {
         },
         events: [
           pushed("PR1", "topic/original", HEAD_1, originalIssue, at(12)),
-          integrated("PR1", HEAD_1, originalIssue, "R1", originalLanding, at(12)),
+          integrated("PR1", HEAD_1, originalIssue, "R1", originalMerge, at(12)),
           pushed("PR2", "topic/repair", HEAD_2, repairIssue, at(14)),
-          integrated("PR2", HEAD_2, repairIssue, "R2", repairLanding, at(14)),
+          integrated("PR2", HEAD_2, repairIssue, "R2", repairMerge, at(14)),
           {
             id: nextId(),
             name: "pr/regression-recorded",
@@ -1012,7 +1012,7 @@ describe("withBays", () => {
               repairIssueRef: repairIssue,
               repairPr: "PR2",
               repairRun: "R2",
-              repairLandingSha: repairLanding,
+              repairLandingSha: repairMerge,
             },
           },
         ],
@@ -2329,7 +2329,7 @@ describe("withBays", () => {
     })
     expect(pr.revs).toHaveLength(2)
     expect(pr.terminalRun).toBeUndefined()
-    expect(pr.alreadyLanded).toMatchObject({
+    expect(pr.alreadyMerged).toMatchObject({
       baseSha: nextBase,
       candidateSha: nextBase,
       candidateTreeSha: baseTreeSha,

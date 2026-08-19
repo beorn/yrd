@@ -29,7 +29,7 @@ function checksumOverRawContent(record: unknown): string {
     .digest("hex")
 }
 
-const SHA_LANDED = "a".repeat(40)
+const SHA_MERGED = "a".repeat(40)
 const SHA_SUBMITTED = "b".repeat(40)
 const SHA_BASE = "c".repeat(40)
 const SHA_PIN_BEFORE = "d".repeat(40)
@@ -44,7 +44,7 @@ const VALID_BODY: MergeRecordBody = {
     baseSha: SHA_BASE,
     candidate: "CANDIDATE1",
     result: "merged",
-    mergedCommit: SHA_LANDED,
+    mergedCommit: SHA_MERGED,
     startedAt: "2026-08-13T00:00:00Z",
     finishedAt: "2026-08-13T00:01:00Z",
   },

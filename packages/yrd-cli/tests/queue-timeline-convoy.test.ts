@@ -12,7 +12,7 @@ import { projectedChangeStatus, QueueTimelineView, type QueueTimelineProjection 
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const SUBMITTED_AT = "2026-07-13T11:30:00.000Z"
-const LANDED_AT = "2026-07-13T11:45:00.000Z"
+const MERGED_AT = "2026-07-13T11:45:00.000Z"
 
 /** The R2649 specimen: three PRs admitted together and landed by ONE run. */
 const CONVOY = ["PR151", "PR152", "PR153"] as const
@@ -28,9 +28,9 @@ const DASH_ROW = /^-\s+-\s+-\s/u
 
 function convoySnapshot(): ReturnType<typeof fixtureSnapshot> {
   const prs = CONVOY.map((id) =>
-    fixturePr(id, "integrated", SUBMITTED_AT, `Convoy ${id}`, { integratedAt: LANDED_AT, submitter: "@chief" }),
+    fixturePr(id, "integrated", SUBMITTED_AT, `Convoy ${id}`, { integratedAt: MERGED_AT, submitter: "@chief" }),
   )
-  const run = fixtureRun("R2649", prs, "passed", SUBMITTED_AT, { finishedAt: LANDED_AT })
+  const run = fixtureRun("R2649", prs, "passed", SUBMITTED_AT, { finishedAt: MERGED_AT })
   return fixtureSnapshot(fixtureResult(prs, [run]))
 }
 
@@ -39,7 +39,7 @@ function convoySnapshot(): ReturnType<typeof fixtureSnapshot> {
  * outlives the close — the pr#1073 specimen. */
 function withdrawnAfterRefusal(): PR {
   return {
-    ...fixturePr("PR1073", "withdrawn", SUBMITTED_AT, "Withdrawn change", { withdrawnAt: LANDED_AT }),
+    ...fixturePr("PR1073", "withdrawn", SUBMITTED_AT, "Withdrawn change", { withdrawnAt: MERGED_AT }),
     needsAuthor: {
       at: "2026-07-13T11:35:00.000Z",
       run: "R2600",

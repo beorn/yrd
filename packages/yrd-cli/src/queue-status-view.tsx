@@ -327,7 +327,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   waitMs: number | null
   queueWaitMs: number | null
   /** Diagnostic landing class for display/JSON (21801) — not a success verdict. */
-  landingVerdict?: LandingVerdict
+  mergeVerdict?: MergeVerdict
   /** Step names in run order — scripts must not infer landing from glyph alone. */
   stepNames?: readonly string[]
 }>
@@ -395,7 +395,7 @@ export type QueueDriverEpoch = Readonly<{
   /** One resident lifetime. A same-PID exec reload mints a successor epoch. */
   epoch: string
   /** Latest proven queue landing, or null before this queue has landed anything. */
-  lastLanded: Readonly<{ commit: string; at: string }> | null
+  lastMerged: Readonly<{ commit: string; at: string }> | null
 }>
 
 /** One uncarried sweep: what it found AND when it looked. The two travel
@@ -729,7 +729,7 @@ export type QueueFlowMetrics = Readonly<{
   terminalAttempts: number
   outcomes: Readonly<{
     integrated: number
-    alreadyLanded: number
+    alreadyMerged: number
     /** Completed without merge proof — not a landing (21801/22323). */
     passed: number
     rejected: number
@@ -989,7 +989,7 @@ export type HumanQueueProjection = Readonly<{
   open: number
   activeCount: number
   integrated: number
-  alreadyLanded: number
+  alreadyMerged: number
   rejected: number
   needsAuthor: number
   pause?: QueueSummary["pause"]
@@ -1038,7 +1038,7 @@ type GateEvidence = Readonly<{
 }>
 
 /** Perfect-detector landing class for scripts (21801 / 22323). */
-export type LandingVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
+export type MergeVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
 
 export type QueueShowData = Readonly<{
   run: string
@@ -1050,7 +1050,7 @@ export type QueueShowData = Readonly<{
   glyph: StatusGlyph
   outcome: string
   /** Perfect detector: landed only when merge/integration proof exists. */
-  landingVerdict: LandingVerdict
+  mergeVerdict: MergeVerdict
   /** Step names in run order — scripts must not infer landing from glyph alone. */
   stepNames: readonly string[]
   started: string
@@ -1225,11 +1225,11 @@ export function queueFlowMetrics(
   const seenRuns = new Set<string>()
   const activeAll: number[] = []
   const activeIntegrated: number[] = []
-  const activeAlreadyLanded: number[] = []
+  const activeAlreadyMerged: number[] = []
   const activeFailed: number[] = []
   const waits: number[] = []
   let integrated = 0
-  let alreadyLanded = 0
+  let alreadyMerged = 0
   let passed = 0
   let rejected = 0
   let environmentRefused = 0
@@ -1246,7 +1246,7 @@ export function queueFlowMetrics(
     seenRuns.add(fact.run)
 
     if (fact.outcome === "integrated") integrated += 1
-    else if (fact.outcome === "already-landed") alreadyLanded += 1
+    else if (fact.outcome === "already-landed") alreadyMerged += 1
     else if (fact.outcome === "passed") passed += 1
     else if (fact.outcome === "rejected") rejected += 1
     else if (fact.outcome === "environment-refused") environmentRefused += 1
@@ -1264,7 +1264,7 @@ export function queueFlowMetrics(
       const activeMs = finiteNonnegative(fact.activeMs, `Run '${fact.run}' active duration`)
       activeAll.push(activeMs)
       if (fact.outcome === "integrated") activeIntegrated.push(activeMs)
-      else if (fact.outcome === "already-landed") activeAlreadyLanded.push(activeMs)
+      else if (fact.outcome === "already-landed") activeAlreadyMerged.push(activeMs)
       else activeFailed.push(activeMs)
     }
     for (const wait of fact.queueWaitMs) {
@@ -1272,13 +1272,13 @@ export function queueFlowMetrics(
     }
   }
 
-  const decisions = integrated + alreadyLanded + rejected
+  const decisions = integrated + alreadyMerged + rejected
   return {
     windowMs,
     terminalAttempts: seenRuns.size,
     outcomes: {
       integrated,
-      alreadyLanded,
+      alreadyMerged,
       passed,
       rejected,
       environmentRefused,
@@ -1298,7 +1298,7 @@ export function queueFlowMetrics(
     activeRun: {
       allTerminal: durationDistribution(activeAll),
       integratedOnly: durationDistribution(activeIntegrated),
-      alreadyLandedOnly: durationDistribution(activeAlreadyLanded),
+      alreadyLandedOnly: durationDistribution(activeAlreadyMerged),
       failedOnly: durationDistribution(activeFailed),
     },
     queueWait: waitDistribution(waits),
@@ -1769,7 +1769,7 @@ function queueOutcome(run: Run): string {
     const integration = queueIntegration(run)
     return integration === undefined
       ? "passed"
-      : integration.alreadyLanded === undefined
+      : integration.alreadyMerged === undefined
         ? "integrated"
         : "already-landed"
   }
@@ -1785,7 +1785,7 @@ function queueOutcome(run: Run): string {
  * merge step remains the sole success channel (CTO 2026-07-25: one test for
  * success). Maps: integrated/already-landed → landed*; passed without
  * integration proof → non-landing; duration is secondary and never drives this. */
-export function landingVerdictOfOutcome(outcome: string): LandingVerdict {
+export function mergeVerdictOfOutcome(outcome: string): MergeVerdict {
   if (outcome === "integrated") return "landed"
   if (outcome === "already-landed") return "already-landed"
   if (outcome === "passed") return "non-landing"
@@ -1802,7 +1802,7 @@ function queueIntegration(run: Run): IntegrationProof | undefined {
   return run.integration ?? ("integration" in run.shape ? run.shape.integration : undefined)
 }
 
-function queueLanding(run: Run): string {
+function queueMerge(run: Run): string {
   const proof = queueIntegration(run)
   if (proof === undefined) return "-"
   return `${proof.commit.slice(0, 12)}@${proof.baseSha.slice(0, 12)}`
@@ -2194,13 +2194,13 @@ function terminalProjection(run: Run): QueueTerminalProjection {
   }
   if (run.conclusion === "success") {
     // Perfect detector (21801 / 22323 audit): only a recorded integration proof
-    // is a landing. `queueIntegration(run)?.alreadyLanded === undefined` used to
+    // is a landing. `queueIntegration(run)?.alreadyMerged === undefined` used to
     // treat missing proof as integrated because `undefined?.x === undefined`.
     const integration = queueIntegration(run)
     if (integration === undefined) {
       return { outcome: "passed", display: "passed" }
     }
-    return integration.alreadyLanded === undefined
+    return integration.alreadyMerged === undefined
       ? { outcome: "integrated", display: "integrated" }
       : { outcome: "already-landed", display: "already-landed" }
   }
@@ -2340,8 +2340,8 @@ function timelineRunMemberRows(
   const totalMs = running ? elapsedRunMs : (durations.totalDurationMs ?? null)
   const activeMs = running ? null : (durations.activeDurationMs ?? null)
   const waitMs = running ? null : (durations.waitDurationMs ?? null)
-  const landed = status === "integrated" || status === "already-landed"
-  const failure = landed ? undefined : failureFact(run, relevantStep(run))
+  const merged = status === "integrated" || status === "already-landed"
+  const failure = merged ? undefined : failureFact(run, relevantStep(run))
   const step = relevantStep(run)
   // The row's STEP cell names the currently executing step; a later queued
   // step (requested) only shows when nothing is actively running.
@@ -2351,8 +2351,8 @@ function timelineRunMemberRows(
     running && currentStep !== undefined ? `${run.steps.indexOf(currentStep) + 1}:${currentStep.name}` : undefined
   const baseDetail =
     failure === undefined
-      ? landed
-        ? queueLanding(run)
+      ? merged
+        ? queueMerge(run)
         : step === undefined
           ? run.status
           : `${step.name}: ${jobStatus(step)}`
@@ -2360,7 +2360,7 @@ function timelineRunMemberRows(
   const queueWaits = timelineQueueWaits(run, submissionTimes)
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
   const stepNames = stepNamesOfRun(run)
-  const landingVerdict = running ? ("running" as const) : landingVerdictOfOutcome(status)
+  const mergeVerdict = running ? ("running" as const) : mergeVerdictOfOutcome(status)
   return run.prs.map((member, index) => {
     const current = result.prs.find((candidate) => candidate.id === member.id)
     // An intent member's snapshot is its complete record: render from it and
@@ -2419,7 +2419,7 @@ function timelineRunMemberRows(
       activeMs,
       waitMs,
       queueWaitMs: queueWaits[index] ?? null,
-      landingVerdict,
+      mergeVerdict,
       stepNames,
     }
   })
@@ -3274,7 +3274,7 @@ export function humanQueueProjection(
     open: queueRows.length,
     activeCount: queueRows.filter((row) => ["checking", "waiting"].includes(row.state)).length,
     integrated: rows.filter((row) => row.nativeStatus === "integrated").length,
-    alreadyLanded: rows.filter((row) => row.nativeStatus === "already-landed").length,
+    alreadyMerged: rows.filter((row) => row.nativeStatus === "already-landed").length,
     rejected: rows.filter((row) => row.nativeStatus === "rejected" && row.state !== "needs-author").length,
     needsAuthor: rows.filter((row) => row.state === "needs-author").length,
     ...(result.pause === undefined ? {} : { pause: result.pause }),
@@ -3410,7 +3410,7 @@ export function changeListRows(
   entries: readonly Readonly<{ pr: PR; eligibility: changeEligibility }>[],
   runs: readonly Run[],
   now: number,
-  landings: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
+  merges: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
 ): ChangeListRow[] {
   const summary: QueueSummary = {
     base: "*",
@@ -3433,9 +3433,9 @@ export function changeListRows(
     // about content, and a head already reachable from the base contradicts it.
     // Showing the later write as the whole truth sends the author back to
     // re-cut a branch that is already on the base branch (22376).
-    const landing = landings.get(pr.id)
-    const state = landing === undefined ? projectedChangeStatus(pr, eligibility) : "already-landed"
-    const glyph = landing === undefined ? projected.glyph : "✓"
+    const merge = merges.get(pr.id)
+    const state = merge === undefined ? projectedChangeStatus(pr, eligibility) : "already-landed"
+    const glyph = merge === undefined ? projected.glyph : "✓"
     return {
       pr: projected.pr,
       state,
@@ -3448,7 +3448,7 @@ export function changeListRows(
       target: projected.target,
       review: reviewLabel(eligibility),
       checks: checkLabels[eligibility.checks.status],
-      why: landing?.code ?? eligibility.reason?.code ?? "-",
+      why: merge?.code ?? eligibility.reason?.code ?? "-",
       age: projected.age,
       touched: projected.touched,
     }
@@ -3782,7 +3782,7 @@ export function ChangeDetailView({
   const currentStateWord = delivery === "submitted" ? "pending" : delivery
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
-  const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
+  const merge = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
   const detail = changeDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
   const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
@@ -3856,10 +3856,10 @@ export function ChangeDetailView({
           {supersededRunRevision === undefined ? "" : ` (rev ${supersededRunRevision})`} {blocker}
         </Text>
       )}
-      {detail.run === undefined && landing !== undefined ? (
+      {detail.run === undefined && merge !== undefined ? (
         <Text>
           <Text bold>LANDING</Text>{" "}
-          {landing.commit === landing.baseSha ? landing.commit : `${landing.commit}@${landing.baseSha}`}
+          {merge.commit === merge.baseSha ? merge.commit : `${merge.commit}@${merge.baseSha}`}
         </Text>
       ) : null}
     </Box>
@@ -3889,10 +3889,10 @@ function SummaryQueue({ projection, repositoryRoot }: { projection: HumanQueuePr
       <Text wrap="truncate">
         <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text> {projection.activeCount}{" "}
         <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text> {projection.rejected}
-        {projection.alreadyLanded === 0 ? null : (
+        {projection.alreadyMerged === 0 ? null : (
           <>
             {" "}
-            <Text bold>ALREADY-LANDED</Text> {projection.alreadyLanded}
+            <Text bold>ALREADY-LANDED</Text> {projection.alreadyMerged}
           </>
         )}
         {projection.needsAuthor === 0 ? null : (
@@ -4519,9 +4519,9 @@ function noticeExplanation(
     return `${step === undefined ? "Run" : `Step ${step}`} is running (${timing.join("; ")}).`
   }
   if (state === "integrated") {
-    const landing = presentFact(data?.landing)
+    const merge = presentFact(data?.landing)
     const completed = presentFact(data?.finished)
-    return `Integrated${landing === undefined ? "" : ` as ${queueLandingLabel(landing)}`}${
+    return `Integrated${merge === undefined ? "" : ` as ${queueMergeLabel(merge)}`}${
       completed === undefined ? "" : ` at ${detailClock(completed)}`
     }.`
   }
@@ -6382,7 +6382,7 @@ export function queueLogRows(
           attempts: attemptSummaries,
           activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputQueueageIndex(finished, run, pr.revision, pr.id))),
-          landing: queueLanding(run),
+          landing: queueMerge(run),
           integration:
             (outcome === "integrated" || outcome === "already-landed") &&
             run.status === "completed" &&
@@ -6528,7 +6528,7 @@ function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliverySt
     evidence: stepEvidence(step, gate),
     ...(gate === undefined ? {} : { gate }),
     checkpoint: stepCheckpointText(step),
-    landing: queueLanding(run),
+    landing: queueMerge(run),
     locations,
     ...(location === undefined ? {} : { location }),
   }
@@ -6595,7 +6595,7 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: ChangeD
           : { gate: gateEvidenceLabel(gate) },
     ...(gate === undefined ? {} : { gate }),
     checkpoint: "-",
-    landing: queueLanding(run),
+    landing: queueMerge(run),
     locations,
     ...(firstLocation === undefined ? {} : { location: firstLocation }),
   }
@@ -6647,11 +6647,11 @@ export function queueShowData(
   const runDurationMs = durations.totalDurationMs
   const taskStatus = runTaskStatusOf(run)
   const outcome = queueOutcome(run)
-  const landingVerdict = landingVerdictOfOutcome(outcome)
+  const mergeVerdict = mergeVerdictOfOutcome(outcome)
   const stepNames = stepNamesOfRun(run)
   // Glyph for non-landing success must not share ✓ with real merges (21801).
   const glyph =
-    landingVerdict === "non-landing" ? (statusPresentation("passed").glyph as StatusGlyph) : taskStatusGlyph(taskStatus)
+    mergeVerdict === "non-landing" ? (statusPresentation("passed").glyph as StatusGlyph) : taskStatusGlyph(taskStatus)
   const runFailure = failureFact(run, relevantStep(run))
   return {
     run: run.id,
@@ -6662,7 +6662,7 @@ export function queueShowData(
     taskStatus,
     glyph,
     outcome,
-    landingVerdict,
+    mergeVerdict,
     stepNames,
     started: toIso(run.startedAt),
     finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
@@ -6675,7 +6675,7 @@ export function queueShowData(
     waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
     ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
     retries: queueShowRetries(finished, run),
-    landing: queueLanding(run),
+    landing: queueMerge(run),
     integration: run.status === "completed" && run.conclusion === "success" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
@@ -6863,10 +6863,10 @@ function queueGateSummary(data: QueueShowData): string | undefined {
 }
 
 /** Dedupe `X@X` landings (commit == landing sha) to one SHA. */
-export function queueLandingLabel(landing: string): string {
-  const [commit, base, ...rest] = landing.split("@")
+export function queueMergeLabel(merge: string): string {
+  const [commit, base, ...rest] = merge.split("@")
   if (rest.length === 0 && commit !== undefined && base !== undefined && commit === base) return commit
-  return landing
+  return merge
 }
 
 /**
@@ -6909,7 +6909,7 @@ function QueueProofView({ data }: { data: QueueShowData }) {
       )}
       {presentFact(data.landing) === undefined ? null : (
         <Text>
-          LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+          LANDING <Text color="$fg-muted">{queueMergeLabel(data.landing)}</Text>
         </Text>
       )}
     </Box>

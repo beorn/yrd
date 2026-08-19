@@ -11,7 +11,7 @@ import { YRD_QUEUE_AUDIT_FINDING_CODES, type QueueAuditEmission } from "@yrd/que
 /** The two producers whose findings `queue audit` concatenates: the core walk
  * in this package, and the environment (installed-baseline) audit in the CLI. */
 const PRODUCERS = [
-  { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "\nfunction latestQueueLandingMs(" },
+  { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "\nfunction latestQueueMergeMs(" },
   { module: "packages/yrd-cli/src/installed-baseline.ts", from: "export function installedBaselineDrift(", to: null },
 ] as const
 

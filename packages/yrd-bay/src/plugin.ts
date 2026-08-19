@@ -527,18 +527,18 @@ export const ChangeIntegratedSchema = z.preprocess(
       path: ["landingSha"],
     }),
 )
-const ChangeAlreadyLandedSettlementSchema = z
+const ChangeAlreadyMergedSettlementSchema = z
   .object({
     kind: z.literal("refresh-superseded"),
     proof: z.literal("payload-already-contained"),
     patchId: GitShaSchema,
   })
   .strict()
-export const ChangeAlreadyLandedSchema = z.preprocess(
+export const ChangeAlreadyMergedSchema = z.preprocess(
   normalizeV2Submitter,
   ChangeTerminalIdentitySchema.extend({
     run: TextSchema.optional(),
-    settlement: ChangeAlreadyLandedSettlementSchema.optional(),
+    settlement: ChangeAlreadyMergedSettlementSchema.optional(),
     baseSha: GitShaSchema,
     candidateSha: GitShaSchema,
     candidateTreeSha: GitShaSchema,
@@ -1101,11 +1101,11 @@ export function createBays(
       // idempotent. Addressed by a moving alias (its branch), a new head mints a
       // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
       if (resolved?.matchedBy === "canonical") return bindSubmission(pr, options)
-      const landedHead = await options.resolveRevision(selector)
-      if (landedHead === undefined) {
+      const mergedHead = await options.resolveRevision(selector)
+      if (mergedHead === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
-      if (landedHead === changeHead(pr)) return bindSubmission(pr, options)
+      if (mergedHead === changeHead(pr)) return bindSubmission(pr, options)
       // A new head on a landed branch mints a fresh delivery identity below.
     }
 
@@ -1367,7 +1367,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/rejected": journalEvent(1, ChangeRejectedFactSchema),
         "pr/terminal-associated": journalEvent(1, ChangeTerminalAssociationSchema),
         "pr/integrated": journalEvent(2, ChangeIntegratedSchema),
-        "pr/already-landed": journalEvent(1, ChangeAlreadyLandedSchema),
+        "pr/already-landed": journalEvent(1, ChangeAlreadyMergedSchema),
         "pr/canceled": journalEvent(1, ChangeCanceledSchema),
         "pr/regression-recorded": journalEvent(1, ChangeRegressionSchema),
         "pr/edited": journalEvent(1, ChangeEditArgsSchema),
@@ -1387,7 +1387,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/needs-author": ChangeNeedsAuthorFactSchema,
         "pr/rejected": ChangeReplayRejectedSchema,
         "pr/integrated": z.union([ChangeIntegratedSchema, ChangeIntegratedV1Schema, LegacyChangeIntegratedSchema]),
-        "pr/already-landed": ChangeAlreadyLandedSchema,
+        "pr/already-landed": ChangeAlreadyMergedSchema,
         "pr/canceled": z.union([ChangeCanceledSchema, LegacyChangeCanceledSchema]),
         "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
@@ -2869,7 +2869,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               integratedAt: undefined,
               integration: undefined,
               alreadyLandedAt: undefined,
-              alreadyLanded: undefined,
+              alreadyMerged: undefined,
               withdrawnAt: undefined,
               withdrawReason: undefined,
               canceledAt: undefined,
@@ -2984,7 +2984,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         alreadyLandedAt: undefined,
-        alreadyLanded: undefined,
+        alreadyMerged: undefined,
         withdrawnAt: undefined,
         withdrawReason: undefined,
         canceledAt: undefined,
@@ -3037,7 +3037,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         alreadyLandedAt: undefined,
-        alreadyLanded: undefined,
+        alreadyMerged: undefined,
         withdrawnAt: undefined,
         withdrawReason: undefined,
         canceledAt: undefined,
@@ -3142,7 +3142,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         merged: true,
         integratedAt: applied.ts,
         alreadyLandedAt: undefined,
-        alreadyLanded: undefined,
+        alreadyMerged: undefined,
         terminalRun: run,
         integration: {
           commit: changed.commit,
@@ -3155,7 +3155,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/already-landed": {
-      const changed = ChangeAlreadyLandedSchema.parse(data)
+      const changed = ChangeAlreadyMergedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3167,7 +3167,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         alreadyLandedAt: applied.ts,
         terminalRun: changed.run,
         integration: { commit: changed.baseSha, baseSha: changed.baseSha },
-        alreadyLanded: {
+        alreadyMerged: {
           baseSha: changed.baseSha,
           candidateSha: changed.candidateSha,
           candidateTreeSha: changed.candidateTreeSha,

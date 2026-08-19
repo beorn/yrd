@@ -149,7 +149,7 @@ describe("queueStats calendar buckets", () => {
     ]
 
     const hour = queueStats(facts, now, new Date(2026, 5, 1).getTime(), 1)[0]!
-    expect(hour.runs).toMatchObject({ all: 3, integrated: 1, alreadyLanded: 1, fails: 1 })
+    expect(hour.runs).toMatchObject({ all: 3, integrated: 1, alreadyMerged: 1, fails: 1 })
     expect(hour.runs.failureBreakdown.other).toBe(1)
     expect(hour.total.n).toBe(1)
     expect(hour.retries).toMatchObject({ n: 1, avg: 1 })

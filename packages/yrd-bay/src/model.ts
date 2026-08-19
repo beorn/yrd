@@ -592,7 +592,7 @@ export type ChangeCheckRequest = Readonly<{
   at: string
 }>
 
-export type ChangeAlreadyLandedEvidence = Readonly<{
+export type ChangeAlreadyMergedEvidence = Readonly<{
   baseSha: string
   candidateSha: string
   candidateTreeSha: string
@@ -682,7 +682,7 @@ export type PR = Readonly<{
     changeId?: ChangeId
   }>
   alreadyLandedAt?: string
-  alreadyLanded?: ChangeAlreadyLandedEvidence
+  alreadyMerged?: ChangeAlreadyMergedEvidence
   withdrawnAt?: string
   withdrawReason?: string
   canceledAt?: string
@@ -821,7 +821,7 @@ export const changeRecut = (pr: PR): ChangeRecutProof | undefined => currentChan
 /** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
 export function changeDeliveryState(pr: PR): ChangeDeliveryState {
   if (pr.state === "closed") {
-    if (pr.merged) return pr.alreadyLanded === undefined ? "integrated" : "already-landed"
+    if (pr.merged) return pr.alreadyMerged === undefined ? "integrated" : "already-landed"
     if (pr.canceledAt !== undefined) return "canceled"
     return "withdrawn"
   }
@@ -1080,12 +1080,12 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         branch: bay.branch,
         openedAt: bay.openedAt,
       }
-      const landedAt = pr?.alreadyLandedAt ?? pr?.integratedAt
+      const mergedAt = pr?.alreadyLandedAt ?? pr?.integratedAt
       if (
         bay.headSha !== undefined &&
         current?.head === bay.headSha &&
         pr?.merged === true &&
-        landedAt !== undefined &&
+        mergedAt !== undefined &&
         pr.integration !== undefined
       ) {
         return {
@@ -1095,7 +1095,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           landed: {
             pr: pr.id,
             revision: current.n,
-            at: landedAt,
+            at: mergedAt,
             commit: pr.integration.commit,
           },
         }

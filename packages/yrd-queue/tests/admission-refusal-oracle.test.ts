@@ -405,9 +405,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     if (ignored === undefined) throw new Error("submitted PR was not recorded")
 
     clock.set("2026-01-01T00:20:00.000Z")
-    const landed = await submitAndRequestChecks(app, "issue/unrelated-landing")
-    await app.queue.run({ prs: [landed.id] }, runtime)
-    expect(app.bays.pr(landed.id)?.integratedAt).toBe("2026-01-01T00:20:00.000Z")
+    const merged = await submitAndRequestChecks(app, "issue/unrelated-landing")
+    await app.queue.run({ prs: [merged.id] }, runtime)
+    expect(app.bays.pr(merged.id)?.integratedAt).toBe("2026-01-01T00:20:00.000Z")
     expect(app.bays.pr(ignored.id)?.integratedAt).toBeUndefined()
     expect(app.bays.checksRequested(ignored.id)).toBe(false)
 

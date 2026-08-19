@@ -15,7 +15,7 @@ import { createRenderer, createTermless, waitFor } from "silvery/test"
 import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureSnapshot, queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
-import { queueLandingLabel } from "../src/queue-status-view.tsx"
+import { queueMergeLabel } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 function rowIndexOf(text: string, needle: string): number {
@@ -39,9 +39,9 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 
 describe("queueLandingLabel", () => {
   it("dedupes commit==landing SHAs to one SHA and keeps distinct pairs", () => {
-    expect(queueLandingLabel("abcdef123456@abcdef123456")).toBe("abcdef123456")
-    expect(queueLandingLabel("bbbbbbbbbbbb@aaaaaaaaaaaa")).toBe("bbbbbbbbbbbb@aaaaaaaaaaaa")
-    expect(queueLandingLabel("-")).toBe("-")
+    expect(queueMergeLabel("abcdef123456@abcdef123456")).toBe("abcdef123456")
+    expect(queueMergeLabel("bbbbbbbbbbbb@aaaaaaaaaaaa")).toBe("bbbbbbbbbbbb@aaaaaaaaaaaa")
+    expect(queueMergeLabel("-")).toBe("-")
   })
 })
 

@@ -165,7 +165,7 @@ import {
   type ResidentRefusalObservation,
   type ResidentRefusalStall,
 } from "./refusal-remedy.ts"
-import { reconcileChangeLandings, type ChangeLanding } from "./pr-landing.ts"
+import { reconcileChangeMerges, type ChangeMerge } from "./pr-landing.ts"
 import { requireImplicitRecutBranchFreshness, type RecutBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { lifecycleStatus } from "./status-presentation.ts"
@@ -240,7 +240,7 @@ import {
   submodulePinPublications,
   unreachableSubmodulePins,
 } from "./pr-submodule-publication.ts"
-import { landingAuthorityBoundary } from "./landing-authority-boundary.ts"
+import { mergeAuthorityBoundary } from "./merge-authority-boundary.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
@@ -523,32 +523,32 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
   if (typeof driver.epoch !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(driver.epoch)) {
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver epoch is invalid")
   }
-  let lastLanded: QueueDriverEpoch["lastLanded"]
-  if (driver.lastLanded === null) {
-    lastLanded = null
-  } else if (typeof driver.lastLanded === "object" && driver.lastLanded !== null) {
-    const landed = driver.lastLanded as Record<string, unknown>
+  let lastMerged: QueueDriverEpoch["lastMerged"]
+  if (driver.lastMerged === null) {
+    lastMerged = null
+  } else if (typeof driver.lastMerged === "object" && driver.lastMerged !== null) {
+    const merged = driver.lastMerged as Record<string, unknown>
     if (
-      typeof landed.commit !== "string" ||
-      !/^[0-9a-f]{40,64}$/u.test(landed.commit) ||
-      typeof landed.at !== "string" ||
-      !Number.isFinite(Date.parse(landed.at))
+      typeof merged.commit !== "string" ||
+      !/^[0-9a-f]{40,64}$/u.test(merged.commit) ||
+      typeof merged.at !== "string" ||
+      !Number.isFinite(Date.parse(merged.at))
     ) {
       raiseFailure(
         "infrastructure",
         "resident-runner-status-invalid",
-        "yrd: resident runner driver lastLanded is invalid",
+        "yrd: resident runner driver lastMerged is invalid",
       )
     }
-    lastLanded = { commit: landed.commit, at: landed.at }
+    lastMerged = { commit: merged.commit, at: merged.at }
   } else {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner driver lastLanded is invalid",
+      "yrd: resident runner driver lastMerged is invalid",
     )
   }
-  return { queueId: driver.queueId, epoch: driver.epoch, lastLanded }
+  return { queueId: driver.queueId, epoch: driver.epoch, lastMerged }
 }
 
 function parseUncarriedObservation(value: unknown): UncarriedObservation | undefined {
@@ -1050,14 +1050,14 @@ function queuedDeliveryCount(app: YrdCliApp): number {
   }).length
 }
 
-function sameDriverLanding(left: QueueDriverEpoch["lastLanded"], right: QueueDriverEpoch["lastLanded"]): boolean {
+function sameDriverMerge(left: QueueDriverEpoch["lastMerged"], right: QueueDriverEpoch["lastMerged"]): boolean {
   return left === null ? right === null : right !== null && left.commit === right.commit && left.at === right.at
 }
 
 function runnerDriverHealthError(
   runner: QueueTimelineRunner,
   expectedQueueId: string,
-  expectedLastLanded: QueueDriverEpoch["lastLanded"] | undefined,
+  expectedLastMerged: QueueDriverEpoch["lastMerged"] | undefined,
 ): ReturnType<typeof runnerHealthError> | undefined {
   if (runner.driver === undefined) {
     return runnerHealthError(
@@ -1073,7 +1073,7 @@ function runnerDriverHealthError(
       ["Stop the mismatched resident and start the runner from the expected repository."],
     )
   }
-  if (expectedLastLanded !== undefined && !sameDriverLanding(runner.driver.lastLanded, expectedLastLanded)) {
+  if (expectedLastMerged !== undefined && !sameDriverMerge(runner.driver.lastMerged, expectedLastMerged)) {
     return runnerHealthError(
       "resident-runner-driver-stale",
       "resident runner heartbeat does not report the queue's latest landed commit",
@@ -1112,7 +1112,7 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
 /** Exact latest landing driven for one queue. The epoch heartbeat publishes
  * this content so a probe can distinguish the right driver from an unrelated
  * resident process with the same service name. */
-export function residentDriverLastLanded(app: YrdCliApp, base: string): QueueDriverEpoch["lastLanded"] {
+export function residentDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
   return (
     Object.values(stateOf(app).bays.prs)
       .flatMap((pr) => {
@@ -1244,9 +1244,9 @@ async function queueRunnerHealth(
       }
     }
     const base = baseIdentity(services.base ?? "main")
-    const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, base)
+    const expectedLastMerged = app === undefined ? undefined : residentDriverLastMerged(app, base)
     const driverError =
-      runner === null ? undefined : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), expectedLastLanded)
+      runner === null ? undefined : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), expectedLastMerged)
     if (driverError !== undefined) {
       return {
         exitCode: 2,
@@ -1351,9 +1351,9 @@ async function queueRunnerHealth(
     if (runnerStatus === "fresh" && hasQueuedWork && runnerAgeMs !== undefined && runner !== null) {
       const runnerUptimeMs = now - Date.parse(runner.startedAt)
       if (runnerUptimeMs >= 3 * 60 * 60_000) {
-        const expectedLastLanded = app === undefined ? undefined : residentDriverLastLanded(app, base)
-        const lastLandedMs = expectedLastLanded ? Date.parse(expectedLastLanded.at) : 0
-        const noMergeMs = now - lastLandedMs
+        const expectedLastMerged = app === undefined ? undefined : residentDriverLastMerged(app, base)
+        const lastMergedMs = expectedLastMerged ? Date.parse(expectedLastMerged.at) : 0
+        const noMergeMs = now - lastMergedMs
         if (noMergeMs >= 3 * 60 * 60_000) {
           const uptimeFormatted = Math.floor(runnerUptimeMs / 3600000)
           const noMergeFormatted = Math.floor(noMergeMs / 3600000)
@@ -1446,7 +1446,7 @@ async function runClientDeadMan(
         ? runnerHealthError("resident-runner-unhealthy", `resident runner heartbeat is stale by ${runnerAgeMs}ms`, [
             "Inspect the resident runner log, then restart it.",
           ])
-        : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), residentDriverLastLanded(app, base))
+        : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), residentDriverLastMerged(app, base))
   const observations = [
     ...(queueProgress.state === "stalled"
       ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
@@ -1566,7 +1566,7 @@ export async function startResidentRunnerHeartbeat(
     driver?: Readonly<{
       queueId: string
       epoch?: string
-      lastLanded: () => QueueDriverEpoch["lastLanded"]
+      lastMerged: () => QueueDriverEpoch["lastMerged"]
     }>
   }> = {},
 ): Promise<ResidentRunnerHeartbeat> {
@@ -1639,7 +1639,7 @@ export async function startResidentRunnerHeartbeat(
             driver: {
               queueId: options.driver.queueId,
               epoch: driverEpoch,
-              lastLanded: options.driver.lastLanded(),
+              lastMerged: options.driver.lastMerged(),
             },
           }),
       command,
@@ -1991,29 +1991,29 @@ function trackerDeliveryV2(
         bounce,
       }
     case "integrated": {
-      const landing = changeLandingOutcome(pr)
-      if (landing.outcome !== "landed") refusal(`integrated PR '${pr.id}' has no canonical landing outcome`)
+      const merge = changeMergeOutcome(pr)
+      if (merge.outcome !== "landed") refusal(`integrated PR '${pr.id}' has no canonical landing outcome`)
       return {
         ...identity,
         status: "integrated",
-        at: landing.at,
-        landingSha: landing.landingSha,
+        at: merge.at,
+        landingSha: merge.landingSha,
         ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
       }
     }
     case "already-landed": {
-      const landing = changeLandingOutcome(pr)
-      if (landing.outcome !== "already-landed") {
+      const merge = changeMergeOutcome(pr)
+      if (merge.outcome !== "already-landed") {
         refusal(`PR '${pr.id}' is recorded as already merged but has no canonical equivalence proof`)
       }
       return {
         ...identity,
         status: "already-landed",
-        at: landing.at,
-        baseSha: landing.baseSha,
-        candidateSha: landing.candidateSha,
-        candidateTreeSha: landing.candidateTreeSha,
-        baseTreeSha: landing.baseTreeSha,
+        at: merge.at,
+        baseSha: merge.baseSha,
+        candidateSha: merge.candidateSha,
+        candidateTreeSha: merge.candidateTreeSha,
+        baseTreeSha: merge.baseTreeSha,
       }
     }
     case "withdrawn":
@@ -2520,24 +2520,24 @@ type ChangeListStatusProjection = Omit<ReturnType<typeof projectChangeTaskStatus
     /** answers: What delivery status did the rebuildable index record? tense: historical. */
     nativeStatus?: ChangeDeliveryState
     /** answers: Why did repository proof override nativeStatus? tense: current. */
-    landedOnBase?: Readonly<Pick<ChangeLanding, "baseSha" | "headSha" | "code">>
+    mergedOnBase?: Readonly<Pick<ChangeMerge, "baseSha" | "headSha" | "code">>
   }>
 
 function projectChangeTaskStatusWithEligibility(
   pr: PR,
   eligibility: changeEligibility,
-  landing?: ChangeLanding,
+  merge?: ChangeMerge,
 ): ChangeListStatusProjection {
   const projected = projectChangeTaskStatus(pr)
   // A proven landing is the strongest projection there is: it contradicts the
   // recorded state with content, so it wins over both the native state and the
   // eligibility projection. `nativeStatus` keeps the record readable (22376).
-  if (landing !== undefined) {
+  if (merge !== undefined) {
     return {
       ...projected,
-      nativeStatus: landing.recorded,
+      nativeStatus: merge.recorded,
       status: "already-landed" as const,
-      landedOnBase: { baseSha: landing.baseSha, headSha: landing.headSha, code: landing.code },
+      mergedOnBase: { baseSha: merge.baseSha, headSha: merge.headSha, code: merge.code },
     }
   }
   const status = projectedChangeStatus(pr, eligibility)
@@ -3535,9 +3535,9 @@ function gatherBayStatusFacts(
   const path = bay.path
   let worktreeDirty: boolean | undefined
   let worktreeMissing: boolean | undefined
-  let tipLanded: boolean | undefined
+  let tipMerged: boolean | undefined
   let tipDurableAt: string | undefined
-  let tipLandedUnknown: boolean | undefined
+  let tipMergedUnknown: boolean | undefined
   let aheadOfOrigin: number | undefined
   let uniquePatches: number | undefined
   const branchMissingFromOrigin = originBranchMissing(repoRoot, bay.branch, remoteTrackingFresh)
@@ -3569,12 +3569,12 @@ function gatherBayStatusFacts(
         const originMain = gitSync(repoRoot, ["rev-parse", "origin/main"]).trim()
         try {
           gitSync(path, ["merge-base", "--is-ancestor", head, originMain])
-          tipLanded = true
+          tipMerged = true
           tipDurableAt = "origin/main"
           aheadOfOrigin = 0
           uniquePatches = 0
         } catch {
-          tipLanded = false
+          tipMerged = false
           try {
             const counts = gitSync(path, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
               .trim()
@@ -3583,16 +3583,16 @@ function gatherBayStatusFacts(
             const ahead = counts[1]
             if (Number.isSafeInteger(ahead)) aheadOfOrigin = ahead
           } catch {
-            tipLandedUnknown = true
+            tipMergedUnknown = true
           }
           try {
             uniquePatches = gitSync(path, ["cherry", originMain, head])
               .split("\n")
               .filter((line) => line.startsWith("+ ")).length
             if (uniquePatches === 0) {
-              tipLanded = true
+              tipMerged = true
               tipDurableAt = "origin/main (same changes)"
-              tipLandedUnknown = undefined
+              tipMergedUnknown = undefined
             } else if (remoteTrackingFresh) {
               const remoteRef = gitSync(path, [
                 "for-each-ref",
@@ -3606,17 +3606,17 @@ function gatherBayStatusFacts(
                 .find((ref) => ref !== "" && ref !== "origin")
               if (remoteRef !== undefined) {
                 tipDurableAt = remoteRef
-                tipLandedUnknown = undefined
+                tipMergedUnknown = undefined
               }
             } else {
-              tipLandedUnknown = true
+              tipMergedUnknown = true
             }
           } catch {
-            tipLandedUnknown = true
+            tipMergedUnknown = true
           }
         }
       } catch {
-        tipLandedUnknown = true
+        tipMergedUnknown = true
       }
 
       try {
@@ -3656,9 +3656,9 @@ function gatherBayStatusFacts(
     ...(ageMs === undefined ? {} : { ageMs }),
     ...(worktreeDirty === undefined ? {} : { worktreeDirty }),
     ...(worktreeMissing === undefined ? {} : { worktreeMissing }),
-    ...(tipLanded === undefined ? {} : { tipLanded }),
+    ...(tipMerged === undefined ? {} : { tipMerged }),
     ...(tipDurableAt === undefined ? {} : { tipDurableAt }),
-    ...(tipLandedUnknown === undefined ? {} : { tipLandedUnknown }),
+    ...(tipMergedUnknown === undefined ? {} : { tipMergedUnknown }),
     ...(aheadOfOrigin === undefined ? {} : { aheadOfOrigin }),
     ...(uniquePatches === undefined ? {} : { uniquePatches }),
     remoteTrackingFresh,
@@ -4913,16 +4913,16 @@ function submitRequiredCheckContexts(
  * that predicate measures the fixture rather than the defect. The state of a
  * queue that has never run cannot tell you whether it ever will.
  */
-async function refuseSubmitWithoutLandingAuthority(
+async function refuseSubmitWithoutMergeAuthority(
   options: ChangeSelectionOptions,
   io: YrdCliIO,
   services: YrdCliServices,
 ): Promise<YrdCliExitCode | undefined> {
   const repo = io.cwd ?? process.cwd()
-  const landing =
-    landingAuthorityBoundary(services) ??
-    (await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })).config.landing
-  if (landing !== "none") return undefined
+  const merge =
+    mergeAuthorityBoundary(services) ??
+    (await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })).config.merge
+  if (merge !== "none") return undefined
   // Both halves are load-bearing. WHICH repository, because a seat working
   // across two of them reads this message with no other clue; and that no
   // runner is coming, because "submit failed" invites a retry and a retry
@@ -4953,7 +4953,7 @@ async function applyChangeSelectionVerb(
   command: ChangeSelectionCommand,
 ): Promise<YrdCliExitCode> {
   if (command === "pr.submit") {
-    const unlandable = await refuseSubmitWithoutLandingAuthority(options, io, services)
+    const unlandable = await refuseSubmitWithoutMergeAuthority(options, io, services)
     if (unlandable !== undefined) return unlandable
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
       // Guards first, and in the same loop, so the cheap verdict on THIS
@@ -5071,7 +5071,7 @@ function requiredPr(app: YrdCliApp, selector: string): PR {
   return app.bays.pr(selector) ?? requireLivePR(stateOf(app).bays, selector)
 }
 
-type changeLandingOutcome =
+type changeMergeOutcome =
   | Readonly<{
       outcome: "landed"
       status: "integrated"
@@ -5092,14 +5092,14 @@ type changeLandingOutcome =
     }>
   | Readonly<{ outcome: "not-landed"; status: Exclude<ChangeDeliveryState, "integrated" | "already-landed"> }>
 
-function changeLandingOutcome(pr: DeepReadonly<PR>): changeLandingOutcome {
+function changeMergeOutcome(pr: DeepReadonly<PR>): changeMergeOutcome {
   const delivery = changeDeliveryState(pr)
   if (delivery === "already-landed") {
     const hasRunProof = pr.terminalRun !== undefined
-    const hasRefreshProof = pr.alreadyLanded?.settlement !== undefined
+    const hasRefreshProof = pr.alreadyMerged?.settlement !== undefined
     if (
       pr.integration === undefined ||
-      pr.alreadyLanded === undefined ||
+      pr.alreadyMerged === undefined ||
       pr.alreadyLandedAt === undefined ||
       hasRunProof === hasRefreshProof
     ) {
@@ -5109,9 +5109,9 @@ function changeLandingOutcome(pr: DeepReadonly<PR>): changeLandingOutcome {
       outcome: "already-landed",
       status: "already-landed",
       baseSha: pr.integration.baseSha,
-      candidateSha: pr.alreadyLanded.candidateSha,
-      candidateTreeSha: pr.alreadyLanded.candidateTreeSha,
-      baseTreeSha: pr.alreadyLanded.baseTreeSha,
+      candidateSha: pr.alreadyMerged.candidateSha,
+      candidateTreeSha: pr.alreadyMerged.candidateTreeSha,
+      baseTreeSha: pr.alreadyMerged.baseTreeSha,
       at: pr.alreadyLandedAt,
       ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
     }
@@ -5350,7 +5350,7 @@ async function listPrs(
     )
   const selected = new Set(rows.map(({ pr }) => pr.id))
   const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
-  const { landings, warnings } = await reconcileChangeLandings(
+  const { merges, warnings } = await reconcileChangeMerges(
     rows.map(({ pr }) => pr),
     io,
   )
@@ -5368,7 +5368,7 @@ async function listPrs(
       prs: rows.map(({ pr, eligibility, needsReview }) => {
         const publication = projectPublication(publicationJob(app, pr))
         return {
-          ...projectChangeTaskStatusWithEligibility(pr, eligibility, landings.get(pr.id)),
+          ...projectChangeTaskStatusWithEligibility(pr, eligibility, merges.get(pr.id)),
           eligibility: projectEligibilityTaskStatus(eligibility),
           requestedReviewers: pr.requestedReviewers ?? [],
           needsReview,
@@ -5378,7 +5378,7 @@ async function listPrs(
       runs: runs.map(projectQueueRunTaskStatus),
     },
     createElement(ChangeListView, {
-      rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), landings),
+      rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), merges),
       columns: io.columns ?? 120,
       window: { hidden: matching.length - listed.length, total: matching.length },
     }),
@@ -5414,7 +5414,7 @@ async function viewPr(
       command,
       pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
       eligibility: projectEligibilityTaskStatus(eligibility),
-      landing: changeLandingOutcome(pr),
+      landing: changeMergeOutcome(pr),
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,
@@ -7684,10 +7684,10 @@ type IndexRebuildReport = Readonly<{
 }>
 
 type JournalPR = NonNullable<ReturnType<YrdCliApp["bays"]["pr"]>>
-type LandingRepairInput = Parameters<YrdCliApp["queue"]["reconcileLanding"]>[0]
+type MergeRepairInput = Parameters<YrdCliApp["queue"]["reconcileMerge"]>[0]
 
-type LandingRepair =
-  | Readonly<{ status: "repairable"; input: LandingRepairInput }>
+type MergeRepair =
+  | Readonly<{ status: "repairable"; input: MergeRepairInput }>
   | Readonly<{
       status: "already-indexed" | "legacy-no-change-id" | "revision-superseded" | "no-merged-commit"
       detail: string
@@ -7713,11 +7713,11 @@ function mergeInstant(record: MergeRecordBody): number {
  * `yrd why <selector> --repair` and `yrd doctor --rebuild-index-from-repo` are
  * the same repair at different breadths, and had drifted into two copies of the
  * same "does this record cover the PR's CURRENT revision" predicate and the same
- * eight-field `reconcileLanding` argument. Each caller still owns its own
+ * eight-field `reconcileMerge` argument. Each caller still owns its own
  * reporting: the bulk path names every skip, the selector path stays quiet, and
  * only the bulk path treats a merged record with no merged commit as a refusal.
  */
-function landingRepair(record: MergeRecordBody, pr: JournalPR): LandingRepair {
+function mergeRepair(record: MergeRecordBody, pr: JournalPR): MergeRepair {
   const revision = currentChangeRev(pr)
   const change = record.changes.find((entry) => entry.pr === pr.id)
   if (change?.changeId === undefined) {
@@ -7825,13 +7825,13 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
         skip("pr-unknown", "no PR in the journal; a merge record proves a landing, not a PR's existence")
         continue
       }
-      const repair = landingRepair(record, pr)
+      const repair = mergeRepair(record, pr)
       if (repair.status === "no-merged-commit") refusal(repair.detail)
       if (repair.status !== "repairable") {
         skip(repair.status, repair.detail)
         continue
       }
-      await app.queue.reconcileLanding(repair.input)
+      await app.queue.reconcileMerge(repair.input)
       rebuilt.push({ pr: prId, revision: change.revision, run, commit: repair.input.commit })
     } catch (cause) {
       skip("unverifiable", cause instanceof Error ? cause.message : String(cause))
@@ -8215,7 +8215,7 @@ async function configDoctor(
       ? await (services.journal?.rebuildViews?.() ?? configuration("journal view rebuild capability is not installed"))
       : undefined
   // `rebuildIndexFromRepo` reads `app.bays.pr(...)` to decide what repository
-  // truth can repair, and writes through `reconcileLanding`. Both need a current
+  // truth can repair, and writes through `reconcileMerge`. Both need a current
   // projection: refresh before it so the read is not stale, and again after so
   // the findings below see what it repaired.
   await app.refresh()
@@ -9828,7 +9828,7 @@ export async function followQueueRuns(
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
           ...(io.driver === undefined ? {} : { epoch: io.driver.epoch }),
-          lastLanded: () => residentDriverLastLanded(app, base),
+          lastMerged: () => residentDriverLastMerged(app, base),
         },
       })
     : undefined
@@ -10406,7 +10406,7 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
  * canceled attempt minted no landed commit to be the Statement's subject, and a
  * record whose run the journal has never seen has no builder to attribute.
  */
-function landingStatement(
+function mergeStatement(
   app: YrdCliApp,
   record: MergeRecordBody,
 ): Readonly<{ statement: InTotoStatement }> | Readonly<{ statementUnavailable: string }> {
@@ -10424,7 +10424,7 @@ function landingStatement(
     : { statement }
 }
 
-async function explainLanding(
+async function explainMerge(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
@@ -10487,9 +10487,9 @@ async function explainLanding(
       let repaired = false
       const pr = app.bays.pr(selector)
       if (verdict === "merged" && options.repair === true && pr !== undefined) {
-        const repair = landingRepair(latest.record, pr)
+        const repair = mergeRepair(latest.record, pr)
         if (repair.status === "repairable") {
-          await app.queue.reconcileLanding(repair.input)
+          await app.queue.reconcileMerge(repair.input)
           repaired = true
         }
       }
@@ -10516,7 +10516,7 @@ async function explainLanding(
           record: latest.record,
           pointer: latest.pointer,
           attempts,
-          ...landingStatement(app, latest.record),
+          ...mergeStatement(app, latest.record),
         },
         human,
       )
@@ -10752,7 +10752,7 @@ function buildProgram(
     .option("--repair", "append a missing pr/integrated index row from repository proof")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
-      setExit(await explainLanding(installed(), installedServices(), selector, options, io)),
+      setExit(await explainMerge(installed(), installedServices(), selector, options, io)),
     )
 
   const bay = program
@@ -11155,7 +11155,7 @@ function buildProgram(
       "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
       "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
       "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
-      "landedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
+      "mergedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
       "--state needs-author — answers: does this PR currently need author action? tense: current",
     ].join("\n"),
   )

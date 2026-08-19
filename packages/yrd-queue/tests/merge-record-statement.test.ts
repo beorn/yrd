@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { mergeRecordToStatement } from "../src/merge-record-statement.ts"
 import { mergeJoinedNothing, MergeRecordBodySchema, type MergeRecordBody } from "../src/merge-record.ts"
 
-const SHA_LANDED = "a".repeat(40)
+const SHA_MERGED = "a".repeat(40)
 const SHA_SUBMITTED = "b".repeat(40)
 const SHA_BASE = "c".repeat(40)
 const SHA_PIN_BEFORE = "d".repeat(40)
@@ -17,7 +17,7 @@ const merged: MergeRecordBody = MergeRecordBodySchema.parse({
     baseSha: SHA_BASE,
     candidate: "CANDIDATE1",
     result: "merged",
-    mergedCommit: SHA_LANDED,
+    mergedCommit: SHA_MERGED,
     startedAt: "2026-08-13T00:00:00Z",
     finishedAt: "2026-08-13T00:01:00Z",
   },
@@ -41,7 +41,7 @@ const merged: MergeRecordBody = MergeRecordBodySchema.parse({
 describe("mergeRecordToStatement", () => {
   it("attests the landed sha as the subject", () => {
     expect(mergeRecordToStatement(merged, "queue:main")?.subject).toEqual([
-      { name: "CANDIDATE1", digest: { sha1: SHA_LANDED } },
+      { name: "CANDIDATE1", digest: { sha1: SHA_MERGED } },
     ])
   })
 
@@ -79,13 +79,13 @@ describe("mergeRecordToStatement", () => {
   })
 
   it("digests a sha256 object under sha256", () => {
-    const sha256Landed = "f".repeat(64)
+    const sha256Merged = "f".repeat(64)
     const sha256Record = MergeRecordBodySchema.parse({
       ...merged,
-      merge: { ...merged.merge, mergedCommit: sha256Landed },
+      merge: { ...merged.merge, mergedCommit: sha256Merged },
     })
     expect(mergeRecordToStatement(sha256Record, "queue:main")?.subject).toEqual([
-      { name: "CANDIDATE1", digest: { sha256: sha256Landed } },
+      { name: "CANDIDATE1", digest: { sha256: sha256Merged } },
     ])
   })
 
@@ -135,7 +135,7 @@ describe("mergeJoinedNothing — the nothing-new outcome is a projection over st
 
   it("is false for an ordinary landing that moved the base", () => {
     const record = MergeRecordBodySchema.parse({
-      merge: { ...base, result: "merged", mergedCommit: SHA_LANDED },
+      merge: { ...base, result: "merged", mergedCommit: SHA_MERGED },
       ...skeleton,
     })
     expect(mergeJoinedNothing(record)).toBe(false)

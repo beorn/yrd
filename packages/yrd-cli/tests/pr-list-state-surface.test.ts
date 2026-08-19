@@ -28,7 +28,7 @@ import { ChangeListView, type ChangeListRow } from "../src/queue-status-view.tsx
 const WIDTH = 120
 const BASE_SHA = "a".repeat(40)
 const MERGED_SHA = "b".repeat(40)
-const LANDED_HEAD = "c".repeat(40)
+const MERGED_HEAD = "c".repeat(40)
 const LIVE_HEAD = "d".repeat(40)
 
 // ---------------------------------------------------------------------------
@@ -200,11 +200,11 @@ function yrd(...args: string[]): string[] {
 /** Git facts that place LANDED_HEAD on the base tip and keep LIVE_HEAD off it.
  * Every other capability refuses so a test proves exactly which plumbing the
  * list consulted. */
-function landingGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
+function mergeGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
   return {
     resolveCommit: (ref) =>
-      ref === "origin/main" || ref === "main" ? BASE_SHA : ref === LANDED_HEAD || ref === LIVE_HEAD ? ref : undefined,
-    isAncestor: (ancestor, descendant) => ancestor === LANDED_HEAD && descendant === BASE_SHA,
+      ref === "origin/main" || ref === "main" ? BASE_SHA : ref === MERGED_HEAD || ref === LIVE_HEAD ? ref : undefined,
+    isAncestor: (ancestor, descendant) => ancestor === MERGED_HEAD && descendant === BASE_SHA,
     mergeTree: () => {
       throw new Error("pr list must not need a merge-tree proof")
     },
@@ -263,10 +263,10 @@ describe("pr list landing reconciliation (22376)", () => {
    */
   it("reports the landing when a withdrawal arrives on top of it", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/landed", headSha: LANDED_HEAD, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/landed", headSha: MERGED_HEAD, base: "main", baseSha: BASE_SHA })
     await app.bays.closePr({ pr: "PR1", reason: "author changed their mind" })
 
-    const json = outputIO({ pruneGit: () => landingGit() })
+    const json = outputIO({ pruneGit: () => mergeGit() })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
     const listed = JSON.parse(json.stdout()) as {
       prs: readonly Readonly<{ id: string; status: string; nativeStatus?: string }>[]
@@ -278,7 +278,7 @@ describe("pr list landing reconciliation (22376)", () => {
       nativeStatus: "withdrawn",
     })
 
-    const human = outputIO({ pruneGit: () => landingGit(), columns: 200 })
+    const human = outputIO({ pruneGit: () => mergeGit(), columns: 200 })
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
     expect(human.stdout()).toContain("already-landed")
     expect(human.stdout()).toContain("withdrawn-after-landing")
@@ -289,7 +289,7 @@ describe("pr list landing reconciliation (22376)", () => {
     await app.bays.submit({ branch: "topic/live", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
     await app.bays.closePr({ pr: "PR1", reason: "superseded by a different design" })
 
-    const json = outputIO({ pruneGit: () => landingGit() })
+    const json = outputIO({ pruneGit: () => mergeGit() })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
     const listed = JSON.parse(json.stdout()) as { prs: readonly Readonly<{ id: string; status: string }>[] }
     expect(listed.prs[0]).toMatchObject({ id: "PR1", status: "withdrawn" })
@@ -313,7 +313,7 @@ describe("pr list landing reconciliation (22376)", () => {
       writeFileSync(join(dir, "landed.md"), "landed\n")
       git("add", ".")
       git("commit", "-qm", "landed")
-      const landedHead = git("rev-parse", "HEAD")
+      const mergedHead = git("rev-parse", "HEAD")
 
       git("switch", "-q", "-c", "topic/live", "main")
       writeFileSync(join(dir, "live.md"), "live\n")
@@ -322,15 +322,15 @@ describe("pr list landing reconciliation (22376)", () => {
       const liveHead = git("rev-parse", "HEAD")
 
       git("switch", "-q", "main")
-      git("merge", "-q", "--no-ff", "-m", "merge landed", landedHead)
+      git("merge", "-q", "--no-ff", "-m", "merge landed", mergedHead)
       const baseSha = git("rev-parse", "HEAD")
 
       const facts = createPruneGitFacts(dir)
       const absent = "9".repeat(40)
-      expect(facts.landedOnBase?.(baseSha, [landedHead, liveHead, absent])).toEqual([landedHead])
+      expect(facts.mergedOnBase?.(baseSha, [mergedHead, liveHead, absent])).toEqual([mergedHead])
       // The fallback path every implementation without the batch fact takes
       // must reach the same verdict, or the two rails could disagree silently.
-      expect(facts.isAncestor(landedHead, baseSha)).toBe(true)
+      expect(facts.isAncestor(mergedHead, baseSha)).toBe(true)
       expect(facts.isAncestor(liveHead, baseSha)).toBe(false)
       expect(facts.resolveCommit(absent)).toBeUndefined()
     } finally {
@@ -344,7 +344,7 @@ describe("pr list landing reconciliation (22376)", () => {
 
     const json = outputIO({
       pruneGit: () => ({
-        ...landingGit(),
+        ...mergeGit(),
         resolveCommit: () => {
           throw new Error("a live PR needs no ancestry proof")
         },

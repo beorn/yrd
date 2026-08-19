@@ -180,7 +180,7 @@ export type PruneGitFacts = Readonly<{
    * of the object is not evidence about the content. Implementations that omit
    * this fact are still answered exactly, one `resolveCommit` + `isAncestor`
    * pair per head. */
-  landedOnBase?(baseSha: string, heads: readonly string[]): readonly string[] | Promise<readonly string[]>
+  mergedOnBase?(baseSha: string, heads: readonly string[]): readonly string[] | Promise<readonly string[]>
 }>
 
 export type YrdCliIO = {

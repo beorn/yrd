@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest"
 import {
-  landingVerdictOfOutcome,
+  mergeVerdictOfOutcome,
   queueShowData,
   queueTimelineProjection,
   queueTimelineStatusBucket,
@@ -17,7 +17,7 @@ import { statusPresentation } from "../src/status-presentation.ts"
 import { fixtureJob, fixturePr, fixtureResult, fixtureRun, fixtureStep } from "../dev/queue-timeline-fixtures.ts"
 
 const HEAD_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-const LANDING_SHA = "cccccccccccccccccccccccccccccccccccccccc"
+const MERGE_SHA = "cccccccccccccccccccccccccccccccccccccccc"
 const BASE_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 function admissionOnlyRun() {
@@ -42,7 +42,7 @@ function admissionOnlyRun() {
   }
 }
 
-function landedRun() {
+function mergedRun() {
   const pr = fixturePr("PR8", "submitted", "2026-07-25T05:00:00.000Z", "Landed merge", {
     headSha: HEAD_SHA,
   })
@@ -62,7 +62,7 @@ function landedRun() {
       cursor: 2,
       results: {
         "bead-identity-admission": { detail: "ok", exitCode: 0 },
-        merge: { commit: LANDING_SHA, baseSha: BASE_SHA },
+        merge: { commit: MERGE_SHA, baseSha: BASE_SHA },
       },
     }),
   }
@@ -82,20 +82,20 @@ function withoutIntegration<T extends { integration?: unknown; shape: { integrat
 
 describe("21801 non-landing detector (perfect signals)", () => {
   it("landingVerdictOfOutcome ranks perfect detectors over duration heuristics", () => {
-    expect(landingVerdictOfOutcome("integrated")).toBe("landed")
-    expect(landingVerdictOfOutcome("already-landed")).toBe("already-landed")
-    expect(landingVerdictOfOutcome("passed")).toBe("non-landing")
-    expect(landingVerdictOfOutcome("rejected")).toBe("failed")
+    expect(mergeVerdictOfOutcome("integrated")).toBe("landed")
+    expect(mergeVerdictOfOutcome("already-landed")).toBe("already-landed")
+    expect(mergeVerdictOfOutcome("passed")).toBe("non-landing")
+    expect(mergeVerdictOfOutcome("rejected")).toBe("failed")
   })
 
   it("presentation: non-landing glyph is not the green check", () => {
-    const landed = statusPresentation("integrated")
-    const nonLanding = statusPresentation("passed")
-    expect(landed.glyph).toBe("✓")
-    expect(landed.color).toBe("$fg-success")
-    expect(nonLanding.glyph).not.toBe("✓")
-    expect(nonLanding.glyph).toBe("◌")
-    expect(nonLanding.color).toBe("$fg-warning")
+    const merged = statusPresentation("integrated")
+    const nonMerge = statusPresentation("passed")
+    expect(merged.glyph).toBe("✓")
+    expect(merged.color).toBe("$fg-success")
+    expect(nonMerge.glyph).not.toBe("✓")
+    expect(nonMerge.glyph).toBe("◌")
+    expect(nonMerge.color).toBe("$fg-warning")
   })
 
   it("admission-only success is non-landing: status pass, not done/integrated", () => {
@@ -106,7 +106,7 @@ describe("21801 non-landing detector (perfect signals)", () => {
 
     const show = queueShowData(run)
     expect(show.outcome).toBe("passed")
-    expect(show.landingVerdict).toBe("non-landing")
+    expect(show.mergeVerdict).toBe("non-landing")
     expect(show.landing).toBe("-")
     expect(show.integration).toBeUndefined()
     expect(show.stepNames).toEqual(["bead-identity-admission"])
@@ -126,7 +126,7 @@ describe("21801 non-landing detector (perfect signals)", () => {
     expect(row?.status).toBe("passed")
     expect(row?.glyph).toBe("◌")
     // Row-level JSON (not only details) carries the script-facing fields.
-    expect(row?.landingVerdict).toBe("non-landing")
+    expect(row?.mergeVerdict).toBe("non-landing")
     expect(row?.stepNames).toEqual(["bead-identity-admission"])
     expect(queueTimelineStatusBucket("passed")).toBe("failed") // not the done court
     expect(projection.metrics.outcomes.passed).toBe(1)
@@ -134,17 +134,17 @@ describe("21801 non-landing detector (perfect signals)", () => {
     // JSON details carry the same script-facing fields
     const detail = projection.details.find((candidate) => candidate.run === run.id)
     expect(detail?.outcome).toBe("passed")
-    expect(detail?.landingVerdict).toBe("non-landing")
+    expect(detail?.mergeVerdict).toBe("non-landing")
     expect(detail?.stepNames).toEqual(["bead-identity-admission"])
   })
 
   it("merge with integration proof remains landed: status done, green check", () => {
-    const { pr, run } = landedRun()
+    const { pr, run } = mergedRun()
     expect(run.integration).toBeDefined()
 
     const show = queueShowData(run)
     expect(show.outcome).toBe("integrated")
-    expect(show.landingVerdict).toBe("landed")
+    expect(show.mergeVerdict).toBe("landed")
     expect(show.stepNames).toContain("merge")
     expect(show.glyph).toBe("✓")
 

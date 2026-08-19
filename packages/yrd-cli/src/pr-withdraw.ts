@@ -708,7 +708,7 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       }
       return { sourceOnly, targetOnly }
     },
-    landedOnBase(baseSha: string, heads: readonly string[]): readonly string[] {
+    mergedOnBase(baseSha: string, heads: readonly string[]): readonly string[] {
       const unique = [...new Set(heads)]
       if (unique.length === 0) return []
       // Two batched calls, independent of row count. `cat-file --batch-check`
@@ -726,15 +726,15 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       }
       if (resolved.size === 0) return []
       const present = [...resolved.keys()]
-      const unlanded = new Set<string>()
+      const unmerged = new Set<string>()
       for (let start = 0; start < present.length; start += REV_LIST_BATCH) {
         const batch = present.slice(start, start + REV_LIST_BATCH)
         for (const line of git(["rev-list", "--no-walk", ...batch, "--not", baseSha], []).stdout.split("\n")) {
           const sha = line.trim()
-          if (sha !== "") unlanded.add(sha)
+          if (sha !== "") unmerged.add(sha)
         }
       }
-      return present.filter((sha) => !unlanded.has(sha)).map((sha) => resolved.get(sha) ?? sha)
+      return present.filter((sha) => !unmerged.has(sha)).map((sha) => resolved.get(sha) ?? sha)
     },
     patchMatch(sourceBaseSha: string, headSha: string, targetBaseSha: string) {
       const diff = git(["diff", "--no-ext-diff", "--binary", sourceBaseSha, headSha], []).stdout

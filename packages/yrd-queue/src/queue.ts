@@ -1,7 +1,7 @@
 import {
   GitRefSchema,
   GitShaSchema,
-  ChangeAlreadyLandedSchema,
+  ChangeAlreadyMergedSchema,
   ChangeAdmissionRecordedFactSchema,
   ChangeIntegratedSchema,
   PRIdSchema,
@@ -723,7 +723,7 @@ export type QueueCommands = Readonly<{
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
-    reconcileLanding: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
+    reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
 }>
 
@@ -807,7 +807,7 @@ export type Queue<Shape extends changeShape = changeShape> = Readonly<{
    * partitioning, batch size, and FIFO order as compose. */
   freshnessCandidateBatches(): readonly (readonly string[])[]
   /** Append a missing index row only after repository proof supplied the exact fact. */
-  reconcileLanding(args: z.infer<typeof ChangeIntegratedSchema>): Promise<void>
+  reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<void>
   /** Live PR ids in the exact admission order used by a selectorless drain. */
   admissionOrder(): readonly string[]
   checks(selectors?: readonly string[]): readonly ChangeCheckRecord[]
@@ -974,7 +974,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
-              reconcileLanding: (args) => yrd.dispatch(commands.queue.reconcileLanding, args),
+              reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -1019,7 +1019,7 @@ type QueueActions = Readonly<{
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
-  reconcileLanding(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
+  reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
 }>
 
 function terminalIdentity(
@@ -2156,8 +2156,8 @@ function createQueue<Shape extends changeShape>(
     state,
     steps: () => steps.map(descriptor),
     admissionOrder: () => admissionOrderPRs(runtime().bays).map((pr) => pr.id),
-    async reconcileLanding(args) {
-      await actions.reconcileLanding(args)
+    async reconcileMerge(args) {
+      await actions.reconcileMerge(args)
     },
     async admit(args, runOptions) {
       return observeYrdLifecycle(
@@ -3789,7 +3789,7 @@ function createQueueCommands(
     },
   })
 
-  const reconcileLanding = command({
+  const reconcileMerge = command({
     title: "Reconcile one repository-proven landing into the journal index",
     params: ChangeIntegratedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof ChangeIntegratedSchema>) {
@@ -3860,7 +3860,7 @@ function createQueueCommands(
       associateTerminals,
       admissionRefused,
       settleAdmissionRefusal,
-      reconcileLanding,
+      reconcileMerge,
     },
   }
 }
@@ -4495,12 +4495,12 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     }
   }
   if (applied.name === "pr/already-landed") {
-    const alreadyLanded = ChangeAlreadyLandedSchema.parse(applied.data)
-    if (!terminalAuthorityMatches(state.queues.authority, alreadyLanded, applied.name, true)) return state
+    const alreadyMerged = ChangeAlreadyMergedSchema.parse(applied.data)
+    if (!terminalAuthorityMatches(state.queues.authority, alreadyMerged, applied.name, true)) return state
     return {
       queues: {
         ...state.queues,
-        authority: invalidateChangeAuthority(state.queues.authority, alreadyLanded.pr, "already-landed"),
+        authority: invalidateChangeAuthority(state.queues.authority, alreadyMerged.pr, "already-landed"),
       },
     }
   }
@@ -5203,16 +5203,16 @@ function advanceQueue(
     // member, and only the ordinary PR-landing bookkeeping below applies to it.
     const changeSnapshots = record.prs.filter((member) => member.intent === undefined)
     for (const current of samePayloadPRs(state.bays, changeSnapshots)) {
-      const alreadyLanded = shape.integration.alreadyLanded
-      if (alreadyLanded !== undefined) {
-        const existingEvidence = current.alreadyLanded
+      const alreadyMerged = shape.integration.alreadyMerged
+      if (alreadyMerged !== undefined) {
+        const existingEvidence = current.alreadyMerged
         if (
           changeDeliveryState(current) === "already-landed" &&
           current.integration?.commit === shape.integration.commit &&
           current.integration?.baseSha === shape.integration.baseSha &&
-          existingEvidence?.candidateSha === alreadyLanded.candidateSha &&
-          existingEvidence.candidateTreeSha === alreadyLanded.candidateTreeSha &&
-          existingEvidence.baseTreeSha === alreadyLanded.baseTreeSha
+          existingEvidence?.candidateSha === alreadyMerged.candidateSha &&
+          existingEvidence.candidateTreeSha === alreadyMerged.candidateTreeSha &&
+          existingEvidence.baseTreeSha === alreadyMerged.baseTreeSha
         ) {
           continue
         }
@@ -5225,9 +5225,9 @@ function advanceQueue(
             run: record.id,
             ...(current.issue === undefined ? {} : { issueRef: current.issue }),
             baseSha: shape.integration.baseSha,
-            candidateSha: alreadyLanded.candidateSha,
-            candidateTreeSha: alreadyLanded.candidateTreeSha,
-            baseTreeSha: alreadyLanded.baseTreeSha,
+            candidateSha: alreadyMerged.candidateSha,
+            candidateTreeSha: alreadyMerged.candidateTreeSha,
+            baseTreeSha: alreadyMerged.baseTreeSha,
             ...(changeCorrelation(current) === undefined ? {} : { correlation: changeCorrelation(current) }),
             ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
           }),
@@ -6278,11 +6278,11 @@ function queueProgressAuditFindings(
 
     const started = prs.filter((pr) => checksRequested(pr))
     if (started.length === 0) continue
-    const latestLandingMs = latestQueueLandingMs(state, base)
+    const latestMergeMs = latestQueueMergeMs(state, base)
     const queuedAtMs = Math.min(
       ...started.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)),
     )
-    const sinceMs = Math.max(queuedAtMs, latestLandingMs ?? queuedAtMs)
+    const sinceMs = Math.max(queuedAtMs, latestMergeMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
     const first = started[0]
     const admissionChecks = started.reduce(
@@ -6317,7 +6317,7 @@ function queueProgressAuditFindings(
   return findings
 }
 
-function latestQueueLandingMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
+function latestQueueMergeMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
   return Object.values(state.bays.prs)
     .filter((pr) => baseIdentity(pr.base) === base)
     .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
@@ -7638,7 +7638,7 @@ function changeShape(prs: readonly changeSnapshot[]): changeShape {
 function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined {
   if (prs.every((pr) => !pr.merged)) return undefined
   const proof = prs[0]?.integration
-  const alreadyLanded = prs[0]?.alreadyLanded
+  const alreadyMerged = prs[0]?.alreadyMerged
   if (
     proof === undefined ||
     prs.some(
@@ -7646,12 +7646,12 @@ function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined 
         !pr.merged ||
         pr.integration?.commit !== proof.commit ||
         pr.integration?.baseSha !== proof.baseSha ||
-        (alreadyLanded === undefined) !== (pr.alreadyLanded === undefined) ||
-        (alreadyLanded !== undefined &&
-          (pr.alreadyLanded?.baseSha !== proof.baseSha ||
-            pr.alreadyLanded.candidateSha !== alreadyLanded.candidateSha ||
-            pr.alreadyLanded.candidateTreeSha !== alreadyLanded.candidateTreeSha ||
-            pr.alreadyLanded.baseTreeSha !== alreadyLanded.baseTreeSha)),
+        (alreadyMerged === undefined) !== (pr.alreadyMerged === undefined) ||
+        (alreadyMerged !== undefined &&
+          (pr.alreadyMerged?.baseSha !== proof.baseSha ||
+            pr.alreadyMerged.candidateSha !== alreadyMerged.candidateSha ||
+            pr.alreadyMerged.candidateTreeSha !== alreadyMerged.candidateTreeSha ||
+            pr.alreadyMerged.baseTreeSha !== alreadyMerged.baseTreeSha)),
     )
   ) {
     throw new Error("yrd: every PR in a queue candidate must share one integration proof")
@@ -7661,14 +7661,14 @@ function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined 
   return {
     ...changeShape(prs.map(Queues.snapshot)),
     integration:
-      alreadyLanded === undefined
+      alreadyMerged === undefined
         ? integration
         : {
             ...integration,
-            alreadyLanded: {
-              candidateSha: alreadyLanded.candidateSha,
-              candidateTreeSha: alreadyLanded.candidateTreeSha,
-              baseTreeSha: alreadyLanded.baseTreeSha,
+            alreadyMerged: {
+              candidateSha: alreadyMerged.candidateSha,
+              candidateTreeSha: alreadyMerged.candidateTreeSha,
+              baseTreeSha: alreadyMerged.baseTreeSha,
             },
           },
   }
@@ -7730,18 +7730,18 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
     if (step.kind !== "merge" || run.integration === undefined) return false
     return run.prs.some((pr) => {
       const current = state.bays.prs[pr.id]
-      const alreadyLanded = run.integration?.alreadyLanded
-      const currentAlreadyLanded = current?.alreadyLanded
+      const alreadyMerged = run.integration?.alreadyMerged
+      const currentAlreadyMerged = current?.alreadyMerged
       return (
         current?.merged !== true ||
         current.integration?.commit !== run.integration?.commit ||
         current.integration?.baseSha !== run.integration?.baseSha ||
-        (alreadyLanded === undefined) !== (currentAlreadyLanded === undefined) ||
-        (alreadyLanded !== undefined &&
-          (currentAlreadyLanded?.baseSha !== run.integration?.baseSha ||
-            currentAlreadyLanded?.candidateSha !== alreadyLanded.candidateSha ||
-            currentAlreadyLanded?.candidateTreeSha !== alreadyLanded.candidateTreeSha ||
-            currentAlreadyLanded?.baseTreeSha !== alreadyLanded.baseTreeSha))
+        (alreadyMerged === undefined) !== (currentAlreadyMerged === undefined) ||
+        (alreadyMerged !== undefined &&
+          (currentAlreadyMerged?.baseSha !== run.integration?.baseSha ||
+            currentAlreadyMerged?.candidateSha !== alreadyMerged.candidateSha ||
+            currentAlreadyMerged?.candidateTreeSha !== alreadyMerged.candidateTreeSha ||
+            currentAlreadyMerged?.baseTreeSha !== alreadyMerged.baseTreeSha))
       )
     })
   }

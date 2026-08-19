@@ -5,13 +5,13 @@ import type { YrdCliServices } from "./types.ts"
  * symbol stays out of YrdCliServices because this is a private host/CLI fact,
  * not a plugin capability.
  */
-export const LandingAuthorityBoundary = Symbol("yrd.landing-authority-boundary")
+export const MergeAuthorityBoundary = Symbol("yrd.landing-authority-boundary")
 
 type InternalServices = YrdCliServices &
   Readonly<{
-    [LandingAuthorityBoundary]?: "expected" | "none"
+    [MergeAuthorityBoundary]?: "expected" | "none"
   }>
 
-export function landingAuthorityBoundary(services: YrdCliServices): "expected" | "none" | undefined {
-  return (services as InternalServices)[LandingAuthorityBoundary]
+export function mergeAuthorityBoundary(services: YrdCliServices): "expected" | "none" | undefined {
+  return (services as InternalServices)[MergeAuthorityBoundary]
 }

@@ -3799,8 +3799,8 @@ describe("Queue", () => {
       changeId,
     }
 
-    await app.queue.reconcileLanding(fact)
-    await app.queue.reconcileLanding(fact)
+    await app.queue.reconcileMerge(fact)
+    await app.queue.reconcileMerge(fact)
 
     expect(changeFacts(app.bays.pr(pr.id))).toMatchObject({
       delivery: "integrated",

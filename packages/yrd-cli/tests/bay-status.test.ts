@@ -20,7 +20,7 @@ const base: BayStatusFacts = {
   branch: "task/example",
   path: "/repo/.bays/B1",
   worktreeDirty: false,
-  tipLanded: true,
+  tipMerged: true,
   aheadOfOrigin: 0,
   stashAttributed: 0,
   openChangeIds: [],
@@ -94,7 +94,7 @@ describe("classifyBayStatus", () => {
       ...base,
       ownerPid: 9,
       ownerAlive: false,
-      tipLanded: false,
+      tipMerged: false,
       aheadOfOrigin: 3,
     })
     expect(report.exit).toBe(1)
@@ -191,7 +191,7 @@ describe("classifyBayStatus", () => {
       worktreeMissing: true,
       branchMissingFromOrigin: true,
       remoteTrackingFresh: true,
-      tipLanded: undefined,
+      tipMerged: undefined,
       aheadOfOrigin: undefined,
       uniquePatches: 0,
     })

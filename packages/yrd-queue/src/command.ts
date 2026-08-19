@@ -18,7 +18,7 @@ import { pushRefUpdates } from "git-super/push"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import * as z from "zod"
 import type {
-  AlreadyLandedEvidence,
+  AlreadyMergedEvidence,
   Candidate,
   ComponentMainOutcomes,
   ComponentMainReceipt,
@@ -1994,7 +1994,7 @@ export const RepositoryChangeIdentitySchema = z
   .strict()
 export type RepositoryChangeIdentity = Readonly<z.infer<typeof RepositoryChangeIdentitySchema>>
 
-export type RepositoryChangeLandingResult =
+export type RepositoryChangeMergeResult =
   | Readonly<{
       status: "proven"
       fact: RepositoryChangeIdentity & Readonly<{ landingSha: string; baseSha: string }>
@@ -2008,14 +2008,14 @@ export type RepositoryChangeLandingResult =
  * selected base's history is the population, so a match is already ancestry
  * proof and no subject, branch name, patch-id, or Journal row participates.
  */
-export async function findRepositoryChangeLanding(
+export async function findRepositoryChangeMerge(
   options: Readonly<{
     inject: Readonly<{ process: Pick<Process, "run"> }>
     repo: string
     baseSha: string
     identity: RepositoryChangeIdentity
   }>,
-): Promise<RepositoryChangeLandingResult> {
+): Promise<RepositoryChangeMergeResult> {
   const identity = RepositoryChangeIdentitySchema.parse(options.identity)
   const baseSha = z
     .string()
@@ -2145,14 +2145,14 @@ async function recutPR(git: Git, repo: string, input: ChangeRecutInput): Promise
   // against. Re-derive it from the immutable source instead of refusing
   // `recut-certificate` on the fast path (22373). Composed revisions legitimately
   // sit at the base and certify by wrapper replay, so they keep the fast path.
-  const alreadyLandedDirect =
+  const alreadyMergedDirect =
     (current?.composition ?? input.composition) === undefined && current?.headSha === target.sha
   if (
     (current?.revision === input.revision || current?.fromRevision === input.revision) &&
     current.baseSha === target.sha &&
     current.treeSha !== undefined &&
     current.patchId !== undefined &&
-    !alreadyLandedDirect
+    !alreadyMergedDirect
   ) {
     await assertCurrentRecutCertificate(git, repo, target, input, current)
     return {
@@ -3570,7 +3570,7 @@ async function prepareCandidateMembers(
     }
     if (pr.composition === undefined) {
       if (pr.recut !== undefined) {
-        const dropped = await carrierDropsLandedFailure(git, repo, path, pr.id, pr.headSha, authoritativeBase)
+        const dropped = await carrierDropsMergedFailure(git, repo, path, pr.id, pr.headSha, authoritativeBase)
         if (dropped !== undefined) return dropped
       }
       const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
@@ -3685,20 +3685,20 @@ async function prepareCandidateMembers(
     }
     const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
     if (wrapper !== undefined) return wrapper
-    const landed = await git.commit(path, "HEAD")
+    const mergedHead = await git.commit(path, "HEAD")
     // The clean path only. A conflicted merge is already refused above, and the
     // submodule-composition branch resolves by re-authoring its own tree, so its
     // deletions are the policy's, not the carrier's, and this comparison would
     // measure the wrong author.
-    const erased = await unauthoredDeletionFailure(git, path, pr.id, pr.headSha, before, landed)
+    const erased = await unauthoredDeletionFailure(git, path, pr.id, pr.headSha, before, mergedHead)
     if (erased !== undefined) return erased
     // Deletions first, then what survives: the deletion guard rules on paths the
     // merge removed, so by here every remaining path is one this witness can
     // read, and the only question left is whether its content still says what
     // both parents said.
-    const unwitnessed = await droppedContributionFailure(git, path, pr.id, pr.headSha, before, landed)
+    const unwitnessed = await droppedContributionFailure(git, path, pr.id, pr.headSha, before, mergedHead)
     if (unwitnessed !== undefined) return unwitnessed
-    let generated = landed
+    let generated = mergedHead
     if (authoredFill !== undefined && authoredFill.updates.length > 0) {
       // The shaset commit: the queue's own write on top of the content merge,
       // filling each authored gitlink in from its submodule's main (plus the
@@ -3707,7 +3707,7 @@ async function prepareCandidateMembers(
       const synthesized = await synthesizeGitlinkWrapper(
         git,
         path,
-        landed,
+        mergedHead,
         authoredFill.updates,
         candidateChangeCommitMessage("compose", pr),
         provisionPinIntent,
@@ -4216,12 +4216,12 @@ async function inspectBaseContainment(
 
   // Post-landing actuator retries intentionally carry a head already contained
   // by current main. They cannot remove current-base commits and remain safe.
-  const alreadyLanded = await git.run(repo, ["merge-base", "--is-ancestor", carrierHead, authoritativeBase], true)
-  if (alreadyLanded.code === 0) return { status: "contained" }
-  if (alreadyLanded.code !== 1) {
+  const alreadyMerged = await git.run(repo, ["merge-base", "--is-ancestor", carrierHead, authoritativeBase], true)
+  if (alreadyMerged.code === 0) return { status: "contained" }
+  if (alreadyMerged.code !== 1) {
     return {
       status: "inspection-failed",
-      detail: alreadyLanded.stderr || alreadyLanded.stdout || "git merge-base failed",
+      detail: alreadyMerged.stderr || alreadyMerged.stdout || "git merge-base failed",
     }
   }
 
@@ -4292,13 +4292,13 @@ async function spentGitlinkCarrier(
   candidate: string,
   headSha: string,
   authoritativeBase: string,
-): Promise<Readonly<{ landings: readonly string[] }> | undefined> {
+): Promise<Readonly<{ merges: readonly string[] }> | undefined> {
   const forkPoint = await git.run(candidate, ["merge-base", authoritativeBase, headSha], true)
   if (forkPoint.code !== 0 || forkPoint.stdout === "") return undefined
   const authored = await changedPaths(git, candidate, forkPoint.stdout, headSha)
   if (authored.length === 0) return undefined
 
-  const landings: string[] = []
+  const merges: string[] = []
   for (const path of authored) {
     // A path that is not a gitlink on both sides carries payload this verdict
     // cannot speak for, so the carrier is not pins-only.
@@ -4306,7 +4306,7 @@ async function spentGitlinkCarrier(
     const basePin = await readGitlink(git, candidate, authoritativeBase, path)
     if (carrierPin === undefined || basePin === undefined) return undefined
     if (carrierPin === basePin) {
-      landings.push(`pin '${carrierPin}' for '${path}' is the pin the base already carries`)
+      merges.push(`pin '${carrierPin}' for '${path}' is the pin the base already carries`)
       continue
     }
     // Below this line every failure keeps the existing refusal rather than
@@ -4316,12 +4316,12 @@ async function spentGitlinkCarrier(
     const component = await componentCheckout(git, repo, path)
     if (component === undefined) return undefined
     if (!(await isAncestor(git, component, carrierPin, basePin))) return undefined
-    landings.push(`pin '${carrierPin}' for '${path}' is already contained in the base's pin '${basePin}'`)
+    merges.push(`pin '${carrierPin}' for '${path}' is already contained in the base's pin '${basePin}'`)
   }
-  return { landings }
+  return { merges }
 }
 
-async function carrierDropsLandedFailure(
+async function carrierDropsMergedFailure(
   git: Git,
   repo: string,
   candidate: string,
@@ -4341,7 +4341,7 @@ async function carrierDropsLandedFailure(
   if (spent !== undefined) {
     return candidateFailure(
       "carrier-pin-already-landed",
-      `merge request '${pr}' branch '${headSha}' authors component pins only, and every one of them already landed: ${spent.landings.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
+      `merge request '${pr}' branch '${headSha}' authors component pins only, and every one of them already landed: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
     )
   }
   return candidateFailure(
@@ -4374,9 +4374,9 @@ async function unauthoredDeletionFailure(
   pr: string,
   headSha: string,
   before: string,
-  landed: string,
+  merged: string,
 ): Promise<CandidateFailure | undefined> {
-  const removed = await deletedPaths(git, repo, before, landed)
+  const removed = await deletedPaths(git, repo, before, merged)
   if (removed.length === 0) return undefined
   const base = await authoredDeltaBase((cwd, args) => git.run(cwd, args, true), repo, before, headSha)
   if (base.status === "unreadable") {
@@ -4494,7 +4494,7 @@ async function droppedContributionFailure(
   pr: string,
   headSha: string,
   before: string,
-  landed: string,
+  merged: string,
 ): Promise<CandidateFailure | undefined> {
   const unreadable = (path: string, detail: string): CandidateFailure =>
     candidateFailure(
@@ -4514,7 +4514,7 @@ async function droppedContributionFailure(
   const drops: ContributionDrop[] = []
   const excluded: string[] = []
   for (const path of contested) {
-    const result = await witnessLines(git, repo, landed, path)
+    const result = await witnessLines(git, repo, merged, path)
     if (result.status === "unreadable") return unreadable(path, result.detail)
     if (result.status === "absent") continue
     if (result.status === "opaque") {
@@ -7691,8 +7691,8 @@ async function validatePinnedCandidate(
 ): Promise<PinnedCandidateResult> {
   let pinned = checked
   if (checked.baseSha !== baseSha) {
-    const attemptedLanding =
-      (await landingAttemptRefs(git, repo, input, checked)).length > 0 &&
+    const attemptedMerge =
+      (await mergeAttemptRefs(git, repo, input, checked)).length > 0 &&
       (await git.run(repo, ["merge-base", "--is-ancestor", checked.candidateSha, baseSha], true)).code === 0
     const current = input.candidate
     const treeEquivalent =
@@ -7701,7 +7701,7 @@ async function validatePinnedCandidate(
       current?.treeSha === checked.candidateTreeSha &&
       current.sha !== undefined &&
       current.ref !== undefined
-    if (!treeEquivalent && !attemptedLanding) {
+    if (!treeEquivalent && !attemptedMerge) {
       return {
         error: {
           code: "stale-check",
@@ -7709,7 +7709,7 @@ async function validatePinnedCandidate(
         },
       }
     }
-    if (!attemptedLanding) {
+    if (!attemptedMerge) {
       if (current?.sha === undefined || current.treeSha === undefined || current.ref === undefined) {
         return {
           error: {
@@ -7832,7 +7832,7 @@ async function mergeCandidate(
   if ("error" in validated) return { status: "completed", conclusion: "failure", error: validated.error }
   // Last comparison before either merge step publishes: `checked` is the pin
   // both of them land, and `base.sha` is what they land it onto.
-  const erased = await landingDeletionFloor(git, repo, input, base.sha, checked)
+  const erased = await mergeDeletionFloor(git, repo, input, base.sha, checked)
   if (erased !== undefined) return { status: "completed", conclusion: "failure", error: erased.error }
   return { status: "completed", conclusion: "success", base, checked }
 }
@@ -7856,7 +7856,7 @@ async function mergeCandidate(
  * Every such path is named IN FULL, unlike its composition-time sibling: whoever
  * reads this refusal is reconstructing what a landing would have erased, and a
  * truncated list is a search they have to redo by hand. */
-async function landingDeletionFloor(
+async function mergeDeletionFloor(
   git: Git,
   repo: string,
   input: StepExecution,
@@ -7894,12 +7894,12 @@ async function landingDeletionFloor(
   )
 }
 
-async function alreadyLandedEvidence(
+async function alreadyMergedEvidence(
   git: Git,
   repo: string,
   baseSha: string,
   checked: PinnedCandidate,
-): Promise<AlreadyLandedEvidence | undefined> {
+): Promise<AlreadyMergedEvidence | undefined> {
   const candidateTreeSha = (await git.run(repo, ["rev-parse", `${checked.candidateSha}^{tree}`])).stdout
   const baseTreeSha = (await git.run(repo, ["rev-parse", `${baseSha}^{tree}`])).stdout
   return candidateTreeSha === baseTreeSha
@@ -8111,7 +8111,7 @@ export async function resolveGitQueueTarget(options: {
   )
 }
 
-async function landingError(
+async function mergeError(
   git: Git,
   repo: string,
   input: StepExecution,
@@ -8131,7 +8131,7 @@ async function rollbackQueueBase(
   git: Git,
   repo: string,
   base: GitQueueTarget,
-  landing: GitQueueTarget,
+  merge: GitQueueTarget,
 ): Promise<string | undefined> {
   try {
     if (base.remote !== undefined) {
@@ -8145,7 +8145,7 @@ async function rollbackQueueBase(
             remote: base.remote,
             source: base.sha,
             destination: base.branchRef,
-            expectedDestination: { state: "oid", oid: landing.sha },
+            expectedDestination: { state: "oid", oid: merge.sha },
             allowNonFastForward: true,
           },
         ],
@@ -8158,7 +8158,7 @@ async function rollbackQueueBase(
 
     const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
     if (checkedOut !== undefined) {
-      if ((await git.commit(checkedOut, "HEAD")) !== landing.sha) return `'${base.branch}' moved during rollback`
+      if ((await git.commit(checkedOut, "HEAD")) !== merge.sha) return `'${base.branch}' moved during rollback`
       const rolledBack = await git.run(checkedOut, ["reset", "--merge", base.sha], true)
       const restored = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
       if (rolledBack.code !== 0 || restored.code !== 0) {
@@ -8166,7 +8166,7 @@ async function rollbackQueueBase(
         return detail || `could not restore '${base.branch}' after source ref loss`
       }
     } else {
-      const rolledBack = await git.run(repo, ["update-ref", base.branchRef, base.sha, landing.sha], true)
+      const rolledBack = await git.run(repo, ["update-ref", base.branchRef, base.sha, merge.sha], true)
       if (rolledBack.code !== 0) {
         return rolledBack.stderr || rolledBack.stdout || `'${base.branch}' moved during rollback`
       }
@@ -8192,11 +8192,11 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
-      const alreadyLanded = await alreadyLandedEvidence(git, repo, baseSha, checked)
-      if (alreadyLanded !== undefined) {
+      const alreadyMerged = await alreadyMergedEvidence(git, repo, baseSha, checked)
+      if (alreadyMerged !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
-        const recovering = (await landingAttemptRefs(git, repo, input, checked)).length > 0
+        const recovering = (await mergeAttemptRefs(git, repo, input, checked)).length > 0
         return await withComponentMainPromotions(
           git,
           repo,
@@ -8210,7 +8210,7 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
               conclusion: "success",
               output: recovering
                 ? await physicalIntegrationProof(git, repo, input, context, baseSha, checked, settlement.receipts)
-                : integrationProof(baseSha, checked, alreadyLanded, settlement.receipts),
+                : integrationProof(baseSha, checked, alreadyMerged, settlement.receipts),
             }
           },
           { settleSafePromotions: true },
@@ -8237,7 +8237,7 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
             if (sourceRefError !== undefined) return failed("invalid-candidate", sourceRefError)
             const cancellation = mergeAuthorityCancellation(context)
             if (cancellation !== undefined) return cancellation
-            await recordLandingAttempt(git, repo, input, context, checked)
+            await recordMergeAttempt(git, repo, input, context, checked)
             return withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
               // Component mains are promoted explicitly around this root push.
               // A caller's recursive-push config would replay the root-only SHA refspec inside each component.
@@ -8297,12 +8297,12 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
             })
           },
         )
-        const landing = await authoritativeQueueBase(git, repo, branch)
-        const missing = await landingError(git, repo, input, checked, landing.sha)
+        const merge = await authoritativeQueueBase(git, repo, branch)
+        const missing = await mergeError(git, repo, input, checked, merge.sha)
         if (missing === undefined) {
           const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
           if (sourceRefError !== undefined) {
-            const rollbackError = await rollbackQueueBase(git, repo, base, landing)
+            const rollbackError = await rollbackQueueBase(git, repo, base, merge)
             if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
             return failed("invalid-candidate", sourceRefError)
           }
@@ -8322,7 +8322,7 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
               git,
               repo,
               undefined,
-              landing.sha,
+              merge.sha,
               async (promotions, receipts) => {
                 const settlement = await applyComponentMainPromotions(git, promotions, receipts)
                 return settlement.status === "passed"
@@ -8334,7 +8334,7 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
                         repo,
                         input,
                         context,
-                        landing.sha,
+                        merge.sha,
                         checked,
                         settlement.receipts,
                       ),
@@ -8348,10 +8348,10 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
           if (attempted.status === "completed" && attempted.conclusion === "success") return attempted
           return attempted
         }
-        if (landing.sha !== baseSha) {
+        if (merge.sha !== baseSha) {
           return failed(
             "stale-base",
-            `queue '${branch}' moved from '${baseSha}' to '${landing.sha}' before the candidate could land`,
+            `queue '${branch}' moved from '${baseSha}' to '${merge.sha}' before the candidate could land`,
           )
         }
         if (attempted.status === "completed" && attempted.conclusion === "failure") return attempted
@@ -8366,10 +8366,10 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
           if ((await git.commit(checkedOut, "HEAD")) !== baseSha) return failed("stale-base", `${branch} moved`)
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
-          await recordLandingAttempt(git, repo, input, context, checked)
+          await recordMergeAttempt(git, repo, input, context, checked)
           const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
           if (moved.code !== 0) {
-            await clearLandingAttempts(git, repo, input, checked)
+            await clearMergeAttempts(git, repo, input, checked)
             return failed("stale-base", moved.stderr || "base branch moved")
           }
           const aligned = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
@@ -8382,7 +8382,7 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
                 [aligned.stderr, rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
               )
             }
-            await clearLandingAttempts(git, repo, input, checked)
+            await clearMergeAttempts(git, repo, input, checked)
             const detail = aligned.stderr || aligned.stdout || "could not align merged candidate submodules"
             return candidateSubmodulesFailure(git, repo, detail)
           }
@@ -8396,17 +8396,17 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
                 [rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
               )
             }
-            await clearLandingAttempts(git, repo, input, checked)
+            await clearMergeAttempts(git, repo, input, checked)
             return failed("invalid-candidate", sourceRefError)
           }
         } else {
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
-          await recordLandingAttempt(git, repo, input, context, checked)
+          await recordMergeAttempt(git, repo, input, context, checked)
           const expected = base.local ? baseSha : "0".repeat(baseSha.length)
           const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
           if (moved.code !== 0) {
-            await clearLandingAttempts(git, repo, input, checked)
+            await clearMergeAttempts(git, repo, input, checked)
             return failed("stale-base", moved.stderr || "base branch moved")
           }
         }
@@ -8458,11 +8458,11 @@ export function configuredMergeStep<Shape extends changeShape>(
         ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
       })
       if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
-      const alreadyLanded = await alreadyLandedEvidence(git, repo, candidate.base.sha, candidate.checked)
-      if (alreadyLanded !== undefined) {
+      const alreadyMerged = await alreadyMergedEvidence(git, repo, candidate.base.sha, candidate.checked)
+      if (alreadyMerged !== undefined) {
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
-        const recovering = (await landingAttemptRefs(git, repo, input, candidate.checked)).length > 0
+        const recovering = (await mergeAttemptRefs(git, repo, input, candidate.checked)).length > 0
         return await withComponentMainPromotions(
           git,
           repo,
@@ -8484,7 +8484,7 @@ export function configuredMergeStep<Shape extends changeShape>(
                     candidate.checked,
                     settlement.receipts,
                   )
-                : integrationProof(candidate.base.sha, candidate.checked, alreadyLanded, settlement.receipts),
+                : integrationProof(candidate.base.sha, candidate.checked, alreadyMerged, settlement.receipts),
             }
           },
           { settleSafePromotions: true },
@@ -8517,11 +8517,11 @@ export function configuredMergeStep<Shape extends changeShape>(
         async () => {
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
-          await recordLandingAttempt(git, repo, input, context, candidate.checked)
+          await recordMergeAttempt(git, repo, input, context, candidate.checked)
           const outcome = await command(input, context)
-          let landing: GitQueueTarget
+          let merge: GitQueueTarget
           try {
-            landing = await authoritativeQueueBase(git, repo, branch)
+            merge = await authoritativeQueueBase(git, repo, branch)
           } catch (cause) {
             const refusal = queueAuthorityRefusal(cause)
             if (refusal !== undefined) {
@@ -8535,20 +8535,20 @@ export function configuredMergeStep<Shape extends changeShape>(
               ? failed(outcome.error.code, outcome.error.message)
               : failed("merge-verification-failed", messageOf(cause))
           }
-          const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
+          const missing = await mergeError(git, repo, input, candidate.checked, merge.sha)
           if (missing === undefined) {
             const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
             if (sourceRefError !== undefined) {
-              const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
+              const rollbackError = await rollbackQueueBase(git, repo, candidate.base, merge)
               if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
-              await clearLandingAttempts(git, repo, input, candidate.checked)
+              await clearMergeAttempts(git, repo, input, candidate.checked)
               return failed("invalid-candidate", sourceRefError)
             }
             return withComponentMainPromotions(
               git,
               repo,
               undefined,
-              landing.sha,
+              merge.sha,
               async (promotions, receipts) => {
                 const settlement = await applyComponentMainPromotions(git, promotions, receipts)
                 if (settlement.status === "failed") return componentMainFailureResult(settlement.error)
@@ -8560,7 +8560,7 @@ export function configuredMergeStep<Shape extends changeShape>(
                     repo,
                     input,
                     context,
-                    landing.sha,
+                    merge.sha,
                     candidate.checked,
                     settlement.receipts,
                   ),
@@ -8569,7 +8569,7 @@ export function configuredMergeStep<Shape extends changeShape>(
               { settleSafePromotions: true },
             )
           }
-          await clearLandingAttempts(git, repo, input, candidate.checked)
+          await clearMergeAttempts(git, repo, input, candidate.checked)
           if (outcome.status === "completed" && outcome.conclusion === "failure") {
             return failed(outcome.error.code, outcome.error.message)
           }
@@ -8625,21 +8625,21 @@ function repositoryReceiptFailure(
   throw createFailure({ kind: "infrastructure", code, message })
 }
 
-const LANDING_ATTEMPT_REF_ROOT = "refs/yrd/landing-attempts"
+const MERGE_ATTEMPT_REF_ROOT = "refs/yrd/landing-attempts"
 
-function landingAttemptRef(input: StepExecution, context: JobContext): string {
+function mergeAttemptRef(input: StepExecution, context: JobContext): string {
   const safeJob = context.id.replace(/[^a-zA-Z0-9._-]/gu, "-")
-  return `${LANDING_ATTEMPT_REF_ROOT}/${input.run}/${safeJob}/attempt-${context.attempt}`
+  return `${MERGE_ATTEMPT_REF_ROOT}/${input.run}/${safeJob}/attempt-${context.attempt}`
 }
 
-async function recordLandingAttempt(
+async function recordMergeAttempt(
   git: Git,
   repo: string,
   input: StepExecution,
   context: JobContext,
   checked: PinnedCandidate,
 ): Promise<void> {
-  const ref = landingAttemptRef(input, context)
+  const ref = mergeAttemptRef(input, context)
   const zero = "0".repeat(checked.candidateSha.length)
   const recorded = await git.run(repo, ["update-ref", "--create-reflog", ref, checked.candidateSha, zero], true)
   if (recorded.code === 0 || (await git.optionalCommit(repo, ref)) === checked.candidateSha) return
@@ -8649,13 +8649,13 @@ async function recordLandingAttempt(
   )
 }
 
-async function landingAttemptRefs(
+async function mergeAttemptRefs(
   git: Git,
   repo: string,
   input: StepExecution,
   checked: PinnedCandidate,
 ): Promise<readonly string[]> {
-  const prefix = `${LANDING_ATTEMPT_REF_ROOT}/${input.run}/`
+  const prefix = `${MERGE_ATTEMPT_REF_ROOT}/${input.run}/`
   const listed = await git.run(repo, ["for-each-ref", "--format=%(objectname) %(refname)", prefix], true)
   if (listed.code !== 0) {
     return repositoryReceiptFailure(
@@ -8683,13 +8683,13 @@ async function landingAttemptRefs(
       })
 }
 
-async function clearLandingAttempts(
+async function clearMergeAttempts(
   git: Git,
   repo: string,
   input: StepExecution,
   checked: PinnedCandidate,
 ): Promise<void> {
-  for (const ref of await landingAttemptRefs(git, repo, input, checked)) {
+  for (const ref of await mergeAttemptRefs(git, repo, input, checked)) {
     const deleted = await git.run(repo, ["update-ref", "-d", ref, checked.candidateSha], true)
     if (deleted.code !== 0) {
       return repositoryReceiptFailure(
@@ -8709,20 +8709,20 @@ async function physicalIntegrationProof(
   checked: PinnedCandidate,
   componentMains: readonly ComponentMainReceipt[] = [],
 ): Promise<IntegrationProof> {
-  await clearLandingAttempts(git, repo, input, checked)
+  await clearMergeAttempts(git, repo, input, checked)
   return integrationProof(commit, checked, undefined, componentMains)
 }
 
 function integrationProof(
   commit: string,
   checked: PinnedCandidate,
-  alreadyLanded?: AlreadyLandedEvidence,
+  alreadyMerged?: AlreadyMergedEvidence,
   componentMains: readonly ComponentMainReceipt[] = [],
 ): IntegrationProof {
   return IntegrationProofSchema.parse({
     commit,
     baseSha: commit,
-    ...(alreadyLanded === undefined ? {} : { alreadyLanded }),
+    ...(alreadyMerged === undefined ? {} : { alreadyMerged }),
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
     ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
     ...(componentMains.length === 0 ? {} : { componentMains }),

@@ -70,8 +70,8 @@ const MERGED_SHA = "b".repeat(40)
 const BASE_TREE = "e".repeat(40)
 const OTHER_TREE = "f".repeat(40)
 const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
-const PR380_LANDING_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
-const PR473_LANDING_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
+const PR380_MERGE_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
+const PR473_MERGE_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
 const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
 const PR1640_RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
 const PR1640_LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
@@ -754,7 +754,7 @@ describe("pr recut --preflight", () => {
     const output = outputIO({
       pruneGit: () =>
         recutPreflightGit({
-          patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_LANDING_SHA }),
+          patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_MERGE_SHA }),
         }),
     })
 
@@ -1749,7 +1749,7 @@ describe("pr recut --preflight", () => {
     const output = outputIO({
       pruneGit: () =>
         recutPreflightGit({
-          patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_LANDING_SHA }),
+          patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_MERGE_SHA }),
         }),
     })
 
@@ -1765,7 +1765,7 @@ describe("pr recut --preflight", () => {
         targetBaseSha: TARGET_BASE_SHA,
         pinDistance: { sourceOnly: 0, targetOnly: 3 },
         patchId: PR380_PATCH_ID,
-        patchMatchTarget: PR380_LANDING_SHA,
+        patchMatchTarget: PR380_MERGE_SHA,
         tree: "identical",
       },
     })
@@ -1779,7 +1779,7 @@ describe("pr recut --preflight", () => {
       verdict: "SUBSUMED-WITHDRAW",
       mergeTree: BASE_TREE,
       patchId: "c".repeat(40),
-      patchTarget: PR473_LANDING_SHA,
+      patchTarget: PR473_MERGE_SHA,
       targetOnly: 2,
     },
     {

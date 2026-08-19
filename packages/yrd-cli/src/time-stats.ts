@@ -22,7 +22,7 @@ export type QueueStatsBucket = Readonly<{
   runs: Readonly<{
     all: number
     integrated: number
-    alreadyLanded: number
+    alreadyMerged: number
     /** Admission-only / non-landing successes (21801) — not FAILS, not INTEGRATED. */
     passed: number
     fails: number
@@ -174,21 +174,21 @@ function queueStatsBucket(
   const selected = facts.filter((fact) => fact.terminalAtMs >= window.startMs && fact.terminalAtMs < window.endMs)
   const members = selected.flatMap((fact) => fact.members)
   const integratedMembers = selected.filter((fact) => fact.outcome === "integrated").flatMap((fact) => fact.members)
-  const alreadyLandedMembers = selected
+  const alreadyMergedMembers = selected
     .filter((fact) => fact.outcome === "already-landed")
     .flatMap((fact) => fact.members)
   const totalMembers = integratedMembers.filter((member) => member.totalMs !== null)
-  const isLanding = (outcome: string) => outcome === "integrated" || outcome === "already-landed"
-  const isNonLandingSuccess = (outcome: string) => outcome === "passed"
+  const isMerged = (outcome: string) => outcome === "integrated" || outcome === "already-landed"
+  const isNonMergeSuccess = (outcome: string) => outcome === "passed"
   return {
     ...window,
     covered: earliestFactMs !== null && earliestFactMs <= window.startMs,
     runs: {
       all: selected.length,
       integrated: integratedMembers.length,
-      alreadyLanded: alreadyLandedMembers.length,
-      passed: selected.filter((fact) => isNonLandingSuccess(fact.outcome)).length,
-      fails: selected.filter((fact) => !isLanding(fact.outcome) && !isNonLandingSuccess(fact.outcome)).length,
+      alreadyMerged: alreadyMergedMembers.length,
+      passed: selected.filter((fact) => isNonMergeSuccess(fact.outcome)).length,
+      fails: selected.filter((fact) => !isMerged(fact.outcome) && !isNonMergeSuccess(fact.outcome)).length,
       failureBreakdown: failureBreakdown(selected),
     },
     total: {
