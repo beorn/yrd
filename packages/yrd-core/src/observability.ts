@@ -15,7 +15,6 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   // One-shot commands report their final error at the CLI boundary. Keeping
   // lifecycle failures at INFO avoids printing the same failure twice; the
   // resident runner enables INFO and still records every background outcome.
-  refused: "info",
   recovered: "warn",
   failed: "info",
 } as const satisfies Record<string, Exclude<LogLevel, "silent">>)
@@ -111,8 +110,13 @@ export async function observeYrdLifecycle<Result>(
     try {
       result = await operation()
     } catch (error) {
-      const failure = failureFact(error)
-      finish(failure !== undefined && failure.kind !== "infrastructure" ? "refused" : "failed", error)
+      // The "refused" outcome retired 2026-08-18: the ratified result states
+      // are queued -> checking -> merged | failed, and the distinction this
+      // used to carry (a typed domain failure whose kind isn't
+      // "infrastructure", versus everything else) lives in `failure?.kind` on
+      // the attached result content instead -- see the `failure` field
+      // `finish` already assigns onto spanProps below.
+      finish("failed", error)
       throw error
     }
     finish(

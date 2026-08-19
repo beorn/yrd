@@ -174,7 +174,6 @@ describe("Yrd lifecycle records", () => {
       // deepest failing job/step owns the single ERROR, so the enclosing
       // run/compose settle at INFO instead of re-raising the same failure.
       settled: "info",
-      refused: "info",
       recovered: "warn",
       failed: "info",
     })
@@ -370,14 +369,21 @@ describe("Yrd lifecycle records", () => {
       }),
     ).rejects.toThrow("network down")
 
-    expect(
-      events
-        .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
-        .filter((event) => event.props?.outcome !== "started")
-        .map((event) => [event.namespace, event.level, event.props?.outcome]),
-    ).toEqual([
-      ["yrd:admit", "info", "refused"],
+    const finished = events
+      .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
+      .filter((event) => event.props?.outcome !== "started")
+    expect(finished.map((event) => [event.namespace, event.level, event.props?.outcome])).toEqual([
+      ["yrd:admit", "info", "failed"],
       ["yrd:remote", "info", "failed"],
+    ])
+    // The "refused" outcome retired: a typed domain refusal and an untyped
+    // thrown error now share the one "failed" outcome, so the distinction
+    // between them has to live somewhere else -- the attached failure
+    // record's `kind` when there is one (a plain, non-YrdFailure Error, like
+    // the "network down" throw above, carries none at all).
+    expect(finished.map((event) => (event.props?.failure as { kind?: string } | undefined)?.kind)).toEqual([
+      "refusal",
+      undefined,
     ])
     log.end()
   })
