@@ -638,12 +638,18 @@ export type QueueRunnerAbsence =
   | Readonly<{ kind: "never" }>
 
 /**
- * One queue the projection covers, and the short label every surface uses for
- * it: the legend pill, the digit that toggles it, and the `N:` prefix on its
- * run references. Labels are positions in `queues`, so they are stable for a
- * given snapshot and always start at the primary base.
+ * One queue the projection covers, under the three-tier naming model
+ * (operator rulings 2026-08-18, items 32a/34/36):
+ *
+ * - `label` — the DIGIT filter accelerator: this queue's position in `queues`,
+ *   stable for a given snapshot, primary base first. It toggles the queue's
+ *   pill and never appears in a name (item 34 kills the `1:` run prefix).
+ * - `base` + `path` — the identity pair; `path@base` is the canonical FQN.
+ *   `path` is absent when the surface does not know its repository root.
+ * - `name` — the short config handle (`code`, `pm`) when one is declared;
+ *   run names lead with it (`code#23423`), falling back to `base`.
  */
-export type QueueTimelineQueue = Readonly<{ label: number; base: string }>
+export type QueueTimelineQueue = Readonly<{ label: number; base: string; path?: string; name?: string }>
 
 export type QueueTimelineProjection = Readonly<{
   now: string
@@ -705,6 +711,14 @@ export type QueueTimelineProjectionOptions = Readonly<{
   state?: BaysState
   runner?: QueueTimelineRunner | null
   runnerAbsence?: QueueRunnerAbsence
+  /** Repository root the projected journal belongs to — the `path` half of
+   * every queue's FQN identity pair (items 32a/36). One journal per repo, so
+   * one path covers every queue this projection labels. */
+  repositoryRoot?: string
+  /** Config-handle labels by base (`main` → `code`). Today only a composition
+   * host declares one, for its configured base; per-queue config labels ride
+   * the 37i machinery. */
+  queueNames?: ReadonlyMap<string, string>
 }>
 
 export type DurationDistribution = Readonly<{
@@ -2815,10 +2829,17 @@ type QueueTimelineProjectionBuild = Readonly<{
 function queueTimelineQueues(
   results: readonly QueueStatusResult[],
   primary: string | undefined,
+  repositoryRoot: string | undefined,
+  queueNames: ReadonlyMap<string, string> | undefined,
 ): readonly QueueTimelineQueue[] {
   const base = primary ?? results[0]?.base ?? "main"
   const others = [...new Set(results.map((result) => result.base))].filter((candidate) => candidate !== base).toSorted()
-  return [base, ...others].map((queueBase, index) => ({ label: index + 1, base: queueBase }))
+  return [base, ...others].map((queueBase, index) => ({
+    label: index + 1,
+    base: queueBase,
+    ...(repositoryRoot === undefined ? {} : { path: repositoryRoot }),
+    ...(queueNames?.get(queueBase) === undefined ? {} : { name: queueNames.get(queueBase) }),
+  }))
 }
 
 function buildQueueTimelineProjection(
@@ -2871,7 +2892,7 @@ function buildQueueTimelineProjection(
     return options.latest ? latestTimelineRows(filtered) : filtered
   }
   const displayed = selectRows(sinceMs)
-  const queues = queueTimelineQueues(results, options.base)
+  const queues = queueTimelineQueues(results, options.base, options.repositoryRoot, options.queueNames)
   const labelsByBase = new Map(queues.map(({ label, base: queueBase }) => [queueBase, label]))
   // One queue means no labels at all — not label 1 — so nothing about a
   // single-queue watch changes shape when the feature ships.
