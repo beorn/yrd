@@ -4783,6 +4783,22 @@ export function QueueStatusNotice({
           active step pulses in the ag-code idiom; a failed step takes the
           box's severity color WITH its remedy inline. The same derivation
           feeds the workflow step tabs, so the two can never disagree. */}
+      <RunStepLines steps={steps} live={live} />
+    </TitledBox>
+  )
+}
+
+/**
+ * The kind-agnostic step-line skeleton (items 39 + 37m): one hanging-marker
+ * line per step, active pulsing, failed severity-colored with the remedy
+ * inline. It consumes {@link QueueRunStepFact}s and nothing else, so a
+ * deployment-kind run renders its rollout phases through this exact
+ * component with zero display-code changes — the run's KIND selects what
+ * produces the facts, never how they draw.
+ */
+export function RunStepLines({ steps, live = false }: { steps: readonly QueueRunStepFact[]; live?: boolean }) {
+  return (
+    <>
       {steps.map((step) => (
         <MarkerRow
           key={step.step}
@@ -4801,7 +4817,7 @@ export function QueueStatusNotice({
           </Text>
         </MarkerRow>
       ))}
-    </TitledBox>
+    </>
   )
 }
 

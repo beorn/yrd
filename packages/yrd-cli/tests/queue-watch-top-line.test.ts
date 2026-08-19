@@ -14,6 +14,7 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
+import { QueueTopLine } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 function snapshot() {
@@ -53,6 +54,29 @@ describe("watch pane top line (@yrd/cli/queue-watch-top-line)", () => {
       expect(topRow).toContain("YRD QUEUES")
       expect(topRow, "the identity pair degrades to the branch half").toContain("1 ⎇ main")
       expect(topRow).not.toContain("undefined")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("spells the three-tier pill — digit, config handle, pretty name (item 36)", async () => {
+    // `1 code /hh ⎇ main` — the digit accelerator, the config-handle label
+    // when one is declared, and the pretty rendering of the FQN identity
+    // pair with the shortest unique friendly path (/hh/pm shortens to pm).
+    const app = createRenderer({ cols: 140, rows: 6 })(
+      createElement(QueueTopLine, {
+        queues: [
+          { label: 1, base: "main", name: "code", path: "/hh" },
+          { label: 2, base: "main", name: "pm", path: "/hh/pm" },
+        ],
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const topRow = app.text.split("\n")[0] ?? ""
+      expect(topRow).toContain("1 code /hh ⎇ main")
+      expect(topRow).toContain("2 pm pm ⎇ main")
+      expect(topRow, "digits are filter accelerators, never name prefixes").not.toContain("1:code")
     } finally {
       app.unmount()
     }
