@@ -185,6 +185,9 @@ export type PruneGitFacts = Readonly<{
   ):
     | Readonly<{ sourceOnly: number; targetOnly: number }>
     | Promise<Readonly<{ sourceOnly: number; targetOnly: number }>>
+  /** Parent SHAs of one commit, in order. The recut preflight gate counts
+   * them to enforce the linear-root rule at the first evaluation. */
+  parents?(sha: string): readonly string[] | Promise<readonly string[]>
   /** Stable patch identity and an equivalent target-side commit when one can
    * be attributed. Patch identity is evidence only; exact tree proof remains
    * the authority for a subsumed verdict. */

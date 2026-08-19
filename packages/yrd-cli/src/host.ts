@@ -109,6 +109,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { requireLinearRootTip } from "./linear-tip.ts"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
@@ -1303,19 +1304,12 @@ async function requireSubmitLinearTip(
         `at '${head}': ${lineage.stderr.trim() || lineage.stdout.trim() || `exit ${String(lineage.exitCode)}`}`,
     )
   }
-  if (parents.length <= 1) return head
   const identity =
     source === "origin"
       ? `live 'origin/${branch}' is '${head}'; local '${branch}' is '${localHead ?? "missing"}'`
       : `local '${branch}' is '${head}'`
-  raiseFailure(
-    "refusal",
-    "merge-tip-carrier",
-    `yrd: ${identity}. The submitted branch tip is a merge commit with ${parents.length} parents; ` +
-      `Yrd requires a linear root carrier. linear rebuild required: merge inside the affected component repository, ` +
-      `fast-forward that component's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
-      `then run 'yrd pr submit ${branch}'`,
-  )
+  requireLinearRootTip(identity, branch, parents)
+  return head
 }
 
 /** Submission asks whether this is unpublished local work or "what commit does

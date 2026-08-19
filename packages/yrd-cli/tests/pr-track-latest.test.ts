@@ -184,6 +184,8 @@ function trackGit(branchHead: () => string): PruneGitFacts {
       if (sha === LIVE_HEAD || sha === NEXT_LIVE_HEAD) return LIVE_TREE
       throw new Error(`unexpected tree lookup for ${sha}`)
     },
+    // Linear by default: the preflight linear-root gate counts parents.
+    parents: () => [BASE_SHA],
     pinDistance: () => ({ sourceOnly: 0, targetOnly: 3 }),
     patchMatch: () => ({ patchId: OTHER_PATCH_ID }),
   } as PruneGitFacts
