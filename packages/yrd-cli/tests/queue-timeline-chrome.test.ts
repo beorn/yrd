@@ -43,11 +43,11 @@ function rowAt(text: string, index: number): string {
   return row
 }
 
-/** The status-pills row (no more "FILTER" label; the four plain-word pills share
- *  one row with any non-default dimensions). The pending bucket's pill reads
- *  `open` (user respec 2026-07-23). */
+/** The status-pills row (no more "FILTER" label; the four plain-word pills
+ *  share one row with any non-default dimensions). `all` moved to the top
+ *  line's queue-pill group (operator ruling 2026-08-18, item 32). */
 function pillsRow(text: string): string {
-  const found = text.split("\n").find((row) => /all.*open.*running.*done.*failed/u.test(row))
+  const found = text.split("\n").find((row) => /open.*running.*done.*failed/u.test(row))
   if (found === undefined) throw new Error("no pills row")
   return found
 }
@@ -72,44 +72,93 @@ function queuedEligibility(pr: string, position: number) {
 }
 
 describe("queue timeline chrome 21106", () => {
-  it.each([
-    {
-      path: "unprojected",
-      rows: 40,
-      downstream: [] as const,
-      // QueueWatchFrame's own top line (item 12, always present) sits above
-      // this fixture's QUEUE/ROOT rows.
-      topLineRows: 1,
-      element: (root: string) => {
-        const source = queueTimelineStories["production-overview"].snapshot
-        return createElement(QueueWatchFrame, {
-          snapshot: { repositoryRoot: root, results: source.results, state: source.state, now: source.now },
+  it("keeps the legacy unprojected dashboard's exact ROOT row per repository", async () => {
+    // The legacy (no-projection) path still prints its QUEUE/ROOT summary
+    // rows; the path routes through the friendly formatter (item 33).
+    const headers: string[] = []
+    for (const root of ["/hh", "/hh/pm"] as const) {
+      using term = createTermless({ cols: 40, rows: 40 })
+      const source = queueTimelineStories["production-overview"].snapshot
+      const handle = await act(async () => {
+        const mounted = await run(
+          createElement(QueueWatchFrame, {
+            snapshot: { repositoryRoot: root, results: source.results, state: source.state, now: source.now },
+          }),
+          term,
+          { mouse: false, selection: false },
+        )
+        await mounted.waitForLayoutStable()
+        return mounted
+      })
+      try {
+        const frame = term.screen.getText()
+        expect.soft(frame, `${root} summary names its root`).toContain(`ROOT ${root}`)
+        headers.push(frame.split("\n").find((row) => row.includes("ROOT ")) ?? "")
+      } finally {
+        await act(async () => {
+          handle.unmount()
         })
-      },
-    },
-    {
-      path: "projected",
-      rows: 40,
-      downstream: [] as const,
-      // Bare QueueTimelineView, no QueueWatchFrame — no top line.
-      topLineRows: 0,
-      element: (root: string) =>
+      }
+    }
+    expect(headers[0]).not.toBe(headers[1])
+  })
+
+  it("carries the projected repository identity on the top-line pill, distinguishable per root", async () => {
+    // Items 30/32b/33: the `QUEUE main` / `ROOT /hh` header row is deleted —
+    // the one-shot print leads with the YRD QUEUES top line whose pill
+    // carries `path ⎇ branch` through the one friendly-path formatter.
+    const headers: string[] = []
+    // The pill shows the SHORTEST UNIQUE friendly path (item 32b): a lone
+    // `/hh/pm` shortens to its unique suffix `pm`.
+    for (const [root, shown] of [
+      ["/hh", "/hh"],
+      ["/hh/pm", "pm"],
+    ] as const) {
+      using term = createTermless({ cols: 60, rows: 40 })
+      const handle = await act(async () => {
+        const mounted = await run(
+          createElement(QueueTimelineView, {
+            repositoryRoot: root,
+            projection: queueTimelineStories["contract-overview"].snapshot.projection,
+            columns: 60,
+          }),
+          term,
+          { mouse: false, selection: false },
+        )
+        await mounted.waitForLayoutStable()
+        return mounted
+      })
+      try {
+        const frame = term.screen.getText()
+        const topRow = frame.split("\n")[0] ?? ""
+        expect.soft(topRow, `${root} top line title`).toContain("YRD QUEUES")
+        expect.soft(topRow, `${root} pill carries the path ⎇ branch pair`).toContain(`${shown} ⎇ main`)
+        expect.soft(frame, `${root} old ROOT row is deleted`).not.toContain("ROOT ")
+        expect.soft(frame, `${root} old QUEUE header is deleted`).not.toContain("QUEUE main")
+        // The muted `updated HH:MM:SS` stamp survives on its own row, never
+        // on the top line (item 30's sub-point).
+        expect.soft(topRow).not.toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+        expect.soft(frame).toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+        headers.push(topRow)
+      } finally {
+        await act(async () => {
+          handle.unmount()
+        })
+      }
+    }
+    expect(headers[0]).not.toBe(headers[1])
+  })
+
+  it("survives a 12-column live pane with the RUNNER chrome intact", async () => {
+    // Narrow panes cannot fit the pill text; the frame must still render its
+    // downstream chrome rather than overflow (the old exact-ROOT pin moved
+    // to the wider test above when the pills took over the identity).
+    const source = queueTimelineStories.paused.snapshot
+    using term = createTermless({ cols: 12, rows: 24 })
+    const handle = await act(async () => {
+      const mounted = await run(
         createElement(QueueTimelineView, {
-          repositoryRoot: root,
-          projection: queueTimelineStories["contract-overview"].snapshot.projection,
-          columns: 12,
-        }),
-    },
-    {
-      path: "projected-live",
-      rows: 24,
-      downstream: ["RUNNER", "TIME", "│ $"] as const,
-      // Bare QueueTimelineView, no QueueWatchFrame — no top line.
-      topLineRows: 0,
-      element: (root: string) => {
-        const source = queueTimelineStories.paused.snapshot
-        return createElement(QueueTimelineView, {
-          repositoryRoot: root,
+          repositoryRoot: "/hh",
           projection: source.projection,
           results: source.results,
           state: source.state,
@@ -118,45 +167,24 @@ describe("queue timeline chrome 21106", () => {
           fillHeight: true,
           nav: true,
           availableRows: 24,
-        })
-      },
-    },
-  ])(
-    "keeps the exact resolved repository path visible in a 12-column $path header",
-    async ({ path, rows, downstream, topLineRows, element }) => {
-      const headers: string[] = []
-      for (const root of ["/hh", "/hh/pm"] as const) {
-        using term = createTermless({ cols: 12, rows })
-        const handle = await act(async () => {
-          const mounted = await run(element(root), term, { mouse: false, selection: false })
-          await mounted.waitForLayoutStable()
-          return mounted
-        })
-        try {
-          const frame = term.screen.getText()
-          const renderedRows = frame.split("\n")
-          // QueueWatchFrame's own top line (item 12, always present) precedes
-          // the QUEUE/ROOT rows only for fixtures that render through it.
-          expect.soft(renderedRows[topLineRows], `${path} ${root} queue row`).toContain("QUEUE")
-          expect
-            .soft(renderedRows[topLineRows + 1]?.trim(), `${path} ${root} root row`)
-            .toBe(`ROOT ${root}`)
-          expect
-            .soft(renderedRows.slice(topLineRows + 2).join("\n"), `${path} ${root} unique root row`)
-            .not.toContain(`ROOT ${root}`)
-          for (const witness of downstream) {
-            expect.soft(frame, `${path} ${root} ${witness} witness`).toContain(witness)
-          }
-          headers.push(renderedRows.slice(topLineRows, topLineRows + 2).join("\n"))
-        } finally {
-          await act(async () => {
-            handle.unmount()
-          })
-        }
+        }),
+        term,
+        { mouse: false, selection: false },
+      )
+      await mounted.waitForLayoutStable()
+      return mounted
+    })
+    try {
+      const frame = term.screen.getText()
+      for (const witness of ["RUNNER", "TIME", "│ $"]) {
+        expect.soft(frame, `${witness} witness`).toContain(witness)
       }
-      expect(headers[0]).not.toBe(headers[1])
-    },
-  )
+    } finally {
+      await act(async () => {
+        handle.unmount()
+      })
+    }
+  })
 
   it("header and row cells share one column geometry with nav on at 120 cols", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
@@ -243,7 +271,10 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("mutes real run ids like TIME while a not-yet-started run shows a muted dash", async () => {
+  it("renders run cells as #N + glyph with id+title CHANGES cells, em-dash pre-run", async () => {
+    // Items 28/38: the CHANGES cell is `pr#id.rev <title>` (never the
+    // branch), the RUN cell is `label#N <glyph>` with the label elided on a
+    // single visible queue, and a run-less row carries a muted em-dash.
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -253,32 +284,25 @@ describe("queue timeline chrome 21106", () => {
       const runRowY = rowIndexOf(text, "pr#4.1")
       expect(runRowY).toBeGreaterThan(0)
       const runRow = rowAt(text, runRowY)
-      const runX = runRow.indexOf("main#4 ") >= 0 ? runRow.indexOf("main#4 ") : runRow.indexOf("main#4")
+      // Single visible queue: the label elides — `#4`, not `main#4` (item 34).
+      expect(runRow).toContain("#4 ")
+      expect(runRow).not.toContain("main#4")
+      // The row shows the change's TITLE, not its branch glyph (item 28).
+      expect(runRow).not.toContain("\uE0A0")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
-      // The flexible cell now holds the branch (item Q); its `/` marks a branch
-      // char rendered in the default (non-muted) fg.
-      const branchX = runRow.indexOf("/")
-      expect(branchX).toBeGreaterThan(0)
-      const runFg = app.cell(runX, runRowY).fg
       const timeFg = app.cell(timeX, runRowY).fg
-      const branchFg = app.cell(branchX, runRowY).fg
-      expect(runFg, "run id shares TIME's muted fg").toEqual(timeFg)
-      expect(runFg, "run id is not default fg").not.toEqual(branchFg)
+      // The run NUMBER renders bright — distinct from the muted TIME cell
+      // (item 38: id bright on the first member row).
+      const hashX = runRow.indexOf("#4 ")
+      expect(app.cell(hashX, runRowY).fg, "run number is bright, not muted").not.toEqual(timeFg)
 
-      // The branch glyph (U+E0A0) is a dim decoration (W2, 2026-07-16): muted
-      // like TIME, and distinctly dimmer than the branch name it prefixes.
-      const iconX = runRow.indexOf("")
-      expect(iconX, "branch glyph present").toBeGreaterThan(0)
-      const iconFg = app.cell(iconX, runRowY).fg
-      expect(iconFg, "branch glyph is muted, like TIME").toEqual(timeFg)
-      expect(iconFg, "branch glyph is dimmer than the branch name").not.toEqual(branchFg)
-
-      // Item 9: a not-yet-started run shows a muted "-" in the RUN cell — no
-      // colored pending word there. The submitted PR's display-only STATUS cell
-      // reads `ready` and keeps its info color.
+      // A not-yet-started run shows a muted em-dash in the RUN cell (item
+      // 38). The submitted PR's display-only STATUS cell reads `ready` and
+      // keeps its info color.
       const readyRowY = rowIndexOf(text, " ready ")
       const readyRow = rowAt(text, readyRowY)
       expect(readyRow, "run-less row shows no colored pending run id").not.toContain("pending")
+      expect(readyRow, "run-less row carries the em-dash placeholder").toContain("—")
       const readyStatusX = readyRow.indexOf("ready")
       expect(readyStatusX, "ready status word present").toBeGreaterThan(0)
       expect(
@@ -301,8 +325,8 @@ describe("queue timeline chrome 21106", () => {
       expect(integratedRow).not.toContain(" ok ")
       const revisedRow = rowAt(app.text, rowIndexOf(app.text, "pr#5.1"))
       expect(revisedRow).toContain(" rev ")
-      const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "main#5"))
-      expect(rejectedRow).toContain(" failed ")
+      const rejectedRow = rowAt(app.text, timelineRowIndexOf(app.text, " failed "))
+      expect(rejectedRow).toContain("#5")
       expect(rejectedRow).not.toContain(" rej ")
     } finally {
       app.unmount()
@@ -467,7 +491,7 @@ describe("queue timeline chrome 21106", () => {
       const titleLine = rowAt(app.text, titleY)
       const titleX = titleLine.indexOf("RUNNER")
       const borderX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
-      const failedY = rowIndexOf(app.text, "main#5")
+      const failedY = timelineRowIndexOf(app.text, " failed ")
       const failedLine = rowAt(app.text, failedY)
       const errorX = failedLine.indexOf("fail")
 
@@ -580,7 +604,7 @@ describe("queue timeline chrome 21106", () => {
       for (let offset = 0; offset < message.length; offset += 4) {
         expect(app.cell(startX + offset, messageY).fg, `fg at offset ${offset}`).toEqual(messageFg)
       }
-      const rejectedY = rowIndexOf(app.text, "main#5")
+      const rejectedY = timelineRowIndexOf(app.text, " failed ")
       const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)
@@ -681,19 +705,19 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("heads the live QUEUE pane with one clean tab and moves the temporal cue to the RUNNER border (items L + C)", async () => {
-    // The QUEUE pane is headed by its tab-style label (item L). The `updated`
-    // clock is GONE from the live pane header (user directive 2026-07-21): the
-    // RUNNER box's always-on border timer is the watch view's temporal-trust
-    // cue now. Sibling branch names still do not wrap through the table header.
+  it("heads the live pane with only the top line and keeps the temporal cue on the RUNNER border", async () => {
+    // Item 30: the top of the watch is ONLY the top line — the old per-queue
+    // `QUEUE main` header row is deleted. The `updated` clock stays absent
+    // from the live pane (user directive 2026-07-21): the RUNNER box's
+    // always-on border timer is the watch view's temporal-trust cue.
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("╭─ STATS "))
-      const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
-      expect(queueLine, "QUEUE tab row omits sibling branch noise").not.toContain("release/")
-      // The `updated HH:MM:SS` clock is absent from the live pane header.
+      expect(app.text.split("\n")[0], "the top line titles the frame").toContain("YRD QUEUES")
+      expect(app.text, "the QUEUE header row is deleted").not.toContain("QUEUE main")
+      // The `updated HH:MM:SS` clock is absent from the live pane.
       expect(app.text, "the live pane drops the updated clock").not.toMatch(/updated \d{2}:\d{2}:\d{2}/u)
       // The temporal cue rides the RUNNER box's top border as uptime/downtime.
       const runnerBorderY = rowIndexOf(app.text, "╭─ RUNNER ")
@@ -750,10 +774,11 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("╭─ STATS "))
       const text = app.text
-      // QUEUE is a tab-headed pane; DETAIL is headed by the selected target's
-      // identity title (`CANDIDATE C42 RUN main#42`), not "DETAIL" — neither is boxed.
-      expect(rowIndexOf(text, "QUEUE main"), "QUEUE pane tab").toBeGreaterThanOrEqual(0)
-      expect(text, "DETAIL pane shows the target identity title, not a DETAIL box").toContain("RUN main#42")
+      // The frame is headed by the one top line; DETAIL's identity lives on
+      // the status box border (`RUN main#42`) — neither pane is boxed.
+      expect(text.split("\n")[0], "top line titles the frame").toContain("YRD QUEUES")
+      expect(text, "the QUEUE header row is deleted").not.toContain("QUEUE main")
+      expect(text, "DETAIL identity rides the status-box border").toContain("RUN main#42")
       expect(text).not.toContain("╭─ DETAIL")
       expect(text).not.toContain("╭─ QUEUE")
       // Padded content: the TIME header sits inside the pane's horizontal padding.

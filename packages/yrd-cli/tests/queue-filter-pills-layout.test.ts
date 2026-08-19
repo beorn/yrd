@@ -65,10 +65,10 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       await app.waitForLayoutStable()
       const headerY = rowIndex(app.text, /\bTIME\b/u)
       const firstRowY = rowIndex(app.text, /pr#0\.\d/u)
-      // `all` moved to its own centered pill, left of the status pills
-      // (operator ruling 2026-08-18, item 9) — it clears both filter kinds,
-      // so it no longer sits inside the open/running/done/failed cluster.
-      const pillsY = rowIndex(app.text, /all.*open.*running.*done.*failed/u)
+      // `all` moved to the frame's TOP line beside the queue pills (operator
+      // ruling 2026-08-18, item 32); the bottom row keeps only the status
+      // pills, right-aligned.
+      const pillsY = rowIndex(app.text, /open.*running.*done.*failed/u)
       const statsY = rowIndex(app.text, /╭─ STATS /u)
 
       expect(app.text).toContain("╭─ RUNNER ")
@@ -102,9 +102,12 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       await app.waitForLayoutStable()
       expect(app.text, "the FILTER label text is gone").not.toContain("FILTER")
       expect(app.text, "no [t]/[r]/[f]/[d] brackets").not.toMatch(/\[[trfd]\]/u)
-      for (const word of ["open", "running", "done", "failed", "all"]) {
+      for (const word of ["open", "running", "done", "failed"]) {
         expect(app.text, `the ${word} pill renders as a plain word`).toContain(word)
       }
+      // `all` lives on the watch frame's top line now (item 32); the bare
+      // timeline surface renders no stray copy of it.
+      expect(app.text, "no all pill on the bottom row").not.toMatch(/failed.*all|all.*open/u)
     } finally {
       app.unmount()
     }
