@@ -2474,13 +2474,14 @@ checks: [{check: {run: "true"}}]
       "log",
       "watch",
       "prime",
-      "submit",
       "cancel",
       // The branch-state quartet: `yrd branch <state>` is the complete set,
-      // and the three states whose names are free are also bare verbs.
-      // `submit` above is the merge-request verb, a different act.
+      // and every state is also a bare verb. Root `submit` is one of them
+      // (@cto 2026-08-19, cliverbs ruling-a) — it used to alias the PR path,
+      // which keeps its own spelling as `yrd pr submit`.
       "branch",
       "draft",
+      "submit",
       "archive",
       "ignore",
       "deployment",

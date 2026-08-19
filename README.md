@@ -431,6 +431,7 @@ yrd prime                   delivery briefing plus current context
 yrd branch                  move branches into a delivery state:
                             draft, submit, archive, ignore
 yrd draft                   shorthand for yrd branch draft
+yrd submit                  shorthand for yrd branch submit
 yrd archive                 shorthand for yrd branch archive
 yrd ignore                  shorthand for yrd branch ignore
 ```
@@ -467,7 +468,14 @@ is auto-classified, and why an ignore is refused while a live submit stands.
 These verbs select, print and push; a refusal comes back in the receiver's own
 words, unaltered.
 
-`yrd submit` is a different act: it submits a merge request into the queue.
+Each state also has a bare top-level spelling: `yrd draft`, `yrd submit`,
+`yrd archive`, `yrd ignore`.
+
+Root `yrd submit` IS `yrd branch submit`. It used to alias `yrd pr submit`,
+which is untouched and still drives the PR path with all of its options. The
+two are the same intent at two phases — the receiver already writes
+`refs/yrd/submit/<branch>` itself when a carrier is pushed — so the everyday
+spelling now names that act directly.
 
 ### Workspace Operations
 
@@ -597,9 +605,6 @@ push, and the same PR resumes automatically as its next revision.
 ```text
 yrd pr create [selector] [--base <branch>] [--issue <ref>] [--track]
   [--title <text>] [--description <text>]
-  [--correlation <namespace:id>] [--json]
-yrd submit [selector...] [--base <branch>] [--track] [--keep-on-failure]
-  [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr submit [selector...] [--base <branch>] [--track] [--keep-on-failure]
   [--issue <ref>] [--title <text>] [--description <text>]
