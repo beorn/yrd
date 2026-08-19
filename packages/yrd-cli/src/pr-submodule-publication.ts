@@ -32,7 +32,7 @@ function submoduleRepository(repo: string, path: string): string {
  * honest name; asking main-ancestry here would deadlock the publication pipeline, since a
  * queue-carried pin cannot be on main until the very merge being admitted.
  *
- * Author demands ask a different question — `submodulePinPublications` below — and the two
+ * Author min commits ask a different question — `submodulePinPublications` below — and the two
  * used to share one word ("unpublished"), which is how a side-branch pin passed as
  * published for two months.
  */

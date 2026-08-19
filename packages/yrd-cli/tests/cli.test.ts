@@ -3351,7 +3351,7 @@ describe("runYrd", () => {
     expect(remerge).toHaveBeenCalled()
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: nextHead })
     // A recut PR is queue-carried, so the gate asks reachability (the mute stub advertises
-    // zero refs → unreachable), never the author-demand main-ancestry question.
+    // zero refs → unreachable), never the author min-commit main-ancestry question.
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       pr: "PR1",
       revision: 3,
@@ -5078,7 +5078,7 @@ describe("runYrd", () => {
     const beforeRelative = await Array.fromAsync(relativeApp.events()).then((events) => events.length)
     const relative = outputIO()
     expect(await runYrd(relativeApp, yrd("bay", "path", "B1"), relative.io)).toBe(1)
-    expect(relative.stderr()).toContain("bay 'B1' has no absolute workspace path")
+    expect(relative.stderr()).toContain("bay 'B1' has no absolute worktree path")
     expect(relative.stderr()).toContain("yrd bay --json")
     expect(await Array.fromAsync(relativeApp.events()).then((events) => events.length)).toBe(beforeRelative)
   })

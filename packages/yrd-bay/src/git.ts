@@ -348,7 +348,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     },
 
     async refresh(input: RefreshBayInput): Promise<JobResult<RefreshedBay>> {
-      if (input.path === undefined) return failure("refresh-failed", `bay '${input.bay}' has no workspace path`)
+      if (input.path === undefined) return failure("refresh-failed", `bay '${input.bay}' has no worktree path`)
       try {
         await worktreePosture(git, { ...input, path: input.path })
         const [headSha, baseSha, status] = await Promise.all([
@@ -367,7 +367,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     },
 
     async checkpoint(input: CheckpointBayInput): Promise<JobResult<CheckpointedBay>> {
-      if (input.path === undefined) return failure("checkpoint-failed", `bay '${input.bay}' has no workspace path`)
+      if (input.path === undefined) return failure("checkpoint-failed", `bay '${input.bay}' has no worktree path`)
       try {
         const posture = await worktreePosture(git, { ...input, path: input.path })
         const submodules = await git.run(
@@ -499,7 +499,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
       try {
         if (input.path === undefined || !existsSync(input.path)) {
-          // Provision can fail before either a workspace path or head is
+          // Provision can fail before either a worktree path or head is
           // recorded. Closing that lifecycle is an idempotent no-op: there is
           // no authored head to preserve and therefore no archive proof to invent.
           // A recorded head is already durable content, so atomically create

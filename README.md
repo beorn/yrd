@@ -217,7 +217,7 @@ $ yrd pr ready PR1
 $ yrd pr checks PR1 --follow
 ```
 
-`bay open` creates a persistent workspace and returns. `bay run` owns the scoped
+`bay open` creates a persistent Bay and returns. `bay run` owns the scoped
 foreground lifecycle: provision, run the exact child argv (or `$SHELL` by
 default), checkpoint, push, and close. `--keep` leaves a successful run open.
 A failed or interrupted child preserves the workspace as an orphan for diagnosis.

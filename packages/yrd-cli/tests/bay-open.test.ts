@@ -1489,7 +1489,7 @@ printf ran > "$YRD_TEST_SHELL_LOG"
       status: "open",
       orphan: { exitCode: 17, reason: expect.stringContaining("child exited 17") },
     })
-    if (orphan?.path === undefined) throw new Error("orphaned Bay did not retain its workspace path")
+    if (orphan?.path === undefined) throw new Error("orphaned Bay did not retain its worktree path")
     expect(await readFile(join(orphan.path, "crash.txt"), "utf8")).toBe("preserve")
   })
 
