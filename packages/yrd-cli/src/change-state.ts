@@ -168,9 +168,16 @@ function archiveMessage(options: ChangeStateOptions, readFile: (path: string) =>
 export type ChangeStateDeps = Readonly<{
   git: ChangeStateGitFacts
   readFile: (path: string) => string
-  /** The branch a bare invocation targets. Supplied by the caller so this
-   * surface uses the CLI's one current-branch resolver rather than a second
-   * one that only honours the test seam. */
+  /**
+   * The branch a bare invocation targets.
+   *
+   * REQUIRED, not optional, and that is the whole point. This read used to go
+   * straight to `io.currentBranch`, which only tests set: every injected test
+   * passed while `yrd draft` in a real repository refused with "no current
+   * Git branch to act on". Making the supplier mandatory means the caller
+   * cannot forget to pass the CLI's one real resolver, so the seam and
+   * reality cannot drift apart again.
+   */
   currentBranch: () => string | undefined
 }>
 
