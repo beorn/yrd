@@ -4358,11 +4358,6 @@ function timelineRunContinues(
   return row.run !== undefined && previous !== undefined && previous.run === row.run && previous.base === row.base
 }
 
-function timelineBranchLabel(branch: string): string {
-  const legacyWorkBranchPrefix = ["ta", "sk/"].join("")
-  return branch.startsWith(legacyWorkBranchPrefix) ? branch.slice(legacyWorkBranchPrefix.length) : branch
-}
-
 /**
  * The RUN region's identity + timing block. It stays above the tab strip for
  * every active tab, so the operator never has to leave the failing output to
