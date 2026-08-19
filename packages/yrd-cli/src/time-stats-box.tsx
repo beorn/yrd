@@ -156,6 +156,15 @@ function StatsValueCell({
   onSelect: (key: string) => void
 }>) {
   const interactive = detail !== undefined
+  // A measured zero renders as a muted "-", never the digit (operator ruling
+  // 2026-08-19): a grid of zeros drowns the cells that carry signal. This is
+  // deliberately NOT the "—" em dash, which means NO DATA — the bucket is
+  // uncovered, or nothing was sampled — and which the value functions still
+  // produce. Every cell in the panel renders through here, counts and
+  // averages alike, so the rule holds in exactly one place.
+  const measuredZero = value === "0"
+  const shown = measuredZero ? "-" : value
+  const tone = measuredZero ? "$fg-muted" : color
   return (
     <Box
       width={bucketWidth(bucket)}
@@ -177,11 +186,11 @@ function StatsValueCell({
         : {})}
     >
       <Text
-        color={color}
+        color={tone}
         inverse={interactive && (hoveredKey === detail.key || activeKey === detail.key)}
         wrap="truncate"
       >
-        {value}
+        {shown}
       </Text>
     </Box>
   )
