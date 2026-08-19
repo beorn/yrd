@@ -1,6 +1,6 @@
 /**
  * @failure The bulk merge-record scan — the one `yrd doctor --rebuild-index-from-repo` runs to
- * rebuild a lost index — fails hardest in exactly the damaged estate it exists for: a component
+ * rebuild a lost index — fails hardest in exactly the damaged estate it exists for: a submodule
  * checkout the working tree never materialized crashes the process with ENOENT out of `posix_spawn`
  * (`git -C <dir>` is also given `cwd: <dir>`, so the tolerant probe never sees an exit code), and a
  * single unverifiable record ends the whole scan instead of being reported and skipped.
@@ -38,11 +38,11 @@ async function git(repo: string, args: readonly string[], stdin?: string): Promi
   return stdout.trim()
 }
 
-/** The estate a recovery scan actually meets: a superproject whose base tree pins a component that
+/** The estate a recovery scan actually meets: a superproject whose base tree pins a submodule that
  * this checkout never materialized on disk. Git builds the tree from the index, so the gitlink is
  * real repository truth while `<repo>/dep` does not exist — the same shape a `--no-checkout` clone,
  * a partially materialized habitat, or a working tree older than the commit that introduced the
- * component presents to the scan. */
+ * submodule presents to the scan. */
 async function unmaterializedSubmoduleRepository(): Promise<
   Readonly<{ repo: string; baseSha: string; moduleA: string; moduleB: string }>
 > {
@@ -111,10 +111,10 @@ async function publishPoisoned(repo: string, id: string): Promise<void> {
 }
 
 describe("bulk merge-record scan over a damaged estate", () => {
-  it("reports a component checkout it cannot inspect instead of crashing on spawn", async () => {
+  it("reports a submodule checkout it cannot inspect instead of crashing on spawn", async () => {
     const { repo, baseSha, moduleA } = await unmaterializedSubmoduleRepository()
     // The pin the record authored differs from the one the base carries, so the scan must ask the
-    // component for ancestry — and `<repo>/dep` does not exist.
+    // submodule for ancestry — and `<repo>/dep` does not exist.
     await publish(
       repo,
       mergedRecord("R-unmaterialized", "PR1", baseSha, [{ path: "dep", before: null, after: moduleA }]),
@@ -123,7 +123,7 @@ describe("bulk merge-record scan over a damaged estate", () => {
 
     await expect(findRepositoryMergeRecords({ inject: { process }, repo, baseSha })).resolves.toMatchObject({
       status: "repository-incomplete",
-      reason: expect.stringContaining("cannot inspect component checkout 'dep'"),
+      reason: expect.stringContaining("cannot inspect submodule checkout 'dep'"),
     })
 
     // The recovery scan meets this estate more often than any other caller, and it reports the one
@@ -135,7 +135,7 @@ describe("bulk merge-record scan over a damaged estate", () => {
       unverifiable: [
         {
           status: "repository-incomplete",
-          reason: expect.stringContaining("cannot inspect component checkout 'dep'"),
+          reason: expect.stringContaining("cannot inspect submodule checkout 'dep'"),
         },
       ],
     })

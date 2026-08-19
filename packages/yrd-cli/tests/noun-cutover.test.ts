@@ -50,7 +50,7 @@ describe("noun cutover ratchet", () => {
     const script = join(root, "scripts", "typecheck-hh.ts")
     expect(
       existsSync(script),
-      "the component entrypoint must be executable rather than a package-script incantation",
+      "the submodule entrypoint must be executable rather than a package-script incantation",
     ).toBe(true)
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
       scripts?: Record<string, string>

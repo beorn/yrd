@@ -1,6 +1,6 @@
 /**
  * @failure Composition stops absorbing a stale carrier — one that never touched
- * a gitlink but whose base moved its component pins on — and either refuses it
+ * a gitlink but whose base moved its submodule pins on — and either refuses it
  * as authored or lands it carrying the older pin.
  * @level l2
  * @consumer @yrd/queue candidate preparer
@@ -37,7 +37,7 @@ async function gitlinkAt(repo: string, ref: string, path = "dep"): Promise<strin
  * A superproject pinning `dep` at A, a carrier branched from there that only
  * adds a file, and a base that has since advanced the pin to B without the
  * carrier's involvement. This is the ordinary shape of any branch that sat
- * while main landed a component bump.
+ * while main landed a submodule bump.
  */
 async function staleCarrierRepository(): Promise<{
   repo: string

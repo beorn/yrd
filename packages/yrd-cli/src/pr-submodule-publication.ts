@@ -25,9 +25,9 @@ function submoduleRepository(repo: string, path: string): string {
 }
 
 /**
- * The pins the queue could NOT fetch from their component's origin — reachability, the
+ * The pins the queue could NOT fetch from their submodule's origin — reachability, the
  * queue-carried question. A composition or recut pin is queue-authored: its commit only
- * needs to be somewhere the merge path can fetch it from, because component main is
+ * needs to be somewhere the merge path can fetch it from, because submodule main is
  * promoted AT merge, not before. This is deliberately the old any-branch oracle under an
  * honest name; asking main-ancestry here would deadlock the publication pipeline, since a
  * queue-carried pin cannot be on main until the very merge being admitted.
@@ -64,18 +64,18 @@ export type SubmodulePinPublication =
   | Readonly<{ state: "undetermined"; pin: UnpublishedSubmodulePin; reason: string }>
 
 /**
- * Where each changed pin sits relative to its own component's MAIN — the shaset model's
+ * Where each changed pin sits relative to its own submodule's MAIN — the shaset model's
  * submodule-main-first rule, asked with the merge path's mechanism.
  *
  * This used to ask git-super whether the commit sat under any tip matching `refs/heads/`,
  * which is every branch, so a pin pushed only to someone's unmerged side branch counted as
  * published. That was harmless only while the authored-gitlink refusal rejected the request
  * a few lines later regardless; the shaset build removes that backstop, and admitting a pin
- * the component never accepted would compose a candidate against a commit with no home.
+ * the submodule never accepted would compose a candidate against a commit with no home.
  *
  * Three states, not two, and the third is the point: "I could not tell" must never collapse
  * into "not published". They need opposite remedies — one says land your commit on the
- * component's main, the other says the check could not reach the component's origin at all —
+ * submodule's main, the other says the check could not reach the submodule's origin at all —
  * and reporting the second as the first sends someone to merge a branch over a network fault.
  */
 export async function submodulePinPublications(options: {
@@ -107,7 +107,7 @@ export async function submodulePinPublications(options: {
       publications.push({
         state: "undetermined",
         pin,
-        reason: `commit '${pin.pin}' is not present in '${pin.repository}', so it cannot be compared with that component's main`,
+        reason: `commit '${pin.pin}' is not present in '${pin.repository}', so it cannot be compared with that submodule's main`,
       })
       continue
     }
@@ -124,7 +124,7 @@ export async function submodulePinPublications(options: {
       state: "undetermined",
       pin,
       reason:
-        `could not compare '${pin.pin}' with component main '${main.sha}': ` +
+        `could not compare '${pin.pin}' with submodule main '${main.sha}': ` +
         `${reached.stderr.trim() || reached.stdout.trim() || "git merge-base failed"}`,
     })
   }

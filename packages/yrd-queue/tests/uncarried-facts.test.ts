@@ -1,6 +1,6 @@
 /**
  * @failure The sweep's fact gatherer compares a pin the ref never touched, runs
- * a component query in the superproject where the objects are unreadable, or
+ * a submodule query in the superproject where the objects are unreadable, or
  * reports a git failure as a direction.
  * @level l1
  * @consumer @yrd/queue

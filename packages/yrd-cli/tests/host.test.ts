@@ -357,7 +357,7 @@ checks: [{check: {run: "true"}}]
 }
 
 /** A branch whose own delta touches no gitlink, submitted after main bumped an
- * unrelated component pin. The PR's recorded base is current main, so a two-dot
+ * unrelated submodule pin. The PR's recorded base is current main, so a two-dot
  * diff from it reports main's pin move as this branch reverting the pin — while
  * the branch's authored delta, measured from where it actually diverged, has no
  * gitlink in it at all. */
@@ -380,9 +380,9 @@ async function staleBaseUnrelatedPinRepository(): Promise<{
   await git(module, "config", "user.name", "Yrd Test")
   await git(module, "config", "user.email", "yrd@example.invalid")
   await git(module, "remote", "add", "origin", moduleRemote)
-  await writeFile(join(module, "README.md"), "component base\n")
+  await writeFile(join(module, "README.md"), "submodule base\n")
   await git(module, "add", "README.md")
-  await git(module, "commit", "-qm", "component base")
+  await git(module, "commit", "-qm", "submodule base")
   await git(module, "push", "-qu", "origin", "main")
   const basePin = await git(module, "rev-parse", "HEAD")
 
@@ -413,11 +413,11 @@ checks: [{check: {run: "true"}}]
   await git(repo, "push", "-qu", "origin", branch)
   await git(repo, "switch", "-q", "main")
 
-  // Main moves on under the branch: an unrelated component pin advances and
+  // Main moves on under the branch: an unrelated submodule pin advances and
   // lands, with no involvement from the branch.
-  await writeFile(join(module, "README.md"), "component advanced\n")
+  await writeFile(join(module, "README.md"), "submodule advanced\n")
   await git(module, "add", "README.md")
-  await git(module, "commit", "-qm", "advance the component")
+  await git(module, "commit", "-qm", "advance the submodule")
   await git(module, "push", "-q", "origin", "main")
   const advancedPin = await git(module, "rev-parse", "HEAD")
   await git(join(repo, "dep"), "fetch", "-q", "origin", "main")
@@ -3572,7 +3572,7 @@ checks: [{check: {run: "true"}}]
       prs: [{ branch, checkRequests: [] }],
     })
 
-    // Once the pin lands on the component's own MAIN, the backstop this test used to hit here
+    // Once the pin lands on the submodule's own MAIN, the backstop this test used to hit here
     // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
     // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
     // covers that admission directly; composition-fill-in.test.ts in @yrd/queue covers the
@@ -3784,7 +3784,7 @@ checks: [{check: {run: "true"}}]
       prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
     })
 
-    // Once the pin lands on the component's own MAIN, the backstop this test used to hit here
+    // Once the pin lands on the submodule's own MAIN, the backstop this test used to hit here
     // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
     // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
     // covers that admission directly). This test stays scoped to the still-refusing case.

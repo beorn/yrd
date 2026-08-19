@@ -4020,13 +4020,13 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
   // Two kinds of changed gitlink, two questions — and the KIND must be decided first.
   //
   // Queue-carried pins (a composition or a recut) are not author demands: the queue's own
-  // publication job pushes the commit to a branch ref, and component main is PROMOTED at
+  // publication job pushes the commit to a branch ref, and submodule main is PROMOTED at
   // merge. Asking main-ancestry at admission would deadlock that pipeline by construction —
   // the pin cannot be on main until the very merge being admitted — so the whole question
-  // there is reachability: can the queue fetch this commit from the component's origin?
+  // there is reachability: can the queue fetch this commit from the submodule's origin?
   //
   // Authored pins are the shaset model's demands, and the demand is submodule-main-first:
-  // the component's own workflow must have landed the commit on that component's MAIN.
+  // the submodule's own workflow must have landed the commit on that submodule's MAIN.
   // Reachability was the old oracle for these too, which is exactly the gap it left — a pin
   // on someone's unmerged side branch counted as published, and only the authored-gitlink
   // backstop caught it.
@@ -4038,7 +4038,7 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
         .map(
           ({ path, pin, repository }) =>
             `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; whoever holds this commit in ` +
-            `'${repository}' must publish it through that component's own git workflow, then get it onto that ` +
+            `'${repository}' must publish it through that submodule's own git workflow, then get it onto that ` +
             `submodule's main and submit an ordinary change whose diff is the gitlink bump`,
         )
         .join("\n")
@@ -4060,7 +4060,7 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
       "refusal",
       "authored-gitlink",
       `yrd: PR '${pr.id}' adds generated-only gitlinks [${added.map(({ path }) => path).join(", ")}]; a merge ` +
-        "request's gitlink diff can only bump an existing component, never add one; authorize the " +
+        "request's gitlink diff can only bump an existing submodule, never add one; authorize the " +
         "component-model addition as an ordinary code change",
     )
   }
@@ -4077,7 +4077,7 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
     raiseFailure(
       "refusal",
       "component-main-inspection-failed",
-      `yrd: PR '${pr.id}' changes submodule pins whose component main could not be inspected:\n${detail}`,
+      `yrd: PR '${pr.id}' changes submodule pins whose submodule main could not be inspected:\n${detail}`,
     )
   }
   const offMain = publications.filter((entry) => entry.state === "off-component-main")
@@ -4085,18 +4085,18 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
     const detail = offMain
       .map(
         ({ pin: { path, pin, repository }, mainSha }) =>
-          `submodule '${path}' pin '${pin}' is not on that component's main ('${mainSha}'); whoever holds this ` +
-          `commit in '${repository}' must publish it through that component's own git workflow, then get it ` +
+          `submodule '${path}' pin '${pin}' is not on that submodule's main ('${mainSha}'); whoever holds this ` +
+          `commit in '${repository}' must publish it through that submodule's own git workflow, then get it ` +
           "onto that submodule's main and submit an ordinary change whose diff is the gitlink bump",
       )
       .join("\n")
     raiseFailure(
       "refusal",
       "submodule-pin-unpublished",
-      `yrd: PR '${pr.id}' changes submodule pins that are not on their component's main:\n${detail}`,
+      `yrd: PR '${pr.id}' changes submodule pins that are not on their submodule's main:\n${detail}`,
     )
   }
-  // Every remaining pin is a straightforward update, published and on its component's main —
+  // Every remaining pin is a straightforward update, published and on its submodule's main —
   // admitted. The queue's own composition-time fill derives the shaset value at merge; this
   // gate's only job was to stop refusing what that machinery can now safely process.
 }
@@ -8061,7 +8061,7 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   // PR — 58 of the 115 merged records under the live merge-record ref carry an intent id
   // (`I102`…`yrdpin#181`), 57 a PR id, none anything else (read 2026-08-14). The intent RAIL that
   // once held those records as `app.intents` is retired (2026-08-18) — there is no live lookup
-  // left to name which component a given intent id advanced — but the id SHAPE alone is still
+  // left to name which submodule a given intent id advanced — but the id SHAPE alone is still
   // sufficient: any id this schema accepts is a pin-intent landing by construction (the mint that
   // wrote it never wrote anything else), so it never carries a `pr/integrated` row and is never a
   // gap.

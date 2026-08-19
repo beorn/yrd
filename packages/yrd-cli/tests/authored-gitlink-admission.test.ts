@@ -47,7 +47,7 @@ async function repository(path: string): Promise<void> {
 }
 
 /**
- * A superproject on `main` recording one component commit, plus a branch that advances that
+ * A superproject on `main` recording one submodule commit, plus a branch that advances that
  * gitlink by hand — the exact shape an author produces when they bump a pin themselves.
  * `main` deliberately stays at the base so the gate's live merge-base lookup has two sides.
  */
@@ -60,25 +60,25 @@ async function superprojectWithHandBumpedPin(): Promise<{
 }> {
   const fixture = await mkdtemp(join(tmpdir(), "yrd-authored-gitlink-"))
   roots.push(fixture)
-  const submodule = join(fixture, "component")
-  const submoduleRemote = join(fixture, "component.git")
+  const submodule = join(fixture, "submodule")
+  const submoduleRemote = join(fixture, "submodule.git")
   const root = join(fixture, "root")
 
   await repository(submodule)
-  await writeFile(join(submodule, "component.txt"), "one\n")
-  await git(submodule, ["add", "component.txt"])
-  await git(submodule, ["commit", "-qm", "component one"])
+  await writeFile(join(submodule, "submodule.txt"), "one\n")
+  await git(submodule, ["add", "submodule.txt"])
+  await git(submodule, ["commit", "-qm", "submodule one"])
   await git(fixture, ["init", "-q", "--bare", "-b", "main", submoduleRemote])
   await git(submodule, ["remote", "add", "origin", submoduleRemote])
   await git(submodule, ["push", "-q", "-u", "origin", "main"])
 
   await repository(root)
   await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
-  await git(root, ["commit", "-qam", "record component one"])
+  await git(root, ["commit", "-qam", "record submodule one"])
   await git(join(root, "dep"), ["remote", "set-url", "origin", submoduleRemote])
 
-  await writeFile(join(submodule, "component.txt"), "two\n")
-  await git(submodule, ["commit", "-qam", "component two"])
+  await writeFile(join(submodule, "submodule.txt"), "two\n")
+  await git(submodule, ["commit", "-qam", "submodule two"])
   const pin = await git(submodule, ["rev-parse", "HEAD"])
 
   await git(root, ["checkout", "-q", "-b", "task/hand-bump"])
@@ -102,7 +102,7 @@ async function superprojectWithHandBumpedPin(): Promise<{
 }
 
 /**
- * A superproject on `main` with NO component recorded at all, plus a branch that adds one by
+ * A superproject on `main` with NO submodule recorded at all, plus a branch that adds one by
  * hand — the shape a min-commit admission must still refuse: the shaset-commit writer
  * (`synthesizeGitlinkWrapper`) is update-only, so an added gitlink can never be filled in from
  * a submodule's main the way an existing one can, no matter how published its target is.
@@ -110,14 +110,14 @@ async function superprojectWithHandBumpedPin(): Promise<{
 async function superprojectWithHandAddedPin(): Promise<{ root: string; headSha: string }> {
   const fixture = await mkdtemp(join(tmpdir(), "yrd-authored-gitlink-added-"))
   roots.push(fixture)
-  const submodule = join(fixture, "component")
-  const submoduleRemote = join(fixture, "component.git")
+  const submodule = join(fixture, "submodule")
+  const submoduleRemote = join(fixture, "submodule.git")
   const root = join(fixture, "root")
 
   await repository(submodule)
-  await writeFile(join(submodule, "component.txt"), "one\n")
-  await git(submodule, ["add", "component.txt"])
-  await git(submodule, ["commit", "-qm", "component one"])
+  await writeFile(join(submodule, "submodule.txt"), "one\n")
+  await git(submodule, ["add", "submodule.txt"])
+  await git(submodule, ["commit", "-qm", "submodule one"])
   await git(fixture, ["init", "-q", "--bare", "-b", "main", submoduleRemote])
   await git(submodule, ["remote", "add", "origin", submoduleRemote])
   await git(submodule, ["push", "-q", "-u", "origin", "main"])
@@ -125,7 +125,7 @@ async function superprojectWithHandAddedPin(): Promise<{ root: string; headSha: 
   await repository(root)
   await writeFile(join(root, "root.txt"), "root\n")
   await git(root, ["add", "root.txt"])
-  await git(root, ["commit", "-qm", "root, no component yet"])
+  await git(root, ["commit", "-qm", "root, no submodule yet"])
 
   await git(root, ["checkout", "-q", "-b", "task/hand-add"])
   await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
@@ -178,7 +178,7 @@ async function refusalFrom(root: string, headSha: string): Promise<{ kind: strin
 }
 
 describe("pre-admission gate for hand-written gitlinks — step (d)'s admission flip", () => {
-  it("admits a hand-bumped gitlink once the component commit is published on its main", async () => {
+  it("admits a hand-bumped gitlink once the submodule commit is published on its main", async () => {
     const { root, headSha, publish } = await superprojectWithHandBumpedPin()
     await publish()
 
@@ -200,13 +200,13 @@ describe("pre-admission gate for hand-written gitlinks — step (d)'s admission 
     expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
     // The message names the QUESTION the oracle asks — main-ancestry, with main's sha — not
     // the old any-branch phrasing ("is on zero refs fetched from origin").
-    expect(refusal.message).toContain("is not on that component's main")
+    expect(refusal.message).toContain("is not on that submodule's main")
     // The remedy no longer names a verb step (d) deletes.
     expect(refusal.message).not.toContain("yrd intent submit")
     expect(refusal.message).toContain("ordinary change")
   })
 
-  it("refuses a pin that is on a side branch and NOT on the component's main", async () => {
+  it("refuses a pin that is on a side branch and NOT on the submodule's main", async () => {
     const { root, headSha, publishToSideBranchOnly } = await superprojectWithHandBumpedPin()
     await publishToSideBranchOnly()
 
@@ -215,15 +215,15 @@ describe("pre-admission gate for hand-written gitlinks — step (d)'s admission 
     // The publication oracle stops it, same as before the admission flip: this case never
     // reaches the authored-gitlink question at all.
     expect(refusal).toMatchObject({ kind: "refusal", code: "submodule-pin-unpublished" })
-    expect(refusal.message).toContain("is not on that component's main")
+    expect(refusal.message).toContain("is not on that submodule's main")
   })
 
-  it("still refuses a hand-ADDED gitlink, even when its target is published on the component's main", async () => {
+  it("still refuses a hand-ADDED gitlink, even when its target is published on the submodule's main", async () => {
     const { root, headSha } = await superprojectWithHandAddedPin()
 
     const refusal = await refusalFrom(root, headSha)
 
-    // An addition is not a min commit on an existing component — the shaset-commit writer
+    // An addition is not a min commit on an existing submodule — the shaset-commit writer
     // cannot fill it in, so the admission flip must not reach a new path. If this ever starts
     // returning "admitted", composition will refuse what the gate just admitted.
     expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })

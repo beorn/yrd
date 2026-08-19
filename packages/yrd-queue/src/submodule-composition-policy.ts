@@ -14,7 +14,7 @@ import { pushRefUpdates } from "git-super/push"
 import type { GitSuperResult } from "git-super/result"
 
 /**
- * The ref a component's main is read from — ONE definition, because more than one drifts.
+ * The ref a submodule's main is read from — ONE definition, because more than one drifts.
  *
  * The merge path fetches this ref to decide what a submodule's main currently is, and the
  * shaset model's submodule-main-first rule asks the same question at admission time. Those
@@ -26,7 +26,7 @@ import type { GitSuperResult } from "git-super/result"
 export const SUBMODULE_MAIN_REF = "refs/heads/main"
 
 /**
- * The private ref a component's main is fetched into before anything asks it a question.
+ * The private ref a submodule's main is fetched into before anything asks it a question.
  *
  * Never a caller-supplied name: the whole point is that both stages probe the same place,
  * and a ref the caller chooses is a ref two callers can choose differently.
@@ -44,7 +44,7 @@ export type SubmoduleMainResolution =
   | Readonly<{ status: "unavailable"; message: string }>
 
 /**
- * Fetch a component's main into the probe ref and resolve it — the ONE way either stage
+ * Fetch a submodule's main into the probe ref and resolve it — the ONE way either stage
  * learns what a submodule's main currently is.
  *
  * This exists because asking the question two ways produced two answers. Merge fetched
@@ -75,7 +75,7 @@ export async function resolveSubmoduleMain(
     return {
       status: "unavailable",
       message:
-        `could not refresh component main from '${origin}': ` +
+        `could not refresh submodule main from '${origin}': ` +
         `${fetched.stderr.trim() || fetched.stdout.trim() || "git fetch failed"}`,
     }
   }

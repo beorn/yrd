@@ -1,7 +1,7 @@
 /**
  * @failure  A remedy/refusal string anywhere in the yrd tool surface tells its
  *           reader to run a git command the project's landing-path rules
- *           forbid — a hand-push to a component's `refs/heads/*`, a
+ *           forbid — a hand-push to a submodule's `refs/heads/*`, a
  *           cherry-pick onto a landing path, `--force-with-lease`, or
  *           destructive git (`reset --hard` / `stash` / `checkout .` /
  *           `clean -f`) against a checkout the guard has not proven is the
@@ -51,7 +51,7 @@ const ALLOWLIST: readonly Allowed[] = [
     file: "yrd-queue/src/candidate-pool.ts",
     reason:
       "reset --hard / clean -fdx run only against the pipeline's own ephemeral candidate-pool worktree to prove " +
-      "it residue-free before reuse — never a component's canonical checkout, never shared main, never printed " +
+      "it residue-free before reuse — never a submodule's canonical checkout, never shared main, never printed " +
       "to a human.",
   },
   {

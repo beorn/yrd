@@ -524,7 +524,7 @@ export const ChangeRemergeProofSchema = z
      * base-refresh recuts and legacy journal rows use their existing proof. */
     certificate: ChangeRemergeCertificateSchema.optional(),
     /** Durable non-ancestral identity mapping for the root and any rewritten
-     * component heads. Missing only while replaying pre-provenance journals. */
+     * submodule heads. Missing only while replaying pre-provenance journals. */
     sources: z.array(ChangeRemergeSourceSchema).min(1).readonly().optional(),
     transition: ChangeFreshnessTransitionSchema.optional(),
   })
