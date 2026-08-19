@@ -1362,6 +1362,35 @@ describe("withBays", () => {
     await expect(app.bays.open({ name: "missing-owner" })).rejects.toThrow("Bay open requires non-empty 'by'")
   })
 
+  it("refuses to open a Bay whose branch is its own base", async () => {
+    await using app = (await createHarness()).app
+
+    // A Bay's pushes reach materializeCarrier, which fast-forwards
+    // refs/heads/<branch>. A Bay sitting on the mainline turns that into a
+    // second writer to the ref the queue must own alone.
+    await expect(app.bays.open({ name: "mainline", branch: "main", base: "main", by: "test" })).rejects.toThrow(
+      "a bay's branch must differ from its base; branch 'main' and base 'main' are the same ref",
+    )
+
+    // Ref identity, not string equality. `base` is canonical by the time
+    // openBay sees it, so it is the branch side that has to be resolved.
+    await expect(
+      app.bays.open({ name: "mainline-origin", branch: "origin/main", base: "main", by: "test" }),
+    ).rejects.toThrow("branch 'origin/main' and base 'main' are the same ref")
+    await expect(
+      app.bays.open({ name: "mainline-refs", branch: "refs/heads/main", base: "origin/main", by: "test" }),
+    ).rejects.toThrow("branch 'refs/heads/main' and base 'main' are the same ref")
+
+    // `from` is the other spelling openBay resolves a branch out of, and here
+    // the base is the default rather than an argument.
+    await expect(app.bays.open({ name: "mainline-from", from: "main", by: "test" })).rejects.toThrow(
+      "branch 'main' and base 'main' are the same ref",
+    )
+
+    // A Bay off the mainline is untouched by the guard.
+    await expect(app.bays.open({ name: "ordinary", base: "main", by: "test" })).resolves.toBeDefined()
+  })
+
   it("does not infer a lifecycle submitter from Bay process ownership", async () => {
     await using app = (await createHarness()).app
     const opened = await app.bays.open({ name: "unknown-submitter", by: "yrd:4242" })
