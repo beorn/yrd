@@ -59,7 +59,16 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       // the selected PR regardless of which tab is active.
       // Row 0 is the watch pane's own top line (item 12, always present); the
       // title row that used to be row 0 sits one row lower.
-      const titleRow = () => app.text.split("\n")[1] ?? ""
+      // The detail pane names its change via the change-list bullet / member
+      // header (item 23 killed the identity title row).
+      const titleRow = () => {
+        const rows = app.text.split("\n")
+        const divider = (rows[1] ?? "").indexOf("│")
+        return rows
+          .map((row) => (divider > 0 ? row.slice(divider) : row))
+          .filter((row) => row.includes("· pr#") || row.includes(" ⎇ "))
+          .join("\n")
+      }
 
       await app.press("j")
       await app.press("j")

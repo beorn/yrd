@@ -139,16 +139,20 @@ describe("RUNNER box live coarse tick (@yrd/cli/runner-box-live-tick, items 16/1
   })
 })
 
-describe("RUNNER box other text dims while processing (@yrd/cli/runner-box-dim-while-processing, item 14)", () => {
-  function sourceCell(app: ReturnType<ReturnType<typeof createRenderer>>) {
+describe("RUNNER box state-conditional coloring (@yrd/cli/runner-box-severity-never-muted, item 27)", () => {
+  function cellAt(app: ReturnType<ReturnType<typeof createRenderer>>, needle: string, anchor = needle) {
     const rows = app.text.split("\n")
-    const y = rows.findIndex((row) => row.includes("source abc1234"))
-    if (y < 0) throw new Error(`no source rail row:\n${app.text}`)
-    const x = rows[y]!.indexOf("source")
+    const y = rows.findIndex((row) => row.includes(anchor))
+    if (y < 0) throw new Error(`no row containing '${anchor}':\n${app.text}`)
+    const x = rows[y]!.indexOf(needle)
     return app.cell(x, y)
   }
 
-  it("mutes the source rail's warning color while the queue is actively running", async () => {
+  it("keeps the source rail's warning color while the queue is actively running — severity never mutes", async () => {
+    // Operator ruling 2026-08-18, item 27, superseding item 14's blanket
+    // muting: informational rails stay muted, but WARNING/ERROR text keeps
+    // the severity color regardless of runner activity. The pre-27 build
+    // muted a behind-pin warning while running — exactly the bug banned.
     const processing = processingSnapshot().projection
     const idle = idleSnapshot().projection
     const render = createRenderer({ cols: 120, rows: 40 })
@@ -156,17 +160,22 @@ describe("RUNNER box other text dims while processing (@yrd/cli/runner-box-dim-w
     const idleApp = render(
       createElement(QueueTimelineView, { projection: idle, columns: 120, nav: true, paneChrome: true }),
     )
-    const idleColor = sourceCell(idleApp).fg
+    const idleWarning = cellAt(idleApp, "source", "source abc1234").fg
     idleApp.unmount()
 
     const processingApp = render(
       createElement(QueueTimelineView, { projection: processing, columns: 120, nav: true, paneChrome: true }),
     )
     try {
-      // Same `sourceBehind: 3` fact on both fixtures — idle shows it as a
-      // warning; processing mutes it so the activity line carries the eye.
-      expect(sourceCell(processingApp).fg, "processing mutes the otherwise-warning source rail").not.toEqual(
-        idleColor,
+      expect(
+        cellAt(processingApp, "source", "source abc1234").fg,
+        "the behind-pin warning keeps its severity color while processing",
+      ).toEqual(idleWarning)
+      // The command line takes the health-marker color: blue while
+      // processing, muted when idle — the state-conditional half of item 27.
+      const processingCommand = cellAt(processingApp, "resident runner", "resident runner").fg
+      expect(processingCommand, "the running command line is not muted").not.toEqual(
+        cellAt(processingApp, "progress measured", "progress measured").fg,
       )
     } finally {
       processingApp.unmount()

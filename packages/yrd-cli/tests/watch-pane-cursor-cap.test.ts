@@ -58,13 +58,11 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
       expect(app.text, "the running row the cap hid now renders").toContain("pr#19.1")
       expect(app.text, "fill suppresses the pre-slice residue").not.toContain("... 1 more")
 
-      // The mandated default cursor is the first RUNNING row. The detail title
-      // is PR-scoped now (user directive 2026-07-21), so the running run's PR
-      // identity heads the pane; the JOB body resolves the same run below,
-      // without PR-list or log-accordion chrome.
-      // Row 0 is the watch pane's own top line (item 12, always present); the
-      // QUEUE tab + DETAIL title row that used to be row 0 sits one row lower.
-      expect(app.text.split("\n")[1], "detail resolves the running run").toContain("pr#19.1")
+      // The mandated default cursor is the first RUNNING row. The detail
+      // pane has no identity title (item 23); its change-list bullet names
+      // the running run's member, and the JOB body resolves the same run
+      // below, without PR-list or log-accordion chrome.
+      expect(app.text, "detail resolves the running run").toContain("· pr#19.1")
       expect(app.text, "detail resolves the running run's job").toContain("JOB yrd#JRR-check")
       expect(app.text).not.toContain("RUN LOGS")
       expect(app.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
