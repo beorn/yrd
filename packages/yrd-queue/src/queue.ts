@@ -2331,7 +2331,7 @@ function createQueue<Shape extends ChangeShape>(
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
           // The intent lane that used to interleave here with a head-of-line
-          // release (keyed by component) is retired along with the rest of the
+          // release (keyed by submodule) is retired along with the rest of the
           // intent rail — there is no longer a second lane of queue members to
           // arbitrate against, so this compose always proceeds straight to PR
           // selection below. `intentCutoff` stays declared (always `undefined`

@@ -2073,7 +2073,7 @@ describe("withBays", () => {
       reviewCarried: true,
       sources: [
         {
-          repo: "vendor/component",
+          repo: "vendor/submodule",
           fromHeadSha: HEAD_1,
           toHeadSha: HEAD_2,
           patchId: "d".repeat(40),

@@ -240,7 +240,7 @@ async function submoduleMainMergeRepository(
   featureSha: string
 }> {
   const { repo } = await repository()
-  const submodule = join(repo, "..", "component")
+  const submodule = join(repo, "..", "submodule")
   const bareSubmoduleRemote = join(repo, "..", "component-origin.git")
   await Bun.$`git init -q -b main ${submodule}`
   await git(submodule, ["config", "user.name", "Yrd Test"])
@@ -263,11 +263,11 @@ async function submoduleMainMergeRepository(
   await git(repo, ["remote", "add", "origin", rootRemote])
   await git(repo, ["push", "-q", "origin", "main"])
 
-  await git(submodule, ["switch", "-qc", "task/component"])
+  await git(submodule, ["switch", "-qc", "task/submodule"])
   await writeFile(join(submodule, "version.txt"), "pin\n")
   await git(submodule, ["commit", "-qam", "pin"])
   const pinSha = await git(submodule, ["rev-parse", "HEAD"])
-  await git(submodule, ["push", "-q", "origin", "task/component"])
+  await git(submodule, ["push", "-q", "origin", "task/submodule"])
   if (options.nonBareComponentOrigin === true) await git(submodule, ["switch", "-q", "main"])
 
   await git(repo, ["switch", "-qc", "issue/feature"])
@@ -288,7 +288,7 @@ async function submoduleMainMergeRepository(
     await writeFile(join(submodule, "version.txt"), "successor\n")
     await git(submodule, ["commit", "-qam", "successor"])
     successorSha = await git(submodule, ["rev-parse", "HEAD"])
-    await git(submodule, ["push", "-q", "origin", "task/component"])
+    await git(submodule, ["push", "-q", "origin", "task/submodule"])
   }
   await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
 
@@ -1568,7 +1568,7 @@ describe("Queue command adapters", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message: expect.stringMatching(
-            new RegExp(`${fixture.gitlinkAdd.sha}.*new component.*can only bump an existing component`, "su"),
+            new RegExp(`${fixture.gitlinkAdd.sha}.*new submodule.*can only bump an existing submodule`, "su"),
           ),
         },
         mutations: [],
@@ -2794,7 +2794,7 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "merge-tip-carrier",
-        message: expect.stringContaining("submit each component advance as its own ordinary change"),
+        message: expect.stringContaining("submit each submodule advance as its own ordinary change"),
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
@@ -3836,7 +3836,7 @@ describe("Queue command adapters", () => {
         failure: {
           kind: "refusal",
           code: "merge-tip-carrier",
-          message: expect.stringMatching(/submit each component advance.*Queue owns the root carrier/iu),
+          message: expect.stringMatching(/submit each submodule advance.*Queue owns the root carrier/iu),
         },
       },
     })
@@ -4473,7 +4473,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "composition-invalid",
-        message: expect.stringMatching(/root code must be submitted separately from component pin intents/iu),
+        message: expect.stringMatching(/root code must be submitted separately from submodule pin intents/iu),
       },
     })
     expect(run.error?.message).not.toContain("yrd pr recut")
@@ -8313,14 +8313,14 @@ describe("Queue command adapters", () => {
       "refs/remotes/origin/",
     ])
 
-    expect(carriers).toContain("refs/remotes/origin/task/component")
+    expect(carriers).toContain("refs/remotes/origin/task/submodule")
     expect(
       await git(fixture.submoduleRemote, ["merge-base", "--is-ancestor", fixture.pinSha, fixture.successorSha]),
     ).toBe("")
   })
 
   it.each(["native", "configured"] as const)(
-    "advances component main when a root gitlink lands (%s)",
+    "advances submodule main when a root gitlink lands (%s)",
     async (mode) => {
       // The task branch advances again after publishing the pin, matching the
       // production sequence that made the post-landing actuator necessary.
@@ -8363,7 +8363,7 @@ describe("Queue command adapters", () => {
         await git(fixture.repo, ["switch", "-q", "query-base"])
         await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.successorSha])
         await git(fixture.repo, ["add", "dep"])
-        await git(fixture.repo, ["commit", "-qm", "advance contained component pin"])
+        await git(fixture.repo, ["commit", "-qm", "advance contained submodule pin"])
         const currentBase = await git(fixture.repo, ["rev-parse", "HEAD"])
 
         await expect(
@@ -8389,7 +8389,7 @@ describe("Queue command adapters", () => {
     20_000,
   )
 
-  it("refuses a success-looking no-op actuator instead of emitting an empty component outcome set", async () => {
+  it("refuses a success-looking no-op actuator instead of emitting an empty submodule outcome set", async () => {
     const fixture = await submoduleMainMergeRepository()
     await using process = createProcess()
     const noOpProcess: Pick<Process, "run"> = {
@@ -8437,7 +8437,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.submoduleBaseSha)
   }, 20_000)
 
-  it("fast-forwards a clean checked-out main at a local non-bare component origin", async () => {
+  it("fast-forwards a clean checked-out main at a local non-bare submodule origin", async () => {
     const fixture = await submoduleMainMergeRepository({ nonBareComponentOrigin: true })
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
@@ -8453,7 +8453,7 @@ describe("Queue command adapters", () => {
     expect(await readFile(join(fixture.submodule, "version.txt"), "utf8")).toBe("pin\n")
   }, 20_000)
 
-  it("refuses to advance a dirty checked-out main at a local non-bare component origin", async () => {
+  it("refuses to advance a dirty checked-out main at a local non-bare submodule origin", async () => {
     const fixture = await submoduleMainMergeRepository({ nonBareComponentOrigin: true })
     await writeFile(join(fixture.submodule, "version.txt"), "dirty\n")
     await using process = createProcess()
@@ -8490,7 +8490,7 @@ describe("Queue command adapters", () => {
       const fixture = await submoduleMainMergeRepository()
 
       // Preserve the production R2715 residue: the root pin landed, but its
-      // component main never advanced. The next carrier does not touch the
+      // submodule main never advanced. The next carrier does not touch the
       // gitlink, so changed-pin-only planning cannot see the standing gap.
       await git(fixture.repo, ["push", "-q", "origin", `${fixture.featureSha}:refs/heads/main`])
       expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
@@ -8526,7 +8526,7 @@ describe("Queue command adapters", () => {
   )
 
   it.each(["native", "configured"] as const)(
-    "advances safe component mains while loudly refusing an independent standing divergence (%s)",
+    "advances safe submodule mains while loudly refusing an independent standing divergence (%s)",
     async (mode) => {
       const fixture = await multiSubmoduleMainMergeRepository()
       const [divergentSubmodule, safeSubmodule] = fixture.submodules
@@ -8544,7 +8544,7 @@ describe("Queue command adapters", () => {
       const divergentMainSha = await git(divergentWorktree, ["rev-parse", "HEAD"])
       await git(divergentWorktree, ["push", "-q", "origin", "main"])
 
-      // Preserve a root-only landing with two standing component gaps. The
+      // Preserve a root-only landing with two standing submodule gaps. The
       // first origin now needs a compose; the second remains a plain FF.
       await git(fixture.repo, ["push", "-q", "origin", `${fixture.featureSha}:refs/heads/main`])
       await git(fixture.repo, ["switch", "-q", "issue/feature"])
@@ -8600,7 +8600,7 @@ describe("Queue command adapters", () => {
     40_000,
   )
 
-  it("classifies against freshly fetched component main instead of a stale bay tracking ref", async () => {
+  it("classifies against freshly fetched submodule main instead of a stale bay tracking ref", async () => {
     const fixture = await submoduleMainMergeRepository()
     const baySubmodule = join(fixture.repo, "dep")
     expect(await git(baySubmodule, ["rev-parse", "origin/main"])).toBe(fixture.submoduleBaseSha)
@@ -8642,7 +8642,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
   }, 20_000)
 
-  it("refuses a non-ancestral component main without landing or force-pushing", async () => {
+  it("refuses a non-ancestral submodule main without landing or force-pushing", async () => {
     const fixture = await submoduleMainMergeRepository()
     await git(fixture.submodule, ["switch", "-q", "main"])
     await writeFile(join(fixture.submodule, "divergent.txt"), "divergent main\n")
@@ -8690,10 +8690,10 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   /**
-   * The sibling below covers a DIVERGENT component pin: the carrier resolved
-   * against an older main, so pin and component main share no ancestry line and
+   * The sibling below covers a DIVERGENT submodule pin: the carrier resolved
+   * against an older main, so pin and submodule main share no ancestry line and
    * the work genuinely still needs re-deriving. This covers the other half —
-   * a SPENT pin, a strict ancestor of component main.
+   * a SPENT pin, a strict ancestor of submodule main.
    *
    * The two are the same ancestry test and opposite cures. A spent pin has
    * nothing left to deliver, so "linear rebuild required" is advice that cannot
@@ -8710,10 +8710,10 @@ describe("Queue command adapters", () => {
   /**
    * The rollback edge the backward-pin lore actually guards: a carrier whose HEAD
    * is clean — it contains the current base, so nothing about it looks stale —
-   * but whose TREE moves the gitlink to an OLDER component sha. Nothing in the
+   * but whose TREE moves the gitlink to an OLDER submodule sha. Nothing in the
    * promotion loop sees this, because that loop reads merged pin intents rather
    * than a branch carrier's authored tree, so if this merged it would silently
-   * revert the component.
+   * revert the submodule.
    *
    * It is NOT refused — it merges. The guard is monotonicity, not refusal: the
    * promotion target only ever advances (command.ts:4361), so the merge writes
@@ -8722,7 +8722,7 @@ describe("Queue command adapters", () => {
    * unguarded, read the promotion loop and it looks unreachable — so the
    * assertion below reads the pin the run actually wrote.
    */
-  it("does not roll the component back for a clean-headed carrier that moves the gitlink backward", async () => {
+  it("does not roll the submodule back for a clean-headed carrier that moves the gitlink backward", async () => {
     const fixture = await submoduleMainMergeRepository()
 
     // Component main absorbs the pinned work, and the root advances its gitlink
@@ -8734,12 +8734,12 @@ describe("Queue command adapters", () => {
     await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
     await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.pinSha])
     await git(fixture.repo, ["add", "dep"])
-    await git(fixture.repo, ["commit", "-qm", "advance dependency to component main"])
+    await git(fixture.repo, ["commit", "-qm", "advance dependency to submodule main"])
     const currentBase = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["push", "-q", "origin", "main"])
 
     // The carrier branches from that current base — its head is clean — and
-    // walks the gitlink back to the component's earlier commit.
+    // walks the gitlink back to the submodule's earlier commit.
     await git(fixture.repo, ["switch", "-qc", "issue/backward-gitlink", currentBase])
     await git(join(fixture.repo, "dep"), ["checkout", "-q", fixture.submoduleBaseSha])
     await git(fixture.repo, ["add", "dep"])
@@ -8763,7 +8763,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
 
     // The property under test is not "it refused" but "it did not roll the
-    // component back", so read the pin the run actually wrote.
+    // submodule back", so read the pin the run actually wrote.
     await git(fixture.repo, ["switch", "-q", "main"])
     const writtenPin = (await git(fixture.repo, ["ls-tree", "HEAD", "dep"])).split(/\s+/u)[2] ?? "none"
     const walkedBack =
@@ -8774,7 +8774,7 @@ describe("Queue command adapters", () => {
         .catch(() => false))
 
     // It MERGES — the carrier is admitted, which is the surprising half. What
-    // protects the component is that the merge writes the forward pin anyway:
+    // protects the submodule is that the merge writes the forward pin anyway:
     // the promotion target only ever advances (:4361), so the authored backward
     // gitlink loses to it. Refusal is not the guard here; monotonicity is.
     expect({ conclusion: run?.conclusion, writtenPin, walkedBack }).toEqual({
@@ -8784,20 +8784,20 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("does not tell a spent component pin to rebuild when component main already contains it", async () => {
+  it("does not tell a spent submodule pin to rebuild when submodule main already contains it", async () => {
     const fixture = await submoduleMainMergeRepository()
 
-    // The component lands the pinned work and moves on.
+    // The submodule lands the pinned work and moves on.
     await git(fixture.submodule, ["switch", "-q", "main"])
-    await git(fixture.submodule, ["merge", "-q", "--no-ff", fixture.pinSha, "-m", "land the pinned component work"])
+    await git(fixture.submodule, ["merge", "-q", "--no-ff", fixture.pinSha, "-m", "land the pinned submodule work"])
     await writeFile(join(fixture.submodule, "later.txt"), "later\n")
     await git(fixture.submodule, ["add", "later.txt"])
-    await git(fixture.submodule, ["commit", "-qm", "later component landing"])
+    await git(fixture.submodule, ["commit", "-qm", "later submodule landing"])
     const submoduleMain = await git(fixture.submodule, ["rev-parse", "HEAD"])
     await git(fixture.submodule, ["push", "-q", "origin", "main"])
 
     // `git()` throws on a non-zero exit, so the ancestry call is itself the
-    // precondition: the pin is contained, and component main has moved past it,
+    // precondition: the pin is contained, and submodule main has moved past it,
     // which is what separates spent from a no-op.
     await git(fixture.submodule, ["merge-base", "--is-ancestor", fixture.pinSha, submoduleMain])
     expect(await git(fixture.submodule, ["log", "--oneline", `${fixture.pinSha}..${submoduleMain}`])).not.toBe("")
@@ -8827,7 +8827,7 @@ describe("Queue command adapters", () => {
    * that cannot succeed: the rebuild is empty and is refused again on the same
    * ground. That is the loop PR562 rode to revision 43.
    *
-   * LIVE (the sibling below): component main holds the work, but root main's
+   * LIVE (the sibling below): submodule main holds the work, but root main's
    * gitlink still points before it — so this carrier is the one that would
    * perform the promotion, and telling its author to close would DROP the
    * advance. Measured directly: with root's gitlink behind, the rebuild still
@@ -8845,7 +8845,7 @@ describe("Queue command adapters", () => {
       baseSha: fixture.rootBaseSha,
     })
 
-    // Another carrier promotes the component past this one's pin, and root main
+    // Another carrier promotes the submodule past this one's pin, and root main
     // moves on, so the head goes stale and the pin goes spent in one step.
     await git(fixture.submodule, ["switch", "-q", "main"])
     await git(fixture.submodule, ["merge", "-q", "--ff-only", fixture.successorSha])
@@ -8882,10 +8882,10 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(movedBase)
   }, 20_000)
 
-  it("keeps the rebuild remedy when component main has the work but the base's pin does not", async () => {
+  it("keeps the rebuild remedy when submodule main has the work but the base's pin does not", async () => {
     const fixture = await submoduleMainMergeRepository()
 
-    // The component lands the pinned work, but nothing promotes root's gitlink —
+    // The submodule lands the pinned work, but nothing promotes root's gitlink —
     // so this carrier is still the one that would deliver it.
     await git(fixture.submodule, ["switch", "-q", "main"])
     await git(fixture.submodule, ["merge", "-q", "--ff-only", fixture.pinSha])
@@ -8921,22 +8921,22 @@ describe("Queue command adapters", () => {
     })
   }, 20_000)
 
-  it("refuses a stale resolved component pin and enumerates the component commits it would drop", async () => {
+  it("refuses a stale resolved submodule pin and enumerates the submodule commits it would drop", async () => {
     const fixture = await submoduleMainMergeRepository()
     await git(fixture.submodule, ["switch", "-q", "main"])
     await writeFile(join(fixture.submodule, "earlier-landing.txt"), "already resolved\n")
     await git(fixture.submodule, ["add", "earlier-landing.txt"])
-    await git(fixture.submodule, ["commit", "-qm", "component landing already resolved"])
-    await git(fixture.submodule, ["switch", "-q", "task/component"])
-    await git(fixture.submodule, ["merge", "-q", "--no-ff", "main", "-m", "resolve component carrier"])
+    await git(fixture.submodule, ["commit", "-qm", "submodule landing already resolved"])
+    await git(fixture.submodule, ["switch", "-q", "task/submodule"])
+    await git(fixture.submodule, ["merge", "-q", "--no-ff", "main", "-m", "resolve submodule carrier"])
     const resolvedPin = await git(fixture.submodule, ["rev-parse", "HEAD"])
-    await git(fixture.submodule, ["push", "-q", "origin", "task/component"])
+    await git(fixture.submodule, ["push", "-q", "origin", "task/submodule"])
 
     await git(fixture.repo, ["switch", "-qc", "issue/stale-component", fixture.rootBaseSha])
     await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
     await git(join(fixture.repo, "dep"), ["checkout", "-q", resolvedPin])
     await git(fixture.repo, ["add", "dep"])
-    await git(fixture.repo, ["commit", "-qm", "pin resolved component carrier"])
+    await git(fixture.repo, ["commit", "-qm", "pin resolved submodule carrier"])
     const carrierHead = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["push", "-q", "origin", "issue/stale-component"])
     await git(fixture.repo, ["switch", "-q", "main"])
@@ -8945,7 +8945,7 @@ describe("Queue command adapters", () => {
     await git(fixture.submodule, ["switch", "-q", "main"])
     await writeFile(join(fixture.submodule, "protected-component-landing.txt"), "must survive\n")
     await git(fixture.submodule, ["add", "protected-component-landing.txt"])
-    await git(fixture.submodule, ["commit", "-qm", "protected component landing after resolution"])
+    await git(fixture.submodule, ["commit", "-qm", "protected submodule landing after resolution"])
     const submoduleMain = await git(fixture.submodule, ["rev-parse", "HEAD"])
     await git(fixture.submodule, ["push", "-q", "origin", "main"])
     expect(await git(fixture.submodule, ["merge-tree", "--write-tree", submoduleMain, resolvedPin])).toMatch(
@@ -8967,14 +8967,14 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "carrier-drops-landed",
-        message: expect.stringMatching(/protected component landing after resolution.*linear.*current base/isu),
+        message: expect.stringMatching(/protected submodule landing after resolution.*linear.*current base/isu),
       },
     })
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(submoduleMain)
   }, 20_000)
 
-  it("leaves the root landed and converges component main when a transient promotion failure is retried", async () => {
+  it("leaves the root landed and converges submodule main when a transient promotion failure is retried", async () => {
     const fixture = await submoduleMainMergeRepository()
     await using process = createProcess()
     let failedPromotion = false
@@ -8991,7 +8991,7 @@ describe("Queue command adapters", () => {
             exitCode: 1,
             signal: null,
             stdout: "",
-            stderr: "transient component push failure",
+            stderr: "transient submodule push failure",
             durationMs: 1,
             timedOut: false,
           })
@@ -9046,7 +9046,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
   }, 30_000)
 
-  it("keeps earlier component fast-forwards and converges the remaining origins on retry", async () => {
+  it("keeps earlier submodule fast-forwards and converges the remaining origins on retry", async () => {
     const fixture = await multiSubmoduleMainMergeRepository()
     const [firstSubmodule, secondSubmodule] = fixture.submodules
     if (firstSubmodule === undefined || secondSubmodule === undefined) {
@@ -9060,7 +9060,7 @@ describe("Queue command adapters", () => {
         if (
           request.argv[0] === "git" &&
           request.argv.includes("push") &&
-          fixture.submodules.some((component) => request.argv.includes(component.remote))
+          fixture.submodules.some((submodule) => request.argv.includes(submodule.remote))
         ) {
           submodulePushes.push([...request.argv])
         }
@@ -9075,7 +9075,7 @@ describe("Queue command adapters", () => {
             exitCode: 1,
             signal: null,
             stdout: "",
-            stderr: "transient second component push failure",
+            stderr: "transient second submodule push failure",
             durationMs: 1,
             timedOut: false,
           })
