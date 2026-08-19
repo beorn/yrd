@@ -5998,7 +5998,8 @@ describe("runYrd", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message:
-            "yrd: PR 'PR1' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>",
+            "yrd: PR 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
+            "ordinary merge request whose diff is the gitlink bump",
         })
       },
     })
@@ -6120,7 +6121,8 @@ describe("runYrd", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message:
-            "yrd: PR 'PR1' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>",
+            "yrd: PR 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
+            "ordinary merge request whose diff is the gitlink bump",
         })
       },
     })
