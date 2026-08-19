@@ -103,7 +103,7 @@ import {
   type RuntimePosture,
   type YrdContext,
 } from "./invocation.ts"
-import { requireUnqualifiedRunSelector } from "./qualified-run-ref.ts"
+import { requireUnqualifiedRunSelector, resolveCanonicalRunSelector } from "./qualified-run-ref.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
@@ -5914,7 +5914,7 @@ async function cancelQueueRun(
 ): Promise<YrdCliExitCode> {
   if (options.reason?.trim() === "") usage("--reason requires text")
   const run = await app.queue.cancelRun({
-    run: requireUnqualifiedRunSelector(selector, "cancel"),
+    run: requireUnqualifiedRunSelector(resolveCanonicalRunSelector(selector, io.repositoryRoot), "cancel"),
     by: io.runner ?? "operator",
     reason: options.reason ?? "run canceled by operator",
   })
@@ -8563,7 +8563,7 @@ async function finishQueue(
   }
   const attempt = Number(options.attempt)
   if (!Number.isSafeInteger(attempt) || attempt < 1) usage("--attempt must be a positive integer")
-  const run = requireUnqualifiedRunSelector(selector, "finish")
+  const run = requireUnqualifiedRunSelector(resolveCanonicalRunSelector(selector, io.repositoryRoot), "finish")
   const revisionAdmission = app.queue.waitingAdmission(run, options.step)
   const waiting = revisionAdmission ?? app.queue.waiting(run, options.step)
   const selectedJob = waiting.step.job
@@ -10759,7 +10759,18 @@ function buildProgram(
     .option("--repair", "append a missing pr/integrated index row from repository proof")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
-      setExit(await explainMerge(installed(), installedServices(), selector, options, io)),
+      setExit(
+        await explainMerge(
+          installed(),
+          installedServices(),
+          // `yrd why` accepts the canonical `path@branch#N` run address and
+          // the bare `#N` form (items 34/36); the resolver validates the
+          // path half against this repository before stripping it.
+          resolveCanonicalRunSelector(selector, io.repositoryRoot),
+          options,
+          io,
+        ),
+      ),
     )
 
   const bay = program

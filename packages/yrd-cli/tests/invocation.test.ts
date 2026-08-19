@@ -384,10 +384,19 @@ describe("repository aliases supplied by a composition host", () => {
     expect(() => normalizeYrdRepositoryAliasInvocation(["queue", "run", "docs"], repositories)).toThrow(
       "unknown Yrd repository 'docs'; expected alpha or beta",
     )
+  })
+
+  it("routes bare watch spellings to the current-repository watch instead of refusing (item 35)", () => {
+    // #undead (operator ruling 2026-08-18): bare `yrd watch` MUST work — the
+    // "all-repository queue watch is unsupported" refusal branch is dead.
+    // The normalizer marks the invocation; the planner resolves WHICH
+    // declared repository the invocation directory belongs to (item 37f's
+    // default discovery tier: the current repository).
     for (const args of [["watch"], ["queue", "watch"], ["queue", "list", "--watch"], ["queue", "--watch"]]) {
-      expect(() => normalizeYrdRepositoryAliasInvocation(args, repositories)).toThrow(
-        "all-repository queue watch is unsupported; run 'yrd queue alpha --watch' or 'yrd queue beta --watch'",
-      )
+      const normalized = normalizeYrdRepositoryAliasInvocation(args, repositories)
+      expect(normalized.kind, args.join(" ")).toBe("all-repositories-watch")
+      if (normalized.kind !== "all-repositories-watch") throw new Error("unreachable")
+      expect(normalized.args).toEqual(["queue", "list", "--watch"])
     }
   })
 
