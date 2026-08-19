@@ -316,6 +316,32 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   throw createFailure({ kind: "configuration", code: "invalid-config", message })
 }
 
+/**
+ * The queue's own submission/admission gate: judge a CANDIDATE's raw pushed
+ * `.yrd.yml` text against this exact schema, before the push is even
+ * accepted (wired into the Git receiver — `@yrd/bay`'s `validateConfig` hook
+ * — by the host that owns both the receiver and this schema; `@yrd/bay`
+ * cannot import this file itself without a dependency cycle).
+ *
+ * This is the fix for PR1337 (2026-08-19): a `.yrd.yml` carrying an invalid
+ * `test-fast.comparison: gate-residuals` key passed typecheck, lockfile and
+ * manifest gates — none of them parse `.yrd.yml` — then wedged the resident
+ * queue runner for 31 minutes the moment its own config load (always FROM
+ * THE BASE REF, `readConfigFromBase` in `host.ts`) hit the newly-landed key.
+ * Nothing before this function ever asked whether the PUSHED `.yrd.yml`
+ * itself would parse.
+ *
+ * `yaml === undefined` (the pushed tree has no config file at all) is a
+ * real, valid answer — the built-in defaults, exactly what `loadYrdConfig`
+ * resolves for a base with no config — never a skip: it still calls
+ * `parseYrdConfig`, which still throws if `undefined` were ever somehow
+ * invalid (it is not, by construction), so a future schema change that made
+ * absence meaningful could not silently bypass this gate by accident.
+ */
+export function validatePushedYrdConfig(yaml: string | undefined): void {
+  parseYrdConfig(yaml === undefined ? undefined : Bun.YAML.parse(yaml))
+}
+
 function mostSpecificConfigIssue(issue: z.core.$ZodIssue | undefined): z.core.$ZodIssue | undefined {
   if (issue?.code !== "invalid_union") return issue
   return issue.errors

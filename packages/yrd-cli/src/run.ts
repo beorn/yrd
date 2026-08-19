@@ -10810,9 +10810,20 @@ function buildProgram(
       const runtimeIO = io as RuntimeInvocationIO
       const selected = resolveRuntimeContext(globals, bootstrap)
       if (invocation.queueRunnerCheck && bootstrap.probe !== undefined) {
+        // Set BEFORE calling probe(), never after: when the SELECTED repository's
+        // own config is exactly what makes probe() throw (PR1337's shape — an
+        // invalid `.yrd.yml` at the base ref), the assignment used to run only on
+        // the success path, so a throw left `io.cwd` unset. The catch in this
+        // function's caller then re-ran the health check against `runtimeIO`
+        // unchanged, which fell back to `process.cwd()` — the AMBIENT directory,
+        // never the one --repo/--config selected — and reported a misleading
+        // "not a Git queue repository" about the wrong directory entirely,
+        // masking the real config error behind it. --repo/--config's authority
+        // over which repository is examined must hold on the error path too.
+        runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
+        io.cwd = selected.repo
         const probed = await bootstrap.probe(selected)
         runtimeServices = probed.services
-        runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
         Object.assign(io, probed.io)
         return
       }

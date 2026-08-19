@@ -110,6 +110,16 @@ export type ResolveReceiverTarget = (
   intent?: ReceiverSubmitIntent,
 ) => ReceiverTarget | null | undefined | Promise<ReceiverTarget | null | undefined>
 
+/**
+ * Judge the pushed head's own `.yrd.yml` — its raw text, or undefined when the
+ * pushed tree has none (a real, valid answer: no file means the built-in
+ * defaults, the same as `loadYrdConfig` reading a base with no config). Throw
+ * to refuse the push; the receiver never parses config itself (`@yrd/bay`
+ * cannot depend on `@yrd/cli`'s schema without a cycle), only reads the blob
+ * and hands it to whichever schema the caller owns.
+ */
+export type ReceiverConfigValidator = (yaml: string | undefined) => void | Promise<void>
+
 /** Intake must atomically deduplicate result.id with its own durable event. */
 export type DurableReceiverIntake = (result: Readonly<ReceiverResult>) => void | Promise<void>
 export type ReceiverHookOptions = {
@@ -124,6 +134,13 @@ export type ReceiverHookOptions = {
    * whoever owns it. Omit and the refusal is unchanged.
    */
   intakePolicy?: string
+  /**
+   * Judge the pushed head's `.yrd.yml` before the push is accepted. Omit and
+   * the receiver reads and stores the push unjudged, exactly as it always
+   * has — this gate is additive, never a default behavior change for a caller
+   * that has not wired a schema in yet.
+   */
+  validateConfig?: ReceiverConfigValidator
 }
 export type ReceiverDrainResult = {
   delivered: string[]
@@ -771,6 +788,51 @@ async function validateSubmitCarrier(
   )
 }
 
+/**
+ * The pushed head's `.yrd.yml`, or undefined when that revision's tree has
+ * none. `includeMainObjects` matters here exactly as it does for the ancestry
+ * checks above: at pre-receive the pushed blob lives only in the receiver's
+ * quarantine, not yet in the main repository's object store.
+ */
+async function readPushedBlob(
+  receiver: GitPushReceiver,
+  sha: string,
+  path: string,
+  env?: Environment,
+): Promise<string | undefined> {
+  const object = `${sha}:${path}`
+  const exists = await receiverGit(receiver, ["cat-file", "-e", object], {
+    env,
+    allowFailure: true,
+    includeMainObjects: true,
+  })
+  if (exists.code !== 0) return undefined
+  return (await receiverGit(receiver, ["show", object], { env, includeMainObjects: true })).stdout
+}
+
+/**
+ * Config admission: read the pushed head's `.yrd.yml` and hand it to whatever
+ * schema the caller owns (@yrd/bay cannot import @yrd/cli's parser without a
+ * dependency cycle — the receiver only ever reads the blob). Runs at BOTH
+ * pre-receive and post-receive, same as `validatePin`/`validateSubmitCarrier`
+ * above, so a config the base's own queue schema would refuse is rejected at
+ * the push itself — the same "unlandable" guarantee those two already give
+ * gitlink pins and carrier ancestry, closing the gap PR1337 fell through
+ * (typecheck, lockfile and manifest gates all passed; nothing ever asked
+ * whether the pushed .yrd.yml itself would parse).
+ *
+ * `options.validateConfig` is optional and additive: a caller that has not
+ * wired a schema in yet keeps today's unjudged behavior exactly.
+ */
+async function validateQueueConfig(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  options: ReceiverHookOptions,
+): Promise<void> {
+  if (options.validateConfig === undefined) return
+  await options.validateConfig(await readPushedBlob(receiver, update.newSha, ".yrd.yml", options.env))
+}
+
 async function authorize(
   receiver: GitPushReceiver,
   update: ReceiverRefUpdate,
@@ -820,6 +882,7 @@ async function authorize(
   )
   await validatePin(receiver, update, target, options.env)
   if (intent !== undefined) await validateSubmitCarrier(receiver, update, branch, options.env)
+  await validateQueueConfig(receiver, update, options)
   return intent === undefined ? { branch, target } : { branch, target, intent }
 }
 
