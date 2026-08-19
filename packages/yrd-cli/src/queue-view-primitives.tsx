@@ -123,3 +123,72 @@ export function TitledBox({
     </Box>
   )
 }
+
+/**
+ * The universal hanging-marker rule (operator ruling 2026-08-18, item 29a):
+ * every line with a leading marker (✓ × $ · ⏺ ▶) puts the marker in a GUTTER
+ * and left-aligns its text — and all text within a box aligns to ONE column,
+ * so wrapped text hangs off the marker instead of wrapping back under it.
+ * `marker` renders any glyph node (plain, colored, or pulsing); an absent
+ * marker still reserves the gutter so sibling rows share the text column.
+ */
+export function MarkerRow({
+  marker,
+  gutter = 2,
+  children,
+}: Readonly<{
+  marker?: React.ReactNode
+  /** Gutter width in cells — marker glyph plus its trailing space. */
+  gutter?: number
+  children: React.ReactNode
+}>) {
+  return (
+    <Box flexDirection="row" minWidth={0} width="100%">
+      <Box width={gutter} flexShrink={0}>
+        {marker}
+      </Box>
+      <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
+        {children}
+      </Box>
+    </Box>
+  )
+}
+
+/**
+ * Bounded hanging wrap for one marker-led line (operator ruling 2026-08-18,
+ * item 29, settling the item-13 deviation): wrapped text hangs off the marker
+ * and the line's HEIGHT is capped, eliding with `…`, so a long command can
+ * never push the run list off a narrow pane — the 2026-08-13 regression
+ * guard's reason survives while its single-line mechanism is replaced.
+ * Pure and width-driven so the guard test can pin exact rows.
+ */
+export function boundedHangingLines(text: string, width: number, maxRows = 3): readonly string[] {
+  const safeWidth = Math.max(1, Math.floor(width))
+  const words = text.split(/\s+/u).filter((word) => word !== "")
+  const rows: string[] = []
+  let current = ""
+  const push = (row: string): void => {
+    if (row !== "") rows.push(row)
+  }
+  for (const word of words) {
+    const candidate = current === "" ? word : `${current} ${word}`
+    if (candidate.length <= safeWidth) {
+      current = candidate
+      continue
+    }
+    push(current)
+    // A single word longer than the row hard-breaks; anything else wraps whole.
+    let rest = word
+    while (rest.length > safeWidth) {
+      rows.push(rest.slice(0, safeWidth))
+      rest = rest.slice(safeWidth)
+    }
+    current = rest
+  }
+  push(current)
+  if (rows.length <= maxRows) return rows
+  const kept = rows.slice(0, maxRows)
+  const last = kept[maxRows - 1] ?? ""
+  kept[maxRows - 1] = last.length >= safeWidth ? `${last.slice(0, Math.max(0, safeWidth - 1))}…` : `${last}…`
+  return kept
+}
