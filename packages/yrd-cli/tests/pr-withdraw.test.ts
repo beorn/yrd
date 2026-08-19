@@ -41,7 +41,6 @@ import {
   type SourceRewrite,
   type StepExecution,
 } from "@yrd/queue"
-import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import {
   withContests,
@@ -193,7 +192,6 @@ async function createCliApp(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withIntents(),
     withBays({
       jobs: bayJobs,
       defaultBase: "main",

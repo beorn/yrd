@@ -5,8 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { PRIdSchema } from "@yrd/bay"
-import { IntentRecordIdSchema } from "@yrd/intent"
-import { CandidateChangeSchema, MergeRecordChangeSchema, QueueMemberIdSchema } from "@yrd/queue"
+import { CandidateChangeSchema, IntentRecordIdSchema, MergeRecordChangeSchema, QueueMemberIdSchema } from "@yrd/queue"
 
 /**
  * Drawn from the live journal (39,254 history frames plus the snapshot prefix

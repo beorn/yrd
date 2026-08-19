@@ -105,8 +105,6 @@ import {
   type ResolvedRetention,
 } from "@yrd/persistence"
 import { adaptProcessGit, createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
-import { withIntents } from "@yrd/intent"
-import { admitPinIntent } from "./intent-admission.ts"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
@@ -200,13 +198,19 @@ type RuntimeStep = StepDef<PRShape, PRShape>
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 /** Durable production predecessors: the pre-restore two-check checkpoint, the
  * three-check checkpoint rewritten by the recovery before this protocol
- * shipped, and the pre-quarantine intent contract (intents-v1, no
- * `unreadable` report) that live deployments hold until intents-v2 code
- * first migrates them. */
+ * shipped, the pre-quarantine intent contract (intents-v1, no `unreadable`
+ * report), and the intents-v2 contract (yrdpin#401, `unreadable` present)
+ * that live deployments hold until the intent rail's deletion first migrates
+ * them — the intent rail itself (`@yrd/intent`, `state.intents`, its seven
+ * `intent/*` events) is gone as of this identity; every one of those events
+ * is now unknown-name-quarantined at replay (`@yrd/core`'s unknown-event-name
+ * tolerance), and the `intents` slice a checkpoint still carries is dropped
+ * explicitly by `migrate` below rather than left to leak forever. */
 const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
   "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
   "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
+  "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -1592,21 +1596,6 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
       ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
     }),
     recordMerge: gitMergeRecorder({ inject: { process: options.process }, repo: options.repo }),
-    evaluateIntent: ({ intent, baseSha, tombstones }) =>
-      admitPinIntent({
-        process: options.process,
-        repo: options.repo,
-        base: baseSha,
-        component: intent.component,
-        issue: `${intent.issue.source}:${intent.issue.id}`,
-        ...(intent.target === undefined ? {} : { target: intent.target }),
-        ...(intent.preconditions.expectedCurrentPin === undefined
-          ? {}
-          : { expectedCurrentPin: intent.preconditions.expectedCurrentPin }),
-        ...(intent.preconditions.allowOffTrunk === true ? { allowOffTrunk: true } : {}),
-        tombstones,
-        deriveTarget: true,
-      }),
     runner: (jobs) => {
       const contexts = worktreeContexts({
         repo: options.repo,
@@ -1639,7 +1628,6 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     withIssues({
       sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
     }),
-    withIntents(),
     withBays({
       jobs: bayJobs,
       defaultBase: baseIdentity(options.config.base),
@@ -1672,8 +1660,19 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // validation both assume the current contract (2026-08-18: intents-v2
         // added `unreadable`, absent from every intents-v1 checkpoint).
         const compacted = definition.compact(fillMissingStateFromInitial(definition.initialState, state))
+        // The intent rail's deletion (2026-08-18) dropped `intents` from the
+        // state contract entirely — no feature owns that key anymore, so
+        // `compact`'s composition (each surviving feature merges only ITS OWN
+        // slice) has no one left to prune it and would otherwise pass a stale
+        // `intents` value through forever, unread by anything. Drop it here,
+        // explicitly, once, rather than let a retained checkpoint leak it into
+        // every future one. Every retained predecessor above — including this
+        // migration's own immediate one, intents-v2 — routes through this same
+        // callback, so this single drop covers all of them.
+        const { intents: _deadIntents, ...withoutDeadIntents } = compacted as typeof compacted &
+          Readonly<{ intents?: unknown }>
         return {
-          ...compacted,
+          ...withoutDeadIntents,
           queues: {
             ...compacted.queues,
             // Construction policy is not a journal fact. A retained checkpoint

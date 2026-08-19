@@ -11,7 +11,6 @@
     "@yrd/bay": "workspace:*",
     "@yrd/config": "workspace:*",
     "@yrd/core": "workspace:*",
-    "@yrd/intent": "workspace:*",
     "@yrd/job": "workspace:*",
     "@yrd/process": "workspace:*",
     "canonicalize": "^3.0.0",

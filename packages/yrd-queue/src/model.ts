@@ -2,6 +2,7 @@ import {
   ChangeIdSchema,
   CompositionV1Schema,
   CorrelationSchema,
+  GitPayloadPathSchema,
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
@@ -24,7 +25,6 @@ import {
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { FlowPin, StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
-import { IntentRecordIdSchema, PinIntentAuthoredSchema, PinIntentEvaluationSchema } from "@yrd/intent"
 import * as z from "zod"
 import {
   projectionLookupGet,
@@ -63,7 +63,25 @@ const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
 }).strict()
 
 /**
- * A queue member is a PR or a pin intent, and this union decides which: both
+ * A historical intent record id, in either minted form.
+ *
+ * `yrdpin#<n>` is what the retired intent rail minted before it was deleted.
+ * `I<n>` is what the counter minted before that. The intent rail itself is
+ * gone — there is no live `Intents` interface and no new record is ever
+ * minted again — but the journal still holds these ids forever, and
+ * `QueueMemberIdSchema`/`queueMemberKind` must keep recognizing their SHAPE so
+ * a stored member id still parses, selects and prints instead of being
+ * mis-kinded or refused. Relocated verbatim from the deleted `@yrd/intent`
+ * package (`IntentRecordIdSchema`) rather than re-derived, so the regex a
+ * historical id must match never drifts from what actually minted it.
+ */
+export const IntentRecordIdSchema = z.string().regex(/^(?:I|yrdpin#)\d+$/u, "expected an intent id, e.g. yrdpin#162")
+
+const IntentIdSchema = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u, "expected a lowercase UUID")
+
+/** A queue member is a PR or a pin intent, and this union decides which: both
  * arms are pinned to the shape their mint writes (`PR182` vs `I148` /
  * `yrdpin#164`), so a mis-kinded id fails at the schema rather than much later.
  * Positions that hold members of either kind must use THIS schema — a bare
@@ -89,11 +107,34 @@ export function queueMemberKind(id: string): QueueMemberKind | undefined {
   if (IntentRecordIdSchema.safeParse(id).success) return "gitlink"
   return undefined
 }
+/**
+ * The authored-to-evaluated lineage a historical "carrier-free pin intent"
+ * run recorded onto its own PR-shaped queue member. Both sub-shapes are
+ * relocated verbatim from the deleted `@yrd/intent` package (`PinIntentAuthoredSchema`,
+ * `PinIntentEvaluationSchema`) — no live code ever constructs one again (the
+ * evaluator and the CLI verb that fed it are both gone), but a Run record
+ * minted before the rail's deletion still carries this shape inside its own
+ * `queue/run/*` event, which is a SURVIVING event family. Replay must keep
+ * parsing it, so the shape stays exact rather than loosened.
+ */
+const QueueIntentAuthoredSchema = z
+  .object({
+    intentId: IntentIdSchema,
+    // Matches `@yrd/issue`'s IssueRefSchema shape exactly (not `.strict()`,
+    // same as the original) without adding a new workspace dependency for one
+    // nested field of a replay-only, no-longer-produced shape.
+    issue: z.object({ source: z.string().trim().min(1), id: z.string().trim().min(1) }),
+    component: GitPayloadPathSchema,
+    target: GitShaSchema.optional(),
+  })
+  .strict()
+const QueueIntentEvaluationSchema = z.object({ priorPin: GitShaSchema, target: GitShaSchema }).strict()
+
 export const QueueIntentSnapshotSchema = z
   .object({
     id: IntentRecordIdSchema,
-    authored: PinIntentAuthoredSchema,
-    evaluated: PinIntentEvaluationSchema,
+    authored: QueueIntentAuthoredSchema,
+    evaluated: QueueIntentEvaluationSchema,
   })
   .strict()
 export type QueueIntentSnapshot = Readonly<z.infer<typeof QueueIntentSnapshotSchema>>
@@ -821,7 +862,6 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "orphaned-requested-job",
   "unisolable-stale-plan",
   "admission-refusal-loop",
-  "intent-lane-stalled",
   "queue-never-started",
   "queue-progress-stalled",
   "config-drift",

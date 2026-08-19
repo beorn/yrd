@@ -3,7 +3,7 @@
 // @consumer @yrd/cli
 
 import { execFileSync } from "node:child_process"
-import { createHash, randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 import {
   chmodSync,
   existsSync,
@@ -70,7 +70,6 @@ import {
   type PRShape,
   type StepExecution,
 } from "@yrd/queue"
-import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
 import { renderString, stripAnsi } from "silvery"
@@ -524,7 +523,6 @@ async function createApp(
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, deploymentJobs] }),
     withDeployments({ jobs: deploymentJobs }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withIntents(),
     withBays({
       jobs: bayJobs,
       defaultBase: "main",
@@ -15176,37 +15174,13 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       pins: [{ path: COMPONENT, before: CURRENT_PIN, after: TARGET_SHA }],
     })
 
-    it("buckets a landed intent carrier as an intent landing and calls the estate clean", async () => {
-      await using app = await createApp()
-      // Historically this fixture ran the CLI's `intent submit` verb end to end; step (d)
-      // deleted that verb (and every verb in its group), but `app.intents` — the read/write
-      // programmatic surface `doctor`'s bucketing reads from — is untouched, so the fixture is
-      // built one layer down instead. This test is about doctor's bucketing, not admission.
-      const issue = await app.issues.resolve(app.issues.ref("one"))
-      await app.intents.submit({
-        intentId: randomUUID(),
-        issue: issue.ref,
-        component: COMPONENT,
-        submitter: "operator",
-        target: TARGET_SHA,
-      })
-      const output = outputIO()
-
-      expect(
-        await runYrd(
-          app,
-          yrd("doctor", "--rebuild-index-from-repo"),
-          output.io,
-          servicesFor([{ record: intentRecord("yrdpin#1"), pointer }]),
-        ),
-        output.stderr(),
-      ).toBe(0)
-      expect(output.stdout()).toContain("SKIPPED yrdpin#1 revision 1 intent-carrier")
-      expect(output.stdout()).toContain(COMPONENT)
-      expect(output.stdout()).not.toContain("pr-unknown")
-    })
-
-    it("separates an intent the journal has never seen from a missing PR", async () => {
+    it("buckets a landed intent carrier as a healthy skip, never a PR gap", async () => {
+      // The intent rail itself is retired (this carrier's own commit): there is
+      // no more `app.intents` to submit through or consult, so doctor can no
+      // longer distinguish "a known intent record" from "an id merely shaped
+      // like one" — and it no longer needs to. Any id `IntentRecordIdSchema`
+      // accepts is a pin-intent landing by construction (the mint that wrote it
+      // never wrote anything else), so it is always a healthy skip, never a gap.
       await using app = await createApp()
       const output = outputIO()
 
@@ -15218,8 +15192,8 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           servicesFor([{ record: intentRecord("yrdpin#164"), pointer }]),
         ),
         output.stderr(),
-      ).toBe(1)
-      expect(output.stdout()).toContain("SKIPPED yrdpin#164 revision 1 intent-unknown")
+      ).toBe(0)
+      expect(output.stdout()).toContain("SKIPPED yrdpin#164 revision 1 intent-carrier")
       expect(output.stdout()).not.toContain("pr-unknown")
     })
 
