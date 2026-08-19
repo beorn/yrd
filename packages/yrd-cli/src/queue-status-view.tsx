@@ -113,7 +113,7 @@ import {
   type QueueTerminalMemberFact,
   type QueueTerminalOutcome,
 } from "./queue-terminal-facts.ts"
-import { MarkerRow, TitledBox } from "./queue-view-primitives.tsx"
+import { boundedHangingLines, MarkerRow, TitledBox } from "./queue-view-primitives.tsx"
 import type { JournalRetentionObservation } from "./types.ts"
 
 export type { QueueTerminalFact, QueueTerminalMemberFact, QueueTerminalOutcome } from "./queue-terminal-facts.ts"
@@ -5674,12 +5674,15 @@ function TimelineRunnerBox({
   results,
   state,
   live = false,
+  columns = 120,
 }: {
   projection: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal
   results?: readonly QueueStatusResult[]
   state?: BaysState
   live?: boolean
+  /** Pane content width, for the bounded hanging command wrap (item 29). */
+  columns?: number
 }) {
   const runner = projection.runner
   // ONE derivation for every relative age in this box (items 16/17): a
@@ -5710,81 +5713,106 @@ function TimelineRunnerBox({
   const headBlock = queueHeadBlockDetails(projection, state, results, now)
   const borderColor =
     marker.kind === "down" || marker.kind === "stalled" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
-  // While the queue is actively running, the OTHER text goes muted grey so
-  // the pulsing blue activity line carries the eye (operator ruling
-  // 2026-08-18, item 14). Scoped to the informational rails below the
-  // activity line — never the pause warning, which stays at full severity
-  // regardless of runner activity.
-  const dimOtherText = marker.kind === "processing"
+  // Text coloring is STATE-CONDITIONAL (operator ruling 2026-08-18, item 27):
+  // while running normally the `$ …` command line renders BLUE (the marker
+  // color) with the pulsing activity marker, and every INFORMATIONAL rail is
+  // muted grey so the activity line carries the eye — but severity text
+  // NEVER mutes: a warning source/uncarried rail and every error row keep
+  // the box's severity color regardless of runner activity (muting must
+  // never dim an error; the pre-27 build muted a behind-pin warning while
+  // running, which is exactly the bug this rule bans).
+  // Item 29: ALL text left-aligns with the COMMAND TEXT column — the `$`
+  // sits outdented as a hanging marker in its own 2-cell gutter. Wrapped
+  // command text hangs off the marker BOUNDED (≤3 rows, `…`-elided) so the
+  // run list always survives on narrow panes — the 2026-08-13 regression
+  // guard's reason, with wrap-with-hanging-indent as the new mechanism.
+  // Gutter 2 + borders 2 + TitledBox paddingX 2 = 6 cells of chrome.
+  const commandWidth = Math.max(8, columns - 6)
+  const commandRows =
+    runner === null
+      ? []
+      : boundedHangingLines(`${runner.command ?? "resident runner"} [${runner.pid}]`, commandWidth, 3)
   return (
     <TitledBox
       title="RUNNER"
       {...(timer === undefined ? {} : { titleRight: timer })}
       {...(borderColor === undefined ? {} : { borderColor })}
     >
-      {/* The prose rails below wrap; these two glyph-led header rows do not.
-          A `wrap="truncate"` Text that is a direct COLUMN child of the box
-          paints straight over the right border and is clipped by the TERMINAL,
-          not the frame (operator report 2026-08-13: the uncarried rail ate the
-          `│` and lost its "as of …" clause) — so every rail became `wrap`.
-          Inside THIS flex row the same mode shrinks correctly and stays in the
-          frame, and wrapping here would instead starve the timeline: a paused
-          12-column pane spends 16 of its 24 rows on a wrapped NO RUNNER +
-          STATUS pair and the run list falls off screen entirely
-          (queue-timeline-chrome, "12-column projected-live header"). */}
-      <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-        <RunnerActivity marker={marker} live={live} bold flexShrink={0}>
-          {QUEUE_HEALTH_GLYPH}
-        </RunnerActivity>
+      <MarkerRow
+        marker={
+          <RunnerActivity marker={marker} live={live} bold flexShrink={0}>
+            {QUEUE_HEALTH_GLYPH}
+          </RunnerActivity>
+        }
+      >
         {runner === null ? (
+          // The NO RUNNER banner stays a one-line elided rail: a remedy
+          // parked on wrapped continuation rows is a remedy a narrow pane
+          // spends its whole height on (queue-timeline-chrome, "12-column
+          // projected-live header").
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
             {queueNoRunnerBanner(projection, drained, now, runnerRefusal)}
           </Text>
         ) : (
-          <Text color={marker.color} wrap="truncate" minWidth={0}>
-            {runner.command ?? "resident runner"} <Text color="$fg-muted">[{runner.pid}]</Text>
-          </Text>
+          commandRows.map((commandRow, index) => (
+            <Text key={`command:${index}`} color={marker.color} wrap="truncate" minWidth={0}>
+              {commandRow}
+            </Text>
+          ))
         )}
-      </Box>
+      </MarkerRow>
       {runner === null ? null : (
-        <Text
-          color={dimOtherText || runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"}
-          wrap="truncate"
-          minWidth={0}
-        >
-          {runnerSourceLine(runner)}
-        </Text>
+        <MarkerRow>
+          <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="truncate" minWidth={0}>
+            {runnerSourceLine(runner)}
+          </Text>
+        </MarkerRow>
       )}
       {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
           every other surface here, because a ref with no merge request has no
           candidate and so appears in no row. Colour rules live in
-          `uncarriedRailColor` — only genuine stranded work earns attention, or
-          the rail becomes noise and gets ignored, which is how the last one
-          died. Coverage is carried by the TEXT, never by the colour. */}
+          `uncarriedRailColor` — only genuine stranded work earns attention,
+          and a warning-colored rail never mutes (item 27). Coverage is
+          carried by the TEXT, never by the colour. */}
       {runner === null ? null : (
-        <Text color={dimOtherText ? "$fg-muted" : uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
-          {uncarriedLine(runner.uncarried, now)}
-        </Text>
+        <MarkerRow>
+          <Text color={uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
+            {uncarriedLine(runner.uncarried, now)}
+          </Text>
+        </MarkerRow>
       )}
       {runner === null && runnerRefusal !== undefined ? (
-        <Text color="$fg-error" wrap="truncate" minWidth={0}>
-          {runnerRefusal.code}: {runnerRefusal.message}
-        </Text>
+        <MarkerRow>
+          <Text color="$fg-error" wrap="truncate" minWidth={0}>
+            {runnerRefusal.code}: {runnerRefusal.message}
+          </Text>
+        </MarkerRow>
       ) : null}
       {runnerStale && timing !== null ? (
-        <Text color="$fg-error" bold wrap="truncate">
-          RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
-        </Text>
+        <MarkerRow>
+          <Text color="$fg-error" bold wrap="truncate">
+            RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
+          </Text>
+        </MarkerRow>
       ) : null}
-      {runner === null ? null : <RunnerProgressObservation progress={runner.queueProgress} now={now} />}
-      <RunnerProgressStatus progress={runner?.queueProgress} headBlock={headBlock} />
+      {runner === null ? null : (
+        <MarkerRow>
+          <RunnerProgressObservation progress={runner.queueProgress} now={now} />
+        </MarkerRow>
+      )}
+      <MarkerRow>
+        <RunnerProgressStatus progress={runner?.queueProgress} headBlock={headBlock} />
+      </MarkerRow>
       {pause === undefined ? null : (
         <>
           <Box height={1} flexShrink={0} />
-          <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-            <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} flexShrink={0}>
-              {pauseHealth?.blocksAll === true ? "⚠" : "×"}
-            </Text>
+          <MarkerRow
+            marker={
+              <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} flexShrink={0}>
+                {pauseHealth?.blocksAll === true ? "⚠" : "×"}
+              </Text>
+            }
+          >
             <Text color={pauseHealth?.blocksAll === true ? "$fg-error" : "$fg-warning"} wrap="truncate" minWidth={0}>
               {pauseHealth?.blocksAll === true ? (
                 <>
@@ -5800,7 +5828,7 @@ function TimelineRunnerBox({
                 </>
               )}
             </Text>
-          </Box>
+          </MarkerRow>
         </>
       )}
     </TitledBox>
@@ -6170,6 +6198,7 @@ function ProjectedQueueTimeline({
           results={results}
           state={state}
           live={nav}
+          columns={columns}
         />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
