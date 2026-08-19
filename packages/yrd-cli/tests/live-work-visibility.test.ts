@@ -257,7 +257,7 @@ describe("root yrd submit", () => {
     const out = outputIO()
     await runYrd(app as CliApp, yrd("submit", "--help"), out.io)
     const help = out.stdout() + out.stderr()
-    expect(help.toLowerCase()).toContain("merge request")
+    expect(help.toLowerCase()).toContain("change")
     expect(help).toContain("--keep-on-failure")
     expect(help.toLowerCase()).not.toContain("submission")
   })

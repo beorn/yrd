@@ -2539,11 +2539,26 @@ checks: [{check: {run: "true"}}]
     // identity change shipped without one; the intent rail's deletion, same
     // day, is the second edge this same lock caught).
     expect(attestation.manifest.edges).toEqual([
-      { from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3", to: attestation.manifest.targetIdentity },
-      { from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25", to: attestation.manifest.targetIdentity },
-      { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: attestation.manifest.targetIdentity },
-      { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: attestation.manifest.targetIdentity },
-      { from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8", to: attestation.manifest.targetIdentity },
+      {
+        from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
+        to: attestation.manifest.targetIdentity,
+      },
     ])
     expect(existsSync(join(repo, ".git", "yrd"))).toBe(false)
   })
@@ -3472,7 +3487,7 @@ checks: [{check: {run: "true"}}]
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
-    expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
+    expect(stderr).toContain("ordinary change whose diff is the gitlink bump")
 
     let listed = ""
     expect(
@@ -3684,7 +3699,7 @@ checks: [{check: {run: "true"}}]
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
-    expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
+    expect(stderr).toContain("ordinary change whose diff is the gitlink bump")
 
     let listed = ""
     expect(
@@ -3765,7 +3780,7 @@ checks: [{check: {run: "true"}}]
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
-    expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
+    expect(stderr).toContain("ordinary change whose diff is the gitlink bump")
 
     let listed = ""
     expect(

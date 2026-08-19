@@ -1903,9 +1903,10 @@ describe("runYrd", () => {
     expect(checkedRevisions).toEqual([])
 
     const remerge = remergeIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services), remerge.stderr()).toBe(
-      0,
-    )
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services),
+      remerge.stderr(),
+    ).toBe(0)
     expect(JSON.parse(remerge.stdout())).toMatchObject({
       pr: "PR1",
       revision: 2,
@@ -2899,7 +2900,9 @@ describe("runYrd", () => {
 
     await refresh(app, services, io)
     expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
-    expect(["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n)).toEqual([3, 3, 2, 2, 2])
+    expect(["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n)).toEqual([
+      3, 3, 2, 2, 2,
+    ])
 
     await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
     await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
@@ -7400,7 +7403,7 @@ describe("runYrd", () => {
 
       const refusalFinding = {
         code: "admission-refusal-loop",
-        message: "merge request 'PR1' failed its entry checks 160 consecutive times",
+        message: "change 'PR1' failed its entry checks 160 consecutive times",
         pr: "PR1",
         specimen: "pr:PR1:refusal:base-moved",
         refusal: "base-moved",
@@ -7596,7 +7599,7 @@ describe("runYrd", () => {
     const refusalLoop = {
       code: "admission-refusal-loop",
       message:
-        "merge request 'PR1' failed its entry checks 160 consecutive times; latest failure " +
+        "change 'PR1' failed its entry checks 160 consecutive times; latest failure " +
         "'recut-gitlink-conflict': yrd: PR 'PR1' could not recut: target root " +
         "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' pins submodule 'dep' to " +
         "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; replayed authored root " +
@@ -11568,11 +11571,15 @@ describe("runYrd", () => {
     const unsuggested = outputIO()
 
     expect(await runYrd(app, yrd("pr", "xyzzy"), unsuggested.io)).toBe(2)
-    expect(unsuggested.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd change --help' for available commands.)\n")
+    expect(unsuggested.stderr()).toBe(
+      "error: unknown command 'xyzzy' (Run 'yrd change --help' for available commands.)\n",
+    )
 
     const repoScoped = outputIO()
     expect(await runInternals.runYrdHelp(yrd("--repo", "/tmp/project", "pr", "xyzzy"), repoScoped.io)).toBe(2)
-    expect(repoScoped.stderr()).toBe("error: unknown command 'xyzzy' (Run 'yrd change --help' for available commands.)\n")
+    expect(repoScoped.stderr()).toBe(
+      "error: unknown command 'xyzzy' (Run 'yrd change --help' for available commands.)\n",
+    )
 
     for (const operand of ["foo.bar", "foo,bar"]) {
       const punctuated = outputIO()
@@ -11615,7 +11622,7 @@ describe("runYrd", () => {
     // "no such PR" from "the index returned nothing". This app has no PRs, so
     // `searched 0` here is HONEST ABSENCE — which is why the message reports
     // the count and does not assert a verdict at zero.
-    expect(optionValue.stderr()).toBe("error: no PR 'PR404' — searched 0 pull request(s)\n")
+    expect(optionValue.stderr()).toBe("error: no PR 'PR404' — searched 0 change(s)\n")
 
     const afterTerminator = outputIO()
     expect(await runYrd(app, yrd("pr", "crate", "--", "--json"), afterTerminator.io)).toBe(2)
@@ -11642,7 +11649,7 @@ describe("runYrd", () => {
     // package, none of which could reach the bay model's builder while it was
     // private. Exporting it collapsed eleven hand-rolled spellings onto one
     // sentence. `searched 0` is honest here — this app has no PRs.
-    expect(missingPR.stderr()).toBe("error: no PR 'PR404' — searched 0 pull request(s)\n")
+    expect(missingPR.stderr()).toBe("error: no PR 'PR404' — searched 0 change(s)\n")
 
     const missingChangeJson = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingChangeJson.io)).toBe(1)
@@ -11650,8 +11657,8 @@ describe("runYrd", () => {
       failure: {
         kind: "refusal",
         code: "pr-not-found",
-        message: "yrd: no PR 'PR404' — searched 0 pull request(s)",
-        cause: "no PR 'PR404' — searched 0 pull request(s)",
+        message: "yrd: no PR 'PR404' — searched 0 change(s)",
+        cause: "no PR 'PR404' — searched 0 change(s)",
         resolution: ["Correct the cause above, then retry the same Yrd command."],
       },
     })
@@ -11921,8 +11928,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -11973,8 +11990,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -11992,8 +12019,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1"), human.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -12043,8 +12080,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -12099,8 +12146,18 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        find: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
+        all: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
         retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
       },
     } as YrdCliServices)
@@ -12145,8 +12202,18 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        find: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
+        all: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
         retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
       },
     } as YrdCliServices)
@@ -12353,7 +12420,9 @@ describe("correlation projections", () => {
         prs: readonly Readonly<Record<string, unknown>>[]
       }>
 
-      expect.soft(changeDeliveryState(pr)).toBe(terminal === "rejected" || terminal === "canceled" ? "submitted" : terminal)
+      expect
+        .soft(changeDeliveryState(pr))
+        .toBe(terminal === "rejected" || terminal === "canceled" ? "submitted" : terminal)
       expect.soft(persisted.prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect
@@ -15398,4 +15467,3 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 const SUBMODULE = "components/alpha"
 const CURRENT_PIN = "a".repeat(40)
 const TARGET_SHA = "b".repeat(40)
-

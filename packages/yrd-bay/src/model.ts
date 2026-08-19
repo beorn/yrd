@@ -764,7 +764,7 @@ export function isChangeRevisionSelector(pr: string): boolean {
  * judges it.
  *
  * The `no PR '<selector>'` prefix is preserved so any matcher on the old text
- * keeps matching. The noun is `pr list`'s own ("list pull requests").
+ * keeps matching. The noun is `pr list`'s own ("list changes").
  *
  * Exported because this message had ELEVEN hand-rolled spellings beside this
  * one: nine in the queue package, plus `pr withdraw` and the `--pr` create
@@ -778,14 +778,15 @@ export function isChangeRevisionSelector(pr: string): boolean {
  * about a corrupt journal, not an operator whose selector found nothing.
  */
 export function changeNotFoundMessage(state: BaysState, selector: string): string {
-  const searched = `searched ${Object.keys(state.prs).length} pull request(s)`
+  const searched = `searched ${Object.keys(state.prs).length} change(s)`
   if (parseChangeSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
     return `yrd: no PR '${selector}' — ${searched}`
   }
   const copiedId = /^(?:pr#?)?([a-z0-9_-]+)/iu.exec(selector.trim())?.[1]
   const copiedPr = copiedId === undefined ? undefined : state.prs[`PR${copiedId}`]
   const examplePr = copiedPr ?? Object.values(state.prs).toSorted((left, right) => compareNatural(left.id, right.id))[0]
-  const example = examplePr === undefined ? "pr#1.1" : formatChangeRevisionSelector(examplePr.id, currentChangeRev(examplePr))
+  const example =
+    examplePr === undefined ? "pr#1.1" : formatChangeRevisionSelector(examplePr.id, currentChangeRev(examplePr))
   return `yrd: no PR '${selector}'; accepted form: ${example} — ${searched}`
 }
 
@@ -795,7 +796,8 @@ export function currentChangeRev(pr: Pick<PR, "id" | "revs">): ChangeRev {
   return revision
 }
 
-export const changeAdmission = (pr: Pick<PR, "id" | "revs">): ChangeAdmission | undefined => currentChangeRev(pr).admission
+export const changeAdmission = (pr: Pick<PR, "id" | "revs">): ChangeAdmission | undefined =>
+  currentChangeRev(pr).admission
 
 export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
   if (pr.needsAuthor !== undefined) return pr.needsAuthor
