@@ -7,14 +7,14 @@ import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { Fragment, createElement } from "react"
 import {
   CompositionV1Schema,
-  CorrelationSchema,
+  ChangePropsSchema,
   DeploymentInputSchema,
   DeploymentSourceResultSchema,
   baseIdentity,
   currentChangeRev,
   changeBaseSha,
   changeComposition,
-  changeCorrelation,
+  changeProps,
   changeDeliveryState,
   changeHead,
   isLivePR,
@@ -35,7 +35,7 @@ import {
   type Bay,
   type BaysState,
   type CompositionV1,
-  type Correlation,
+  type ChangeProps,
   type PR,
   type ChangeFreshnessTransition,
   type ChangeDeliveryState,
@@ -1907,7 +1907,7 @@ type TrackerDeliveryIdentity = Readonly<{
   status: ChangeDeliveryState | "needs-author"
   at: string
   runs: readonly string[]
-  correlation?: Correlation
+  props?: ChangeProps
 }>
 
 type TrackerBounce = Readonly<{ run: string; detail?: string }>
@@ -1967,7 +1967,7 @@ function trackerDeliveryV2(
     revision: revision.n,
     headSha: revision.head,
     runs,
-    ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
+    ...(revision.props === undefined ? {} : { props: revision.props }),
   }
   const refusalFact =
     changeNeedsAuthor(pr) ??
@@ -2072,7 +2072,7 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
     headSha: delivery.headSha,
     at: delivery.at,
     runs: delivery.runs,
-    ...(delivery.correlation === undefined ? {} : { correlation: delivery.correlation }),
+    ...(delivery.props === undefined ? {} : { props: delivery.props }),
   }
   const status = TRACKER_V1_STATUS_MAP[delivery.status]
   if (status === "rejected") {
@@ -2496,15 +2496,27 @@ function oneBaseOfAliases(
   return selected
 }
 
-function parseCorrelation(value: unknown): Correlation | undefined {
-  if (value === undefined) return undefined
-  if (typeof value !== "string") usage("--correlation requires <namespace:id>")
-  const separator = value.indexOf(":")
-  if (separator === -1) usage("--correlation requires <namespace:id>")
+function parseProps(values: unknown): ChangeProps | undefined {
+  if (values === undefined) return undefined
+  const list = Array.isArray(values) ? values : [values]
+  if (list.length === 0) return undefined
+  const props: Record<string, string> = {}
+  for (const value of list) {
+    if (typeof value !== "string") usage("--prop requires <key>=<value>")
+    const separator = value.indexOf("=")
+    if (separator < 1) usage("--prop requires <key>=<value>")
+    const key = value.slice(0, separator)
+    const next = value.slice(separator + 1)
+    const previous = props[key]
+    if (previous !== undefined && previous !== next) {
+      usage(`--prop '${key}' was given twice with different values`)
+    }
+    props[key] = next
+  }
   try {
-    return CorrelationSchema.parse({ namespace: value.slice(0, separator), id: value.slice(separator + 1) })
+    return ChangePropsSchema.parse(props)
   } catch {
-    usage("--correlation requires <namespace:id>")
+    usage("--prop requires <key>=<value>")
   }
 }
 
@@ -4410,7 +4422,7 @@ async function executeRemergePr(
     revision: source.n,
     headSha: source.head,
     ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
-    ...(source.correlation === undefined ? {} : { correlation: source.correlation }),
+    ...(source.props === undefined ? {} : { props: source.props }),
     ...(source.composition === undefined ? {} : { composition: source.composition }),
     ...(currentCompositions === undefined ? {} : { currentCompositions }),
     ...(proposedHeadSha === undefined ? {} : { proposedHeadSha }),
@@ -4454,7 +4466,7 @@ async function executeRemergePr(
         treeSha: result.treeSha,
         patchId: result.patchId,
         reviewCarried: approval !== undefined,
-        ...(changeCorrelation(current) === undefined ? {} : { correlation: changeCorrelation(current) }),
+        ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
         sourceReadyAt: changeSourceReadyAt(current),
         lineage: changeRevisionLineage(current).map((revision) => revision.n),
         unchanged: false,
@@ -4544,7 +4556,7 @@ async function executeRemergePr(
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
-    ...(changeCorrelation(current) === undefined ? {} : { correlation: changeCorrelation(current) }),
+    ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
     sourceReadyAt: changeSourceReadyAt(current),
     lineage: changeRevisionLineage(current).map((revision) => revision.n),
     unchanged,
@@ -4797,7 +4809,7 @@ type ChangeSelectionOptions = {
   issue?: string
   title?: string
   description?: string
-  correlation?: string
+  prop?: readonly string[]
   composition?: string
   reviewer?: readonly string[]
   track?: boolean
@@ -4817,7 +4829,7 @@ async function applyChangeSelection(
   stageAsDraft = command === "pr.create",
 ): Promise<ChangeSelectionResult> {
   const createOnly = command === "pr.create"
-  const correlation = parseCorrelation(options.correlation)
+  const props = parseProps(options.prop)
   const state = stateOf(app)
   const cwd = io.cwd ?? process.cwd()
   const local = currentBay(state.bays, cwd)
@@ -4852,7 +4864,7 @@ async function applyChangeSelection(
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
       ...(options.track === true ? { track: true } : {}),
       ...(stageAsDraft ? { draft: true } : {}),
-      ...(correlation === undefined ? {} : { correlation }),
+      ...(props === undefined ? {} : { props }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
@@ -10886,7 +10898,12 @@ function buildProgram(
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
+    .option(
+      "--prop <key>=<value>",
+      "set a prop on the submitted revision — an opaque key=value label (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
@@ -10938,7 +10955,12 @@ function buildProgram(
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
+    .option(
+      "--prop <key>=<value>",
+      "set a prop on the submitted revision — an opaque key=value label (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
@@ -11160,7 +11182,7 @@ function buildProgram(
     .option("--job <id>", "waiting-job id")
     .option("--runner <runner>", "waiting-job runner identity")
     .option("--attempt <attempt>", "waiting-job attempt number")
-    .option("--token <token>", "waiting-job correlation token")
+    .option("--token <token>", "waiting-job props token")
     .option("--detail <text>", "human-readable result detail")
     .option("--url <url>", "external runner URL")
     .option("--artifact [artifact...]", "artifact name=path-or-url")
@@ -11214,7 +11236,12 @@ function buildProgram(
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option("--correlation <namespace:id>", "bind an opaque correlation to the draft revision")
+    .option(
+      "--prop <key>=<value>",
+      "set a prop on the draft revision — an opaque key=value label (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
@@ -11244,7 +11271,12 @@ function buildProgram(
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--title <text>", "PR subject (defaults to the head commit subject)")
     .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
+    .option(
+      "--prop <key>=<value>",
+      "set a prop on the submitted revision — an opaque key=value label (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
@@ -11500,7 +11532,7 @@ function buildProgram(
     .option("--ok", "record a passing evaluator verdict")
     .option("--fail", "record a failing evaluator verdict")
     .option("--error <code>", "record an evaluator infrastructure failure")
-    .option("--token <token>", "waiting-job correlation token")
+    .option("--token <token>", "waiting-job props token")
     .option("--detail <text>", "human-readable result summary")
     .option("--artifact [artifact...]", "artifact name=path-or-url")
     .option("--json", "emit stable JSON")

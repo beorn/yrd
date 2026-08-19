@@ -51,7 +51,7 @@ type LegacyFixtureRevision = Readonly<{
   base: string
   baseSha?: string
   submitter?: string
-  correlation?: PR["revs"][number]["correlation"]
+  props?: PR["revs"][number]["props"]
   composition?: PR["revs"][number]["composition"]
   recut?: PR["revs"][number]["recut"]
   pushedAt: string
@@ -72,7 +72,7 @@ function fixtureRevision(revision: FixtureRevision): PR["revs"][number] {
     base: revision.base,
     ...(revision.baseSha === undefined ? {} : { baseSha: revision.baseSha }),
     ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
-    ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
+    ...(revision.props === undefined ? {} : { props: revision.props }),
     ...(revision.composition === undefined ? {} : { composition: revision.composition }),
     ...(revision.recut === undefined ? {} : { recut: revision.recut }),
     pushedAt: revision.pushedAt,

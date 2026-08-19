@@ -207,7 +207,7 @@ function currentChangeSnapshot(pr: PR) {
     revision: revision.n,
     headSha: revision.head,
     ...(revision.baseSha === undefined ? {} : { baseSha: revision.baseSha }),
-    ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
+    ...(revision.props === undefined ? {} : { props: revision.props }),
     ...(revision.composition === undefined ? {} : { composition: revision.composition }),
   }
 }
@@ -2325,7 +2325,7 @@ describe("runYrd", () => {
     const nextBase = "b".repeat(40)
     const treeSha = "c".repeat(40)
     const patchId = "d".repeat(40)
-    const correlation = { namespace: "tribe-request", id: "recut-identity" }
+    const props = { request: "recut-identity" }
     const requests: unknown[] = []
     const services = {
       recut: {
@@ -2341,7 +2341,7 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, correlation })
+    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, props })
     const sourceReadyAt = app.bays.pr("PR1")?.revs[0]?.submittedAt
     if (sourceReadyAt === undefined) throw new Error("missing first revision submission clock")
     await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "review-r1" })
@@ -2363,7 +2363,7 @@ describe("runYrd", () => {
         revision: 1,
         headSha: HEAD_SHA,
         baseSha: BASE_SHA,
-        correlation,
+        props,
       }),
     ])
     expect(JSON.parse(output.stdout())).toMatchObject({
@@ -2373,7 +2373,7 @@ describe("runYrd", () => {
       treeSha,
       patchId,
       reviewCarried: true,
-      correlation,
+      props,
       sourceReadyAt,
       lineage: [1, 2],
       unchanged: false,
@@ -2383,7 +2383,7 @@ describe("runYrd", () => {
     expect(currentChangeRev(remergePr)).toMatchObject({
       n: 2,
       head: nextHead,
-      correlation,
+      props,
       recut: {
         fromRevision: 1,
         treeSha,
@@ -2401,8 +2401,8 @@ describe("runYrd", () => {
       },
     })
     expect(remergePr.revs).toMatchObject([
-      { n: 1, correlation, submittedAt: sourceReadyAt },
-      { n: 2, correlation, submittedAt: expect.any(String) },
+      { n: 1, props, submittedAt: sourceReadyAt },
+      { n: 2, props, submittedAt: expect.any(String) },
     ])
     expect(remergePr.revs[1]?.submittedAt).not.toBe(sourceReadyAt)
     expect(app.bays.reviewState("PR1")).toMatchObject({
@@ -12317,62 +12317,48 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
   })
 })
 
-describe("submit correlation", () => {
-  it.each(["bay", "pr"] as const)("persists an opaque correlation through %s submit", async (surface) => {
+describe("submit props", () => {
+  it.each(["bay", "pr"] as const)("persists an opaque props through %s submit", async (surface) => {
     const app = await createApp()
     const output = outputIO({ resolveRevision: async () => HEAD_SHA })
-    const correlation = {
-      namespace: "tribe-request",
-      id: "review-20925/custom 61's docs:retry 2",
+    const props = {
+      request: "review-20925/custom 61's docs:retry 2",
     }
 
     expect(
       await runYrd(
         app,
-        yrd(
-          surface,
-          "submit",
-          "topic/correlated",
-          "--base",
-          "main",
-          "--correlation",
-          `${correlation.namespace}:${correlation.id}`,
-          "--json",
-        ),
+        yrd(surface, "submit", "topic/correlated", "--base", "main", "--prop", `request=${props.request}`, "--json"),
         output.io,
       ),
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: `${surface}.submit`,
-      prs: [{ revs: [{ correlation }] }],
+      prs: [{ revs: [{ props }] }],
     })
-    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ correlation })
+    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ props })
   })
 
-  it.each(["bay", "pr"] as const)("rejects malformed correlation before %s submit appends", async (surface) => {
-    for (const correlation of ["tribe-request", "tribe-request:   "]) {
+  it.each(["bay", "pr"] as const)("rejects malformed props before %s submit appends", async (surface) => {
+    for (const props of ["request", "=orphan-value", "request=   "]) {
       const app = await createApp()
       const before = await Array.fromAsync(app.events()).then((events) => events.length)
       const output = outputIO({ resolveRevision: async () => HEAD_SHA })
 
       expect(
-        await runYrd(
-          app,
-          yrd(surface, "submit", "topic/correlated", "--correlation", correlation, "--json"),
-          output.io,
-        ),
+        await runYrd(app, yrd(surface, "submit", "topic/correlated", "--prop", props, "--json"), output.io),
         output.stderr(),
       ).toBe(2)
       expect(output.stdout()).toBe("")
-      expect(output.stderr()).toContain("--correlation requires <namespace:id>")
+      expect(output.stderr()).toContain("--prop requires <key>=<value>")
       expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
       expect(app.state().bays.prs).toEqual({})
     }
   })
 })
 
-const PROJECTION_CORRELATION = { namespace: "tribe-request", id: "request-20925" } as const
+const PROJECTION_PROPS = { request: "request-20925" } as const
 
 async function correlatedTerminalRun(terminal: "integrated" | "rejected" | "canceled") {
   const app = await createApp({ failingCheck: terminal === "rejected" })
@@ -12380,7 +12366,7 @@ async function correlatedTerminalRun(terminal: "integrated" | "rejected" | "canc
     branch: `topic/${terminal}`,
     headSha: HEAD_SHA,
     base: "main",
-    correlation: PROJECTION_CORRELATION,
+    props: PROJECTION_PROPS,
   })
 
   if (terminal === "canceled") {
@@ -12412,8 +12398,8 @@ async function projectedLogRows(app: TestApp, pr = "PR1"): Promise<Record<string
   return (JSON.parse(output.stdout()) as { rows: Record<string, unknown>[] }).rows
 }
 
-describe("correlation projections", () => {
-  it("keeps structured correlation in terminal Run, show, and log JSON", async () => {
+describe("prop projections", () => {
+  it("keeps structured props in terminal Run, show, and log JSON", async () => {
     for (const terminal of ["integrated", "rejected", "canceled"] as const) {
       const { app, pr, run } = await correlatedTerminalRun(terminal)
       const persisted = JSON.parse(JSON.stringify(run)) as Readonly<{
@@ -12423,11 +12409,11 @@ describe("correlation projections", () => {
       expect
         .soft(changeDeliveryState(pr))
         .toBe(terminal === "rejected" || terminal === "canceled" ? "submitted" : terminal)
-      expect.soft(persisted.prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
-      expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
+      expect.soft(persisted.prs).toEqual([expect.objectContaining({ props: PROJECTION_PROPS })])
+      expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ props: PROJECTION_PROPS })])
       expect
         .soft(await projectedLogRows(app, pr.id))
-        .toEqual([expect.objectContaining({ pr: pr.id, correlation: PROJECTION_CORRELATION })])
+        .toEqual([expect.objectContaining({ pr: pr.id, props: PROJECTION_PROPS })])
       if (terminal === "canceled") {
         const human = await renderString(createElement(QueueShowView, { data: queueShowData(run) }), {
           width: 120,
@@ -12446,13 +12432,13 @@ describe("correlation projections", () => {
       headSha: HEAD_SHA,
       base: "main",
       draft: true,
-      correlation: PROJECTION_CORRELATION,
+      props: PROJECTION_PROPS,
     })
     await withdrawn.bays.closePr({ pr: "PR1" })
     expect.soft(withdrawn.state().bays.prs.PR1).toMatchObject({
       state: "closed",
       merged: false,
-      revs: [{ correlation: PROJECTION_CORRELATION, terminal: { kind: "withdrawn" } }],
+      revs: [{ props: PROJECTION_PROPS, terminal: { kind: "withdrawn" } }],
     })
     expect.soft(withdrawn.queue.status("main").finished).toEqual([])
     expect.soft(await projectedLogRows(withdrawn)).toEqual([
@@ -12460,12 +12446,12 @@ describe("correlation projections", () => {
         run: "-",
         pr: "PR1",
         outcome: "retired",
-        correlation: PROJECTION_CORRELATION,
+        props: PROJECTION_PROPS,
       }),
     ])
   })
 
-  it("omits correlation from uncorrelated Run, show, and log JSON", async () => {
+  it("omits props from uncorrelated Run, show, and log JSON", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/uncorrelated", headSha: HEAD_SHA, base: "main" })
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
@@ -13270,7 +13256,7 @@ describe("typed issue landing bridge", () => {
         "--implementation-run",
         "hab:turn/original-implementation",
         "--review",
-        "tribe:verdict/original-review",
+        "wire:verdict/original-review",
         "--repair-pr",
         "pr2",
         "--repair-run",
@@ -13288,7 +13274,7 @@ describe("typed issue landing bridge", () => {
       severity: "high",
       evidence: "artifact://tty/21091-red",
       implementationRunRef: "hab:turn/original-implementation",
-      reviewRef: "tribe:verdict/original-review",
+      reviewRef: "wire:verdict/original-review",
       repairIssueRef: repairIssue,
       repairPr: "PR2",
       repairRun: "R2",
@@ -13350,7 +13336,7 @@ describe("typed issue landing bridge", () => {
       `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalMerge}`,
       "artifact://tty/21091-red",
       "hab:turn/original-implementation",
-      "tribe:verdict/original-review",
+      "wire:verdict/original-review",
       `REPAIR ${repairIssue} PR2 R2 LANDING ${repairMerge}`,
     ]) {
       expect(human.stdout()).toContain(visibleFact)
