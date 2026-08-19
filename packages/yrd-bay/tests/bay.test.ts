@@ -458,12 +458,12 @@ describe("withBays", () => {
   it("journals an exact revision-bound issue join when a PR is withdrawn", async () => {
     await using app = (await createHarness()).app
     const issueRef = "@km/all/21063-steering-laser"
-    const correlation = { namespace: "tribe-request", id: "21091-withdrawn" }
+    const props = { request: "21091-withdrawn" }
     await app.bays.submit({
       branch: "topic/mentions-2106-but-not-the-issue",
       headSha: HEAD_1,
       issue: issueRef,
-      correlation,
+      props,
     })
 
     const retired = await app.bays.closePr({ pr: "PR1" })
@@ -471,7 +471,7 @@ describe("withBays", () => {
     expect(retired.events).toContainEqual(
       expect.objectContaining({
         name: "pr/withdrawn",
-        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation, submitter: "operator" },
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, props, submitter: "operator" },
       }),
     )
   })
@@ -1008,7 +1008,7 @@ describe("withBays", () => {
               severity: "high",
               evidence: "artifact://regression",
               implementationRunRef: "hab:turn/original",
-              reviewRef: "tribe:review/original",
+              reviewRef: "wire:review/original",
               repairIssueRef: repairIssue,
               repairPr: "PR2",
               repairRun: "R2",
@@ -1026,41 +1026,41 @@ describe("withBays", () => {
     )
   })
 
-  it("persists one opaque correlation on a draft revision and preserves it through ready", async () => {
+  it("persists one opaque props on a draft revision and preserves it through ready", async () => {
     await using app = (await createHarness()).app
-    const correlation = { namespace: "tribe-request", id: "review-20925/custom 61's docs" }
+    const props = { request: "review-20925/custom 61's docs" }
 
     const drafted = await app.bays.submit({
       branch: "issue/correlated-draft",
       headSha: HEAD_1,
       draft: true,
-      correlation,
+      props,
     })
     expect(drafted.events).toContainEqual(
       expect.objectContaining({
-        data: expect.objectContaining({ correlation }),
+        data: expect.objectContaining({ props }),
       }),
     )
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       delivery: "pushed",
-      current: { n: 1, correlation },
-      revs: [{ n: 1, correlation }],
+      current: { n: 1, props },
+      revs: [{ n: 1, props }],
     })
 
-    expect((await app.bays.submit({ pr: "PR1", correlation })).events).toEqual([])
+    expect((await app.bays.submit({ pr: "PR1", props })).events).toEqual([])
     await expect(
       app.bays.submit({
         pr: "PR1",
-        correlation: { namespace: "tribe-request", id: "review-20925/conflicting" },
+        props: { request: "review-20925/conflicting" },
       }),
-    ).rejects.toThrow("already bound to correlation 'tribe-request:review-20925/custom 61's docs'")
+    ).rejects.toThrow("already carries prop 'request=review-20925/custom 61's docs'")
 
     const ready = await app.bays.ready({ pr: "PR1" })
     expect(ready.events).toHaveLength(1)
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       delivery: "submitted",
-      current: { n: 1, correlation },
-      revs: [{ n: 1, correlation }],
+      current: { n: 1, props },
+      revs: [{ n: 1, props }],
     })
   })
 
@@ -1752,12 +1752,12 @@ describe("withBays", () => {
     const patchId = "d".repeat(40)
     const changeId = "I10db26abe7d1f6cae0a29e37b3d6b9b5d0e9a3da"
 
-    const correlation = { namespace: "tribe-request", id: "recut-identity" }
+    const props = { request: "recut-identity" }
     const pushed = await app.bays.submit({
       branch: "issue/recut",
       headSha: HEAD_1,
       baseSha: BASE,
-      correlation,
+      props,
       submitter: "@dev/3",
       draft: true,
     })
@@ -1812,18 +1812,18 @@ describe("withBays", () => {
         changeId,
         head: HEAD_2,
         baseSha: nextBase,
-        correlation,
+        props,
         submitter: "@dev/3",
         recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
       },
       revs: [
-        { n: 1, changeId, head: HEAD_1, correlation, submitter: "@dev/3" },
+        { n: 1, changeId, head: HEAD_1, props, submitter: "@dev/3" },
         {
           n: 2,
           changeId,
           head: HEAD_2,
           baseSha: nextBase,
-          correlation,
+          props,
           submitter: "@dev/3",
           recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
         },
@@ -2379,18 +2379,18 @@ describe("withBays", () => {
     expect(pr?.revs[2]?.recut).toBeUndefined()
   })
 
-  it("keeps the selected immutable revision correlation when recutting an older payload", async () => {
+  it("keeps the selected immutable revision props when recutting an older payload", async () => {
     await using app = (await createHarness()).app
-    const sourceCorrelation = { namespace: "tribe-request", id: "source" }
-    const currentCorrelation = { namespace: "tribe-request", id: "current" }
+    const sourceProps = { request: "source" }
+    const currentProps = { request: "current" }
     await app.bays.submit({
       branch: "issue/recut-source",
       headSha: HEAD_1,
-      correlation: sourceCorrelation,
+      props: sourceProps,
       draft: true,
     })
     await app.bays.intake({ branch: "issue/recut-source", headSha: HEAD_2, base: "main" })
-    await app.bays.submit({ pr: "PR1", correlation: currentCorrelation })
+    await app.bays.submit({ pr: "PR1", props: currentProps })
 
     await app.bays.recut({
       pr: "PR1",
@@ -2403,17 +2403,17 @@ describe("withBays", () => {
     })
 
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
-      current: { n: 3, correlation: sourceCorrelation },
+      current: { n: 3, props: sourceProps },
       revs: [
-        { n: 1, correlation: sourceCorrelation },
-        { n: 2, correlation: currentCorrelation },
-        { n: 3, correlation: sourceCorrelation, recut: { fromRevision: 1 } },
+        { n: 1, props: sourceProps },
+        { n: 2, props: currentProps },
+        { n: 3, props: sourceProps, recut: { fromRevision: 1 } },
       ],
     })
 
     await app.bays.submit({ branch: "issue/recut-uncorrelated", headSha: "4".repeat(40), draft: true })
     await app.bays.intake({ branch: "issue/recut-uncorrelated", headSha: "5".repeat(40), base: "main" })
-    await app.bays.submit({ pr: "PR2", correlation: currentCorrelation })
+    await app.bays.submit({ pr: "PR2", props: currentProps })
     await app.bays.recut({
       pr: "PR2",
       fromRevision: 1,
@@ -2423,8 +2423,8 @@ describe("withBays", () => {
       patchId: "d".repeat(40),
       reviewCarried: false,
     })
-    expect(changeFacts(app.bays.pr("PR2")).current.correlation).toBeUndefined()
-    expect(app.bays.pr("PR2")?.revs[2]?.correlation).toBeUndefined()
+    expect(changeFacts(app.bays.pr("PR2")).current.props).toBeUndefined()
+    expect(app.bays.pr("PR2")?.revs[2]?.props).toBeUndefined()
   })
 
   it("refuses to append check requests to terminal PR history", async () => {
