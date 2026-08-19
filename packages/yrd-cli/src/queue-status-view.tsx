@@ -59,7 +59,7 @@ import {
   useWindowSize,
 } from "silvery"
 import { queueAdmissionPositions } from "./queue-admission-index.ts"
-import { friendlyRepositoryPath, queuePrettyName, queueRunLabel, shortUniqueQueuePaths } from "./queue-naming.ts"
+import { friendlyRepositoryPath, QUEUE_BRANCH_GLYPH, queuePrettyName, queueRunLabel, shortUniqueQueuePaths } from "./queue-naming.ts"
 import {
   artifactHref as locationHref,
   artifactLabel,
@@ -6186,7 +6186,11 @@ function ProjectedQueueTimeline({
           // user directive 2026-07-21). The live frame renders its top line
           // itself, above the split, so `paneChrome` contributes no header.
           <>
-            <QueueTopLine queues={projection.queues} />
+            <QueueTopLine
+              queues={projection.queues.map((queue) =>
+                queue.path === undefined && repositoryRoot !== undefined ? { ...queue, path: repositoryRoot } : queue,
+              )}
+            />
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
               <QueueUpdatedClock now={projection.now} />
             </Box>
@@ -7478,8 +7482,10 @@ export function QueueDetailRunChangeBlocks({
             <Box flexDirection="row" minWidth={0}>
               <QueueChangeId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
               <Text flexShrink={0}> </Text>
+              {/* The ⎇ branch idiom (items 4/32d) — the same glyph the queue
+                  pills spell, so the two surfaces share one convention. */}
               <Text internal_dim flexShrink={0}>
-                {TIMELINE_BRANCH_ICON}
+                {QUEUE_BRANCH_GLYPH}
               </Text>
               <Text wrap="wrap" minWidth={0}>
                 {` ${member.branch}`}

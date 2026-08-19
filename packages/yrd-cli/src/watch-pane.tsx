@@ -1316,9 +1316,17 @@ function QueueWatchTopLine({
   onShowAll: () => void
   allActive: boolean
 }>) {
+  // A projection built before the loader threaded repositoryRoot still has
+  // the snapshot-level root; pills prefer the queue's own path and fall back
+  // to it, so the identity pair renders whenever either layer knows it.
+  const queues = (snapshot.projection?.queues ?? []).map((queue) =>
+    queue.path === undefined && snapshot.repositoryRoot !== undefined
+      ? { ...queue, path: snapshot.repositoryRoot }
+      : queue,
+  )
   return (
     <QueueTopLine
-      queues={snapshot.projection?.queues ?? []}
+      queues={queues}
       visibleQueues={visibleQueues}
       onToggleQueue={onToggleQueue}
       onShowAll={onShowAll}

@@ -48,10 +48,11 @@ function rowIndex(rows: readonly string[], needle: string): number {
   return index
 }
 
-function detailTitleRow(text: string): string {
-  // Row 0 is the watch pane's own top line (item 12, always present); the
-  // QUEUE tab + DETAIL title row that used to be row 0 sits one row lower.
-  return text.split("\n")[1] ?? ""
+/** The detail pane names its change through the change LIST bullet under the
+ * status box (`· pr#12.1 …`) and each member box's `pr#12.1 ⎇ branch` header
+ * — the identity title row is gone (operator ruling 2026-08-18, item 23). */
+function detailShows(text: string, id: string): boolean {
+  return text.split("\n").some((row) => row.includes(`· ${id}`) || row.includes(`${id} ⎇`))
 }
 
 describe("queue timeline 21106 contract", () => {
@@ -70,7 +71,7 @@ describe("queue timeline 21106 contract", () => {
   it("renders one calendar STATS panel after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
-    const pillsLine = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
+    const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed/u.test(row))
     const statsLine = rowIndex(rows, "╭─ STATS ")
 
     expect(statsLine).toBeGreaterThan(pillsLine)
@@ -278,14 +279,14 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the information groups in order with RUNNER but no STATUS when normal", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
-    const queueLine = rowIndex(rows, "QUEUE")
+    const queueLine = rowIndex(rows, "YRD QUEUES")
     const updatedLine = rowIndex(rows, "updated 17:30:00")
     const headerLine = rowIndex(rows, "TIME")
     const lastRowLine = rowIndex(rows, "pr#4.1")
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
     // the STATS frame.
-    const pillsLine = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
+    const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed/u.test(row))
     const statsBoxLine = rowIndex(rows, "╭─ STATS ")
 
     expect(queueLine).toBeLessThan(updatedLine)
@@ -343,54 +344,49 @@ describe("queue timeline 21106 contract", () => {
     const lead = rows[rowIndex(rows, "pr#42.1")]
     const partner = rows[rowIndex(rows, "pr#43.1")]
     const revised = rows[rowIndex(rows, "pr#5.1")]
-    const rejected = rows[rowIndex(rows, "main#5")]
+    const rejected = rows[rowIndex(rows, " failed ")]
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
-    // Row contract (user directive 2026-07-16): STEP folded into the flexible
-    // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
-    // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
-    // branch glyph (U+E0A0) is matched as one non-space char.
-    expect(pending?.trim()).toMatch(
-      /^16:40:00 ○ ready\s+-\s+pr#1\.1 @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
-    )
-    expect(lead?.trim()).toMatch(
-      /^17:10:00 ◉ checking\s+main#42 pr#42\.1 @hab\/super\/21135-herdr-keybindings\s+@agent\/3\s+36:00 20:00$/u,
-    )
-    // The convoy PARTNER renders its own TIME/STATUS/RUN, identical to its
-    // lead's because they share a run. It used to render `-  -  -` as a
-    // "continuation" of the lead; that made a landed member and a
-    // never-attempted PR print the same row of dashes
-    // (@i/10-merge-queue/22925-watch-shows-every-pr, operator 2026-08-17,
-    // superseding the Round 8 continuation-placeholder contract).
-    expect(partner?.trim()).toMatch(
-      /^17:10:00 ◉ checking\s+main#42 pr#43\.1 @si\/ui\/21119-split-pane\s+@agent\/5\s+34:00 20:00$/u,
-    )
-    expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+-\s+pr#5\.1\s+\S topic\/pr5\s+@agent\/2\s+1:15:00$/u)
-    expect(rejected?.trim()).toMatch(
-      /^16:42:00 × failed\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
-    )
-    expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ merged\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7\s+25:00 15:00$/u,
-    )
+    // Row contract under the ratified display model (operator rulings
+    // 2026-08-18, items 28/38): the CHANGES cell is `pr#id.rev <title>` —
+    // never the branch — with the live step / failure code as its
+    // parenthesized suffix; the RUN cell is `label#N <glyph>` with the label
+    // ELIDED here (one visible queue), an em-dash pre-run, and a muted `·`
+    // continuation on a batch member behind its lead; BY stays left-aligned
+    // and the run duration is a bare dimmed time.
+    expect(pending?.trim()).toMatch(/^16:40:00 ○ ready\s+—\s+pr#1\.1 Prepare release notes\s+@cto\s+50:00$/u)
+    expect(lead?.trim()).toMatch(/^17:10:00 ◉ checking\s+#42 ◉\s+pr#42\.1 Align host navigation.*\(2:check\)\s+@agent\/3\s+36:00 20:00$/u)
+    // The convoy PARTNER keeps its own TIME/STATUS (a landed member and a
+    // never-attempted PR must never print the same row of dashes —
+    // @i/10-merge-queue/22925); the shared run id renders once, the partner
+    // carrying the `·` membership continuation (item 38).
+    expect(partner?.trim()).toMatch(/^17:10:00 ◉ checking\s+·\s+pr#43\.1 Carry the production.*\(2:check\)\s+@agent\/5\s+34:00 20:00$/u)
+    expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+—\s+pr#5\.1 Reject broken payload\s+@agent\/2\s+1:15:00$/u)
+    expect(rejected?.trim()).toMatch(/^16:42:00 × failed\s+#5 ×\s+pr#5\.1 Reject broken payload \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u)
+    expect(integrated?.trim()).toMatch(/^16:25:00 ✓ merged\s+#4 ✓\s+pr#4\.1 Land the durable patch\s+@agent\/7\s+25:00 15:00$/u)
 
-    // No row carries the removed clock glyph, and a not-yet-started run shows a
-    // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
+    // No row carries the removed clock glyph; a not-yet-started run shows the
+    // muted em-dash in the RUN cell, never a run id or duration.
     for (const row of [revised, pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
-    expect(pending).not.toContain("main#")
+    expect(pending).not.toContain("#1 ")
   })
 
-  it("places the issue directly after the PR identity without filler", async () => {
+  it("places the change title directly after the PR identity, branch and issue omitted", async () => {
+    // Item 28: the CHANGES cell is id then TITLE — the branch lives only in
+    // the detail pane's per-change box header, and the issue in its metadata.
     const rows = (await renderTimeline(contractProjection(), 160)).map((row) => row.trimEnd())
-    const pending = rows[rowIndex(rows, "@yrd/core/21120-pr-state-notifications")]
-    const running = rows[rowIndex(rows, "@hab/super/21135-herdr-keybindings")]
+    const pending = rows[rowIndex(rows, "pr#1.1")]
+    const running = rows[rowIndex(rows, "pr#42.1")]
 
-    expect(pending).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
-    expect(running).toContain("pr#42.1 @hab/super/21135-herdr-keybindings")
+    expect(pending).toContain("pr#1.1 Prepare release notes")
+    expect(running).toContain("pr#42.1 Align host navigation")
+    expect(pending).not.toContain("@yrd/core/21120-pr-state-notifications")
+    expect(running).not.toContain("@hab/super/21135-herdr-keybindings")
     expect(pending).not.toContain(" for ")
     expect(running).not.toContain(" for ")
   })
 
-  it("keys the RUN label by base as well as run id, and keeps the selected issue blue", async () => {
+  it("keys the RUN label by base as well as run id when several queues are visible", async () => {
     const source = contractProjection()
     const lead = source.rows.find((row) => row.pr === "PR42")
     const partner = source.rows.find((row) => row.pr === "PR43")
@@ -399,6 +395,10 @@ describe("queue timeline 21106 contract", () => {
     }
     const projection = {
       ...source,
+      queues: [
+        { label: 1, base: "main" },
+        { label: 2, base: "release" },
+      ],
       rows: [lead, { ...partner, id: `release:${partner.id}`, base: "release" }],
       display: { ...source.display, shown: 2, hidden: 0 },
     }
@@ -408,31 +408,26 @@ describe("queue timeline 21106 contract", () => {
     try {
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
-      const leadY = rowIndex(rows, "@hab/super/21135-herdr-keybindings")
-      const partnerY = rowIndex(rows, "@si/ui/21119-split-pane")
-      const leadIssueX = rows[leadY]?.indexOf("@hab/super/21135-herdr-keybindings") ?? -1
-      const partnerIssueX = rows[partnerY]?.indexOf("@si/ui/21119-split-pane") ?? -1
-      const leadRunX = rows[leadY]?.indexOf("main#42") ?? -1
-
-      expect(rows[partnerY]).toContain("release#42")
-      expect(app.cell(leadIssueX, leadY).fg).toEqual(app.cell(partnerIssueX, partnerY).fg)
-      expect(app.cell(leadIssueX, leadY).fg).not.toEqual(app.cell(leadRunX, leadY).fg)
+      // Two visible queues: the label spells (items 34/38) — `main#42` and
+      // `release#42` are DIFFERENT runs in different journals, which is the
+      // collision the pair identity exists to remove. Same-numbered runs on
+      // different bases never fold into a `·` continuation.
+      const leadY = rowIndex(rows, "main#42")
+      const partnerY = rowIndex(rows, "release#42")
+      expect(leadY).not.toBe(partnerY)
+      expect(rows[leadY]).toContain("pr#42.1 Align host navigation")
+      expect(rows[partnerY]).toContain("pr#43.1 Carry the production")
     } finally {
       app.unmount()
     }
   })
 
-  it("uses distinct semantic queue glyphs and removes the redundant task/ branch prefix", async () => {
-    const source = contractProjection()
-    const projection = {
-      ...source,
-      rows: source.rows.map((row) => ({ ...row, branch: `task/${row.branch}` })),
-    }
-    const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
+  it("uses distinct semantic queue glyphs on every status", async () => {
+    const rows = (await renderTimeline(contractProjection(), 160)).map((row) => row.trimEnd())
     const pending = rows[rowIndex(rows, "pr#1.1")]
     const running = rows[rowIndex(rows, "pr#42.1")]
     const revised = rows[rowIndex(rows, "pr#5.1")]
-    const rejected = rows[rowIndex(rows, "main#5")]
+    const rejected = rows[rowIndex(rows, " failed ")]
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     expect(pending).toContain("○ ready")
@@ -440,6 +435,8 @@ describe("queue timeline 21106 contract", () => {
     expect(revised).toContain("× rev")
     expect(rejected).toContain("× failed")
     expect(integrated).toContain("✓ merged")
+    // The branch left the list entirely (item 28) — its `task/` prefix noise
+    // went with it; the detail pane's box header owns the branch now.
     for (const row of [revised, pending, running, rejected, integrated]) expect(row).not.toContain("task/")
 
     const production = queueTimelineStories["production-overview"].snapshot.projection
@@ -530,14 +527,13 @@ describe("queue timeline 21106 contract", () => {
     expect(expanded[3]?.repeat?.collapsed).toBe(true)
   })
 
-  it("keeps the full run noun and fixed fields intact at 80 columns", async () => {
+  it("keeps the full run number and fixed fields intact at 80 columns", async () => {
     const rows = (await renderTimeline(contractProjection(), 80)).map((row) => row.trimEnd())
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
-    expect(lead).toContain("main#42")
-    expect(lead).toContain("@hab/super/21135-herdr-keybin…")
+    expect(lead).toContain("#42")
+    expect(lead).toContain("Align host naviga")
     expect(lead).not.toContain(" for ")
-    expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
     expect(lead).toContain("20:00")
     expect(lead).not.toContain("◷")
@@ -546,7 +542,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead?.trimStart().startsWith("17:10:00 ◉ checking")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
-    const rejected = rows[rowIndex(rows, "main#5")]
+    const rejected = rows[rowIndex(rows, " failed ")]
     expect(rejected).toContain("typecheck-failed")
     expect(rejected).toContain("12:00")
     expect(rejected).not.toContain("◷")
@@ -570,7 +566,7 @@ describe("queue timeline 21106 contract", () => {
       const runningMarker = cell("◉", "pr#42.1").fg
       const successMarker = cell("✓", "pr#4.1").fg
       const successText = cell("merged", "pr#4.1").fg
-      const failureText = cell("typecheck-failed", "main#5").fg
+      const failureText = cell("typecheck-failed", "err=typecheck-failed").fg
       const mutedTime = cell("16:40:00", "pr#1.1").fg
       const mutedAge = cell("50:00", "pr#1.1").fg
 
@@ -604,7 +600,7 @@ describe("queue timeline 21106 contract", () => {
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ ready", "╭─ STATS"]) {
+    for (const anchor of ["YRD QUEUES", "16:40:00 ○ ready", "╭─ STATS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
@@ -668,7 +664,7 @@ describe("queue timeline 21106 contract", () => {
     for (const width of [120, 200]) {
       const rows = await renderTimeline(contractProjection(), width)
       const headerLine = rowIndex(rows, "TIME")
-      const pillsLine = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
+      const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed/u.test(row))
       // Item 2: the pills row renders BELOW the list, not above the header.
       expect(pillsLine, `width ${width}`).toBeGreaterThan(headerLine)
       const filter = rows[pillsLine]
@@ -678,11 +674,10 @@ describe("queue timeline 21106 contract", () => {
       // directive 2026-07-21). Right-aligned to the cap.
       expect(filter).not.toContain("FILTER")
       expect(filter).not.toMatch(/\[[trfd]\]/u)
-      // `all` is its own centered pill, left of the status cluster (operator
-      // ruling 2026-08-18, item 9) — no longer adjacent to `failed`.
+      // The bottom row keeps ONLY the status pills, right-aligned (operator
+      // ruling 2026-08-18, item 32); `all` rides the top line's pill group.
       expect(filter.trim()).toContain("since=6:00:00 open running done failed")
-      expect(filter.indexOf("all")).toBeGreaterThanOrEqual(0)
-      expect(filter.indexOf("all")).toBeLessThan(filter.indexOf("since="))
+      expect(filter).not.toContain("all ")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
@@ -707,7 +702,7 @@ describe("queue timeline 21106 contract", () => {
     expect(runnerBottom, "the RUNNER box closes below the pause line").toBeGreaterThan(statusLine)
     // It still renders between the metadata clock and the pills row.
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
-    const pillsAt = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
+    const pillsAt = rows.findIndex((row) => /open.*running.*done.*failed/u.test(row))
     expect(statusLine, "the RUNNER box sits above the pills row").toBeLessThan(pillsAt)
 
     const render = createRenderer({ cols: 120, rows: 45 })
@@ -810,20 +805,20 @@ describe("queue timeline 21106 contract", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
-      // No running rows: the newest finished run R12 is the default. The detail
-      // title is PR-scoped now (user directive 2026-07-21): `pr#12.1` heads the
-      // pane, not `RUN main#12` (which moved into the RUN region header below).
-      expect(detailTitleRow(handle.text)).toContain("pr#12.1")
+      // No running rows: the newest finished run R12 is the default. The
+      // detail pane has no identity title (item 23) — the change list bullet
+      // and the member box header carry the selected change's id.
+      expect(detailShows(handle.text, "pr#12.1")).toBe(true)
 
       // A manual move is sticky: the arriving newer run R13 must not steal
       // the cursor.
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(detailTitleRow(handle.text)).toContain("pr#11.1")
+      expect(detailShows(handle.text, "pr#11.1")).toBe(true)
       handle.rerender(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
       await handle.waitForLayoutStable()
-      expect(detailTitleRow(handle.text)).toContain("pr#11.1")
-      expect(detailTitleRow(handle.text)).not.toContain("pr#13.1")
+      expect(detailShows(handle.text, "pr#11.1")).toBe(true)
+      expect(detailShows(handle.text, "pr#13.1")).toBe(false)
     } finally {
       handle.unmount()
     }
@@ -833,7 +828,7 @@ describe("queue timeline 21106 contract", () => {
     const reopened = fresh(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
     try {
       await reopened.waitForLayoutStable()
-      expect(detailTitleRow(reopened.text)).toContain("pr#13.1")
+      expect(detailShows(reopened.text, "pr#13.1")).toBe(true)
     } finally {
       reopened.unmount()
     }
@@ -862,8 +857,8 @@ describe("queue timeline 21106 contract", () => {
       // running-step-wins default). The batch membership surfaces there as a
       // `PRs` members row listing both pr#42.1 and pr#43.1 — the partner PR
       // no longer gets its own block or its own submit-timeline line.
-      expect(detailTitleRow(handle.text)).toContain("pr#42.1")
-      expect(handle.text, "the run identity moved into the RUN region header").toContain("RUN main#42")
+      expect(detailShows(handle.text, "pr#42.1")).toBe(true)
+      expect(handle.text, "the run identity rides the status-box border").toContain("RUN main#42")
       expect(handle.text, "the RUN region lists every batch member").toMatch(/PRs\b.*pr#42\.1.*pr#43\.1/u)
       expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
 
@@ -976,25 +971,34 @@ describe("queue timeline 21106 contract", () => {
     // convoy members included. These assertions used to be skipped for a row
     // sharing its predecessor's run, which is precisely the blindness 22925
     // removed \u2014 the skipped rows were the ones rendering as dashes.
-    for (const row of projection.rows) {
+    projection.rows.forEach((row, index) => {
       const pr = formatQueueChangeId(row.pr, row.revision)
       expect(parseChangeSelector(pr), `rendered identity ${pr}`).toEqual({
         pr: row.pr,
         revision: Number(row.revision),
       })
-      const run = row.run === undefined ? undefined : `${row.base}#${row.run.replace(/^R/u, "")}`
+      // Disambiguate same-PR rows (draft vs terminal) by their own clock.
+      const clock = row.timestamp === null ? undefined : wallClock(row.timestamp)
       const rendered = rows.find(
-        (candidate) => candidate.includes(pr) && (run === undefined || candidate.includes(run)),
+        (candidate) => candidate.includes(pr) && (clock === undefined || candidate.includes(clock)),
       )
       if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
-      if (row.timestamp !== null) expect(rendered, row.id).toContain(wallClock(row.timestamp))
       if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
-      if (row.issue !== undefined) expect(rendered, row.id).toContain(row.issue)
-      else if (row.step !== undefined) expect(rendered, row.id).toContain(row.step)
+      // Item 28: the CHANGES cell carries the change's TITLE.
+      expect(rendered, row.id).toContain(row.subject.slice(0, 18))
+      // Item 38: the run number renders on the FIRST member row; an adjacent
+      // batch member carries the `·` continuation instead of repeating it.
+      const previous = projection.rows[index - 1]
+      const continues =
+        row.run !== undefined && previous !== undefined && previous.run === row.run && previous.base === row.base
+      if (row.run !== undefined && !continues) {
+        expect(rendered, row.id).toContain(`#${row.run.replace(/^R/u, "")}`)
+      }
+      if (row.status === "running" && row.step !== undefined) expect(rendered, row.id).toContain(`(${row.step})`)
       if (row.ageMs !== null) expect(rendered, row.id).toContain(duration(row.ageMs))
-      // Run duration is a bare dimmed time now \u2014 no `\u25f7` glyph (item S).
+      // Run duration is a bare dimmed time now — no clock glyph (item S).
       if (row.totalMs !== null) expect(rendered, row.id).toContain(duration(row.totalMs))
-    }
+    })
   })
 
   it("selects whole rows through the canonical primitive with no textual cursor", async () => {
@@ -1007,16 +1011,20 @@ describe("queue timeline 21106 contract", () => {
       expect(frame.some((row) => row.trimStart().startsWith("> "))).toBe(false)
 
       // Default cursor row (running batch lead) carries the selection
-      // background across the whole row; its sibling does not. Scope to actual
-      // list rows (they start with a clock) so the DETAIL pane's identity title
-      // — which also names the selected PR (item M) — isn't mistaken for a row.
-      const isListRow = (row: string): boolean => /^\s*(?:\d{2}:\d{2}:\d{2}|-)\s/u.test(row)
-      const cursorRow = frame.findIndex((row) => row.includes("pr#42.1") && isListRow(row))
-      const siblingRow = frame.findIndex((row) => row.includes("pr#43.1") && isListRow(row))
+      // background across the whole row; its sibling does not. The split
+      // panes share terminal lines and the DETAIL side also names both PRs
+      // now (change list + member-box headers, items 24/25) — so match on
+      // the LEFT pane only, cut at the split divider.
+      const divider = (frame[1] ?? "").indexOf("│")
+      expect(divider).toBeGreaterThan(0)
+      const leftHalf = (row: string): string => row.slice(0, divider)
+      const isListRow = (row: string): boolean => /^\s*\d{2}:\d{2}:\d{2} ◉ checking/u.test(row)
+      const cursorRow = frame.findIndex((row) => leftHalf(row).includes("pr#42.1") && isListRow(leftHalf(row)))
+      const siblingRow = frame.findIndex((row) => leftHalf(row).includes("pr#43.1") && isListRow(leftHalf(row)))
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""
-      for (const anchor of ["◉", "pr#42.1", "@hab/super/21135-herdr-keybindings"]) {
+      for (const anchor of ["◉", "pr#42.1", "Align host navigation"]) {
         const column = cursorText.indexOf(anchor)
         expect(column, anchor).toBeGreaterThanOrEqual(0)
         expect(handle.cell(column, cursorRow).bg, `selection bg under ${anchor}`).not.toBeNull()
