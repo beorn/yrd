@@ -75,19 +75,35 @@ function refusedBy(delivery: ChangeDeliveryState, command: string): boolean {
 }
 
 describe("actionable failure projection", () => {
-  it("turns authored-gitlink into a fast-forward-and-submit remedy, independent of PR delivery state", () => {
+  it("turns authored-gitlink into a submit remedy, independent of PR delivery state", () => {
     expect(actionableFailure(AUTHORED_GITLINK, { delivery: "pushed" })).toEqual({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["git -C vendor/yrd push origin <target-sha>:main", "yrd pr submit <branch>"],
+      resolution: ["yrd pr submit <branch>"],
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
     for (const delivery of ALL_DELIVERY_STATES) {
-      expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual([
-        "git -C vendor/yrd push origin <target-sha>:main",
-        "yrd pr submit <branch>",
-      ])
+      expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual(["yrd pr submit <branch>"])
     }
+  })
+
+  it("surfaces the queue's own fast-forward-the-component's-main instruction as cause, never re-deriving it", () => {
+    // intentSubmissionWorkflow (yrd-queue/src/command.ts) already speaks this
+    // prose into the failure message; oneLineCause preserves it verbatim
+    // because no quoted 'yrd ...' command follows it to strip. The projection
+    // must not discard it and construct its own instead (23000 root cause).
+    const failure = actionableFailure({
+      code: "authored-gitlink",
+      message:
+        "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
+        "own main, then submit an ordinary merge request whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
+    })
+
+    expect(failure.cause).toBe(
+      "PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s own " +
+        "main, then submit an ordinary merge request whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
+    )
+    expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })
 
   it("does not project an unexecutable mechanical remedy for a component addition or deletion", () => {
@@ -209,26 +225,20 @@ describe("22396 — state-aware remedies", () => {
     }
   })
 
-  it("keeps the fast-forward-and-submit remedy available for an already-submitted authored-gitlink PR", () => {
+  it("keeps the submit remedy available for an already-submitted authored-gitlink PR", () => {
     const failure = actionableFailure(AUTHORED_GITLINK, { delivery: "submitted" })
 
-    expect(failure.resolution).toEqual(["git -C vendor/yrd push origin <target-sha>:main", "yrd pr submit <branch>"])
+    expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })
 
-  it("keeps the fast-forward-and-submit remedy available for a terminal PR", () => {
+  it("keeps the submit remedy available for a terminal PR", () => {
     for (const delivery of ["integrated", "already-landed", "withdrawn", "canceled"] as const) {
-      expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual([
-        "git -C vendor/yrd push origin <target-sha>:main",
-        "yrd pr submit <branch>",
-      ])
+      expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual(["yrd pr submit <branch>"])
     }
   })
 
-  it("defaults to the fast-forward-and-submit remedy when no PR is in hand", () => {
-    expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual([
-      "git -C vendor/yrd push origin <target-sha>:main",
-      "yrd pr submit <branch>",
-    ])
+  it("defaults to the submit remedy when no PR is in hand", () => {
+    expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
   })
 
   it("escalates the recut gitlink conflict instead of printing the merge as executable", () => {
@@ -277,17 +287,11 @@ describe("22396 — state-aware remedies", () => {
 
     const detail = ChangeDetailData(pr, [run])
     const projected = detail.runs[0]
-    expect(projected?.failure?.resolution).toEqual([
-      "git -C vendor/yrd push origin <target-sha>:main",
-      "yrd pr submit <branch>",
-    ])
+    expect(projected?.failure?.resolution).toEqual(["yrd pr submit <branch>"])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)
 
     const draft = queueShowData(run, [], [], undefined, "pushed")
-    expect(draft.failure?.resolution).toEqual([
-      "git -C vendor/yrd push origin <target-sha>:main",
-      "yrd pr submit <branch>",
-    ])
+    expect(draft.failure?.resolution).toEqual(["yrd pr submit <branch>"])
   })
 })
 
@@ -308,11 +312,10 @@ describe("actionable failure output", () => {
       }),
     )
 
-    // A bare CLI diagnostic still points at the carrier-free fast-forward-and-submit remedy.
+    // A bare CLI diagnostic still points at the carrier-free submit remedy.
     expect(stderr).toBe(
       [
         "error: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-        "resolve: git -C vendor/yrd push origin <target-sha>:main",
         "resolve: yrd pr submit <branch>",
         "reference: README.md#pr-eligibility-and-checks",
         "",
@@ -386,7 +389,7 @@ describe("actionable failure output", () => {
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
       cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["git -C vendor/yrd push origin <target-sha>:main", "yrd pr submit <branch>"],
+      resolution: ["yrd pr submit <branch>"],
     })
     expect(data.steps[0]?.failure).toEqual(data.failure)
 
@@ -400,7 +403,6 @@ describe("actionable failure output", () => {
       expect(output).toContain("CAUSE")
       expect(output).toContain("PR 'PR42' changes generated-only gitlinks [vendor/yrd]")
       expect(output).toContain("RESOLVE")
-      expect(output).toContain("git -C vendor/yrd push origin <target-sha>:main")
       expect(output).toContain("yrd pr submit <branch>")
       expect(output).toContain("REFERENCE README.md#pr-eligibility-and-checks")
       if (!compact) {
