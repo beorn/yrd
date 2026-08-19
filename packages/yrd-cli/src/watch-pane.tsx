@@ -28,6 +28,7 @@ import {
   QueueTopLine,
   QueueDetailRunChangeBlocks,
   QueueShowView,
+  queueRunStepFacts,
   QueueStatusNotice,
   QueueTimelineView,
   queueShowData,
@@ -637,7 +638,11 @@ function QueueChangeDiffView({ diff }: { diff: QueueChangeDiff | undefined }) {
     )
   }
   const summary = `Diff +${diff.additions} −${diff.deletions}`
-  const fold = expanded ? "▼" : "▶"
+  // Plain triangles (operator ruling 2026-08-18, item 31: no emoji
+  // presentation selector). Silvery emoji-presents a bare U+25B6 — appending
+  // VS16 and rendering the blue play button — so the TEXT presentation
+  // selector (U+FE0E) pins the plain glyph the ruling asks for.
+  const fold = expanded ? "▼\uFE0E" : "▶\uFE0E"
   return (
     <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: onToggle } : {})}>
       <Box height={1} flexShrink={0} />
@@ -763,6 +768,11 @@ export function QueueWorkflowStepTabs({
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
   const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
 
+  // ONE derivation feeds the status box's step lines AND these tab labels
+  // (operator ruling 2026-08-18, item 39) — glyph, status word, and duration
+  // can never disagree between the two surfaces.
+  const stepFacts = useMemo(() => (data === undefined ? [] : queueRunStepFacts(data)), [data])
+  const stepFactByName = useMemo(() => new Map(stepFacts.map((fact) => [fact.step, fact])), [stepFacts])
   // Round 6 tabs are two-row, equally measured segments. Both active and
   // inactive states are filled, and no flex growth may stretch them past the
   // widest title/status+duration content.
@@ -773,12 +783,11 @@ export function QueueWorkflowStepTabs({
           1,
           PR_TAB_LABEL.length,
           ...names.map((name) => {
-            const rep = data.steps.filter((row) => row.step === name).at(-1)
-            const duration = rep?.duration === undefined || rep.duration === "-" ? "" : rep.duration
-            const glyph = rep === undefined ? "" : timelineStatusGlyph(rep.status)
+            const fact = stepFactByName.get(name)
+            const duration = fact?.duration ?? ""
             return Math.max(
               `${names.indexOf(name) + 1}: ${name}`.length,
-              `${glyph} ${rep?.status ?? ""}${duration === "" ? "" : ` ${duration}`}`.length,
+              `${fact?.glyph ?? ""} ${fact?.status ?? ""}${duration === "" ? "" : ` ${duration}`}`.length,
             )
           }),
         )
@@ -793,22 +802,17 @@ export function QueueWorkflowStepTabs({
       )
     }
     if (data === undefined) return name
-    const stepRows = data.steps.filter((row) => row.step === name)
-    const rep = stepRows.at(-1)
-    if (rep === undefined) return name
-    const duration = rep.duration === "-" ? "" : rep.duration
+    const fact = stepFactByName.get(name)
+    if (fact === undefined) return name
+    const duration = fact.duration
     const number = names.indexOf(name) + 1
-    const glyph = timelineStatusGlyph(rep.status)
-    const status = `${glyph} ${rep.status}`
+    const status = `${fact.glyph} ${fact.status}`
     const remainder = Math.max(0, stepTabWidth - status.length - (duration === "" ? 0 : duration.length + 1))
     return (
       <Text color={selected ? "$fg-on-selected" : undefined}>
         {`${number}: ${name}`.padEnd(stepTabWidth)}
         {"\n"}
-        <Text
-          color={selected ? "$fg-on-selected" : statusPresentation(rep.status).color}
-          bold={rep.status === "running"}
-        >
+        <Text color={selected ? "$fg-on-selected" : fact.color} bold={fact.active}>
           {status}
         </Text>
         {duration === "" ? "" : " "}

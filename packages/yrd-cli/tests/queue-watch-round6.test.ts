@@ -25,7 +25,7 @@ import {
 import { QueueStatsPanel } from "../src/time-stats-box.tsx"
 import { QueueWatchFrame, QueueWorkflowStepTabs } from "../src/watch-pane.tsx"
 
-const BRANCH_GLYPH = ""
+const BRANCH_GLYPH = "⎇"
 
 function branchGlyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: number): number {
   let match = -1
@@ -324,7 +324,6 @@ describe("queue watch user round 6", () => {
         rows: activityProjection.rows,
         prs: [lead],
         runDetails: allRuns.map((candidate) => queueShowData(candidate, allRuns)),
-        titleAbove: true,
       }),
     )
     try {
@@ -335,7 +334,9 @@ describe("queue watch user round 6", () => {
     } finally {
       olderActivity.unmount()
     }
-    const app = createRenderer({ cols: 200, rows: 70 })(h(QueueWatchFrame, { snapshot }))
+    // 110 rows: the status box + change list now sit above the tabs (item 23),
+    // so the second member's box needs the taller canvas to stay on screen.
+    const app = createRenderer({ cols: 200, rows: 110 })(h(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
 
@@ -347,17 +348,19 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
 
       const rows = app.text.split("\n")
-      const titleY = rows.findIndex((row) => row.includes("pr#60.4"))
-      const detailX = rows[titleY]?.indexOf("pr#60.4") ?? -1
-      expect(titleY).toBeGreaterThanOrEqual(0)
-      const runY = rows.findIndex((row) => row.slice(detailX).includes("RUN main#60"))
+      // The status box IS the pane's top (item 23): its border carries the
+      // run identity, the change list follows, then the tabs, and the member
+      // boxes (each with its own identity header, item 25) sit in the
+      // Changes panel below them.
+      const runY = rows.findIndex((row) => row.includes("RUN main#60"))
+      expect(runY, "the status box border leads with the run identity").toBeGreaterThanOrEqual(0)
+      const detailX = rows[runY]?.lastIndexOf("╭") ?? -1
+      const listY = rows.findIndex((row) => row.slice(detailX).includes("· pr#60.4"))
       const tabY = rows.findIndex((row) => row.slice(detailX).includes("1: merge"))
-      expect(runY, "the composite run header follows the PR identity").toBeGreaterThan(titleY)
-      expect(tabY, "the step tabs follow the composite run header").toBeGreaterThan(runY)
-      expect(rows[titleY]?.slice(detailX)).not.toMatch(/\d+(?:h|m|s)/u)
-      expect(rows[titleY]).not.toContain("RUN main#60")
-      expect(rows[titleY]).not.toContain("PR60")
-      expect(rows[titleY]).not.toContain("PR61")
+      const headerY = rows.findIndex((row) => row.slice(detailX).includes("pr#60.4 ⎇"))
+      expect(listY, "the change list follows the status box").toBeGreaterThan(runY)
+      expect(tabY, "the step tabs follow the change list").toBeGreaterThan(listY)
+      expect(headerY, "the member box carries its own identity header").toBeGreaterThan(tabY)
       expect(app.text).not.toMatch(/[▸•]\s+PRS\b/u)
       expect(app.text).not.toContain("TIMELINE")
       expect(app.text).not.toContain("LANDING")
@@ -392,8 +395,11 @@ describe("queue watch user round 6", () => {
       // uppercase KEY/value fact rows, not "- key: value" timeline entries.
       expect(app.text).toMatch(/NOTE\s+visual confirmation required/u)
       expect(app.text).toMatch(/CORRELATION\s+tribe:21514-round6-agent1/u)
-      expect(app.text).toMatch(/REQUESTED REVIEWERS\s+@chief/u)
-      expect(app.text).toMatch(/CHECK REQUESTED\s+\d{2}:\d{2}/u)
+      expect(app.text).toMatch(/REVIEWERS\s+@chief/u)
+      // Live/mechanical rows left the metadata (item 31): no CHECK REQUESTED
+      // fact — the echo renders in HISTORY only when its time differs from
+      // the revision row.
+      expect(app.text).not.toMatch(/CHECK REQUESTED\s/u)
       expect(app.text).not.toMatch(/- check requested: \d{2}:\d{2}/u)
       // Timeline rows are bare (no leading "- "), strictly newest-first.
       expect(app.text).toMatch(/\d{2}:\d{2} r4 integrated \(age 11:00\)/u)
@@ -415,7 +421,8 @@ describe("queue watch user round 6", () => {
       expect([r4Y, submittedY, r3Y, r2Y, r1Y], "history renders newest clock time first").toEqual(
         [r4Y, submittedY, r3Y, r2Y, r1Y].toSorted((left, right) => left - right),
       )
-      expect(app.text).toContain(`▶️ Diff +324 / -323 ${["li", "nes"].join("")}`)
+      expect(app.text).toContain("Diff +324 −323")
+      expect(app.text, "plain triangle, no emoji presentation selector").not.toContain("▶️")
       expect(app.text).not.toContain("src/detail-pane.tsx")
       expect(app.text).not.toContain("click to expand")
 
@@ -445,7 +452,7 @@ describe("queue watch user round 6", () => {
       expect(app.cell(titleX, titleBlockY).bold).toBe(true)
       expect(app.cell(bodyX, bodyY).bold).not.toBe(true)
 
-      const diff = pointOf(app.text, `Diff +324 / -323 ${["li", "nes"].join("")}`)
+      const diff = pointOf(app.text, "Diff +324 −323")
       const collapsedRows = app.text.split("\n")
       // Each change now sits inside its own box (operator spec item 4), so the
       // rows immediately above/below the diff summary carry that box's own
@@ -464,8 +471,9 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("src/detail-pane.tsx")
       expect(app.text).toContain("+new detail")
       // The fold marker flips collapsed->expanded (▶->▼) in place.
-      expect(app.text).toContain(`▼ Diff +324 / -323 ${["li", "nes"].join("")}`)
-      expect(app.text).not.toContain(`▶️ Diff +324 / -323 ${["li", "nes"].join("")}`)
+      expect(app.text).toContain("Diff +324 −323")
+      expect(app.text, "the fold marker flips to the expanded triangle").toContain("▼")
+      expect(app.text).not.toContain("▶️")
 
       const expandedPatch = pointOf(app.text, "+new detail")
       await app.click(expandedPatch[0], expandedPatch[1])
@@ -561,7 +569,10 @@ describe("queue watch user round 6", () => {
     )
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toMatch(/AGE\s+3 revisions · 57:00 total · r3 queued 8:00/u)
+      // Item 31: the live AGE/WAIT fact left the metadata — Age · Runtime ·
+      // Wait live on the status box, and the lineage count rides COMMITS.
+      expect(app.text).toMatch(/COMMITS\s+3 revisions/u)
+      expect(app.text).not.toMatch(/AGE\s+\d+ revisions/u)
     } finally {
       app.unmount()
     }
@@ -879,7 +890,10 @@ describe("queue watch user round 6", () => {
     // section, where an expanded diff renders its full patch inline (no per-diff
     // scroll). A viewport tall enough to hold the whole diff shows the complete
     // patch, tail included; a collapsed diff shows only its summary.
-    const app = createRenderer({ cols: 200, rows: 130 })(h(QueueWatchFrame, { snapshot }))
+    // 170 rows: the status box + change list + full member header (items
+    // 23/25) sit above the diff now, so the 91-row patch needs the taller
+    // canvas for its tail to stay on screen.
+    const app = createRenderer({ cols: 200, rows: 170 })(h(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await app.press("h")

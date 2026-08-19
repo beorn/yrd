@@ -67,9 +67,10 @@ describe("queue timeline storybook", () => {
       { mouse: true, selection: false },
     )
     try {
-      // Wait for the PR-scoped detail title (which paints after the QUEUE list)
-      // so the captured frame is stable — the title now carries pr#id + issue.
-      await waitFor(() => term.screen.getText().includes("pr#42.1 @hab/super/21135-herdr-keybindings"))
+      // Wait for the detail body (which paints after the QUEUE list) so the
+      // captured frame is stable — the change list bullet names the selected
+      // change; the identity title row is gone (item 23).
+      await waitFor(() => term.screen.getText().includes("· pr#42.1"))
       const frame = term.screen.getText()
 
       expect(frame).not.toMatch(/\[(?: |\/|!|x|-)\]/u)
@@ -78,7 +79,7 @@ describe("queue timeline storybook", () => {
       expect(frame).not.toContain("RUN LOGS")
       expect(frame).not.toContain("OUTPUT check#")
       expect(frame).not.toContain("DETAILS")
-      expect(frame).toContain("pr#42.1 @hab/super/21135-herdr-keybindings")
+      expect(frame).toContain("· pr#42.1")
       // The synthetic `0: submit` tab is gone (user directive 2026-07-21); the
       // tabs are the real workflow steps, numbered from 1.
       expect(frame).toContain("2: check")
@@ -113,7 +114,9 @@ describe("queue timeline storybook", () => {
         await handle.waitForLayoutStable()
       })
       const changeFrame = term.screen.getText()
-      expect(changeFrame).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
+      // Item 31: the fold row reads `▶ Diff +A −B` (minus sign, no line-count
+      // suffix) as the code group's last row.
+      expect(changeFrame).toContain("Diff +324 −323")
     } finally {
       handle.unmount()
     }
@@ -150,7 +153,7 @@ describe("queue timeline storybook", () => {
         return text.includes("production-overview") && text.includes("2: check")
       })
       const frame = term.screen.getText()
-      expect(frame).toContain("QUEUE main")
+      expect(frame).toContain("YRD QUEUES")
       expect(frame).toContain("running")
       expect(frame).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
       // The synthetic `0: submit` tab is gone (user directive 2026-07-21).
@@ -406,19 +409,14 @@ describe("queue timeline storybook", () => {
           height: 48,
           plain: true,
         })
-        // A single-queue pane names its queue in the tab. A multi-queue pane
-        // must NOT — naming one base while listing several is the lie the
-        // legend replaced (user directive 2026-08-13) — so it says QUEUES and
-        // the legend carries `N base` for every queue.
-        if (projection.queues.length > 1) {
-          expect(rendered, name).toContain("QUEUES")
-          for (const { label, base } of projection.queues) {
-            // `N:base` (operator ruling 2026-08-18, item 9).
-            expect(rendered, `${name} legend for ${base}`).toContain(`${String(label)}:${base}`)
-          }
-        } else {
-          expect(rendered, name).toContain(`QUEUE ${projection.base}`)
+        // The one top line heads every surface (items 30/33): `YRD QUEUES`
+        // plus one pill per queue — `digit ⎇ branch` here, these stories
+        // carrying no repository path — single- and multi-queue alike.
+        expect(rendered, name).toContain("YRD QUEUES")
+        for (const { label, base } of projection.queues) {
+          expect(rendered, `${name} pill for ${base}`).toContain(`${String(label)} ⎇ ${base}`)
         }
+        expect(rendered, name).not.toContain(`QUEUE ${projection.base} `)
         expect(
           Math.max(...rendered.split("\n").map((row) => row.length)),
           `${name} at ${width} columns`,
@@ -479,23 +477,22 @@ describe("queue timeline storybook", () => {
         selection: false,
       })
       try {
-        await waitFor(() => term.screen.getText().includes("QUEUE main"))
-        expect(term.screen.getText(), name).toContain("QUEUE main")
+        await waitFor(() => term.screen.getText().includes("YRD QUEUES"))
+        expect(term.screen.getText(), name).toContain("YRD QUEUES")
 
         if (divider === "vertical") {
-          // Right-docked: the DETAIL pane's target identity title shares the
-          // top row with the QUEUE tab, and the
-          // split divider is the lone vertical glyph on that row.
+          // Right-docked: the DETAIL pane's top IS the status box (operator
+          // ruling 2026-08-18, item 23) — its border carries `RUN main#4` on
+          // the detail's first row, and the split divider is the lone
+          // vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 1) >= 0)
           const topRow = term.screen.getText().split("\n")[1] ?? ""
-          // The detail title is PR-scoped now (user directive 2026-07-21): the
-          // selected run's PR identity (`pr#4.1`), not `RUN main#N`, is the title.
-          expect(topRow, name).toContain("pr#4.1")
-          expect(topRow, "detail identity is a flush-top title, not a DETAIL tab").not.toContain("DETAIL")
+          expect(topRow, name).toContain("RUN main#4")
+          expect(topRow, "detail identity is the status-box border, not a DETAIL tab").not.toContain("DETAIL")
           expect(findGlyphColumn(term, "│", 1), name).toBeGreaterThan(0)
-          // The run/timing header persists above every detail tab. The newest
-          // terminal step is selected by default.
-          expect(term.screen.getText(), name).toContain("RUN main#4")
+          // The compact tier spends its rows on the box itself; the member
+          // boxes with the `pr#N.1 ⎇ branch` headers sit below the fold and
+          // are covered by the taller detail-controls story.
         } else if (divider === "horizontal") {
           // Below-docked: the detail renders under the list, so the identity
           // title is not on the top row (which holds only the QUEUE tab).
@@ -571,7 +568,7 @@ describe("queue timeline storybook", () => {
         rows: viewport.rows,
       })
       try {
-        expect(handle.text, name).toContain("QUEUE main")
+        expect(handle.text, name).toContain("YRD QUEUES")
         if (name === "detail-full") {
           await handle.press("Enter")
           await handle.waitForLayoutStable()
@@ -790,11 +787,16 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("pr#1.1")
       // Timeline rows are bare now (user directive 2026-07-21): no leading `- `.
       expect(handle.text).toMatch(/\d{2}:\d{2} r1 submitted by @cto/u)
-      // Pending renders as `todo` in the detail title fallback (item 8).
-      expect(handle.text).toContain("○ queued")
+      // One unified status derivation: a submitted-awaiting-run change reads
+      // `ready` in the box exactly as the list column does, its position
+      // carried by the explanation (`Queued at position 1`).
+      expect(handle.text).toContain("○ ready")
+      expect(handle.text).toContain("Queued at position 1")
       expect(handle.text).toContain("Prepare release notes")
-      expect(handle.text).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
-      expect(handle.text).toContain("topic/pr1")
+      // The member box owns the identity header and the issue moved into the
+      // grouped metadata (items 25/31).
+      expect(handle.text).toContain("pr#1.1 ⎇ topic/pr1")
+      expect(handle.text).toMatch(/ISSUE\s+@yrd\/core\/21120-pr-state-notifications/u)
       expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
       expect(handle.text).not.toContain("PR PR1 STATUS")
       expect(handle.text).not.toContain("SOURCE ")
