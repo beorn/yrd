@@ -413,7 +413,8 @@ describe("queue timeline storybook", () => {
         if (projection.queues.length > 1) {
           expect(rendered, name).toContain("QUEUES")
           for (const { label, base } of projection.queues) {
-            expect(rendered, `${name} legend for ${base}`).toContain(`${String(label)} ${base}`)
+            // `N:base` (operator ruling 2026-08-18, item 9).
+            expect(rendered, `${name} legend for ${base}`).toContain(`${String(label)}:${base}`)
           }
         } else {
           expect(rendered, name).toContain(`QUEUE ${projection.base}`)
@@ -485,20 +486,20 @@ describe("queue timeline storybook", () => {
           // Right-docked: the DETAIL pane's target identity title shares the
           // top row with the QUEUE tab, and the
           // split divider is the lone vertical glyph on that row.
-          await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
-          const topRow = term.screen.getText().split("\n")[0] ?? ""
+          await waitFor(() => findGlyphColumn(term, "│", 1) >= 0)
+          const topRow = term.screen.getText().split("\n")[1] ?? ""
           // The detail title is PR-scoped now (user directive 2026-07-21): the
           // selected run's PR identity (`pr#4.1`), not `RUN main#N`, is the title.
           expect(topRow, name).toContain("pr#4.1")
           expect(topRow, "detail identity is a flush-top title, not a DETAIL tab").not.toContain("DETAIL")
-          expect(findGlyphColumn(term, "│", 0), name).toBeGreaterThan(0)
+          expect(findGlyphColumn(term, "│", 1), name).toBeGreaterThan(0)
           // The run/timing header persists above every detail tab. The newest
           // terminal step is selected by default.
           expect(term.screen.getText(), name).toContain("RUN main#4")
         } else if (divider === "horizontal") {
           // Below-docked: the detail renders under the list, so the identity
           // title is not on the top row (which holds only the QUEUE tab).
-          const topRow = term.screen.getText().split("\n")[0] ?? ""
+          const topRow = term.screen.getText().split("\n")[1] ?? ""
           expect(topRow, name).not.toContain("RUN main#4")
           // The run/timing header persists above every detail tab. The newest
           // terminal step is selected by default.
@@ -539,13 +540,13 @@ describe("queue timeline storybook", () => {
       await waitFor(() => term.screen.getText().includes("RUN main#3"))
       // Row 0 carries the two pane titles; the only vertical glyph there is
       // the SplitPane divider (pane side walls start below the title rows).
-      const initialDivider = findGlyphColumn(term, "│", 0)
+      const initialDivider = findGlyphColumn(term, "│", 1)
       expect(initialDivider).toBeGreaterThan(0)
       const draggedDivider = initialDivider + 12
 
       await term.mouse.down(initialDivider, 1)
       await term.mouse.move(draggedDivider, 1)
-      await waitFor(() => findGlyphColumn(term, "│", 0) === draggedDivider)
+      await waitFor(() => findGlyphColumn(term, "│", 1) === draggedDivider)
       await term.mouse.up(draggedDivider, 1)
 
       await handle.press("j")
@@ -553,7 +554,7 @@ describe("queue timeline storybook", () => {
       // PR tab (user directive 2026-07-21) rather than a `RUN main#7` step
       // tab; the PR identity title is the stable readiness marker instead.
       await waitFor(() => term.screen.getText().includes("pr#7.1"))
-      expect(findGlyphColumn(term, "│", 0)).toBe(draggedDivider)
+      expect(findGlyphColumn(term, "│", 1)).toBe(draggedDivider)
     } finally {
       handle.unmount()
     }
@@ -584,15 +585,18 @@ describe("queue timeline storybook", () => {
     }
 
     const boundaryStory = queueTimelineStories["detail-below"]
+    // The watch pane's own top line (item 12, always present) costs one more
+    // row of chrome than this boundary assumed, so the tier flip that used to
+    // land at 32/33 now lands one row later.
     const fullAtNaturalBoundary = await run(createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot }), {
       writable: { write: () => {} },
       cols: 100,
-      rows: 32,
+      rows: 33,
     })
     const belowAfterNaturalBoundary = await run(createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot }), {
       writable: { write: () => {} },
       cols: 100,
-      rows: 33,
+      rows: 34,
     })
     try {
       expect(fullAtNaturalBoundary.text).not.toContain("RUN main#4")

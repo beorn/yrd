@@ -6693,7 +6693,7 @@ describe("runYrd", () => {
     const buckets = queueStats(projection.timeStatsFacts, now, projection.earliestFactMs, 0)
     const attempts = (label: string) => buckets.find((bucket) => bucket.label === label)!.runs.all
     expect(attempts("TODAY")).toBe(1)
-    expect(attempts("YESTERDAY")).toBe(0)
+    expect(attempts("YSTRDAY")).toBe(0)
     expect(attempts("WEEK")).toBe(1)
     expect(attempts("MONTH")).toBe(2)
   })
@@ -7038,7 +7038,7 @@ describe("runYrd", () => {
     expect(rendered).not.toContain("siblings none")
     // Item 2/3: the status pills row moved BELOW the list (was directly above
     // the header) and dropped its "FILTER" label — plain-word pills now.
-    const pillsRowIndex = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
+    const pillsRowIndex = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
     const statsIndex = rows.findIndex((row) => row.includes("╭─ STATS "))
     expect(statsIndex).toBeGreaterThan(pillsRowIndex)
@@ -8269,12 +8269,15 @@ describe("runYrd", () => {
         ),
       )
       const rows = fixed.split("\n")
-      const filter = rows.find((row) => /open.*running.*done.*failed.*all/u.test(row))
+      const filter = rows.find((row) => /all.*open.*running.*done.*failed/u.test(row))
       // The pills share the row with the left-aligned coverage text ("retained
       // since …" / "... N more"), so assert the pill cluster is present rather
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
       // no [p] brackets — the since= dimension survives, pills are plain words.
-      expect.soft(filter).toContain("since=6:00:00 open running done failed all")
+      // `all` is its own centered pill, left of the status cluster (operator
+      // ruling 2026-08-18, item 9) — no longer adjacent to `failed`.
+      expect.soft(filter).toContain("since=6:00:00 open running done failed")
+      expect.soft(filter?.indexOf("all")).toBeGreaterThanOrEqual(0)
       // The STATS frame reads the same retained terminal facts at every tier.
       // The landed per-24h throughput fact stays in projection.metrics for JSON.
       expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
@@ -8491,15 +8494,17 @@ describe("runYrd", () => {
     try {
       // Default cursor is the first row (PR1); the detail follows it with no
       // Enter, heading the pane with its PR-scoped title and its HEAD fact (the
-      // uppercase key padded to the fact column width).
-      expect(handle.text.split("\n")[0]).toContain("pr#1.1")
+      // uppercase key padded to the fact column width). Row 0 is the watch
+      // pane's own top line (item 12, always present); the title row that
+      // used to be row 0 sits one row lower.
+      expect(handle.text.split("\n")[1]).toContain("pr#1.1")
       expect(handle.text).toContain(`HEAD      ${HEAD_SHA}`)
       expect(handle.text).not.toMatch(/\bPRS\b/giu)
 
       await handle.press("j")
       await handle.waitForLayoutStable()
       // The cursor moved to PR2 and the detail followed — still no Enter.
-      expect(handle.text.split("\n")[0]).toContain("pr#2.1")
+      expect(handle.text.split("\n")[1]).toContain("pr#2.1")
       expect(handle.text).toContain(`HEAD      ${"2".repeat(40)}`)
       expect(handle.text).not.toContain(`HEAD      ${HEAD_SHA}`)
 
@@ -8645,8 +8650,9 @@ describe("runYrd", () => {
     try {
       expect(wide.text).toContain("│")
       // Right-docked: the DETAIL pane's identity title (item M — the selected
-      // `PR.rev`) shares the top row with the QUEUE tab.
-      expect(wide.text.split("\n")[0]).toMatch(/pr#\d+\.\d+/u)
+      // `PR.rev`) shares a row with the QUEUE tab, one row below the watch
+      // pane's own top line (item 12, always present).
+      expect(wide.text.split("\n")[1]).toMatch(/pr#\d+\.\d+/u)
       expect(wide.text).toContain(`HEAD      ${HEAD_SHA}`)
       await wide.press("Escape")
       await wide.waitForLayoutStable()
@@ -8656,8 +8662,9 @@ describe("runYrd", () => {
       expect(wide.text).toContain(`HEAD      ${HEAD_SHA}`)
 
       expect(below.text).toContain("─")
-      // Below-docked: the detail identity title is not on the top row.
-      expect(below.text.split("\n")[0]).not.toMatch(/PR\d+\.\d+/u)
+      // Below-docked: the detail identity title is not on the QUEUE tab's
+      // row (row 1 — row 0 is the watch pane's own top line, item 12).
+      expect(below.text.split("\n")[1]).not.toMatch(/PR\d+\.\d+/u)
       expect(below.text).toContain(`HEAD      ${HEAD_SHA}`)
 
       expect(compact.text).toContain("QUEUE main")

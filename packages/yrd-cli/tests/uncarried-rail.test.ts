@@ -31,7 +31,10 @@ describe("uncarriedLine", () => {
     // different facts about the fleet, and collapsing them asserts a healthy
     // queue that was never swept.
     const line = uncarriedLine(undefined, NOW)
-    expect(line).toContain("not swept")
+    // Plain language, own label (operator ruling 2026-08-18, item 15):
+    // "UNCARRIED — stranded-refs sweep hasn't produced an observation yet".
+    expect(line).toContain("UNCARRIED")
+    expect(line).toContain("stranded-refs sweep hasn't produced an observation yet")
     expect(line).not.toMatch(/\b0\b/u)
   })
 

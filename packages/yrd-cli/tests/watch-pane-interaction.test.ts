@@ -23,7 +23,9 @@ function rowIndexOf(text: string, needle: string): number {
 }
 
 function detailTitleRow(text: string): string {
-  return text.split("\n")[0] ?? ""
+  // Row 0 is the watch pane's own top line (item 12, always present); the
+  // QUEUE tab + DETAIL title row that used to be row 0 sits one row lower.
+  return text.split("\n")[1] ?? ""
 }
 
 function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string, row: number): number {
@@ -223,16 +225,16 @@ describe("QueueWatchFrame 21106 interaction", () => {
     })
     try {
       await waitFor(() => detailTitleRow(term.screen.getText()).includes("pr#3.1"))
-      const initialDivider = findGlyphColumn(term, "│", 0)
+      const initialDivider = findGlyphColumn(term, "│", 1)
       expect(initialDivider).toBeGreaterThan(0)
 
       // Drag far past the list's minimum width: the divider must clamp at
       // the LIST natural width (80), never collapsing the list pane.
       await term.mouse.down(initialDivider, 1)
       await term.mouse.move(10, 1)
-      await waitFor(() => findGlyphColumn(term, "│", 0) !== initialDivider)
+      await waitFor(() => findGlyphColumn(term, "│", 1) !== initialDivider)
       await term.mouse.up(10, 1)
-      const clamped = findGlyphColumn(term, "│", 0)
+      const clamped = findGlyphColumn(term, "│", 1)
       expect(clamped).toBeGreaterThanOrEqual(80)
       expect(clamped).toBeLessThan(initialDivider)
     } finally {
@@ -277,7 +279,9 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).toContain("pr#42.1")
       // The pills row (the one carrying all four plain-word pills) sits below
       // the list; find `running` there, not in a running PR row above it.
-      const filterY = app.text.split("\n").findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
+      // `all` is its own centered pill LEFT of the status cluster (operator
+      // ruling 2026-08-18, item 9), so it leads rather than trails here.
+      const filterY = app.text.split("\n").findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
       const filterX = app.text.split("\n")[filterY]?.indexOf("running") ?? -1
       expect(filterY).toBeGreaterThan(0)
       expect(filterX).toBeGreaterThan(0)

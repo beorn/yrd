@@ -47,7 +47,7 @@ function rowAt(text: string, index: number): string {
  *  one row with any non-default dimensions). The pending bucket's pill reads
  *  `open` (user respec 2026-07-23). */
 function pillsRow(text: string): string {
-  const found = text.split("\n").find((row) => /open.*running.*done.*failed.*all/u.test(row))
+  const found = text.split("\n").find((row) => /all.*open.*running.*done.*failed/u.test(row))
   if (found === undefined) throw new Error("no pills row")
   return found
 }
@@ -77,6 +77,9 @@ describe("queue timeline chrome 21106", () => {
       path: "unprojected",
       rows: 40,
       downstream: [] as const,
+      // QueueWatchFrame's own top line (item 12, always present) sits above
+      // this fixture's QUEUE/ROOT rows.
+      topLineRows: 1,
       element: (root: string) => {
         const source = queueTimelineStories["production-overview"].snapshot
         return createElement(QueueWatchFrame, {
@@ -88,6 +91,8 @@ describe("queue timeline chrome 21106", () => {
       path: "projected",
       rows: 40,
       downstream: [] as const,
+      // Bare QueueTimelineView, no QueueWatchFrame — no top line.
+      topLineRows: 0,
       element: (root: string) =>
         createElement(QueueTimelineView, {
           repositoryRoot: root,
@@ -99,6 +104,8 @@ describe("queue timeline chrome 21106", () => {
       path: "projected-live",
       rows: 24,
       downstream: ["RUNNER", "TIME", "│ $"] as const,
+      // Bare QueueTimelineView, no QueueWatchFrame — no top line.
+      topLineRows: 0,
       element: (root: string) => {
         const source = queueTimelineStories.paused.snapshot
         return createElement(QueueTimelineView, {
@@ -116,7 +123,7 @@ describe("queue timeline chrome 21106", () => {
     },
   ])(
     "keeps the exact resolved repository path visible in a 12-column $path header",
-    async ({ path, rows, downstream, element }) => {
+    async ({ path, rows, downstream, topLineRows, element }) => {
       const headers: string[] = []
       for (const root of ["/hh", "/hh/pm"] as const) {
         using term = createTermless({ cols: 12, rows })
@@ -128,13 +135,19 @@ describe("queue timeline chrome 21106", () => {
         try {
           const frame = term.screen.getText()
           const renderedRows = frame.split("\n")
-          expect.soft(renderedRows[0], `${path} ${root} queue row`).toContain("QUEUE")
-          expect.soft(renderedRows[1]?.trim(), `${path} ${root} root row`).toBe(`ROOT ${root}`)
-          expect.soft(renderedRows.slice(2).join("\n"), `${path} ${root} unique root row`).not.toContain(`ROOT ${root}`)
+          // QueueWatchFrame's own top line (item 12, always present) precedes
+          // the QUEUE/ROOT rows only for fixtures that render through it.
+          expect.soft(renderedRows[topLineRows], `${path} ${root} queue row`).toContain("QUEUE")
+          expect
+            .soft(renderedRows[topLineRows + 1]?.trim(), `${path} ${root} root row`)
+            .toBe(`ROOT ${root}`)
+          expect
+            .soft(renderedRows.slice(topLineRows + 2).join("\n"), `${path} ${root} unique root row`)
+            .not.toContain(`ROOT ${root}`)
           for (const witness of downstream) {
             expect.soft(frame, `${path} ${root} ${witness} witness`).toContain(witness)
           }
-          headers.push(renderedRows.slice(0, 2).join("\n"))
+          headers.push(renderedRows.slice(topLineRows, topLineRows + 2).join("\n"))
         } finally {
           await act(async () => {
             handle.unmount()
@@ -443,7 +456,7 @@ describe("queue timeline chrome 21106", () => {
       },
     }
 
-    expect(queueHealthMarker(projection).kind).toBe("stalled")
+    expect(queueHealthMarker(projection, Date.parse(projection.now)).kind).toBe("stalled")
 
     const app = createRenderer({ cols: 120, rows: 40 })(
       createElement(QueueTimelineView, { projection, results, state, nav: false, columns: 120 }),

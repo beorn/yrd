@@ -10,6 +10,14 @@ export type QueueStatsBucket = Readonly<{
   kind: "hour" | "period"
   startMs: number
   endMs: number
+  /** A local calendar day starts at or before this bucket, immediately after
+   * the previous (chronologically newer, visually left) one. Carried as its
+   * own field rather than folded into `label` (operator ruling 2026-08-18):
+   * the renderer draws the boundary as a dedicated one-character column
+   * running through the whole STATS box, never a glyph fused onto an hour
+   * label. Always `false` for `period` buckets — the calendar columns are
+   * not part of the hourly strip this marks. */
+  dayBoundary: boolean
   covered: boolean
   runs: Readonly<{
     all: number
@@ -41,7 +49,9 @@ export type QueueStatsCountDistribution = Readonly<{
   p95: number | null
 }>
 
-type QueueStatsWindow = Readonly<Pick<QueueStatsBucket, "key" | "label" | "kind" | "startMs" | "endMs">>
+type QueueStatsWindow = Readonly<
+  Pick<QueueStatsBucket, "key" | "label" | "kind" | "startMs" | "endMs" | "dayBoundary">
+>
 
 function statsDurationDistribution(values: readonly number[], subject: string): QueueStatsDurationDistribution {
   const { n, avg, p50, p95 } = numericDistribution(values, subject)
@@ -97,10 +107,15 @@ function statsWindows(
       labels[index] = `${labels[index]}${String.fromCharCode("a".charCodeAt(0) + order)}`
     })
   }
+  // The day-boundary marker is a fact about the bucket, never a character
+  // fused onto its label (operator ruling 2026-08-18): the renderer draws it
+  // as its own column, so hour labels stay a uniform "HH"/"HHa" shape and the
+  // 4-column hour-cell width (`bucketWidth`) never has to account for it.
+  const dayBoundaries = starts.map(() => false)
   let newerDay = localDayKey(nowMs)
   for (const [index, startMs] of starts.entries()) {
     const day = localDayKey(startMs)
-    if (day !== newerDay) labels[index] = `│${labels[index]}`
+    if (day !== newerDay) dayBoundaries[index] = true
     newerDay = day
   }
   const hours = starts.map((startMs, index): QueueStatsWindow => {
@@ -110,6 +125,7 @@ function statsWindows(
       kind: "hour",
       startMs,
       endMs: Math.min(startMs + hourMs, nowMs + 1),
+      dayBoundary: dayBoundaries[index] ?? false,
     }
   })
   const today = localDayStart(nowMs)
@@ -121,16 +137,19 @@ function statsWindows(
   const nowEnd = nowMs + 1
   return [
     ...hours,
-    { key: "today", label: "TODAY", kind: "period", startMs: today.getTime(), endMs: nowEnd },
+    { key: "today", label: "TODAY", kind: "period", startMs: today.getTime(), endMs: nowEnd, dayBoundary: false },
     {
+      // Operator directive 2026-08-18: YESTERDAY crowds the fixed-width
+      // calendar row; YSTRDAY carries the same meaning in less space.
       key: "yesterday",
-      label: "YESTERDAY",
+      label: "YSTRDAY",
       kind: "period",
       startMs: yesterday.getTime(),
       endMs: today.getTime(),
+      dayBoundary: false,
     },
-    { key: "week", label: "WEEK", kind: "period", startMs: week.getTime(), endMs: nowEnd },
-    { key: "month", label: "MONTH", kind: "period", startMs: month.getTime(), endMs: nowEnd },
+    { key: "week", label: "WEEK", kind: "period", startMs: week.getTime(), endMs: nowEnd, dayBoundary: false },
+    { key: "month", label: "MONTH", kind: "period", startMs: month.getTime(), endMs: nowEnd, dayBoundary: false },
   ]
 }
 
