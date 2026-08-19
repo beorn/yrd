@@ -3868,11 +3868,7 @@ function shellQuote(value: string): string {
  * refusal's code as a fixture label, so they stay green through a behaviour change.
  * See tests/authored-gitlink-admission.test.ts and @i/10-merge-queue/shaset-model.
  */
-export async function requireQueueableSubmodulePins(
-  pr: PR,
-  services: YrdCliServices,
-  io: YrdCliIO,
-): Promise<void> {
+export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
   if (services.process === undefined) return
   const repo = io.cwd ?? process.cwd()
   const headSha = prHead(pr)

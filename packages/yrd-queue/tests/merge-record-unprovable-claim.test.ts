@@ -270,7 +270,6 @@ describe("the writer cannot mint a claim no verification could ever prove", () =
   })
 })
 
-
 describe("a retracted record stops poisoning the estate without rewriting history", () => {
   /** The note blob sha git assigned to a published record — what a retraction binds to. */
   async function noteBlobFor(repo: string, mergeId: string): Promise<string> {
@@ -391,7 +390,6 @@ describe("a retracted record stops poisoning the estate without rewriting histor
     expect(isolated.unverifiable[0]?.reason).toContain("CHANGE-ID")
   })
 })
-
 
 describe("the estate-repair verb enumerates every producer class, not just the first", () => {
   const NOW = "2026-08-18T04:00:00.000Z"

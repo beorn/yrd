@@ -185,7 +185,6 @@ export function parseMergeRecord(value: string): MergeRecordEnvelope {
   return MergeRecordEnvelopeSchema.parse(JSON.parse(value) as unknown)
 }
 
-
 /**
  * A confession that one merge record cannot prove itself, appended beside it.
  *

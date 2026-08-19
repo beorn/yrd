@@ -353,7 +353,7 @@ async function loadSettlementHook(
   // A blank owner is a host bug, and the quiet reading of it — "ownerless, so
   // observe but never settle" — looks exactly like a healthy drain while every
   // terminal fact goes unacknowledged.
-  if (hook.owner !== undefined && hook.owner.trim() === "") {
+  if (hook.owner?.trim() === "") {
     throw new Error(`yrd: settlement hook ${specifier} returned a blank owner; omit the owner to observe only`)
   }
   return hook

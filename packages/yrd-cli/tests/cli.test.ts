@@ -11854,8 +11854,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -11906,8 +11916,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -11925,8 +11945,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1"), human.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -11976,8 +12006,18 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
         mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+          find: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
+          all: async () => ({
+            status: "proven" as const,
+            records: [{ record, pointer }],
+            unverifiable: [],
+            retracted: [],
+          }),
           retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
         },
       } as YrdCliServices),
@@ -12032,8 +12072,18 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        find: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
+        all: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
         retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
       },
     } as YrdCliServices)
@@ -12078,8 +12128,18 @@ describe("runYrd", () => {
 
     await runYrd(app, yrd("why", "PR1", "--json"), output.io, {
       mergeRecords: {
-        find: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
-        all: async () => ({ status: "proven" as const, records: [{ record, pointer }], unverifiable: [], retracted: [] }),
+        find: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
+        all: async () => ({
+          status: "proven" as const,
+          records: [{ record, pointer }],
+          unverifiable: [],
+          retracted: [],
+        }),
         retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
       },
     } as YrdCliServices)

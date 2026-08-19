@@ -1774,10 +1774,13 @@ export async function findRepositoryMergeRecords(
           }
         }
         if (!(await isAncestor(git, component, pin.after, current))) {
-          return corrupt(`merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`, {
-            merge: parsed.record.merge.id,
-            checksum: parsed.checksum,
-          })
+          return corrupt(
+            `merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`,
+            {
+              merge: parsed.record.merge.id,
+              checksum: parsed.checksum,
+            },
+          )
         }
       }
     }

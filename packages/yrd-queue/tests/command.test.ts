@@ -4307,8 +4307,6 @@ describe("Queue command adapters", () => {
       await git(repo, ["diff", "--no-renames", "--diff-filter=D", "--name-only", authoredBase, carrierHead, "--"]),
     ).toBe("")
 
-
-
     await using process = createProcess()
     const pr = PRSnapshotSchema.parse({
       id: "PR1",
