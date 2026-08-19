@@ -11,36 +11,28 @@ const PR = "PR1791"
 function authoredGitlink(pr = PR): { code: string; message: string } {
   return {
     code: "authored-gitlink",
-    message:
-      `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]; run ` +
-      "'yrd intent submit --component km --issue <issue-ref>' and " +
-      "'yrd intent submit --component ag --issue <issue-ref>'",
+    message: `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]`,
   }
 }
 
 describe("refusal remedy classification — self-applicable vs judgment-required", () => {
-  it("leaves authored-gitlink intent submission to the author instead of auto-recutting", () => {
+  it("leaves authored-gitlink pin work to the author instead of auto-recutting", () => {
     const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "submitted" })
 
     expect(remedy.kind).toBe("judgment")
     if (remedy.kind !== "judgment") return
-    expect(remedy.reason).toContain("yrd intent submit --component km")
+    expect(remedy.reason).toContain("git -C km push origin")
   })
 
-  it("does not resurrect the draft create path for an intent remedy", () => {
+  it("does not resurrect the draft create path for a gitlink-bump remedy", () => {
     const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "pushed" })
 
     expect(remedy.kind).toBe("judgment")
   })
 
-  it("does not mechanise a composition-invalid carrier routed to intent", () => {
+  it("does not mechanise a composition-invalid carrier lacking a mechanical remedy", () => {
     const remedy = classifyRefusalRemedy(
-      {
-        code: "composition-invalid",
-        message:
-          `yrd: PR '${PR}' composition manifest names no source; use ` +
-          "'yrd intent submit --component km --issue <issue-ref>'",
-      },
+      { code: "composition-invalid", message: `yrd: PR '${PR}' composition manifest names no source` },
       { branch: "task/22474", delivery: "submitted" },
     )
 

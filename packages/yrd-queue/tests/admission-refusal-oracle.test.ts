@@ -175,8 +175,7 @@ function refuseForever(
   blocked: () => string,
   failure: Readonly<{ code: string; message: (pr: string) => string }> = {
     code: "authored-gitlink",
-    message: (pr) =>
-      `yrd: PR '${pr}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
+    message: (pr) => `yrd: PR '${pr}' authors a gitlink bump`,
   },
 ): CandidatePreparer {
   return (input) => {
@@ -691,7 +690,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).toBe(
       `merge request '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
-        `yrd: PR '${pr.id}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
+        `yrd: PR '${pr.id}' authors a gitlink bump`,
     )
     log.end()
   })
@@ -897,7 +896,7 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
       pr: pr.id,
       code: "authored-gitlink",
       kind: "refusal",
-      reason: `PR '${pr.id}' changes generated-only gitlinks [ag]; submit pin work as 'yrd intent submit …'`,
+      reason: `PR '${pr.id}' changes generated-only gitlinks [ag]`,
     })
     expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink" })
 

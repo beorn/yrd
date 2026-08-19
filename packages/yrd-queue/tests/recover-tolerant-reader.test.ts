@@ -323,7 +323,7 @@ describe("recover reaches the PR1128 shape with an unreadable record in the same
         pr: pr.id,
         code: "authored-gitlink",
         kind: "refusal",
-        reason: `PR '${pr.id}' changes generated-only gitlinks [ag]; submit pin work as 'yrd intent submit …'`,
+        reason: `PR '${pr.id}' changes generated-only gitlinks [ag]`,
       })
     })
     await using app = await createApp(journal, ids(100))

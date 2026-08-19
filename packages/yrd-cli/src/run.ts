@@ -11774,6 +11774,25 @@ async function executeYrd(
     io.stdout(`${formatYrdRuntimeVersion()}\n`)
     return 0
   }
+  // `intent` (submit, fix, set, withdraw, close, tombstone) is a retired verb
+  // group, not an absent one — Commander's unknown-command handling prints
+  // top-level usage here, indistinguishable from a typo, which is exactly the
+  // wrong instruction at the moment of the block (23000). Name the
+  // replacement instead of falling through to generic help.
+  if (invocation.args[0] === "intent") {
+    await diagnostic(
+      io,
+      createFailure({
+        kind: "usage",
+        code: "retired-command",
+        message:
+          "yrd intent is retired; a pure pin advance is an ordinary change — fast-forward the component's " +
+          "own main to the target, then run 'yrd pr submit <branch>'",
+      }),
+      { json: invocation.args.includes("--json") },
+    )
+    return 2
+  }
   let exit: YrdCliExitCode = 0
   const setExit = (code: YrdCliExitCode) => {
     exit = maxExit(exit, code)
