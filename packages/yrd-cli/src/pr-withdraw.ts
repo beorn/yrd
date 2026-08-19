@@ -4,6 +4,7 @@ import { currentChangeRev, isLivePR, changeDeliveryState, changeNeedsAuthor, cha
 import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { requireLinearRootTip } from "./linear-tip.ts"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
@@ -424,6 +425,26 @@ export async function preflightRemerge(
   }
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
+  // The linear-root rule, at the gate: a merge-tip head is refused HERE, at
+  // the first evaluation, with the SAME refusal the submit path raises — not
+  // after the whole preflight investment (2026-08-19: a merge-tip carrier ran
+  // this gate clean and was refused only at submit). Subsumed heads are
+  // exempt: their payload already landed, and a linear rebuild of spent
+  // content is advice that cannot succeed — withdrawal stays the verdict.
+  if (!subsumed) {
+    const parents =
+      git.parents ??
+      raiseFailure(
+        "configuration",
+        "recut-preflight-git-facts",
+        "yrd: installed PR Git facts do not provide commit-parent evidence",
+      )
+    requireLinearRootTip(
+      `PR '${pr.id}' revision ${source.n} head '${candidateHeadSha}'`,
+      pr.branch,
+      await parents(candidateHeadSha),
+    )
+  }
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
   const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
@@ -672,6 +693,14 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
     },
     isAncestor(ancestor: string, descendant: string): boolean {
       return git(["merge-base", "--is-ancestor", ancestor, descendant], [1]).code === 0
+    },
+    parents(sha: string): readonly string[] {
+      const raw = git(["rev-list", "--parents", "-n", "1", sha], []).stdout.trim().toLowerCase()
+      const [commit, ...parents] = raw.split(/\s+/u)
+      if (commit !== sha.toLowerCase()) {
+        throw new Error(`yrd: git rev-list --parents of ${short(sha)} returned '${commit ?? "no commit"}', expected the commit itself`)
+      }
+      return parents
     },
     mergeTree(baseSha: string, headSha: string): string | undefined {
       const args = ["merge-tree", "--write-tree", baseSha, headSha] as const

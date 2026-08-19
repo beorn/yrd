@@ -140,6 +140,8 @@ function harness(
       isAncestor: async () => verdict === "SUBSUMED-WITHDRAW",
       mergeTree: async () => "tree-merged",
       treeOf: async () => (verdict === "SUBSUMED-WITHDRAW" ? "tree-merged" : "tree-base"),
+      // Linear by default: the preflight linear-root gate counts parents.
+      parents: async () => [TARGET],
       pinDistance: async () => ({ sourceOnly: 0, targetOnly: verdict === "FRESH-NOOP" ? 0 : 3 }),
       patchMatch: async () => ({}),
     }),

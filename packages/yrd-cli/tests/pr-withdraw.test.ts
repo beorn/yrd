@@ -423,6 +423,9 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
         return BASE_TREE
       },
     }),
+    // Linear by default: the preflight linear-root gate consults parent count,
+    // and a scenario about merge tips overrides this with two parents.
+    parents: () => [BASE_SHA],
     pinDistance: () => ({ sourceOnly: 0, targetOnly: 3 }),
     patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
     ...overrides,
@@ -769,6 +772,31 @@ describe("pr recut --preflight", () => {
       },
     })
     expect((await Array.fromAsync(app.events())).length).toBe(before)
+  })
+
+  it("refuses a merge-tip head at the preflight gate with the submit-path linear-root refusal", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "topic/merge-tip", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    const output = outputIO({
+      pruneGit: () =>
+        remergePreflightGit({
+          mergeTree: () => OTHER_TREE,
+          parents: (sha) => (sha === HEAD_SHA ? [BASE_SHA, HEAD2_SHA] : [BASE_SHA]),
+        }),
+    })
+
+    // Measured 2026-08-19: a merge-tip carrier ran the whole preflight gate
+    // CLEAN (verdict RECUT) and was refused only later, at submit, by the
+    // linear-root rule — the gate passed work the landing path cannot land.
+    // The gate must raise the SAME refusal at the first evaluation.
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io)).toBe(1)
+    const failure = JSON.parse(output.stderr())
+    expect(failure).toMatchObject({ failure: { code: "merge-tip-carrier" } })
+    expect(failure.failure.cause).toContain("is a merge commit with 2 parents")
+    expect(failure.failure.cause).toContain("Yrd requires a linear root carrier")
+    // The envelope splits the trailing drill into the machine-readable
+    // resolution; assert the remedy survives somewhere in the failure.
+    expect(JSON.stringify(failure)).toContain("yrd pr submit topic/merge-tip")
   })
 
   it("applies RECUT and records a re-derivable result", async () => {
