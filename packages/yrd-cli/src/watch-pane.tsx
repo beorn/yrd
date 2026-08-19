@@ -25,8 +25,8 @@ import { formatChangeRevisionSelector, changeRevisionNumber, type BaysState, typ
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailChangeList,
+  QueueTopLine,
   QueueDetailRunChangeBlocks,
-  QueueDetailTitle,
   QueueShowView,
   QueueStatusNotice,
   QueueTimelineView,
@@ -636,7 +636,7 @@ function QueueChangeDiffView({ diff }: { diff: QueueChangeDiff | undefined }) {
       </Box>
     )
   }
-  const summary = `Diff +${diff.additions} / -${diff.deletions} ${["li", "nes"].join("")}`
+  const summary = `Diff +${diff.additions} −${diff.deletions}`
   const fold = expanded ? "▼" : "▶"
   return (
     <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: onToggle } : {})}>
@@ -704,7 +704,6 @@ function QueueDetailChangeSection({
     <Box flexDirection="column" minWidth={0} flexShrink={0}>
       {showFacts ? (
         <QueueDetailRunChangeBlocks
-          titleAbove
           {...(data === undefined ? {} : { data })}
           {...(row === undefined ? {} : { row })}
           rows={rows}
@@ -738,6 +737,7 @@ export function QueueWorkflowStepTabs({
   runRows = [],
   runDetails = [],
   diffs = [],
+  runLabel,
 }: {
   data?: QueueShowData
   row?: QueueTimelineProjectedRow
@@ -750,6 +750,8 @@ export function QueueWorkflowStepTabs({
   runRows?: readonly QueueTimelineProjectedRow[]
   runDetails?: readonly QueueShowData[]
   diffs?: readonly QueueChangeDiff[]
+  /** The run's queue label for the status box border (item 39). */
+  runLabel?: string
 }) {
   const names = useMemo(() => (data === undefined ? [] : queueStepNames(data)), [data])
   // The PR/submission overview remains tab 0, ahead of the real step tabs.
@@ -828,7 +830,12 @@ export function QueueWorkflowStepTabs({
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       {data === undefined ? (
         <>
-          <QueueStatusNotice {...(row === undefined ? {} : { row })} runDetails={runDetails} live={active} />
+          <QueueStatusNotice
+            {...(row === undefined ? {} : { row })}
+            runDetails={runDetails}
+            live={active}
+            {...(runLabel === undefined ? {} : { runLabel })}
+          />
           <QueueDetailChangeList data={data} rows={runRows} prs={prs} />
           <QueueDetailChangeSection
             {...(row === undefined ? {} : { row })}
@@ -846,6 +853,7 @@ export function QueueWorkflowStepTabs({
             data={data}
             runDetails={runDetails}
             live={active}
+            {...(runLabel === undefined ? {} : { runLabel })}
           />
           <QueueDetailChangeList data={data} rows={runRows} prs={prs} />
           <Box height={1} flexShrink={0} />
@@ -931,15 +939,6 @@ export function QueueWorkflowStepTabs({
       )}
     </Box>
   )
-}
-
-/** The selected PR's linked issue for the PR-scoped pane title. */
-function selectedDetailIssue(
-  prs: readonly PR[],
-  selectedPr: string | undefined,
-  fallbackPr: string | undefined,
-): string | undefined {
-  return prs.find((candidate) => candidate.id === (selectedPr ?? fallbackPr))?.issue
 }
 
 type QueueWatchCursorMode = "follow-newest" | "auto-follow-run" | "fixed-row"
@@ -1235,7 +1234,8 @@ const QUEUE_WATCH_HELP: ReadonlyArray<readonly [key: string, action: string]> = 
   ["g", "action position ↔ absolute top"],
   ["G", "absolute bottom"],
   ["j / k · ↑ / ↓", "move the cursor"],
-  ["1 - 9", "show / hide a queue by its legend label"],
+  ["1 - 9", "toggle a queue's pill on / off"],
+  ["a", "everything on — every queue, every status"],
   ["Enter / Esc", "open / close detail"],
   ["?", "close this help"],
 ]
@@ -1293,24 +1293,37 @@ function QueueWatchFooter({
 }
 
 /**
- * The watch pane's own top line (operator ruling 2026-08-18, item 12):
- * `YRD MERGE QUEUE` left, the repository this snapshot's Journal projects
- * muted and right-aligned — `for /hh`. Sits above both the QUEUE and DETAIL
- * panes (and above the QUEUE tab's own "QUEUE main"/"QUEUES" label), since it
- * identifies the whole pane rather than either side of the split. Renders
- * identically whether or not a projection has loaded yet, so it never
- * flashes in partway through the first snapshot.
+ * The watch frame's own top line (operator rulings 2026-08-18, items
+ * 30/32/32b/33): `YRD QUEUES` plus the queue pills — the whole queue chrome
+ * in one row. The pills carry each queue's digit accelerator, config handle,
+ * and pretty `path ⎇ branch` identity, so the old right-aligned `for /hh`
+ * half (item 12) and the `QUEUE main ROOT /hh` header row below it are both
+ * gone: the identity they carried lives ON the pills now (item 32b dropped
+ * the address side as redundant). Sits above both the QUEUE and DETAIL panes
+ * since it identifies the whole frame; renders before the first projection
+ * loads (title only) so it never flashes in partway.
  */
-function QueueWatchTopLine({ repositoryRoot }: Readonly<{ repositoryRoot?: string }>) {
+function QueueWatchTopLine({
+  snapshot,
+  visibleQueues,
+  onToggleQueue,
+  onShowAll,
+  allActive,
+}: Readonly<{
+  snapshot: QueueWatchSnapshot
+  visibleQueues: ReadonlySet<string>
+  onToggleQueue: (base: string) => void
+  onShowAll: () => void
+  allActive: boolean
+}>) {
   return (
-    <Box height={1} flexDirection="row" justifyContent="space-between" flexShrink={0} minWidth={0}>
-      <Text bold>YRD MERGE QUEUE</Text>
-      {repositoryRoot === undefined ? null : (
-        <Text color="$fg-muted" wrap="truncate">
-          for {repositoryRoot}
-        </Text>
-      )}
-    </Box>
+    <QueueTopLine
+      queues={snapshot.projection?.queues ?? []}
+      visibleQueues={visibleQueues}
+      onToggleQueue={onToggleQueue}
+      onShowAll={onShowAll}
+      allActive={allActive}
+    />
   )
 }
 
@@ -1336,22 +1349,29 @@ export function QueueWatchFrame({
       ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)
       : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
   )
-  // Every queue is shown by default and a digit FILTERS TO that queue — the
-  // same select-only idiom as the status pills' lowercase o/r/d/f, not a
-  // toggle (operator ruling 2026-08-18, item 9; supersedes the 2026-08-13
-  // toggle-off directive this replaced). `undefined` means no filter is
-  // active — every queue this projection currently has, tracked dynamically
-  // — while a concrete Set is a specific choice pinned to those bases, so a
-  // snapshot that relabels (a queue appears or drains away) cannot silently
-  // move the operator's choice onto a different queue.
+  // Queues are ON/OFF filters (operator ruling 2026-08-18, item 32,
+  // restoring the 2026-08-13 toggle): every queue is shown by default and a
+  // digit or pill click TOGGLES that queue's membership. `undefined` means no
+  // filter is active — every queue this projection currently has, tracked
+  // dynamically — while a concrete Set is a specific choice pinned to those
+  // bases, so a snapshot that relabels (a queue appears or drains away)
+  // cannot silently move the operator's choice onto a different queue. A
+  // toggle that lands back on the full set collapses to `undefined` so the
+  // dynamic default resumes.
   const [shownQueues, setShownQueues] = useState<ReadonlySet<string> | undefined>(undefined)
   const queues = snapshot.projection?.queues
   const visibleQueues = useMemo(
     () => new Set(shownQueues === undefined ? (queues ?? []).map(({ base }) => base) : shownQueues),
     [queues, shownQueues],
   )
-  const selectOnlyQueue = (base: string): void => {
-    setShownQueues(new Set([base]))
+  const toggleQueue = (base: string): void => {
+    setShownQueues((current) => {
+      const everyBase = (queues ?? []).map((queue) => queue.base)
+      const next = new Set(current ?? everyBase)
+      if (next.has(base)) next.delete(base)
+      else next.add(base)
+      return everyBase.length > 0 && everyBase.every((candidate) => next.has(candidate)) ? undefined : next
+    })
   }
   const showAllQueues = (): void => {
     setShownQueues(undefined)
@@ -1367,6 +1387,12 @@ export function QueueWatchFrame({
     setVisibleBuckets(new Set(QUEUE_TIMELINE_STATUS_BUCKETS))
     showAllQueues()
   }
+  // The `all` pill reads "on" only when NEITHER filter kind is narrowed —
+  // it clears both at once, so it only lights when both already show
+  // everything (item 32; the rule the bottom row's centered pill carried).
+  const allFiltersActive =
+    QUEUE_TIMELINE_STATUS_BUCKETS.every((bucket) => visibleBuckets.has(bucket)) &&
+    (queues ?? []).every(({ base }) => visibleQueues.has(base))
   const toggleBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets((current) => {
       const next = new Set(current)
@@ -1488,13 +1514,12 @@ export function QueueWatchFrame({
     if (character === "d") selectOnlyBucket("done")
     if (character === "f") selectOnlyBucket("failed")
     if (character === "a") showAll()
-    // 1..9 select ONLY that queue by its legend label — the digits the legend
-    // bolds, the same idiom as o/r/d/f selecting only their bucket. Only
-    // labels this projection actually has respond, so a stray digit is inert
-    // rather than filtering to a queue that does not exist.
+    // 1..9 TOGGLE that queue by its pill digit (item 32 — the toggle idiom
+    // restored; digits are filter accelerators, never names). Only digits
+    // this projection actually has respond, so a stray digit is inert.
     if (/^[1-9]$/u.test(character)) {
       const queue = snapshot.projection.queues.find(({ label }) => label === Number(character))
-      if (queue !== undefined) selectOnlyQueue(queue.base)
+      if (queue !== undefined) toggleQueue(queue.base)
       return
     }
     if (character === "O") toggleBucket("open")
@@ -1554,9 +1579,11 @@ export function QueueWatchFrame({
     detailData?.prs.map((member) => member.id) ?? (detailPr === undefined ? [] : [detailPr]),
   )
   const detailFullPrs = allFullPrs.filter((candidate) => detailMemberIds.has(candidate.id))
-  // The pane title is PR-scoped (user directive 2026-07-21): it carries the
-  // selected PR's linked issue beside the pr#id identity.
-  const detailTitleIssue = selectedDetailIssue(allFullPrs, selectedRow?.pr, detailPr)
+  // The status box border leads with the queue's config handle (item 36's
+  // label-primary run naming), base branch when none is declared.
+  const detailQueueBase = detailData?.base ?? selectedProjectedRow?.base
+  const detailQueue = snapshot.projection?.queues.find((queue) => queue.base === detailQueueBase)
+  const detailRunLabel = detailQueue === undefined ? detailQueueBase : (detailQueue.name ?? detailQueue.base)
   const timelineOuterColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timelineColumns =
     snapshot.projection === undefined
@@ -1596,8 +1623,6 @@ export function QueueWatchFrame({
         visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={selectOnlyBucket}
-        onShowAll={showAll}
-        onSelectQueue={selectOnlyQueue}
         listRef={timelineListRef}
       />
     )
@@ -1622,13 +1647,20 @@ export function QueueWatchFrame({
           compact
           active={detailOpen}
           highlightPr={selectedRow?.pr}
+          {...(detailRunLabel === undefined ? {} : { runLabel: detailRunLabel })}
         />
       </Box>
     )
   if (snapshot.projection === undefined) {
     return (
       <Box position="relative" flexDirection="column">
-        <QueueWatchTopLine {...(snapshot.repositoryRoot === undefined ? {} : { repositoryRoot: snapshot.repositoryRoot })} />
+        <QueueWatchTopLine
+          snapshot={snapshot}
+          visibleQueues={visibleQueues}
+          onToggleQueue={toggleQueue}
+          onShowAll={showAll}
+          allActive={allFiltersActive}
+        />
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
         {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
@@ -1677,10 +1709,9 @@ export function QueueWatchFrame({
       paddingX={QUEUE_PANE_PADDING_X}
       userSelect="contain"
     >
-      <QueueDetailTitle
-        {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
-        {...(detailTitleIssue === undefined ? {} : { issue: detailTitleIssue })}
-      />
+      {/* No identity title row (operator ruling 2026-08-18, item 23): the
+          pane's top is the RUN status box itself, rendered by the detail
+          body; each member box beneath carries its own identity header. */}
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {detail}
       </Box>
@@ -1696,7 +1727,13 @@ export function QueueWatchFrame({
       minHeight={0}
       userSelect="text"
     >
-      <QueueWatchTopLine {...(snapshot.repositoryRoot === undefined ? {} : { repositoryRoot: snapshot.repositoryRoot })} />
+      <QueueWatchTopLine
+        snapshot={snapshot}
+        visibleQueues={visibleQueues}
+        onToggleQueue={toggleQueue}
+        onShowAll={showAll}
+        allActive={allFiltersActive}
+      />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>

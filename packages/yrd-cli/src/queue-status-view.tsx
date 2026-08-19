@@ -59,6 +59,7 @@ import {
   useWindowSize,
 } from "silvery"
 import { queueAdmissionPositions } from "./queue-admission-index.ts"
+import { friendlyRepositoryPath, queuePrettyName, queueRunLabel, shortUniqueQueuePaths } from "./queue-naming.ts"
 import {
   artifactHref as locationHref,
   artifactLabel,
@@ -112,7 +113,7 @@ import {
   type QueueTerminalMemberFact,
   type QueueTerminalOutcome,
 } from "./queue-terminal-facts.ts"
-import { TitledBox } from "./queue-view-primitives.tsx"
+import { MarkerRow, TitledBox } from "./queue-view-primitives.tsx"
 import type { JournalRetentionObservation } from "./types.ts"
 
 export type { QueueTerminalFact, QueueTerminalMemberFact, QueueTerminalOutcome } from "./queue-terminal-facts.ts"
@@ -176,18 +177,8 @@ function runIdValue(run: string): string {
   return run.replace(/^R(?=\d+$)/u, "")
 }
 
-function RunId({
-  base,
-  run,
-  queueLabel,
-  ...props
-}: { base: string; run: string; queueLabel?: number } & QueueNounIdProps) {
-  return (
-    <>
-      {queueLabel === undefined ? null : <Text {...props}>{`${String(queueLabel)}:`}</Text>}
-      <NounId noun={base} value={runIdValue(run)} {...props} />
-    </>
-  )
+function RunId({ base, run, ...props }: { base: string; run: string } & QueueNounIdProps) {
+  return <NounId noun={base} value={runIdValue(run)} {...props} />
 }
 
 export type QueueStatusResult = QueueSummary &
@@ -4303,61 +4294,73 @@ type TimelineCellLayout = Readonly<{
   includeDate: boolean
 }>
 
-type TimelineRunCell = Readonly<{ text: string; color?: string }>
+/**
+ * The RUN cell under the label-primary naming model (items 34/36/38, killing
+ * the digit-prefix `1:main#2173` form — digits are unstable filter
+ * accelerators and never appear in names):
+ *
+ * - a run renders `label#N` plus its state glyph (`code#23423 ✓`); the label
+ *   is the queue's config handle, base branch when none is declared, and it
+ *   ELIDES when exactly one queue is visible (context supplies it) — never
+ *   in the ALL view;
+ * - batch members share one run: the id renders bright on the FIRST member
+ *   row and the rest carry a muted `·` continuation (membership visible, no
+ *   repetition noise);
+ * - a pre-run row shows a muted em-dash, never blank.
+ */
+type TimelineRunCellModel =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "continuation" }>
+  | Readonly<{ kind: "run"; label: string; number: string; glyph: string; color: string }>
 
-// The RUN(id) part of the RUN·PR identity cell: main#N (or #N on the compact
-// tier); a run that has not started yet renders a plain muted dash (item 9),
-// never blank.
-function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): TimelineRunCell {
-  void compact
-  if (row.run === undefined) return { text: "-", color: "$fg-muted" }
-  // `1:main#2173` on a multi-queue watch (user directive 2026-08-13). The
-  // label is a PREFIX, never part of the id: `main#2173` stays the copyable
-  // resolver alias, so a reader can still paste the cell's id half anywhere
-  // yrd accepts a run.
-  return { text: `${queueLabelPrefix(row)}${formatNounId(row.base, runIdValue(row.run))}` }
+function timelineRunCellModel(
+  row: QueueTimelineProjectedRow,
+  runLabels: ReadonlyMap<string, string>,
+  showQueueLabel: boolean,
+  continuesRun: boolean,
+): TimelineRunCellModel {
+  if (row.run === undefined) return { kind: "none" }
+  if (continuesRun) return { kind: "continuation" }
+  const label = showQueueLabel ? (runLabels.get(row.base) ?? row.base) : ""
+  return {
+    kind: "run",
+    label,
+    number: `#${runIdValue(row.run)}`,
+    glyph: row.glyph,
+    color: timelineStatusColor(row),
+  }
 }
 
-/** `N:` for a row in a multi-queue projection, empty for a single-queue one. */
-function queueLabelPrefix(row: Pick<QueueTimelineProjectedRow, "queueLabel">): string {
-  return row.queueLabel === undefined ? "" : `${String(row.queueLabel)}:`
+function timelineRunCellText(model: TimelineRunCellModel): string {
+  if (model.kind === "none") return "—"
+  if (model.kind === "continuation") return "·"
+  return `${model.label}${model.number} ${model.glyph}`
+}
+
+/** Config-handle (or base) run label per base, from the projection's queues (item 36). */
+function timelineRunLabels(queues: readonly QueueTimelineQueue[]): ReadonlyMap<string, string> {
+  return new Map(queues.map((queue) => [queue.base, queueRunLabel(queue)]))
+}
+
+/** The label half elides only when exactly ONE queue is visible — context
+ * supplies it; the ALL view always spells it (item 34). */
+function timelineShowQueueLabel(visibleQueueCount: number): boolean {
+  return visibleQueueCount !== 1
+}
+
+/** Adjacent rows sharing one run id are that run's batch members in display
+ * order; only strict adjacency counts, so an interleaved row restarts the
+ * bright id (item 38). */
+function timelineRunContinues(
+  row: QueueTimelineProjectedRow,
+  previous: QueueTimelineProjectedRow | undefined,
+): boolean {
+  return row.run !== undefined && previous !== undefined && previous.run === row.run && previous.base === row.base
 }
 
 function timelineBranchLabel(branch: string): string {
   const legacyWorkBranchPrefix = ["ta", "sk/"].join("")
   return branch.startsWith(legacyWorkBranchPrefix) ? branch.slice(legacyWorkBranchPrefix.length) : branch
-}
-
-/**
- * The DETAIL pane's flush-top identity. The detail view is FOR a PR (user
- * directive 2026-07-21, supersedes Round-6 Revision A's run-as-unit title):
- * the left side is `pr#id.rev` plus its linked ISSUE, for run rows and
- * pending rows alike. Run identity/timing and status live in the composite
- * header below, so this row never carries a competing corner status.
- */
-export function QueueDetailTitle({ row, issue }: { row?: QueueTimelineProjectedRow; issue?: string }) {
-  if (row === undefined) {
-    return (
-      <Text bold color="$fg-warning" wrap="truncate">
-        No queue row selected.
-      </Text>
-    )
-  }
-  if (row.run !== undefined && row.candidateId === undefined) {
-    throw new Error(`yrd: queue timeline Run '${row.run}' is missing its Candidate identity`)
-  }
-  const presentIssue = presentFact(issue)
-  return (
-    <Box flexDirection="row" width="100%" minWidth={0} overflow="hidden" flexShrink={0}>
-      <QueueChangeId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
-      {presentIssue === undefined ? null : (
-        <>
-          <Text flexShrink={0}> </Text>
-          <IssueValue issue={presentIssue} flex />
-        </>
-      )}
-    </Box>
-  )
 }
 
 /**
@@ -4468,7 +4471,14 @@ function noticeHeadline(
   // "queued" here). Every `data !== undefined` case is handled above or in
   // the state checks that follow, so this never overrides a Run-driven
   // headline.
-  if (data === undefined && row !== undefined) return timelineStatusCell(row).word
+  if (data === undefined && row !== undefined) {
+    const word = timelineStatusCell(row).word
+    // The queue position is a LIVE fact and the status box is its single
+    // home (operator ruling 2026-08-18, item 31): `queued #1` joins the
+    // headline rather than riding a metadata row.
+    if (word === "queued" && row.position !== undefined) return `queued #${row.position}`
+    return word
+  }
   if (state === "running") return "checking"
   if (state === "rejected") return "failed"
   if (state === "needs-author") return "needs author"
@@ -4627,6 +4637,84 @@ export function queueStatusNotice(
 }
 
 /**
+ * ONE derivation for a run's step lines, shared by the status box (item 39)
+ * and the workflow step tabs — the two surfaces can never drift. Each step
+ * contributes its LAST attempt row (the tabs' own rule): glyph + name +
+ * duration, an `active` flag for the ag-code pulse, and for failed steps the
+ * severity color plus the remedy inline (failure summary, then the first
+ * linked artifact as the evidence pointer).
+ */
+export type QueueRunStepFact = Readonly<{
+  step: string
+  status: string
+  glyph: string
+  color: StatusPresentationColor
+  duration: string
+  active: boolean
+  failed: boolean
+  remedy?: string
+}>
+
+export function queueRunStepFacts(data: Pick<QueueShowData, "steps">): readonly QueueRunStepFact[] {
+  const names = [...new Set(data.steps.map((row) => row.step))]
+  return names.flatMap((name) => {
+    const rep = data.steps.filter((row) => row.step === name).at(-1)
+    if (rep === undefined) return []
+    const failed = rep.status === "failed" || rep.status === "lost" || rep.taskStatus === "blocked"
+    const active = rep.status === "running" || rep.status === "waiting"
+    const presentation = statusPresentation(rep.status)
+    const evidence = rep.locations[0]
+    const evidenceText =
+      evidence === undefined
+        ? undefined
+        : (evidence.display ?? ("path" in evidence.location ? evidence.location.path : evidence.location.url))
+    const remedy =
+      !failed || rep.failure === undefined
+        ? undefined
+        : `${rep.failure.summary}${evidenceText === undefined ? "" : ` (${evidenceText})`}`
+    return [
+      {
+        step: name,
+        status: rep.status,
+        glyph: presentation.glyph,
+        color: presentation.color,
+        duration: rep.duration === "-" ? "" : rep.duration,
+        active,
+        failed,
+        ...(remedy === undefined ? {} : { remedy }),
+      },
+    ]
+  })
+}
+
+/**
+ * Generalized run presentation (operator ruling 2026-08-18, item 37m): the
+ * data layer shapes runs around a KIND so a deployment run (rollout phases as
+ * steps) or a future workflow run reuses the same status-box skeleton without
+ * display-code changes. Today's journal only mints integration-queue runs;
+ * the discriminant exists so the next kind is a data change, not a redesign.
+ */
+export type QueueRunPresentationKind = "integration" | "deployment" | "workflow"
+
+export type QueueRunPresentation = Readonly<{
+  kind: QueueRunPresentationKind
+  /** Border identity, e.g. `RUN code#23423` (deploys would name their environment). */
+  title: string
+  steps: readonly QueueRunStepFact[]
+}>
+
+export function queueRunPresentation(
+  data: Pick<QueueShowData, "steps" | "base" | "run">,
+  runLabel?: string,
+): QueueRunPresentation {
+  return {
+    kind: "integration",
+    title: `RUN ${runLabel ?? data.base}#${runIdValue(data.run)}`,
+    steps: queueRunStepFacts(data),
+  }
+}
+
+/**
  * The detail pane's top status box (operator spec item 1): one TitledBox
  * integrating what were two separate elements — the RUN identity/timing
  * header and the status notice. The border carries no left title, only the
@@ -4641,56 +4729,77 @@ export function QueueStatusNotice({
   data,
   runDetails = [],
   live = false,
+  runLabel,
 }: {
   row?: QueueTimelineProjectedRow
   data?: QueueShowData
   runDetails?: readonly QueueShowData[]
   live?: boolean
+  /** The run's queue label (config handle, base fallback) for the border identity. */
+  runLabel?: string
 }) {
   const stepP50Ms = historicalStepP50Ms(runningStepName(row, data), data?.run, runDetails)
   const notice = queueStatusNotice(row, data, { stepP50Ms })
   if (notice === undefined) return null
   const timingRows = data === undefined ? [] : queueDetailRunTimingRows(data, row)
-  // The queue label leads here too (operator ruling 2026-08-18, item 11 —
-  // RUN identifiers show the queue first in list AND detail): `1:main#2345`,
-  // reusing the same `queueLabelPrefix` the list rows already apply so the
-  // two surfaces can never drift onto different formats.
+  const steps = data === undefined ? [] : queueRunStepFacts(data)
+  // Identity on the border (item 39): `RUN <label>#N` — label-primary run
+  // naming (item 36), the same `queueRunLabel` fallback the list cells use,
+  // so the two surfaces can never drift onto different formats.
   const titleRight =
-    data === undefined
-      ? undefined
-      : `RUN ${queueLabelPrefix({ queueLabel: row?.queueLabel })}${formatNounId(data.base, runIdValue(data.run))}`
+    data === undefined ? undefined : `RUN ${runLabel ?? data.base}#${runIdValue(data.run)}`
+  const glyphNode = (
+    live && notice.state === "running" ? (
+      <Pulse synchronized colors={[notice.color, "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS} bold flexShrink={0}>
+        {notice.glyph}
+      </Pulse>
+    ) : (
+      <Text bold color={notice.color} flexShrink={0}>
+        {notice.glyph}
+      </Text>
+    )
+  )
   return (
     <TitledBox title="" {...(titleRight === undefined ? {} : { titleRight })} borderColor={notice.color}>
-      <Box flexDirection="row" minWidth={0}>
-        {live && notice.state === "running" ? (
-          <Pulse
-            synchronized
-            colors={[notice.color, "$fg-muted"]}
-            intervalMs={AG_PULSE_INTERVAL_MS}
-            bold
-            flexShrink={0}
-          >
-            {notice.glyph}
-          </Pulse>
-        ) : (
-          <Text bold color={notice.color} flexShrink={0}>
-            {notice.glyph}
-          </Text>
-        )}
+      {/* Hanging markers throughout (item 29a): the glyph sits in a 2-cell
+          gutter and every body line — headline, explanation, clocks, step
+          rows — aligns to ONE text column, wrapped text hanging off it. */}
+      <MarkerRow marker={glyphNode}>
         <Text bold color={notice.color} wrap="wrap" minWidth={0}>
-          {" "}
           {notice.headline}
         </Text>
-      </Box>
-      <Box paddingLeft={2} minWidth={0}>
+      </MarkerRow>
+      <MarkerRow>
         <Text color={notice.color} wrap="wrap" minWidth={0}>
           {notice.explanation}
         </Text>
-      </Box>
+      </MarkerRow>
       {timingRows.map((timing) => (
-        <Text key={timing} wrap="truncate">
-          {timing}
-        </Text>
+        <MarkerRow key={timing}>
+          <Text wrap="truncate">{timing}</Text>
+        </MarkerRow>
+      ))}
+      {/* One line per step (item 39): hanging glyph + name + duration; the
+          active step pulses in the ag-code idiom; a failed step takes the
+          box's severity color WITH its remedy inline. The same derivation
+          feeds the workflow step tabs, so the two can never disagree. */}
+      {steps.map((step) => (
+        <MarkerRow
+          key={step.step}
+          marker={
+            step.active ? (
+              <ActivityPulse live={live}>{step.glyph}</ActivityPulse>
+            ) : (
+              <Text color={step.color}>{step.glyph}</Text>
+            )
+          }
+        >
+          <Text wrap="wrap" minWidth={0}>
+            <Text color={step.failed ? step.color : step.active ? "$fg-info" : undefined}>{step.step}</Text>
+            {step.duration === "" ? null : <Text color="$fg-muted"> {step.duration}</Text>}
+            {step.remedy === undefined ? null : <Text color={step.color}> — {step.remedy}</Text>}
+          </Text>
+        </MarkerRow>
       ))}
     </TitledBox>
   )
@@ -4795,12 +4904,13 @@ function timelineCellLayout(
   rows: readonly QueueTimelineProjectedRow[],
   includeDate: boolean,
   columns: number,
+  runCells: readonly TimelineRunCellModel[],
 ): TimelineCellLayout {
   const compact = columns <= 80
   return {
     timeWidth: includeDate ? 19 : 8,
     statusWidth: Math.max(6, ...rows.map((row) => timelineStatusCell(row).word.length + 2)),
-    runWidth: Math.max(3, ...rows.map((row) => timelineRunCell(row, compact).text.length)),
+    runWidth: Math.max(3, ...runCells.map((model) => timelineRunCellText(model).length)),
     byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
     ageWidth: Math.max(3, ...rows.map((row) => timelineAgeCell(row).length)),
     runDurationWidth: Math.max(3, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length))),
@@ -5003,12 +5113,14 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
  */
 function TimelineProjectedRow({
   row,
+  runCell,
   cursor,
   hovered,
   layout,
   live,
 }: {
   row: QueueTimelineDisplayRow
+  runCell: TimelineRunCellModel
   cursor: boolean
   hovered: boolean
   layout: TimelineCellLayout
@@ -5016,7 +5128,6 @@ function TimelineProjectedRow({
 }) {
   const active = row.status === "running"
   const status = timelineStatusCell(row)
-  const runCell = timelineRunCell(row, layout.compact)
   const step = timelineStepCell(row)
   const runDuration = timelineTotalCell(row)
   // Selection forces the semantic pair on EVERY cell (user respec
@@ -5059,27 +5170,41 @@ function TimelineProjectedRow({
         </>
       }
       run={
-        // Real run ids share TIME's muted treatment (user respec 2026-07-15);
-        // run-less pending rows keep their info-colored `pending`.
-        row.run === undefined ? (
-          <Text color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate">
-            {runCell.text}
+        // Item 38: `label#N` + state glyph — the queue label muted, the run
+        // number bright, the glyph in the run's status color. Pre-run rows
+        // carry a muted em-dash; a batch member behind the first carries a
+        // muted `·` continuation instead of repeating the id.
+        runCell.kind === "none" ? (
+          <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
+            —
+          </Text>
+        ) : runCell.kind === "continuation" ? (
+          <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
+            ·
           </Text>
         ) : (
-          <RunId
-            base={row.base}
-            run={row.run}
-            {...(row.queueLabel === undefined ? {} : { queueLabel: row.queueLabel })}
-            color={forcedFg ?? runCell.color ?? "$fg-muted"}
-            wrap="truncate"
-          />
+          <Box flexDirection="row" minWidth={0} overflow="hidden">
+            {runCell.label === "" ? null : (
+              <Text color={forcedFg ?? "$fg-muted"} flexShrink={0}>
+                {runCell.label}
+              </Text>
+            )}
+            <Text color={forcedFg} wrap="truncate" minWidth={0}>
+              {runCell.number}
+            </Text>
+            <Text color={forcedFg ?? runCell.color} flexShrink={0}>
+              {" "}
+              {runCell.glyph}
+            </Text>
+          </Box>
         )
       }
       pr={
-        // The flexible cell folds the removed STEP column in (user directive
-        // 2026-07-16, item Q): `PR.rev  <branch-glyph> <branch> (<status>)`.
-        // The PR+revision id stays bold (item F); the parenthesized suffix is
-        // the live step (running) or terminal failure code, colorized by state.
+        // The CHANGES cell is `pr#id.rev <title>` (operator ruling 2026-08-18,
+        // item 28): the change's id then its TITLE, ellipsis-truncated — never
+        // the branch name, which lives only in the detail pane's per-change
+        // box header (`pr#id.rev ⎇ branch`). The live step / terminal failure
+        // code keeps its parenthesized colorized suffix (status, not identity).
         <>
           <QueueChangeId pr={row.pr} revision={row.revision} color={forcedFg} flexShrink={0} />
           {row.repeat?.collapsed === true ? (
@@ -5087,27 +5212,17 @@ function TimelineProjectedRow({
               {` ${timelineRepeatLabel(row.repeat)}`}
             </Text>
           ) : null}
-          {row.issue === undefined ? (
-            <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
-              <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
-                {BRANCH_ICON}
-              </Text>
-              <Text color={forcedFg} wrap="truncate" minWidth={0}>
+          <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Text color={forcedFg} wrap="truncate" minWidth={0} bgConflict="ignore">
+              {row.subject}
+            </Text>
+            {step.text === "" ? null : (
+              <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
                 {" "}
-                {timelineBranchLabel(row.branch)}
+                ({step.text})
               </Text>
-              {step.text === "" ? null : (
-                <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
-                  {" "}
-                  ({step.text})
-                </Text>
-              )}
-            </Box>
-          ) : (
-            <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
-              <IssueValue issue={row.issue} flex />
-            </Box>
-          )}
+            )}
+          </Box>
         </>
       }
       by={
@@ -5125,39 +5240,71 @@ function TimelineProjectedRow({
   )
 }
 
-// The QUEUE pane is headed by one TAB, not a titled box (user directive
-// 2026-07-16, item L). Wide headers keep that tab and the resolved root on one
-// row; narrow viewports may wrap the root to a second row so provenance remains
-// visible without wrapping the Tab text through the TIME/STATUS table header.
-function QueueTabsLine({
-  base,
-  queueCount = 1,
-  showLabel = true,
-}: {
-  base: string
-  /** How many queues the pane is showing; >1 stops the tab claiming one base. */
-  queueCount?: number
-  showLabel?: boolean
-}) {
-  // Naming ONE base while rows from several are listed below is a lie about
-  // scope, and it is the reading an operator trusts most. Multi-queue panes
-  // say QUEUES and let the legend on the filter row carry the names, which is
-  // where the operator put them (2026-08-13).
-  const label = queueCount > 1 ? "QUEUES" : `QUEUE ${base}`
-  return (
-    <Tabs value={base} isActive={false}>
-      <TabList>
-        <Tab value={base}>{showLabel ? label : base}</Tab>
-      </TabList>
-    </Tabs>
-  )
-}
-
+// Legacy summary rows (the non-projection dashboard) still name their root;
+// the path routes through the one user-friendly formatter (item 33).
 function QueueRepositoryRoot({ root }: { root: string | undefined }) {
   return root === undefined ? null : (
     <Text color="$fg-muted" wrap="truncate" flexShrink={0}>
-      ROOT {root}
+      ROOT {friendlyRepositoryPath(root)}
     </Text>
+  )
+}
+
+/**
+ * The one top line every queue surface leads with (operator rulings
+ * 2026-08-18, items 30/32/32b/33/36): the `YRD QUEUES` title, then the queue
+ * pills. Each pill is `digit label path ⎇ branch` — the digit filter
+ * accelerator, the config handle when one is declared, and the pretty
+ * rendering of the queue's FQN identity pair (shortest unique friendly
+ * path). ON pills are bright, OFF muted; a digit or click TOGGLES its queue,
+ * and the trailing `all` pill (interactive surfaces only) clears both filter
+ * kinds. The old `QUEUE main` / `ROOT /hh` header row is deleted — the pills
+ * ARE the queue identity now, so no second line repeats it.
+ */
+export function QueueTopLine({
+  queues,
+  visibleQueues,
+  onToggleQueue,
+  onShowAll,
+  allActive = true,
+}: {
+  queues: readonly QueueTimelineQueue[]
+  /** Bases currently shown; undefined means every queue (the default). */
+  visibleQueues?: ReadonlySet<string>
+  onToggleQueue?: (base: string) => void
+  onShowAll?: () => void
+  allActive?: boolean
+}) {
+  const shortPaths = shortUniqueQueuePaths(queues.flatMap((queue) => (queue.path === undefined ? [] : [queue.path])))
+  return (
+    <Box height={1} flexDirection="row" columnGap={2} flexShrink={0} minWidth={0} overflow="hidden">
+      <Text bold flexShrink={0}>
+        YRD QUEUES
+      </Text>
+      {queues.length === 0 ? null : (
+        <TogglePillGroup flexShrink={1} minWidth={0} overflow="hidden">
+          {queues.map((queue) => {
+            const pretty = queuePrettyName(
+              queue,
+              queue.path === undefined ? undefined : shortPaths.get(queue.path),
+            )
+            const handle = queue.name === undefined ? "" : `${queue.name} `
+            return (
+              <TogglePill
+                key={`${queue.path ?? ""}@${queue.base}`}
+                label={`${String(queue.label)} ${handle}${pretty}`}
+                boldFirstLetter
+                active={visibleQueues === undefined || visibleQueues.has(queue.base)}
+                onToggle={() => onToggleQueue?.(queue.base)}
+              />
+            )
+          })}
+          {onShowAll === undefined ? null : (
+            <TogglePill label="all" boldFirstLetter active={allActive} onToggle={() => onShowAll()} />
+          )}
+        </TogglePillGroup>
+      )}
+    </Box>
   )
 }
 
@@ -5906,43 +6053,6 @@ function TimelineFilterLine({
 }
 
 /**
- * The queue legend: one pill per queue, labelled `N:base` (operator ruling
- * 2026-08-18, item 9 — e.g. `1:code  2:pm`), left-aligned at the START of the
- * filter row. Every queue is shown by default and its digit FILTERS TO that
- * queue — the same select-only idiom as the status pills' lowercase o/r/d/f —
- * the bold leading digit doubling as the hotkey hint exactly as the bold
- * first letter does there. `all` (its own centered pill, rendered by the
- * caller) clears this alongside the status filters.
- *
- * A single-queue projection renders NOTHING here: there is no choice to offer,
- * and the QUEUE tab above already names it.
- */
-function TimelineQueueLegend({
-  queues,
-  visibleQueues,
-  onSelectQueue,
-}: {
-  queues: readonly QueueTimelineQueue[]
-  visibleQueues?: ReadonlySet<string>
-  onSelectQueue?: (base: string) => void
-}) {
-  if (queues.length < 2) return null
-  return (
-    <TogglePillGroup flexShrink={1} minWidth={0} overflow="hidden">
-      {queues.map(({ label, base }) => (
-        <TogglePill
-          key={base}
-          label={`${String(label)}:${base}`}
-          boldFirstLetter
-          active={visibleQueues === undefined || visibleQueues.has(base)}
-          onToggle={() => onSelectQueue?.(base)}
-        />
-      ))}
-    </TogglePillGroup>
-  )
-}
-
-/**
  * The one temporal-trust cue, `updated HH:MM:SS`. The snapshot clock is always
  * "now", so day qualification never applies. The QUEUE pane renders it flush
  * against the title border (its `flushTop` drops the top padding) so it reads
@@ -5980,8 +6090,6 @@ function ProjectedQueueTimeline({
   visibleQueues,
   expandedStorms,
   onSelectBucket,
-  onShowAll,
-  onSelectQueue,
   listRef,
 }: {
   repositoryRoot?: string
@@ -6003,8 +6111,6 @@ function ProjectedQueueTimeline({
   visibleQueues?: ReadonlySet<string>
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
-  onShowAll?: () => void
-  onSelectQueue?: (base: string) => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
@@ -6017,12 +6123,6 @@ function ProjectedQueueTimeline({
   const rows = fillHeight ? displayRows : timelineRetainedRows(displayRows, projection.display.shown)
   const hiddenDisplayRows = Math.max(0, displayRows.length - rows.length)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
-  // The centered `all` pill (item 9) is active only when NEITHER filter kind
-  // is narrowed — it clears both at once, so it only reads as "on" when both
-  // already show everything.
-  const allFiltersActive =
-    QUEUE_TIMELINE_STATUS_BUCKETS.every((bucket) => buckets.has(bucket)) &&
-    (visibleQueues === undefined || projection.queues.every(({ base }) => visibleQueues.has(base)))
   // In the fill pane the TIME cell is time-of-day only (item 1) and the day is
   // carried by YYYY-MM-DD header rows (leading + per-boundary, below). The
   // one-shot print path is pinned: it keeps the inline-date TIME cell when the
@@ -6030,31 +6130,35 @@ function ProjectedQueueTimeline({
   const includeDate =
     !fillHeight &&
     rows.some((row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10))
-  const layout = timelineCellLayout(rows, includeDate, columns)
+  // One RUN-cell model per row, derived once against display ORDER: batch
+  // continuation needs each row's predecessor, and the label-elide rule needs
+  // the visible-queue count (items 34/38). "Visible" is the ON filter subset
+  // — a queue toggled on with no rows in the window still counts, so the ALL
+  // view never elides just because one queue happens to be quiet.
+  const runLabels = timelineRunLabels(projection.queues)
+  const visibleQueueCount = projection.queues.filter(
+    ({ base }) => visibleQueues === undefined || visibleQueues.has(base),
+  ).length
+  const showQueueLabel = timelineShowQueueLabel(visibleQueueCount)
+  const runCells = rows.map((row, index) =>
+    timelineRunCellModel(row, runLabels, showQueueLabel, timelineRunContinues(row, rows[index - 1])),
+  )
+  const layout = timelineCellLayout(rows, includeDate, columns, runCells)
   const { rows: viewportRows } = useWindowSize()
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
-        {paneChrome ? (
-          // Pane chrome (item L, 2026-07-16): the QUEUE pane is headed by its
-          // tab-style label (no surrounding box). Wide headers keep the resolved
-          // root on that row; narrow viewports wrap it to a second row so the
-          // provenance stays visible.
-          <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
-            <QueueTabsLine base={projection.base} queueCount={projection.queues.length} />
-            <QueueRepositoryRoot root={repositoryRoot} />
-            <Box flexGrow={1} flexBasis={0} minWidth={0} />
-            {/* The `updated HH:MM:SS` clock is gone from the live pane (user
-                directive 2026-07-21): the RUNNER box's always-on border timer
-                is the watch view's temporal-trust cue. One-shot prints below
-                keep the clock — a static snapshot has no ticking timer. */}
-          </Box>
-        ) : (
+        {paneChrome ? null : (
+          // One-shot prints lead with the same YRD QUEUES top line the live
+          // frame owns (items 30/33) — the old `QUEUE main` / `ROOT /hh`
+          // header row is deleted, the pills carry the queue identity — and
+          // keep the muted `updated HH:MM:SS` stamp on its own row beneath it
+          // (item 30's sub-point: the stamp survives, never on the top line;
+          // the live pane's temporal-trust cue stays the RUNNER border timer,
+          // user directive 2026-07-21). The live frame renders its top line
+          // itself, above the split, so `paneChrome` contributes no header.
           <>
-            <Box flexDirection="row" flexWrap="wrap" columnGap={1} minWidth={0}>
-              <QueueTabsLine base={projection.base} queueCount={projection.queues.length} />
-              <QueueRepositoryRoot root={repositoryRoot} />
-            </Box>
+            <QueueTopLine queues={projection.queues} />
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
               <QueueUpdatedClock now={projection.now} />
             </Box>
@@ -6113,6 +6217,7 @@ function ProjectedQueueTimeline({
                 const entry = (
                   <TimelineProjectedRow
                     row={row}
+                    runCell={runCells[index] ?? { kind: "none" }}
                     cursor={meta.isCursor}
                     hovered={meta.isHovered}
                     layout={layout}
@@ -6135,25 +6240,14 @@ function ProjectedQueueTimeline({
             the bottom; a non-empty fill pane grows its row block instead, so no
             spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
-        {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
-            order optional STATUS → header → rows → pills → STATS). Three
-            regions (operator ruling 2026-08-18, item 9): the queue legend +
-            "... N more"/retained coverage LEFT, the shared `all` pill
-            CENTERED (it clears both filter kinds, so it belongs to neither
-            cluster alone), the status pills RIGHT. In fill mode the coverage
-            degrades to EMPTY (the rows virtualize and scroll, so nothing is
-            permanently hidden — no "... 0 more"); the pills always render. */}
+        {/* The bottom row keeps ONLY the status pills, right-aligned
+            (operator ruling 2026-08-18, item 32) — the queue pills and the
+            `all` pill moved to the top line, which is where filtering by
+            queue now lives. One-shot prints keep their coverage facts
+            ("... N more" / retained horizon) on the left of this row; the
+            fill pane suppresses both (rows virtualize, nothing is hidden). */}
         <Box height={1} flexDirection="row" minWidth={0} overflow="hidden">
           <Box flexGrow={1} flexBasis={0} flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
-            {/* The queue legend takes the left slot of this row (user
-                directive 2026-08-13) — the same line as the status filters.
-                In the live fill pane both of that slot's previous occupants
-                are suppressed, so it was empty. */}
-            <TimelineQueueLegend
-              queues={projection.queues}
-              {...(visibleQueues === undefined ? {} : { visibleQueues })}
-              {...(onSelectQueue === undefined ? {} : { onSelectQueue })}
-            />
             {fillHeight || hiddenDisplayRows === 0 ? null : (
               <Text color="$fg-muted" wrap="truncate">
                 ... {hiddenDisplayRows} more
@@ -6165,12 +6259,7 @@ function ProjectedQueueTimeline({
               </Text>
             )}
           </Box>
-          <Box flexGrow={1} flexBasis={0} flexDirection="row" justifyContent="center" minWidth={0} flexShrink={0}>
-            <TogglePillGroup flexShrink={0}>
-              <TogglePill label="all" boldFirstLetter active={allFiltersActive} onToggle={() => onShowAll?.()} />
-            </TogglePillGroup>
-          </Box>
-          <Box flexGrow={1} flexBasis={0} flexDirection="row" justifyContent="flex-end" minWidth={0}>
+          <Box flexDirection="row" justifyContent="flex-end" minWidth={0} flexShrink={0}>
             <TimelineFilterLine projection={projection} buckets={buckets} onSelectBucket={onSelectBucket} />
           </Box>
         </Box>
@@ -6209,8 +6298,6 @@ export function QueueTimelineView({
   visibleQueues,
   expandedStorms,
   onSelectBucket,
-  onShowAll,
-  onSelectQueue,
   listRef,
 }: {
   repositoryRoot?: string
@@ -6232,8 +6319,6 @@ export function QueueTimelineView({
   visibleQueues?: ReadonlySet<string>
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
-  onShowAll?: () => void
-  onSelectQueue?: (base: string) => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
@@ -6259,8 +6344,6 @@ export function QueueTimelineView({
         visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={onSelectBucket}
-        onShowAll={onShowAll}
-        onSelectQueue={onSelectQueue}
         listRef={listRef}
       />
     )
@@ -6987,8 +7070,6 @@ type ChangeActivityEntry = Readonly<{
   at: string
   rank: number
   text: string
-  status?: StatusNoticeState
-  statusLabel?: string
   detail?: string
 }>
 
@@ -7028,24 +7109,32 @@ function changeTerminalLineageEntries(
   )
 }
 
+/** A check-request echo within this tolerance of its revision row is the same
+ * journal act seen twice; only a LATER (re-)request earns its own line. */
+const CHECK_REQUEST_ECHO_TOLERANCE_MS = 1_000
+
 function changeActivityEntries(
   pr: PR,
   runDetails: readonly QueueShowData[],
   currentRow: QueueTimelineProjectedRow | undefined,
 ): readonly ChangeActivityEntry[] {
+  void currentRow
   const entries: ChangeActivityEntry[] = []
   const revisions = pr.revs
+  // ONE line per revision (operator ruling 2026-08-18, item 31): a human
+  // verb only where a human acted — `submitted by @chief` — while a machine
+  // base-advance reads `re-merged onto <short-sha>` with no fabricated
+  // "submitted by -" beside it.
   for (const revision of revisions) {
     const submitted = revision.submittedAt !== undefined
     const activityAt = revision.submittedAt ?? revision.pushedAt
     if (revision.recut !== undefined) {
       entries.push({
         at: revision.pushedAt,
-        rank: 10,
-        text: `r${revision.n} recut of r${revision.recut.fromRevision}${
-          revision.baseSha === undefined ? "" : ` onto ${revision.baseSha.slice(0, 8)}`
-        }`,
+        rank: 20,
+        text: `r${revision.n} re-merged${revision.baseSha === undefined ? "" : ` onto ${revision.baseSha.slice(0, 8)}`}`,
       })
+      continue
     }
     entries.push({
       at: activityAt,
@@ -7053,22 +7142,21 @@ function changeActivityEntries(
       text: `r${revision.n} ${submitted ? "submitted" : "registered"} by ${revision.submitter ?? "-"}`,
     })
   }
+  // The mechanical `check requested` echo renders ONLY when its time differs
+  // from the revision row (a genuine re-request) — the same-transaction echo
+  // is noise (item 31). The record carries no failure state yet; when it
+  // does, a FAILED request must always render (failures never collapse).
   for (const request of pr.checkRequests) {
-    const currentQueued =
-      currentRow?.pr === pr.id &&
-      currentRow.revision === request.revision &&
-      (currentRow.status === "ready" || currentRow.status === "pending")
-    entries.push({
-      at: request.at,
-      rank: 30,
-      text: `r${request.revision} check requested`,
-      ...(currentQueued
-        ? {
-            status: "queued" as const,
-            statusLabel: `queued${currentRow.position === undefined ? "" : ` position ${currentRow.position}`}`,
-          }
-        : {}),
-    })
+    const revision = revisions.find((candidate) => candidate.n === request.revision)
+    const revisionAt = revision?.submittedAt ?? revision?.pushedAt
+    const revisionAtMs = revisionAt === undefined ? Number.NaN : Date.parse(revisionAt)
+    const requestAtMs = Date.parse(request.at)
+    const echoesRevisionRow =
+      Number.isFinite(revisionAtMs) &&
+      Number.isFinite(requestAtMs) &&
+      Math.abs(requestAtMs - revisionAtMs) <= CHECK_REQUEST_ECHO_TOLERANCE_MS
+    if (echoesRevisionRow) continue
+    entries.push({ at: request.at, rank: 30, text: `r${request.revision} check requested` })
   }
   for (const review of pr.reviews) {
     entries.push({
@@ -7087,6 +7175,9 @@ function changeActivityEntries(
     })
   }
 
+  // Run rows stay plain history facts: the outcome is part of the sentence,
+  // never a colored status chip fused onto the row (item 31 — the CURRENT
+  // run's live status lives in the status box, its single home).
   const representedRuns = new Set<string>()
   for (const data of runDetails) {
     const member = data.prs.find((candidate) => candidate.id === pr.id)
@@ -7098,9 +7189,9 @@ function changeActivityEntries(
     entries.push({
       at,
       rank: 60,
-      text: `r${member.revision} run ${formatNounId(data.base, runIdValue(data.run))}`,
-      status: state,
-      statusLabel: state === "failed" ? data.outcome : state,
+      text: `r${member.revision} run ${formatNounId(data.base, runIdValue(data.run))} ${
+        state === "failed" ? data.outcome : state
+      }`,
       ...(data.failure === undefined ? {} : { detail: data.failure.summary }),
     })
   }
@@ -7110,13 +7201,10 @@ function changeActivityEntries(
   for (const revision of revisions) {
     const terminal = revision.terminal
     if (terminal === undefined || representedRuns.has(`${revision.n}:${terminal.run}`)) continue
-    const state = terminal.kind === "integrated" ? "integrated" : terminal.kind === "canceled" ? "canceled" : "rejected"
     entries.push({
       at: terminal.at,
       rank: 60,
-      text: `r${revision.n}${terminal.run === undefined ? "" : ` run ${terminal.run}`}`,
-      status: state,
-      statusLabel: terminal.kind,
+      text: `r${revision.n}${terminal.run === undefined ? "" : ` run ${terminal.run}`} ${terminal.kind}`,
     })
   }
 
@@ -7133,26 +7221,17 @@ function QueueChangeActivity({ entries }: { entries: readonly ChangeActivityEntr
   if (entries.length === 0) return null
   return (
     <Box flexDirection="column" minWidth={0}>
-      {entries.map((entry, index) => {
-        const presentation = entry.status === undefined ? undefined : statusPresentation(entry.status)
-        return (
-          <Box key={`${entry.at}:${entry.rank}:${index}`} flexDirection="row" minWidth={0}>
-            <Text color="$fg-muted" flexShrink={0}>
-              {queueLogClock(entry.at, true, false)}{" "}
-            </Text>
-            <Text wrap="wrap" minWidth={0} bgConflict="ignore">
-              {entry.text}
-              {presentation === undefined ? null : (
-                <Text color={presentation.color}>
-                  {" "}
-                  {presentation.glyph} {entry.statusLabel ?? entry.status}
-                </Text>
-              )}
-              {entry.detail === undefined ? "" : ` — ${entry.detail}`}
-            </Text>
-          </Box>
-        )
-      })}
+      {entries.map((entry, index) => (
+        <Box key={`${entry.at}:${entry.rank}:${index}`} flexDirection="row" minWidth={0}>
+          <Text color="$fg-muted" flexShrink={0}>
+            {queueLogClock(entry.at, true, false)}{" "}
+          </Text>
+          <Text wrap="wrap" minWidth={0} bgConflict="ignore">
+            {entry.text}
+            {entry.detail === undefined ? "" : ` — ${entry.detail}`}
+          </Text>
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -7171,54 +7250,66 @@ function descriptionWithoutDuplicatedIssue(
   )
 }
 
-function changeAgeLabel(
-  pr: PR | undefined,
-  revision: number,
-  row: QueueTimelineProjectedRow | undefined,
-): string | undefined {
-  if (row?.ageMs === null || row?.ageMs === undefined) return undefined
-  const count = pr?.revs.filter((candidate) => candidate.n <= revision).length ?? 1
-  const countLabel = `${count} ${count === 1 ? "revision" : "revisions"}`
-  const total = `${mediaDuration(row.ageMs)} total`
-  if (row.queueWaitMs === null) return `${countLabel} · ${total}`
-  const currentLabel =
-    row.group === "pending"
-      ? "queued"
-      : row.group === "draft"
-        ? "registered"
-        : row.group === "running"
-          ? "waited"
-          : "waited"
-  return `${countLabel} · ${total} · r${revision} ${currentLabel} ${mediaDuration(row.queueWaitMs)}`
-}
+type ChangeMetadataFact = Readonly<{ key: string; value: string; render?: () => React.ReactElement }>
 
-function changeDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
-  const retained = pr.revs.find((candidate) => candidate.n === revision)
-  const checkRequest = pr.checkRequests.findLast(
-    (request) => request.revision === revision && request.headSha === retained?.head,
-  )
+/**
+ * The per-change metadata under the ratified design (operator ruling
+ * 2026-08-18, item 31): three blank-line-separated groups, no group labels,
+ * keys muted uppercase in one fixed-width column —
+ *
+ *   identity — ISSUE, BY (plus the change's own annotations: NOTE, DETAIL,
+ *     CORRELATION, REVIEWERS, COMPOSITION, REGRESSIONS);
+ *   dates — CREATED, UPDATED, COMMITS `first … · last … · N revisions`.
+ *     The clock halves are supplied by the pr-dates retrofit
+ *     ([[workedat-retrofit]]); until the record carries them only the
+ *     revision count renders;
+ *   code — HEAD `<short-sha> (rN)`, BASE, with the `▶ Diff +A −B` fold row
+ *     rendered last by the caller.
+ *
+ * LIVE facts deliberately have no row here: position joined the status-box
+ * headline, and Age · Runtime · Wait live on its timing line — the status
+ * box is their single home. The mechanical check-requested echo moved to
+ * HISTORY under its only-when-differing rule.
+ */
+function changeMetadataGroups(
+  pr: PR | undefined,
+  member: Readonly<{ id: string; revision: number; headSha: string; base?: string }>,
+  issue: string | undefined,
+  submitter: string | undefined,
+): readonly (readonly ChangeMetadataFact[])[] {
+  const retained = pr?.revs.find((candidate) => candidate.n === member.revision)
   const correlation = retained?.correlation
-  const note = presentFact(pr.note)
-  const detail = presentFact(pr.detail)
-  const requestedReviewers = pr.requestedReviewers ?? []
-  const facts: Readonly<{ key: string; value: string }>[] = [
+  const note = pr === undefined ? undefined : presentFact(pr.note)
+  const detail = pr === undefined ? undefined : presentFact(pr.detail)
+  const requestedReviewers = pr?.requestedReviewers ?? []
+  const by = presentFact(submitter ?? retained?.submitter)
+  const identity: ChangeMetadataFact[] = [
+    ...(issue === undefined ? [] : [{ key: "issue", value: issue, render: () => <IssueValue issue={issue} /> }]),
+    ...(by === undefined ? [] : [{ key: "by", value: by }]),
     ...(note === undefined ? [] : [{ key: "note", value: note }]),
     ...(detail === undefined ? [] : [{ key: "detail", value: detail }]),
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
-    { key: "head", value: retained?.head ?? changeHead(pr) },
-    { key: "base", value: retained?.base ?? pr.base },
+    ...(requestedReviewers.length === 0 ? [] : [{ key: "reviewers", value: requestedReviewers.join(", ") }]),
     ...(retained?.composition === undefined
       ? []
       : [{ key: "composition", value: boundedQueue(safeText(retained.composition), 160) }]),
-    ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
-    ...(checkRequest === undefined
-      ? []
-      : [{ key: "check requested", value: queueLogClock(checkRequest.at, false, false) }]),
-    ...((pr.regressions?.length ?? 0) === 0
+    ...(pr === undefined || (pr.regressions?.length ?? 0) === 0
       ? []
       : [{ key: "regressions", value: boundedQueue(safeText(pr.regressions), 160) }]),
   ]
-  return facts
+  const revisionCount = pr?.revs.filter((candidate) => candidate.n <= member.revision).length ?? 1
+  const dates: ChangeMetadataFact[] = [
+    // CREATED and UPDATED join this group when the pr-dates retrofit lands
+    // them on the record; fabricating them from other clocks would be the
+    // silent-fallback bug this file bans.
+    { key: "commits", value: `${revisionCount} ${revisionCount === 1 ? "revision" : "revisions"}` },
+  ]
+  const headSha = retained?.head ?? (pr === undefined ? member.headSha : changeHead(pr))
+  const code: ChangeMetadataFact[] = [
+    { key: "head", value: `${headSha.slice(0, 8)} (r${member.revision})` },
+    { key: "base", value: retained?.base ?? pr?.base ?? member.base ?? "-" },
+  ]
+  return [identity, dates, code].filter((group) => group.length > 0)
 }
 
 /** Shared by {@link QueueDetailChangeList} and {@link QueueDetailRunChangeBlocks}: the
@@ -7279,12 +7370,11 @@ export function QueueDetailChangeList({
 }
 
 /**
- * The PR-scoped detail header (user directive 2026-07-21, supersedes Round-6
- * Revision A v4's run-scoped member blocks): the detail view is FOR a PR, so
- * this block leads the pane body — branch under the identity title, then the
- * bold subject, then the chronological activity timeline, then the aligned
- * KEY/value facts. `titleAbove` drops the identity row when the pane title (see
- * QueueDetailTitle) already owns it.
+ * The per-change boxes of the detail pane (operator rulings 2026-08-18,
+ * items 23/25): the pane's top is the RUN status box, no identity row above
+ * it, so EVERY member's box — the cursor member included — carries its own
+ * `pr#id.rev ⎇ branch` header, then the bold subject, the reverse-
+ * chronological history, and the grouped metadata.
  */
 export function QueueDetailRunChangeBlocks({
   data,
@@ -7292,7 +7382,6 @@ export function QueueDetailRunChangeBlocks({
   rows,
   prs,
   runDetails = [],
-  titleAbove = false,
   position,
   renderDiff,
 }: {
@@ -7301,9 +7390,7 @@ export function QueueDetailRunChangeBlocks({
   rows: readonly QueueTimelineProjectedRow[]
   prs: readonly PR[]
   runDetails?: readonly QueueShowData[]
-  /** True when QueueDetailTitle renders the pr#id + ISSUE identity above. */
-  titleAbove?: boolean
-  /** Queue position for pending rows, rendered as one more KEY/value fact. */
+  /** Queue position for pending rows — reserved; the status box owns it now (item 31). */
   position?: number
   /** Diff slot for one change's box (operator spec item 4: "diff lines fronted
    * by a folding triangle marker"). Injected rather than owned here: the diff
@@ -7350,34 +7437,18 @@ export function QueueDetailRunChangeBlocks({
             : data?.status === "completed" && member.revision === changeRevisionNumber(pr)
               ? changeTerminalLineageEntries(pr, member.revision, runDetails)
               : changeActivityEntries(pr, runDetails, memberRow ?? row)
-        const age = changeAgeLabel(pr, member.revision, memberRow ?? row)
-        // Key:value metadata, all rendered one uniform way (operator spec item
-        // 4.e): every row is an upper-cased padded KEY then its value, `issue`
-        // included — only the value's element differs (a hyperlink instead of
-        // plain text), the same "special value, uniform row" idiom the EVIDENCE
-        // column already uses elsewhere in this file.
-        const facts: readonly Readonly<{ key: string; value: string; render?: () => React.ReactElement }>[] = [
-          ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
-          ...(issue === undefined ? [] : [{ key: "issue", value: issue, render: () => <IssueValue issue={issue} /> }]),
-          ...(age === undefined ? [] : [{ key: "age", value: age }]),
-          ...(pr === undefined ? [] : changeDetailFacts(pr, member.revision)),
-        ]
-        const factKeyWidth = Math.max(0, ...facts.map((fact) => fact.key.length)) + 2
-        // `titleAbove` means the pane's own title (QueueDetailTitle) already
-        // shows ONE pr#id.rev — the one the cursor row names — so only THIS
-        // member skips repeating it. A batched run's other members still
-        // need their own id here: the title never shows more than one.
-        const isTitledMember = titleAbove && row !== undefined && row.pr === member.id && row.revision === member.revision
+        const memberSubmitter = (memberRow ?? row)?.submitter
+        const metadataGroups = changeMetadataGroups(pr, member, issue, memberSubmitter)
+        const factKeyWidth =
+          Math.max(0, ...metadataGroups.flatMap((group) => group.map((fact) => fact.key.length))) + 2
         return (
           <TitledBox key={`${member.id}:${member.revision}:${member.headSha}`} title="" marginTop={index === 0 ? 0 : 1}>
-            {/* Header line (operator spec item 4.a): `pr#id.rev ⎇ branch`. */}
+            {/* Header line (items 4.a + 25): `pr#id.rev ⎇ branch` on EVERY
+                member's box, the cursor member included — the pane title no
+                longer carries any identity, so no member may skip its own. */}
             <Box flexDirection="row" minWidth={0}>
-              {isTitledMember ? null : (
-                <>
-                  <QueueChangeId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
-                  <Text flexShrink={0}> </Text>
-                </>
-              )}
+              <QueueChangeId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
+              <Text flexShrink={0}> </Text>
               <Text internal_dim flexShrink={0}>
                 {TIMELINE_BRANCH_ICON}
               </Text>
@@ -7400,10 +7471,10 @@ export function QueueDetailRunChangeBlocks({
                 <QueueChangeActivity entries={activity} />
               </>
             )}
-            {facts.length === 0 ? null : (
-              <>
+            {metadataGroups.map((group, groupIndex) => (
+              <Box key={`group:${groupIndex}`} flexDirection="column" minWidth={0}>
                 <Box height={1} flexShrink={0} />
-                {facts.map((fact, factIndex) => (
+                {group.map((fact, factIndex) => (
                   <Box key={`${fact.key}:${factIndex}`} flexDirection="row" minWidth={0}>
                     <Text color="$fg-muted" flexShrink={0}>
                       {fact.key.toUpperCase().padEnd(factKeyWidth)}
@@ -7417,8 +7488,8 @@ export function QueueDetailRunChangeBlocks({
                     )}
                   </Box>
                 ))}
-              </>
-            )}
+              </Box>
+            ))}
             {renderDiff?.(member)}
           </TitledBox>
         )
