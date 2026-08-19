@@ -991,9 +991,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         runnable: false,
         reason: {
           code: "admission-refused",
-          message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue --apply`),
+          message: expect.stringContaining("Settled needs-person at 2026-01-01T00:10:00.000Z"),
         },
       })
+      expect(app.queue.eligibility(pr.id).reason?.message).not.toContain("yrd pr recut")
       expect(app.queue.eligibility(pr.id).reason?.message).toContain("authored-gitlink")
     }
 
@@ -1006,7 +1007,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       runnable: false,
       reason: {
         code: "admission-refused",
-        message: expect.stringContaining("yrd pr recut PR1 --preflight --queue --apply"),
+        message: expect.stringContaining("Settled needs-person at 2026-01-01T00:10:00.000Z"),
       },
     })
 
@@ -1025,6 +1026,62 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await replayed.queue.run({}, runtime)
     expect(replayed.queue.eligibility("PR1")).toMatchObject({ checks: { status: "passed" } })
     expect(replayed.state().queues.admissionRefusals).toEqual({})
+  })
+
+  it("prints the settlement, never the recut drill, once a refusal is settled needs-person", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = ""
+    await using app = await createApp(
+      refuseForever(() => blocked),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/settled-judgment")
+    blocked = pr.id
+    await app.queue.run({}, runtime)
+    const revision = app.bays.pr(pr.id)!.revs.at(-1)!
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: revision.n,
+      headSha: revision.head,
+      disposition: "needs-person",
+      reason: "the recut certificate requires human judgment",
+    })
+
+    // classifyRefusalRemedy already judged this refusal to have NO mechanical
+    // remedy — the settlement is that judgment made durable. The per-PR message
+    // still printed the recut drill after it, sending readers back into the
+    // loop the settlement had closed; the settled case must print the judgment
+    // fact instead (2026-08-19).
+    const message = app.queue.eligibility(pr.id).reason?.message
+    expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
+    expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
+    expect(message).toContain("the recut certificate requires human judgment")
+    expect(message).not.toContain("yrd pr recut")
+  })
+
+  it("prints the settlement for a still-submitted PR whose refusal auto-settled needs-person", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = ""
+    // recut-base-diverged is structurally permanent (auto-settles needs-person
+    // on the first refusal) and is NOT a needs-author code, so the PR stays
+    // `submitted` — the exact shape the resident's settleNeedsPerson leaves
+    // behind, reaching the settled admission-refusal verdict directly.
+    await using app = await createApp(
+      refuseForever(() => blocked, {
+        code: "recut-base-diverged",
+        message: (pr) => `PR '${pr}' revision 1 certifies a base the authoritative candidate base never descended from`,
+      }),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/settled-submitted")
+    blocked = pr.id
+    await app.queue.run({}, runtime)
+    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toMatchObject({ disposition: "needs-person" })
+
+    const message = app.queue.eligibility(pr.id).reason?.message
+    expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
+    expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
+    expect(message).not.toContain("yrd pr recut")
   })
 })
 

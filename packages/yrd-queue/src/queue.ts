@@ -7486,6 +7486,34 @@ function needsAuthorMessage(pr: DeepReadonly<PR>, result: JobError): string {
   return `PR '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`
 }
 
+/** The action line of an admission-refused eligibility message. A settled
+ * refusal is the remedy classifier's judgment made durable: no mechanical
+ * remedy exists, so printing the recut drill after it points the reader back
+ * into the loop the settlement closed (2026-08-19). Print the judgment fact
+ * instead; the drill is only for refusals nothing has settled. */
+function admissionRefusalNext(
+  pr: string,
+  settlement: Readonly<{ disposition: string; reason: string; settledAt: string }> | undefined,
+): string {
+  return settlement === undefined
+    ? `Next: yrd pr recut ${pr} --preflight --queue --apply`
+    : `Settled ${settlement.disposition} at ${settlement.settledAt}: ${settlement.reason}; ` +
+        "a person decides the next step — no mechanical remedy applies"
+}
+
+/** The current revision's durable settlement, when the refusal ledger holds one
+ * for EXACTLY the revision the caller is looking at. A row naming a replaced
+ * revision proves nothing about the current one. */
+function settledAdmissionRefusal(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+): Readonly<{ disposition: string; reason: string; settledAt: string }> | undefined {
+  const refusal = state.queues.admissionRefusals[pr.id]
+  if (refusal?.settlement === undefined) return undefined
+  const revision = currentChangeRev(pr)
+  return refusal.revision === revision.n && refusal.headSha === revision.head ? refusal.settlement : undefined
+}
+
 function ChangeEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
@@ -7532,7 +7560,7 @@ function ChangeEligibility(
           code: "admission-refused",
           message:
             `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
-            `${admission.receipt.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
+            `${admission.receipt.message}.\n${admissionRefusalNext(pr.id, settledAdmissionRefusal(state, pr))}`,
         })
       }
       const result = changeNeedsAuthor(pr)?.receipt
@@ -7599,8 +7627,8 @@ function ChangeEligibility(
         code: "admission-refused",
         message:
           `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
-          `${admissionRefusal.reason}. ${admissionRefusal.settlement.reason}.\n` +
-          `Next: yrd pr recut ${pr.id} --preflight --queue --apply`,
+          `${admissionRefusal.reason}.\n` +
+          admissionRefusalNext(pr.id, admissionRefusal.settlement),
       })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
