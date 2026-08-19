@@ -8,7 +8,7 @@ import * as z from "zod"
 import { GitRefSchema, GitShaSchema } from "./model.ts"
 
 const RECEIVER_VERSION = 1 as const
-const RECEIPT_VERSION = 1 as const
+const RESULT_VERSION = 1 as const
 const MANAGED_HOOK_MARKER = "// yrd-managed-receiver-hook:1"
 const MANAGED_HOOK_PREFIX = "#!/usr/bin/env bun\n// yrd-managed-receiver-hook:"
 const BRANCH_PREFIX = "refs/heads/"
@@ -25,7 +25,7 @@ const REPOSITORY_ENV =
 
 type Environment = Record<string, string | undefined>
 type HookMode = "pre-receive" | "post-receive"
-type ReceiptState = "prepared" | "pending"
+type ResultState = "prepared" | "pending"
 
 const TextSchema = z.string().trim().min(1)
 const ReceiverRefUpdateSchema = z
@@ -52,18 +52,18 @@ const ReceiverTargetSchema = z
     branch: GitRefSchema.optional(),
   })
   .strict()
-const ReceiverReceiptSchema = z
+const ReceiverResultSchema = z
   .object({
-    version: z.literal(RECEIPT_VERSION),
+    version: z.literal(RESULT_VERSION),
     id: z.string().regex(/^[0-9a-f]{64}$/u),
     receivedAt: z.iso.datetime({ offset: true }),
     ref: TextSchema,
     branch: GitRefSchema,
     /**
      * The change name parsed out of a `refs/for/<base>/<change>` push. Stored
-     * so the receipt's identity check stays a pure function of the receipt:
-     * without it, a submit receipt could only be checked against its base, and
-     * a receipt that cannot fully check its own ref is a receipt that can lie.
+     * so the result's identity check stays a pure function of the result:
+     * without it, a submit result could only be checked against its base, and
+     * a result that cannot fully check its own ref is a result that can lie.
      */
     change: TextSchema.optional(),
     oldSha: GitShaSchema,
@@ -79,7 +79,7 @@ const ReceiverReceiptSchema = z
 
 export type ReceiverRefUpdate = z.infer<typeof ReceiverRefUpdateSchema>
 export type ReceiverTarget = z.infer<typeof ReceiverTargetSchema>
-export type ReceiverReceipt = z.infer<typeof ReceiverReceiptSchema>
+export type ReceiverResult = z.infer<typeof ReceiverResultSchema>
 export type GitPushReceiver = Readonly<{
   version: typeof RECEIVER_VERSION
   receiverPath: string
@@ -89,8 +89,8 @@ export type GitPushReceiver = Readonly<{
   objectFormat: "sha1" | "sha256"
   shaLength: 40 | 64
   process: Pick<Process, "run">
-  prepare(input: string | readonly ReceiverRefUpdate[], options: ReceiverHookOptions): Promise<ReceiverReceipt[]>
-  finalize(input: string | readonly ReceiverRefUpdate[], options: ReceiverHookOptions): Promise<ReceiverReceipt[]>
+  prepare(input: string | readonly ReceiverRefUpdate[], options: ReceiverHookOptions): Promise<ReceiverResult[]>
+  finalize(input: string | readonly ReceiverRefUpdate[], options: ReceiverHookOptions): Promise<ReceiverResult[]>
   drain(
     options: ReceiverHookOptions & { intake: DurableReceiverIntake; lockTimeoutMs?: number },
   ): Promise<ReceiverDrainResult>
@@ -110,8 +110,8 @@ export type ResolveReceiverTarget = (
   intent?: ReceiverSubmitIntent,
 ) => ReceiverTarget | null | undefined | Promise<ReceiverTarget | null | undefined>
 
-/** Intake must atomically deduplicate receipt.id with its own durable event. */
-export type DurableReceiverIntake = (receipt: Readonly<ReceiverReceipt>) => void | Promise<void>
+/** Intake must atomically deduplicate result.id with its own durable event. */
+export type DurableReceiverIntake = (result: Readonly<ReceiverResult>) => void | Promise<void>
 export type ReceiverHookOptions = {
   resolveTarget: ResolveReceiverTarget
   intake?: DurableReceiverIntake
@@ -292,19 +292,19 @@ async function prepareReceiverUpdates(
   receiver: GitPushReceiver,
   input: string | readonly ReceiverRefUpdate[],
   options: ReceiverHookOptions,
-): Promise<ReceiverReceipt[]> {
+): Promise<ReceiverResult[]> {
   const clock = options.clock ?? (() => new Date().toISOString())
   const created: string[] = []
-  const receipts: ReceiverReceipt[] = []
+  const results: ReceiverResult[] = []
   try {
     for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
       const update = ReceiverRefUpdateSchema.parse(value)
-      const receipt = makeReceipt(update, await authorize(receiver, update, options, "before"), clock)
-      const stored = await storeReceipt(receiver, "prepared", receipt)
+      const result = makeResult(update, await authorize(receiver, update, options, "before"), clock)
+      const stored = await storeResult(receiver, "prepared", result)
       if (stored.created) created.push(stored.path)
-      receipts.push(receipt)
+      results.push(result)
     }
-    return receipts
+    return results
   } catch (cause) {
     for (const path of created) await rm(path, { force: true })
     if (created.length > 0) await syncDir(receiver.inboxDir)
@@ -316,36 +316,36 @@ async function finalizeReceiverUpdates(
   receiver: GitPushReceiver,
   input: string | readonly ReceiverRefUpdate[],
   options: ReceiverHookOptions,
-): Promise<ReceiverReceipt[]> {
+): Promise<ReceiverResult[]> {
   const clock = options.clock ?? (() => new Date().toISOString())
-  const receipts: ReceiverReceipt[] = []
+  const results: ReceiverResult[] = []
   for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
     const update = ReceiverRefUpdateSchema.parse(value)
-    const id = receiptId(update)
-    const path = receiptPath(receiver, "prepared", id)
-    let receipt: ReceiverReceipt
+    const id = resultId(update)
+    const path = resultPath(receiver, "prepared", id)
+    let result: ReceiverResult
     if (await entry(path)) {
-      receipt = await readReceipt(path, id)
-      const stored = updateOf(receipt)
+      result = await readResult(path, id)
+      const stored = updateOf(result)
       check(
         stored.oldSha === update.oldSha && stored.newSha === update.newSha && stored.ref === update.ref,
-        `prepared receipt '${id}' does not match post-receive input`,
+        `prepared result '${id}' does not match post-receive input`,
       )
       const current = await refValue(receiver, update.ref, options.env)
       check(
         current === update.newSha,
         `post-receive ref '${update.ref}' is ${current ?? "missing"}, expected ${update.newSha}`,
       )
-      await validateStored(receiver, receipt, options)
+      await validateStored(receiver, result, options)
     } else {
-      receipt = makeReceipt(update, await authorize(receiver, update, options, "after"), clock)
-      await storeReceipt(receiver, "prepared", receipt)
+      result = makeResult(update, await authorize(receiver, update, options, "after"), clock)
+      await storeResult(receiver, "prepared", result)
     }
-    await moveReceipt(receiver, receipt, "prepared", "pending")
-    receipts.push(receipt)
+    await moveResult(receiver, result, "prepared", "pending")
+    results.push(result)
   }
   if (options.intake) await receiver.drain({ ...options, intake: options.intake })
-  return receipts
+  return results
 }
 
 async function drainReceiverInbox(
@@ -353,41 +353,41 @@ async function drainReceiverInbox(
   options: ReceiverHookOptions & { intake: DurableReceiverIntake; lockTimeoutMs?: number },
 ): Promise<ReceiverDrainResult> {
   await mkdir(receiver.inboxDir, { recursive: true, mode: 0o700 })
-  const result: ReceiverDrainResult = { delivered: [], failed: [], ambiguous: [] }
+  const drain: ReceiverDrainResult = { delivered: [], failed: [], ambiguous: [] }
   const exclusive = createExclusive(join(receiver.inboxDir, "drain-lock"), {
     timeoutMs: options.lockTimeoutMs ?? 0,
     pollIntervalMs: 10,
   })
   return exclusive.run(async () => {
-    await recoverPrepared(receiver, options, result)
+    await recoverPrepared(receiver, options, drain)
     const blocked = new Set<string>()
-    for (const { path, receipt } of await pendingReceipts(receiver, result)) {
-      if (blocked.has(receipt.branch)) {
-        result.failed.push({
-          id: receipt.id,
-          error: `blocked by an earlier failed receipt for branch '${receipt.branch}'`,
+    for (const { path, result } of await pendingResults(receiver, drain)) {
+      if (blocked.has(result.branch)) {
+        drain.failed.push({
+          id: result.id,
+          error: `blocked by an earlier failed result for branch '${result.branch}'`,
         })
         continue
       }
       try {
-        await validateStored(receiver, receipt, options)
-        await options.intake(receipt)
+        await validateStored(receiver, result, options)
+        await options.intake(result)
         await rm(path)
         await syncDir(receiver.inboxDir)
-        result.delivered.push(receipt.id)
+        drain.delivered.push(result.id)
       } catch (cause) {
-        blocked.add(receipt.branch)
-        result.failed.push({ id: receipt.id, error: message(cause) })
+        blocked.add(result.branch)
+        drain.failed.push({ id: result.id, error: message(cause) })
       }
     }
-    return result
+    return drain
   })
 }
 
 export async function runReceiverHookFromEnvironment(
   mode: HookMode,
   options: ReceiverHookOptions & { input?: string; process: Pick<Process, "run"> },
-): Promise<ReceiverReceipt[]> {
+): Promise<ReceiverResult[]> {
   const env = options.env ?? process.env
   check(env.GIT_DIR, "GIT_DIR is missing in receive-hook environment")
   const receiver = await loadGitPushReceiver(resolve(process.cwd(), env.GIT_DIR), options.process)
@@ -399,7 +399,7 @@ export async function runReceiverHookFromEnvironment(
 
 type Result = { code: number; stdout: string; stderr: string }
 type ExecOptions = { env?: Environment; allowFailure?: boolean }
-type StoredReceipt = { path: string; receipt: ReceiverReceipt }
+type StoredResult = { path: string; result: ReceiverResult }
 const GIT_TIMEOUT_MS = 30_000
 
 function check(condition: unknown, detail: string): asserts condition {
@@ -823,19 +823,19 @@ async function authorize(
   return intent === undefined ? { branch, target } : { branch, target, intent }
 }
 
-function receiptId(update: ReceiverRefUpdate): string {
+function resultId(update: ReceiverRefUpdate): string {
   return createHash("sha256").update(`${update.ref}\0${update.oldSha}\0${update.newSha}`).digest("hex")
 }
 
-function makeReceipt(
+function makeResult(
   update: ReceiverRefUpdate,
   authorized: { branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent },
   clock: () => string,
-): ReceiverReceipt {
+): ReceiverResult {
   const { branch, target, intent } = authorized
   return {
-    version: RECEIPT_VERSION,
-    id: receiptId(update),
+    version: RESULT_VERSION,
+    id: resultId(update),
     receivedAt: clock(),
     ref: update.ref,
     branch,
@@ -851,45 +851,45 @@ function makeReceipt(
   }
 }
 
-function updateOf(receipt: ReceiverReceipt): ReceiverRefUpdate {
-  return { oldSha: receipt.oldSha, newSha: receipt.headSha, ref: receipt.ref }
+function updateOf(result: ReceiverResult): ReceiverRefUpdate {
+  return { oldSha: result.oldSha, newSha: result.headSha, ref: result.ref }
 }
 
-function receiptPath(receiver: GitPushReceiver, state: ReceiptState, id: string): string {
+function resultPath(receiver: GitPushReceiver, state: ResultState, id: string): string {
   return join(receiver.inboxDir, `${id}.${state}.json`)
 }
 
-function sameReceipt(existing: ReceiverReceipt, expected: ReceiverReceipt, path: string): void {
+function sameResult(existing: ReceiverResult, expected: ReceiverResult, path: string): void {
   check(
     JSON.stringify({ ...existing, receivedAt: undefined }) === JSON.stringify({ ...expected, receivedAt: undefined }),
-    `receipt collision at '${path}'`,
+    `result collision at '${path}'`,
   )
 }
 
-async function linkReceipt(source: string, destination: string, receipt: ReceiverReceipt): Promise<boolean> {
+async function linkResult(source: string, destination: string, result: ReceiverResult): Promise<boolean> {
   try {
     await link(source, destination)
     return true
   } catch (cause) {
     if (code(cause) !== "EEXIST") throw cause
-    sameReceipt(await readReceipt(destination, receipt.id), receipt, destination)
+    sameResult(await readResult(destination, result.id), result, destination)
     return false
   }
 }
 
-async function storeReceipt(
+async function storeResult(
   receiver: GitPushReceiver,
-  state: ReceiptState,
-  receipt: ReceiverReceipt,
+  state: ResultState,
+  result: ReceiverResult,
 ): Promise<{ path: string; created: boolean }> {
-  const path = receiptPath(receiver, state, receipt.id)
+  const path = resultPath(receiver, state, result.id)
   if (await entry(path)) {
-    sameReceipt(await readReceipt(path, receipt.id), receipt, path)
+    sameResult(await readResult(path, result.id), result, path)
     return { path, created: false }
   }
-  const temporary = await durableTemp(receiver.inboxDir, receipt.id, `${JSON.stringify(receipt)}\n`, 0o600)
+  const temporary = await durableTemp(receiver.inboxDir, result.id, `${JSON.stringify(result)}\n`, 0o600)
   try {
-    const created = await linkReceipt(temporary, path, receipt)
+    const created = await linkResult(temporary, path, result)
     if (created) await syncDir(receiver.inboxDir)
     return { path, created }
   } finally {
@@ -897,75 +897,75 @@ async function storeReceipt(
   }
 }
 
-function validateReceipt(value: unknown, id: string, path: string): ReceiverReceipt {
-  const parsed = ReceiverReceiptSchema.safeParse(value)
-  check(parsed.success, `malformed receipt at '${path}'`)
-  const receipt = parsed.data
-  check(receipt.id === id, `malformed receipt at '${path}'`)
+function validateResult(value: unknown, id: string, path: string): ReceiverResult {
+  const parsed = ReceiverResultSchema.safeParse(value)
+  check(parsed.success, `malformed result at '${path}'`)
+  const result = parsed.data
+  check(result.id === id, `malformed result at '${path}'`)
   check(
-    receiptId(updateOf(receipt)) === id && receipt.branch === receipt.intake.branch,
-    `receipt identity mismatch at '${path}'`,
+    resultId(updateOf(result)) === id && result.branch === result.intake.branch,
+    `result identity mismatch at '${path}'`,
   )
   check(
-    receipt.headSha === receipt.intake.headSha && receiptRef(receipt) === receipt.ref,
-    `receipt intake mismatch at '${path}'`,
+    result.headSha === result.intake.headSha && resultRef(result) === result.ref,
+    `result intake mismatch at '${path}'`,
   )
-  return receipt
+  return result
 }
 
 /**
- * The one ref a receipt's own contents could have come from.
+ * The one ref a result's own contents could have come from.
  *
  * A branch push names its branch in the ref; a submit push names its base and
- * its change. Either way the ref is fully determined by fields the receipt
- * already carries, so this stays an equality — a receipt that cannot rebuild
- * its own ref is a receipt that has been edited.
+ * its change. Either way the ref is fully determined by fields the result
+ * already carries, so this stays an equality — a result that cannot rebuild
+ * its own ref is a result that has been edited.
  */
-function receiptRef(receipt: ReceiverReceipt): string {
-  if (receipt.change === undefined) return `${BRANCH_PREFIX}${receipt.branch}`
-  return `${SUBMIT_PREFIX}${receipt.intake.base}/${receipt.change}`
+function resultRef(result: ReceiverResult): string {
+  if (result.change === undefined) return `${BRANCH_PREFIX}${result.branch}`
+  return `${SUBMIT_PREFIX}${result.intake.base}/${result.change}`
 }
 
-async function readReceipt(path: string, id: string): Promise<ReceiverReceipt> {
+async function readResult(path: string, id: string): Promise<ReceiverResult> {
   try {
-    return validateReceipt(JSON.parse(await readFile(path, "utf8")), id, path)
+    return validateResult(JSON.parse(await readFile(path, "utf8")), id, path)
   } catch (cause) {
     if (cause instanceof SyntaxError) {
-      throw new Error(`yrd: receiver: invalid JSON in receipt '${path}': ${cause.message}`, { cause: cause })
+      throw new Error(`yrd: receiver: invalid JSON in result '${path}': ${cause.message}`, { cause: cause })
     }
     throw cause
   }
 }
 
-async function moveReceipt(
+async function moveResult(
   receiver: GitPushReceiver,
-  receipt: ReceiverReceipt,
-  from: ReceiptState,
-  to: ReceiptState,
+  result: ReceiverResult,
+  from: ResultState,
+  to: ResultState,
 ): Promise<void> {
-  await linkReceipt(receiptPath(receiver, from, receipt.id), receiptPath(receiver, to, receipt.id), receipt)
-  await rm(receiptPath(receiver, from, receipt.id), { force: true })
+  await linkResult(resultPath(receiver, from, result.id), resultPath(receiver, to, result.id), result)
+  await rm(resultPath(receiver, from, result.id), { force: true })
   await syncDir(receiver.inboxDir)
 }
 
 async function validateStored(
   receiver: GitPushReceiver,
-  receipt: ReceiverReceipt,
+  result: ReceiverResult,
   options: ReceiverHookOptions,
 ): Promise<void> {
-  validSha(receipt.oldSha, receiver.shaLength, "receipt old commit id", true)
-  validSha(receipt.headSha, receiver.shaLength, "receipt head commit id")
-  const update = updateOf(receipt)
+  validSha(result.oldSha, receiver.shaLength, "result old commit id", true)
+  validSha(result.headSha, receiver.shaLength, "result head commit id")
+  const update = updateOf(result)
   // The recheck must ask the SAME question the push asked. By now the bay a
   // submit opened exists, so a branch lookup would also answer — but only by
   // accident, and a resolver that answers only the intent would start failing
   // here for reasons that have nothing to do with authorization.
-  const intent = receipt.change === undefined ? undefined : { base: receipt.intake.base, name: receipt.change }
-  const resolved = await options.resolveTarget(receipt.branch, update, intent)
-  check(resolved, withIntakePolicy(`branch '${receipt.branch}' is no longer authorized for Yrd intake`, options))
+  const intent = result.change === undefined ? undefined : { base: result.intake.base, name: result.change }
+  const resolved = await options.resolveTarget(result.branch, update, intent)
+  check(resolved, withIntakePolicy(`branch '${result.branch}' is no longer authorized for Yrd intake`, options))
   const target = normalizeTarget(resolved, receiver)
-  const stored = receipt.intake
-  // Every field the receipt carries forward into intake is compared, including
+  const stored = result.intake
+  // Every field the result carries forward into intake is compared, including
   // the carrier branch: a submit resolver derives that branch rather than
   // reading it off the ref, so it is exactly the field that can move between
   // the push and the drain, and an unchecked field is an unauthorized one.
@@ -975,15 +975,15 @@ async function validateStored(
       stored.issue === target.issue &&
       stored.base === target.base &&
       stored.baseSha === target.baseSha &&
-      stored.branch === (target.branch ?? receipt.branch),
-    `authorization changed for receipt '${receipt.id}'`,
+      stored.branch === (target.branch ?? result.branch),
+    `authorization changed for result '${result.id}'`,
   )
-  await validBranch(receiver, receipt.branch, "intake branch")
-  await validBranch(receiver, receipt.intake.base, "base branch")
+  await validBranch(receiver, result.branch, "intake branch")
+  await validBranch(receiver, result.intake.base, "base branch")
   await validatePin(receiver, update, target, options.env)
 }
 
-async function receiptFiles(receiver: GitPushReceiver, state: ReceiptState): Promise<string[]> {
+async function resultFiles(receiver: GitPushReceiver, state: ResultState): Promise<string[]> {
   const suffix = `.${state}.json`
   return (await readdir(receiver.inboxDir))
     .filter((name) => name.endsWith(suffix))
@@ -1007,53 +1007,53 @@ async function refContains(receiver: GitPushReceiver, ref: string, commit: strin
 async function recoverPrepared(
   receiver: GitPushReceiver,
   options: ReceiverHookOptions,
-  result: ReceiverDrainResult,
+  drain: ReceiverDrainResult,
 ): Promise<void> {
-  for (const path of await receiptFiles(receiver, "prepared")) {
+  for (const path of await resultFiles(receiver, "prepared")) {
     const id = basename(path).slice(0, -".prepared.json".length)
     try {
-      const receipt = await readReceipt(path, id)
-      if (!(await refContains(receiver, receipt.ref, receipt.headSha))) {
-        result.ambiguous.push(id)
+      const result = await readResult(path, id)
+      if (!(await refContains(receiver, result.ref, result.headSha))) {
+        drain.ambiguous.push(id)
         continue
       }
-      await validateStored(receiver, receipt, options)
-      await moveReceipt(receiver, receipt, "prepared", "pending")
+      await validateStored(receiver, result, options)
+      await moveResult(receiver, result, "prepared", "pending")
     } catch (cause) {
-      result.failed.push({ id, error: message(cause) })
+      drain.failed.push({ id, error: message(cause) })
     }
   }
 }
 
-function receiptOrder(left: StoredReceipt, right: StoredReceipt): number {
+function resultOrder(left: StoredResult, right: StoredResult): number {
   return (
-    left.receipt.receivedAt.localeCompare(right.receipt.receivedAt) || left.receipt.id.localeCompare(right.receipt.id)
+    left.result.receivedAt.localeCompare(right.result.receivedAt) || left.result.id.localeCompare(right.result.id)
   )
 }
 
-function orderBranch(receipts: StoredReceipt[]): StoredReceipt[] {
-  const remaining = [...receipts].toSorted(receiptOrder)
-  const heads = new Set(receipts.map((item) => item.receipt.headSha))
-  const ordered: StoredReceipt[] = []
+function orderBranch(results: StoredResult[]): StoredResult[] {
+  const remaining = [...results].toSorted(resultOrder)
+  const heads = new Set(results.map((item) => item.result.headSha))
+  const ordered: StoredResult[] = []
   while (remaining.length > 0) {
-    const root = remaining.findIndex((item) => !heads.has(item.receipt.oldSha))
+    const root = remaining.findIndex((item) => !heads.has(item.result.oldSha))
     const [next] = remaining.splice(root < 0 ? 0 : root, 1)
     if (next === undefined) break
     ordered.push(next)
-    heads.delete(next.receipt.headSha)
+    heads.delete(next.result.headSha)
   }
   return ordered
 }
 
-async function pendingReceipts(receiver: GitPushReceiver, result: ReceiverDrainResult): Promise<StoredReceipt[]> {
-  const branches = new Map<string, StoredReceipt[]>()
-  for (const path of await receiptFiles(receiver, "pending")) {
+async function pendingResults(receiver: GitPushReceiver, drain: ReceiverDrainResult): Promise<StoredResult[]> {
+  const branches = new Map<string, StoredResult[]>()
+  for (const path of await resultFiles(receiver, "pending")) {
     const id = basename(path).slice(0, -".pending.json".length)
     try {
-      const receipt = await readReceipt(path, id)
-      branches.set(receipt.branch, [...(branches.get(receipt.branch) ?? []), { path, receipt }])
+      const result = await readResult(path, id)
+      branches.set(result.branch, [...(branches.get(result.branch) ?? []), { path, result }])
     } catch (cause) {
-      result.failed.push({ id, error: message(cause) })
+      drain.failed.push({ id, error: message(cause) })
     }
   }
   return [...branches.entries()]

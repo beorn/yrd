@@ -411,7 +411,7 @@ describe("drainYrdSettlementNotices", () => {
     ])
   })
 
-  it("quarantines an undated receipt rather than printing an ageless warning", () => {
+  it("quarantines an undated result rather than printing an ageless warning", () => {
     const dir = temporaryDir("yrd-notices-undated-")
     const body = `${JSON.stringify({ version: 1, owner: "@seat/1", commandCwd: "/repo", error: "boom" })}\n`
     writeFileSync(join(dir, "undated.json"), body)

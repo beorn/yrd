@@ -564,22 +564,22 @@ export function drainYrdSettlementNotices(noticeDir: string, write: (text: strin
         write(`yrd: cannot claim prior settlement warning ${path} (${detail(error)})\n`)
         continue
       }
-      let receipt: Record<string, unknown>
+      let result: Record<string, unknown>
       try {
-        receipt = JSON.parse(readFileSync(claimed, "utf8")) as Record<string, unknown>
+        result = JSON.parse(readFileSync(claimed, "utf8")) as Record<string, unknown>
         // `failedAt` is required, not optional: a warning that cannot say how
         // old it is reads as current, and operators act on stale ones. Both
-        // writers stamp it, so an undated or unparsable receipt is a legacy
+        // writers stamp it, so an undated or unparsable result is a legacy
         // artifact — quarantined with the rest of the unreadable evidence
         // rather than printed bare or rendered with a NaN age.
         if (
-          receipt?.["version"] !== 1 ||
-          typeof receipt["error"] !== "string" ||
-          typeof receipt["commandCwd"] !== "string" ||
-          typeof receipt["failedAt"] !== "string" ||
-          !Number.isFinite(Date.parse(receipt["failedAt"]))
+          result?.["version"] !== 1 ||
+          typeof result["error"] !== "string" ||
+          typeof result["commandCwd"] !== "string" ||
+          typeof result["failedAt"] !== "string" ||
+          !Number.isFinite(Date.parse(result["failedAt"]))
         ) {
-          throw new Error("invalid receipt shape")
+          throw new Error("invalid result shape")
         }
       } catch (error) {
         write(`yrd: invalid prior settlement warning ${path} (${detail(error)})\n`)
@@ -592,12 +592,12 @@ export function drainYrdSettlementNotices(noticeDir: string, write: (text: strin
         }
         continue
       }
-      const owner = typeof receipt["owner"] === "string" && receipt["owner"] !== "" ? ` for ${receipt["owner"]}` : ""
-      const failedAt = receipt["failedAt"] as string
+      const owner = typeof result["owner"] === "string" && result["owner"] !== "" ? ` for ${result["owner"]}` : ""
+      const failedAt = result["failedAt"] as string
       write(
         `warning: background work from a previous Yrd command${owner} failed in ` +
-          `${receipt["commandCwd"] as string} ${formatDuration(Date.now() - Date.parse(failedAt))} ago ` +
-          `(${failedAt}): ${receipt["error"] as string}\n`,
+          `${result["commandCwd"] as string} ${formatDuration(Date.now() - Date.parse(failedAt))} ago ` +
+          `(${failedAt}): ${result["error"] as string}\n`,
       )
       try {
         rmSync(claimed, { force: true })

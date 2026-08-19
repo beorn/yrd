@@ -1,5 +1,5 @@
 /**
- * @failure A scratch cleanup failure erases the per-pin component-main receipts produced by a successful actuator.
+ * @failure A scratch cleanup failure erases the per-pin component-main results produced by a successful actuator.
  * @level l2
  * @consumer @yrd/queue component-main settlement
  */
@@ -10,7 +10,7 @@ import { componentMainScratchCleanupFailure } from "../src/component-main-outcom
 
 const sha = (digit: string): string => digit.repeat(40)
 
-it("preserves successful per-pin receipts when scratch cleanup fails", () => {
+it("preserves successful per-pin results when scratch cleanup fails", () => {
   const outcome: JobResult<IntegrationProof> = {
     status: "completed",
     conclusion: "success",
@@ -38,7 +38,7 @@ it("preserves successful per-pin receipts when scratch cleanup fails", () => {
       message: "cleanup denied",
       evidence: {
         kind: "component-main-outcomes",
-        receipts: outcome.output.componentMains,
+        results: outcome.output.componentMains,
         refusals: [],
       },
     },

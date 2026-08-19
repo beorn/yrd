@@ -40,7 +40,7 @@ export type YrdDeliveryIdentity = Readonly<{
   job?: string
   attempt?: number
   runner?: string
-  receipt?: string
+  result?: string
   ref?: string
   command?: string
   cause?: string

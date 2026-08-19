@@ -979,7 +979,7 @@ describe("resident merge-into-latest", () => {
     expect(changeAdmission(failed)).toMatchObject({
       status: "refused",
       kind: "failure",
-      receipt: { code: "authored-failure" },
+      result: { code: "authored-failure" },
     })
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })

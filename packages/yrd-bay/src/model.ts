@@ -93,12 +93,12 @@ export const ChangeRejectedFactSchema = z.preprocess(normalizeV2Submitter, Chang
 export type ChangeRejectedFact = Readonly<z.infer<typeof ChangeRejectedFactSchema>>
 
 /** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the PR in the
- * submitted queue lifecycle and carries the exact typed receipt needed to fix
+ * submitted queue lifecycle and carries the exact typed result needed to fix
  * the branch in place. */
 export const ChangeNeedsAuthorFactSchema = z.preprocess(
   normalizeV2Submitter,
   ChangeRejectedFactObjectSchema.extend({
-    receipt: JobErrorSchema,
+    result: JobErrorSchema,
   }).strict(),
 )
 export type ChangeNeedsAuthorFact = Readonly<z.infer<typeof ChangeNeedsAuthorFactSchema>>
@@ -390,7 +390,7 @@ export type ChangeAdmissionStep = Readonly<{
   job: string
   status: "passed" | "refused"
   output?: JsonValue
-  receipt?: JobError
+  result?: JobError
 }>
 
 export const ChangeAdmissionStepSchema = z
@@ -400,18 +400,18 @@ export const ChangeAdmissionStepSchema = z
     job: TextSchema,
     status: z.enum(["passed", "refused"]),
     output: JsonSchema.optional(),
-    receipt: JobErrorSchema.optional(),
+    result: JobErrorSchema.optional(),
   })
   .strict()
   .superRefine((step, context) => {
-    if ((step.status === "passed") !== (step.receipt === undefined)) {
+    if ((step.status === "passed") !== (step.result === undefined)) {
       context.addIssue({
         code: "custom",
         message:
           step.status === "passed"
-            ? "a passed entry-check step cannot carry a receipt"
-            : "a failed entry-check step requires a receipt",
-        path: ["receipt"],
+            ? "a passed entry-check step cannot carry a result"
+            : "a failed entry-check step requires a result",
+        path: ["result"],
       })
     }
   }) as z.ZodType<ChangeAdmissionStep>
@@ -465,7 +465,7 @@ export type ChangeAdmissionRecord =
       candidate?: string
       steps: readonly ChangeAdmissionStep[]
       step: string
-      receipt: JobError
+      result: JobError
     }>
 
 export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
@@ -474,7 +474,7 @@ export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
     status: z.literal("refused"),
     kind: z.enum(["refusal", "failure", "infrastructure"]),
     step: TextSchema,
-    receipt: JobErrorSchema,
+    result: JobErrorSchema,
   }).strict(),
 ]) as z.ZodType<ChangeAdmissionRecord>
 export type ChangeAdmission = ChangeAdmissionRecord & Readonly<{ at: string }>
@@ -668,7 +668,7 @@ export type PR = Readonly<{
     at: string
     run: string
     step: string
-    receipt: JobError
+    result: JobError
     evidence?: string
     detail?: string
   }>
@@ -806,8 +806,8 @@ export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
     at: admission.at,
     run: failed?.job ?? `admission:${pr.id}:${currentChangeRev(pr).n}`,
     step: admission.step,
-    receipt: admission.receipt,
-    detail: admission.receipt.message,
+    result: admission.result,
+    detail: admission.result.message,
   }
 }
 
@@ -927,7 +927,7 @@ export function checkRequest(pr: PR): ChangeCheckRequest | undefined {
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
   prs: Readonly<Record<PRId, PR>>
-  receipts: Readonly<
+  results: Readonly<
     Record<
       string,
       Readonly<{
@@ -1043,7 +1043,7 @@ export function defaultBayBranch(name: string): string {
 }
 
 export function emptyBaysState(): BaysState {
-  return { byId: {}, prs: {}, receipts: {} }
+  return { byId: {}, prs: {}, results: {} }
 }
 
 function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {

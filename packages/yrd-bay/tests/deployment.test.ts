@@ -91,14 +91,14 @@ describe("createGitDeploymentStore", () => {
       process: recordingProcess,
     })
 
-    const receipt = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
+    const result = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
     try {
       const add = calls.find((argv) => argv.includes("worktree") && argv.includes("add"))
       expect(add).toEqual(expect.arrayContaining(["--lock", "--reason", "--detach", sha]))
       expect(calls.some((argv) => argv.includes("worktree") && argv.includes("lock"))).toBe(false)
       expect(existsSync(marker)).toBe(false)
     } finally {
-      await store.release(receipt)
+      await store.release(result)
     }
     expect(calls.some((argv) => argv.includes("worktree") && argv.includes("prune"))).toBe(false)
   })
@@ -135,8 +135,8 @@ describe("createGitDeploymentStore", () => {
       ).rejects.toThrow(/holder=deployment D1 worktree add/iu)
     } finally {
       release.resolve()
-      const receipt = await first
-      await firstStore.release(receipt)
+      const result = await first
+      await firstStore.release(result)
     }
   })
 
@@ -198,36 +198,36 @@ describe("createGitDeploymentStore", () => {
     await using process = createProcess()
     const store = await createGitDeploymentStore({ repo, deploymentsRoot: join(root, "deployments"), process })
 
-    const receipt = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "last-green" })
+    const result = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "last-green" })
 
-    expect(receipt.submodules.map(({ path }) => path)).toEqual(["vendor/dependency", "vendor/dependency/vendor/nested"])
-    expect(receipt.submodules.find(({ path }) => path.endsWith("vendor/nested"))?.sha).toBe(nestedSha)
-    expect(existsSync(join(receipt.path, "vendor/dependency/vendor/nested/nested.txt"))).toBe(true)
-    expect(JSON.parse(await readFile(join(root, "deployments", "records", "D1.json"), "utf8"))).toEqual(receipt)
-    await store.release(receipt)
+    expect(result.submodules.map(({ path }) => path)).toEqual(["vendor/dependency", "vendor/dependency/vendor/nested"])
+    expect(result.submodules.find(({ path }) => path.endsWith("vendor/nested"))?.sha).toBe(nestedSha)
+    expect(existsSync(join(result.path, "vendor/dependency/vendor/nested/nested.txt"))).toBe(true)
+    expect(JSON.parse(await readFile(join(root, "deployments", "records", "D1.json"), "utf8"))).toEqual(result)
+    await store.release(result)
   })
 
   it("refuses cleanup unless Hab releases the exact generation, path, and SHA", async () => {
     const { root, repo, sha } = await repository()
     await using process = createProcess()
     const store = await createGitDeploymentStore({ repo, deploymentsRoot: join(root, "deployments"), process })
-    const receipt = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
+    const result = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
 
-    await expect(store.release({ ...receipt, generation: "G-other" })).rejects.toThrow("generation")
-    await expect(store.release({ ...receipt, path: join(root, "wrong") })).rejects.toThrow("path")
-    await expect(store.release({ ...receipt, sha: "0".repeat(40) })).rejects.toThrow("SHA")
-    expect(existsSync(receipt.path)).toBe(true)
+    await expect(store.release({ ...result, generation: "G-other" })).rejects.toThrow("generation")
+    await expect(store.release({ ...result, path: join(root, "wrong") })).rejects.toThrow("path")
+    await expect(store.release({ ...result, sha: "0".repeat(40) })).rejects.toThrow("SHA")
+    expect(existsSync(result.path)).toBe(true)
 
-    await expect(store.release(receipt)).resolves.toEqual({ released: true, path: receipt.path })
-    expect(existsSync(receipt.path)).toBe(false)
-    await expect(store.release(receipt)).resolves.toEqual({ released: true, path: receipt.path })
+    await expect(store.release(result)).resolves.toEqual({ released: true, path: result.path })
+    expect(existsSync(result.path)).toBe(false)
+    await expect(store.release(result)).resolves.toEqual({ released: true, path: result.path })
   })
 
   it("routes authorized release through a keyed Journal Job definition", async () => {
     const { root, repo, sha } = await repository()
     await using process = createProcess()
     const store = await createGitDeploymentStore({ repo, deploymentsRoot: join(root, "deployments"), process })
-    const receipt = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
+    const result = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
     const jobs = createDeploymentJobDefs(store)
     const release = jobs["deployment.release"]
     const context = {
@@ -236,11 +236,11 @@ describe("createGitDeploymentStore", () => {
       runner: "test",
       signal: new AbortController().signal,
     }
-    const habReleaseReceipt = {
+    const habReleaseResult = {
       schema: "hab-service-generation-release/1" as const,
       jurisdiction: "single-habitat" as const,
       habitatRoot: join(root, "habitat"),
-      retiredSource: { path: receipt.path, sha: receipt.sha, verification: "verified" as const },
+      retiredSource: { path: result.path, sha: result.sha, verification: "verified" as const },
       replacementSource: {
         path: join(root, "deployments", "roots", "D2"),
         sha: "2".repeat(40),
@@ -249,59 +249,59 @@ describe("createGitDeploymentStore", () => {
       releasedAt: "2026-08-11T20:00:00.000Z",
     }
     const input = {
-      deploymentId: receipt.deploymentId,
-      generation: receipt.generation,
-      path: receipt.path,
-      sha: receipt.sha,
+      deploymentId: result.deploymentId,
+      generation: result.generation,
+      path: result.path,
+      sha: result.sha,
       authorization: {
         kind: "hab-generation-release" as const,
-        generation: receipt.generation,
-        path: receipt.path,
-        sha: receipt.sha,
-        receipt: habReleaseReceipt,
+        generation: result.generation,
+        path: result.path,
+        sha: result.sha,
+        result: habReleaseResult,
       },
     }
 
-    expect(release.request(input, { key: deploymentJobKey("release", receipt.deploymentId) })).toMatchObject({
+    expect(release.request(input, { key: deploymentJobKey("release", result.deploymentId) })).toMatchObject({
       data: { key: "deployment:D1:release" },
     })
     await expect(
       release.execute({ ...input, authorization: { ...input.authorization, path: join(root, "wrong") } }, context),
     ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
-    expect(existsSync(receipt.path)).toBe(true)
+    expect(existsSync(result.path)).toBe(true)
     await expect(
       release.execute(
         {
           ...input,
           authorization: {
             ...input.authorization,
-            receipt: {
-              ...habReleaseReceipt,
-              retiredSource: { path: join(root, "wrong"), sha: receipt.sha, verification: "verified" },
+            result: {
+              ...habReleaseResult,
+              retiredSource: { path: join(root, "wrong"), sha: result.sha, verification: "verified" },
             },
           },
         },
         context,
       ),
     ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
-    expect(existsSync(receipt.path)).toBe(true)
+    expect(existsSync(result.path)).toBe(true)
     await expect(
       release.execute(
         {
           ...input,
           authorization: {
             ...input.authorization,
-            receipt: { ...habReleaseReceipt, nonce: "strict-same-user-schema-has-no-nonce" },
+            result: { ...habReleaseResult, nonce: "strict-same-user-schema-has-no-nonce" },
           },
         },
         context,
       ),
     ).rejects.toThrow(/unrecognized key.*nonce/iu)
-    expect(existsSync(receipt.path)).toBe(true)
+    expect(existsSync(result.path)).toBe(true)
     await expect(release.execute(input, context)).resolves.toMatchObject({
       status: "completed",
       conclusion: "success",
-      output: { released: true, path: receipt.path },
+      output: { released: true, path: result.path },
     })
   })
 
@@ -346,8 +346,8 @@ describe("createGitDeploymentStore", () => {
     const input = { deploymentId: "D1", generation: "G1", sha, pin: "tip" } as const
 
     await expect(store.materialize(input)).rejects.toThrow("dependency install failed")
-    const receipt = await store.materialize(input)
-    expect(receipt).toMatchObject(input)
-    await store.release(receipt)
+    const result = await store.materialize(input)
+    expect(result).toMatchObject(input)
+    await store.release(result)
   })
 })

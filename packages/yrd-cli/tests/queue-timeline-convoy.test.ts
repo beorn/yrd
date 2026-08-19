@@ -44,7 +44,7 @@ function withdrawnAfterRefusal(): PR {
       at: "2026-07-13T11:35:00.000Z",
       run: "R2600",
       step: "typecheck",
-      receipt: { code: "typecheck", message: "tsc --noEmit reported 3 errors" },
+      result: { code: "typecheck", message: "tsc --noEmit reported 3 errors" },
     },
   }
 }

@@ -9,7 +9,7 @@ import {
   CompositionV1Schema,
   CorrelationSchema,
   DeploymentInputSchema,
-  DeploymentSourceReceiptSchema,
+  DeploymentSourceResultSchema,
   baseIdentity,
   currentChangeRev,
   changeBaseSha,
@@ -25,7 +25,7 @@ import {
   ChangePublicationInputSchema,
   changeSourceReadyAt,
   deploymentJobKey,
-  HabGenerationReleaseReceiptSchema,
+  HabGenerationReleaseResultSchema,
   ReleaseDeploymentJobInputSchema,
   isConcurrentCheckabilityConflict,
   resolveBay,
@@ -1902,7 +1902,7 @@ type TrackerDeliveryV1 =
 
 type TrackerDeliveryV2 =
   | TrackerDeliveryV1
-  | (TrackerDeliveryIdentity & Readonly<{ status: "needs-author"; bounce: TrackerBounce; attributedReceipt: JobError }>)
+  | (TrackerDeliveryIdentity & Readonly<{ status: "needs-author"; bounce: TrackerBounce; attributedResult: JobError }>)
 
 type TrackerBridgeV1 = Readonly<{
   version: 1
@@ -1945,11 +1945,11 @@ function trackerDeliveryV2(
   }
   const refusalFact =
     changeNeedsAuthor(pr) ??
-    (eligibility.reason?.code === "needs-author" && eligibility.reason.receipt !== undefined
+    (eligibility.reason?.code === "needs-author" && eligibility.reason.result !== undefined
       ? {
           at: pr.rejectedAt ?? revision.submittedAt ?? revision.pushedAt,
           run: pr.terminalRun ?? eligibility.checks.run ?? "unknown",
-          receipt: eligibility.reason.receipt,
+          result: eligibility.reason.result,
           detail: eligibility.reason.message,
         }
       : undefined)
@@ -1962,7 +1962,7 @@ function trackerDeliveryV2(
         run: refusalFact.run,
         ...(refusalFact.detail === undefined ? {} : { detail: refusalFact.detail }),
       },
-      attributedReceipt: refusalFact.receipt,
+      attributedResult: refusalFact.result,
     }
   }
   const delivery = changeDeliveryState(pr)
@@ -2128,7 +2128,7 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
         : {}),
       ...(delivery.status === "rejected" ? { bounce: delivery.bounce } : {}),
       ...(delivery.status === "needs-author"
-        ? { bounce: delivery.bounce, attributedReceipt: delivery.attributedReceipt }
+        ? { bounce: delivery.bounce, attributedResult: delivery.attributedResult }
         : {}),
     }
   })
@@ -2266,7 +2266,7 @@ function sameDeploymentJobRequest(
 }
 
 function stableReleaseAuthority(input: ReleaseDeploymentJobInput): unknown {
-  const receipt = HabGenerationReleaseReceiptSchema.parse(input.authorization.receipt)
+  const result = HabGenerationReleaseResultSchema.parse(input.authorization.result)
   return {
     deploymentId: input.deploymentId,
     generation: input.generation,
@@ -2277,11 +2277,11 @@ function stableReleaseAuthority(input: ReleaseDeploymentJobInput): unknown {
       generation: input.authorization.generation,
       path: input.authorization.path,
       sha: input.authorization.sha,
-      receipt: {
-        schema: receipt.schema,
-        jurisdiction: receipt.jurisdiction,
-        habitatRoot: receipt.habitatRoot,
-        retiredSource: receipt.retiredSource,
+      result: {
+        schema: result.schema,
+        jurisdiction: result.jurisdiction,
+        habitatRoot: result.habitatRoot,
+        retiredSource: result.retiredSource,
       },
     },
   }
@@ -2312,12 +2312,12 @@ async function materializeDeployment(
 ): Promise<void> {
   const input = DeploymentInputSchema.parse({ deploymentId, generation, sha, pin: options.pin })
   const job = await requestAndRunDeploymentJob(app, "materialize", input)
-  const receipt = DeploymentSourceReceiptSchema.parse(successfulJobOutput(job))
+  const result = DeploymentSourceResultSchema.parse(successfulJobOutput(job))
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "deployment.materialize", job: job.id, receipt },
-    `${receipt.path}\n`,
+    { command: "deployment.materialize", job: job.id, result },
+    `${result.path}\n`,
   )
 }
 
@@ -2337,13 +2337,13 @@ async function reapDeployment(
 
 async function releaseDeployment(
   app: YrdCliApp,
-  deploymentReceiptPath: string,
-  habReleaseReceiptPath: string,
+  deploymentResultPath: string,
+  habReleaseResultPath: string,
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<void> {
-  const deployment = DeploymentSourceReceiptSchema.parse(await readJson(deploymentReceiptPath, "deployment receipt"))
-  const habRelease = await readJson(habReleaseReceiptPath, "Hab generation release receipt")
+  const deployment = DeploymentSourceResultSchema.parse(await readJson(deploymentResultPath, "deployment result"))
+  const habRelease = await readJson(habReleaseResultPath, "Hab generation release result")
   const input: ReleaseDeploymentJobInput = {
     deploymentId: deployment.deploymentId,
     generation: deployment.generation,
@@ -2354,7 +2354,7 @@ async function releaseDeployment(
       generation: deployment.generation,
       path: deployment.path,
       sha: deployment.sha,
-      receipt: habRelease as ReleaseDeploymentJobInput["authorization"]["receipt"],
+      result: habRelease as ReleaseDeploymentJobInput["authorization"]["result"],
     },
   }
   const job = await requestAndRunDeploymentJob(app, "release", input)
@@ -10710,7 +10710,7 @@ function buildProgram(
   program.version(YRD_VERSION, "-V, --version")
   program.addHelpSection(
     "Model:",
-    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nmerge requests queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed receipt.",
+    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nmerge requests queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed result.",
   )
   program.addHelpSection("Objects:", [
     ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
@@ -10950,11 +10950,11 @@ function buildProgram(
       reapDeployment(installed(), deploymentId, generation, sha, options as JsonOption & Readonly<{ pin: string }>, io),
     )
   deployment
-    .command("release <deployment-receipt> <hab-release-receipt>")
-    .description("release an exact deployment after a matching Hab generation-death receipt")
+    .command("release <deployment-result> <hab-release-result>")
+    .description("release an exact deployment after a matching Hab generation-death result")
     .option("--json", "emit stable JSON")
-    .action(async (deploymentReceipt, habReleaseReceipt, options) =>
-      releaseDeployment(installed(), deploymentReceipt, habReleaseReceipt, options, io),
+    .action(async (deploymentResult, habReleaseResult, options) =>
+      releaseDeployment(installed(), deploymentResult, habReleaseResult, options, io),
     )
 
   const queue = program.command("queue").description("manage integration queues")

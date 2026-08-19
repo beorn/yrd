@@ -339,7 +339,7 @@ describe("persistent Core projection checkpoint", () => {
     for (const value of [1, 2, 3]) await app.dispatch({ op: "items.add", args: { value } })
 
     expect(app.state().items).toEqual([1, 2, 3])
-    expect(app.retentionDiagnostics()).toMatchObject({ receiptFrames: 3 })
+    expect(app.retentionDiagnostics()).toMatchObject({ resultFrames: 3 })
     expect(app.retentionDiagnostics()).not.toHaveProperty("journal")
   })
 
@@ -423,7 +423,7 @@ describe("persistent Core projection checkpoint", () => {
     ])
   })
 
-  it("bounds the warm receipt cache while exact old retries and complete events stay journal-backed", async () => {
+  it("bounds the warm result cache while exact old retries and complete events stay journal-backed", async () => {
     const definition = counterDefinition()
     const indexed = indexedCheckpointJournal()
     const writer = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
@@ -436,7 +436,7 @@ describe("persistent Core projection checkpoint", () => {
     const checkpoint = indexed.checkpoint()
     expect(checkpoint).toMatchObject({ cursor: 4_097, value: { v: 1 } })
     if (checkpoint === undefined) throw new Error("expected the warm checkpoint")
-    expect((checkpoint.value as { receipts: unknown[] }).receipts).toHaveLength(4_096)
+    expect((checkpoint.value as { results: unknown[] }).results).toHaveLength(4_096)
 
     await using reader = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
     const before = await Array.fromAsync(reader.events())
@@ -490,7 +490,7 @@ describe("persistent Core projection checkpoint", () => {
             value: {
               v: 1,
               state: { counter: { value: 41 } },
-              receipts: [],
+              results: [],
               causeIds: [],
               eventIds: [],
             },
@@ -695,7 +695,7 @@ describe("persistent Core projection checkpoint", () => {
     const definition = counterDefinition()
     const id = ids()
     const first = await createYrd(definition, { inject: { journal: createJournal({ dir }), id } })
-    const receipt = await first.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable" })
+    const result = await first.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable" })
     await first.close()
 
     const seeded = storedCheckpoint(dir)
@@ -714,7 +714,7 @@ describe("persistent Core projection checkpoint", () => {
     await using warm = await createYrd(definition, { inject: { journal: createJournal({ dir }), log, id } })
 
     expect(warm.state().counter.value).toBe(3)
-    await expect(warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable" })).resolves.toEqual(receipt)
+    await expect(warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable" })).resolves.toEqual(result)
     expect(warm.state().counter.value).toBe(3)
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: seeded!.cursor, toCursor: expect.any(Number) },
@@ -747,7 +747,7 @@ describe("persistent Core projection checkpoint", () => {
     expect(after?.identity).not.toBe(before?.identity)
   })
 
-  it("rejects a re-signed checkpoint whose receipt breaks the command/cause binding", async () => {
+  it("rejects a re-signed checkpoint whose result breaks the command/cause binding", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
     const seed = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
@@ -760,9 +760,9 @@ describe("persistent Core projection checkpoint", () => {
       .get()
     if (row === null) throw new Error("expected a persisted checkpoint")
     const poisoned = JSON.parse(row.checkpoint_json) as {
-      value: { receipts: Array<{ command: { id: string }; cause: { commandId: string } }> }
+      value: { results: Array<{ command: { id: string }; cause: { commandId: string } }> }
     }
-    poisoned.value.receipts[0]!.cause.commandId = "00000000-0000-7000-8000-ffffffffffff"
+    poisoned.value.results[0]!.cause.commandId = "00000000-0000-7000-8000-ffffffffffff"
     const checkpointJson = JSON.stringify(poisoned)
     const checkpointSha256 = createHash("sha256").update(checkpointJson).digest("hex")
     database
@@ -788,15 +788,15 @@ describe("persistent Core projection checkpoint", () => {
     })
     const repaired = storedCheckpoint(dir)
     expect(repaired?.value).toMatchObject({
-      receipts: [{ command: { id: expect.any(String) }, cause: { commandId: expect.any(String) } }],
+      results: [{ command: { id: expect.any(String) }, cause: { commandId: expect.any(String) } }],
     })
     if (repaired === undefined) throw new Error("expected repaired checkpoint")
-    const [receipt] = (
+    const [result] = (
       repaired.value as {
-        receipts: Array<{ command: { id: string }; cause: { commandId: string } }>
+        results: Array<{ command: { id: string }; cause: { commandId: string } }>
       }
-    ).receipts
-    expect(receipt?.cause.commandId).toBe(receipt?.command.id)
+    ).results
+    expect(result?.cause.commandId).toBe(result?.command.id)
   })
 
   it("rejects a re-signed checkpoint whose command intent no longer matches its cause hash", async () => {
@@ -812,13 +812,13 @@ describe("persistent Core projection checkpoint", () => {
       .get()
     if (row === null) throw new Error("expected a persisted checkpoint")
     const poisoned = JSON.parse(row.checkpoint_json) as {
-      value: { receipts: Array<{ command: { args: { by: number } }; cause: { commandHash: string } }> }
+      value: { results: Array<{ command: { args: { by: number } }; cause: { commandHash: string } }> }
     }
-    const receipt = poisoned.value.receipts[0]
-    if (receipt === undefined) throw new Error("expected a persisted receipt")
-    const originalHash = receipt.cause.commandHash
-    receipt.command.args.by = 999
-    expect(receipt.cause.commandHash).toBe(originalHash)
+    const result = poisoned.value.results[0]
+    if (result === undefined) throw new Error("expected a persisted result")
+    const originalHash = result.cause.commandHash
+    result.command.args.by = 999
+    expect(result.cause.commandHash).toBe(originalHash)
     const checkpointJson = JSON.stringify(poisoned)
     const checkpointSha256 = createHash("sha256").update(checkpointJson).digest("hex")
     database

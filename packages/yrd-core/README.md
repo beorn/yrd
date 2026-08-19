@@ -113,11 +113,11 @@ authority and do not enter Core's `Journal` port.
 
 Persistence-backed runtimes expose `historySnapshot()` for an intentionally
 complete replay, `events()` over all committed frames, and
-`retentionDiagnostics()` for warm receipt and journal page counts. `events()`
+`retentionDiagnostics()` for warm result and journal page counts. `events()`
 takes the same optional `after`/`before` cursors as `Journal.read`, because a
 Journal resolves its whole range before it yields: a caller that wants only the
 journal's first events must say so at the read, or it pays for every frame
-regardless of when it stops iterating. Core keeps the latest 4,096 receipt
+regardless of when it stops iterating. Core keeps the latest 4,096 result
 frames in its private projection cache; an exact retry outside that window
 resolves the original checksummed frame through the Journal, compares canonical
 intent, and returns the committed result without appending. Cause and event identities remain global through the same history

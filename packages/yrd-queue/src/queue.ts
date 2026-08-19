@@ -80,7 +80,7 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@yrd/config"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
-import { CandidateFailureReceiptEvidenceSchema, candidateFailureReceiptEvidence } from "./check-attribution.ts"
+import { CandidateFailureResultEvidenceSchema, candidateFailureResultEvidence } from "./check-attribution.ts"
 import {
   CandidateSchema,
   IntegrationProofSchema,
@@ -813,7 +813,7 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   checks(selectors?: readonly string[]): readonly ChangeCheckRecord[]
   terminalAssociationPlan(): TerminalAssociationPlan
   migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
-  quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsReceipt>
+  quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsResult>
   /** Journal a preparation refusal that happened outside Queue's own admission
    * dispatcher, so the same durable wedge oracle sees every compose robot. */
   recordAdmissionRefusal(args: RecordAdmissionRefusalArgs): Promise<void>
@@ -838,7 +838,7 @@ export type QuiesceLegacyRootsOptions = Readonly<{
   by: string
 }>
 
-export type QuiesceLegacyRootsReceipt = Readonly<{
+export type QuiesceLegacyRootsResult = Readonly<{
   provenance: "migration/21012-legacy-quiesce"
   reason: "legacy-quiesced"
   quiesced: readonly Readonly<{ run: RunId; jobs: readonly string[] }>[]
@@ -1702,7 +1702,7 @@ function createQueue<Shape extends ChangeShape>(
     pr: DeepReadonly<PR>,
     baseSha: string,
     step: string,
-    receipt: JobError,
+    result: JobError,
     options: Readonly<{
       candidate?: string
       kind?: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]
@@ -1711,7 +1711,7 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<
     Readonly<{ code: string; kind: Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"]; reason: string }>
   > => {
-    const kind = options.kind ?? admissionFailureKind(receipt, false)
+    const kind = options.kind ?? admissionFailureKind(result, false)
     await recordRevisionAdmission(pr, {
       status: "refused",
       kind,
@@ -1720,9 +1720,9 @@ function createQueue<Shape extends ChangeShape>(
       ...(options.candidate === undefined ? {} : { candidate: options.candidate }),
       steps: [...(options.steps ?? [])],
       step,
-      receipt,
+      result,
     })
-    return { code: receipt.code, kind, reason: receipt.message }
+    return { code: result.code, kind, reason: result.message }
   }
 
   type RevisionAdmissionOutcome = Readonly<{
@@ -1762,12 +1762,12 @@ function createQueue<Shape extends ChangeShape>(
       prepared = await candidateFactsForSnapshots([snapshot], baseSha)
     } catch (error) {
       const fact = failureFact(error)
-      const receipt = {
+      const result = {
         code: fact?.code ?? "candidate-refused",
         message: fact?.message ?? (error instanceof Error ? error.message : String(error)),
       }
-      const kind = admissionFailureKind(receipt, fact?.kind === "infrastructure")
-      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", receipt, { kind })
+      const kind = admissionFailureKind(result, fact?.kind === "infrastructure")
+      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { kind })
       if (kind === "infrastructure") throw error
       return { processed: true, refusal }
     }
@@ -1781,11 +1781,11 @@ function createQueue<Shape extends ChangeShape>(
       },
     )
     if (candidate.mergeability === "conflicting") {
-      const receipt = {
+      const result = {
         code: "candidate-conflicting",
         message: `Candidate '${candidate.id}' conflicts before required checks`,
       }
-      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", receipt, { candidate: candidate.id })
+      const refusal = await refuseRevisionAdmission(pr, baseSha, "candidate", result, { candidate: candidate.id })
       return { processed: true, refusal }
     }
     const admissionRunner =
@@ -1841,18 +1841,18 @@ function createQueue<Shape extends ChangeShape>(
         return { processed: requestedJob !== undefined || beforeRun?.status === "queued" }
       }
       if (job.conclusion !== "success") {
-        const receipt = jobFailure(job)
+        const result = jobFailure(job)
         const failed: ChangeAdmissionStep = {
           name: step.name,
           revision: step.revision,
           job: job.id,
           status: "refused",
           ...("output" in job && job.output !== undefined ? { output: job.output } : {}),
-          receipt,
+          result,
         }
-        const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, receipt, {
+        const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, result, {
           candidate: candidate.id,
-          kind: admissionFailureKind(receipt, job.conclusion !== "failure"),
+          kind: admissionFailureKind(result, job.conclusion !== "failure"),
           steps: [...evidence, failed],
         })
         return { processed: true, refusal }
@@ -2375,7 +2375,7 @@ function createQueue<Shape extends ChangeShape>(
                   ...(args.steps === undefined ? {} : { steps: args.steps }),
                 })
                 if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
-                  throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author receipt`)
+                  throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author result`)
                 }
               }
               const gapReason =
@@ -2389,7 +2389,7 @@ function createQueue<Shape extends ChangeShape>(
                 reason: gapReason,
                 remedy: `yrd pr recut ${gap.pr} --preflight --queue --apply`,
               })
-              // A `consumed` gap ejects with a durable `pr/needs-author` receipt,
+              // A `consumed` gap ejects with a durable `pr/needs-author` result,
               // so it leaves a trace and stops repeating. A `missing` gap leaves
               // nothing and re-skips the same PR every cycle — ledger that one.
               if (gap.reason === "missing") {
@@ -2512,7 +2512,7 @@ function createQueue<Shape extends ChangeShape>(
           // The admission phase owns these still-checking PRs for this tick.
           // Exclude them from merge selection without aborting the whole phase,
           // so unrelated ready PRs can integrate while targeted one-PR drains
-          // return their admission receipt instead of a checks-running refusal.
+          // return their admission result instead of a checks-running refusal.
           const unavailable = new Set([...consumed, ...pendingIds, ...authorityGaps.map((gap) => gap.pr)])
           const runnable = runnableChangeSelection(snapshot, args, steps, unavailable, {
             explicitStepAuthority,
@@ -2620,12 +2620,12 @@ function createQueue<Shape extends ChangeShape>(
               const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
               if (ejected !== undefined) {
                 const refusal = ChangeNeedsAuthorFactSchema.parse(ejected.data)
-                if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
+                if (!selectorless) raiseFailure("refusal", refusal.result.code, refusal.result.message)
                 log.warn?.("queue compose ejected a candidate without runnable authority", {
                   action: "compose-candidate-skip",
                   pr: refusal.pr,
-                  code: refusal.receipt.code,
-                  reason: refusal.receipt.message,
+                  code: refusal.result.code,
+                  reason: refusal.result.message,
                   remedy: `yrd pr recut ${refusal.pr} --preflight --queue --apply`,
                 })
                 continue
@@ -2854,10 +2854,10 @@ function createQueue<Shape extends ChangeShape>(
           // Orphan hygiene: cancel every requested Job whose parent run is
           // terminal or absent, so a state upgrade or a settled/canceled run that
           // never terminalized its pending Job cannot strand it forever (the class
-          // that fed the selectorless-compose poison). Loud structured receipt
+          // that fed the selectorless-compose poison). Loud structured result
           // naming every settled Job + run; a terminal-run orphan's record is
           // re-materialized into the return, an absent-run orphan has no record to
-          // return so the receipt is its report.
+          // return so the result is its report.
           const settledOrphans = orphanedRequestedQueueJobs(runtime(), reader)
           for (const orphan of settledOrphans) {
             await jobs.cancel({
@@ -2880,7 +2880,7 @@ function createQueue<Shape extends ChangeShape>(
           // grace: nothing else can. `jobs.recover()` above walks Jobs, and
           // `advance` no-ops without one, so a jobless run is projected `running`
           // forever (R1582 ticked for 45h over an already-integrated PR). Loud
-          // structured receipt naming every settled run and the step it stalled on.
+          // structured result naming every settled run and the step it stalled on.
           const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime, reader)
           for (const orphan of orphanedRuns) {
             await actions.settleOrphanedRun({
@@ -2899,7 +2899,7 @@ function createQueue<Shape extends ChangeShape>(
           }
           // Retire every FAILED batch whose recorded plan drifted so it can never
           // isolate — otherwise it re-refuses isolation every compose cycle forever
-          // (the isolate-path zombie). Typed stale-plan release; loud receipt.
+          // (the isolate-path zombie). Typed stale-plan release; loud result.
           const plannedRetirements = unisolableStalePlanBatches(runtime(), byName, reader)
           const retiredBatches: UnisolableStalePlanBatch[] = []
           for (const planned of plannedRetirements) {
@@ -3044,7 +3044,7 @@ function createQueue<Shape extends ChangeShape>(
         quiesced.push({ run: target.run, jobs: target.jobs.map((job) => job.id) })
       }
       if (quiesced.length > 0) {
-        // ONE loud structured receipt naming every settled root and job.
+        // ONE loud structured result naming every settled root and job.
         log.warn?.(`Stopped old queue runs during startup: ${quiesced.map((entry) => entry.run).join(", ")}.`, {
           action: "legacy-quiesce",
           reason: "legacy-quiesced",
@@ -3907,7 +3907,7 @@ function queueAuthorityNeedsAuthorEvent(
     ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
     step,
     detail: message,
-    receipt: { code, message },
+    result: { code, message },
   })
 }
 
@@ -4234,8 +4234,8 @@ function compactQueueProjection(
     const order = jobs.retention.queueTerminalOrder[record.id]
     if (order === undefined) {
       // A pre-settlement root can carry its own durable failure/cancellation
-      // without a terminal Job receipt (or after that receipt aged out). Rank
-      // that explicit Queue authority before every receipt-ordered root so it
+      // without a terminal Job result (or after that result aged out). Rank
+      // that explicit Queue authority before every result-ordered root so it
       // compacts first; never invent an order for an unexplained success.
       if (record.failure === undefined && record.canceledAt === undefined) {
         throw new Error(`yrd: quiesced legacy Queue root '${record.id}' has no terminal journal order`)
@@ -4284,7 +4284,7 @@ function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonl
 /** The one production projection path for a started Queue run. */
 export function projectQueueStarted(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): QueuesState {
   if (Queues.get(queues, record.id) !== undefined) throw new Error(`yrd: duplicate queue run '${record.id}'`)
-  validateRunCandidateReceipt(queues, record)
+  validateRunCandidateResult(queues, record)
   return {
     ...queues,
     records: Queues.set(queues.records, record),
@@ -4293,7 +4293,7 @@ export function projectQueueStarted(queues: DeepReadonly<QueuesState>, record: D
   }
 }
 
-function validateRunCandidateReceipt(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): void {
+function validateRunCandidateResult(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): void {
   const candidate = queues.candidates[record.candidateId]
   if (candidate === undefined) {
     throw new Error(`yrd: Queue run '${record.id}' names missing Candidate '${record.candidateId}'`)
@@ -4303,18 +4303,18 @@ function validateRunCandidateReceipt(queues: DeepReadonly<QueuesState>, record: 
   }
   const first = record.prs[0]
   if (first === undefined) {
-    throw new Error(`yrd: Queue run '${record.id}' has no PR receipt for Candidate '${candidate.id}'`)
+    throw new Error(`yrd: Queue run '${record.id}' has no PR result for Candidate '${candidate.id}'`)
   }
   if (record.queueId !== candidate.queueId) mismatch(`queue '${record.queueId}' does not match`)
   if (queueIdentity(first) !== candidate.queueId) mismatch("snapshot queue does not match")
   if (baseIdentity(record.base) !== baseIdentity(first.base)) mismatch("queue target does not match")
-  if (!sameFlow(record.flow, candidateFlow(record.prs))) mismatch("Flow receipt does not match")
+  if (!sameFlow(record.flow, candidateFlow(record.prs))) mismatch("Flow result does not match")
 
   const baseSha = (() => {
     try {
       return requiredCandidateBaseSha(record.prs)
     } catch {
-      return mismatch("has an invalid base-SHA receipt for")
+      return mismatch("has an invalid base-SHA result for")
     }
   })()
   if (baseSha !== candidate.baseSha) mismatch("base SHA does not match")
@@ -4577,7 +4577,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const queueId = baseIdentity(started.queueId ?? started.base)
     // Pre-Candidate batch Runs carried each PR's last check base independently,
     // so one immutable Run could contain several base SHAs. Target-model replay
-    // gives that synthetic Candidate the first ordered receipt as its stable
+    // gives that synthetic Candidate the first ordered result as its stable
     // compatibility anchor and pins the projected snapshots to the same SHA.
     // Fresh Runs always carry candidateId and retain strict common-base checks.
     const legacyBaseSha =
@@ -4949,7 +4949,7 @@ function candidateArtifactKey(prs: readonly DeepReadonly<ChangeSnapshot>[], base
   ])
 }
 
-function candidateReceiptKey(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): string {
+function candidateResultKey(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): string {
   return JSON.stringify([
     prs[0] === undefined ? "" : queueIdentity(prs[0]),
     baseSha,
@@ -4982,14 +4982,14 @@ function candidateFor(
 ): DeepReadonly<Candidate> | undefined {
   const first = prs[0]
   if (first === undefined) return undefined
-  const key = candidateReceiptKey(prs, baseSha)
+  const key = candidateResultKey(prs, baseSha)
   const records = Queues.values(queues)
   const record = records.find((run) => {
     const candidate = queues.candidates[run.candidateId]
     return (
       candidate !== undefined &&
       candidate.mergeability !== "unknown" &&
-      candidateReceiptKey(run.prs, candidate.baseSha) === key
+      candidateResultKey(run.prs, candidate.baseSha) === key
     )
   })
   if (record !== undefined) return queues.candidates[record.candidateId]
@@ -5164,9 +5164,9 @@ function advanceQueue(
       (job.conclusion === "failure" ? firstArtifact(job.error.evidence, "stderr") : undefined) ??
       firstArtifact(checkEvidence(job), "stderr") ??
       ("artifacts" in job ? firstArtifact({ artifacts: job.artifacts }, "stderr") : undefined)
-    const authorReceipt = needsAuthorJobReceipt(job)
+    const authorResult = needsAuthorJobResult(job)
     if (
-      authorReceipt === undefined ||
+      authorResult === undefined ||
       isIntegrated(before) ||
       pr === undefined ||
       current === undefined ||
@@ -5187,7 +5187,7 @@ function advanceQueue(
       detail: failure.message,
     }
     return {
-      events: [failed, event("pr/needs-author", { ...refusal, receipt: authorReceipt })],
+      events: [failed, event("pr/needs-author", { ...refusal, result: authorResult })],
     }
   }
 
@@ -5663,7 +5663,7 @@ type TolerantQueueReader = Readonly<{
  * So recovery reads one record at a time and quarantines what it cannot
  * materialize. This is not a silent fallback and must never become one: the
  * reader keeps every refusal verbatim and the CALLER is obliged to report each
- * one (what, where, why) — `recover` as a structured receipt, `auditQueues` as
+ * one (what, where, why) — `recover` as a structured result, `auditQueues` as
  * an `invalid-run` finding. What this removes is the veto, never the disclosure.
  *
  * A record is quarantined once however many enumerations meet it, so one bad row
@@ -5777,7 +5777,7 @@ function orphanedRequestedQueueJobs(
     // An unreadable parent is quarantined, never judged. "Absent" and
     // "terminal" are both claims about a record that was READ; cancelling live
     // work under a record no reader can read would be a repair invented from no
-    // evidence. The caller's quarantine receipt is what says so out loud.
+    // evidence. The caller's quarantine result is what says so out loud.
     if (parent === undefined) continue
     if (Queues.terminal(parent)) {
       orphans.push({ job, run, reason: "run-terminal" })
@@ -5880,7 +5880,7 @@ type CandidateRevisionMismatch = Readonly<{
  * Content-equivalent historical Candidates are valid artifacts, but they are
  * not authority for a newer PR revision. Surface the exact state that used to
  * make {@link candidateFor} select the old Candidate and then make
- * {@link startRun} refuse its immutable receipt. Once an exact current receipt
+ * {@link startRun} refuse its immutable result. Once an exact current result
  * exists, the old Candidate is ordinary history and the finding clears.
  */
 function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonly CandidateRevisionMismatch[] {
@@ -5904,7 +5904,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
     const currentBaseSha = current[0]?.baseSha
     if (currentBaseSha === undefined || current.some((snapshot) => snapshot.baseSha !== currentBaseSha)) continue
     if (candidateArtifactKey(record.prs, candidate.baseSha) !== candidateArtifactKey(current, currentBaseSha)) continue
-    if (candidateReceiptKey(record.prs, candidate.baseSha) === candidateReceiptKey(current, currentBaseSha)) continue
+    if (candidateResultKey(record.prs, candidate.baseSha) === candidateResultKey(current, currentBaseSha)) continue
     if (candidateFor(state.queues, current, currentBaseSha) !== undefined) continue
     const mismatchIndex = candidate.revs.findIndex((revision, index) => {
       const snapshot = current[index]
@@ -5918,7 +5918,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
     const recorded = candidate.revs[mismatchIndex]
     const latest = current[mismatchIndex]
     if (recorded === undefined || latest === undefined) continue
-    const key = candidateReceiptKey(current, currentBaseSha)
+    const key = candidateResultKey(current, currentBaseSha)
     if (seen.has(key)) continue
     seen.add(key)
     mismatches.push({
@@ -6142,7 +6142,7 @@ function auditQueues(
       code: "candidate-revision-mismatch",
       message:
         `Candidate '${mismatch.candidate}' from queue run '${mismatch.run}' records PR '${mismatch.pr}' ` +
-        `revision ${mismatch.recordedRevision}@${mismatch.recordedHead}, but the content-equivalent current receipt is ` +
+        `revision ${mismatch.recordedRevision}@${mismatch.recordedHead}, but the content-equivalent current result is ` +
         `revision ${mismatch.currentRevision}@${mismatch.currentHead}; no exact current-revision Candidate exists`,
       run: mismatch.run,
       pr: mismatch.pr,
@@ -6171,7 +6171,7 @@ function auditQueues(
   // Every walk that reads run records is above this line, so the quarantine is
   // now complete: one finding per record no reader could materialize, carrying
   // the reader's exact refusal. This is the standing operator surface for the
-  // class — `recover` reports the same rows as a receipt at the moment it works
+  // class — `recover` reports the same rows as a result at the moment it works
   // around them, and this reports them for as long as they stand.
   for (const unreadable of reader.quarantined()) {
     findings.push({
@@ -7091,8 +7091,8 @@ function projectChangeChecks(
       const diagnostics =
         Array.isArray(output?.diagnostics) || typeof output?.detail === "string"
           ? ((output?.diagnostics ?? output?.detail) as JsonValue)
-          : evidence.receipt?.message
-      const artifact = firstArtifact(evidence.output, evidence.receipt === undefined ? undefined : "stderr")
+          : evidence.result?.message
+      const artifact = firstArtifact(evidence.output, evidence.result === undefined ? undefined : "stderr")
       return {
         pr: pr.id,
         revision: changeRevisionNumber(pr),
@@ -7104,7 +7104,7 @@ function projectChangeChecks(
         ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
         ...(diagnostics === undefined ? {} : { diagnostics }),
         ...(artifact === undefined ? {} : { artifact }),
-        ...(evidence.receipt === undefined ? {} : { error: evidence.receipt }),
+        ...(evidence.result === undefined ? {} : { error: evidence.result }),
       }
     })
     if (records.length > 0) return records
@@ -7115,7 +7115,7 @@ function projectChangeChecks(
           revision: changeRevisionNumber(pr),
           status: "failed",
           ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
-          error: admission.receipt,
+          error: admission.result,
         },
       ]
     }
@@ -7339,11 +7339,11 @@ export const COMPOSITION_FAILURE_BUCKETS = {
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 
 function admissionFailureKind(
-  receipt: DeepReadonly<JobError>,
+  result: DeepReadonly<JobError>,
   infrastructure: boolean,
 ): Extract<ChangeAdmissionRecord, { status: "refused" }>["kind"] {
   if (infrastructure) return "infrastructure"
-  return NEEDS_AUTHOR_CODES.has(receipt.code) ? "refusal" : "failure"
+  return NEEDS_AUTHOR_CODES.has(result.code) ? "refusal" : "failure"
 }
 
 type InfraRetryCompositionFailure =
@@ -7366,19 +7366,19 @@ function terminalJobError(job: DeepReadonly<Job> | undefined): JobError | undefi
   return undefined
 }
 
-function needsAuthorJobReceipt(job: DeepReadonly<Job> | undefined): JobError | undefined {
+function needsAuthorJobResult(job: DeepReadonly<Job> | undefined): JobError | undefined {
   const error = terminalJobError(job)
   if (error === undefined) return undefined
   if (NEEDS_AUTHOR_CODES.has(error.code)) return error
   if (job?.status !== "completed" || job.conclusion !== "failure") return undefined
-  const evidence = candidateFailureReceiptEvidence(job.output)
+  const evidence = candidateFailureResultEvidence(job.output)
   return evidence === undefined ? undefined : JobErrorSchema.parse({ ...error, evidence })
 }
 
-/** Recover the immutable author-attribution receipt from an exact Queue run.
+/** Recover the immutable author-attribution result from an exact Queue run.
  * This remains valid after the PR advances to a later revision, unlike a
  * lookup through current PR eligibility. */
-export function authorAttributionReceipt(
+export function authorAttributionResult(
   run: DeepReadonly<Run> | undefined,
   identity?: Readonly<{ pr: string; revision: number; headSha: string }>,
 ): JobError | undefined {
@@ -7393,23 +7393,23 @@ export function authorAttributionReceipt(
     return undefined
   }
   for (const step of run.steps) {
-    const receipt = needsAuthorJobReceipt(step.job)
-    if (receipt !== undefined) return receipt
+    const result = needsAuthorJobResult(step.job)
+    if (result !== undefined) return result
   }
   return run.error !== undefined && NEEDS_AUTHOR_CODES.has(run.error.code) ? run.error : undefined
 }
 
-/** Recover the attributed receipt for a legacy rejected journal. Scans EVERY
+/** Recover the attributed result for a legacy rejected journal. Scans EVERY
  * step across both the admission/check run and terminal integration run,
  * including integrating steps hidden from ordinary check projections. Native
- * needs-author reads the receipt directly from the PR fact. */
-function needsAuthorReceipt(
+ * needs-author reads the result directly from the PR fact. */
+function needsAuthorResult(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
 ): JobError | undefined {
   const current = changeNeedsAuthor(pr)
-  if (current !== undefined) return current.receipt
+  if (current !== undefined) return current.result
   const runIds = new Set<RunId>()
   const checkRun = checkEligibility(state, pr, steps).run
   if (checkRun !== undefined) runIds.add(checkRun)
@@ -7420,15 +7420,15 @@ function needsAuthorReceipt(
     const record = Queues.get(state.queues, runId)
     if (record === undefined) continue
     const run = materializeRun(record, state.jobs)
-    const receipt = authorAttributionReceipt(run)
-    if (receipt !== undefined) return receipt
+    const result = authorAttributionResult(run)
+    if (result !== undefined) return result
   }
   return undefined
 }
 
-function needsAuthorMessage(pr: DeepReadonly<PR>, receipt: JobError): string {
-  const attributed = CandidateFailureReceiptEvidenceSchema.safeParse(receipt.evidence)
-  if (!attributed.success) return `PR '${pr.id}' cannot be composed as submitted: ${receipt.message}`
+function needsAuthorMessage(pr: DeepReadonly<PR>, result: JobError): string {
+  const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
+  if (!attributed.success) return `PR '${pr.id}' cannot be composed as submitted: ${result.message}`
   const failures = attributed.data.failures
     .map(
       (failure) =>
@@ -7464,7 +7464,7 @@ function ChangeEligibility(
   const exhaustedAutomaticAdmissions =
     checks.status === "failed" &&
     automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(state.queues, steps))
-  const result = (reason?: ChangeEligibility["reason"]): ChangeEligibility => ({
+  const verdict = (reason?: ChangeEligibility["reason"]): ChangeEligibility => ({
     pr: pr.id,
     revision: changeRevisionNumber(pr),
     runnable: reason === undefined,
@@ -7477,53 +7477,53 @@ function ChangeEligibility(
     options.resumeIntegrated === true && (delivery === "integrated" || delivery === "already-landed")
   if (!resumingIntegration) {
     if (delivery === "pushed") {
-      return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
+      return verdict({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
     }
     if (delivery === "needs-author") {
       const admission = changeAdmission(pr)
       if (admission?.status === "refused") {
-        return result({
+        return verdict({
           code: "admission-refused",
           message:
-            `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
-            `${admission.receipt.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
+            `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.result.code}': ` +
+            `${admission.result.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
         })
       }
-      const receipt = changeNeedsAuthor(pr)?.receipt
-      if (receipt === undefined) {
-        throw new Error(`yrd: PR '${pr.id}' is needs-author without an attribution receipt`)
+      const result = changeNeedsAuthor(pr)?.result
+      if (result === undefined) {
+        throw new Error(`yrd: PR '${pr.id}' is needs-author without an attribution result`)
       }
-      return result({
+      return verdict({
         code: "needs-author",
-        message: needsAuthorMessage(pr, receipt),
-        receipt,
+        message: needsAuthorMessage(pr, result),
+        result,
       })
     }
     // A composition refusal is deterministic: the queue could not build the
     // candidate from what the author submitted, so re-running the same payload
     // cannot pass — whether the failed compose left the PR `submitted` or drove
     // an automatic `rejected`. Project it as `needs-author` with the refusal
-    // receipt attached, ahead of the generic `rejected`/`required-check-failed` verdicts.
+    // result attached, ahead of the generic `rejected`/`required-check-failed` verdicts.
     // This is a derived projection over the failed check's recorded refusal
     // evidence; it stores no new PR state (the bay state is untouched).
     if (
       options.ignoreChecks !== true &&
       (delivery === "submitted" || delivery === "ready" || delivery === "rejected")
     ) {
-      const receipt = needsAuthorReceipt(state, pr, steps)
-      if (receipt !== undefined) {
-        return result({
+      const result = needsAuthorResult(state, pr, steps)
+      if (result !== undefined) {
+        return verdict({
           code: "needs-author",
-          message: needsAuthorMessage(pr, receipt),
-          receipt,
+          message: needsAuthorMessage(pr, result),
+          result,
         })
       }
     }
     if (delivery === "rejected") {
-      return result({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
+      return verdict({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
     }
     if (delivery !== "submitted" && delivery !== "ready") {
-      return result({ code: "terminal", message: `PR '${pr.id}' is ${delivery}, not queueable` })
+      return verdict({ code: "terminal", message: `PR '${pr.id}' is ${delivery}, not queueable` })
     }
     const revision = currentChangeRev(pr)
     const conflictingCandidate = Object.values(state.queues.candidates)
@@ -7538,7 +7538,7 @@ function ChangeEligibility(
       .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
       .at(-1)
     if (conflictingCandidate !== undefined) {
-      return result({
+      return verdict({
         code: "candidate-conflicting",
         message: `PR '${pr.id}' revision ${revision.n} conflicts in Candidate '${conflictingCandidate.id}'`,
       })
@@ -7549,7 +7549,7 @@ function ChangeEligibility(
       admissionRefusal.revision === revision.n &&
       admissionRefusal.headSha === revision.head
     ) {
-      return result({
+      return verdict({
         code: "admission-refused",
         message:
           `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
@@ -7559,11 +7559,11 @@ function ChangeEligibility(
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
       const position = checks.position === undefined ? "" : ` at position ${checks.position}`
-      return result({ code: "checks-pending", message: `PR '${pr.id}' checks are queued${position}` })
+      return verdict({ code: "checks-pending", message: `PR '${pr.id}' checks are queued${position}` })
     }
     if (options.ignoreChecks !== true && checks.status === "checking") {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
-      return result({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
+      return verdict({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
     }
     if (
       options.ignoreChecks !== true &&
@@ -7573,19 +7573,19 @@ function ChangeEligibility(
         exhaustedAutomaticAdmissions)
     ) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
-      return result({
+      return verdict({
         code: "required-check-failed",
         message: `PR '${pr.id}' required check failed${run}; fix the branch and push, or request fresh checks`,
       })
     }
     if (required && !reviewed.approved) {
       if (reviewed.current?.decision === "reject") {
-        return result({
+        return verdict({
           code: "review-rejected",
           message: `PR '${pr.id}' was rejected by ${reviewed.current.by} for revision ${changeRevisionNumber(pr)}`,
         })
       }
-      return result({
+      return verdict({
         code: "review-required",
         message: `PR '${pr.id}' needs approval for revision ${changeRevisionNumber(pr)}`,
       })
@@ -7594,7 +7594,7 @@ function ChangeEligibility(
   const base = baseIdentity(pr.base)
   const pause = blockingQueuePause(state, pr)
   if (pause !== undefined) {
-    return result({
+    return verdict({
       code: "queue-paused",
       message: `queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
     })
@@ -7606,11 +7606,11 @@ function ChangeEligibility(
       run.prs.some((candidate) => candidate.id === pr.id),
   )
   return claimed !== undefined
-    ? result({
+    ? verdict({
         code: "claimed",
         message: `PR '${pr.id}' is already in active queue run '${claimed.id}'`,
       })
-    : result()
+    : verdict()
 }
 
 function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {

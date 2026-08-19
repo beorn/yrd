@@ -2528,7 +2528,7 @@ describe("Queue command adapters", () => {
     await writeFile(join(repo, ".gitattributes"), "doctrine.md merge=union\n")
     await writeFile(
       join(repo, "doctrine.md"),
-      doctrineText(["Validate admitted work.", "Receipt marker: �(", "Keep it flowing."]),
+      doctrineText(["Validate admitted work.", "Result marker: �(", "Keep it flowing."]),
     )
     await git(repo, ["add", ".gitattributes", "doctrine.md"])
     await git(repo, ["commit", "-qam", "add dependency"])
@@ -2570,7 +2570,7 @@ describe("Queue command adapters", () => {
       doctrineText([
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
-        "Receipt marker: �(",
+        "Result marker: �(",
         "Keep it flowing.",
       ]),
     )
@@ -2587,7 +2587,7 @@ describe("Queue command adapters", () => {
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
         "For authored roots, draft then recut the same PR.",
-        "Receipt marker: �(",
+        "Result marker: �(",
         "Keep it flowing.",
       ]),
     )
@@ -2677,7 +2677,7 @@ describe("Queue command adapters", () => {
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
         "For authored roots, draft then recut the same PR.",
-        "Receipt marker: �(",
+        "Result marker: �(",
         "Keep it flowing.",
       ]),
     )
@@ -3040,7 +3040,7 @@ describe("Queue command adapters", () => {
     expect(changeAdmission(current)).toMatchObject({
       status: "refused",
       baseSha: advancedBaseSha,
-      receipt: {
+      result: {
         code: "carrier-drops-landed",
         message: expect.stringMatching(/advance base disjoint.*linear rebuild.*current base/isu),
       },
@@ -3465,14 +3465,14 @@ describe("Queue command adapters", () => {
       output: { conflicts: [{ repo: ".", paths: ["dep"] }] },
     })
     // End-to-end through the REAL compose path: the composition refusal commits
-    // native needs-author with its typed receipt, never a terminal rejection.
+    // native needs-author with its typed result, never a terminal rejection.
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "needs-author" })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
     expect(eventNames).not.toContain("pr/rejected")
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility.reason?.code).toBe("needs-author")
-    expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
+    expect(eligibility.reason?.result).toMatchObject({ code: "authored-gitlink" })
   })
 
   it("puts a provisioned lockfile in the immutable pin candidate before checks run", async () => {
@@ -5392,7 +5392,7 @@ describe("Queue command adapters", () => {
       runnable: false,
       reason: {
         code: "needs-author",
-        receipt: {
+        result: {
           code: "check-failed",
           evidence: {
             kind: "candidate-attributed-check-failure",
@@ -5406,7 +5406,7 @@ describe("Queue command adapters", () => {
     expect(app.queue.eligibility("PR1").reason?.message).toContain("55 baseline errors unchanged")
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "needs-author",
-      needsAuthor: { receipt: { code: "check-failed" } },
+      needsAuthor: { result: { code: "check-failed" } },
     })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
@@ -6450,7 +6450,7 @@ describe("Queue command adapters", () => {
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility).toMatchObject({ reason: { code: "required-check-failed" } })
-    expect(eligibility.reason).not.toHaveProperty("receipt")
+    expect(eligibility.reason).not.toHaveProperty("result")
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")
     expect(eventNames).not.toContain("pr/needs-author")
@@ -8319,7 +8319,7 @@ describe("Queue command adapters", () => {
         code: "component-main-promotion-failed",
         evidence: {
           kind: "component-main-outcomes",
-          receipts: [],
+          results: [],
           refusals: [
             {
               code: "component-main-promotion-failed",
@@ -8365,7 +8365,7 @@ describe("Queue command adapters", () => {
         code: "component-main-promotion-failed",
         evidence: {
           kind: "component-main-outcomes",
-          receipts: [],
+          results: [],
           refusals: [
             expect.objectContaining({
               code: "component-main-promotion-failed",
@@ -8474,7 +8474,7 @@ describe("Queue command adapters", () => {
       })
       expect(run.error?.evidence).toMatchObject({
         kind: "component-main-outcomes",
-        receipts: [
+        results: [
           {
             action: "fast-forwarded",
             path: safeComponent.path,
@@ -8568,7 +8568,7 @@ describe("Queue command adapters", () => {
         message: expect.stringMatching(/divergent main.*linear rebuild.*current base/isu),
         evidence: {
           kind: "component-main-outcomes",
-          receipts: [],
+          results: [],
           refusals: [
             {
               code: "carrier-drops-landed",
@@ -8912,7 +8912,7 @@ describe("Queue command adapters", () => {
         code: "component-main-promotion-failed",
         evidence: {
           kind: "component-main-outcomes",
-          receipts: [],
+          results: [],
           refusals: [
             {
               code: "component-main-promotion-failed",
@@ -8996,7 +8996,7 @@ describe("Queue command adapters", () => {
         code: "component-main-promotion-failed",
         evidence: {
           kind: "component-main-outcomes",
-          receipts: [
+          results: [
             {
               action: "fast-forwarded",
               path: firstComponent.path,

@@ -153,7 +153,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
     expect(finding?.step).toBe("first")
   })
 
-  it("recover settles a stale jobless run with a truthful reason and a loud receipt", async () => {
+  it("recover settles a stale jobless run with a truthful reason and a loud result", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await joblessRun(log)
@@ -169,12 +169,12 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
     expect(run?.error?.message).toContain(START)
     expect(app.queue.audit().findings.some((item) => item.code === "orphaned-run")).toBe(false)
 
-    const receipt = events.find(
+    const result = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" && event.level === "warn" && event.props?.action === "recover-orphan-run-settle",
     )
-    expect(receipt, "recover must emit a loud structured receipt for settled orphan runs").toBeDefined()
-    expect(receipt?.props).toMatchObject({ reason: "orphaned-run", runs: ["R1"], steps: ["first"] })
+    expect(result, "recover must emit a loud structured result for settled orphan runs").toBeDefined()
+    expect(result?.props).toMatchObject({ reason: "orphaned-run", runs: ["R1"], steps: ["first"] })
     log.end()
   })
 

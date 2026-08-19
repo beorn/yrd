@@ -135,7 +135,7 @@ describe("actionable failure projection", () => {
     const failure = actionableFailure(DIVERGED_RECUT_BASE, { delivery: "submitted" })
 
     expect(failure.code).toBe("recut-base-diverged")
-    // Both bases stay in the receipt: the operator checks the fresh revision
+    // Both bases stay in the result: the operator checks the fresh revision
     // against the base the queue actually holds, not the one it certified.
     expect(failure.cause).toContain(BASE_PIN)
     expect(failure.cause).toContain(BASE_ROOT)

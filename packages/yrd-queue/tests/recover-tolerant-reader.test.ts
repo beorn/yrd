@@ -33,7 +33,7 @@ function tracing(): Readonly<{ log: ReturnType<typeof createLogger>; events: Log
   return { log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]), events }
 }
 
-function receipt(events: readonly LogEvent[], action: string) {
+function result(events: readonly LogEvent[], action: string) {
   return events.find(
     (event): event is Extract<LogEvent, { kind: "log" }> =>
       event.kind === "log" && event.level === "warn" && event.props?.action === action,
@@ -211,7 +211,7 @@ describe("recovery reads a queue population one record at a time", () => {
     expect(repaired?.status).toBe("completed")
     expect(repaired?.error?.code).toBe("orphaned-run")
     expect(repaired?.error?.message).toContain("runner disappeared before step 'first' started")
-    expect(receipt(events, "recover-orphan-run-settle")?.props).toMatchObject({
+    expect(result(events, "recover-orphan-run-settle")?.props).toMatchObject({
       reason: "orphaned-run",
       runs: ["R2"],
       steps: ["first"],
@@ -225,7 +225,7 @@ describe("recovery reads a queue population one record at a time", () => {
 
     await app.queue.recover({ recoveryTime: LATER, reason: "resident restart" })
 
-    const quarantine = receipt(events, "recover-unreadable-run-quarantine")
+    const quarantine = result(events, "recover-unreadable-run-quarantine")
     expect(quarantine, "a skipped record must be reported, never swallowed").toBeDefined()
     expect(quarantine?.props).toMatchObject({ reason: "unreadable-run", runs: ["R1"] })
     // WHY, verbatim: the reader's own refusal, not a summary of it.
@@ -241,7 +241,7 @@ describe("recovery reads a queue population one record at a time", () => {
 
     // Recovery walks this population four times over (tree, orphaned jobs,
     // jobless runs, stale plans). One bad row is one incident, not four.
-    expect(receipt(events, "recover-unreadable-run-quarantine")?.props?.runs).toEqual(["R1"])
+    expect(result(events, "recover-unreadable-run-quarantine")?.props?.runs).toEqual(["R1"])
     expect(app.queue.audit().findings.filter((finding) => finding.code === "invalid-run")).toEqual([
       { code: "invalid-run", message: EAGER_REFUSAL, run: "R1" },
     ])
@@ -281,7 +281,7 @@ describe("the audit walks the same population through the same reader", () => {
 })
 
 describe("valid state reads exactly as it did before", () => {
-  it("quarantines nothing, and recovers the orphan with no quarantine receipt", async () => {
+  it("quarantines nothing, and recovers the orphan with no quarantine result", async () => {
     const { log, events } = tracing()
     await using app = await createApp(await seedValidPopulation(), ids(100), log)
 
@@ -295,7 +295,7 @@ describe("valid state reads exactly as it did before", () => {
       status: "completed",
       conclusion: "success",
     })
-    expect(receipt(events, "recover-unreadable-run-quarantine")).toBeUndefined()
+    expect(result(events, "recover-unreadable-run-quarantine")).toBeUndefined()
     log.end()
   })
 })

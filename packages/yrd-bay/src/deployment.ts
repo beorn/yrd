@@ -10,9 +10,9 @@ import * as z from "zod"
 
 export type DeploymentPin = "tip" | "last-green"
 
-export type DeploymentSubmoduleReceipt = Readonly<{ path: string; sha: string }>
+export type DeploymentSubmoduleResult = Readonly<{ path: string; sha: string }>
 
-export type DeploymentSourceReceipt = Readonly<{
+export type DeploymentSourceResult = Readonly<{
   deploymentId: string
   generation: string
   path: string
@@ -21,7 +21,7 @@ export type DeploymentSourceReceipt = Readonly<{
   dirty: false
   loadedAt: string
   pin: DeploymentPin
-  submodules: readonly DeploymentSubmoduleReceipt[]
+  submodules: readonly DeploymentSubmoduleResult[]
 }>
 
 export type MaterializeDeploymentInput = Readonly<{
@@ -31,7 +31,7 @@ export type MaterializeDeploymentInput = Readonly<{
   pin: DeploymentPin
 }>
 
-export type ReleaseDeploymentInput = Pick<DeploymentSourceReceipt, "deploymentId" | "generation" | "path" | "sha">
+export type ReleaseDeploymentInput = Pick<DeploymentSourceResult, "deploymentId" | "generation" | "path" | "sha">
 export type ReleaseDeploymentJobInput = ReleaseDeploymentInput &
   Readonly<{
     authorization: Readonly<{
@@ -39,7 +39,7 @@ export type ReleaseDeploymentJobInput = ReleaseDeploymentInput &
       generation: string
       path: string
       sha: string
-      receipt: JsonValue
+      result: JsonValue
     }>
   }>
 
@@ -66,23 +66,23 @@ export const DeploymentInputSchema = z
     pin: DeploymentPinSchema,
   })
   .strict()
-const DeploymentSubmoduleReceiptSchema = z
+const DeploymentSubmoduleResultSchema = z
   .object({ path: z.string().min(1), sha: z.string().regex(FULL_OBJECT_ID) })
   .strict()
-export const DeploymentSourceReceiptSchema = DeploymentInputSchema.extend({
+export const DeploymentSourceResultSchema = DeploymentInputSchema.extend({
   path: z.string().min(1),
   verification: z.literal("verified"),
   dirty: z.literal(false),
   loadedAt: z.iso.datetime({ offset: true }),
-  submodules: z.array(DeploymentSubmoduleReceiptSchema).readonly(),
+  submodules: z.array(DeploymentSubmoduleResultSchema).readonly(),
 }).strict()
-const ReleaseDeploymentInputSchema = DeploymentSourceReceiptSchema.pick({
+const ReleaseDeploymentInputSchema = DeploymentSourceResultSchema.pick({
   deploymentId: true,
   generation: true,
   path: true,
   sha: true,
 }).strict()
-export const HabGenerationReleaseReceiptSchema = z
+export const HabGenerationReleaseResultSchema = z
   .object({
     schema: z.literal("hab-service-generation-release/1"),
     jurisdiction: z.literal("single-habitat"),
@@ -112,7 +112,7 @@ export const ReleaseDeploymentJobInputSchema: z.ZodType<ReleaseDeploymentJobInpu
         generation: GenerationIdSchema,
         path: z.string().min(1),
         sha: z.string().regex(FULL_OBJECT_ID),
-        receipt: HabGenerationReleaseReceiptSchema,
+        result: HabGenerationReleaseResultSchema,
       })
       .strict(),
   }).strict()
@@ -124,8 +124,8 @@ function validateId(kind: "deployment", value: string): void {
 }
 
 function assertHabReleaseAuthorization(input: ReleaseDeploymentJobInput): void {
-  const receipt = HabGenerationReleaseReceiptSchema.parse(input.authorization.receipt)
-  const source = receipt.retiredSource
+  const result = HabGenerationReleaseResultSchema.parse(input.authorization.result)
+  const source = result.retiredSource
   if (resolve(source.path) !== resolve(input.authorization.path)) {
     throw new Error(`Hab release path '${source.path}' does not authorize '${input.authorization.path}'`)
   }
@@ -143,7 +143,7 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
-async function writeReceipt(path: string, content: string): Promise<"created" | "exists"> {
+async function writeResult(path: string, content: string): Promise<"created" | "exists"> {
   const directory = resolve(path, "..")
   const temporary = join(directory, `.${randomUUID()}.tmp`)
   const file = await open(temporary, "wx", 0o600)
@@ -167,10 +167,10 @@ async function writeReceipt(path: string, content: string): Promise<"created" | 
   }
 }
 
-async function readReceipt(recordsRoot: string, deploymentId: string): Promise<DeploymentSourceReceipt | undefined> {
+async function readResult(recordsRoot: string, deploymentId: string): Promise<DeploymentSourceResult | undefined> {
   const path = join(recordsRoot, `${deploymentId}.json`)
   if (!existsSync(path)) return undefined
-  return JSON.parse(await readFile(path, "utf8")) as DeploymentSourceReceipt
+  return JSON.parse(await readFile(path, "utf8")) as DeploymentSourceResult
 }
 
 /** Resolve Yrd's opaque deployment identity from Hab's exact path+SHA join. */
@@ -178,7 +178,7 @@ export async function readDeploymentBySource(
   deploymentsRoot: string,
   path: string,
   sha: string,
-): Promise<DeploymentSourceReceipt | undefined> {
+): Promise<DeploymentSourceResult | undefined> {
   const recordsRoot = join(resolve(deploymentsRoot), "records")
   let names: string[]
   try {
@@ -187,10 +187,10 @@ export async function readDeploymentBySource(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
     throw error
   }
-  const matches: DeploymentSourceReceipt[] = []
+  const matches: DeploymentSourceResult[] = []
   for (const name of names) {
-    const receipt = DeploymentSourceReceiptSchema.parse(JSON.parse(await readFile(join(recordsRoot, name), "utf8")))
-    if (resolve(receipt.path) === resolve(path) && receipt.sha === sha) matches.push(receipt)
+    const result = DeploymentSourceResultSchema.parse(JSON.parse(await readFile(join(recordsRoot, name), "utf8")))
+    if (resolve(result.path) === resolve(path) && result.sha === sha) matches.push(result)
   }
   if (matches.length > 1) {
     throw new Error(`multiple Yrd deployments claim exact source '${resolve(path)}@${sha}'`)
@@ -199,7 +199,7 @@ export async function readDeploymentBySource(
 }
 
 /** Read every published deployment whose immutable physical path still exists. */
-export async function readLiveDeployments(deploymentsRoot: string): Promise<DeploymentSourceReceipt[]> {
+export async function readLiveDeployments(deploymentsRoot: string): Promise<DeploymentSourceResult[]> {
   const recordsRoot = join(resolve(deploymentsRoot), "records")
   let names: string[]
   try {
@@ -208,10 +208,10 @@ export async function readLiveDeployments(deploymentsRoot: string): Promise<Depl
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
     throw error
   }
-  const matches: DeploymentSourceReceipt[] = []
+  const matches: DeploymentSourceResult[] = []
   for (const name of names) {
-    const receipt = DeploymentSourceReceiptSchema.parse(JSON.parse(await readFile(join(recordsRoot, name), "utf8")))
-    if (existsSync(receipt.path)) matches.push(receipt)
+    const result = DeploymentSourceResultSchema.parse(JSON.parse(await readFile(join(recordsRoot, name), "utf8")))
+    if (existsSync(result.path)) matches.push(result)
   }
   return matches.sort((left, right) => left.deploymentId.localeCompare(right.deploymentId))
 }
@@ -219,7 +219,7 @@ export async function readLiveDeployments(deploymentsRoot: string): Promise<Depl
 async function submoduleClosure(
   git: Awaited<ReturnType<typeof createGitWorktreeStore>>["git"],
   path: string,
-): Promise<DeploymentSubmoduleReceipt[]> {
+): Promise<DeploymentSubmoduleResult[]> {
   const result = await git.run(
     path,
     ["submodule", "foreach", "--recursive", "--quiet", 'printf "%s\\t%s\\n" "$displaypath" "$(git rev-parse HEAD)"'],
@@ -232,7 +232,7 @@ async function submoduleClosure(
     .map((line) => {
       const [submodulePath, sha, ...rest] = line.split("\t")
       if (submodulePath === undefined || sha === undefined || rest.length !== 0 || !FULL_OBJECT_ID.test(sha)) {
-        throw new Error(`invalid recursive submodule receipt row '${line}'`)
+        throw new Error(`invalid recursive submodule result row '${line}'`)
       }
       return { path: submodulePath, sha }
     })
@@ -255,8 +255,8 @@ async function changeWritePermission(path: string, writable: boolean): Promise<v
 }
 
 function assertExactRelease(
-  record: Pick<DeploymentSourceReceipt, "generation" | "path" | "sha">,
-  input: Pick<DeploymentSourceReceipt, "generation" | "path" | "sha">,
+  record: Pick<DeploymentSourceResult, "generation" | "path" | "sha">,
+  input: Pick<DeploymentSourceResult, "generation" | "path" | "sha">,
 ): void {
   if (record.generation !== input.generation) {
     throw new Error(`generation '${input.generation}' does not release recorded generation '${record.generation}'`)
@@ -278,11 +278,11 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
   await worktrees.prepareRoot(deploymentsRoot)
 
   return Object.freeze({
-    async materialize(input: MaterializeDeploymentInput): Promise<DeploymentSourceReceipt> {
+    async materialize(input: MaterializeDeploymentInput): Promise<DeploymentSourceResult> {
       validateId("deployment", input.deploymentId)
       if (!FULL_OBJECT_ID.test(input.sha)) throw new Error(`deployment SHA '${input.sha}' is not a full Git object id`)
       const path = join(rootsRoot, input.deploymentId)
-      const existing = await readReceipt(recordsRoot, input.deploymentId)
+      const existing = await readResult(recordsRoot, input.deploymentId)
       if (existing !== undefined) {
         assertExactRelease(existing, { ...input, path })
         if (existing.pin !== input.pin) {
@@ -335,7 +335,7 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
       }
       if (registration.locked === undefined) throw new Error(`deployment '${input.deploymentId}' is not Git-locked`)
       await changeWritePermission(physicalPath, false)
-      const receipt: DeploymentSourceReceipt = {
+      const result: DeploymentSourceResult = {
         deploymentId: input.deploymentId,
         generation: input.generation,
         path: physicalPath,
@@ -346,39 +346,39 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
         pin: input.pin,
         submodules,
       }
-      const published = await writeReceipt(
+      const published = await writeResult(
         join(recordsRoot, `${input.deploymentId}.json`),
-        `${JSON.stringify(receipt, null, 2)}\n`,
+        `${JSON.stringify(result, null, 2)}\n`,
       )
       if (published === "exists") {
-        const winner = await readReceipt(recordsRoot, input.deploymentId)
-        if (winner === undefined || JSON.stringify(winner) !== JSON.stringify(receipt)) {
-          throw new Error(`deployment '${input.deploymentId}' receipt publication raced with different evidence`)
+        const winner = await readResult(recordsRoot, input.deploymentId)
+        if (winner === undefined || JSON.stringify(winner) !== JSON.stringify(result)) {
+          throw new Error(`deployment '${input.deploymentId}' result publication raced with different evidence`)
         }
       }
-      return receipt
+      return result
     },
 
     async release(input: ReleaseDeploymentInput): Promise<Readonly<{ released: true; path: string }>> {
       validateId("deployment", input.deploymentId)
-      const receipt = await readReceipt(recordsRoot, input.deploymentId)
-      if (receipt === undefined) throw new Error(`deployment '${input.deploymentId}' has no published receipt`)
-      assertExactRelease(receipt, input)
-      if (existsSync(receipt.path)) {
-        await changeWritePermission(receipt.path, true)
-        await worktrees.remove(receipt.path, {
+      const result = await readResult(recordsRoot, input.deploymentId)
+      if (result === undefined) throw new Error(`deployment '${input.deploymentId}' has no published result`)
+      assertExactRelease(result, input)
+      if (existsSync(result.path)) {
+        await changeWritePermission(result.path, true)
+        await worktrees.remove(result.path, {
           unlock: true,
           operation: `deployment ${input.deploymentId} worktree remove`,
         })
       } else {
-        await worktrees.recoverDestroyed(receipt.path, `deployment ${input.deploymentId} released-worktree recovery`)
+        await worktrees.recoverDestroyed(result.path, `deployment ${input.deploymentId} released-worktree recovery`)
       }
-      return { released: true, path: receipt.path }
+      return { released: true, path: result.path }
     },
 
     async reap(input: MaterializeDeploymentInput): Promise<Readonly<{ reaped: true; path: string }>> {
       validateId("deployment", input.deploymentId)
-      if ((await readReceipt(recordsRoot, input.deploymentId)) !== undefined) {
+      if ((await readResult(recordsRoot, input.deploymentId)) !== undefined) {
         throw new Error(`deployment '${input.deploymentId}' is published and cannot be reaped as failed preparation`)
       }
       const path = join(rootsRoot, input.deploymentId)
@@ -399,7 +399,7 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
 export type GitDeploymentStore = Awaited<ReturnType<typeof createGitDeploymentStore>>
 
 export type DeploymentJobDefs = Readonly<{
-  "deployment.materialize": JobDef<MaterializeDeploymentInput, DeploymentSourceReceipt>
+  "deployment.materialize": JobDef<MaterializeDeploymentInput, DeploymentSourceResult>
   "deployment.reap": JobDef<MaterializeDeploymentInput, Readonly<{ reaped: true; path: string }>>
   "deployment.release": JobDef<ReleaseDeploymentJobInput, Readonly<{ released: true; path: string }>>
 }>
@@ -419,7 +419,7 @@ export function deploymentJobKey(operation: "materialize" | "reap" | "release", 
 
 /**
  * Journal-backed lifecycle definitions for immutable deployment resources.
- * Receipt files are derived crash evidence only; callers request these Jobs
+ * Result files are derived crash evidence only; callers request these Jobs
  * with {@link deploymentJobKey} so the Journal remains the mutable authority.
  */
 export function createDeploymentJobDefs(store: GitDeploymentStore): DeploymentJobDefs {
@@ -429,7 +429,7 @@ export function createDeploymentJobDefs(store: GitDeploymentStore): DeploymentJo
       title: "Materialize immutable deployment",
       revision: "deployment-materialize-v1",
       input: DeploymentInputSchema,
-      output: DeploymentSourceReceiptSchema,
+      output: DeploymentSourceResultSchema,
       observe: (input) => ({ lifecycle: "deployment-materialization", attributes: { ...input } }),
       async execute(input) {
         try {

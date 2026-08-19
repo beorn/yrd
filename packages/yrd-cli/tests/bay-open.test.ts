@@ -1009,7 +1009,7 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     expect(JSON.parse(prs.stdout())).toMatchObject({ prs: [] })
   })
 
-  it("keeps the Bay open without an archive receipt when the checkpoint commit fails", async () => {
+  it("keeps the Bay open without an archive result when the checkpoint commit fails", async () => {
     const { repo } = await repository()
     const originalHead = await git(repo, "rev-parse", "HEAD")
     const preCommit = join(repo, ".git", "hooks", "pre-commit")
@@ -1024,7 +1024,7 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     expect(run.stderr()).toContain("scratch.txt")
     expect(run.stderr()).toContain("checkpoint commit failed")
     expect(run.stderr()).toContain("checkpoint denied")
-    expect(run.stderr()).toContain("Bay remains open and no archive receipt was written")
+    expect(run.stderr()).toContain("Bay remains open and no archive result was written")
     expect(await git(repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(originalHead)
     await expect(git(repo, "show", `refs/remotes/origin/${BRANCH}:scratch.txt`)).rejects.toThrow()
     await expect(git(repo, "rev-parse", "--verify", "refs/yrd/closed/B1")).rejects.toThrow()

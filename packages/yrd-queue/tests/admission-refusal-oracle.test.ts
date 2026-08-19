@@ -271,7 +271,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       count: 1,
       settlement: { disposition: "needs-person" },
     })
-    // The receipt carries the discriminating fact: which base the revision
+    // The result carries the discriminating fact: which base the revision
     // certifies and which one the queue actually holds.
     expect(refusal?.settlement?.reason).toContain(DIVERGED)
     expect(refusal?.settlement?.reason).toContain(BASE)

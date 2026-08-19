@@ -404,7 +404,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
               `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
                 `but the checkpoint commit failed: ${committed.stderr.trim() || committed.stdout.trim() || `exit ${String(committed.code)}`}` +
                 (remaining === "" ? "" : `\nremaining uncommitted work:\n${remaining}`) +
-                "\nThe Bay remains open and no archive receipt was written. Fix the commit failure, then retry.",
+                "\nThe Bay remains open and no archive result was written. Fix the commit failure, then retry.",
             )
           }
           headSha = await git.commit(input.path, "HEAD")
@@ -418,7 +418,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
                 (remaining === ""
                   ? "the dirty content disappeared from the index/worktree during the commit"
                   : `the work remains uncommitted:\n${remaining}`) +
-                "\nThe Bay remains open and no archive receipt was written. " +
+                "\nThe Bay remains open and no archive result was written. " +
                 "Fix the Git hook or filter so committing the listed paths advances HEAD, then retry.",
             )
           }
@@ -428,7 +428,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
               `workspace '${input.path}' reported uncommitted work:\n${dirtyStatus}\n` +
                 `but checkpoint commit '${headSha}' contains tree '${committedTree}', not staged tree '${stagedTree}'; ` +
                 "the commit did not preserve the staged content.\n" +
-                "The Bay remains open and no archive receipt was written. " +
+                "The Bay remains open and no archive result was written. " +
                 "Fix the Git hook or filter that replaced the staged content, then retry.",
             )
           }

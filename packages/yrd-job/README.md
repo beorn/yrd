@@ -14,14 +14,14 @@ const deliver = createJobDef({
   title: "Deliver message",
   revision: "transport-v3",
   input: z.object({ text: z.string() }),
-  output: z.object({ receipt: z.string() }),
+  output: z.object({ result: z.string() }),
   async execute(input, context) {
-    const receipt = await transport.send(input.text, {
+    const result = await transport.send(input.text, {
       idempotencyKey: context.id,
       attempt: context.attempt,
       signal: context.signal,
     })
-    return { status: "passed", output: { receipt } }
+    return { status: "passed", output: { result } }
   },
 })
 

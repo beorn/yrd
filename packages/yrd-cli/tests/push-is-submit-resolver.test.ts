@@ -13,7 +13,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { ReceiverRefUpdate, ReceiverSubmitIntent } from "@yrd/bay"
-import type { ReceiverReceipt } from "@yrd/bay"
+import type { ReceiverResult } from "@yrd/bay"
 import { materializeCarrier, receiverTarget, type ReceiverBayView } from "../src/host.ts"
 
 const process = createProcess()
@@ -136,7 +136,7 @@ describe("push-is-submit target resolution", () => {
 
     // No `branch` field: a branch push names its branch in the ref, and the
     // receiver reads it there. Adding one would be a second spelling of a fact
-    // the receipt already holds.
+    // the result already holds.
     await expect(resolve("task/one", branchUpdate)).resolves.toEqual({
       bay: "B1",
       name: "bay-one",
@@ -148,8 +148,8 @@ describe("push-is-submit target resolution", () => {
 })
 
 describe("push-is-submit carrier materialization", () => {
-  /** A receipt shaped exactly as the receiver writes one for a submit push. */
-  function receipt(headSha: string, overrides: Partial<ReceiverReceipt> = {}): ReceiverReceipt {
+  /** A result shaped exactly as the receiver writes one for a submit push. */
+  function result(headSha: string, overrides: Partial<ReceiverResult> = {}): ReceiverResult {
     return {
       version: 1,
       id: "a".repeat(64),
@@ -161,7 +161,7 @@ describe("push-is-submit carrier materialization", () => {
       headSha,
       intake: { name: "my-change", base: "main", baseSha: zero, branch: "issue/my-change", headSha },
       ...overrides,
-    } as ReceiverReceipt
+    } as ReceiverResult
   }
 
   it("creates the carrier the submit push named, at the head it pushed", async () => {
@@ -171,7 +171,7 @@ describe("push-is-submit carrier materialization", () => {
     // pre-submit gate with `required-check candidate '<branch>' is missing`.
     await expect(git(repo, "rev-parse", "--verify", "refs/heads/issue/my-change")).rejects.toThrow()
 
-    await materializeCarrier(process, repo, receipt(mainSha))
+    await materializeCarrier(process, repo, result(mainSha))
     expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
   })
 
@@ -179,12 +179,12 @@ describe("push-is-submit carrier materialization", () => {
     const { repo, mainSha, releaseSha } = await repository()
     // `release/2` is one behind `main`, so this is a genuine fast-forward.
     await git(repo, "update-ref", "refs/heads/issue/my-change", releaseSha)
-    await materializeCarrier(process, repo, receipt(mainSha))
+    await materializeCarrier(process, repo, result(mainSha))
     expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
 
-    // Draining the same receipt twice must not fail — the carrier is already
+    // Draining the same result twice must not fail — the carrier is already
     // where it belongs, which is success, not a collision.
-    await materializeCarrier(process, repo, receipt(mainSha))
+    await materializeCarrier(process, repo, result(mainSha))
     expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
   })
 
@@ -199,14 +199,14 @@ describe("push-is-submit carrier materialization", () => {
     const siblingSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "update-ref", "refs/heads/issue/my-change", siblingSha)
 
-    await expect(materializeCarrier(process, repo, receipt(mainSha))).rejects.toThrow(/does not descend from/u)
+    await expect(materializeCarrier(process, repo, result(mainSha))).rejects.toThrow(/does not descend from/u)
     // And it left the carrier exactly where it was.
     expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(siblingSha)
   })
 
   it("does nothing for a branch push, which already is its own branch", async () => {
     const { repo, mainSha } = await repository()
-    const branchPush = receipt(mainSha, { ref: "refs/heads/task/one", branch: "task/one", change: undefined })
+    const branchPush = result(mainSha, { ref: "refs/heads/task/one", branch: "task/one", change: undefined })
     await materializeCarrier(process, repo, branchPush)
     // No ref invented: a refs/heads push created its branch by pushing it.
     await expect(git(repo, "rev-parse", "--verify", "refs/heads/task/one")).rejects.toThrow()

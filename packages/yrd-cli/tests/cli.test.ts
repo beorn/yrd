@@ -1021,7 +1021,7 @@ describe("runYrd", () => {
 
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "deployment.materialize",
-      receipt: {
+      result: {
         deploymentId: "D1",
         generation,
         path: "/repo/.deployments/D1",
@@ -1036,15 +1036,15 @@ describe("runYrd", () => {
     })
   })
 
-  it("releases only when the strict Hab service-generation receipt names the exact deployment source", async () => {
+  it("releases only when the strict Hab service-generation result names the exact deployment source", async () => {
     const app = await createApp()
     const temp = mkdtempSync(join(tmpdir(), "yrd-deployment-release-"))
-    const deploymentReceipt = join(temp, "deployment.json")
-    const habReleaseReceipt = join(temp, "hab-release.json")
+    const deploymentResult = join(temp, "deployment.json")
+    const habReleaseResult = join(temp, "hab-release.json")
     const generation = "@dev/1#generation-1.attempt-1"
     const path = "/repo/.deployments/D1"
     writeFileSync(
-      deploymentReceipt,
+      deploymentResult,
       JSON.stringify({
         deploymentId: "D1",
         generation,
@@ -1058,7 +1058,7 @@ describe("runYrd", () => {
       }),
     )
     writeFileSync(
-      habReleaseReceipt,
+      habReleaseResult,
       JSON.stringify({
         schema: "hab-service-generation-release/1",
         jurisdiction: "single-habitat",
@@ -1071,7 +1071,7 @@ describe("runYrd", () => {
     try {
       const output = outputIO()
       expect(
-        await runYrd(app, yrd("deployment", "release", deploymentReceipt, habReleaseReceipt, "--json"), output.io),
+        await runYrd(app, yrd("deployment", "release", deploymentResult, habReleaseResult, "--json"), output.io),
         output.stderr(),
       ).toBe(0)
       expect(JSON.parse(output.stdout())).toMatchObject({
@@ -1085,7 +1085,7 @@ describe("runYrd", () => {
       })
 
       writeFileSync(
-        habReleaseReceipt,
+        habReleaseResult,
         JSON.stringify({
           schema: "hab-service-generation-release/1",
           jurisdiction: "single-habitat",
@@ -1097,7 +1097,7 @@ describe("runYrd", () => {
       )
       const retry = outputIO()
       expect(
-        await runYrd(app, yrd("deployment", "release", deploymentReceipt, habReleaseReceipt, "--json"), retry.io),
+        await runYrd(app, yrd("deployment", "release", deploymentResult, habReleaseResult, "--json"), retry.io),
         retry.stderr(),
       ).toBe(0)
       expect(JSON.parse(retry.stdout())).toMatchObject({
@@ -2281,7 +2281,7 @@ describe("runYrd", () => {
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
       step: "check",
-      receipt: { code: "check-failed" },
+      result: { code: "check-failed" },
     })
 
     // Keep the recut target pending so only the unrelated predecessor is terminal.
@@ -5973,7 +5973,7 @@ describe("runYrd", () => {
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
-      receipt: { code: "authored-gitlink" },
+      result: { code: "authored-gitlink" },
     })
     expect(app.queue.audit().findings).toEqual([])
 
@@ -6018,7 +6018,7 @@ describe("runYrd", () => {
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
       baseSha: advancedBaseSha,
-      receipt: { code: "carrier-drops-landed" },
+      result: { code: "carrier-drops-landed" },
     })
     expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([
       { revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
@@ -10496,7 +10496,7 @@ describe("runYrd", () => {
       headSha: "f".repeat(40),
     })
     const statusRows = queueStatusRows(
-      { byId: {}, prs: { PR1: statusPr }, receipts: {} },
+      { byId: {}, prs: { PR1: statusPr }, results: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr], admissionOrder: ["PR1"] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),
@@ -12743,7 +12743,7 @@ describe("typed issue landing bridge", () => {
     expect(human.stdout()).toContain(`${BASE_SHA} TREE ${equivalentTreeSha}`)
   })
 
-  it("adds needs-author with its attributed receipt in trackerBridge v2 and degrades it explicitly in v1", async () => {
+  it("adds needs-author with its attributed result in trackerBridge v2 and degrades it explicitly in v1", async () => {
     const issueRef = "@yrd/core/21634-submit-and-stay"
     const failure = "submitted composition cannot be built"
     await using app = await createApp({
@@ -12778,7 +12778,7 @@ describe("typed issue landing bridge", () => {
           status: "needs-author",
           runs: ["R1"],
           bounce: { run: "R1", detail: failure },
-          attributedReceipt: { code: "composition-invalid", message: failure },
+          attributedResult: { code: "composition-invalid", message: failure },
         },
       ],
     })
@@ -12797,7 +12797,7 @@ describe("typed issue landing bridge", () => {
         },
       ],
     })
-    expect(v1.deliveries[0]).not.toHaveProperty("attributedReceipt")
+    expect(v1.deliveries[0]).not.toHaveProperty("attributedResult")
 
     let snapshotEligibilityReads = 0
     const snapshotQueue = {
@@ -12828,7 +12828,7 @@ describe("typed issue landing bridge", () => {
       eligibility: {
         reason: {
           code: "needs-author",
-          receipt: { code: "composition-invalid", message: failure },
+          result: { code: "composition-invalid", message: failure },
         },
       },
     })
@@ -14621,7 +14621,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         const uncovered = {
           ...app,
           retentionDiagnostics: () => ({
-            receiptFrames: 0,
+            resultFrames: 0,
             causeIds: 0,
             eventIds: 0,
             journal: {
@@ -14653,7 +14653,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         const uncovered = {
           ...app,
           retentionDiagnostics: () => ({
-            receiptFrames: 0,
+            resultFrames: 0,
             causeIds: 0,
             eventIds: 0,
             journal: {
@@ -14686,7 +14686,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         const inconsistent = {
           ...app,
           retentionDiagnostics: () => ({
-            receiptFrames: 0,
+            resultFrames: 0,
             causeIds: 0,
             eventIds: 0,
             journal: {

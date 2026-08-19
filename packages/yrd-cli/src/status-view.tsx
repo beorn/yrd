@@ -339,7 +339,7 @@ export type IssueDeliveryRow = Readonly<{
   candidateTreeSha?: string
   baseTreeSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>
-  attributedReceipt?: JobError
+  attributedResult?: JobError
   regressions?: readonly ChangeRegression[]
 }> &
   TaskStatusFields
@@ -416,9 +416,9 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
           {delivery.bounce.detail === undefined ? "" : ` ${delivery.bounce.detail}`}
         </Text>
       )}
-      {delivery.attributedReceipt === undefined ? null : (
+      {delivery.attributedResult === undefined ? null : (
         <Text wrap="wrap" color="$fg-warning">
-          <Text bold>ATTRIBUTED</Text> {delivery.attributedReceipt.code} — {delivery.attributedReceipt.message}
+          <Text bold>ATTRIBUTED</Text> {delivery.attributedResult.code} — {delivery.attributedResult.message}
         </Text>
       )}
       {delivery.regressions?.map((regression) => (

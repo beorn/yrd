@@ -771,7 +771,7 @@ describe("pr recut --preflight", () => {
     expect((await Array.fromAsync(app.events())).length).toBe(before)
   })
 
-  it("applies RECUT and records a re-derivable receipt", async () => {
+  it("applies RECUT and records a re-derivable result", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/apply", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     const remergeInputs: unknown[] = []
@@ -867,7 +867,7 @@ describe("pr recut --preflight", () => {
     await app.queue.run({ prs: ["PR1"] }, runtime)
     await app.queue.run({}, runtime)
     expect(app.state().bays.prs.PR1).toMatchObject({
-      needsAuthor: { receipt: { code: "queue-submit-authority-consumed" } },
+      needsAuthor: { result: { code: "queue-submit-authority-consumed" } },
     })
 
     const remedy = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
@@ -919,7 +919,7 @@ describe("pr recut --preflight", () => {
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
     expect(app.state().bays.prs.PR1).toMatchObject({
-      revs: [{ admission: { status: "refused", receipt: { code: "composition-invalid" } } }],
+      revs: [{ admission: { status: "refused", result: { code: "composition-invalid" } } }],
     })
 
     const gitFacts = () =>

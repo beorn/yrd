@@ -661,7 +661,7 @@ describe("withBays", () => {
     expect(changeFacts(app.bays.pr("topic/landed"))).toMatchObject({ id: "PR2", delivery: "submitted" })
   })
 
-  it("refuses a terminal receipt that does not transition the current PR revision", async () => {
+  it("refuses a terminal result that does not transition the current PR revision", async () => {
     const journal = createMemoryJournal()
     const staleWithdraw = command({
       title: "Emit a stale PR withdrawal",
@@ -1081,12 +1081,12 @@ describe("withBays", () => {
       baseSha: BASE,
     })
 
-    const receipt = "f".repeat(64)
-    const pushed = { bay: "B1", headSha: HEAD_1, baseSha: BASE, receipt }
+    const result = "f".repeat(64)
+    const pushed = { bay: "B1", headSha: HEAD_1, baseSha: BASE, result }
     expect((await app.bays.intake(pushed)).events).toHaveLength(1)
     expect((await app.bays.intake(pushed)).events).toHaveLength(0)
     await expect(app.bays.intake({ ...pushed, headSha: HEAD_2 })).rejects.toThrow(
-      `receiver receipt '${receipt}' does not match its recorded intake`,
+      `receiver result '${result}' does not match its recorded intake`,
     )
     await app.bays.submit({ pr: "PR1" })
 

@@ -358,7 +358,7 @@ export const AlreadyMergedEvidenceSchema = z
     path: ["candidateTreeSha"],
   }) as z.ZodType<AlreadyMergedEvidence>
 
-export type ComponentMainReceipt = Readonly<{
+export type ComponentMainResult = Readonly<{
   path: string
   origin: string
   pinSha: string
@@ -367,7 +367,7 @@ export type ComponentMainReceipt = Readonly<{
   action: "verified" | "fast-forwarded"
 }>
 
-export const ComponentMainReceiptSchema = z
+export const ComponentMainResultSchema = z
   .object({
     path: z.string().min(1),
     origin: z.string().min(1),
@@ -376,7 +376,7 @@ export const ComponentMainReceiptSchema = z
     mainAfterSha: GitShaSchema,
     action: z.enum(["verified", "fast-forwarded"]),
   })
-  .strict() as z.ZodType<ComponentMainReceipt>
+  .strict() as z.ZodType<ComponentMainResult>
 
 export type ComponentMainRefusal = Readonly<{
   path: string
@@ -400,14 +400,14 @@ export const ComponentMainRefusalSchema = z
 
 export type ComponentMainOutcomes = Readonly<{
   kind: "component-main-outcomes"
-  receipts: readonly ComponentMainReceipt[]
+  results: readonly ComponentMainResult[]
   refusals: readonly ComponentMainRefusal[]
 }>
 
 export const ComponentMainOutcomesSchema = z
   .object({
     kind: z.literal("component-main-outcomes"),
-    receipts: z.array(ComponentMainReceiptSchema),
+    results: z.array(ComponentMainResultSchema),
     refusals: z.array(ComponentMainRefusalSchema),
   })
   .strict() as z.ZodType<ComponentMainOutcomes>
@@ -418,7 +418,7 @@ export type IntegrationProof = Readonly<{
   alreadyMerged?: AlreadyMergedEvidence
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
-  componentMains?: readonly ComponentMainReceipt[]
+  componentMains?: readonly ComponentMainResult[]
 }>
 
 export const IntegrationProofSchema = z
@@ -429,7 +429,7 @@ export const IntegrationProofSchema = z
     alreadyMerged: AlreadyMergedEvidenceSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
-    componentMains: z.array(ComponentMainReceiptSchema).min(1).optional(),
+    componentMains: z.array(ComponentMainResultSchema).min(1).optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 
@@ -557,10 +557,10 @@ export type QueueRecord = Readonly<{
   settlement?: "explicit"
   queueId: string
   candidateId: CandidateId
-  /** Immutable execution receipt. Candidate owns the ordered revision identity;
-   * projection rejects any receipt that diverges from it. */
+  /** Immutable execution result. Candidate owns the ordered revision identity;
+   * projection rejects any result that diverges from it. */
   prs: readonly ChangeSnapshot[]
-  /** Queue-target receipt; Candidate owns the exact base SHA. */
+  /** Queue-target result; Candidate owns the exact base SHA. */
   base: string
   /** Effective Queue batch size when this Run started. Absent only on legacy journal records. */
   batchSize?: number
@@ -703,10 +703,10 @@ export type ChangeEligibilityReason = Readonly<{
     | "rejected"
     | "terminal"
   message: string
-  /** The attributed failure receipt carried by native `pr/needs-author` (or
+  /** The attributed failure result carried by native `pr/needs-author` (or
    * recovered from a legacy rejected journal) for the author to act on. Absent
    * for every other reason code. */
-  receipt?: JobError
+  result?: JobError
 }>
 
 export type ChangeEligibility = Readonly<{

@@ -4941,7 +4941,7 @@ checks: [{check: {run: "true"}}]
     })
     const candidateSha = result.integration.commit
     const mergedPinSha = result.integration.sourceRewrites?.[0]?.newTipSha
-    if (mergedPinSha === undefined) throw new Error("expected one source rewrite receipt")
+    if (mergedPinSha === undefined) throw new Error("expected one source rewrite result")
     expect(await git(repo, "rev-parse", "main")).toBe(candidateSha)
     expect(await git(repo, "rev-parse", "main^")).toBe(rootBaseSha)
     expect(await git(join(repo, "dep"), "rev-parse", "HEAD")).toBe(mergedPinSha)

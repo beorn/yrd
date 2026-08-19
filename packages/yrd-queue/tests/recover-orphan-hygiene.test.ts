@@ -100,7 +100,7 @@ describe("recover orphan hygiene — a stranded requested Job is flagged and set
     expect(finding?.message).toContain("terminal")
   })
 
-  it("recover settles the orphaned requested job with a loud receipt and clears the audit finding", async () => {
+  it("recover settles the orphaned requested job with a loud result and clears the audit finding", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createApp(createMemoryJournal(), ids(), log)
@@ -116,12 +116,12 @@ describe("recover orphan hygiene — a stranded requested Job is flagged and set
     expect(app.state().jobs.byId[jobId]).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(app.queue.audit().findings.some((f) => f.code === "orphaned-requested-job")).toBe(false)
 
-    const receipt = events.find(
+    const result = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" && event.level === "warn" && event.props?.action === "recover-orphan-settle",
     )
-    expect(receipt, "recover must emit a loud structured receipt for settled orphans").toBeDefined()
-    expect(receipt?.props).toMatchObject({ reason: "orphaned-requested-job", jobs: [jobId], runs: ["R1"] })
+    expect(result, "recover must emit a loud structured result for settled orphans").toBeDefined()
+    expect(result?.props).toMatchObject({ reason: "orphaned-requested-job", jobs: [jobId], runs: ["R1"] })
     log.end()
   })
 })

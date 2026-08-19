@@ -15,7 +15,7 @@ export const CommandDiagnosticSchema = z
   .strict()
 export type CommandDiagnostic = Readonly<z.infer<typeof CommandDiagnosticSchema>>
 
-export const CandidateFailureReceiptEvidenceSchema = z
+export const CandidateFailureResultEvidenceSchema = z
   .object({
     kind: z.literal("candidate-attributed-check-failure"),
     baseSha: GitShaSchema,
@@ -24,7 +24,7 @@ export const CandidateFailureReceiptEvidenceSchema = z
     unchangedBaselineCount: z.number().int().nonnegative().optional(),
   })
   .strict()
-export type CandidateFailureReceiptEvidence = Readonly<z.infer<typeof CandidateFailureReceiptEvidenceSchema>>
+export type CandidateFailureResultEvidence = Readonly<z.infer<typeof CandidateFailureResultEvidenceSchema>>
 
 const DeltaComparisonEvidenceSchema = z
   .object({
@@ -49,17 +49,17 @@ const DeltaComparisonEvidenceSchema = z
   .passthrough()
 
 /** Normalize only a carrier-classified, certified candidate-vs-exact-base
- * delta into the receipt projected to the author. Base-health steps explicitly
+ * delta into the result projected to the author. Base-health steps explicitly
  * describe the target environment, so their reds remain base-owned even when
  * a diagnostics comparator observes a candidate-only difference. Opaque reds,
  * strict gates, inherited-only failures, and malformed evidence are likewise
  * not attributable. */
-export function candidateFailureReceiptEvidence(value: unknown): CandidateFailureReceiptEvidence | undefined {
+export function candidateFailureResultEvidence(value: unknown): CandidateFailureResultEvidence | undefined {
   const parsed = DeltaComparisonEvidenceSchema.safeParse(value)
   if (!parsed.success) return undefined
   const { baseSha, candidateSha, certificate, comparison } = parsed.data
   if (certificate.baseSha !== baseSha || certificate.candidateSha !== candidateSha) return undefined
-  return CandidateFailureReceiptEvidenceSchema.parse({
+  return CandidateFailureResultEvidenceSchema.parse({
     kind: "candidate-attributed-check-failure",
     baseSha,
     candidateSha,

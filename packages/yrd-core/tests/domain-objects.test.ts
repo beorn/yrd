@@ -392,7 +392,7 @@ describe("Yrd domain objects", () => {
     const first = await createYrd(definition, {
       inject: { journal: cache.journal, id: ids("first-command", "first-event") },
     })
-    const receipt = await first.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })
+    const result = await first.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })
     await first.close()
 
     const saved = cache.stored()
@@ -412,8 +412,8 @@ describe("Yrd domain objects", () => {
     expect(cache.reads[0]).toBe(saved?.cursor)
     expect(warm.state().counter.value).toBe(3)
     const retried = await warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })
-    expect(retried).toEqual(receipt)
-    expect(retried).not.toBe(receipt)
+    expect(retried).toEqual(result)
+    expect(retried).not.toBe(result)
     expect(Object.isFrozen(retried)).toBe(true)
     expect(Object.isFrozen(retried.command)).toBe(true)
     expect(Object.isFrozen(retried.command.args)).toBe(true)
@@ -491,7 +491,7 @@ describe("Yrd domain objects", () => {
     const writer = await createYrd(predecessor, {
       inject: { journal: cache.journal, id: ids("predecessor-command", "predecessor-event") },
     })
-    const receipt = await writer.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "migrated-retry" })
+    const result = await writer.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "migrated-retry" })
     await writer.close()
     const stored = cache.stored()
     if (stored === undefined) throw new Error("expected predecessor checkpoint")
@@ -525,7 +525,7 @@ describe("Yrd domain objects", () => {
     expect(migrated.state().counter.value).toBe(4)
     expect(reads).toEqual([stored.cursor])
     await expect(migrated.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "migrated-retry" })).resolves.toEqual(
-      receipt,
+      result,
     )
     expect(cache.stored()).toMatchObject({ cursor: stored.cursor })
     expect(cache.stored()?.identity).not.toBe(stored.identity)
@@ -586,7 +586,7 @@ describe("Yrd domain objects", () => {
     ).toThrow(/not a SHA-256 identity/iu)
   })
 
-  it("restores versioned receipt frames from a projection checkpoint", async () => {
+  it("restores versioned result frames from a projection checkpoint", async () => {
     const backing = createMemoryJournal<unknown>()
     const cache = createCheckpointJournal(backing)
     const definition = withCounter()(createYrdDef())
@@ -609,7 +609,7 @@ describe("Yrd domain objects", () => {
     expect(cache.stored()).toMatchObject({
       cursor: 1,
       value: {
-        receipts: [expect.objectContaining({ compatibility })],
+        results: [expect.objectContaining({ compatibility })],
       },
     })
   })
@@ -803,7 +803,7 @@ describe("Yrd domain objects", () => {
     await app.close()
   })
 
-  it("returns an existing receipt before re-evaluating current availability", async () => {
+  it("returns an existing result before re-evaluating current availability", async () => {
     const close = command({
       title: "Close gate",
       visibility: "public",

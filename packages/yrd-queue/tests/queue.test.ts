@@ -771,7 +771,7 @@ describe("Queue", () => {
     expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
-  it("audits a content-equivalent Candidate whose receipt names the prior PR revision", async () => {
+  it("audits a content-equivalent Candidate whose result names the prior PR revision", async () => {
     const fixture = await replaySameHeadCandidateRemerge()
     await using app = fixture.app
 
@@ -1263,7 +1263,7 @@ describe("Queue", () => {
     })
   })
 
-  it("replays legacy batch Runs whose PR receipts recorded different base SHAs", async () => {
+  it("replays legacy batch Runs whose PR results recorded different base SHAs", async () => {
     const nextId = ids(900)
     const command = { id: nextId(), op: "queue.run", args: { prs: ["PR1", "PR2"] } }
     const journal = createMemoryJournal([
@@ -1884,7 +1884,7 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, leasedRuntime)).rejects.toThrow("job finish refused")
   }
 
-  it("auto-quiesces an unleased pre-settlement legacy root and receipts it", async () => {
+  it("auto-quiesces an unleased pre-settlement legacy root and results it", async () => {
     // The writer's lease (00:01:00) is long expired by migration time (00:05:00):
     // the root is abandoned, so the migration settles it itself — no verb, no
     // waiting on a writer that will never return.
@@ -1902,22 +1902,22 @@ describe("Queue", () => {
     const cursorJob = stuck?.steps[stuck.cursor]?.job
     expect(cursorJob?.status).toBe("in_progress")
 
-    const receipt = await replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
-    expect(receipt.reason).toBe("legacy-quiesced")
-    expect(receipt.quiesced).toEqual([{ run: "R1", jobs: [cursorJob?.id] }])
+    const result = await replayed.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
+    expect(result.reason).toBe("legacy-quiesced")
+    expect(result.quiesced).toEqual([{ run: "R1", jobs: [cursorJob?.id] }])
 
     const settled = replayed.queue.get("R1")
     expect(settled).toMatchObject({ status: "completed", conclusion: "failure" })
     expect(settled?.error?.code).toBe("legacy-quiesced")
     expect(settled?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "cancelled" })
 
-    const receipts = events.filter(
+    const results = events.filter(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
     )
-    expect(receipts).toHaveLength(1)
-    expect(receipts[0]?.message).toContain("R1")
-    expect(receipts[0]?.props).toMatchObject({ reason: "legacy-quiesced", runs: ["R1"] })
+    expect(results).toHaveLength(1)
+    expect(results[0]?.message).toContain("R1")
+    expect(results[0]?.props).toMatchObject({ reason: "legacy-quiesced", runs: ["R1"] })
     log.end()
   })
 
@@ -1947,8 +1947,8 @@ describe("Queue", () => {
 
     {
       await using first = await createQueueApp({}, journal, undefined, id)
-      const receipt = await first.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
-      expect(receipt.quiesced.map((entry) => entry.run)).toEqual(["R1"])
+      const result = await first.queue.quiesceLegacyRoots({ now: "2026-01-01T00:05:00.000Z", by: "yrd/migration" })
+      expect(result.quiesced.map((entry) => entry.run)).toEqual(["R1"])
     }
 
     const events: LogEvent[] = []
@@ -1957,13 +1957,13 @@ describe("Queue", () => {
     // The first pass appended the terminal settlement, so the replay meets R1 already terminal.
     expect(second.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
     const before = await Array.fromAsync(second.events())
-    const receipt = await second.queue.quiesceLegacyRoots({ now: "2026-01-01T00:06:00.000Z", by: "yrd/migration" })
-    expect(receipt.quiesced).toEqual([])
+    const result = await second.queue.quiesceLegacyRoots({ now: "2026-01-01T00:06:00.000Z", by: "yrd/migration" })
+    expect(result.quiesced).toEqual([])
     expect(await Array.fromAsync(second.events())).toEqual(before)
-    const receipts = events.filter(
+    const results = events.filter(
       (event) => event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
     )
-    expect(receipts).toEqual([])
+    expect(results).toEqual([])
     log.end()
   })
 
@@ -2178,13 +2178,13 @@ describe("Queue", () => {
     },
   )
 
-  it("rejects a Queue start whose execution receipt diverges from its Candidate", async () => {
+  it("rejects a Queue start whose execution result diverges from its Candidate", async () => {
     await using app = await createQueueApp()
-    const pr = await submitBranch(app, "issue/candidate-run-receipt")
+    const pr = await submitBranch(app, "issue/candidate-run-result")
     await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
     const seed = Queues.get(app.state().queues, "R1")
     const snapshot = seed?.prs[0]
-    if (seed === undefined || snapshot === undefined) throw new Error("expected Candidate receipt fixture")
+    if (seed === undefined || snapshot === undefined) throw new Error("expected Candidate result fixture")
 
     const mismatches: readonly (readonly [string, QueueRecord])[] = [
       ["queue identity", { ...seed, id: "R2", queueId: "other" }],
@@ -3785,7 +3785,7 @@ describe("Queue", () => {
 
   it("repairs a repository merge record whose pr/integrated index row is missing exactly once", async () => {
     await using app = await createQueueApp()
-    const pr = await submitBranch(app, "issue/receipt-index-gap")
+    const pr = await submitBranch(app, "issue/result-index-gap")
     const changeId = currentChangeRev(app.bays.pr(pr.id)!).changeId
     if (changeId === undefined) throw new Error("expected current PR Change-Id")
     const fact = {
@@ -4547,7 +4547,7 @@ describe("Queue", () => {
         status: "refused",
         kind: "failure",
         step: "check",
-        receipt: { code: "queue-environment-refused" },
+        result: { code: "queue-environment-refused" },
       })
       expect(Queues.ids(app.state().queues)).toEqual([])
     }
@@ -5107,7 +5107,7 @@ describe("Queue", () => {
           revision: pr.revision,
           headSha: pr.headSha,
           run: "R1",
-          receipt: {
+          result: {
             code: "queue-submit-authority-consumed",
             message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue --apply`),
           },
@@ -5476,7 +5476,7 @@ describe("Queue", () => {
   })
 
   it.each(["pr/withdrawn", "pr/canceled"] as const)(
-    "refuses stale revision-one %s before projecting a terminal receipt",
+    "refuses stale revision-one %s before projecting a terminal result",
     async (terminal) => {
       const journal = createMemoryJournal<unknown>()
       const original = await createQueueApp({}, journal)
@@ -5551,7 +5551,7 @@ describe("Queue", () => {
       status: "refused",
       kind: "failure",
       step: "check",
-      receipt: { code: "typecheck-failed" },
+      result: { code: "typecheck-failed" },
     })
     expect(deliveryOf(app.state().bays.prs.PR1)).toBe("pushed")
 

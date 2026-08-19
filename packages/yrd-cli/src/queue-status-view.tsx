@@ -7956,8 +7956,8 @@ export function ChangeRunsView({ data }: { data: ChangeRunsData }) {
     (revisionRefusal === undefined
       ? undefined
       : {
-          message: revisionRefusal.detail ?? revisionRefusal.receipt.message,
-          receipt: revisionRefusal.receipt,
+          message: revisionRefusal.detail ?? revisionRefusal.result.message,
+          result: revisionRefusal.result,
         })
   const currentRevision = currentChangeRev(data.pr)
   return (
@@ -7968,9 +7968,9 @@ export function ChangeRunsView({ data }: { data: ChangeRunsData }) {
       {needsAuthor === undefined ? null : (
         <>
           <Text wrap="wrap">NEEDS AUTHOR {needsAuthor.message}</Text>
-          {needsAuthor.receipt === undefined ? null : (
+          {needsAuthor.result === undefined ? null : (
             <Text wrap="wrap">
-              ATTRIBUTED {needsAuthor.receipt.code}: {needsAuthor.receipt.message}
+              ATTRIBUTED {needsAuthor.result.code}: {needsAuthor.result.message}
             </Text>
           )}
         </>

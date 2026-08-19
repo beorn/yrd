@@ -1,5 +1,5 @@
 /**
- * @failure The PR receiver can accept unsafe refs, lose hook receipts, or duplicate intake after recovery.
+ * @failure The PR receiver can accept unsafe refs, lose hook results, or duplicate intake after recovery.
  * @level l3
  * @consumer @yrd/bay Git push receiver
  */
@@ -16,7 +16,7 @@ import {
   receiverHookSource,
   submitRefSplits,
   type GitPushReceiver,
-  type ReceiverReceipt,
+  type ReceiverResult,
   type ReceiverTarget,
 } from "../src/receiver.ts"
 
@@ -224,7 +224,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)
   })
 
-  it("accepts an authorized pinned push and leaves a pending receipt for Bay intake", async () => {
+  it("accepts an authorized pinned push and leaves a pending result for Bay intake", async () => {
     const f = await fixture("push")
     await git(f.mainRepo, "switch", "-qc", "issue/good")
     const headSha = await commit(f.mainRepo, "good.txt")
@@ -237,10 +237,10 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/good")).toBe(headSha)
     expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
 
-    const delivered: ReceiverReceipt[] = []
+    const delivered: ReceiverResult[] = []
     const drained = await f.receiver.drain({
       resolveTarget: async () => target(f.baseSha),
-      intake: async (receipt) => void delivered.push(receipt),
+      intake: async (result) => void delivered.push(result),
     })
     expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
     expect(delivered).toEqual([
@@ -348,14 +348,14 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(without.stderr).not.toContain("open one with")
   })
 
-  it("recovers prepared receipts by ref and retries the same receipt id after ambiguous intake", async () => {
+  it("recovers prepared results by ref and retries the same result id after ambiguous intake", async () => {
     const f = await fixture("recover")
     await git(f.mainRepo, "switch", "-qc", "issue/recover")
     const headSha = await commit(f.mainRepo, "recover.txt")
     await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${headSha}:refs/yrd/test/recover`)
     const update = `${zero} ${headSha} refs/heads/issue/recover\n`
-    const [receipt] = await f.receiver.prepare(update, { resolveTarget: async () => target(f.baseSha) })
-    expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.prepared.json`])
+    const [result] = await f.receiver.prepare(update, { resolveTarget: async () => target(f.baseSha) })
+    expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
     expect(
       await f.receiver.drain({
         resolveTarget: async () => target(f.baseSha),
@@ -363,8 +363,8 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
           throw new Error("must not run before ref acceptance")
         },
       }),
-    ).toEqual({ delivered: [], failed: [], ambiguous: [receipt!.id] })
-    expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.prepared.json`])
+    ).toEqual({ delivered: [], failed: [], ambiguous: [result!.id] })
+    expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/recover", headSha, zero)
 
     const applied = new Set<string>()
@@ -375,8 +375,8 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         throw new Error("crash after durable intake")
       },
     })
-    expect(failed.failed).toEqual([{ id: receipt!.id, error: "crash after durable intake" }])
-    expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.pending.json`])
+    expect(failed.failed).toEqual([{ id: result!.id, error: "crash after durable intake" }])
+    expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.pending.json`])
 
     const retried: string[] = []
     const recovered = await f.receiver.drain({
@@ -386,12 +386,12 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         retried.push(current.id)
       },
     })
-    expect(recovered).toEqual({ delivered: [receipt!.id], failed: [], ambiguous: [] })
-    expect(retried).toEqual([receipt!.id])
+    expect(recovered).toEqual({ delivered: [result!.id], failed: [], ambiguous: [] })
+    expect(retried).toEqual([result!.id])
     expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
-  it("drains each branch in ref-update order rather than receipt-name order", async () => {
+  it("drains each branch in ref-update order rather than result-name order", async () => {
     const f = await fixture("order")
     await git(f.mainRepo, "switch", "-qc", "issue/source")
     const first = await commit(f.mainRepo, "one.txt")
@@ -416,13 +416,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const heads: string[] = []
     const result = await f.receiver.drain({
       resolveTarget,
-      intake: async (receipt) => void heads.push(receipt.headSha),
+      intake: async (result) => void heads.push(result.headSha),
     })
     expect(result.failed).toEqual([])
     expect(heads).toEqual([first, second])
   })
 
-  it("retains and reports malformed receipt data", async () => {
+  it("retains and reports malformed result data", async () => {
     const f = await fixture("malformed")
     const id = "a".repeat(64)
     const corrupt = join(f.receiver.inboxDir, `${id}.pending.json`)
@@ -465,15 +465,15 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.stderr).not.toContain("only branch refs")
     expect(result.code).toBe(0)
 
-    // Read the receipt by DRAINING rather than by parsing the inbox file: drain
-    // re-validates it, so this also proves the stored receipt passes its own
-    // identity check. A submit receipt used to fail that check outright, since
+    // Read the result by DRAINING rather than by parsing the inbox file: drain
+    // re-validates it, so this also proves the stored result passes its own
+    // identity check. A submit result used to fail that check outright, since
     // the invariant hardcoded refs/heads/<branch>.
-    const delivered: ReceiverReceipt[] = []
+    const delivered: ReceiverResult[] = []
     const drained = await f.receiver.drain({
       resolveTarget: async (_branch, _update, intent) =>
         intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
-      intake: async (receipt) => void delivered.push(receipt),
+      intake: async (result) => void delivered.push(result),
     })
     expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
     expect(delivered).toEqual([
@@ -499,7 +499,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
-  it("refuses a rewritten submit patchset before it can strand a receiver receipt", async () => {
+  it("refuses a rewritten submit patchset before it can strand a receiver result", async () => {
     const f = await fixture("submit-rewrite")
     await git(f.mainRepo, "switch", "-qc", "work")
     const firstHead = await commit(f.mainRepo, "first.txt")
@@ -515,10 +515,10 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     })
     expect(firstDrain.failed).toEqual([])
 
-    // Model the successful first receipt's carrier materialization. A later
+    // Model the successful first result's carrier materialization. A later
     // patchset must contain this carrier; otherwise accepting the Git ref and
     // discovering the conflict during post-receive leaves an undrainable
-    // receipt after the pusher has already seen success.
+    // result after the pusher has already seen success.
     await git(f.mainRepo, "update-ref", "refs/heads/issue/my-change", firstHead)
     await git(f.mainRepo, "switch", "-qc", "rewritten", f.baseSha)
     const rewrittenHead = await commit(f.mainRepo, "rewritten.txt")
@@ -626,7 +626,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await commit(f.mainRepo, "nobranch.txt")
 
     // A resolver that admits the change but names no branch would otherwise
-    // produce a receipt whose `branch` is undefined — an invisible state one
+    // produce a result whose `branch` is undefined — an invisible state one
     // layer down. It must fail loudly here instead.
     const env = await installHookHost(f.root, { "for:main/orphan": target(f.baseSha) })
     const result = await push(f, "work:refs/for/main/orphan", env)

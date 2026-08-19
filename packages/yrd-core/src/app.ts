@@ -110,7 +110,7 @@ const checkpointMigrations = Symbol("yrd.checkpointMigrations")
 const PROJECTION_CHECKPOINT_VERSION = 1
 const PROJECTION_CHECKPOINT_REFRESH_FRAMES = 256
 const PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES = 512
-const RECEIPT_CACHE_FRAMES = 4_096
+const RESULT_CACHE_FRAMES = 4_096
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 /** One unregistered event NAME the replay quarantined, aggregated. The
@@ -140,7 +140,7 @@ const ProjectionCheckpointSchema = z
     v: z.literal(PROJECTION_CHECKPOINT_VERSION),
     state: z.unknown(),
     at: z.string().optional(),
-    receipts: z.array(z.unknown()),
+    results: z.array(z.unknown()),
     causeIds: z.array(z.string()),
     eventIds: z.array(z.string()),
     // Optional and OMITTED while empty: a checkpoint written by this code
@@ -176,7 +176,7 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   historySnapshot(): Promise<JournalSnapshot<State>>
   history?: JournalHistory<unknown>
   retentionDiagnostics(): Readonly<{
-    receiptFrames: number
+    resultFrames: number
     causeIds: number
     eventIds: number
     journal?: JournalHistoryDiagnostics
@@ -247,7 +247,7 @@ export type CheckpointMigration<State extends object> = Readonly<{
   from: string
   /** Exact successor identity. Omit only for the current definition. */
   to?: string
-  /** Pure projection-state transform. Journal frames and receipt registries are preserved by Core. */
+  /** Pure projection-state transform. Journal frames and result registries are preserved by Core. */
   migrate(state: DeepReadonly<State>): State
 }>
 
@@ -608,8 +608,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
     revision: number
     at?: string
     state: DeepReadonly<State>
-    receiptsById: ReadonlyMap<string, JournalFrame>
-    receiptsByKey: ReadonlyMap<string, JournalFrame>
+    resultsById: ReadonlyMap<string, JournalFrame>
+    resultsByKey: ReadonlyMap<string, JournalFrame>
     causeIds: ReadonlySet<string>
     eventIds: ReadonlySet<string>
     /** Replay's unknown-name quarantine report, keyed by event name. */
@@ -620,8 +620,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
     cursor: 0,
     revision: 0,
     state: state(),
-    receiptsById: new Map(),
-    receiptsByKey: new Map(),
+    resultsById: new Map(),
+    resultsByKey: new Map(),
     causeIds: new Set(),
     eventIds: new Set(),
     unknownEvents: new Map(),
@@ -720,10 +720,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const projectFrame = (base: Projection, frame: JournalFrame, source: "append" | "replay"): Projection => {
-    if (base.receiptsById.has(frame.command.id)) {
+    if (base.resultsById.has(frame.command.id)) {
       throw new Error(`yrd: journal contains duplicate command id '${frame.cause.commandId}'`)
     }
-    if (frame.cause.key !== undefined && base.receiptsByKey.has(frame.cause.key)) {
+    if (frame.cause.key !== undefined && base.resultsByKey.has(frame.cause.key)) {
       throw new Error(`yrd: journal contains duplicate command key '${frame.cause.key}'`)
     }
     const causeIds = new Set(base.causeIds)
@@ -754,18 +754,18 @@ export async function createYrd<State extends object, Commands extends CommandTr
     if (history !== undefined && source === "append" && frame.events.length > 0) {
       nextState = freeze(definition.compact(nextState)) as DeepReadonly<State>
     }
-    const receiptsById = new Map(base.receiptsById)
-    receiptsById.set(frame.command.id, frame)
-    const receiptsByKey = new Map(base.receiptsByKey)
-    if (frame.cause.key !== undefined) receiptsByKey.set(frame.cause.key, frame)
-    if (history !== undefined) trimReceiptCache(receiptsById, receiptsByKey, causeIds, eventIds)
+    const resultsById = new Map(base.resultsById)
+    resultsById.set(frame.command.id, frame)
+    const resultsByKey = new Map(base.resultsByKey)
+    if (frame.cause.key !== undefined) resultsByKey.set(frame.cause.key, frame)
+    if (history !== undefined) trimResultCache(resultsById, resultsByKey, causeIds, eventIds)
     const at = frame.events.at(-1)?.ts ?? base.at
     return {
       ...base,
       revision: base.revision + 1,
       state: nextState,
-      receiptsById,
-      receiptsByKey,
+      resultsById,
+      resultsByKey,
       causeIds,
       eventIds,
       ...(unknownEvents === undefined ? {} : { unknownEvents }),
@@ -773,19 +773,19 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
   }
 
-  const trimReceiptCache = (
-    receiptsById: Map<string, JournalFrame>,
-    receiptsByKey: Map<string, JournalFrame>,
+  const trimResultCache = (
+    resultsById: Map<string, JournalFrame>,
+    resultsByKey: Map<string, JournalFrame>,
     causeIds: Set<string>,
     eventIds: Set<string>,
   ): void => {
-    while (receiptsById.size > RECEIPT_CACHE_FRAMES) {
-      const oldest = receiptsById.entries().next().value as readonly [string, JournalFrame] | undefined
+    while (resultsById.size > RESULT_CACHE_FRAMES) {
+      const oldest = resultsById.entries().next().value as readonly [string, JournalFrame] | undefined
       if (oldest === undefined) break
       const [commandId, frame] = oldest
-      receiptsById.delete(commandId)
-      if (frame.cause.key !== undefined && receiptsByKey.get(frame.cause.key)?.command.id === commandId) {
-        receiptsByKey.delete(frame.cause.key)
+      resultsById.delete(commandId)
+      if (frame.cause.key !== undefined && resultsByKey.get(frame.cause.key)?.command.id === commandId) {
+        resultsByKey.delete(frame.cause.key)
       }
       causeIds.delete(frame.cause.id)
       for (const applied of frame.events) eventIds.delete(applied.id)
@@ -809,19 +809,19 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
     const stateValidatedAt = performance.now()
 
-    const receiptsById = new Map<string, JournalFrame>()
-    const receiptsByKey = new Map<string, JournalFrame>()
+    const resultsById = new Map<string, JournalFrame>()
+    const resultsByKey = new Map<string, JournalFrame>()
     const expectedCauseIds = new Set<string>()
     const expectedEventIds = new Set<string>()
     const commandHashes = new Map<string, string>()
     let expectedAt: string | undefined
-    for (const value of parsed.receipts) {
+    for (const value of parsed.results) {
       const frame = parseCheckpointFrame(value, commandHashes)
-      if (receiptsById.has(frame.command.id)) throw new Error(`checkpoint repeats command id '${frame.command.id}'`)
-      receiptsById.set(frame.command.id, frame)
+      if (resultsById.has(frame.command.id)) throw new Error(`checkpoint repeats command id '${frame.command.id}'`)
+      resultsById.set(frame.command.id, frame)
       if (frame.cause.key !== undefined) {
-        if (receiptsByKey.has(frame.cause.key)) throw new Error(`checkpoint repeats command key '${frame.cause.key}'`)
-        receiptsByKey.set(frame.cause.key, frame)
+        if (resultsByKey.has(frame.cause.key)) throw new Error(`checkpoint repeats command key '${frame.cause.key}'`)
+        resultsByKey.set(frame.cause.key, frame)
       }
       if (expectedCauseIds.has(frame.cause.id)) throw new Error(`checkpoint repeats cause id '${frame.cause.id}'`)
       expectedCauseIds.add(frame.cause.id)
@@ -831,21 +831,21 @@ export async function createYrd<State extends object, Commands extends CommandTr
         expectedAt = applied.ts
       }
     }
-    const receiptsValidatedAt = performance.now()
+    const resultsValidatedAt = performance.now()
     const causeIds = new Set(parsed.causeIds)
     const eventIds = new Set(parsed.eventIds)
-    if (!setsEqual(causeIds, expectedCauseIds)) throw new Error("checkpoint cause registry does not match receipts")
-    if (!setsEqual(eventIds, expectedEventIds)) throw new Error("checkpoint event registry does not match receipts")
-    if (parsed.at !== expectedAt) throw new Error("checkpoint event-order timestamp does not match receipts")
-    if (history !== undefined) trimReceiptCache(receiptsById, receiptsByKey, causeIds, eventIds)
+    if (!setsEqual(causeIds, expectedCauseIds)) throw new Error("checkpoint cause registry does not match results")
+    if (!setsEqual(eventIds, expectedEventIds)) throw new Error("checkpoint event registry does not match results")
+    if (parsed.at !== expectedAt) throw new Error("checkpoint event-order timestamp does not match results")
+    if (history !== undefined) trimResultCache(resultsById, resultsByKey, causeIds, eventIds)
     const registriesValidatedAt = performance.now()
     coreLog.debug?.("projection checkpoint restored", {
       envelopeMs: envelopeParsedAt - restoreStarted,
       stateMs: stateValidatedAt - envelopeParsedAt,
-      receiptsMs: receiptsValidatedAt - stateValidatedAt,
-      registriesMs: registriesValidatedAt - receiptsValidatedAt,
+      resultsMs: resultsValidatedAt - stateValidatedAt,
+      registriesMs: registriesValidatedAt - resultsValidatedAt,
       totalMs: registriesValidatedAt - restoreStarted,
-      receipts: parsed.receipts.length,
+      results: parsed.results.length,
       causeIds: parsed.causeIds.length,
       eventIds: parsed.eventIds.length,
     })
@@ -855,8 +855,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
       revision: 0,
       ...(parsed.at === undefined ? {} : { at: parsed.at }),
       state: freeze(state as State) as DeepReadonly<State>,
-      receiptsById,
-      receiptsByKey,
+      resultsById,
+      resultsByKey,
       causeIds,
       eventIds,
       unknownEvents: new Map((parsed.unknownEvents ?? []).map((summary) => [summary.name, summary])),
@@ -937,7 +937,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
           v: PROJECTION_CHECKPOINT_VERSION,
           state: stateValue,
           ...(next.at === undefined ? {} : { at: next.at }),
-          receipts: [...next.receiptsById.values()],
+          results: [...next.resultsById.values()],
           causeIds: [...next.causeIds],
           eventIds: [...next.eventIds],
           ...(next.unknownEvents.size === 0
@@ -1152,11 +1152,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
     while (!closing && !scope.signal.aborted) {
       const current = await fold(projection)
       publish(current)
-      const byId = current.receiptsById.get(canonical.id) ?? archivedCommand({ id: canonical.id })
+      const byId = current.resultsById.get(canonical.id) ?? archivedCommand({ id: canonical.id })
       const byKey =
         trace?.key === undefined
           ? undefined
-          : (current.receiptsByKey.get(trace.key) ?? archivedCommand({ key: trace.key }))
+          : (current.resultsByKey.get(trace.key) ?? archivedCommand({ key: trace.key }))
       if (byId !== undefined && byKey !== undefined && byId.cause.id !== byKey.cause.id) {
         raiseFailure(
           "refusal",
@@ -1164,9 +1164,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
           `yrd: command id '${canonical.id}' and key '${trace?.key}' disagree`,
         )
       }
-      const receipt = byKey ?? byId
-      if (receipt !== undefined) {
-        if (receipt.cause.commandHash !== cause.commandHash) {
+      const recorded = byKey ?? byId
+      if (recorded !== undefined) {
+        if (recorded.cause.commandHash !== cause.commandHash) {
           raiseFailure(
             "refusal",
             "command-id-conflict",
@@ -1174,7 +1174,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
           )
         }
         publish(current)
-        return commandResult(receipt)
+        return commandResult(recorded)
       }
 
       await enforceCheckpointHighWater()
@@ -1281,7 +1281,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     historySnapshot: () => track(historySnapshot),
     ...(history === undefined ? {} : { history }),
     retentionDiagnostics: () => ({
-      receiptFrames: projection.receiptsById.size,
+      resultFrames: projection.resultsById.size,
       causeIds: projection.causeIds.size,
       eventIds: projection.eventIds.size,
       ...(history === undefined ? {} : { journal: history.diagnostics() }),
@@ -1612,7 +1612,7 @@ function checkpointStatePath(trail: readonly (string | number)[]): string {
  * instead of rebuilt into a second one. Restored state always arrives freshly
  * materialized — `JSON.parse` in the SQLite store, `structuredClone` in an
  * in-memory one — so the rebuild produced a structurally identical graph and
- * only doubled restore's peak allocation. Receipts in the same envelope already
+ * only doubled restore's peak allocation. Results in the same envelope already
  * take this route through `parseCheckpointFrame`.
  *
  * Every allocation on the success path is load-bearing, because Bun's allocator
@@ -1629,7 +1629,7 @@ function checkpointStatePath(trail: readonly (string | number)[]): string {
  * refused here rather than dropped. The save path strips those before the
  * checkpoint is written, so a stored one cannot carry any; refusing routes the
  * unreachable case to `loadProjection`'s journal rebuild instead of silently
- * reshaping restored state, and matches `checkpointJson` on the receipt half.
+ * reshaping restored state, and matches `checkpointJson` on the result half.
  */
 function assertCheckpointState(value: unknown, trail: (string | number)[] = []): asserts value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return
@@ -1682,7 +1682,7 @@ function assertCheckpointState(value: unknown, trail: (string | number)[] = []):
  * Checkpoint bytes are independently checksummed and bound to the complete
  * projector identity. Validate the frame envelope and command/cause binding
  * here without repeating replay's full Zod clone for every already-validated
- * receipt. Semantic checks still share the canonical command-hash and event
+ * result. Semantic checks still share the canonical command-hash and event
  * timestamp validators used by the authoritative journal path.
  */
 function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>): JournalFrame {
@@ -1735,7 +1735,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
   assertCheckpointCause(command, cause, commandHashes)
   // checkpointJson already walked every dynamic JSON subtree. Freeze those
   // nodes in child-first order, then freeze the fixed frame envelope without
-  // paying for a second recursive walk over the same receipt.
+  // paying for a second recursive walk over the same result.
   for (const node of jsonPostorder) Object.freeze(node)
   Object.freeze(command)
   Object.freeze(cause)
@@ -1766,7 +1766,7 @@ function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>
  * equivalent is the journal reader-version refusal, so `events()` keeps calling
  * `assertJournalReaderCompatibility` — an O(1) field check, 9ms across the same
  * 45.6k frames. This mirrors `parseCheckpointFrame`, which already trades the
- * full Zod clone for targeted checks on already-validated receipts.
+ * full Zod clone for targeted checks on already-validated results.
  *
  * A malformed value still fails loud here rather than yielding partial events.
  */

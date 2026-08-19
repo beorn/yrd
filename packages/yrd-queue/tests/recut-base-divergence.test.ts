@@ -123,7 +123,7 @@ describe("recut base divergence — a stale certified base is discriminated from
     )
 
     expect(refusal.code).toBe("recut-base-diverged")
-    // The receipt has to name both sides: the operator's next act is producing a
+    // The result has to name both sides: the operator's next act is producing a
     // revision at the authoritative base, and they cannot check that without it.
     expect(refusal.message).toContain(diverged)
     expect(refusal.message).toContain(base)

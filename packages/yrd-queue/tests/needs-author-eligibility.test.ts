@@ -150,7 +150,7 @@ async function submitWithChecks(
 }
 
 describe("native needs-author lifecycle", () => {
-  it("projects a composition refusal that reached the runner as needs-author with its receipt", async () => {
+  it("projects a composition refusal that reached the runner as needs-author with its result", async () => {
     await using app = await createQueueApp(() => ({
       status: "completed",
       conclusion: "failure",
@@ -167,7 +167,7 @@ describe("native needs-author lifecycle", () => {
       status: "refused",
       kind: "refusal",
       step: "check",
-      receipt: {
+      result: {
         code: "composition-invalid",
         message: "PR 'PR1' composition head contains root changes",
       },
@@ -180,7 +180,7 @@ describe("native needs-author lifecycle", () => {
     expect(changeNeedsAuthor(current)).toMatchObject({
       run: refused?.status === "refused" ? refused.steps[0]?.job : undefined,
       step: "check",
-      receipt: {
+      result: {
         code: "composition-invalid",
         message: "PR 'PR1' composition head contains root changes",
       },
@@ -215,7 +215,7 @@ describe("native needs-author lifecycle", () => {
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
     expect(eligibility.reason?.code).toBe("admission-refused")
-    expect(eligibility.reason?.receipt).toBeUndefined()
+    expect(eligibility.reason?.result).toBeUndefined()
     expect(eligibility.reason?.message).toContain("composition-invalid")
     expect(eligibility.reason?.message).toContain("yrd pr recut PR1 --preflight --queue --apply")
     expect(Queues.ids(app.state().queues)).toEqual([])
@@ -254,7 +254,7 @@ describe("native needs-author lifecycle", () => {
     expect(app.queue.eligibility(pr).checks.status).toBe("queued")
     expect(app.bays.pr(pr)?.revs[0]?.admission).toMatchObject({
       status: "refused",
-      receipt: { code: "composition-invalid" },
+      result: { code: "composition-invalid" },
     })
   })
 
@@ -381,7 +381,7 @@ describe("native needs-author lifecycle", () => {
 
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.reason?.code).toBe("needs-author")
-    expect(eligibility.reason?.receipt).toMatchObject({ code: "wrapper-mismatch" })
+    expect(eligibility.reason?.result).toMatchObject({ code: "wrapper-mismatch" })
   })
 
   it("keeps an ordinary check failure (tests/lint) off the needs-author path", async () => {
@@ -400,7 +400,7 @@ describe("native needs-author lifecycle", () => {
     const eligibility = app.queue.eligibility(pr)
     expect(eligibility.runnable).toBe(false)
     expect(eligibility.reason?.code).toBe("required-check-failed")
-    expect(eligibility.reason?.receipt).toBeUndefined()
+    expect(eligibility.reason?.result).toBeUndefined()
     expect(eligibility.reason?.message).toContain("fix the branch and push")
     expect(eligibility.reason?.message).not.toContain("submit it again")
   })

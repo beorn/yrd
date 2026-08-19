@@ -47,8 +47,8 @@ type Delivery = {
   step?: string
   prs?: { id: string; revision: number; headSha: string }[]
 }
-type ReceiptArtifact = { name?: string; path?: string; kind?: string; uri?: string }
-type Receipt = { receipt: string; artifacts?: ReceiptArtifact[] }
+type ResultArtifact = { name?: string; path?: string; kind?: string; uri?: string }
+type Result = { result: string; artifacts?: ResultArtifact[] }
 type SendArgs = Delivery & { key?: string }
 
 const SendArgsSchema = z.object({
@@ -75,13 +75,13 @@ function ids(...values: string[]) {
 }
 
 function delivery(
-  execute: JobHandler<Delivery, Receipt> = async ({ message }) => ({
+  execute: JobHandler<Delivery, Result> = async ({ message }) => ({
     status: "completed",
     conclusion: "success",
-    output: { receipt: `ok:${message}` },
+    output: { result: `ok:${message}` },
   }),
   revision = "transport-v1",
-  observeResult?: (result: JobResult<Receipt>) => Readonly<Record<string, unknown>>,
+  observeResult?: (result: JobResult<Result>) => Readonly<Record<string, unknown>>,
 ) {
   return createJobDef({
     name: "message.deliver",
@@ -89,7 +89,7 @@ function delivery(
     revision,
     input: SendArgsSchema.omit({ key: true }),
     output: z.object({
-      receipt: z.string().min(1),
+      result: z.string().min(1),
       artifacts: z
         .array(
           z.object({
@@ -106,7 +106,7 @@ function delivery(
   })
 }
 
-function withSender(job: JobDef<Delivery, Receipt>) {
+function withSender(job: JobDef<Delivery, Result>) {
   const send = command({
     title: "Send message",
     visibility: "public",
@@ -128,7 +128,7 @@ function withSender(job: JobDef<Delivery, Receipt>) {
 }
 
 async function jobsApp(
-  job: JobDef<Delivery, Receipt>,
+  job: JobDef<Delivery, Result>,
   options: {
     journal?: Journal<unknown>
     clock?: () => string
@@ -242,11 +242,11 @@ describe("JobDef", () => {
     await expect(deliver.execute({ message: "hello" }, context)).resolves.toEqual({
       status: "completed",
       conclusion: "success",
-      output: { receipt: "ok:hello" },
+      output: { result: "ok:hello" },
     })
     expect(() => deliver.request({ message: "" })).toThrow()
 
-    const invalid = delivery(async () => ({ status: "completed", conclusion: "success", output: { receipt: "" } }))
+    const invalid = delivery(async () => ({ status: "completed", conclusion: "success", output: { result: "" } }))
     await expect(invalid.execute({ message: "hello" }, context)).rejects.toThrow()
   })
 })
@@ -280,7 +280,7 @@ describe("Jobs", () => {
         id: JOB_ID,
         attempt: 1,
         runner: "worker-1",
-        result: { status: "completed", conclusion: "success", output: { receipt: "ok:hello" } },
+        result: { status: "completed", conclusion: "success", output: { result: "ok:hello" } },
       },
       "2026-01-01T00:00:02.000Z",
     )
@@ -334,7 +334,7 @@ describe("Jobs", () => {
               id: JOB_ID,
               attempt: 1,
               runner: "legacy-runner",
-              result: { status: "completed", conclusion: "success", output: { receipt: "legacy-ok" } },
+              result: { status: "completed", conclusion: "success", output: { result: "legacy-ok" } },
             },
           },
         ],
@@ -378,7 +378,7 @@ describe("Jobs", () => {
     expect(app.jobs.get(JOB_ID)).toMatchObject({
       status: "completed",
       conclusion: "success",
-      output: { receipt: "legacy-ok" },
+      output: { result: "legacy-ok" },
     })
     expect(app.jobs.get(restoredJobId)).toMatchObject({ status: "queued", attempt: 1 })
   })
@@ -650,7 +650,7 @@ describe("Jobs", () => {
             message: "check command exited 1",
             evidence: { unrelated: { artifacts: [unrelatedArtifact] } },
           },
-          output: { receipt: "failed", artifacts: [outputArtifact] },
+          output: { result: "failed", artifacts: [outputArtifact] },
         }),
         "transport-v1",
         (result) => ({
@@ -710,7 +710,7 @@ describe("Jobs", () => {
         result: {
           status: "completed",
           conclusion: "success",
-          output: { receipt: "remote-ok", artifacts: [artifact] },
+          output: { result: "remote-ok", artifacts: [artifact] },
         },
       })
 
@@ -728,7 +728,7 @@ describe("Jobs", () => {
   it("surfaces a definition-owned terminal projection failure instead of falling back silently", async () => {
     const app = await jobsApp(
       delivery(
-        async () => ({ status: "completed", conclusion: "success", output: { receipt: "ok" } }),
+        async () => ({ status: "completed", conclusion: "success", output: { result: "ok" } }),
         "transport-v1",
         () => {
           throw new Error("terminal projection failed")
@@ -746,7 +746,7 @@ describe("Jobs", () => {
       expect(app.jobs.get(id)).toMatchObject({
         status: "completed",
         conclusion: "success",
-        output: { receipt: "ok" },
+        output: { result: "ok" },
       })
     } finally {
       await app.close()
@@ -777,13 +777,13 @@ describe("Jobs", () => {
           attempt: 1,
           runner: "worker",
           token: "remote-1",
-          result: { status: "completed", conclusion: "success", output: { receipt: "remote-ok" } },
+          result: { status: "completed", conclusion: "success", output: { result: "remote-ok" } },
         }),
       ).rejects.toThrow("external terminal projection failed")
       expect(app.jobs.get(id)).toMatchObject({
         status: "completed",
         conclusion: "success",
-        output: { receipt: "remote-ok" },
+        output: { result: "remote-ok" },
       })
     } finally {
       await app.close()
@@ -819,7 +819,7 @@ describe("Jobs", () => {
         if (message === "first") await first.promise
         if (message === "slow") await slow.promise
         active--
-        return { status: "completed", conclusion: "success", output: { receipt: `ok:${message}` } }
+        return { status: "completed", conclusion: "success", output: { result: `ok:${message}` } }
       }),
     )
     const firstResult = await app.dispatch(app.commands.sender.send, { message: "first" })
@@ -839,9 +839,9 @@ describe("Jobs", () => {
     const jobs = await running
 
     expect(jobs).toMatchObject([
-      { id: jobIds[0], status: "completed", conclusion: "success", output: { receipt: "ok:first" } },
-      { id: jobIds[1], status: "completed", conclusion: "success", output: { receipt: "ok:slow" } },
-      { id: jobIds[2], status: "completed", conclusion: "success", output: { receipt: "ok:third" } },
+      { id: jobIds[0], status: "completed", conclusion: "success", output: { result: "ok:first" } },
+      { id: jobIds[1], status: "completed", conclusion: "success", output: { result: "ok:slow" } },
+      { id: jobIds[2], status: "completed", conclusion: "success", output: { result: "ok:third" } },
     ])
     expect(peak).toBe(2)
     await app.close()
@@ -892,7 +892,7 @@ describe("Jobs", () => {
       status: "completed",
       conclusion: "success",
       attempt: 1,
-      output: { receipt: "ok:hello" },
+      output: { result: "ok:hello" },
     })
     expect((await recorded(app)).map(({ name }) => name)).toEqual([
       "job/requested",
@@ -937,7 +937,7 @@ describe("Jobs", () => {
     await app.jobs.finish(JOB_ID, {
       attempt: 1,
       runner: "manual-runner",
-      result: { status: "completed", conclusion: "success", output: { receipt: "manual-ok" } },
+      result: { status: "completed", conclusion: "success", output: { result: "manual-ok" } },
     })
 
     const completion = (await recorded(app)).findLast(
@@ -1025,7 +1025,7 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "other",
         token: "remote-1",
-        result: { status: "completed", conclusion: "success", output: { receipt: "ok" } },
+        result: { status: "completed", conclusion: "success", output: { result: "ok" } },
       }),
     ).rejects.toThrow("runner mismatch")
     await expect(
@@ -1033,7 +1033,7 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "launcher",
         token: "remote-1",
-        result: { status: "completed", conclusion: "success", output: { receipt: "" } },
+        result: { status: "completed", conclusion: "success", output: { result: "" } },
       }),
     ).rejects.toThrow()
 
@@ -1041,12 +1041,12 @@ describe("Jobs", () => {
       attempt: 1,
       runner: "launcher",
       token: "remote-1",
-      result: { status: "completed", conclusion: "success", output: { receipt: "remote-ok" } },
+      result: { status: "completed", conclusion: "success", output: { result: "remote-ok" } },
     })
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
       status: "completed",
       conclusion: "success",
-      output: { receipt: "remote-ok" },
+      output: { result: "remote-ok" },
       checkpoint: { sha: "abc" },
     })
     const completion = (await recorded(app)).findLast(
@@ -1083,18 +1083,18 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "launcher",
         token: "remote-1",
-        result: { status: "completed", conclusion: "success", output: { receipt: "remote-ok" } },
+        result: { status: "completed", conclusion: "success", output: { result: "remote-ok" } },
       }),
     ).resolves.toMatchObject({
       status: "completed",
       conclusion: "success",
       revision: "transport-v1",
-      output: { receipt: "remote-ok" },
+      output: { result: "remote-ok" },
     })
     expect(observeResult).toHaveBeenCalledWith({
       status: "completed",
       conclusion: "success",
-      output: { receipt: "remote-ok" },
+      output: { result: "remote-ok" },
     })
     await resumed.close()
   })
@@ -1130,7 +1130,7 @@ describe("Jobs", () => {
         id: JOB_ID,
         attempt: 1,
         runner: "lost-worker",
-        result: { status: "completed", conclusion: "success", output: { receipt: "stale" } },
+        result: { status: "completed", conclusion: "success", output: { result: "stale" } },
       }),
     ).rejects.toThrow("attempt 1 is stale")
     await app.close()
@@ -1304,7 +1304,7 @@ describe("Jobs", () => {
       delivery(async () => {
         started.resolve()
         await gate.promise
-        return { status: "completed", conclusion: "success", output: { receipt: "slow-ok" } }
+        return { status: "completed", conclusion: "success", output: { result: "slow-ok" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -1356,7 +1356,7 @@ describe("Jobs", () => {
         } finally {
           clearInterval(working)
         }
-        return { status: "completed", conclusion: "success", output: { receipt: "quiet-ok" } }
+        return { status: "completed", conclusion: "success", output: { result: "quiet-ok" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -1444,7 +1444,7 @@ describe("Jobs", () => {
         })
         await Bun.sleep(10)
         cleaned = true
-        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { result: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -1499,7 +1499,7 @@ describe("Jobs", () => {
           if (context.signal.aborted) onAbort()
           else context.signal.addEventListener("abort", onAbort, { once: true })
         })
-        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { result: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -1553,7 +1553,7 @@ describe("Jobs", () => {
             { once: true },
           )
         })
-        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { result: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -1606,7 +1606,7 @@ describe("localRunner", () => {
         peak = Math.max(peak, active)
         await releases[index]!.promise
         active -= 1
-        return { status: "completed", conclusion: "success", output: { receipt: `ok:${message}` } }
+        return { status: "completed", conclusion: "success", output: { result: `ok:${message}` } }
       }),
     )
     const ids: string[] = []
@@ -1729,7 +1729,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     id: JOB_ID,
     attempt: 1,
     runner: "w",
-    result: { status: "completed", conclusion: "success", output: { receipt: "ok" } },
+    result: { status: "completed", conclusion: "success", output: { result: "ok" } },
   }
 
   it("throws a typed JobStateConflict — same message — when a finish meets an already-canceled Job", () => {
@@ -1779,7 +1779,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     // that killed the resident runner on 2026-07-15.
     const journal = createMemoryJournal()
     const executing = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<{ status: "completed"; conclusion: "success"; output: Receipt }>()
+    const release = Promise.withResolvers<{ status: "completed"; conclusion: "success"; output: Result }>()
     const job = delivery(() => {
       executing.resolve()
       return release.promise
@@ -1793,7 +1793,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     await executing.promise
 
     await peerApp.jobs.cancel({ id: id!, attempt: 1, by: "@peer", reason: "superseded" })
-    release.resolve({ status: "completed", conclusion: "success", output: { receipt: "ok:hello" } })
+    release.resolve({ status: "completed", conclusion: "success", output: { result: "ok:hello" } })
 
     const outcome = await running.then(
       () => ({ ok: true as const }),

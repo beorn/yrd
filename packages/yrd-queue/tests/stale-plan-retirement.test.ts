@@ -106,7 +106,7 @@ async function seedStalePlanBatch(journal: Journal<unknown>, id: () => string, l
 }
 
 describe("stale-plan retirement — an un-isolable drifted batch is retired, not refused forever", () => {
-  it("compose retires the batch with a typed stale-plan release and a loud receipt instead of re-refusing every cycle", async () => {
+  it("compose retires the batch with a typed stale-plan release and a loud result instead of re-refusing every cycle", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     const events: LogEvent[] = []
@@ -131,7 +131,7 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" && event.level === "warn" && event.props?.action === "compose-stale-plan-retire",
     )
-    expect(retire, "expected a compose-stale-plan-retire receipt").toBeDefined()
+    expect(retire, "expected a compose-stale-plan-retire result").toBeDefined()
     expect(retire?.props).toMatchObject({ run: "R1", code: "stale-plan" })
 
     // After retirement the audit is clean AND a second compose cycle does NOT
@@ -144,7 +144,7 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     log.end()
   })
 
-  it("recover settles the un-isolable batch with a loud receipt and clears the audit finding", async () => {
+  it("recover settles the un-isolable batch with a loud result and clears the audit finding", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     const events: LogEvent[] = []
@@ -162,12 +162,12 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     })
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(false)
 
-    const receipt = events.find(
+    const result = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" && event.level === "warn" && event.props?.action === "recover-stale-plan-retire",
     )
-    expect(receipt, "expected a recover-stale-plan-retire receipt").toBeDefined()
-    expect(receipt?.props).toMatchObject({ reason: "stale-plan", runs: ["R1"] })
+    expect(result, "expected a recover-stale-plan-retire result").toBeDefined()
+    expect(result?.props).toMatchObject({ reason: "stale-plan", runs: ["R1"] })
     log.end()
   })
 

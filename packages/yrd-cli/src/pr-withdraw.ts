@@ -18,7 +18,7 @@ const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
 /** Commits per `rev-list` invocation, so a listing with thousands of candidate
  * heads cannot overflow the argument vector. */
 const REV_LIST_BATCH = 400
-const CONSUMED_QUEUE_AUTHORITY_RECEIPTS = new Set([
+const CONSUMED_QUEUE_AUTHORITY_RESULTS = new Set([
   "queue-submit-authority-consumed",
   "queue-checks-authority-consumed",
 ])
@@ -427,7 +427,7 @@ export async function preflightRemerge(
   const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
     needsAuthor !== undefined &&
-    CONSUMED_QUEUE_AUTHORITY_RECEIPTS.has(needsAuthor.receipt.code) &&
+    CONSUMED_QUEUE_AUTHORITY_RESULTS.has(needsAuthor.result.code) &&
     source.n === currentChangeRev(pr).n
   if (
     needsAuthor !== undefined &&
@@ -438,7 +438,7 @@ export async function preflightRemerge(
     raiseFailure(
       "refusal",
       "recut-needs-authored-change",
-      `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
+      `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.result.code}'; ` +
         "an unchanged recut cannot resolve it — push new authored content, then retry the printed remedy",
     )
   }
