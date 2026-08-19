@@ -203,6 +203,29 @@ export const CommandEvidenceSchema = z
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
 
+/**
+ * The small per-attempt fact stdout.log/stderr.log/output.log/error.json never
+ * carried: whether the command produced a verdict at all, and what it was.
+ * Written to `terminal.json` beside the streams so a reader holding only the
+ * attempt directory — no journal, no queue access — can tell a green check
+ * from one that never ran to completion (22896). `exitCode`/`signal` are
+ * `null` together only when no process ever ran (the step refused before
+ * spawning one); otherwise they are the process's own terminal facts,
+ * independent of whatever business-logic verdict the step layered on top.
+ */
+export const CommandTerminalSchema = z
+  .object({
+    status: z.enum(["success", "failure", "waiting"]),
+    exitCode: z.number().int().nullable(),
+    signal: z.string().nullable(),
+    timedOut: z.boolean(),
+    startedAt: z.string(),
+    endedAt: z.string(),
+    durationMs: z.number().nonnegative(),
+  })
+  .strict()
+export type CommandTerminal = Readonly<z.infer<typeof CommandTerminalSchema>>
+
 export const GitCheckComparisonEvidenceSchema = z
   .object({
     parent: CommandEvidenceSchema,
@@ -429,13 +452,11 @@ function configuredCommand<Shape extends ChangeShape>(
       YRD_TARGET: input.targetSha ?? primary.headSha,
       ...options.variables?.(input),
     }
-    const artifactSink = await createArtifactSink(
-      resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts")),
-      input,
-      context.attempt,
-    )
+    const artifactRoot = resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts"))
+    const artifactSink = await createArtifactSink(artifactRoot, input, context.attempt)
     const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
     let result: Awaited<ReturnType<Process["run"]>>
+    const startedAt = new Date().toISOString()
     try {
       result = await process.run({
         argv,
@@ -456,6 +477,7 @@ function configuredCommand<Shape extends ChangeShape>(
       }
       throw cause
     }
+    const endedAt = new Date().toISOString()
     const artifacts = await artifactSink.finish(result.stdout, result.stderr)
     const message = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter((part) => part !== "").join("\n")
     const detail = commandDetail(message)
@@ -484,78 +506,95 @@ function configuredCommand<Shape extends ChangeShape>(
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
       ...(progress.escapedDescendant === true ? { escapedDescendant: true } : {}),
     })
-    // A descendant that outlived the command and held its output pipe open is a
-    // distinct, more-actionable failure than a plain output stall (a process
-    // leaked, and it wedged the queue until run() abandoned the drain). Surface
-    // it FIRST, and independently of noProgressTimeoutMs — the post-exit drain
-    // grace fires even when no output-progress lease is configured.
-    if (progress.escapedDescendant === true) {
-      return failed(
-        `${options.purpose}-stalled-escaped-descendant`,
-        `${options.purpose} exited but a descendant held its output pipe open past the drain grace; the drain was abandoned to un-wedge the queue — inspect and kill the leaked process tree`,
-        evidence,
-      )
-    }
-    if (progress.stalled === true) {
-      if (options.noProgressTimeoutMs === undefined) {
-        throw new Error(`${options.purpose} reported an unconfigured output-progress stall`)
+    // Classification is decided once, here, and the terminal record is written
+    // from its OUTCOME — never re-derived from the raw process facts a second
+    // time, which could silently disagree with the verdict a reader trusts
+    // (22896). The inner logic is exactly what this function returned before;
+    // wrapping it only adds the one write point every branch now shares.
+    const outcome = await (async (): Promise<JobResult<CommandEvidence>> => {
+      // A descendant that outlived the command and held its output pipe open is a
+      // distinct, more-actionable failure than a plain output stall (a process
+      // leaked, and it wedged the queue until run() abandoned the drain). Surface
+      // it FIRST, and independently of noProgressTimeoutMs — the post-exit drain
+      // grace fires even when no output-progress lease is configured.
+      if (progress.escapedDescendant === true) {
+        return failed(
+          `${options.purpose}-stalled-escaped-descendant`,
+          `${options.purpose} exited but a descendant held its output pipe open past the drain grace; the drain was abandoned to un-wedge the queue — inspect and kill the leaked process tree`,
+          evidence,
+        )
       }
-      return failed(
-        `${options.purpose}-stalled`,
-        `${options.purpose} stalled after ${options.noProgressTimeoutMs}ms without progress`,
-        evidence,
-      )
-    }
-    // 21012 S1: a wall-clock settlement is a NAMED failure class, never a
-    // generic exit red — the journal evidence must say the bound fired (and
-    // whether the tree sweep itself failed), so a wedged step self-diagnoses.
-    if (result.timedOut) {
-      const action = waiting ? "launcher" : "command"
-      return failed(
-        `${options.purpose}-timeout`,
-        `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound`,
-        evidence,
-      )
-    }
-    // SIGKILL has no task-level meaning: the kernel, an operator, or a memory
-    // supervisor ended the process before it could return a verdict. Keeping
-    // this distinct prevents exit-code normalization from turning missing
-    // evidence into a terminal check failure.
-    if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
-      return failed(
-        `${options.purpose}-infrastructure-signal`,
-        `${options.purpose} command ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict`,
-        evidence,
-      )
-    }
-    if (gateReports.error !== undefined) {
-      return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
-    }
-    if (checkpointMigration.error !== undefined) {
-      return failed(`${options.purpose}-checkpoint-migration-invalid`, checkpointMigration.error, evidence)
-    }
-    if (result.exitCode !== 0) {
-      const action = waiting ? "launcher" : "command"
-      return failed(
-        `${options.purpose}${waiting ? "-launcher" : ""}-failed`,
-        `${options.purpose} ${action} exited ${result.exitCode}`,
-        evidence,
-      )
-    }
-    if (!waiting) return { status: "completed", conclusion: "success", output: evidence }
-    try {
-      const launch = parseJobLaunch(result.stdout)
-      return {
-        status: "waiting",
-        token: launch.token,
-        ...(launch.url === undefined ? {} : { url: launch.url }),
-        ...(launch.detail === undefined ? {} : { detail: launch.detail }),
-        artifacts: [...evidence.artifacts, ...(launch.artifacts ?? [])],
-        checkpoint: evidence,
+      if (progress.stalled === true) {
+        if (options.noProgressTimeoutMs === undefined) {
+          throw new Error(`${options.purpose} reported an unconfigured output-progress stall`)
+        }
+        return failed(
+          `${options.purpose}-stalled`,
+          `${options.purpose} stalled after ${options.noProgressTimeoutMs}ms without progress`,
+          evidence,
+        )
       }
-    } catch (cause) {
-      return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
-    }
+      // 21012 S1: a wall-clock settlement is a NAMED failure class, never a
+      // generic exit red — the journal evidence must say the bound fired (and
+      // whether the tree sweep itself failed), so a wedged step self-diagnoses.
+      if (result.timedOut) {
+        const action = waiting ? "launcher" : "command"
+        return failed(
+          `${options.purpose}-timeout`,
+          `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound`,
+          evidence,
+        )
+      }
+      // SIGKILL has no task-level meaning: the kernel, an operator, or a memory
+      // supervisor ended the process before it could return a verdict. Keeping
+      // this distinct prevents exit-code normalization from turning missing
+      // evidence into a terminal check failure.
+      if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
+        return failed(
+          `${options.purpose}-infrastructure-signal`,
+          `${options.purpose} command ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict`,
+          evidence,
+        )
+      }
+      if (gateReports.error !== undefined) {
+        return failed(`${options.purpose}-gate-report-invalid`, gateReports.error, evidence)
+      }
+      if (checkpointMigration.error !== undefined) {
+        return failed(`${options.purpose}-checkpoint-migration-invalid`, checkpointMigration.error, evidence)
+      }
+      if (result.exitCode !== 0) {
+        const action = waiting ? "launcher" : "command"
+        return failed(
+          `${options.purpose}${waiting ? "-launcher" : ""}-failed`,
+          `${options.purpose} ${action} exited ${result.exitCode}`,
+          evidence,
+        )
+      }
+      if (!waiting) return { status: "completed", conclusion: "success", output: evidence }
+      try {
+        const launch = parseJobLaunch(result.stdout)
+        return {
+          status: "waiting",
+          token: launch.token,
+          ...(launch.url === undefined ? {} : { url: launch.url }),
+          ...(launch.detail === undefined ? {} : { detail: launch.detail }),
+          artifacts: [...evidence.artifacts, ...(launch.artifacts ?? [])],
+          checkpoint: evidence,
+        }
+      } catch (cause) {
+        return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
+      }
+    })()
+    await writeTerminalRecord(artifactRoot, input, context.attempt, {
+      status: outcome.status === "waiting" ? "waiting" : outcome.conclusion,
+      exitCode: result.exitCode,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      startedAt,
+      endedAt,
+      durationMs: result.durationMs,
+    })
+    return outcome
   }
 }
 
@@ -857,6 +896,20 @@ async function writeTerminalArtifacts(
   return artifacts
 }
 
+/** See {@link CommandTerminalSchema}. Same attempt-directory addressing as
+ * {@link writeTerminalArtifacts} and {@link createArtifactSink}, so the record
+ * always lands beside the streams it describes rather than in a parallel store. */
+async function writeTerminalRecord(
+  root: string,
+  input: StepExecution,
+  attempt: number,
+  record: CommandTerminal,
+): Promise<void> {
+  const dir = join(root, input.run, `${input.index}-${input.step}`, `attempt-${attempt}`)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, "terminal.json"), `${JSON.stringify(CommandTerminalSchema.parse(record), undefined, 2)}\n`)
+}
+
 type ArtifactStream = "stdout" | "stderr"
 type ArtifactStreamState = {
   readonly path: string
@@ -970,6 +1023,12 @@ async function hasCommandOutput(dir: string): Promise<boolean> {
   return false
 }
 
+async function hasTerminalRecord(dir: string): Promise<boolean> {
+  return await readFile(join(dir, "terminal.json"))
+    .then(() => true)
+    .catch(() => false)
+}
+
 /** Human-readable rendering of a typed step failure, for operators reading the
  * attempt directory rather than the journal. */
 function renderStepFailure(error: JobError): string {
@@ -1012,6 +1071,23 @@ async function discloseStepFailure<Output extends JsonValue>(
     // and error.json already carries the typed verdict alongside them.
     if (!(await hasCommandOutput(dir))) {
       await writeFile(join(dir, "output.log"), renderStepFailure(result.error))
+    }
+    // A step that refused before any command ran gets no terminal record from
+    // configuredCommand — there was no process to report on — so this is the
+    // ONLY place that outcome is ever written down (22896). Never clobber one
+    // a command already wrote: that record's exitCode/signal/timing are real
+    // process facts this disclosure has none of.
+    if (!(await hasTerminalRecord(dir))) {
+      const disclosedAt = new Date().toISOString()
+      await writeTerminalRecord(root, input, attempt, {
+        status: "failure",
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        startedAt: disclosedAt,
+        endedAt: disclosedAt,
+        durationMs: 0,
+      })
     }
     return result
   } catch (cause) {
