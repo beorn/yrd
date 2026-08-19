@@ -147,7 +147,7 @@ describe("yrd watch hot reload (installed)", () => {
 
     const running = await launchInstalledWatch(repo, { HOME: home, NODE_ENV: "production" })
     try {
-      await running.terminal.waitFor("QUEUE main", SETTLE_MS).catch((error: unknown) => {
+      await running.terminal.waitFor("YRD QUEUES", SETTLE_MS).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(`${message}; exit=${running.terminal.exitInfo ?? "pending"}\n${running.terminal.getText()}`)
       })
@@ -188,7 +188,7 @@ describe("yrd watch hot reload (installed)", () => {
         try {
           // The 2026-07-15 footer respec removed both the LIVE indicator and
           // keybinding footer; the queue identity is the stable liveness sentinel.
-          await running.terminal.waitFor("QUEUE main", SETTLE_MS).catch((error: unknown) => {
+          await running.terminal.waitFor("YRD QUEUES", SETTLE_MS).catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error)
             throw new Error(`${message}; exit=${running.terminal.exitInfo ?? "pending"}\n${running.terminal.getText()}`)
           })
