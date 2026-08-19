@@ -5379,13 +5379,23 @@ function changeListRetainedRows<T extends Readonly<{ id: string; state: string }
   return matching.filter((pr) => kept.has(pr.id))
 }
 
-// Every value the row filter below actually tests `options.state` against:
-// the full ChangeDeliveryState union, plus "rejected" doubles as a read-
-// compatible alias for "needs-author" (v1 clients' only author-fix bucket) —
-// already a real member on its own, so the alias adds no new value here.
-// An unrecognized value used to fall through to an always-false filter —
-// PR count 0 for every candidate, indistinguishable from "no PRs in that
-// state" — the exact silent-empty-list shape this list exists to name.
+// `pr list` emits TWO state words on every row and `--state` has to serve
+// both, filtering whichever field defines the value it was given.
+//
+// `state` is the PR record's own field — PR.state in yrd-bay/src/model.ts,
+// "is the PR record open or closed?". `--state open` and `--state closed`
+// filter it directly.
+const CHANGE_LIST_RECORD_STATES: readonly PR["state"][] = ["open", "closed"]
+const CHANGE_LIST_RECORD_STATE_HELP = CHANGE_LIST_RECORD_STATES.join(", ")
+
+// `status` is the derived delivery label — the ChangeDeliveryState union in
+// yrd-bay/src/model.ts — and this is every value the row filter below tests
+// it against. "rejected" doubles as a read-compatible alias for
+// "needs-author" (v1 clients' only author-fix bucket), already a real member
+// on its own, so the alias adds no new value here. An unrecognized value used
+// to fall through to an always-false filter — PR count 0 for every candidate,
+// indistinguishable from "no PRs in that state" — the exact silent-empty-list
+// shape this list exists to name.
 const CHANGE_LIST_STATES: readonly ChangeDeliveryState[] = [
   "pushed",
   "submitted",
@@ -5406,8 +5416,24 @@ async function listPrs(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
-  if (options.state !== undefined && !CHANGE_LIST_STATES.includes(options.state as ChangeDeliveryState)) {
-    usage(`--state '${options.state}' is invalid; expected one of ${CHANGE_LIST_STATE_HELP}`)
+  const byRecordState = options.state !== undefined && CHANGE_LIST_RECORD_STATES.includes(options.state as PR["state"])
+  const byDeliveryStatus =
+    options.state !== undefined && CHANGE_LIST_STATES.includes(options.state as ChangeDeliveryState)
+  // A value that both vocabularies define has two readings, and picking one
+  // would answer a question the caller did not ask. The two sets are disjoint
+  // today; this fires only if one drifts into the other, and says so rather
+  // than silently filtering the field it happened to check first.
+  if (byRecordState && byDeliveryStatus) {
+    usage(
+      `--state '${options.state}' is ambiguous: it names both a record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
+        `and a delivery status (${CHANGE_LIST_STATE_HELP})`,
+    )
+  }
+  if (options.state !== undefined && !byRecordState && !byDeliveryStatus) {
+    usage(
+      `--state '${options.state}' is invalid; expected a record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
+        `or a delivery status (${CHANGE_LIST_STATE_HELP})`,
+    )
   }
   const state = stateOf(app)
   const base = options.base === undefined ? undefined : selectedBase(state, options.base)
@@ -5441,12 +5467,14 @@ async function listPrs(
     .filter(
       ({ pr, eligibility }) =>
         options.state === undefined ||
-        projectedChangeStatus(pr, eligibility) === options.state ||
-        changeDeliveryState(pr) === options.state ||
-        // v1 clients used `rejected` as the only author-fix bucket. Keep that
-        // filter as a read-compatible superset while every returned row tells
-        // the truth with native `status: needs-author`.
-        (options.state === "rejected" && projectedChangeStatus(pr, eligibility) === "needs-author"),
+        (byRecordState
+          ? pr.state === options.state
+          : projectedChangeStatus(pr, eligibility) === options.state ||
+            changeDeliveryState(pr) === options.state ||
+            // v1 clients used `rejected` as the only author-fix bucket. Keep
+            // that filter as a read-compatible superset while every returned
+            // row tells the truth with native `status: needs-author`.
+            (options.state === "rejected" && projectedChangeStatus(pr, eligibility) === "needs-author")),
     )
     .filter(({ pr, eligibility, needsReview }) =>
       options.needsReview === true
@@ -11308,7 +11336,11 @@ function buildProgram(
     .command("list")
     .description("list changes")
     .option("--base <branch>", "scope changes to one base")
-    .option("--state <state>", "scope changes to one native or projected state")
+    .option(
+      "--state <state>",
+      `scope changes to one record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
+        `or one native or projected delivery status (${CHANGE_LIST_STATE_HELP})`,
+    )
     .option("--issue <ref>", "scope changes to one issue reference")
     .option("--needs-review", "show revisions needing approval")
     .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
