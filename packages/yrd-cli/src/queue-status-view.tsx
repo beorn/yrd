@@ -403,8 +403,10 @@ export type QueueDriverEpoch = Readonly<{
   queueId: string
   /** One resident lifetime. A same-PID exec reload mints a successor epoch. */
   epoch: string
-  /** Latest proven queue landing, or null before this queue has landed anything. */
-  lastMerged: Readonly<{ commit: string; at: string }> | null
+  /** Latest proven queue merge, or null before this queue has merged anything.
+   * Optional for status written by older residents (pre-2026-08-18 they wrote
+   * this field as `lastLanded`); absence is unknown, never "nothing merged". */
+  lastMerged?: Readonly<{ commit: string; at: string }> | null
 }>
 
 /** One uncarried sweep: what it found AND when it looked. The two travel

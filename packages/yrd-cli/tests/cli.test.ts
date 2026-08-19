@@ -7301,6 +7301,65 @@ describe("runYrd", () => {
           driver,
         }),
       )
+      // A resident outlives the CLI reading it, so its status is a wire between
+      // two independently-versioned processes. On 2026-08-18 a rename of this
+      // key (lastLanded -> lastMerged) made every fresh CLI REFUSE against a
+      // resident started minutes earlier: `queue list`, `why` and the watch
+      // pane's status poll all exited 3 while the queue itself kept merging
+      // fine. The old spelling is read, and an unreported position reads
+      // healthy -- a live resident omits the key until it has merged anything,
+      // so absence has never meant a fault.
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
+          driver: { queueId: driver.queueId, epoch: driver.epoch, lastLanded: null },
+        }),
+      )
+      const legacySpelling = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), legacySpelling.io, services)).toBe(0)
+      expect(JSON.parse(legacySpelling.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "healthy",
+        running: true,
+        facts: { lease: "held", runnerStatus: "fresh" },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
+          driver: { queueId: driver.queueId, epoch: driver.epoch },
+        }),
+      )
+      const unreportedMerge = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), unreportedMerge.io, services)).toBe(0)
+      expect(JSON.parse(unreportedMerge.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "healthy",
+        running: true,
+        facts: { lease: "held", runnerStatus: "fresh" },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:58.000Z" },
+          driver,
+        }),
+      )
       const progressing = outputIO({ cwd: repo })
       expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), progressing.io, services)).toBe(0)
       expect(JSON.parse(progressing.stdout())).toMatchObject({

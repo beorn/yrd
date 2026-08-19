@@ -523,11 +523,19 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
   if (typeof driver.epoch !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(driver.epoch)) {
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver epoch is invalid")
   }
+  // A resident outlives the CLI that reads it, so this key is a cross-process
+  // wire between two independently-versioned processes: the reader must accept
+  // what an older resident writes. `lastLanded` is the pre-2026-08-18 spelling
+  // of this same field (the land->merge rename); a resident started before that
+  // rename keeps writing it for its whole lifetime. Absent BOTH spellings is
+  // unknown, never "nothing has landed" -- the same rule the sibling
+  // `missingUpdateClocks` states on this record.
+  const reported = driver.lastMerged ?? driver.lastLanded
   let lastMerged: QueueDriverEpoch["lastMerged"]
-  if (driver.lastMerged === null) {
+  if (reported === null) {
     lastMerged = null
-  } else if (typeof driver.lastMerged === "object" && driver.lastMerged !== null) {
-    const merged = driver.lastMerged as Record<string, unknown>
+  } else if (typeof reported === "object" && reported !== null) {
+    const merged = reported as Record<string, unknown>
     if (
       typeof merged.commit !== "string" ||
       !/^[0-9a-f]{40,64}$/u.test(merged.commit) ||
@@ -541,6 +549,8 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
       )
     }
     lastMerged = { commit: merged.commit, at: merged.at }
+  } else if (reported === undefined) {
+    lastMerged = undefined
   } else {
     raiseFailure(
       "infrastructure",
@@ -1050,7 +1060,12 @@ function queuedDeliveryCount(app: YrdCliApp): number {
   }).length
 }
 
-function sameDriverMerge(left: QueueDriverEpoch["lastMerged"], right: QueueDriverEpoch["lastMerged"]): boolean {
+/** Both sides must be KNOWN: an unreported merge position is not comparable,
+ * so callers resolve that case before reaching here rather than letting an
+ * unknown quietly compare equal (or unequal) to a real commit. */
+type KnownDriverMerge = Exclude<QueueDriverEpoch["lastMerged"], undefined>
+
+function sameDriverMerge(left: KnownDriverMerge, right: KnownDriverMerge): boolean {
   return left === null ? right === null : right !== null && left.commit === right.commit && left.at === right.at
 }
 
@@ -1073,7 +1088,18 @@ function runnerDriverHealthError(
       ["Stop the mismatched resident and start the runner from the expected repository."],
     )
   }
-  if (expectedLastMerged !== undefined && !sameDriverMerge(runner.driver.lastMerged, expectedLastMerged)) {
+  // A resident that reports no merge position is not thereby unhealthy: a live
+  // resident omits the key entirely until it has merged something, and one
+  // started before the 2026-08-18 land->merge rename spells it `lastLanded`.
+  // Either way there is nothing to compare, so this check abstains -- the same
+  // shape as the `expectedLastMerged !== undefined` guard on the other side.
+  // Every other driver check (identity, epoch, heartbeat freshness, progress)
+  // still runs, so abstaining here hides nothing.
+  if (
+    expectedLastMerged !== undefined &&
+    runner.driver.lastMerged !== undefined &&
+    !sameDriverMerge(runner.driver.lastMerged, expectedLastMerged)
+  ) {
     return runnerHealthError(
       "resident-runner-driver-stale",
       "resident runner heartbeat does not report the queue's latest landed commit",
