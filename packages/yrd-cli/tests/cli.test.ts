@@ -5487,12 +5487,59 @@ describe("runYrd", () => {
     const invalid = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--state", "bogus-value", "--json"), invalid.io)).toBe(2)
     expect(invalid.stderr()).toContain(
-      "--state 'bogus-value' is invalid; expected one of pushed, submitted, ready, needs-author, rejected, " +
-        "integrated, already-landed, withdrawn, canceled",
+      "--state 'bogus-value' is invalid; expected a record state (open, closed) or a delivery status " +
+        "(pushed, submitted, ready, needs-author, rejected, integrated, already-landed, withdrawn, canceled)",
     )
     // A refusal must never silently pass through as an empty success either —
     // confirm no `pr.list` result reached stdout at all.
     expect(invalid.stdout()).toBe("")
+  })
+
+  // Every `pr list` row carries TWO state words: `state` from PR.state
+  // (yrd-bay/src/model.ts:643, open | closed) and `status` from
+  // ChangeDeliveryState (yrd-bay/src/model.ts:317). `--state` filtered only
+  // the second, so `--state open` — the record's own word for the field the
+  // flag is named after — matched nothing and returned an empty list. It has
+  // to accept both vocabularies and filter whichever field defines the value.
+  it("filters pr list --state on whichever field defines the value", async () => {
+    const app = await createApp()
+    await app.bays.intake({ branch: "issue/still-open", headSha: HEAD_SHA, base: "main" })
+    await app.bays.submit({ branch: "topic/gone", headSha: MERGED_SHA, base: "main" })
+    await app.bays.closePr({ pr: "PR2" })
+    expect(app.bays.pr("PR1")!.state).toBe("open")
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
+    expect(app.bays.pr("PR2")!.state).toBe("closed")
+    expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("withdrawn")
+
+    const open = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "open", "--json"), open.io), open.stderr()).toBe(0)
+    expect(JSON.parse(open.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1", state: "open" }] })
+    expect(JSON.parse(open.stdout()).prs).toHaveLength(1)
+
+    const closed = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "closed", "--json"), closed.io), closed.stderr()).toBe(0)
+    expect(JSON.parse(closed.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR2", state: "closed" }] })
+    expect(JSON.parse(closed.stdout()).prs).toHaveLength(1)
+
+    // The delivery vocabulary keeps filtering the status field, unchanged.
+    const pushed = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), pushed.io), pushed.stderr()).toBe(0)
+    expect(JSON.parse(pushed.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1" }] })
+    expect(JSON.parse(pushed.stdout()).prs).toHaveLength(1)
+
+    const withdrawn = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "list", "--state", "withdrawn", "--json"), withdrawn.io),
+      withdrawn.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(withdrawn.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR2" }] })
+    expect(JSON.parse(withdrawn.stdout()).prs).toHaveLength(1)
+
+    // A valid value that matches nothing is still a success with an empty
+    // list — the duality the refusal exists to protect, not to replace.
+    const none = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "integrated", "--json"), none.io), none.stderr()).toBe(0)
+    expect(JSON.parse(none.stdout())).toMatchObject({ command: "pr.list", prs: [] })
   })
 
   it("still lists PRs in a valid state after the --state value is validated", async () => {
