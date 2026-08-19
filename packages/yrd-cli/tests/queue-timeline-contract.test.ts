@@ -355,15 +355,23 @@ describe("queue timeline 21106 contract", () => {
     // continuation on a batch member behind its lead; BY stays left-aligned
     // and the run duration is a bare dimmed time.
     expect(pending?.trim()).toMatch(/^16:40:00 ○ ready\s+—\s+pr#1\.1 Prepare release notes\s+@cto\s+50:00$/u)
-    expect(lead?.trim()).toMatch(/^17:10:00 ◉ checking\s+#42 ◉\s+pr#42\.1 Align host navigation.*\(2:check\)\s+@agent\/3\s+36:00 20:00$/u)
+    expect(lead?.trim()).toMatch(
+      /^17:10:00 ◉ checking\s+#42 ◉\s+pr#42\.1 Align host navigation.*\(2:check\)\s+@agent\/3\s+36:00 20:00$/u,
+    )
     // The convoy PARTNER keeps its own TIME/STATUS (a landed member and a
     // never-attempted PR must never print the same row of dashes —
     // @i/10-merge-queue/22925); the shared run id renders once, the partner
     // carrying the `·` membership continuation (item 38).
-    expect(partner?.trim()).toMatch(/^17:10:00 ◉ checking\s+·\s+pr#43\.1 Carry the production.*\(2:check\)\s+@agent\/5\s+34:00 20:00$/u)
+    expect(partner?.trim()).toMatch(
+      /^17:10:00 ◉ checking\s+·\s+pr#43\.1 Carry the production.*\(2:check\)\s+@agent\/5\s+34:00 20:00$/u,
+    )
     expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+—\s+pr#5\.1 Reject broken payload\s+@agent\/2\s+1:15:00$/u)
-    expect(rejected?.trim()).toMatch(/^16:42:00 × failed\s+#5 ×\s+pr#5\.1 Reject broken payload \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u)
-    expect(integrated?.trim()).toMatch(/^16:25:00 ✓ merged\s+#4 ✓\s+pr#4\.1 Land the durable patch\s+@agent\/7\s+25:00 15:00$/u)
+    expect(rejected?.trim()).toMatch(
+      /^16:42:00 × failed\s+#5 ×\s+pr#5\.1 Reject broken payload \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
+    )
+    expect(integrated?.trim()).toMatch(
+      /^16:25:00 ✓ merged\s+#4 ✓\s+pr#4\.1 Land the durable patch\s+@agent\/7\s+25:00 15:00$/u,
+    )
 
     // No row carries the removed clock glyph; a not-yet-started run shows the
     // muted em-dash in the RUN cell, never a run id or duration.
@@ -871,7 +879,7 @@ describe("queue timeline 21106 contract", () => {
       await handle.press("h")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("16:54 r1 submitted by @agent/3")
-      // Operator spec item 4 ("list the merge requests, EACH CHANGE IN ITS OWN
+      // Operator spec item 4 ("list the changes, EACH CHANGE IN ITS OWN
       // BOX") expanded the Changes tab from the lead-only scope above to every
       // batch member — the partner PR now gets its own box, submit timeline
       // included.

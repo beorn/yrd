@@ -424,7 +424,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
   /**
    * Box 2 of @i/10-merge-queue/uptime-is-not-health. The bead's predicate is a
    * CONJUNCTION validated over the whole journal — runner heartbeat fresh AND
-   * ready-set non-empty AND no merge request for the window AND at least ten
+   * ready-set non-empty AND no change for the window AND at least ten
    * admission checks in it — which fired exactly 3 times, all genuine. The
    * duration test alone fires 37 times, and an alarm that fires 37 times is an
    * alarm somebody mutes.
@@ -689,7 +689,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
     expect(finding?.message).toBe(
-      `merge request '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
+      `change '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
         `yrd: PR '${pr.id}' authors a gitlink bump; use yrd intent submit --component vendor/yrd --issue <issue-ref>`,
     )

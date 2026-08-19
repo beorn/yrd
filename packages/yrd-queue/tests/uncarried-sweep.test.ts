@@ -161,7 +161,7 @@ describe("sweepUncarriedRefs", () => {
 
     const result = await sweepUncarriedRefs(git, {
       ...OPTIONS,
-      carriedBranches: new Set(["task/carried"]), // as a merge request records it, without the remote
+      carriedBranches: new Set(["task/carried"]), // as a change records it, without the remote
     })
 
     // Zero findings is only readable next to what produced it.
@@ -324,12 +324,12 @@ describe("sweepUncarriedRefs", () => {
     }
   })
 
-  it("matches a merge request's branch name against a remote-prefixed ref", async () => {
+  it("matches a change's branch name against a remote-prefixed ref", async () => {
     // The bug this pins was invisible to every other test here, because their
     // fixtures used the same string on both sides. Real data does not:
-    // %(refname:short) yields "origin/task/x" and a merge request records
+    // %(refname:short) yields "origin/task/x" and a change records
     // "task/x". Measured on the live fleet before the fix — 4,784 refs scanned,
-    // 7 recognised as carried, against 810 live merge requests. The rail's
+    // 7 recognised as carried, against 810 live changes. The rail's
     // first real run reported carried work as stranded.
     const git = fakeGit({ "for-each-ref": refLine("origin/task/carried", 3 * HOUR) })
     const result = await sweepUncarriedRefs(git, {
@@ -388,7 +388,7 @@ describe("sweepUncarriedRefs", () => {
   })
 
   it("lets a carried newest revision suppress its own stranded ancestors", async () => {
-    // A merge request on `-r2` is the strongest evidence `-r1` is spent: the
+    // A change on `-r2` is the strongest evidence `-r1` is spent: the
     // work moved on and something already tracks it. Looking for the superseder
     // only among UNCARRIED refs would resurrect exactly the row this deletes.
     const git = fakeGit({

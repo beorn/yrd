@@ -538,10 +538,10 @@ export type StepDef<Input extends ChangeShape, Output extends ChangeShape> = Rea
 type AnyStepDef = StepDef<ChangeShape, ChangeShape>
 type InputOf<Step> = Step extends StepDef<infer Input, infer _Output> ? Input : never
 type OutputOf<Step> = Step extends StepDef<infer _Input, infer Output> ? Output : never
-type ValidateStepChain<Steps extends readonly AnyStepDef[], Shape extends ChangeShape = ChangeShape> = Steps extends readonly [
-  infer First extends AnyStepDef,
-  ...infer Rest extends readonly AnyStepDef[],
-]
+type ValidateStepChain<
+  Steps extends readonly AnyStepDef[],
+  Shape extends ChangeShape = ChangeShape,
+> = Steps extends readonly [infer First extends AnyStepDef, ...infer Rest extends readonly AnyStepDef[]]
   ? Shape extends InputOf<First>
     ? ValidateStepChain<Rest, OutputOf<First>>
     : Readonly<{ "yrd: incompatible queue step input": never }>
@@ -1985,7 +1985,7 @@ function createQueue<Shape extends ChangeShape>(
     pr: string,
     refusal: NonNullable<RevisionAdmissionOutcome["refusal"]>,
   ): Promise<void> => {
-    log.warn?.("queue admit skipped a merge request that failed its required checks", {
+    log.warn?.("queue admit skipped a change that failed its required checks", {
       action: "compose-candidate-skip",
       pr,
       ...refusal,
@@ -2050,7 +2050,7 @@ function createQueue<Shape extends ChangeShape>(
           ...(checkability ? { kind: "refusal" } : fact?.kind === undefined ? {} : { kind: fact.kind }),
           reason: error instanceof Error ? error.message : String(error),
         }
-        log.warn?.("queue admit skipped a merge request that is no longer eligible", {
+        log.warn?.("queue admit skipped a change that is no longer eligible", {
           action: "compose-candidate-skip",
           pr: selector,
           ...refusal,
@@ -2169,7 +2169,7 @@ function createQueue<Shape extends ChangeShape>(
             prs.some((selector) => {
               const pr = resolvePR(runtime().bays, selector)
               if (pr === undefined) {
-                throw new Error(`yrd: accepted merge request '${selector}' disappeared from bay state`)
+                throw new Error(`yrd: accepted change '${selector}' disappeared from bay state`)
               }
               return changeAdmission(pr) === undefined
             })
@@ -2405,7 +2405,7 @@ function createQueue<Shape extends ChangeShape>(
               if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
                 throw error
               }
-              log.warn?.("queue compose skipped an authority-gap merge request lost to a losable failure", {
+              log.warn?.("queue compose skipped an authority-gap change lost to a losable failure", {
                 action: "compose-candidate-skip",
                 pr: gap.pr,
                 code: fact.code,
@@ -2800,7 +2800,7 @@ function createQueue<Shape extends ChangeShape>(
               id: job.id,
               attempt: job.attempt,
               by: recoverOptions.runner ?? "yrd/recover",
-              reason: "entry checks no longer belong to a live merge request revision",
+              reason: "entry checks no longer belong to a live change revision",
             })
           }
           if (staleAdmissions.length > 0) {
@@ -2988,7 +2988,8 @@ function createQueue<Shape extends ChangeShape>(
           ? Object.values(snapshot.bays.prs)
           : selectors.map((selector) => {
               const pr = resolvePR(snapshot.bays, selector)
-              if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+              if (pr === undefined)
+                {raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))}
               return pr
             })
       return prs.flatMap((pr) => projectChangeChecks(snapshot, pr, steps))
@@ -3759,7 +3760,7 @@ function createQueueCommands(
         raiseFailure(
           "refusal",
           "stale-pr",
-          `yrd: this settlement targets stale revision ${args.revision} (${args.headSha}) of merge request '${args.pr}'`,
+          `yrd: this settlement targets stale revision ${args.revision} (${args.headSha}) of change '${args.pr}'`,
         )
       }
       const refusal = state.queues.admissionRefusals[args.pr]
@@ -3767,14 +3768,14 @@ function createQueueCommands(
         raiseFailure(
           "refusal",
           "admission-refusal-missing",
-          `yrd: merge request '${args.pr}' has no failed required check to settle`,
+          `yrd: change '${args.pr}' has no failed required check to settle`,
         )
       }
       if (refusal.revision !== undefined && (refusal.revision !== args.revision || refusal.headSha !== args.headSha)) {
         raiseFailure(
           "refusal",
           "admission-refusal-stale",
-          `yrd: the failed check for merge request '${args.pr}' belongs to revision ${refusal.revision} (${refusal.headSha})`,
+          `yrd: the failed check for change '${args.pr}' belongs to revision ${refusal.revision} (${refusal.headSha})`,
         )
       }
       if (
@@ -4721,15 +4722,13 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const settlement = SettleAdmissionRefusalSchema.parse(applied.data)
     const refusal = state.queues.admissionRefusals[settlement.pr]
     if (refusal === undefined) {
-      throw new Error(`yrd: the settlement names merge request '${settlement.pr}', which has no failed check`)
+      throw new Error(`yrd: the settlement names change '${settlement.pr}', which has no failed check`)
     }
     if (
       refusal.revision !== undefined &&
       (refusal.revision !== settlement.revision || refusal.headSha !== settlement.headSha)
     ) {
-      throw new Error(
-        `yrd: the settlement for merge request '${settlement.pr}' does not match the revision that failed`,
-      )
+      throw new Error(`yrd: the settlement for change '${settlement.pr}' does not match the revision that failed`)
     }
     return {
       queues: {
@@ -5295,7 +5294,9 @@ function samePayloadPRs(
   const payloads = new Set(snapshots.map(payloadIdentity))
   return Object.values(state.prs).filter(
     (pr) =>
-      changeDeliveryState(pr) !== "withdrawn" && changeDeliveryState(pr) !== "canceled" && payloads.has(payloadIdentity(pr)),
+      changeDeliveryState(pr) !== "withdrawn" &&
+      changeDeliveryState(pr) !== "canceled" &&
+      payloads.has(payloadIdentity(pr)),
   )
 }
 
@@ -5563,7 +5564,12 @@ function admissionRevisionKeyPrefix(pr: string, revision: number): string {
   return `admission:${pr}:${revision}:`
 }
 
-function admissionJobKey(pr: DeepReadonly<ChangeSnapshot>, baseSha: string, index: number, stepRevision?: string): string {
+function admissionJobKey(
+  pr: DeepReadonly<ChangeSnapshot>,
+  baseSha: string,
+  index: number,
+  stepRevision?: string,
+): string {
   const prefix = `${admissionExecutionId(pr, baseSha)}:${index}`
   return stepRevision === undefined ? prefix : `${prefix}:${stepRevision}`
 }
@@ -6218,7 +6224,7 @@ function admissionRefusalAuditFindings(
     findings.push({
       code: "admission-refusal-loop",
       message:
-        `merge request '${refusal.pr}' at the head of the required-check queue failed its entry checks ` +
+        `change '${refusal.pr}' at the head of the required-check queue failed its entry checks ` +
         `${sameCodeCount} consecutive times ` +
         `over ${formatRefusalSpan(blockedMs)} (since ${sameCodeFirstAt}) without ever completing required checks; ` +
         `latest failure '${refusal.code}': ${refusal.reason}`,
@@ -6416,7 +6422,7 @@ type QueuePosition = Readonly<{ at: string; identity: string }>
 
 function changeQueuePosition(pr: DeepReadonly<PR>): QueuePosition {
   const submittedAt = currentChangeRev(pr).submittedAt
-  if (submittedAt === undefined) throw new Error(`yrd: queued merge request '${pr.id}' has no submit time`)
+  if (submittedAt === undefined) throw new Error(`yrd: queued change '${pr.id}' has no submit time`)
   // Legacy projections expose no cross-plugin journal ordinal. Equal clocks
   // therefore have no recoverable chronology; retain the established PR line
   // ahead of additive intent rows, then use natural identity for replay.
@@ -6444,9 +6450,9 @@ function requestedPRs(
       .toSorted((left, right) => {
         const leftSubmittedAt = currentChangeRev(left).submittedAt
         const rightSubmittedAt = currentChangeRev(right).submittedAt
-        if (leftSubmittedAt === undefined) throw new Error(`yrd: queued merge request '${left.id}' has no submit time`)
+        if (leftSubmittedAt === undefined) throw new Error(`yrd: queued change '${left.id}' has no submit time`)
         if (rightSubmittedAt === undefined) {
-          throw new Error(`yrd: queued merge request '${right.id}' has no submit time`)
+          throw new Error(`yrd: queued change '${right.id}' has no submit time`)
         }
         return leftSubmittedAt.localeCompare(rightSubmittedAt) || compareNatural(left.id, right.id)
       })
@@ -7482,7 +7488,7 @@ function ChangeEligibility(
         return verdict({
           code: "admission-refused",
           message:
-            `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
+            `change '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
             `${admission.receipt.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
         })
       }
@@ -7549,7 +7555,7 @@ function ChangeEligibility(
       return verdict({
         code: "admission-refused",
         message:
-          `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
+          `change '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
           `${admissionRefusal.reason}. ${admissionRefusal.settlement.reason}.\n` +
           `Next: yrd pr recut ${pr.id} --preflight --queue --apply`,
       })

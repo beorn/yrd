@@ -1532,7 +1532,9 @@ export function gitMergeRecorder(options: {
       // equivalence check survives unchanged, only the DIAGNOSIS improves.
       const parsed = parseMergeRecordTolerant(existing.stdout)
       if (parsed.outcome === "unreadable") {
-        throw new Error(`yrd: merge '${run.id}' has an existing merge record this checkout cannot read: ${parsed.reason}`)
+        throw new Error(
+          `yrd: merge '${run.id}' has an existing merge record this checkout cannot read: ${parsed.reason}`,
+        )
       }
       if (
         parsed.outcome === "ok-with-unknown-fields" ||
@@ -1807,10 +1809,13 @@ export async function findRepositoryMergeRecords(
           }
         }
         if (!(await isAncestor(git, submodule, pin.after, current))) {
-          return corrupt(`merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`, {
-            merge: parsed.record.merge.id,
-            checksum: parsed.checksum,
-          })
+          return corrupt(
+            `merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`,
+            {
+              merge: parsed.record.merge.id,
+              checksum: parsed.checksum,
+            },
+          )
         }
       }
     }
@@ -3025,7 +3030,12 @@ async function remergeDirectPR(
     if (usedUnionMerge && hasAbsorbedExceptions) {
       const sourceCount = await git.run(repo, ["rev-list", "--count", `${sourceBase}..${input.headSha}`], true)
       const remergeCount = await git.run(path, ["rev-list", "--count", `${target.sha}..${headSha}`], true)
-      if (sourceCount.code !== 0 || remergeCount.code !== 0 || sourceCount.stdout !== "1" || remergeCount.stdout !== "1") {
+      if (
+        sourceCount.code !== 0 ||
+        remergeCount.code !== 0 ||
+        sourceCount.stdout !== "1" ||
+        remergeCount.stdout !== "1"
+      ) {
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
@@ -3890,7 +3900,9 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
   }
 }
 
-type RemergeBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
+type RemergeBaseMovement =
+  | CandidateFailure
+  | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
 
 /**
  * Classify how the authoritative candidate base relates to the reviewed recut base
@@ -3912,7 +3924,11 @@ type RemergeBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved:
  * its own `recut-base-diverged` code that parks the PR on the first refusal
  * instead of storming the queue head.
  */
-async function remergeBaseMovement(git: Git, repo: string, pr: StepExecution["prs"][number]): Promise<RemergeBaseMovement> {
+async function remergeBaseMovement(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<RemergeBaseMovement> {
   const baseSha = pr.recut?.baseSha
   if (baseSha === undefined) {
     return candidateFailure(
@@ -4168,18 +4184,18 @@ async function intentSubmissionWorkflow(
       const target = await readGitlink(git, repo, headSha, submodule)
       if (previous === undefined) {
         return (
-          `component '${submodule}' is a new component; a merge request's gitlink diff can only bump an ` +
+          `component '${submodule}' is a new component; a change's gitlink diff can only bump an ` +
           "existing component, never add one; authorize the component-model addition as an ordinary code change"
         )
       }
       if (target === undefined) {
         return (
-          `component '${submodule}' is deleted; a merge request's gitlink diff can only bump an existing ` +
+          `component '${submodule}' is deleted; a change's gitlink diff can only bump an existing ` +
           "component, never remove one; restore it, or authorize the component-model deletion as an ordinary code change"
         )
       }
       return (
-        `get commit '${target}' onto '${submodule}''s own main, then submit an ordinary merge request whose ` +
+        `get commit '${target}' onto '${submodule}''s own main, then submit an ordinary change whose ` +
         `diff is the gitlink bump (issue ${issue})`
       )
     }),
@@ -4188,7 +4204,7 @@ async function intentSubmissionWorkflow(
 }
 
 function submoduleIntentWorkflow(): string {
-  return "submit each component advance as its own ordinary merge request whose diff is only the gitlink bump; Queue owns the root carrier"
+  return "submit each component advance as its own ordinary change whose diff is only the gitlink bump; Queue owns the root carrier"
 }
 
 type BaseContainment =
@@ -4334,19 +4350,19 @@ async function carrierDropsMergedFailure(
   if (containment.status === "inspection-failed") {
     return candidateFailure(
       "carrier-inspection",
-      `could not compare root branch '${headSha}' for merge request '${pr}' with the merge-queue base '${authoritativeBase}': ${containment.detail}`,
+      `could not compare root branch '${headSha}' for change '${pr}' with the merge-queue base '${authoritativeBase}': ${containment.detail}`,
     )
   }
   const spent = await spentGitlinkCarrier(git, repo, candidate, headSha, authoritativeBase)
   if (spent !== undefined) {
     return candidateFailure(
       "carrier-pin-already-landed",
-      `merge request '${pr}' branch '${headSha}' authors component pins only, and every one of them already landed: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
+      `change '${pr}' branch '${headSha}' authors component pins only, and every one of them already landed: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
     )
   }
   return candidateFailure(
     "carrier-drops-landed",
-    `merge request '${pr}' branch '${headSha}' does not contain the merge-queue base '${authoritativeBase}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the branch", authoritativeBase)}`,
+    `change '${pr}' branch '${headSha}' does not contain the merge-queue base '${authoritativeBase}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the branch", authoritativeBase)}`,
   )
 }
 
@@ -4382,7 +4398,7 @@ async function unauthoredDeletionFailure(
   if (base.status === "unreadable") {
     return candidateFailure(
       "deletion-inspection",
-      `could not measure the deletions merge request '${pr}' branch '${headSha}' authors against '${before}': ` +
+      `could not measure the deletions change '${pr}' branch '${headSha}' authors against '${before}': ` +
         `${base.detail}; restore readable history before landing a payload that deletes paths`,
     )
   }
@@ -4392,7 +4408,7 @@ async function unauthoredDeletionFailure(
   const shown = unauthored.slice(0, 8).join(", ") + (unauthored.length > 8 ? ", …" : "")
   return candidateFailure(
     "unauthored-path-deletion",
-    `merging merge request '${pr}' branch '${headSha}' deletes [${shown}], which its authored diff against ` +
+    `merging change '${pr}' branch '${headSha}' deletes [${shown}], which its authored diff against ` +
       `'${base.sha}' never deletes; the merge resolved away landed work the branch never authored removing\n` +
       `remedy: ${linearRebuildRemedy("the branch", before)}`,
     ".",
@@ -4499,7 +4515,7 @@ async function droppedContributionFailure(
   const unreadable = (path: string, detail: string): CandidateFailure =>
     candidateFailure(
       "contribution-inspection",
-      `could not read '${path}' while witnessing what merging merge request '${pr}' branch '${headSha}' kept: ` +
+      `could not read '${path}' while witnessing what merging change '${pr}' branch '${headSha}' kept: ` +
         `${detail}; restore readable history before landing a merge whose result cannot be compared with its parents`,
     )
 
@@ -4589,7 +4605,7 @@ async function droppedContributionFailure(
     "; paths the merge deletes outright are unauthored-path-deletion's subject"
   return candidateFailure(
     "dropped-parent-contribution",
-    `merging merge request '${pr}' branch '${headSha}' produced a result that drops content neither parent ` +
+    `merging change '${pr}' branch '${headSha}' produced a result that drops content neither parent ` +
       `authored removing: ${shown}${drops.length > 4 ? ", …" : ""}\n${scope}\n` +
       `remedy: ${linearRebuildRemedy("the branch", before)}`,
     ".",
@@ -4609,20 +4625,20 @@ async function mergeTipCarrierFailure(
   if (lineage.code !== 0 || lineage.stdout === "") {
     return candidateFailure(
       "carrier-inspection",
-      `could not inspect the root branch tip '${headSha}' for merge request '${pr}': ${lineage.stderr || lineage.stdout || "no lineage"}`,
+      `could not inspect the root branch tip '${headSha}' for change '${pr}': ${lineage.stderr || lineage.stdout || "no lineage"}`,
     )
   }
   const [commit, ...parents] = lineage.stdout.split(/\s+/u)
   if (commit !== headSha) {
     return candidateFailure(
       "carrier-inspection",
-      `root branch history for merge request '${pr}' returned '${commit ?? "no commit"}', expected '${headSha}'`,
+      `root branch history for change '${pr}' returned '${commit ?? "no commit"}', expected '${headSha}'`,
     )
   }
   return parents.length > 1
     ? candidateFailure(
         "merge-tip-carrier",
-        `merge request '${pr}' root branch tip '${headSha}' is a merge commit with ${parents.length} parents; ${submoduleIntentWorkflow()}`,
+        `change '${pr}' root branch tip '${headSha}' is a merge commit with ${parents.length} parents; ${submoduleIntentWorkflow()}`,
       )
     : undefined
 }
@@ -7871,7 +7887,7 @@ async function mergeDeletionFloor(
     if (base.status === "unreadable") {
       return candidateFailure(
         "carrier-inspection",
-        `could not measure the deletions merge request '${pr.id}' branch '${pr.headSha}' authors against ` +
+        `could not measure the deletions change '${pr.id}' branch '${pr.headSha}' authors against ` +
           `'${baseSha}': ${base.detail}; a Candidate whose history cannot be read cannot be cleared to land`,
       )
     }

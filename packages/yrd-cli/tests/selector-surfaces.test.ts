@@ -343,7 +343,7 @@ describe("case-insensitive CLI selector surfaces", () => {
 
     expect(await runYrd(app, yrd(...args), output.io)).toBe(1)
     expect(output.stderr()).toContain("no PR 'nope'")
-    expect(output.stderr()).toContain("searched 1 pull request(s)")
+    expect(output.stderr()).toContain("searched 1 change(s)")
   })
 
   /** A recutter whose output never depends on selector casing. */

@@ -203,7 +203,7 @@ describe("pre-admission gate for hand-written gitlinks — step (d)'s admission 
     expect(refusal.message).toContain("is not on that component's main")
     // The remedy no longer names a verb step (d) deletes.
     expect(refusal.message).not.toContain("yrd intent submit")
-    expect(refusal.message).toContain("ordinary merge request")
+    expect(refusal.message).toContain("ordinary change")
   })
 
   it("refuses a pin that is on a side branch and NOT on the component's main", async () => {

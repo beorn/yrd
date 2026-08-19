@@ -26,7 +26,7 @@ export type SweepOptions = UncarriedOptions &
     repo: string
     /** Base branch the refs are judged against, e.g. "main". */
     base: string
-    /** Branch names that already have a merge request. */
+    /** Branch names that already have a change. */
     carriedBranches: ReadonlySet<string>
     /** Ref namespace to sweep, e.g. "refs/remotes/origin". */
     namespace: string
@@ -94,15 +94,15 @@ async function gitlinkPathsOf(git: RefGit, repo: string, base: string): Promise<
 }
 
 /**
- * The branch name a merge request would call this ref.
+ * The branch name a change would call this ref.
  *
  * `%(refname:short)` renders `refs/remotes/origin/task/x` as `origin/task/x`,
- * while a merge request records the branch as `task/x`. Comparing the two
+ * while a change records the branch as `task/x`. Comparing the two
  * directly matches almost nothing, and the failure is invisible in a unit test
  * whose fixture uses the same string on both sides: the sweep reports carried
  * work as stranded and the rail cries wolf on its first real run. Measured
  * before the fix — 4,784 refs scanned, 7 recognised as carried, against 810
- * live merge requests.
+ * live changes.
  */
 function branchOf(ref: string, namespace: string): string {
   const remote = namespace.startsWith("refs/remotes/") ? `${namespace.slice("refs/remotes/".length)}/` : ""
@@ -195,7 +195,7 @@ type SeriesSurvivor = Readonly<{ candidate: EnumeratedRef; absorbedRevisions: nu
  * What a survivor ABSORBS is narrower, and deliberately: the earlier revisions
  * this row stands in for are the uncarried ones it suppressed. A carried
  * sibling is not absorbed by this row — it is counted as `carried` and has its
- * own merge request. That keeps each ref in one bucket and makes the absorbed
+ * own change. That keeps each ref in one bucket and makes the absorbed
  * counts sum to `superseded`.
  */
 function collapseSupersededRevisions(

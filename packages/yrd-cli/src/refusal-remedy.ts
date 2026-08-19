@@ -119,14 +119,14 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
   if (steps.some((step) => step.verb === "recut") && remergeRefusedByDelivery(context.delivery)) {
     return Object.freeze({
       kind: "judgment",
-      reason: `a merge request in delivery state '${context.delivery ?? "unknown"}' cannot be recut`,
+      reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be recut`,
     })
   }
   if (!steps.some((step) => step.verb === "recut" && step.queue)) {
     return Object.freeze({
       kind: "judgment",
       reason:
-        "the printed remedy never re-enters the merge request into the merge queue, " +
+        "the printed remedy never re-enters the change into the merge queue, " +
         "so applying it would not clear the failure",
     })
   }

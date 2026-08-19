@@ -1460,7 +1460,9 @@ function revisionHistoryClock(pr: PR, revision: PR["revs"][number]): ChangeRevis
 export function changeRevisionClocks(pr: PR): readonly ChangeRevisionHistoryClock[] {
   const clocks = pr.revs.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
   if (!clocks.some((clock) => clock.revision === changeRevisionNumber(pr) && clock.headSha === changeHead(pr))) {
-    throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${changeRevisionNumber(pr)}@${changeHead(pr)}`)
+    throw new Error(
+      `yrd: PR '${pr.id}' has no clock for current revision ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
+    )
   }
   return clocks
 }
@@ -2328,7 +2330,9 @@ function timelineRevisionLineage(pr: PR, revision = changeRevisionNumber(pr)): Q
     return {
       pr: pr.id,
       revisions: [revision],
-      ...(revision === changeRevisionNumber(pr) && pr.submittedAt !== undefined ? { sourceReadyAt: pr.submittedAt } : {}),
+      ...(revision === changeRevisionNumber(pr) && pr.submittedAt !== undefined
+        ? { sourceReadyAt: pr.submittedAt }
+        : {}),
     }
   }
   const revisions = changeRevisionLineage(pr, revision)
@@ -3269,7 +3273,11 @@ function projectPR(
   }
 }
 
-function projectedChangeRows(state: BaysState | undefined, result: QueueStatusResult, now: number): HumanChangeProjection[] {
+function projectedChangeRows(
+  state: BaysState | undefined,
+  result: QueueStatusResult,
+  now: number,
+): HumanChangeProjection[] {
   return result.prs.map((pr) =>
     projectPR(
       state,
@@ -3630,7 +3638,13 @@ function checkDiagnosticText(value: unknown): string {
   )
 }
 
-export function ChangeChecksView({ records, now = Date.now() }: { records: readonly ChangeCheckViewRecord[]; now?: number }) {
+export function ChangeChecksView({
+  records,
+  now = Date.now(),
+}: {
+  records: readonly ChangeCheckViewRecord[]
+  now?: number
+}) {
   const data = records.map((record) => {
     const taskStatus = checkTaskStatusOf(record)
     return {
@@ -3732,7 +3746,11 @@ export type ChangeDetailData = Readonly<{
   run?: QueueShowData
 }>
 
-export function ChangeDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): ChangeDetailData {
+export function ChangeDetailData(
+  pr: PR,
+  runs: readonly Run[],
+  attempts: readonly QueueAttempt[] = [],
+): ChangeDetailData {
   const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
   const delivery = changeDeliveryState(pr)
   const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts, undefined, delivery))
@@ -3923,8 +3941,7 @@ export function ChangeDetailView({
       )}
       {detail.run === undefined && merge !== undefined ? (
         <Text>
-          <Text bold>LANDING</Text>{" "}
-          {merge.commit === merge.baseSha ? merge.commit : `${merge.commit}@${merge.baseSha}`}
+          <Text bold>LANDING</Text> {merge.commit === merge.baseSha ? merge.commit : `${merge.commit}@${merge.baseSha}`}
         </Text>
       ) : null}
     </Box>
@@ -4438,10 +4455,7 @@ function queueDetailRunTimingRows(data: QueueShowData, row: QueueTimelineProject
   // Runtime · Wait time); the clocks line above it keeps its historical
   // comma join — no sample specifies it, and `watch-detail-rework.test.ts`
   // only pins the substring "Started ", not a separator.
-  return [
-    ...(clocks.length === 0 ? [] : [clocks.join(", ")]),
-    ...(metrics.length === 0 ? [] : [metrics.join(" · ")]),
-  ]
+  return [...(clocks.length === 0 ? [] : [clocks.join(", ")]), ...(metrics.length === 0 ? [] : [metrics.join(" · ")])]
 }
 
 export type StatusNoticeState = StatusPresentationState
@@ -4640,7 +4654,7 @@ function noticeExplanation(
   }
   if (state === "draft") return "Registered, not queued. The author must submit this revision when it is ready."
   if (state === "rejected") {
-    return `${failureSummary === undefined ? "The merge request failed." : `${failureSummary}.`} The author must fix the branch and resubmit; this is not retried automatically.`
+    return `${failureSummary === undefined ? "The change failed." : `${failureSummary}.`} The author must fix the branch and resubmit; this is not retried automatically.`
   }
   const artifact = noticeArtifact(data)
   return `${failureSummary === undefined ? "The run failed." : `${failureSummary}.`} This failure is not retried automatically; the author must fix the branch and resubmit.${
@@ -4794,9 +4808,8 @@ export function QueueStatusNotice({
   // Identity on the border (item 39): `RUN <label>#N` — label-primary run
   // naming (item 36), the same `queueRunLabel` fallback the list cells use,
   // so the two surfaces can never drift onto different formats.
-  const titleRight =
-    data === undefined ? undefined : `RUN ${runLabel ?? data.base}#${runIdValue(data.run)}`
-  const glyphNode = (
+  const titleRight = data === undefined ? undefined : `RUN ${runLabel ?? data.base}#${runIdValue(data.run)}`
+  const glyphNode =
     live && notice.state === "running" ? (
       <Pulse synchronized colors={[notice.color, "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS} bold flexShrink={0}>
         {notice.glyph}
@@ -4806,7 +4819,6 @@ export function QueueStatusNotice({
         {notice.glyph}
       </Text>
     )
-  )
   return (
     <TitledBox title="" {...(titleRight === undefined ? {} : { titleRight })} borderColor={notice.color}>
       {/* Hanging markers throughout (item 29a): the glyph sits in a 2-cell
@@ -5348,10 +5360,7 @@ export function QueueTopLine({
       {queues.length === 0 ? null : (
         <TogglePillGroup flexShrink={1} minWidth={0} overflow="hidden">
           {queues.map((queue) => {
-            const pretty = queuePrettyName(
-              queue,
-              queue.path === undefined ? undefined : shortPaths.get(queue.path),
-            )
+            const pretty = queuePrettyName(queue, queue.path === undefined ? undefined : shortPaths.get(queue.path))
             const handle = queue.name === undefined ? "" : `${queue.name} `
             return (
               <TogglePill
@@ -5833,7 +5842,7 @@ function TimelineRunnerBox({
         </MarkerRow>
       )}
       {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
-          every other surface here, because a ref with no merge request has no
+          every other surface here, because a ref with no change has no
           candidate and so appears in no row. Colour rules live in
           `uncarriedRailColor` — only genuine stranded work earns attention,
           and a warning-colored rail never mutes (item 27). Coverage is
@@ -7566,15 +7575,20 @@ export function QueueDetailRunChangeBlocks({
               : changeActivityEntries(pr, runDetails, memberRow ?? row)
         const memberSubmitter = (memberRow ?? row)?.submitter
         const metadataGroups = changeMetadataGroups(pr, member, issue, memberSubmitter)
-        const factKeyWidth =
-          Math.max(0, ...metadataGroups.flatMap((group) => group.map((fact) => fact.key.length))) + 2
+        const factKeyWidth = Math.max(0, ...metadataGroups.flatMap((group) => group.map((fact) => fact.key.length))) + 2
         return (
           <TitledBox key={`${member.id}:${member.revision}:${member.headSha}`} title="" marginTop={index === 0 ? 0 : 1}>
             {/* Header line (items 4.a + 25): `pr#id.rev ⎇ branch` on EVERY
                 member's box, the cursor member included — the pane title no
                 longer carries any identity, so no member may skip its own. */}
             <Box flexDirection="row" minWidth={0}>
-              <QueueChangeId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
+              <QueueChangeId
+                pr={member.id}
+                revision={member.revision}
+                color="$fg-warning"
+                wrap="truncate"
+                flexShrink={0}
+              />
               <Text flexShrink={0}> </Text>
               {/* The ⎇ branch idiom (items 4/32d) — the same glyph the queue
                   pills spell, so the two surfaces share one convention. */}
