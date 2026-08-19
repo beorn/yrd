@@ -21,7 +21,10 @@ describe("refusal remedy classification — self-applicable vs judgment-required
 
     expect(remedy.kind).toBe("judgment")
     if (remedy.kind !== "judgment") return
-    expect(remedy.reason).toContain("git -C km push origin")
+    // A submit never re-enters the merge queue by itself (no recut --queue
+    // step): the classifier correctly refuses to auto-apply it, same as
+    // before, just for a printed-remedy reason now instead of an unparseable one.
+    expect(remedy.reason).toContain("never re-enters the merge request into the merge queue")
   })
 
   it("does not resurrect the draft create path for a gitlink-bump remedy", () => {

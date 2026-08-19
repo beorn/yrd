@@ -15486,6 +15486,10 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(output.stderr()).toContain("repository merge-record capability is not installed")
     })
 
+    const SUBMODULE = "components/alpha"
+    const CURRENT_PIN = "a".repeat(40)
+    const TARGET_SHA = "b".repeat(40)
+
     /** A landed pin intent records its OWN id in `changes[].pr` — `mergeRecordBody` fills that
      * field from the queue member's id, and `MergeRecordChange.pr` is `QueueMemberIdSchema`, a
      * union that discriminates PR ids from intent ids. So the record itself says which kind of
@@ -15649,16 +15653,3 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 })
-
-/**
- * @failure  The `yrd intent` verbs exist in the design but not on the CLI, so a
- *           pin advance has no way in except a hand-authored gitlink carrier.
- *           These assertions pin the surface: the verbs, the stable JSON, and —
- *           the part that matters — that a refusal reaches the operator as a
- *           TYPED code plus a runnable remedy, not a sentence to re-parse.
- * @level    l2 (buildProgram over an injected app; git is a stubbed process)
- * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
- */
-const SUBMODULE = "components/alpha"
-const CURRENT_PIN = "a".repeat(40)
-const TARGET_SHA = "b".repeat(40)
