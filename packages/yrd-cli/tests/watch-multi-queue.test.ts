@@ -22,7 +22,11 @@ import {
   fixtureRun,
   fixtureSnapshot,
 } from "../dev/queue-timeline-fixtures.ts"
-import { queueTimelineVisibleRows } from "../src/queue-status-view.tsx"
+import {
+  queueTimelineAdmissionTimes,
+  queueTimelineProjection,
+  queueTimelineVisibleRows,
+} from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 function mainQueue() {
@@ -42,11 +46,34 @@ function twoQueues() {
 }
 
 describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
-  it("labels every queue it covers, primary base first", () => {
+  it("labels every queue it covers, primary base first, each with its typeable address", () => {
+    // Pathless fixtures degrade the address to the bare branch — never a
+    // fabricated path (items 34/36).
     expect(twoQueues().projection.queues).toEqual([
-      { label: 1, base: "main" },
-      { label: 2, base: "release/next" },
+      { label: 1, base: "main", address: "main" },
+      { label: 2, base: "release/next", address: "release/next" },
     ])
+  })
+
+  it("stamps path-qualified queue and run addresses when the repository root is known (items 34/36)", () => {
+    const result = mainQueue()
+    const projection = queueTimelineProjection([result], {
+      now: Date.parse("2026-07-13T12:00:00.000Z"),
+      windowMs: 6 * 60 * 60_000,
+      statuses: [],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: queueTimelineAdmissionTimes([result]),
+      repositoryRoot: "/hh",
+      queueNames: new Map([["main", "code"]]),
+    })
+    expect(projection.queues).toEqual([{ label: 1, base: "main", path: "/hh", name: "code", address: "/hh@main" }])
+    const runRow = projection.rows.find((row) => row.run !== undefined)
+    expect(runRow?.address, "run-bearing rows carry the script-stable address").toBe("/hh@main#1")
+    expect(projection.details[0]?.address, "per-run details carry it too").toBe("/hh@main#1")
+    const preRun = projection.rows.find((row) => row.run === undefined)
+    expect(preRun?.address, "a pre-run row has no run to address").toBeUndefined()
   })
 
   it("shows both queues' runs at once, run cells label-led, never digit-prefixed", async () => {
@@ -130,7 +157,7 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
 
   it("elides the run-cell label on a single-queue watch while the pill still names the queue", async () => {
     const single = fixtureSnapshot(mainQueue())
-    expect(single.projection.queues).toEqual([{ label: 1, base: "main" }])
+    expect(single.projection.queues).toEqual([{ label: 1, base: "main", address: "main" }])
     expect(single.projection.rows.every((row) => row.queueLabel === undefined)).toBe(true)
 
     const app = createRenderer({ cols: 140, rows: 40 })(createElement(QueueWatchFrame, { snapshot: single }))

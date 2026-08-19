@@ -396,8 +396,8 @@ describe("queue timeline 21106 contract", () => {
     const projection = {
       ...source,
       queues: [
-        { label: 1, base: "main" },
-        { label: 2, base: "release" },
+        { label: 1, base: "main", address: "main" },
+        { label: 2, base: "release", address: "release" },
       ],
       rows: [lead, { ...partner, id: `release:${partner.id}`, base: "release" }],
       display: { ...source.display, shown: 2, hidden: 0 },

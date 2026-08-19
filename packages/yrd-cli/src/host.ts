@@ -3216,7 +3216,13 @@ async function runEveryComposedRepository(
     io.stdout(`=== ${repository.name} (${repository.path}) ===\n`)
     try {
       const composed = composeYrdArgv(argv, ["--repo", repository.path, ...plan.args])
-      const targetExit = await runYrdProcessHost(composed, io, false, options)
+      // Each iteration reads ONE declared repository; its handle is that
+      // repository's queue label (item 36), so the listing's rows lead with
+      // `code  /repo@main` rather than the base-branch fallback.
+      const targetExit = await runYrdProcessHost(composed, io, false, {
+        ...options,
+        repositoryLabel: repository.name,
+      })
       if (targetExit !== 0) exitCode = targetExit
     } catch (error) {
       io.stderr(`yrd: repository ${repository.name} failed: ${errorDetail(error)}\n`)

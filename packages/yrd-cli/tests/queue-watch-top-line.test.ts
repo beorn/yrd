@@ -66,8 +66,8 @@ describe("watch pane top line (@yrd/cli/queue-watch-top-line)", () => {
     const app = createRenderer({ cols: 140, rows: 6 })(
       createElement(QueueTopLine, {
         queues: [
-          { label: 1, base: "main", name: "code", path: "/hh" },
-          { label: 2, base: "main", name: "pm", path: "/hh/pm" },
+          { label: 1, base: "main", name: "code", path: "/hh", address: "/hh@main" },
+          { label: 2, base: "main", name: "pm", path: "/hh/pm", address: "/hh/pm@main" },
         ],
       }),
     )

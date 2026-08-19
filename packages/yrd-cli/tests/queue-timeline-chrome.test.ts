@@ -133,6 +133,9 @@ describe("queue timeline chrome 21106", () => {
         const topRow = frame.split("\n")[0] ?? ""
         expect.soft(topRow, `${root} top line title`).toContain("YRD QUEUES")
         expect.soft(topRow, `${root} pill carries the path ⎇ branch pair`).toContain(`${shown} ⎇ main`)
+        // Item 36: the list's queue rows lead with label + typeable FQN —
+        // base-labeled here, no config handle declared.
+        expect.soft(frame, `${root} queue row leads with label + FQN`).toContain(`main  ${root}@main`)
         expect.soft(frame, `${root} old ROOT row is deleted`).not.toContain("ROOT ")
         expect.soft(frame, `${root} old QUEUE header is deleted`).not.toContain("QUEUE main")
         // The muted `updated HH:MM:SS` stamp survives on its own row, never

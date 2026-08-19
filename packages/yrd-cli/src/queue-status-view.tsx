@@ -59,7 +59,15 @@ import {
   useWindowSize,
 } from "silvery"
 import { queueAdmissionPositions } from "./queue-admission-index.ts"
-import { friendlyRepositoryPath, QUEUE_BRANCH_GLYPH, queuePrettyName, queueRunLabel, shortUniqueQueuePaths } from "./queue-naming.ts"
+import {
+  formatQueueRunAddress,
+  friendlyRepositoryPath,
+  QUEUE_BRANCH_GLYPH,
+  queueFullName,
+  queuePrettyName,
+  queueRunLabel,
+  shortUniqueQueuePaths,
+} from "./queue-naming.ts"
 import {
   artifactHref as locationHref,
   artifactLabel,
@@ -274,6 +282,9 @@ export type QueueTimelineRevisionLineage = Readonly<{
  * Run rows, `prId + revision` for pending rows) that live reshuffles preserve.
  */
 export type QueueTimelineProjectedRow = Readonly<{
+  /** Typeable `path@branch#N` run address; present when the projection knows
+   * its repository root and this row has a run (items 34/36). */
+  address?: string
   id: string
   base: string
   /**
@@ -332,6 +343,13 @@ export type QueueTimelineRepeat = Readonly<{
 }>
 
 export type QueueTimelineDisplayRow = QueueTimelineProjectedRow & Readonly<{ repeat?: QueueTimelineRepeat }>
+
+/** The `path@branch#N` script-stable address for one run (items 34/36),
+ * derivable only when the projection knows its repository root. */
+function timelineRunAddress(repositoryRoot: string | undefined, base: string, run: string): string | undefined {
+  if (repositoryRoot === undefined) return undefined
+  return formatQueueRunAddress({ path: repositoryRoot, base }, runIdValue(run))
+}
 
 /** Select the rows the one-shot view draws. Live rows — draft/rev/ready, the
  * current state of open PRs — take priority over history within the display
@@ -640,7 +658,16 @@ export type QueueRunnerAbsence =
  * - `name` — the short config handle (`code`, `pm`) when one is declared;
  *   run names lead with it (`code#23423`), falling back to `base`.
  */
-export type QueueTimelineQueue = Readonly<{ label: number; base: string; path?: string; name?: string }>
+export type QueueTimelineQueue = Readonly<{
+  label: number
+  base: string
+  path?: string
+  name?: string
+  /** The typeable script-stable address: `path@branch` when the repository
+   * path is known, the bare branch otherwise (items 34/36 — scripts never
+   * re-derive it). */
+  address: string
+}>
 
 export type QueueTimelineProjection = Readonly<{
   now: string
@@ -1046,6 +1073,9 @@ type GateEvidence = Readonly<{
 export type MergeVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
 
 export type QueueShowData = Readonly<{
+  /** Typeable `path@branch#N` run address, stamped by the projection when
+   * the repository root is known (items 34/36). */
+  address?: string
   run: string
   candidateId: string
   base: string
@@ -2830,6 +2860,7 @@ function queueTimelineQueues(
     base: queueBase,
     ...(repositoryRoot === undefined ? {} : { path: repositoryRoot }),
     ...(queueNames?.get(queueBase) === undefined ? {} : { name: queueNames.get(queueBase) }),
+    address: queueFullName({ ...(repositoryRoot === undefined ? {} : { path: repositoryRoot }), base: queueBase }),
   }))
 }
 
@@ -2886,13 +2917,17 @@ function buildQueueTimelineProjection(
   const queues = queueTimelineQueues(results, options.base, options.repositoryRoot, options.queueNames)
   const labelsByBase = new Map(queues.map(({ label, base: queueBase }) => [queueBase, label]))
   // One queue means no labels at all — not label 1 — so nothing about a
-  // single-queue watch changes shape when the feature ships.
-  const rows =
-    queues.length > 1
-      ? displayed
-          .toSorted(timelineSort)
-          .map((row) => ({ ...row, ...(labelsByBase.has(row.base) ? { queueLabel: labelsByBase.get(row.base) } : {}) }))
-      : displayed.toSorted(timelineSort)
+  // single-queue watch changes shape when the feature ships. Every
+  // run-bearing row also carries its typeable `path@branch#N` address when
+  // the repository root is known (items 34/36).
+  const rows = displayed.toSorted(timelineSort).map((row) => {
+    const address = row.run === undefined ? undefined : timelineRunAddress(options.repositoryRoot, row.base, row.run)
+    return {
+      ...row,
+      ...(queues.length > 1 && labelsByBase.has(row.base) ? { queueLabel: labelsByBase.get(row.base) } : {}),
+      ...(address === undefined ? {} : { address }),
+    }
+  })
   // Terminal facts drive the flow aggregate over the metrics window, which may
   // reach further back than the listing window; reuse the display set when the
   // windows coincide.
@@ -2930,9 +2965,10 @@ function buildQueueTimelineProjection(
     // passing the pre-narrowed slices is semantically identical and drops two
     // per-detail-row scans of the whole journal: every attempt, and every
     // finished Run.
-    return run === undefined
-      ? []
-      : [queueShowData(run, queueRetryPeersOf(retryPeers, run), attemptsByRun.get(run.id) ?? NO_ATTEMPTS)]
+    if (run === undefined) return []
+    const data = queueShowData(run, queueRetryPeersOf(retryPeers, run), attemptsByRun.get(run.id) ?? NO_ATTEMPTS)
+    const address = timelineRunAddress(options.repositoryRoot, data.base, data.run)
+    return [address === undefined ? data : { ...data, address }]
   })
   const limit = Math.max(1, Math.floor(options.rowLimit))
   const retainedSince =
@@ -6098,6 +6134,31 @@ function TimelineFilterLine({
  * as aligned with the QUEUE title rather than floating below an offset gap
  * (user directive 2026-07-16).
  */
+/**
+ * `yrd queue list` rows lead with label + FQN (operator ruling 2026-08-18,
+ * item 36): one row per queue — the config handle (base branch when none is
+ * declared) bright, then the typeable `path@branch` address muted. Rendered
+ * only when a queue HAS a path-qualified address to type; the live watch
+ * keeps the pretty forms on its pills instead.
+ */
+function QueueAddressRows({ queues }: { queues: readonly QueueTimelineQueue[] }) {
+  const addressed = queues.filter((queue) => queue.address.includes("@"))
+  if (addressed.length === 0) return null
+  const labelWidth = Math.max(0, ...addressed.map((queue) => queueRunLabel(queue).length)) + 2
+  return (
+    <Box flexDirection="column" minWidth={0} flexShrink={0}>
+      {addressed.map((queue) => (
+        <Box key={queue.address} height={1} flexDirection="row" minWidth={0} overflow="hidden">
+          <Text flexShrink={0}>{queueRunLabel(queue).padEnd(labelWidth)}</Text>
+          <Text color="$fg-muted" wrap="truncate" minWidth={0}>
+            {queue.address}
+          </Text>
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 function QueueUpdatedClock({ now }: { now: string }) {
   return (
     <Text color="$fg-muted" flexShrink={0}>
@@ -6183,6 +6244,14 @@ function ProjectedQueueTimeline({
     timelineRunCellModel(row, runLabels, showQueueLabel, timelineRunContinues(row, rows[index - 1])),
   )
   const layout = timelineCellLayout(rows, includeDate, columns, runCells)
+  // The one-shot print's queue surfaces (pills + address rows) fall back to
+  // the component-level repositoryRoot for queues whose projection predates
+  // the loader threading it.
+  const printQueues = projection.queues.map((queue) =>
+    queue.path === undefined && repositoryRoot !== undefined
+      ? { ...queue, path: repositoryRoot, address: queueFullName({ path: repositoryRoot, base: queue.base }) }
+      : queue,
+  )
   const { rows: viewportRows } = useWindowSize()
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
@@ -6197,14 +6266,11 @@ function ProjectedQueueTimeline({
           // user directive 2026-07-21). The live frame renders its top line
           // itself, above the split, so `paneChrome` contributes no header.
           <>
-            <QueueTopLine
-              queues={projection.queues.map((queue) =>
-                queue.path === undefined && repositoryRoot !== undefined ? { ...queue, path: repositoryRoot } : queue,
-              )}
-            />
+            <QueueTopLine queues={printQueues} />
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
               <QueueUpdatedClock now={projection.now} />
             </Box>
+            <QueueAddressRows queues={printQueues} />
           </>
         )}
         <TimelineRunnerBox
