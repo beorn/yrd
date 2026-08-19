@@ -34,6 +34,16 @@ const SUBMIT_REF_PREFIX = "refs/yrd/submit/"
  * this namespace is `authorize()` translating a `refs/heads/` deletion.
  */
 const ARCHIVE_REF_PREFIX = "refs/yrd/archive/"
+/**
+ * Phase 1b's two instance-override (scope) namespaces (bead-branch-is-change,
+ * "Scope — auto-draft by pattern, explicit draft by act"). Existence is the
+ * fact — the value is largely irrelevant, always the branch's own tip at
+ * write time. Mutually exclusive per branch: accepting one sweeps the other
+ * for the SAME branch in the same transaction (`sweepOppositeScopeRef`).
+ */
+const DRAFT_REF_PREFIX = "refs/yrd/draft/"
+/** @see DRAFT_REF_PREFIX */
+const IGNORE_REF_PREFIX = "refs/yrd/ignore/"
 const ZERO_SHA = /^0+$/u
 const HEX_SHA = /^[0-9a-f]+$/u
 const REPOSITORY_ENV =
@@ -136,6 +146,38 @@ export type ResolveReceiverTarget = (
  */
 export type ReceiverConfigValidator = (yaml: string | undefined) => void | Promise<void>
 
+/**
+ * The winning `auto:` classification for one branch, or undefined when
+ * nothing matches (untracked). "draft" writes no ref (draft is the default —
+ * tracked, no decision recorded); "ignore" and "submit" each materialize
+ * their own instance ref.
+ */
+export type ReceiverAutoClassification = "draft" | "submit" | "ignore"
+
+/**
+ * Classify one branch against the BASE branch's own `.yrd.yml` `auto:` block
+ * — draft/ignore/submit glob lists, precedence ignore > submit > draft —
+ * given the base's raw config text (never the pushed branch's own; scope
+ * authority lives with the trusted, already-landed config, mirroring
+ * `readConfigFromBase` in `@yrd/cli/host.ts`) and the branch name. `undefined`
+ * yaml means the base has no config at all — the same "no file means the
+ * built-in defaults" reading `ReceiverConfigValidator` already uses, never a
+ * skip. The receiver never parses `.yrd.yml` or evaluates glob patterns
+ * itself (`@yrd/bay` cannot depend on `@yrd/cli`'s schema, or take on a glob
+ * dependency of its own, without a cycle/scope creep) — it only reads the
+ * base's blob and hands it, with the branch name, to whichever classifier the
+ * caller owns. Called twice per branch, for two different questions: once at
+ * creation (which ref, if any, gets materialized) and, for branches whose
+ * name currently classifies as "submit", again on every later plain push
+ * (does this push re-submit) — re-evaluated fresh each time against the
+ * CURRENT config, never inferred from whether a submit ref already exists (a
+ * manual submit must not turn a branch into a standing lane).
+ */
+export type ReceiverAutoClassifier = (
+  yaml: string | undefined,
+  branch: string,
+) => ReceiverAutoClassification | undefined | Promise<ReceiverAutoClassification | undefined>
+
 /** Intake must atomically deduplicate result.id with its own durable event. */
 export type DurableReceiverIntake = (result: Readonly<ReceiverResult>) => void | Promise<void>
 export type ReceiverHookOptions = {
@@ -157,6 +199,13 @@ export type ReceiverHookOptions = {
    * that has not wired a schema in yet.
    */
   validateConfig?: ReceiverConfigValidator
+  /**
+   * Classify a branch against its base's `auto:` block. Omit and no branch is
+   * ever auto-classified — additive, like `validateConfig`: a caller that has
+   * not wired a classifier in yet keeps today's behavior (draft/ignore/submit
+   * refs remain purely instance decisions, never auto-materialized).
+   */
+  classifyBranch?: ReceiverAutoClassifier
 }
 export type ReceiverDrainResult = {
   delivered: string[]
@@ -392,6 +441,19 @@ async function finalizeReceiverUpdates(
         // `applyArchival`'s doc for why the hook itself never performs that
         // delete), so the transaction below is racing nothing.
         await applyArchival(receiver, update, authorized.branch, options.env)
+      } else if (authorized.kind === "draft-ref" || authorized.kind === "ignore-ref") {
+        // Same reasoning as archival: git already applied THIS ref's own
+        // write or delete natively. A deletion (undrafting/unignoring) needs
+        // no further action; a create-or-update sweeps the opposite scope
+        // namespace for the same branch (mutual exclusion).
+        if (!ZERO_SHA.test(update.newSha)) {
+          await sweepOppositeScopeRef(
+            receiver,
+            authorized.kind === "draft-ref" ? "draft" : "ignore",
+            authorized.branch,
+            options.env,
+          )
+        }
       } else if (authorized.kind === "intake") {
         result = makeResult(update, authorized, clock)
         await storeResult(receiver, "prepared", result)
@@ -440,6 +502,32 @@ async function drainReceiverInbox(
         // not have happened for a result nothing downstream has accepted yet.
         if (result.change !== undefined) {
           await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
+        } else {
+          // An ordinary `refs/heads/` result (never a refs/for one — those
+          // took the branch above unconditionally): evaluate the `auto:`
+          // scope classification, same after-intake timing as the dual-write.
+          const verdict = await evaluateClassification(receiver, options, result.intake.base, result.branch)
+          if (ZERO_SHA.test(result.oldSha) && verdict === "ignore") {
+            // Birth classification, creation only: an ignore-match materializes
+            // the ignore ref at this pushed tip. A submit-match falls through
+            // to the branch below — it is BOTH the birth write and (via the
+            // SAME check, unconditioned on oldSha) the persisting lane.
+            await receiverGit(receiver, ["update-ref", `${IGNORE_REF_PREFIX}${result.branch}`, result.headSha], {
+              env: options.env,
+            })
+          } else if (verdict === "submit") {
+            // "auto.submit is the express lane... every push to an auto-submit
+            // branch submits its exact tip" — re-evaluated from the CURRENT
+            // config on every push (never from whether a submit ref already
+            // exists: a manual submit must not turn a branch into a lane), so
+            // this one check covers both the creation write and every later
+            // plain push while the branch's name keeps matching.
+            await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
+          }
+          // "draft", or no match at all: nothing to write — draft is the
+          // default (tracked, no ref) and no-match is fully untracked. Either
+          // way this is creation-only (a later push to a draft/untracked
+          // branch never re-evaluates draft/no-match, only submit).
         }
         await rm(path)
         await syncDir(receiver.inboxDir)
@@ -1028,11 +1116,15 @@ async function validateArchival(
  *     value and fails) — so this only asserts the fact and aborts the whole
  *     transaction loudly if it somehow does not hold, rather than archiving a
  *     branch that is still alive,
- *   - sweeps a live submit ref for the same branch, if one exists.
+ *   - sweeps a live submit ref for the same branch, if one exists,
+ *   - sweeps a live draft or ignore ref for the same branch, if either exists
+ *     (phase 1b: archival ends every decision this branch was carrying, not
+ *     only its approval — an archived branch's scope markers are as stale as
+ *     its submit).
  *
  * `delete <ref> <old>` on an already-nonexistent ref fails ("does not
  * exist") rather than no-op'ing — confirmed empirically — which is exactly
- * why the branch ref gets `verify`, and why the submit-ref delete line is
+ * why the branch ref gets `verify`, and why every sweep's delete line is
  * included only when a current value was actually read.
  */
 async function applyArchival(
@@ -1042,14 +1134,22 @@ async function applyArchival(
   env?: Environment,
 ): Promise<void> {
   const archiveRef = archiveRefFor(branch, update.oldSha)
-  const submitRef = `${SUBMIT_REF_PREFIX}${branch}`
-  const submitCurrent = await refValue(receiver, submitRef, env)
+  // Read every sweepable ref's current value BEFORE building the transaction,
+  // same reasoning as the original submit-only sweep: only a ref that
+  // actually exists gets a `delete` line, and its old-value is the CAS that
+  // makes the delete safe against a concurrent write.
+  const current = await Promise.all(
+    [SUBMIT_REF_PREFIX, DRAFT_REF_PREFIX, IGNORE_REF_PREFIX].map(async (prefix) => {
+      const ref = `${prefix}${branch}`
+      return [ref, await refValue(receiver, ref, env)] as const
+    }),
+  )
   const zero = "0".repeat(receiver.shaLength)
   const commands = [
     "start",
     `create ${archiveRef} ${update.oldSha}`,
     `verify ${BRANCH_PREFIX}${branch} ${zero}`,
-    ...(submitCurrent === null ? [] : [`delete ${submitRef} ${submitCurrent}`]),
+    ...current.flatMap(([ref, value]) => (value === null ? [] : [`delete ${ref} ${value}`])),
     "prepare",
     "commit",
     "",
@@ -1075,10 +1175,84 @@ async function writeSubmitRefForCarrier(
   await receiverGit(receiver, ["update-ref", `${SUBMIT_REF_PREFIX}${branch}`, headSha], { env })
 }
 
+/**
+ * Draft and ignore are mutually exclusive per branch (bead-branch-is-change,
+ * "Scope"): accepting a write to one clears the other for the SAME branch.
+ * The requested ref's own write already landed via git's native receive-pack
+ * by the time this runs (post-receive, same timing as `applyArchival`) — this
+ * only performs the EXTRA half, a single atomic delete of whichever ref the
+ * opposite namespace holds, CAS'd on its current value so a concurrent writer
+ * to that namespace is a loud failure rather than a lost update. A single
+ * `update-ref -d` is already one atomic operation; there is nothing else to
+ * batch it with (unlike archival's three-way transaction), so no --stdin here.
+ */
+async function sweepOppositeScopeRef(
+  receiver: GitPushReceiver,
+  kind: "draft" | "ignore",
+  branch: string,
+  env?: Environment,
+): Promise<void> {
+  const opposite = `${kind === "draft" ? IGNORE_REF_PREFIX : DRAFT_REF_PREFIX}${branch}`
+  const current = await refValue(receiver, opposite, env)
+  if (current === null) return
+  await receiverGit(receiver, ["update-ref", "-d", opposite, current], { env })
+}
+
+/**
+ * The BASE branch's own `.yrd.yml`, or undefined when that branch's tree has
+ * none — the authority config for scope classification, deliberately NOT the
+ * pushed head's own (that would let a first push classify itself, and is
+ * `readPushedBlob`'s separate job for the admission gate). Mirrors
+ * `readConfigFromBase` in `@yrd/cli/host.ts`: resolve the base's current tip
+ * in the MAIN repository, then read the blob there — the base is already
+ * landed, so unlike `readPushedBlob` this never needs the receiver's own
+ * quarantine object access.
+ */
+async function readBaseBlob(
+  receiver: GitPushReceiver,
+  base: string,
+  path: string,
+  env?: Environment,
+): Promise<string | undefined> {
+  const resolved = await mainGit(
+    receiver.process,
+    receiver.mainRepo,
+    ["rev-parse", "--verify", `refs/heads/${base}^{commit}`],
+    { env, allowFailure: true },
+  )
+  check(resolved.code === 0, `base branch '${base}' does not resolve in the main repository`)
+  const object = `${resolved.stdout}:${path}`
+  const exists = await mainGit(receiver.process, receiver.mainRepo, ["cat-file", "-e", object], {
+    env,
+    allowFailure: true,
+  })
+  if (exists.code !== 0) return undefined
+  return (await mainGit(receiver.process, receiver.mainRepo, ["show", object], { env })).stdout
+}
+
+/**
+ * Classify one branch via the caller's injected classifier, or undefined when
+ * none is wired (additive, like `validateConfig`). Reads the BASE's config
+ * fresh on every call — callers decide how often to call it; nothing here
+ * caches, so "config edits never reclassify existing branches" is enforced
+ * entirely by WHEN this is called (creation only), never by refusing to read.
+ */
+async function evaluateClassification(
+  receiver: GitPushReceiver,
+  options: ReceiverHookOptions,
+  base: string,
+  branch: string,
+): Promise<ReceiverAutoClassification | undefined> {
+  if (options.classifyBranch === undefined) return undefined
+  const yaml = await readBaseBlob(receiver, base, ".yrd.yml", options.env)
+  return options.classifyBranch(yaml, branch)
+}
+
 type AuthorizedUpdate =
   | Readonly<{ kind: "intake"; branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent }>
   | Readonly<{ kind: "submit-ref"; branch: string }>
   | Readonly<{ kind: "archive"; branch: string }>
+  | Readonly<{ kind: "draft-ref" | "ignore-ref"; branch: string }>
 
 async function authorize(
   receiver: GitPushReceiver,
@@ -1098,6 +1272,28 @@ async function authorize(
       `(deleting its '${BRANCH_PREFIX}' ref), never by a direct push`,
   )
 
+  for (const [prefix, label, kind] of [
+    [DRAFT_REF_PREFIX, "draft", "draft-ref"],
+    [IGNORE_REF_PREFIX, "ignore", "ignore-ref"],
+  ] as const) {
+    if (!update.ref.startsWith(prefix)) continue
+    const branch = update.ref.slice(prefix.length)
+    check(branch.length > 0, `${label} ref '${update.ref}' names no branch`)
+    await validBranch(receiver, branch, `${label} branch`)
+    await checkNotStale(receiver, update, stage, options.env)
+    // Existence, never reachability: "value largely irrelevant; existence is
+    // the fact" (phase 1b spec) — unlike submit, a draft/ignore write carries
+    // no approval semantics to validate against the branch's own history.
+    if (!deleting) {
+      const branchTip = await refValue(receiver, `${BRANCH_PREFIX}${branch}`, options.env)
+      check(
+        branchTip !== null,
+        `${label} ref '${update.ref}' names branch '${branch}', which has no ref in this repository`,
+      )
+    }
+    return { kind, branch }
+  }
+
   if (update.ref.startsWith(SUBMIT_REF_PREFIX)) {
     const branch = update.ref.slice(SUBMIT_REF_PREFIX.length)
     check(branch.length > 0, `submit ref '${update.ref}' names no branch`)
@@ -1111,7 +1307,8 @@ async function authorize(
   const isBranch = update.ref.startsWith(BRANCH_PREFIX) && update.ref.length > BRANCH_PREFIX.length
   check(
     isSubmit || isBranch,
-    `only branch refs under ${BRANCH_PREFIX} and submit refs under ${SUBMIT_PREFIX} are accepted, got '${update.ref}'`,
+    `only branch refs under ${BRANCH_PREFIX}, submit refs under ${SUBMIT_PREFIX} or ${SUBMIT_REF_PREFIX}, and ` +
+      `scope refs under ${DRAFT_REF_PREFIX} or ${IGNORE_REF_PREFIX} are accepted, got '${update.ref}'`,
   )
 
   // A branch deletion translates to archival instead of landing on the

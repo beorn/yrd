@@ -65,6 +65,20 @@ async function commit(repo: string, name: string): Promise<string> {
   return await git(repo, "rev-parse", "HEAD")
 }
 
+// The BASE's own .yrd.yml (never a feature branch's) is scope-classification
+// authority — readBaseBlob reads it off 'main' in f.mainRepo specifically, so
+// fixture setup for a classification test must land it there, not on
+// whatever branch is about to be pushed. Switches to main first (fixture()
+// leaves the repo checked out there, but a caller may have moved on since);
+// the caller is responsible for switching back to continue its own setup.
+async function commitOnMain(f: Fixture, name: string, content: string): Promise<string> {
+  await git(f.mainRepo, "switch", "-q", "main")
+  await writeFile(join(f.mainRepo, name), content)
+  await git(f.mainRepo, "add", name)
+  await git(f.mainRepo, "commit", "-qm", `add ${name}`)
+  return await git(f.mainRepo, "rev-parse", "HEAD")
+}
+
 async function createRepo(root: string, name: string): Promise<{ path: string; head: string }> {
   const path = join(root, name)
   await mkdir(path)
@@ -99,6 +113,44 @@ function target(baseSha: string, overrides: Partial<ReceiverTarget> = {}): Recei
   return { bay: "B1", name: "receiver-test", base: "main", baseSha, ...overrides }
 }
 
+type AutoConfig = { draft?: string[]; ignore?: string[]; submit?: string[] }
+type AutoVerdict = "draft" | "submit" | "ignore"
+
+// A plain glob evaluator over a JSON pattern block, not the real @yrd/cli
+// schema/matcher — see installHookHost's own doc for why. The SAME logic is
+// embedded as a string inside the generated hook script below (that half
+// MUST run in a separate process); this in-process copy exists so a test's
+// own direct `f.receiver.drain(...)` call — which never goes through the
+// hook script — can wire an equivalent `classifyBranch`. Keep the two in
+// sync; a receiver.drain() call that omits classifyBranch silently classifies
+// nothing rather than failing loudly (additive-by-design, see
+// ReceiverHookOptions.classifyBranch's doc), so a test that forgets this
+// would pass for the wrong reason instead of failing — exactly the
+// silent-false-negative trap a "writes nothing" assertion is vulnerable to.
+function globMatch(pattern: string, text: string): boolean {
+  const body = pattern
+    .split("**")
+    .map((seg) =>
+      seg
+        .split("*")
+        .map((lit) => lit.replace(/[.+^${}()|[\]\\]/gu, "\\$&"))
+        .join("[^/]*"),
+    )
+    .join(".*")
+  return new RegExp(`^${body}$`).test(text)
+}
+
+function fakeClassifier(autoConfig: AutoConfig): (yaml: string | undefined, branch: string) => AutoVerdict | undefined {
+  return (yaml, branch) => {
+    if (yaml === undefined) return undefined
+    const matches = (patterns?: string[]) => (patterns ?? []).some((pattern) => globMatch(pattern, branch))
+    if (matches(autoConfig.ignore)) return "ignore"
+    if (matches(autoConfig.submit)) return "submit"
+    if (matches(autoConfig.draft)) return "draft"
+    return undefined
+  }
+}
+
 async function installHookHost(
   root: string,
   targets: Record<string, ReceiverTarget>,
@@ -112,6 +164,15 @@ async function installHookHost(
   // whatever validator the caller wired, and refuses the push before
   // acceptance when that validator throws.
   rejectConfigContaining?: string,
+  // Same principle for classification: a plain glob evaluator over a JSON
+  // pattern block, not the real @yrd/cli schema/matcher. This only proves the
+  // RECEIVER'S plumbing — it reads the BASE's `.yrd.yml` (never the pushed
+  // head's), hands (yaml, branch) to whatever classifier the caller wired,
+  // and materializes exactly the ref the verdict says to. `yaml === undefined`
+  // (the base's tree has no `.yrd.yml` at all) always classifies as
+  // untracked, regardless of `autoConfig` — proving the receiver passes
+  // absence through rather than treating "no file" as "match everything".
+  autoConfig?: AutoConfig,
 ): Promise<Env> {
   const bin = join(root, "bin")
   const targetFile = join(root, "targets.json")
@@ -136,7 +197,23 @@ async function installHookHost(
       "const validateConfig = marker === undefined ? undefined : (yaml) => {",
       "  if (yaml !== undefined && yaml.includes(marker)) throw new Error(`yrd: config rejects marker '${marker}'`)",
       "}",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig })",
+      "const autoConfigRaw = process.env.YRD_TEST_AUTO_CONFIG",
+      "function globMatch(pattern, text) {",
+      '  const body = pattern.split("**").map((seg) =>',
+      '    seg.split("*").map((lit) => lit.replace(/[.+^${}()|[\\]\\\\]/g, "\\\\$&")).join("[^/]*"),',
+      '  ).join(".*")',
+      '  return new RegExp(`^${body}$`).test(text)',
+      "}",
+      "const classifyBranch = autoConfigRaw === undefined ? undefined : (yaml, branch) => {",
+      "  if (yaml === undefined) return undefined",
+      "  const auto = JSON.parse(autoConfigRaw)",
+      "  const matches = (patterns) => (patterns ?? []).some((p) => globMatch(p, branch))",
+      '  if (matches(auto.ignore)) return "ignore"',
+      '  if (matches(auto.submit)) return "submit"',
+      '  if (matches(auto.draft)) return "draft"',
+      "  return undefined",
+      "}",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch })",
       "",
     ].join("\n"),
   )
@@ -147,6 +224,7 @@ async function installHookHost(
     YRD_TEST_TARGETS: targetFile,
     ...(intakePolicy === undefined ? {} : { YRD_TEST_INTAKE_POLICY: intakePolicy }),
     ...(rejectConfigContaining === undefined ? {} : { YRD_TEST_REJECT_CONFIG_CONTAINING: rejectConfigContaining }),
+    ...(autoConfig === undefined ? {} : { YRD_TEST_AUTO_CONFIG: JSON.stringify(autoConfig) }),
   }
 }
 
@@ -915,6 +993,250 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       ).failed,
     ).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(secondHead)
+  })
+
+  // ── branch-is-change phase 1b: scope (draft/ignore) + auto classification ──
+  //
+  // bead-branch-is-change "Scope — auto-draft by pattern, explicit draft by
+  // act". Two more instance-override namespaces (draft/ignore, mutually
+  // exclusive per branch) plus the receiver evaluating a base-authored `auto:`
+  // block once, synchronously, at branch creation.
+
+  it("refuses a draft or ignore ref for a branch with no ref in this repository", async () => {
+    const f = await fixture("scope-noref")
+    const env = await installHookHost(f.root, {})
+    const draftResult = await push(f, `${f.baseSha}:refs/yrd/draft/issue/never-pushed`, env)
+    expect(draftResult.code).not.toBe(0)
+    expect(draftResult.stderr).toContain("has no ref in this repository")
+
+    const ignoreResult = await push(f, `${f.baseSha}:refs/yrd/ignore/issue/never-pushed`, env)
+    expect(ignoreResult.code).not.toBe(0)
+    expect(ignoreResult.stderr).toContain("has no ref in this repository")
+  })
+
+  it("draft and ignore are mutually exclusive per branch: writing one sweeps the other, in both directions, and either can be plainly deleted", async () => {
+    const f = await fixture("scope-mutual-exclusion")
+    await git(f.mainRepo, "switch", "-qc", "issue/scope")
+    const headSha = await commit(f.mainRepo, "scope.txt")
+    const env = await installHookHost(f.root, { "issue/scope": target(f.baseSha) })
+    expect((await push(f, "issue/scope:refs/heads/issue/scope", env)).code).toBe(0)
+
+    expect((await push(f, `${headSha}:refs/yrd/ignore/issue/scope`, env)).code).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/issue/scope")).toBe(headSha)
+
+    const draftResult = await push(f, `${headSha}:refs/yrd/draft/issue/scope`, env)
+    expect(draftResult.code, draftResult.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/draft/issue/scope")).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/ignore/issue/scope")).toBe("")
+
+    // And back the other way.
+    const ignoreResult = await push(f, `${headSha}:refs/yrd/ignore/issue/scope`, env)
+    expect(ignoreResult.code, ignoreResult.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/issue/scope")).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/draft/issue/scope")).toBe("")
+
+    // Plain deletion (unignore) is a direct, unconditional accept — no sweep
+    // of the opposite namespace, which is already empty here.
+    const unignoreResult = await push(f, ":refs/yrd/ignore/issue/scope", env)
+    expect(unignoreResult.code, unignoreResult.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/ignore/issue/scope")).toBe("")
+  })
+
+  it("sweeps draft, ignore, and submit refs together — not just submit — when a branch is archived", async () => {
+    const f = await fixture("archive-sweeps-scope")
+    await git(f.mainRepo, "switch", "-qc", "issue/archive-scope")
+    const headSha = await commit(f.mainRepo, "archive-scope.txt")
+    const env = await installHookHost(f.root, { "issue/archive-scope": target(f.baseSha) })
+    expect((await push(f, "issue/archive-scope:refs/heads/issue/archive-scope", env)).code).toBe(0)
+    // draft and submit are NOT mutually exclusive (only draft/ignore are), so
+    // both can be live at once — proving the sweep is unconditional across
+    // ALL THREE namespaces, not merely "whichever one happens to be set".
+    expect((await push(f, `${headSha}:refs/yrd/draft/issue/archive-scope`, env)).code).toBe(0)
+    expect((await push(f, `${headSha}:refs/yrd/submit/issue/archive-scope`, env)).code).toBe(0)
+
+    const result = await push(f, ":refs/heads/issue/archive-scope", env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/draft/issue/archive-scope")).toBe("")
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/archive-scope")).toBe("")
+    expect(
+      await git(f.receiver.receiverPath, "rev-parse", `refs/yrd/archive/issue/archive-scope-${headSha.slice(0, 12)}`),
+    ).toBe(headSha)
+  })
+
+  it("auto-classifies a branch at creation by the base's auto: block, precedence ignore over an overlapping submit match", async () => {
+    const f = await fixture("auto-classify-precedence")
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    // Deliberately overlapping: this branch's name matches BOTH ignore and
+    // submit. Only the precedence rule decides the outcome.
+    const autoConfig = { ignore: ["task/straight-*"], submit: ["task/straight-*"], draft: ["task/**"] }
+    const env = await installHookHost(f.root, { "task/straight-1": target(f.baseSha) }, undefined, undefined, autoConfig)
+    await git(f.mainRepo, "switch", "-qc", "task/straight-1")
+    const headSha = await commit(f.mainRepo, "work.txt")
+    expect((await push(f, "task/straight-1:refs/heads/task/straight-1", env)).code).toBe(0)
+    expect(
+      (
+        await f.receiver.drain({
+          resolveTarget: async () => target(f.baseSha),
+          intake: async () => {},
+          classifyBranch: fakeClassifier(autoConfig),
+        })
+      ).failed,
+    ).toEqual([])
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/task/straight-1")).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/task/straight-1")).toBe("")
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/draft/task/straight-1")).toBe("")
+  })
+
+  it("writes nothing at creation for a draft-matched or wholly unmatched branch — draft is the default, untracked is untracked", async () => {
+    const f = await fixture("auto-no-write")
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    const autoConfig = { draft: ["task/**"], ignore: ["task/wip-*"], submit: ["task/straight-*"] }
+    // A canary alongside the two "nothing written" branches: task/wip-1
+    // DOES match ignore. Without it, this test cannot tell "the classifier
+    // ran and correctly found no match" apart from "the classifier never ran
+    // at all" — both look identical (nothing written) from the outside.
+    const env = await installHookHost(
+      f.root,
+      {
+        "task/plain": target(f.baseSha),
+        "issue/unmatched": target(f.baseSha),
+        "task/wip-1": target(f.baseSha),
+      },
+      undefined,
+      undefined,
+      autoConfig,
+    )
+    const resolveTarget = async () => target(f.baseSha)
+    const classifyBranch = fakeClassifier(autoConfig)
+
+    await git(f.mainRepo, "switch", "-qc", "task/plain")
+    await commit(f.mainRepo, "plain.txt")
+    expect((await push(f, "task/plain:refs/heads/task/plain", env)).code).toBe(0)
+
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "switch", "-qc", "issue/unmatched")
+    await commit(f.mainRepo, "unmatched.txt")
+    expect((await push(f, "issue/unmatched:refs/heads/issue/unmatched", env)).code).toBe(0)
+
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "switch", "-qc", "task/wip-1")
+    const canaryHead = await commit(f.mainRepo, "wip.txt")
+    expect((await push(f, "task/wip-1:refs/heads/task/wip-1", env)).code).toBe(0)
+
+    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    for (const branch of ["task/plain", "issue/unmatched"]) {
+      expect(await git(f.receiver.receiverPath, "for-each-ref", `refs/yrd/draft/${branch}`)).toBe("")
+      expect(await git(f.receiver.receiverPath, "for-each-ref", `refs/yrd/ignore/${branch}`)).toBe("")
+      expect(await git(f.receiver.receiverPath, "for-each-ref", `refs/yrd/submit/${branch}`)).toBe("")
+    }
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/task/wip-1")).toBe(canaryHead)
+  })
+
+  it("classifies nothing when the base has no .yrd.yml at all — absence is not 'match everything', proven against the SAME pattern once the base gets one", async () => {
+    const f = await fixture("auto-config-absent")
+    // No .yrd.yml on main YET — the fixture's own single commit (README.md)
+    // is main's whole tree. This pattern WOULD match if the config were
+    // consulted at all.
+    const autoConfig = { ignore: ["task/**"] }
+    const env = await installHookHost(
+      f.root,
+      { "task/would-match": target(f.baseSha), "task/would-match-2": target(f.baseSha) },
+      undefined,
+      undefined,
+      autoConfig,
+    )
+    const resolveTarget = async () => target(f.baseSha)
+    const classifyBranch = fakeClassifier(autoConfig)
+
+    await git(f.mainRepo, "switch", "-qc", "task/would-match")
+    await commit(f.mainRepo, "would-match.txt")
+    expect((await push(f, "task/would-match:refs/heads/task/would-match", env)).code).toBe(0)
+    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/ignore/task/would-match")).toBe("")
+
+    // The discriminating half: give main a config NOW, and create a SECOND
+    // branch, name-shaped identically, AFTER it exists. If the first
+    // assertion passed only because the classifier was never consulted at
+    // all (the exact false-negative this receiver's own additive design
+    // invites — see ReceiverAutoClassifier's doc), this one exposes it: the
+    // classifier plumbing is proven live, on the very same pattern.
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    await git(f.mainRepo, "switch", "-qc", "task/would-match-2")
+    const secondHeadSha = await commit(f.mainRepo, "would-match-2.txt")
+    expect((await push(f, "task/would-match-2:refs/heads/task/would-match-2", env)).code).toBe(0)
+    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/task/would-match-2")).toBe(secondHeadSha)
+  })
+
+  it("an auto-submit-classified branch re-submits on every later plain push — the lane persists", async () => {
+    const f = await fixture("auto-submit-lane")
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    const autoConfig = { submit: ["task/straight-*"] }
+    const env = await installHookHost(f.root, { "task/straight-2": target(f.baseSha) }, undefined, undefined, autoConfig)
+    const resolveTarget = async () => target(f.baseSha)
+    const classifyBranch = fakeClassifier(autoConfig)
+    await git(f.mainRepo, "switch", "-qc", "task/straight-2")
+    const firstHead = await commit(f.mainRepo, "one.txt")
+    expect((await push(f, "task/straight-2:refs/heads/task/straight-2", env)).code).toBe(0)
+    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-2")).toBe(firstHead)
+
+    // A second, ORDINARY plain push (not refs/for) to the SAME branch — the
+    // lane keeps re-submitting because the name still matches, not because a
+    // submit ref happens to already exist.
+    const secondHead = await commit(f.mainRepo, "two.txt")
+    expect((await push(f, "task/straight-2:refs/heads/task/straight-2", env)).code).toBe(0)
+    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-2")).toBe(secondHead)
+  })
+
+  it("a manually submitted branch never becomes an auto-submit lane — a later plain push does not re-submit it, contrasted against a real lane in the same push", async () => {
+    const f = await fixture("manual-submit-not-a-lane")
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    // auto.submit matches straight-* branches; issue/manual's name never
+    // does. task/straight-canary DOES match — proving in the SAME test that
+    // the lane mechanism is genuinely live (and would re-submit the canary),
+    // so issue/manual's stillness cannot be "nothing ran at all".
+    const autoConfig = { submit: ["task/straight-*"] }
+    const env = await installHookHost(
+      f.root,
+      { "issue/manual": target(f.baseSha), "task/straight-canary": target(f.baseSha) },
+      undefined,
+      undefined,
+      autoConfig,
+    )
+    const resolveTarget = async () => target(f.baseSha)
+    const classifyBranch = fakeClassifier(autoConfig)
+    await git(f.mainRepo, "switch", "-qc", "issue/manual")
+    const firstHead = await commit(f.mainRepo, "one.txt")
+    expect((await push(f, "issue/manual:refs/heads/issue/manual", env)).code).toBe(0)
+    // A MANUAL submit — direct push to the submit-ref namespace, not derived
+    // from any pattern match.
+    expect((await push(f, `${firstHead}:refs/yrd/submit/issue/manual`, env)).code).toBe(0)
+
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "switch", "-qc", "task/straight-canary")
+    await commit(f.mainRepo, "canary-one.txt")
+    expect((await push(f, "task/straight-canary:refs/heads/task/straight-canary", env)).code).toBe(0)
+
+    await git(f.mainRepo, "switch", "-q", "issue/manual")
+    const secondHead = await commit(f.mainRepo, "two.txt")
+    expect((await push(f, "issue/manual:refs/heads/issue/manual", env)).code).toBe(0)
+
+    await git(f.mainRepo, "switch", "-q", "task/straight-canary")
+    const canarySecondHead = await commit(f.mainRepo, "canary-two.txt")
+    expect((await push(f, "task/straight-canary:refs/heads/task/straight-canary", env)).code).toBe(0)
+
+    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    // The canary DID get re-submitted — the lane mechanism is live.
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-canary")).toBe(
+      canarySecondHead,
+    )
+    // issue/manual is still at the FIRST head: lane-ness is derived from the
+    // pattern match, never from the submit ref's mere existence, so the plain
+    // push did not re-submit on the manually-submitted branch's behalf.
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/manual")).toBe(firstHead)
+    expect(secondHead).not.toBe(firstHead)
   })
 
   // Passes before this change as well as after, deliberately: opening one
