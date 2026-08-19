@@ -41,15 +41,15 @@ export const ChangeTerminalAssociationSchema = z
     path: ["evidence", "run"],
   })
 export type ChangeTerminalAssociation = Readonly<z.infer<typeof ChangeTerminalAssociationSchema>>
-export const CorrelationSchema = z
-  .object({
-    namespace: z.string().trim().min(1),
-    id: z
-      .string()
-      .min(1)
-      .refine((id) => id.trim().length > 0, { message: "correlation id cannot be blank" }),
+/** Open key/value labels on a change revision. The same noun as km's node
+ * `props`: yrd stores and echoes them, never interprets them. Each key is a
+ * fact — set once, idempotent to repeat, conflicting values refuse. */
+export const ChangePropsSchema = z
+  .record(z.string(), z.string())
+  .refine((props) => Object.keys(props).length > 0, { message: "props cannot be empty" })
+  .refine((props) => Object.entries(props).every(([key, value]) => key.trim().length > 0 && value.trim().length > 0), {
+    message: "prop keys and values cannot be blank",
   })
-  .strict()
 
 const TextSchema = z.string().trim().min(1)
 
@@ -73,6 +73,35 @@ export function normalizeV2Submitter(value: unknown): unknown {
   return normalizeV2Role(value, "submitter")
 }
 
+/** Normalize pre-props payloads: fold the retired single `correlation`
+ * `{namespace, id}` pair into `props` as one `namespace: id` entry, keeping
+ * current schemas free of the retired vocabulary. A malformed legacy value is
+ * left in place so the strict schema refuses loudly instead of dropping it. */
+export function normalizeV1CorrelationToProps(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value
+  const record = value as Record<string, unknown>
+  const legacy = record["correlation"]
+  if (legacy === undefined) return value
+  if (typeof legacy !== "object" || legacy === null || Array.isArray(legacy)) return value
+  const pair = legacy as Record<string, unknown>
+  const namespace = pair["namespace"]
+  const id = pair["id"]
+  if (typeof namespace !== "string" || typeof id !== "string") return value
+  const { correlation: _retired, ...current } = record
+  const existing = current["props"]
+  const props =
+    typeof existing === "object" && existing !== null && !Array.isArray(existing)
+      ? (existing as Record<string, unknown>)
+      : {}
+  return { ...current, props: { ...props, [namespace]: id } }
+}
+
+/** The composed read-boundary normalizer for change facts: v2 role rename plus
+ * the v1 correlation→props fold. */
+export function normalizeLegacyChangeKeys(value: unknown): unknown {
+  return normalizeV1CorrelationToProps(normalizeV2Submitter(value))
+}
+
 /** Closed current rejection fact used by the Bay projection and post-append signal observers. */
 const ChangeRejectedFactObjectSchema = z
   .object({
@@ -81,7 +110,7 @@ const ChangeRejectedFactObjectSchema = z
     headSha: GitShaSchema,
     run: TextSchema,
     issueRef: TextSchema.optional(),
-    correlation: CorrelationSchema.optional(),
+    props: ChangePropsSchema.optional(),
     /** Persisted v2 key; missing only when a current rejection terminates a pre-identity revision. */
     submitter: TextSchema.optional(),
     step: TextSchema,
@@ -89,14 +118,14 @@ const ChangeRejectedFactObjectSchema = z
     detail: z.string().optional(),
   })
   .strict()
-export const ChangeRejectedFactSchema = z.preprocess(normalizeV2Submitter, ChangeRejectedFactObjectSchema)
+export const ChangeRejectedFactSchema = z.preprocess(normalizeLegacyChangeKeys, ChangeRejectedFactObjectSchema)
 export type ChangeRejectedFact = Readonly<z.infer<typeof ChangeRejectedFactSchema>>
 
 /** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the PR in the
  * submitted queue lifecycle and carries the exact typed result needed to fix
  * the branch in place. */
 export const ChangeNeedsAuthorFactSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   ChangeRejectedFactObjectSchema.extend({
     receipt: JobErrorSchema,
   }).strict(),
@@ -173,7 +202,7 @@ export const CompositionV1Schema = z
 
 export type BayId = string
 export type PRId = string
-export type Correlation = z.infer<typeof CorrelationSchema>
+export type ChangeProps = z.infer<typeof ChangePropsSchema>
 
 /** Stable persisted queue key for local and origin-qualified base refs. */
 export function baseIdentity(ref: string): string {
@@ -540,7 +569,7 @@ export type ChangeRev = Readonly<{
   baseSha?: string
   /** Missing only while replaying journals written before submitter identity was recorded. */
   submitter?: string
-  correlation?: Correlation
+  props?: ChangeProps
   composition?: CompositionV1
   recut?: ChangeRemergeProof
   /** Admission is a verdict about this immutable revision, not a landing
@@ -816,7 +845,7 @@ export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
 export const changeRevisionNumber = (pr: PR): number => currentChangeRev(pr).n
 export const changeHead = (pr: PR): string => currentChangeRev(pr).head
 export const changeBaseSha = (pr: PR): string | undefined => currentChangeRev(pr).baseSha
-export const changeCorrelation = (pr: PR): Correlation | undefined => currentChangeRev(pr).correlation
+export const changeProps = (pr: PR): ChangeProps | undefined => currentChangeRev(pr).props
 export const changeComposition = (pr: PR): CompositionV1 | undefined => currentChangeRev(pr).composition
 export const changeRemerge = (pr: PR): ChangeRemergeProof | undefined => currentChangeRev(pr).recut
 
