@@ -185,7 +185,7 @@ const IntakeChangeArgsSchema = z
     /** The accepted ref was refs/for, so intake and submission are one act. */
     submit: z.literal(true).optional(),
     composition: CompositionV1Schema.optional(),
-    result: z
+    receipt: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
       .optional(),
@@ -418,7 +418,7 @@ const LegacyChangePushedSchema = z
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
     composition: CompositionV1Schema.optional(),
-    result: z
+    receipt: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
       .optional(),
@@ -1805,8 +1805,8 @@ function intakePR(
   // default. Otherwise replaying an unchanged needs-author PR against a
   // non-default base silently looks like a new authored revision.
   const base = baseIdentity(args.base ?? bay?.base ?? existing?.base ?? defaultBase)
-  if (args.result !== undefined) {
-    const received = current.results[args.result]
+  if (args.receipt !== undefined) {
+    const received = current.receipts[args.receipt]
     if (received !== undefined) {
       const matches =
         received.branch === branch &&
@@ -1814,7 +1814,7 @@ function intakePR(
         received.base === base &&
         received.baseSha === args.baseSha &&
         sameComposition(received.composition, args.composition)
-      if (!matches) throw new Error(`yrd: receiver result '${args.result}' does not match its recorded intake`)
+      if (!matches) throw new Error(`yrd: receiver result '${args.receipt}' does not match its recorded intake`)
       return { events: [] }
     }
   }
@@ -1857,7 +1857,7 @@ function intakePR(
     headSha: args.headSha,
     ...(replayBaseSha === undefined ? {} : { baseSha: replayBaseSha }),
     ...(replayComposition === undefined ? {} : { composition: replayComposition }),
-    ...(args.result === undefined ? {} : { result: args.result }),
+    ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
     revision,
     submitter,
   }
@@ -2297,7 +2297,7 @@ function remergePr(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defau
   // Only Queue authority-consumption results make an identical recut an
   // author reauthorization act. Authored-content failures need new bytes;
   // minting the same bytes would manufacture the same refusal at revision N+1.
-  const needsAuthorCode = changeNeedsAuthor(pr)?.result.code
+  const needsAuthorCode = changeNeedsAuthor(pr)?.receipt.code
   const reauthorizesConsumedQueueAuthority =
     needsAuthorCode === "queue-submit-authority-consumed" || needsAuthorCode === "queue-checks-authority-consumed"
   if (!reauthorizesConsumedQueueAuthority && (unchanged || (needsAuthorCode !== undefined && payloadUnchanged))) {
@@ -2869,7 +2869,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               integratedAt: undefined,
               integration: undefined,
               alreadyLandedAt: undefined,
-              alreadyMerged: undefined,
+              alreadyLanded: undefined,
               withdrawnAt: undefined,
               withdrawReason: undefined,
               canceledAt: undefined,
@@ -2879,13 +2879,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             }
       const next = { ...current, prs: { ...current.prs, [pr.id]: pr } }
       return bayState(
-        pushed.result === undefined
+        pushed.receipt === undefined
           ? next
           : {
               ...next,
-              results: {
-                ...next.results,
-                [pushed.result]: {
+              receipts: {
+                ...next.receipts,
+                [pushed.receipt]: {
                   pr: pushed.pr,
                   branch: pushed.branch,
                   headSha: pushed.headSha,
@@ -2984,7 +2984,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         alreadyLandedAt: undefined,
-        alreadyMerged: undefined,
+        alreadyLanded: undefined,
         withdrawnAt: undefined,
         withdrawReason: undefined,
         canceledAt: undefined,
@@ -3037,7 +3037,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         alreadyLandedAt: undefined,
-        alreadyMerged: undefined,
+        alreadyLanded: undefined,
         withdrawnAt: undefined,
         withdrawReason: undefined,
         canceledAt: undefined,
@@ -3092,7 +3092,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           at: applied.ts,
           run: changed.run,
           step: changed.step,
-          result: changed.result,
+          receipt: changed.receipt,
           ...(changed.evidence === undefined ? {} : { evidence: changed.evidence }),
           ...(changed.detail === undefined ? {} : { detail: changed.detail }),
         },
@@ -3142,7 +3142,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         merged: true,
         integratedAt: applied.ts,
         alreadyLandedAt: undefined,
-        alreadyMerged: undefined,
+        alreadyLanded: undefined,
         terminalRun: run,
         integration: {
           commit: changed.commit,
@@ -3167,7 +3167,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         alreadyLandedAt: applied.ts,
         terminalRun: changed.run,
         integration: { commit: changed.baseSha, baseSha: changed.baseSha },
-        alreadyMerged: {
+        alreadyLanded: {
           baseSha: changed.baseSha,
           candidateSha: changed.candidateSha,
           candidateTreeSha: changed.candidateTreeSha,

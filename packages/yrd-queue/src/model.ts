@@ -415,7 +415,7 @@ export const SubmoduleMainOutcomesSchema = z
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
-  alreadyMerged?: AlreadyMergedEvidence
+  alreadyLanded?: AlreadyMergedEvidence
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   componentMains?: readonly SubmoduleMainResult[]
@@ -426,7 +426,7 @@ export const IntegrationProofSchema = z
     commit: GitShaSchema,
     // The base branch tip after integration, not the pre-integration base.
     baseSha: GitShaSchema,
-    alreadyMerged: AlreadyMergedEvidenceSchema.optional(),
+    alreadyLanded: AlreadyMergedEvidenceSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
     componentMains: z.array(SubmoduleMainResultSchema).min(1).optional(),

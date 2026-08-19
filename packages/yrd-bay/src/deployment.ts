@@ -39,7 +39,7 @@ export type ReleaseDeploymentJobInput = ReleaseDeploymentInput &
       generation: string
       path: string
       sha: string
-      result: JsonValue
+      receipt: JsonValue
     }>
   }>
 
@@ -112,7 +112,7 @@ export const ReleaseDeploymentJobInputSchema: z.ZodType<ReleaseDeploymentJobInpu
         generation: GenerationIdSchema,
         path: z.string().min(1),
         sha: z.string().regex(FULL_OBJECT_ID),
-        result: HabGenerationReleaseResultSchema,
+        receipt: HabGenerationReleaseResultSchema,
       })
       .strict(),
   }).strict()
@@ -124,7 +124,7 @@ function validateId(kind: "deployment", value: string): void {
 }
 
 function assertHabReleaseAuthorization(input: ReleaseDeploymentJobInput): void {
-  const result = HabGenerationReleaseResultSchema.parse(input.authorization.result)
+  const result = HabGenerationReleaseResultSchema.parse(input.authorization.receipt)
   const source = result.retiredSource
   if (resolve(source.path) !== resolve(input.authorization.path)) {
     throw new Error(`Hab release path '${source.path}' does not authorize '${input.authorization.path}'`)

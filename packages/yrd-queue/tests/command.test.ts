@@ -3040,7 +3040,7 @@ describe("Queue command adapters", () => {
     expect(changeAdmission(current)).toMatchObject({
       status: "refused",
       baseSha: advancedBaseSha,
-      result: {
+      receipt: {
         code: "carrier-drops-landed",
         message: expect.stringMatching(/advance base disjoint.*linear rebuild.*current base/isu),
       },
@@ -5406,7 +5406,7 @@ describe("Queue command adapters", () => {
     expect(app.queue.eligibility("PR1").reason?.message).toContain("55 baseline errors unchanged")
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "needs-author",
-      needsAuthor: { result: { code: "check-failed" } },
+      needsAuthor: { receipt: { code: "check-failed" } },
     })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
@@ -6385,7 +6385,7 @@ describe("Queue command adapters", () => {
       integration: {
         commit: equivalentBaseSha,
         baseSha: equivalentBaseSha,
-        alreadyMerged: {
+        alreadyLanded: {
           candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
           candidateTreeSha: equivalentTreeSha,
           baseTreeSha: equivalentTreeSha,
@@ -6397,7 +6397,7 @@ describe("Queue command adapters", () => {
       state: "closed",
       merged: true,
       integration: { commit: equivalentBaseSha, baseSha: equivalentBaseSha },
-      alreadyMerged: {
+      alreadyLanded: {
         candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
         candidateTreeSha: equivalentTreeSha,
         baseTreeSha: equivalentTreeSha,

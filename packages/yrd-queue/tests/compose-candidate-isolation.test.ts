@@ -239,13 +239,13 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
     )
     expect(needsAuthor?.data).toMatchObject({
       pr: poisoned.id,
-      result: {
+      receipt: {
         code: "queue-submit-authority-consumed",
         message: expect.stringContaining(`yrd pr recut ${poisoned.id} --preflight --queue --apply`),
       },
     })
     expect(app.state().bays.prs[poisoned.id]).toMatchObject({
-      needsAuthor: { result: { code: "queue-submit-authority-consumed" } },
+      needsAuthor: { receipt: { code: "queue-submit-authority-consumed" } },
     })
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     log.end()

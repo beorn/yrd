@@ -167,7 +167,7 @@ describe("native needs-author lifecycle", () => {
       status: "refused",
       kind: "refusal",
       step: "check",
-      result: {
+      receipt: {
         code: "composition-invalid",
         message: "PR 'PR1' composition head contains root changes",
       },
@@ -180,7 +180,7 @@ describe("native needs-author lifecycle", () => {
     expect(changeNeedsAuthor(current)).toMatchObject({
       run: refused?.status === "refused" ? refused.steps[0]?.job : undefined,
       step: "check",
-      result: {
+      receipt: {
         code: "composition-invalid",
         message: "PR 'PR1' composition head contains root changes",
       },
@@ -254,7 +254,7 @@ describe("native needs-author lifecycle", () => {
     expect(app.queue.eligibility(pr).checks.status).toBe("queued")
     expect(app.bays.pr(pr)?.revs[0]?.admission).toMatchObject({
       status: "refused",
-      result: { code: "composition-invalid" },
+      receipt: { code: "composition-invalid" },
     })
   })
 

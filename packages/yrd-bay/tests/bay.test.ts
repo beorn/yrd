@@ -1082,7 +1082,7 @@ describe("withBays", () => {
     })
 
     const result = "f".repeat(64)
-    const pushed = { bay: "B1", headSha: HEAD_1, baseSha: BASE, result }
+    const pushed = { bay: "B1", headSha: HEAD_1, baseSha: BASE, receipt: result }
     expect((await app.bays.intake(pushed)).events).toHaveLength(1)
     expect((await app.bays.intake(pushed)).events).toHaveLength(0)
     await expect(app.bays.intake({ ...pushed, headSha: HEAD_2 })).rejects.toThrow(
@@ -2329,7 +2329,7 @@ describe("withBays", () => {
     })
     expect(pr.revs).toHaveLength(2)
     expect(pr.terminalRun).toBeUndefined()
-    expect(pr.alreadyMerged).toMatchObject({
+    expect(pr.alreadyLanded).toMatchObject({
       baseSha: nextBase,
       candidateSha: nextBase,
       candidateTreeSha: baseTreeSha,

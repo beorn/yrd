@@ -489,7 +489,7 @@ async function createApp(
       JobResult<{
         commit: string
         baseSha: string
-        alreadyMerged?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
+        alreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
         sourceRewrites?: readonly SourceRewrite[]
       }>
     > => {
@@ -503,7 +503,7 @@ async function createApp(
         output: {
           commit,
           baseSha: commit,
-          ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyMerged: options.mergeAlreadyLanded }),
+          ...(options.mergeAlreadyLanded === undefined ? {} : { alreadyLanded: options.mergeAlreadyLanded }),
           ...(options.sourceRewrites === undefined ? {} : { sourceRewrites: options.sourceRewrites }),
         },
       }
@@ -2281,7 +2281,7 @@ describe("runYrd", () => {
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
       step: "check",
-      result: { code: "check-failed" },
+      receipt: { code: "check-failed" },
     })
 
     // Keep the recut target pending so only the unrelated predecessor is terminal.
@@ -5973,7 +5973,7 @@ describe("runYrd", () => {
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
-      result: { code: "authored-gitlink" },
+      receipt: { code: "authored-gitlink" },
     })
     expect(app.queue.audit().findings).toEqual([])
 
@@ -6018,7 +6018,7 @@ describe("runYrd", () => {
     expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
       baseSha: advancedBaseSha,
-      result: { code: "carrier-drops-landed" },
+      receipt: { code: "carrier-drops-landed" },
     })
     expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([
       { revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
@@ -10496,7 +10496,7 @@ describe("runYrd", () => {
       headSha: "f".repeat(40),
     })
     const statusRows = queueStatusRows(
-      { byId: {}, prs: { PR1: statusPr }, results: {} },
+      { byId: {}, prs: { PR1: statusPr }, receipts: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr], admissionOrder: ["PR1"] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),
@@ -12696,7 +12696,7 @@ describe("typed issue landing bridge", () => {
       state: "closed",
       merged: true,
       integration: { commit: BASE_SHA, baseSha: BASE_SHA },
-      alreadyMerged: {
+      alreadyLanded: {
         candidateSha: HEAD_SHA,
         candidateTreeSha: equivalentTreeSha,
         baseTreeSha: equivalentTreeSha,

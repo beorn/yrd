@@ -98,7 +98,7 @@ export type ChangeRejectedFact = Readonly<z.infer<typeof ChangeRejectedFactSchem
 export const ChangeNeedsAuthorFactSchema = z.preprocess(
   normalizeV2Submitter,
   ChangeRejectedFactObjectSchema.extend({
-    result: JobErrorSchema,
+    receipt: JobErrorSchema,
   }).strict(),
 )
 export type ChangeNeedsAuthorFact = Readonly<z.infer<typeof ChangeNeedsAuthorFactSchema>>
@@ -390,7 +390,7 @@ export type ChangeAdmissionStep = Readonly<{
   job: string
   status: "passed" | "refused"
   output?: JsonValue
-  result?: JobError
+  receipt?: JobError
 }>
 
 export const ChangeAdmissionStepSchema = z
@@ -400,18 +400,18 @@ export const ChangeAdmissionStepSchema = z
     job: TextSchema,
     status: z.enum(["passed", "refused"]),
     output: JsonSchema.optional(),
-    result: JobErrorSchema.optional(),
+    receipt: JobErrorSchema.optional(),
   })
   .strict()
   .superRefine((step, context) => {
-    if ((step.status === "passed") !== (step.result === undefined)) {
+    if ((step.status === "passed") !== (step.receipt === undefined)) {
       context.addIssue({
         code: "custom",
         message:
           step.status === "passed"
-            ? "a passed entry-check step cannot carry a result"
-            : "a failed entry-check step requires a result",
-        path: ["result"],
+            ? "a passed entry-check step cannot carry a receipt"
+            : "a failed entry-check step requires a receipt",
+        path: ["receipt"],
       })
     }
   }) as z.ZodType<ChangeAdmissionStep>
@@ -465,7 +465,7 @@ export type ChangeAdmissionRecord =
       candidate?: string
       steps: readonly ChangeAdmissionStep[]
       step: string
-      result: JobError
+      receipt: JobError
     }>
 
 export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
@@ -474,7 +474,7 @@ export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
     status: z.literal("refused"),
     kind: z.enum(["refusal", "failure", "infrastructure"]),
     step: TextSchema,
-    result: JobErrorSchema,
+    receipt: JobErrorSchema,
   }).strict(),
 ]) as z.ZodType<ChangeAdmissionRecord>
 export type ChangeAdmission = ChangeAdmissionRecord & Readonly<{ at: string }>
@@ -668,7 +668,7 @@ export type PR = Readonly<{
     at: string
     run: string
     step: string
-    result: JobError
+    receipt: JobError
     evidence?: string
     detail?: string
   }>
@@ -682,7 +682,7 @@ export type PR = Readonly<{
     changeId?: ChangeId
   }>
   alreadyLandedAt?: string
-  alreadyMerged?: ChangeAlreadyMergedEvidence
+  alreadyLanded?: ChangeAlreadyMergedEvidence
   withdrawnAt?: string
   withdrawReason?: string
   canceledAt?: string
@@ -806,8 +806,8 @@ export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
     at: admission.at,
     run: failed?.job ?? `admission:${pr.id}:${currentChangeRev(pr).n}`,
     step: admission.step,
-    result: admission.result,
-    detail: admission.result.message,
+    receipt: admission.receipt,
+    detail: admission.receipt.message,
   }
 }
 
@@ -821,7 +821,7 @@ export const changeRemerge = (pr: PR): ChangeRemergeProof | undefined => current
 /** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
 export function changeDeliveryState(pr: PR): ChangeDeliveryState {
   if (pr.state === "closed") {
-    if (pr.merged) return pr.alreadyMerged === undefined ? "integrated" : "already-landed"
+    if (pr.merged) return pr.alreadyLanded === undefined ? "integrated" : "already-landed"
     if (pr.canceledAt !== undefined) return "canceled"
     return "withdrawn"
   }
@@ -927,7 +927,7 @@ export function checkRequest(pr: PR): ChangeCheckRequest | undefined {
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
   prs: Readonly<Record<PRId, PR>>
-  results: Readonly<
+  receipts: Readonly<
     Record<
       string,
       Readonly<{
@@ -1043,7 +1043,7 @@ export function defaultBayBranch(name: string): string {
 }
 
 export function emptyBaysState(): BaysState {
-  return { byId: {}, prs: {}, results: {} }
+  return { byId: {}, prs: {}, receipts: {} }
 }
 
 function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {

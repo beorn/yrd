@@ -140,7 +140,7 @@ const ProjectionCheckpointSchema = z
     v: z.literal(PROJECTION_CHECKPOINT_VERSION),
     state: z.unknown(),
     at: z.string().optional(),
-    results: z.array(z.unknown()),
+    receipts: z.array(z.unknown()),
     causeIds: z.array(z.string()),
     eventIds: z.array(z.string()),
     // Optional and OMITTED while empty: a checkpoint written by this code
@@ -815,7 +815,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     const expectedEventIds = new Set<string>()
     const commandHashes = new Map<string, string>()
     let expectedAt: string | undefined
-    for (const value of parsed.results) {
+    for (const value of parsed.receipts) {
       const frame = parseCheckpointFrame(value, commandHashes)
       if (resultsById.has(frame.command.id)) throw new Error(`checkpoint repeats command id '${frame.command.id}'`)
       resultsById.set(frame.command.id, frame)
@@ -845,7 +845,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       resultsMs: resultsValidatedAt - stateValidatedAt,
       registriesMs: registriesValidatedAt - resultsValidatedAt,
       totalMs: registriesValidatedAt - restoreStarted,
-      results: parsed.results.length,
+      results: parsed.receipts.length,
       causeIds: parsed.causeIds.length,
       eventIds: parsed.eventIds.length,
     })
@@ -937,7 +937,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
           v: PROJECTION_CHECKPOINT_VERSION,
           state: stateValue,
           ...(next.at === undefined ? {} : { at: next.at }),
-          results: [...next.resultsById.values()],
+          receipts: [...next.resultsById.values()],
           causeIds: [...next.causeIds],
           eventIds: [...next.eventIds],
           ...(next.unknownEvents.size === 0

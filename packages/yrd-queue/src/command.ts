@@ -8722,7 +8722,7 @@ function integrationProof(
   return IntegrationProofSchema.parse({
     commit,
     baseSha: commit,
-    ...(alreadyMerged === undefined ? {} : { alreadyMerged }),
+    ...(alreadyMerged === undefined ? {} : { alreadyLanded: alreadyMerged }),
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
     ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
     ...(submoduleMains.length === 0 ? {} : { componentMains: submoduleMains }),

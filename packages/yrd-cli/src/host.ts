@@ -2082,7 +2082,7 @@ async function intakeResult(
   await materializeCarrier(process, repo, result)
   await app.dispatch(
     app.commands.bay.intake,
-    { ...result.intake, result: result.id },
+    { ...result.intake, receipt: result.id },
     { key: `receiver:${result.id}` },
   )
 }

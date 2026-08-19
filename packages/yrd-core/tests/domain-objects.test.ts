@@ -609,7 +609,7 @@ describe("Yrd domain objects", () => {
     expect(cache.stored()).toMatchObject({
       cursor: 1,
       value: {
-        results: [expect.objectContaining({ compatibility })],
+        receipts: [expect.objectContaining({ compatibility })],
       },
     })
   })

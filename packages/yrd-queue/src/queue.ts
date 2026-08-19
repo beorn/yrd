@@ -1720,7 +1720,7 @@ function createQueue<Shape extends ChangeShape>(
       ...(options.candidate === undefined ? {} : { candidate: options.candidate }),
       steps: [...(options.steps ?? [])],
       step,
-      result,
+      receipt: result,
     })
     return { code: result.code, kind, reason: result.message }
   }
@@ -1848,7 +1848,7 @@ function createQueue<Shape extends ChangeShape>(
           job: job.id,
           status: "refused",
           ...("output" in job && job.output !== undefined ? { output: job.output } : {}),
-          result,
+          receipt: result,
         }
         const refusal = await refuseRevisionAdmission(pr, baseSha, step.name, result, {
           candidate: candidate.id,
@@ -2620,12 +2620,12 @@ function createQueue<Shape extends ChangeShape>(
               const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
               if (ejected !== undefined) {
                 const refusal = ChangeNeedsAuthorFactSchema.parse(ejected.data)
-                if (!selectorless) raiseFailure("refusal", refusal.result.code, refusal.result.message)
+                if (!selectorless) raiseFailure("refusal", refusal.receipt.code, refusal.receipt.message)
                 log.warn?.("queue compose ejected a candidate without runnable authority", {
                   action: "compose-candidate-skip",
                   pr: refusal.pr,
-                  code: refusal.result.code,
-                  reason: refusal.result.message,
+                  code: refusal.receipt.code,
+                  reason: refusal.receipt.message,
                   remedy: `yrd pr recut ${refusal.pr} --preflight --queue --apply`,
                 })
                 continue
@@ -3907,7 +3907,7 @@ function queueAuthorityNeedsAuthorEvent(
     ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
     step,
     detail: message,
-    result: { code, message },
+    receipt: { code, message },
   })
 }
 
@@ -5187,7 +5187,7 @@ function advanceQueue(
       detail: failure.message,
     }
     return {
-      events: [failed, event("pr/needs-author", { ...refusal, result: authorResult })],
+      events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })],
     }
   }
 
@@ -5203,9 +5203,9 @@ function advanceQueue(
     // member, and only the ordinary PR-landing bookkeeping below applies to it.
     const changeSnapshots = record.prs.filter((member) => member.intent === undefined)
     for (const current of samePayloadPRs(state.bays, changeSnapshots)) {
-      const alreadyMerged = shape.integration.alreadyMerged
+      const alreadyMerged = shape.integration.alreadyLanded
       if (alreadyMerged !== undefined) {
-        const existingEvidence = current.alreadyMerged
+        const existingEvidence = current.alreadyLanded
         if (
           changeDeliveryState(current) === "already-landed" &&
           current.integration?.commit === shape.integration.commit &&
@@ -7091,8 +7091,8 @@ function projectChangeChecks(
       const diagnostics =
         Array.isArray(output?.diagnostics) || typeof output?.detail === "string"
           ? ((output?.diagnostics ?? output?.detail) as JsonValue)
-          : evidence.result?.message
-      const artifact = firstArtifact(evidence.output, evidence.result === undefined ? undefined : "stderr")
+          : evidence.receipt?.message
+      const artifact = firstArtifact(evidence.output, evidence.receipt === undefined ? undefined : "stderr")
       return {
         pr: pr.id,
         revision: changeRevisionNumber(pr),
@@ -7104,7 +7104,7 @@ function projectChangeChecks(
         ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
         ...(diagnostics === undefined ? {} : { diagnostics }),
         ...(artifact === undefined ? {} : { artifact }),
-        ...(evidence.result === undefined ? {} : { error: evidence.result }),
+        ...(evidence.receipt === undefined ? {} : { error: evidence.receipt }),
       }
     })
     if (records.length > 0) return records
@@ -7115,7 +7115,7 @@ function projectChangeChecks(
           revision: changeRevisionNumber(pr),
           status: "failed",
           ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
-          error: admission.result,
+          error: admission.receipt,
         },
       ]
     }
@@ -7409,7 +7409,7 @@ function needsAuthorResult(
   steps: readonly RuntimeStep[],
 ): JobError | undefined {
   const current = changeNeedsAuthor(pr)
-  if (current !== undefined) return current.result
+  if (current !== undefined) return current.receipt
   const runIds = new Set<RunId>()
   const checkRun = checkEligibility(state, pr, steps).run
   if (checkRun !== undefined) runIds.add(checkRun)
@@ -7485,11 +7485,11 @@ function ChangeEligibility(
         return verdict({
           code: "admission-refused",
           message:
-            `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.result.code}': ` +
-            `${admission.result.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
+            `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
+            `${admission.receipt.message}.\nNext: yrd pr recut ${pr.id} --preflight --queue --apply`,
         })
       }
-      const result = changeNeedsAuthor(pr)?.result
+      const result = changeNeedsAuthor(pr)?.receipt
       if (result === undefined) {
         throw new Error(`yrd: PR '${pr.id}' is needs-author without an attribution result`)
       }
@@ -7638,7 +7638,7 @@ function ChangeShape(prs: readonly ChangeSnapshot[]): ChangeShape {
 function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined {
   if (prs.every((pr) => !pr.merged)) return undefined
   const proof = prs[0]?.integration
-  const alreadyMerged = prs[0]?.alreadyMerged
+  const alreadyMerged = prs[0]?.alreadyLanded
   if (
     proof === undefined ||
     prs.some(
@@ -7646,12 +7646,12 @@ function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined 
         !pr.merged ||
         pr.integration?.commit !== proof.commit ||
         pr.integration?.baseSha !== proof.baseSha ||
-        (alreadyMerged === undefined) !== (pr.alreadyMerged === undefined) ||
+        (alreadyMerged === undefined) !== (pr.alreadyLanded === undefined) ||
         (alreadyMerged !== undefined &&
-          (pr.alreadyMerged?.baseSha !== proof.baseSha ||
-            pr.alreadyMerged.candidateSha !== alreadyMerged.candidateSha ||
-            pr.alreadyMerged.candidateTreeSha !== alreadyMerged.candidateTreeSha ||
-            pr.alreadyMerged.baseTreeSha !== alreadyMerged.baseTreeSha)),
+          (pr.alreadyLanded?.baseSha !== proof.baseSha ||
+            pr.alreadyLanded.candidateSha !== alreadyMerged.candidateSha ||
+            pr.alreadyLanded.candidateTreeSha !== alreadyMerged.candidateTreeSha ||
+            pr.alreadyLanded.baseTreeSha !== alreadyMerged.baseTreeSha)),
     )
   ) {
     throw new Error("yrd: every PR in a queue candidate must share one integration proof")
@@ -7665,7 +7665,7 @@ function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined 
         ? integration
         : {
             ...integration,
-            alreadyMerged: {
+            alreadyLanded: {
               candidateSha: alreadyMerged.candidateSha,
               candidateTreeSha: alreadyMerged.candidateTreeSha,
               baseTreeSha: alreadyMerged.baseTreeSha,
@@ -7730,8 +7730,8 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
     if (step.kind !== "merge" || run.integration === undefined) return false
     return run.prs.some((pr) => {
       const current = state.bays.prs[pr.id]
-      const alreadyMerged = run.integration?.alreadyMerged
-      const currentAlreadyMerged = current?.alreadyMerged
+      const alreadyMerged = run.integration?.alreadyLanded
+      const currentAlreadyMerged = current?.alreadyLanded
       return (
         current?.merged !== true ||
         current.integration?.commit !== run.integration?.commit ||

@@ -428,7 +428,7 @@ export async function preflightRemerge(
   const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
     needsAuthor !== undefined &&
-    CONSUMED_QUEUE_AUTHORITY_RESULTS.has(needsAuthor.result.code) &&
+    CONSUMED_QUEUE_AUTHORITY_RESULTS.has(needsAuthor.receipt.code) &&
     source.n === currentChangeRev(pr).n
   if (
     needsAuthor !== undefined &&
@@ -439,7 +439,7 @@ export async function preflightRemerge(
     raiseFailure(
       "refusal",
       "recut-needs-authored-change",
-      `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.result.code}'; ` +
+      `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
         "an unchanged recut cannot resolve it — push new authored content, then retry the printed remedy",
     )
   }

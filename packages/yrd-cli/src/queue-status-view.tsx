@@ -1769,7 +1769,7 @@ function queueOutcome(run: Run): string {
     const integration = queueIntegration(run)
     return integration === undefined
       ? "passed"
-      : integration.alreadyMerged === undefined
+      : integration.alreadyLanded === undefined
         ? "integrated"
         : "already-landed"
   }
@@ -2200,7 +2200,7 @@ function terminalProjection(run: Run): QueueTerminalProjection {
     if (integration === undefined) {
       return { outcome: "passed", display: "passed" }
     }
-    return integration.alreadyMerged === undefined
+    return integration.alreadyLanded === undefined
       ? { outcome: "integrated", display: "integrated" }
       : { outcome: "already-landed", display: "already-landed" }
   }
@@ -7956,8 +7956,8 @@ export function ChangeRunsView({ data }: { data: ChangeRunsData }) {
     (revisionRefusal === undefined
       ? undefined
       : {
-          message: revisionRefusal.detail ?? revisionRefusal.result.message,
-          result: revisionRefusal.result,
+          message: revisionRefusal.detail ?? revisionRefusal.receipt.message,
+          result: revisionRefusal.receipt,
         })
   const currentRevision = currentChangeRev(data.pr)
   return (

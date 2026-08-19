@@ -4547,7 +4547,7 @@ describe("Queue", () => {
         status: "refused",
         kind: "failure",
         step: "check",
-        result: { code: "queue-environment-refused" },
+        receipt: { code: "queue-environment-refused" },
       })
       expect(Queues.ids(app.state().queues)).toEqual([])
     }
@@ -5107,7 +5107,7 @@ describe("Queue", () => {
           revision: pr.revision,
           headSha: pr.headSha,
           run: "R1",
-          result: {
+          receipt: {
             code: "queue-submit-authority-consumed",
             message: expect.stringContaining(`yrd pr recut ${pr.id} --preflight --queue --apply`),
           },
@@ -5551,7 +5551,7 @@ describe("Queue", () => {
       status: "refused",
       kind: "failure",
       step: "check",
-      result: { code: "typecheck-failed" },
+      receipt: { code: "typecheck-failed" },
     })
     expect(deliveryOf(app.state().bays.prs.PR1)).toBe("pushed")
 

@@ -1949,7 +1949,7 @@ function trackerDeliveryV2(
       ? {
           at: pr.rejectedAt ?? revision.submittedAt ?? revision.pushedAt,
           run: pr.terminalRun ?? eligibility.checks.run ?? "unknown",
-          result: eligibility.reason.result,
+          receipt: eligibility.reason.result,
           detail: eligibility.reason.message,
         }
       : undefined)
@@ -1962,7 +1962,7 @@ function trackerDeliveryV2(
         run: refusalFact.run,
         ...(refusalFact.detail === undefined ? {} : { detail: refusalFact.detail }),
       },
-      attributedResult: refusalFact.result,
+      attributedResult: refusalFact.receipt,
     }
   }
   const delivery = changeDeliveryState(pr)
@@ -2266,7 +2266,7 @@ function sameDeploymentJobRequest(
 }
 
 function stableReleaseAuthority(input: ReleaseDeploymentJobInput): unknown {
-  const result = HabGenerationReleaseResultSchema.parse(input.authorization.result)
+  const result = HabGenerationReleaseResultSchema.parse(input.authorization.receipt)
   return {
     deploymentId: input.deploymentId,
     generation: input.generation,
@@ -2354,7 +2354,7 @@ async function releaseDeployment(
       generation: deployment.generation,
       path: deployment.path,
       sha: deployment.sha,
-      result: habRelease as ReleaseDeploymentJobInput["authorization"]["result"],
+      receipt: habRelease as ReleaseDeploymentJobInput["authorization"]["receipt"],
     },
   }
   const job = await requestAndRunDeploymentJob(app, "release", input)
@@ -5096,10 +5096,10 @@ function ChangeMergeOutcome(pr: DeepReadonly<PR>): ChangeMergeOutcome {
   const delivery = changeDeliveryState(pr)
   if (delivery === "already-landed") {
     const hasRunProof = pr.terminalRun !== undefined
-    const hasRefreshProof = pr.alreadyMerged?.settlement !== undefined
+    const hasRefreshProof = pr.alreadyLanded?.settlement !== undefined
     if (
       pr.integration === undefined ||
-      pr.alreadyMerged === undefined ||
+      pr.alreadyLanded === undefined ||
       pr.alreadyLandedAt === undefined ||
       hasRunProof === hasRefreshProof
     ) {
@@ -5109,9 +5109,9 @@ function ChangeMergeOutcome(pr: DeepReadonly<PR>): ChangeMergeOutcome {
       outcome: "already-landed",
       status: "already-landed",
       baseSha: pr.integration.baseSha,
-      candidateSha: pr.alreadyMerged.candidateSha,
-      candidateTreeSha: pr.alreadyMerged.candidateTreeSha,
-      baseTreeSha: pr.alreadyMerged.baseTreeSha,
+      candidateSha: pr.alreadyLanded.candidateSha,
+      candidateTreeSha: pr.alreadyLanded.candidateTreeSha,
+      baseTreeSha: pr.alreadyLanded.baseTreeSha,
       at: pr.alreadyLandedAt,
       ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
     }

@@ -258,7 +258,7 @@ describe("createGitDeploymentStore", () => {
         generation: result.generation,
         path: result.path,
         sha: result.sha,
-        result: habReleaseResult,
+        receipt: habReleaseResult,
       },
     }
 
@@ -275,7 +275,7 @@ describe("createGitDeploymentStore", () => {
           ...input,
           authorization: {
             ...input.authorization,
-            result: {
+            receipt: {
               ...habReleaseResult,
               retiredSource: { path: join(root, "wrong"), sha: result.sha, verification: "verified" },
             },
@@ -291,7 +291,7 @@ describe("createGitDeploymentStore", () => {
           ...input,
           authorization: {
             ...input.authorization,
-            result: { ...habReleaseResult, nonce: "strict-same-user-schema-has-no-nonce" },
+            receipt: { ...habReleaseResult, nonce: "strict-same-user-schema-has-no-nonce" },
           },
         },
         context,

@@ -516,6 +516,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(repeated).toEqual(first)
     expect(first.hash).toMatch(/^[0-9a-f]{64}$/u)
     expect(first.manifest.targetIdentity).toMatch(/^[0-9a-f]{64}$/u)
+    // The checkpoint composition identity of this exact config. A refactor or
+    // vocabulary rename must never move it: persisted event/state keys are
+    // labels, not code vocabulary (R2752). An INTENTIONAL persisted-contract
+    // change updates this constant consciously and adds a retained migration
+    // edge measured from the PRODUCTION journal's stored identity (the
+    // R2752/R2732 refusal prints it), never from a harness value.
+    expect(first.manifest.targetIdentity).toBe("b45cdd9c3cb1e83752bb472a0b1ecb50505abc6670786a4ee8e2f95fef30acd4")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
