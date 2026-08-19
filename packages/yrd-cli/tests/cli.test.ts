@@ -7919,7 +7919,7 @@ describe("runYrd", () => {
     }
   })
 
-  it.fails("offers only reversible submission for a stranded draft, never payload destruction", async () => {
+  it("offers only reversible submission for a stranded draft, never payload destruction", async () => {
     const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
     try {
       await app.bays.intake({
@@ -7961,7 +7961,7 @@ describe("runYrd", () => {
       blockedMs: 16_200_000,
       submitter: "@dev/7",
       reviewCertification: "unreviewed",
-      resolution: ["yrd pr submit issue/stranded --issue <ref>", "or withdraw it: yrd pr withdraw PR1 --burn-payload"],
+      resolution: ["yrd pr submit issue/stranded --issue <ref>"],
     }
     writeFileSync(
       join(stateDir, "status.json"),
