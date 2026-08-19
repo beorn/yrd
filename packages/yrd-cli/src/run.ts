@@ -2958,6 +2958,14 @@ async function ensureBayDependencies(
   io: YrdCliIO,
   env: NodeJS.ProcessEnv | undefined,
 ): Promise<void> {
+  // A Bay is the queue's own throwaway worktree — package resolution failing
+  // in it (a cold cache, a submodule the hook quarantine left unpopulated) is
+  // an environment fault, not a verdict on the branch. `refusal` blames the
+  // author and tells them to fix a branch that was never broken; infrastructure
+  // is the kind that retries (22917). Same code as the sibling provisioners in
+  // this file and in host.ts's runInCheckout/createPinIntentProvisioner.
+  const provisionFailure: (message: string) => never = (message) =>
+    raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
   await ensureWorkspaceDependencies(processService, {
     path,
     subject: `bay '${bay.id}'`,
@@ -2967,7 +2975,7 @@ async function ensureBayDependencies(
     ...(childInterruptionSignal(io) === undefined ? {} : { signal: childInterruptionSignal(io) }),
     onCommand: (argv) => io.stderr(`yrd: bay '${bay.id}' provisioning: ${argv.join(" ")}\n`),
     writeOutput: io.stderr,
-    fail: refusal,
+    fail: provisionFailure,
   })
 }
 
