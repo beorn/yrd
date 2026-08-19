@@ -4803,6 +4803,28 @@ describe("runYrd", () => {
     expect(app.jobs.get(checkJob!.id)).toMatchObject({ status: "queued" })
   })
 
+  it("names the bay binding and the branch remedy when bare create resolves a finished PR", async () => {
+    const checkRuns: string[] = []
+    const mergeRuns: string[] = []
+    const app = await createApp({ checkRuns, mergeRuns })
+    await openTestBay(app, { name: "finished" })
+
+    const submit = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("pr", "submit"), submit.io), submit.stderr()).toBe(0)
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
+
+    // The B94 shape (2026-08-19): the bay still binds its finished PR, and a
+    // bare `pr create` refused by naming that PR — a record the caller never
+    // mentioned, on a branch it never named — without saying the bay binding
+    // caused the resolution or that a branch selector is the fix.
+    const create = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("pr", "create"), create.io)).toBe(1)
+    expect(create.stderr()).toContain("bay 'B1' is bound to PR 'PR1' (integrated)")
+    expect(create.stderr()).toContain("pass a branch — yrd pr create <branch>")
+  })
+
   it("tells a bayless author which step is missing instead of that a lookup failed", async () => {
     const app = await createApp()
 
