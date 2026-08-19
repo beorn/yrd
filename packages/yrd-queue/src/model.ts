@@ -786,6 +786,19 @@ export type QueueAuditFinding = Readonly<{
    * out of a foreign version's JSON must remain readable. Producers emit the
    * closed {@link QueueAuditReviewCertification}. */
   reviewCertification?: string
+  /**
+   * Who a JUDGMENT disposition (a refusal with no mechanical remedy) routes
+   * to — a STATIC, repository-declared routing fact, deliberately different
+   * from {@link submitter}: `submitter` names an individual, recorded per
+   * instance, and is absent rather than guessed when unrecorded; `owner`
+   * names a ROLE, declared once for the whole repository (`.yrd.yml`
+   * `needsPerson.owner`), true regardless of who currently staffs it. A
+   * finding that carries `owner` at all always sets it to a real string — an
+   * unconfigured repository reads it as explicitly unowned, never by
+   * omitting the field, so the empty slot itself is what a reader sees
+   * (@i/10-merge-queue/22918-needs-person-unowned).
+   */
+  owner?: string
 }>
 
 /** How far a carrier got through review, derived ONLY from review facts the
@@ -862,6 +875,7 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "orphaned-requested-job",
   "unisolable-stale-plan",
   "admission-refusal-loop",
+  "admission-refusal-needs-person",
   "queue-never-started",
   "queue-progress-stalled",
   "config-drift",

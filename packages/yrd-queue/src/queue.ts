@@ -628,6 +628,15 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   flows?: YrdConfig
   /** Progress SLO declaration. Audit emits facts; paging remains a Hab concern. */
   progress?: QueueProgressPolicy
+  /**
+   * Static role routing for a `needs-person` disposition (an admission
+   * refusal with no mechanical remedy) — declared once for the repository
+   * (`.yrd.yml` `needsPerson.owner`), never guessed at read time. Unset keeps
+   * {@link DEFAULT_NEEDS_PERSON_OWNER}, which reads as explicitly unowned
+   * rather than silently omitting the fact
+   * (@i/10-merge-queue/22918-needs-person-unowned).
+   */
+  needsPersonOwner?: string
 }>
 
 /** Built-in candidate width when a repository does not declare `batch`. */
@@ -673,6 +682,15 @@ export const DEFAULT_QUEUE_PROGRESS_POLICY: QueueProgressPolicy = Object.freeze(
   refusalCount: ADMISSION_REFUSAL_LOOP_THRESHOLD,
   minAdmissionChecks: 10,
 })
+
+/**
+ * Owner string a `needs-person` finding carries when no repository config
+ * names one. Deliberately a sentence, not a blank or `undefined` — the
+ * finding's `owner` field is never omitted, so an unconfigured repository
+ * still SHOWS the empty slot to a reader instead of the reader having to
+ * infer it from an absent field (@i/10-merge-queue/22918-needs-person-unowned).
+ */
+export const DEFAULT_NEEDS_PERSON_OWNER = "unowned — no needsPerson.owner is configured in .yrd.yml"
 
 export type QueueAuditOptions = Readonly<{ now?: string }>
 
@@ -888,6 +906,9 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
 ): QueuePlugin<FinalShape<Steps>> {
   const steps = installSteps(options.steps)
   const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
+  const trimmedOwner = options.needsPersonOwner?.trim()
+  const needsPersonOwner =
+    trimmedOwner === undefined || trimmedOwner === "" ? DEFAULT_NEEDS_PERSON_OWNER : trimmedOwner
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   const batchSize = effectiveBatchSize(options.batch)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
@@ -987,6 +1008,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             configuredRunner,
             options.flows,
             progress,
+            needsPersonOwner,
             yrd.log.child("queue"),
             yrd.history,
             async () => (await yrd.historySnapshot()).state as unknown as DeepReadonly<RuntimeState>,
@@ -1206,6 +1228,7 @@ function createQueue<Shape extends ChangeShape>(
   configuredRunner: Runner | undefined,
   flows: YrdConfig | undefined,
   progress: QueueProgressPolicy,
+  needsPersonOwner: string,
   log: ConditionalLogger,
   history: JournalHistory<unknown> | undefined,
   historicalState: () => Promise<DeepReadonly<RuntimeState>>,
@@ -2959,7 +2982,7 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     },
-    audit: (options = {}) => auditQueues(runtime(), steps, progress, options),
+    audit: (options = {}) => auditQueues(runtime(), steps, progress, needsPersonOwner, options),
     eligibility(selector, projected) {
       // Called once per PR by the queue views, and the single largest stage of a
       // cold `queue ls` — resolvePR plus prEligibility together dominate it.
@@ -5957,6 +5980,7 @@ function auditQueues(
   state: DeepReadonly<RuntimeState>,
   steps: readonly RuntimeStep[],
   progress: QueueProgressPolicy,
+  needsPersonOwner: string,
   options: QueueAuditOptions,
 ): QueueAuditEmission {
   // Emissions, not readings: every code pushed below — or written inline into
@@ -6183,7 +6207,7 @@ function auditQueues(
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
   const queued = admissionQueue(state, steps)
-  const refusalFindings = admissionRefusalAuditFindings(state, queued, progress)
+  const refusalFindings = admissionRefusalAuditFindings(state, queued, progress, needsPersonOwner)
   findings.push(...refusalFindings)
   findings.push(
     ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
@@ -6195,6 +6219,7 @@ function admissionRefusalAuditFindings(
   state: DeepReadonly<RuntimeState>,
   queued: readonly DeepReadonly<PR>[],
   progress: QueueProgressPolicy,
+  needsPersonOwner: string,
 ): QueueAuditFindingEmission[] {
   const findings: QueueAuditFindingEmission[] = []
   const refused = Object.entries(state.queues.admissionRefusals).flatMap(([id, refusal]) => {
@@ -6209,9 +6234,33 @@ function admissionRefusalAuditFindings(
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
+    // A settled refusal stopped being a head-of-line RETRY loop the moment a
+    // person's judgment replaced automatic remediation — but "stop retrying"
+    // and "stop REPORTING" are different facts, and the original design
+    // conflated them: this exact branch used to `continue` here, and
+    // `queue audit` went silent the instant a refusal most needed a human
+    // (@i/10-merge-queue/22918-needs-person-unowned). Reported
+    // unconditionally, never gated on being the head of line — a parked PR
+    // lets others proceed around it, so it is no longer a queue-blocking
+    // wedge, but it is still an unresolved judgment call nobody owns until a
+    // person acts on it.
+    if (refusal.settlement !== undefined) {
+      findings.push({
+        code: "admission-refusal-needs-person",
+        message:
+          `merge request '${refusal.pr}' needs a person: its entry-check failure '${refusal.code}' has no ` +
+          `mechanical remedy — ${refusal.settlement.reason}. Owner: ${needsPersonOwner}.`,
+        pr: refusal.pr,
+        specimen: `pr:${refusal.pr}:needs-person`,
+        refusal: refusal.code,
+        since: refusal.settlement.settledAt,
+        owner: needsPersonOwner,
+      })
+      continue
+    }
     const sameCodeCount = refusal.sameCodeCount ?? refusal.count
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
-    if (refusal.settlement !== undefined || head?.id !== refusal.pr) continue
+    if (head?.id !== refusal.pr) continue
     const threshold = structurallyPermanentAdmissionRefusal(refusal.code) ? 1 : progress.refusalCount
     if (sameCodeCount < threshold) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))

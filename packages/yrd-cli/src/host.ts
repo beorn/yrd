@@ -1590,6 +1590,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     defaultBase: options.config.base,
     requires: options.config.requires,
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
+    ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
     ...(flowConfig === undefined ? {} : { flows: flowConfig }),
     resolveBaseSha: async (base) =>
       (
