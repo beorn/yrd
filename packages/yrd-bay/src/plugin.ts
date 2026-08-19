@@ -1616,6 +1616,21 @@ function openBay(
   const id = nextId("B", current.byId)
   const base = baseIdentity(args.base ?? defaultBase)
   const branch = args.branch ?? args.from ?? defaultBayBranch(args.name)
+  // A Bay's pushes reach materializeCarrier, which fast-forwards
+  // refs/heads/<branch> under a compare-and-swap. On a Bay whose branch IS its
+  // base that makes the Bay a second writer to the mainline ref, which the
+  // queue has to own alone — so refuse at open, the one place a Bay's branch
+  // and base are ever chosen (`bay/opened` has no other emitter, and no later
+  // Bay event rewrites either field). `base` arrives canonical — createBays'
+  // own `target` runs baseIdentity over it — so the branch side needs the same
+  // treatment for `origin/main` to be recognized as the ref `main` names.
+  if (baseIdentity(branch) === base) {
+    raiseFailure(
+      "refusal",
+      "bay-branch-equals-base",
+      `yrd: a bay's branch must differ from its base; branch '${branch}' and base '${base}' are the same ref`,
+    )
+  }
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.branch === branch)) {
     throw new Error(`yrd: branch '${branch}' is already open in another bay`)
   }
