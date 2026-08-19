@@ -2721,10 +2721,15 @@ checks: [{check: {run: "true"}}]
       return stdout
     }
 
-    expect((await statusFrom(repo)).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
-    expect((await statusFrom(nested)).split("\n", 1)[0]).toContain(`ROOT ${nested}`)
-    expect((await statusFrom(linked)).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
-    expect((await statusFrom(nested, ["--repo", repo])).split("\n", 1)[0]).toContain(`ROOT ${repo}`)
+    // The canonical root rides the top-line queue pill now (items 30/32b/33):
+    // `digit shortest-unique-path ⎇ branch`. A lone queue shortens to its
+    // basename, so the authority resolution shows as `repo` vs `pm` — and a
+    // linked worktree resolving to anything but its PRIMARY would surface as
+    // `linked-status` here.
+    expect((await statusFrom(repo)).split("\n", 1)[0]).toContain("1 repo ⎇ main")
+    expect((await statusFrom(nested)).split("\n", 1)[0]).toContain("1 pm ⎇ main")
+    expect((await statusFrom(linked)).split("\n", 1)[0]).toContain("1 repo ⎇ main")
+    expect((await statusFrom(nested, ["--repo", repo])).split("\n", 1)[0]).toContain("1 repo ⎇ main")
   })
 
   it("refuses literal --steps merge without starting the certifying check process", async () => {
