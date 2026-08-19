@@ -153,6 +153,45 @@ describe("planYrdComposition", () => {
     })
   })
 
+  it("resolves bare `yrd watch` to the repository containing the invocation directory (item 35)", () => {
+    // #undead (operator ruling 2026-08-18): the all-repository watch refusal
+    // is dead. The watch is a pure reader whose DEFAULT discovery tier is
+    // the current repository (item 37f) — cwd inside a declared repository
+    // picks it; a cwd inside a nested declaration picks the deepest match's
+    // declaration order (first containing match wins here: pm's path nests
+    // under /repo, so a pm cwd matches /repo first only if /repo is listed
+    // first — the declaration order is the tiebreak the composition owns).
+    const fromCode = planYrdComposition(["queue", "list", "--watch"], composition, {
+      env: {},
+      cwd: "/repo",
+      authority: identityAuthority,
+    })
+    expect(fromCode).toEqual({
+      kind: "repository",
+      repository: { name: "code", path: "/repo" },
+      args: ["--repo", "/repo", "queue", "list", "--watch"],
+    })
+
+    // Outside every declared repository the primary (first) declaration wins.
+    const fromElsewhere = planYrdComposition(["watch"], composition, {
+      env: {},
+      cwd: "/somewhere/else",
+      authority: identityAuthority,
+    })
+    expect(fromElsewhere).toEqual({
+      kind: "repository",
+      repository: { name: "code", path: "/repo" },
+      args: ["--repo", "/repo", "queue", "list", "--watch"],
+    })
+
+    // The dead refusal never fires from any watch spelling.
+    for (const args of [["watch"], ["queue", "watch"], ["queue", "--watch"]]) {
+      expect(() =>
+        planYrdComposition(args, composition, { env: {}, cwd: "/repo", authority: identityAuthority }),
+      ).not.toThrow()
+    }
+  })
+
   it.each([
     { label: "--repo", args: ["--repo", "/elsewhere", "queue", "run"], env: {} },
     { label: "--repo=", args: ["--repo=/elsewhere", "queue", "run"], env: {} },

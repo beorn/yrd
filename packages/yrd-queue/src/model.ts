@@ -1080,12 +1080,14 @@ function resolveQueueRecord(state: QueuesState, id: RunId): QueueRecord | undefi
 }
 
 /** The timeline and queue views print a run as `<base>#<number>` (`main#324`
- * for run `R324`); the resolver must accept what those surfaces teach the
- * operator to copy. Bare numbers stay PR selectors — `yrd cancel 324` already
- * means PR324 — so only the full printed form aliases here. */
+ * for run `R324`) and, label-elided on a single visible queue, as `#324`
+ * (operator rulings 2026-08-18, items 34/38); the resolver must accept what
+ * those surfaces teach the operator to copy. `#324` refuses loudly when two
+ * bases share the number (the shared selector machinery names both). Bare
+ * numbers stay PR selectors — `yrd cancel 324` already means PR324. */
 function printedRunRefAliases(record: QueueRecord): readonly string[] {
   const number = /^R(\d+)$/u.exec(record.id)?.[1]
-  return number === undefined ? [] : [`${record.base}#${number}`]
+  return number === undefined ? [] : [`${record.base}#${number}`, `#${number}`]
 }
 
 function compareRunIds(left: RunId, right: RunId): number {

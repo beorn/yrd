@@ -35,6 +35,7 @@ export type YrdRepositoryAlias = Readonly<{
 
 export type YrdRepositoryAliasInvocation =
   | Readonly<{ kind: "all-repositories-read"; args: string[] }>
+  | Readonly<{ kind: "all-repositories-watch"; args: string[] }>
   | (YrdRepositoryAlias & Readonly<{ kind: "repository-read" | "repository-write"; args: string[] }>)
   | Readonly<{ kind: "bypass"; args: string[] }>
 
@@ -342,8 +343,13 @@ export function normalizeYrdRepositoryAliasInvocation(
     if (command !== "list" && command !== "_list") return { kind: "bypass", args }
     const tail = [...commandFlags, ...resolved.tail]
     if (tail.includes("--watch")) {
-      const remedies = namedAlternatives([...byName.keys()].map((name) => `'yrd queue ${name} --watch'`))
-      usage(`all-repository queue watch is unsupported; run ${remedies}`)
+      // Bare `yrd watch` works (operator ruling 2026-08-18, item 35 —
+      // #undead; the old refusal branch is dead). The watch is a pure reader
+      // and its DEFAULT discovery tier is the current repository (item 37f);
+      // the planner resolves which declared repository the invocation
+      // directory belongs to. Cross-repository unions ride the future
+      // --config tier, not this default.
+      return { kind: "all-repositories-watch", args: [...prefix, "queue", "list", ...tail] }
     }
     return { kind: "all-repositories-read", args: [...prefix, "queue", "list", ...tail] }
   }

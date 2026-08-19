@@ -164,6 +164,37 @@ export function planYrdComposition(
   }
   const normalized: YrdRepositoryAliasInvocation = normalizeYrdRepositoryAliasInvocation(args, composition.aliases)
   if (normalized.kind === "bypass") return { kind: "bypass", args: normalized.args }
+  if (normalized.kind === "all-repositories-watch") {
+    // Bare `yrd watch` (item 35): one live watch over the CURRENT
+    // repository's journal — the declared repository containing the
+    // invocation directory, the first declaration when cwd is outside every
+    // one (e.g. a linked worktree the declarations do not name). The watch
+    // shows all of that repository's queues; the composition stays the
+    // WRITER boundary and never constrains this read (item 37f).
+    const cwd = options.cwd ?? process.cwd()
+    const resolved = composition.aliases.map((alias) => ({
+      alias,
+      path: declaredPath(composition, options, alias.repository.path),
+    }))
+    const within = resolved.find(({ path }) => cwd === path || cwd.startsWith(`${path}/`))
+    const chosen = within ?? resolved[0]
+    if (chosen === undefined) {
+      throw new Error(`yrd: ${YRD_REPOSITORY_ALIASES_ENV} declared no repositories to watch`)
+    }
+    const queueIndex = normalized.args.indexOf("queue")
+    if (queueIndex < 0) throw new Error("yrd: normalized watch invocation lost its queue command")
+    const composed = [
+      ...normalized.args.slice(0, queueIndex),
+      "--repo",
+      chosen.path,
+      ...normalized.args.slice(queueIndex),
+    ]
+    return {
+      kind: "repository",
+      repository: Object.freeze({ name: chosen.alias.repository.name, path: chosen.path }),
+      args: composed,
+    }
+  }
   if (normalized.kind === "all-repositories-read") {
     return {
       kind: "all-repositories",

@@ -1701,6 +1701,11 @@ describe("Queue", () => {
     expect(app.queue.get("main#1")).toMatchObject({ id: "R1" })
     expect(app.queue.get("MAIN#1")).toMatchObject({ id: "R1" })
     expect(app.queue.get("other#1")).toBeUndefined()
+    // The label-elided `#N` form the single-queue watch prints (operator
+    // rulings 2026-08-18, items 34/38) resolves when unambiguous in this
+    // repository; the shared selector machinery refuses loudly when two
+    // bases share the number.
+    expect(app.queue.get("#1")).toMatchObject({ id: "R1" })
   })
 
   it("resolves a canonical Queue run without enumerating history while preserving selector fallback", async () => {

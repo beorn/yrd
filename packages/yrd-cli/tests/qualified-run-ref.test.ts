@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { parseQualifiedRunRef, requireUnqualifiedRunSelector } from "../src/qualified-run-ref.ts"
+import { parseQualifiedRunRef, requireUnqualifiedRunSelector, resolveCanonicalRunSelector } from "../src/qualified-run-ref.ts"
 
 describe("parseQualifiedRunRef", () => {
   it.each([
@@ -72,5 +72,33 @@ describe("requireUnqualifiedRunSelector", () => {
     expect(() => requireUnqualifiedRunSelector("2:release/next#4", "finish")).toThrow(
       "use the bare form 'release/next#4'",
     )
+  })
+})
+
+describe("resolveCanonicalRunSelector (items 34/36 — the path@branch#N address)", () => {
+  it("strips a matching repository path to the bare run form", () => {
+    expect(resolveCanonicalRunSelector("/hh@main#23423", "/hh")).toBe("main#23423")
+  })
+
+  it("accepts the friendly (home-relative) spelling of this repository", () => {
+    // The formatter is the same one every surface prints with, so what the
+    // watch shows is what the CLI accepts.
+    expect(resolveCanonicalRunSelector("/hh@release/next#7", "/hh")).toBe("release/next#7")
+  })
+
+  it("refuses a foreign repository path instead of answering about the wrong journal", () => {
+    expect(() => resolveCanonicalRunSelector("/hh/pm@main#5", "/hh")).toThrow(
+      /names repository '\/hh\/pm', but this command reads '\/hh'/u,
+    )
+  })
+
+  it("refuses when no repository root is known to judge the address against", () => {
+    expect(() => resolveCanonicalRunSelector("/hh@main#5", undefined)).toThrow(/use the bare form 'main#5'/u)
+  })
+
+  it("passes every non-canonical token through untouched", () => {
+    for (const token of ["main#5", "#5", "R5", "PR123", "pm:main#5", "topic@v2#3"]) {
+      expect(resolveCanonicalRunSelector(token, "/hh"), token).toBe(token)
+    }
   })
 })

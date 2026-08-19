@@ -1,4 +1,5 @@
 import { raiseFailure } from "@yrd/core"
+import { friendlyRepositoryPath, parseQueueRunAddress } from "./queue-naming.ts"
 
 /**
  * `<repository>:<base>#<number>` — the run reference that stays unambiguous
@@ -76,5 +77,38 @@ export function requireUnqualifiedRunSelector(selector: string, subcommand: stri
     "usage",
     "invalid-usage",
     `qualified run reference '${selector}' needs the composition host's repository declarations, which this process did not receive (standalone Yrd, --repo and YRD_REPO all bypass the host adapter); use the bare form '${qualified.run}' here, or run 'yrd queue ${subcommand} ${qualified.repository} ${qualified.run}' from the composition host`,
+  )
+}
+
+/**
+ * Resolve the canonical `path@branch#N` run address (operator rulings
+ * 2026-08-18, items 34/36) against THIS process's repository: the path half
+ * picks the repository, and one Yrd process reads exactly one journal — so a
+ * matching path strips to the bare `<branch>#<number>` the resolver accepts,
+ * and a foreign path refuses loudly instead of answering about the wrong
+ * repository (both repositories can hold a run of the same number).
+ *
+ * A token that is not the canonical form passes through untouched; with no
+ * known repository root the address cannot be judged, so it refuses and
+ * names the bare form that works anywhere.
+ */
+export function resolveCanonicalRunSelector(selector: string, repositoryRoot: string | undefined): string {
+  const address = parseQueueRunAddress(selector)
+  if (address === undefined) return selector
+  if (repositoryRoot !== undefined) {
+    const friendly = friendlyRepositoryPath(repositoryRoot)
+    if (address.path === repositoryRoot || address.path === friendly) return address.run
+    raiseFailure(
+      "usage",
+      "invalid-usage",
+      `run address '${selector}' names repository '${address.path}', but this command reads '${friendly}'; ` +
+        `run it from '${address.path}', or use the bare form '${address.run}' here`,
+    )
+  }
+  raiseFailure(
+    "usage",
+    "invalid-usage",
+    `run address '${selector}' names a repository, but this command resolved none to compare it against; ` +
+      `use the bare form '${address.run}'`,
   )
 }
