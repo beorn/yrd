@@ -2022,7 +2022,7 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
     // proved this base existed a moment ago, so its disappearance is a race
     // worth naming, not an authorization verdict.
     if (baseSha === undefined) {
-      throw new Error(`yrd: base branch '${intent.base}' disappeared between admission and resolution`)
+      throw new Error(`yrd: base branch '${intent.base}' disappeared between its entry check and resolution`)
     }
     return { name: intent.name, issue: intent.name, base: intent.base, baseSha, branch: carrier }
   }
