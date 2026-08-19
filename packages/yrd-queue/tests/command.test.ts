@@ -4869,12 +4869,18 @@ describe("Queue command adapters", () => {
     })
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     const dir = join(artifactRoot, "R-refused", "0-typecheck", "attempt-1")
-    expect((await readdir(dir)).toSorted()).toEqual(["error.json", "output.log"])
+    expect((await readdir(dir)).toSorted()).toEqual(["error.json", "output.log", "terminal.json"])
     expect(JSON.parse(await readFile(join(dir, "error.json"), "utf8"))).toEqual(outcome.error)
     const disclosure = await readFile(join(dir, "output.log"), "utf8")
     expect(disclosure).toContain("queue-environment-refused")
     expect(disclosure).toContain("candidate-provision-failed")
     expect(disclosure).toContain("lockfile had changes, but lockfile is frozen")
+    // 22896: no command ever ran here — the refusal fired before spawning one —
+    // so exitCode/signal are null TOGETHER, distinct from a command that ran
+    // and exited nonzero. Either shape beats today's silence, but conflating
+    // them would misreport which one happened.
+    const terminal = JSON.parse(await readFile(join(dir, "terminal.json"), "utf8"))
+    expect(terminal).toMatchObject({ status: "failure", exitCode: null, signal: null, timedOut: false })
   })
 
   it("adds the typed error to a failing check without clobbering its command streams", async () => {
@@ -4902,10 +4908,23 @@ describe("Queue command adapters", () => {
     expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "typecheck-failed" } })
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") return
     const dir = join(artifactRoot, "R-red", "0-typecheck", "attempt-1")
-    expect((await readdir(dir)).toSorted()).toEqual(["error.json", "output.log", "stderr.log", "stdout.log"])
+    expect((await readdir(dir)).toSorted()).toEqual([
+      "error.json",
+      "output.log",
+      "stderr.log",
+      "stdout.log",
+      "terminal.json",
+    ])
     expect(JSON.parse(await readFile(join(dir, "error.json"), "utf8"))).toEqual(outcome.error)
     expect(await readFile(join(dir, "stdout.log"), "utf8")).toContain("checked-output")
     expect(await readFile(join(dir, "output.log"), "utf8")).toContain("checked-diagnostic")
+    // 22896: the command DID run and exit 1 — a reader must not have to guess
+    // that from stream contents, and must not confuse it with a check that
+    // never got as far as spawning a process at all.
+    const terminal = JSON.parse(await readFile(join(dir, "terminal.json"), "utf8"))
+    expect(terminal).toMatchObject({ status: "failure", exitCode: 1, signal: null, timedOut: false })
+    expect(new Date(terminal.startedAt).getTime()).not.toBeNaN()
+    expect(new Date(terminal.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(terminal.startedAt).getTime())
   })
 
   it("checks the immutable Candidate already materialized by the Runner Context", async () => {
@@ -5156,10 +5175,17 @@ describe("Queue command adapters", () => {
         ],
       },
     })
-    expect((await readdir(dir)).sort()).toEqual(["output.log", "stderr.log", "stdout.log"])
+    expect((await readdir(dir)).sort()).toEqual(["output.log", "stderr.log", "stdout.log", "terminal.json"])
     expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
     expect(Array.from(await readFile(stderrPath))).toEqual(Array.from(stderr))
     expect(await readFile(outputPath, "utf8")).toBe("first warning\n€ last\n")
+    // 22896: a GREEN check is exactly the case artifacts alone could never
+    // distinguish from one still running or crashed silently — the terminal
+    // record is what makes that distinction possible without the journal.
+    const terminal = JSON.parse(await readFile(join(dir, "terminal.json"), "utf8"))
+    expect(terminal).toMatchObject({ status: "success", exitCode: 0, signal: null, timedOut: false, durationMs: 10 })
+    expect(new Date(terminal.startedAt).getTime()).not.toBeNaN()
+    expect(new Date(terminal.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(terminal.startedAt).getTime())
   }, 10_000)
 
   it("grows a real slow command artifact while the child is still running", async () => {
