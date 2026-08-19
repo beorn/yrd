@@ -899,40 +899,40 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.code, result.stderr).toBe(0)
 
     // All three post-states, the model doc's own inventory for one branch.
+    // The archive ref's own path now embeds the FULL sha as a child segment
+    // (review-panel revision, amending phase 1a's `-shortsha` suffix).
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/heads/issue/archive-me")).toBe("")
-    expect(
-      await git(f.receiver.receiverPath, "rev-parse", `refs/yrd/archive/issue/archive-me-${headSha.slice(0, 12)}`),
-    ).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "rev-parse", `refs/yrd/archive/issue/archive-me/${headSha}`)).toBe(
+      headSha,
+    )
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/archive-me")).toBe("")
   })
 
-  it("refuses to re-archive a branch resurrected at the identical sha it was already archived at", async () => {
+  it("re-archiving a branch resurrected at the identical sha is accepted — a legal newest-wins move, not a collision", async () => {
     // The collision class @yrd/queue/candidate-refs.ts's header (22332) fixed
-    // by naming refs off composed content instead of a pre-evidence id: here
-    // the "id" (the shortsha suffix) is ALREADY content-addressed by
-    // construction, so a resurrection at the same content lands on the SAME
-    // archive name on purpose — and must be a loud pre-receive refusal, never
-    // a silent overwrite or a second, shadowing entry.
-    const f = await fixture("archive-resurrect-collision")
+    // by naming refs off composed content instead of a pre-evidence id — the
+    // review panel's revision to this ref's shape (full sha as a path child,
+    // not a shortsha suffix) goes one step further: since the archive ref's
+    // own path now EMBEDS the exact content, a resurrection at the identical
+    // sha targets the exact same ref at the exact same value on purpose, and
+    // writing that again is explicitly legal (a no-op), never a refusal.
+    const f = await fixture("archive-resurrect-legal")
     await git(f.mainRepo, "switch", "-qc", "issue/archive-twice")
     const headSha = await commit(f.mainRepo, "archive-twice.txt")
     const env = await installHookHost(f.root, { "issue/archive-twice": target(f.baseSha) })
     expect((await push(f, "issue/archive-twice:refs/heads/issue/archive-twice", env)).code).toBe(0)
     expect((await push(f, ":refs/heads/issue/archive-twice", env)).code).toBe(0)
-    const archiveRef = `refs/yrd/archive/issue/archive-twice-${headSha.slice(0, 12)}`
+    const archiveRef = `refs/yrd/archive/issue/archive-twice/${headSha}`
     expect(await git(f.receiver.receiverPath, "rev-parse", archiveRef)).toBe(headSha)
 
     // Resurrect the branch at the EXACT same sha (its object already lives in
     // the receiver's own store from the first, successful push) the way this
     // file's fixtures always simulate out-of-band ref state — a direct
-    // update-ref, never a push — then try to archive it again.
+    // update-ref, never a push — then archive it again.
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/archive-twice", headSha)
     const result = await push(f, ":refs/heads/issue/archive-twice", env)
-    expect(result.code).not.toBe(0)
-    expect(result.stderr).toContain("would collide with the existing archive entry")
-    // Refused before git deletes anything: the resurrected branch survives,
-    // and the original archive entry is untouched.
-    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/archive-twice")).toBe(headSha)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/heads/issue/archive-twice")).toBe("")
     expect(await git(f.receiver.receiverPath, "rev-parse", archiveRef)).toBe(headSha)
   })
 
@@ -963,7 +963,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await git(f.mainRepo, "switch", "-qc", "work")
     const headSha = await commit(f.mainRepo, "direct.txt")
     const env = await installHookHost(f.root, { work: target(f.baseSha) })
-    const archiveRef = `refs/yrd/archive/some-branch-${headSha.slice(0, 12)}`
+    const archiveRef = `refs/yrd/archive/some-branch/${headSha}`
     // An ordinary accepted push first — an object must actually exist in the
     // RECEIVER's own store (not just f.mainRepo's) before a low-level
     // update-ref against receiverPath can name it below; a push a pre-receive
@@ -1088,9 +1088,9 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.code, result.stderr).toBe(0)
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/draft/issue/archive-scope")).toBe("")
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/archive-scope")).toBe("")
-    expect(
-      await git(f.receiver.receiverPath, "rev-parse", `refs/yrd/archive/issue/archive-scope-${headSha.slice(0, 12)}`),
-    ).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "rev-parse", `refs/yrd/archive/issue/archive-scope/${headSha}`)).toBe(
+      headSha,
+    )
   })
 
   it("auto-classifies a branch at creation by the base's auto: block, precedence ignore over an overlapping submit match", async () => {
@@ -1267,6 +1267,113 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // push did not re-submit on the manually-submitted branch's behalf.
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/manual")).toBe(firstHead)
     expect(secondHead).not.toBe(firstHead)
+  })
+
+  // ── review-panel deltas on top of 1a+1b (five changes; see the phase-1b
+  // commit for the full list) ─────────────────────────────────────────────
+
+  it("refuses to ignore a branch while a live submit exists on it — submitted work can never be hidden", async () => {
+    const f = await fixture("ignore-live-submit")
+    await git(f.mainRepo, "switch", "-qc", "issue/live-submit")
+    const headSha = await commit(f.mainRepo, "live.txt")
+    const env = await installHookHost(f.root, { "issue/live-submit": target(f.baseSha) })
+    expect((await push(f, "issue/live-submit:refs/heads/issue/live-submit", env)).code).toBe(0)
+    expect((await push(f, `${headSha}:refs/yrd/submit/issue/live-submit`, env)).code).toBe(0)
+
+    const result = await push(f, `${headSha}:refs/yrd/ignore/issue/live-submit`, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("submitted work can never be hidden")
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/ignore/issue/live-submit")).toBe("")
+  })
+
+  it("accepts ignoring a branch whose only submit already landed on main — merged is not live, contrasted against a still-live submit in the same test", async () => {
+    const f = await fixture("ignore-merged-submit")
+    const env = await installHookHost(f.root, {
+      "issue/merged-submit": target(f.baseSha),
+      "issue/still-live": target(f.baseSha),
+    })
+
+    await git(f.mainRepo, "switch", "-qc", "issue/merged-submit")
+    const mergedHead = await commit(f.mainRepo, "merged.txt")
+    expect((await push(f, "issue/merged-submit:refs/heads/issue/merged-submit", env)).code).toBe(0)
+    expect((await push(f, `${mergedHead}:refs/yrd/submit/issue/merged-submit`, env)).code).toBe(0)
+
+    // A sibling branch whose submit stays live throughout — the discriminating
+    // contrast: without it, "merged accepted" would be indistinguishable from
+    // "the live-submit gate never ran at all".
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "switch", "-qc", "issue/still-live")
+    const liveHead = await commit(f.mainRepo, "live.txt")
+    expect((await push(f, "issue/still-live:refs/heads/issue/still-live", env)).code).toBe(0)
+    expect((await push(f, `${liveHead}:refs/yrd/submit/issue/still-live`, env)).code).toBe(0)
+
+    // Simulate the queue's own merge for ONLY the first branch: advance
+    // mainRepo's "main" to include mergedHead, so ITS submit becomes an
+    // ancestor of main — "merged", per the model doc's own derivation, no
+    // longer live. issue/still-live's submit is a sibling, never on main.
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "merge", "-q", "--ff-only", "issue/merged-submit")
+
+    const merged = await push(f, `${mergedHead}:refs/yrd/ignore/issue/merged-submit`, env)
+    expect(merged.code, merged.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/issue/merged-submit")).toBe(mergedHead)
+
+    const stillLive = await push(f, `${liveHead}:refs/yrd/ignore/issue/still-live`, env)
+    expect(stillLive.code).not.toBe(0)
+    expect(stillLive.stderr).toContain("submitted work can never be hidden")
+  })
+
+  it("materializes birth classification atomically with the creation push itself — no drain() or intake anywhere in this test", async () => {
+    const f = await fixture("auto-classify-atomic")
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    const autoConfig = { ignore: ["task/wip-*"] }
+    const env = await installHookHost(
+      f.root,
+      { "task/wip-atomic": target(f.baseSha) },
+      undefined,
+      undefined,
+      autoConfig,
+    )
+    await git(f.mainRepo, "switch", "-qc", "task/wip-atomic")
+    const headSha = await commit(f.mainRepo, "atomic.txt")
+    const result = await push(f, "task/wip-atomic:refs/heads/task/wip-atomic", env)
+    expect(result.code, result.stderr).toBe(0)
+    // The classification is already materialized from the push alone: proves
+    // it rides the post-receive step that accepts the branch-creation push,
+    // not a later drain()/intake this test deliberately never calls.
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/task/wip-atomic")).toBe(headSha)
+  })
+
+  it("does not materialize a submit ref at creation when the new branch's tip is already an ancestor of the base — contrasted against a sibling with genuinely new content, neither using drain()", async () => {
+    const f = await fixture("auto-submit-noop-creation")
+    await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
+    const autoConfig = { submit: ["task/straight-*"] }
+    const env = await installHookHost(
+      f.root,
+      { "task/straight-old": target(f.baseSha), "task/straight-new": target(f.baseSha) },
+      undefined,
+      undefined,
+      autoConfig,
+    )
+    // Created at EXACTLY main's own current tip (no new commit) — trivially
+    // already an ancestor of main, the same "nothing left to submit" shape
+    // validateSubmitRefValue refuses outright for a direct submit push. A
+    // branch creation must never be refused for this — only silently skip
+    // the classification write.
+    await git(f.mainRepo, "switch", "-qc", "task/straight-old")
+    expect((await push(f, "task/straight-old:refs/heads/task/straight-old", env)).code).toBe(0)
+
+    // A sibling with genuinely NEW content, created from the same starting
+    // point — the discriminating contrast: without it, "old gets nothing"
+    // would be indistinguishable from "classification never ran at all"
+    // (neither test call here goes through drain()/intake).
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "switch", "-qc", "task/straight-new")
+    const newHead = await commit(f.mainRepo, "new.txt")
+    expect((await push(f, "task/straight-new:refs/heads/task/straight-new", env)).code).toBe(0)
+
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/task/straight-old")).toBe("")
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-new")).toBe(newHead)
   })
 
   // Passes before this change as well as after, deliberately: opening one

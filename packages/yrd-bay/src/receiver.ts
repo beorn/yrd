@@ -427,6 +427,13 @@ async function finalizeReceiverUpdates(
         `post-receive ref '${update.ref}' is ${current ?? "missing"}, expected ${update.newSha}`,
       )
       await validateStored(receiver, result, options)
+      // Birth classification rides this same post-receive step, atomic-ish
+      // with the creation push itself — see applyCreationClassification's
+      // doc. Never a refs/for result (result.change !== undefined): those
+      // already submit unconditionally via the drain-time dual-write.
+      if (ZERO_SHA.test(result.oldSha) && result.change === undefined) {
+        await applyCreationClassification(receiver, update, result.branch, result.intake.base, options)
+      }
     } else {
       // No prepared entry exists — either pre-receive never ran (a recovery/
       // direct-call edge case) or this update's `authorize()` never stores one
@@ -457,6 +464,9 @@ async function finalizeReceiverUpdates(
       } else if (authorized.kind === "intake") {
         result = makeResult(update, authorized, clock)
         await storeResult(receiver, "prepared", result)
+        if (ZERO_SHA.test(update.oldSha) && authorized.intent === undefined) {
+          await applyCreationClassification(receiver, update, authorized.branch, authorized.target.base, options)
+        }
       }
       // "submit-ref": git's own ref update already applied the write (or the
       // delete); there is nothing further to do at post-receive.
@@ -502,32 +512,20 @@ async function drainReceiverInbox(
         // not have happened for a result nothing downstream has accepted yet.
         if (result.change !== undefined) {
           await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
-        } else {
-          // An ordinary `refs/heads/` result (never a refs/for one — those
-          // took the branch above unconditionally): evaluate the `auto:`
-          // scope classification, same after-intake timing as the dual-write.
+        } else if (!ZERO_SHA.test(result.oldSha)) {
+          // An ordinary push to an EXISTING branch (never creation — that is
+          // `applyCreationClassification`'s job, run atomically with the
+          // creation push itself at post-receive, not deferred here). "auto.
+          // submit is the express lane... every push to an auto-submit
+          // branch submits its exact tip" — lane-ness is re-derived from the
+          // CURRENT config on every push, never from whether a submit ref
+          // already exists (a manual submit must not turn an unrelated
+          // branch into a lane). Draft/ignore/no-match are creation-only by
+          // construction: nothing re-checks them on a later push.
           const verdict = await evaluateClassification(receiver, options, result.intake.base, result.branch)
-          if (ZERO_SHA.test(result.oldSha) && verdict === "ignore") {
-            // Birth classification, creation only: an ignore-match materializes
-            // the ignore ref at this pushed tip. A submit-match falls through
-            // to the branch below — it is BOTH the birth write and (via the
-            // SAME check, unconditioned on oldSha) the persisting lane.
-            await receiverGit(receiver, ["update-ref", `${IGNORE_REF_PREFIX}${result.branch}`, result.headSha], {
-              env: options.env,
-            })
-          } else if (verdict === "submit") {
-            // "auto.submit is the express lane... every push to an auto-submit
-            // branch submits its exact tip" — re-evaluated from the CURRENT
-            // config on every push (never from whether a submit ref already
-            // exists: a manual submit must not turn a branch into a lane), so
-            // this one check covers both the creation write and every later
-            // plain push while the branch's name keeps matching.
+          if (verdict === "submit") {
             await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
           }
-          // "draft", or no match at all: nothing to write — draft is the
-          // default (tracked, no ref) and no-match is fully untracked. Either
-          // way this is creation-only (a later push to a draft/untracked
-          // branch never re-evaluates draft/no-match, only submit).
         }
         await rm(path)
         await syncDir(receiver.inboxDir)
@@ -1063,40 +1061,85 @@ async function validateSubmitRefValue(
 }
 
 /**
- * The archive shelf name a deleted branch lands on — the branch name plus the
- * old tip's 12-char abbreviation, the format the model doc names verbatim
- * (`refs/yrd/archive/task/fix-drain-<sha>`). Centralized so the precondition
- * check (`validateArchival`) and the transaction that actually creates it
- * (`applyArchival`) can never compute two different names for the same event.
+ * Whether `sha` is already an ancestor of `base`'s CURRENT tip in the main
+ * repository — "nothing left to submit", the same fact `validateSubmitRefValue`
+ * refuses a direct submit push for above. `validateSubmitRefValue` keeps its
+ * own inline computation (already shipped, already tested, and it needs a
+ * DISTINCT refusal message when the base fails to resolve at all); this
+ * standalone boolean is for callers that respond to the SAME fact with
+ * something other than a refusal — silence (`applyCreationClassification`'s
+ * no-op guard) or a different refusal entirely (`isSubmitLive` below).
  */
-function archiveRefFor(branch: string, oldSha: string): string {
-  return `${ARCHIVE_REF_PREFIX}${branch}-${oldSha.slice(0, 12)}`
+async function isAncestorOfBase(
+  receiver: GitPushReceiver,
+  sha: string,
+  base: string,
+  env?: Environment,
+): Promise<boolean> {
+  const baseTip = await mainGit(
+    receiver.process,
+    receiver.mainRepo,
+    ["rev-parse", "--verify", `refs/heads/${base}^{commit}`],
+    { env, allowFailure: true },
+  )
+  if (baseTip.code !== 0) return false
+  const landed = await receiverGit(receiver, ["merge-base", "--is-ancestor", sha, baseTip.stdout], {
+    env,
+    allowFailure: true,
+    includeMainObjects: true,
+  })
+  return landed.code === 0
 }
 
 /**
- * Everything that must hold before a `refs/heads/<branch>` deletion is
- * allowed to proceed at all: the archive name it will land on must not
- * already be taken. Run at BOTH hook stages, same as pin/carrier/config
- * above — pre-receive is what actually protects the branch, since only
- * pre-receive can still refuse the push before git deletes anything; once
- * accepted, git applies the deletion itself (the hook never deletes the
- * branch ref — see `applyArchival`), so a failure caught only at post-receive
- * would mean the branch is already gone with nothing archived. This check
- * existing at both stages narrows that race, it does not close it — the same
- * residual window every other dual-stage check in this file already accepts.
+ * Whether `refs/yrd/submit/<branch>` is LIVE right now, the model doc's own
+ * definition verbatim: reachable from the branch's current tip AND not yet
+ * an ancestor of its resolved base. Used only by the ignore-refusal check in
+ * `authorize()` ("submitted work can never be hidden") — a merged submit is
+ * not live, so ignoring a branch whose only submit already landed is fine,
+ * the same way the model doc treats "merged" as no longer needing protection.
+ * If the base cannot be resolved at all (no bay tracks this branch any more),
+ * this reads as NOT live rather than refusing blind on an unprovable fact —
+ * erring toward allowing the ignore over inventing a refusal from a base this
+ * function cannot even name.
  */
-async function validateArchival(
+async function isSubmitLive(
   receiver: GitPushReceiver,
   update: ReceiverRefUpdate,
+  options: ReceiverHookOptions,
   branch: string,
-  env?: Environment,
-): Promise<void> {
-  const archiveRef = archiveRefFor(branch, update.oldSha)
-  const existing = await refValue(receiver, archiveRef, env)
-  check(
-    existing === null,
-    `archiving branch '${branch}' at ${update.oldSha.slice(0, 12)} would collide with the existing archive entry '${archiveRef}'`,
-  )
+  submitSha: string,
+): Promise<boolean> {
+  const branchTip = await refValue(receiver, `${BRANCH_PREFIX}${branch}`, options.env)
+  if (branchTip === null) return false
+  const reachable = await receiverGit(receiver, ["merge-base", "--is-ancestor", submitSha, branchTip], {
+    env: options.env,
+    allowFailure: true,
+  })
+  if (reachable.code !== 0) return false
+  const resolved = await options.resolveTarget(branch, update, undefined)
+  if (!resolved) return false
+  const target = normalizeTarget(resolved, receiver)
+  return !(await isAncestorOfBase(receiver, submitSha, target.base, options.env))
+}
+
+/**
+ * The archive shelf name a deleted branch lands on — the branch as a path
+ * PREFIX, the archived commit's FULL sha as the final segment (review-panel
+ * revision of the original `<branch>-<shortsha>` suffix format; amends the
+ * shape landed in phase 1a). Two collision classes this kills structurally,
+ * not just probabilistically: re-archiving a branch at IDENTICAL content (the
+ * full path is then byte-identical too — see `applyArchival`'s `update`, not
+ * `create`, for why that is now a legal no-op rather than a refusal) and a
+ * branch name that happens to look like another branch's shortened archive
+ * suffix (the branch is now an exact path SEGMENT, never a string
+ * concatenated with a hyphen — git's own ref hierarchy disambiguates it).
+ * Also makes every archival of one branch name naturally enumerable:
+ * `for-each-ref refs/yrd/archive/<branch>` lists every episode. Centralized
+ * so `applyArchival` is the only place that computes it.
+ */
+function archiveRefFor(branch: string, oldSha: string): string {
+  return `${ARCHIVE_REF_PREFIX}${branch}/${oldSha}`
 }
 
 /**
@@ -1107,7 +1150,13 @@ async function validateArchival(
  * apply all-or-nothing — a bad or unmet command anywhere in the batch leaves
  * every ref in the batch untouched) that:
  *
- *   - creates the archive shelf entry at the branch's old tip,
+ *   - sets the archive shelf entry to the branch's old tip. `update`, not
+ *     `create`: because the ref's own path now embeds the full sha
+ *     (`archiveRefFor`), re-archiving IDENTICAL content targets the exact
+ *     same ref at the exact same value — legal, a no-op "newest wins" move,
+ *     never a collision to refuse. `update` with no old-value also succeeds
+ *     on a ref that does not exist yet, so ordinary (non-identical) archival
+ *     is unaffected — verified empirically both ways before wiring this in,
  *   - VERIFIES (never deletes) that `refs/heads/<branch>` is gone — git's own
  *     receive-pack already deleted it as part of accepting this push, before
  *     post-receive ever runs; doing that deletion here too, or doing it in
@@ -1147,7 +1196,7 @@ async function applyArchival(
   const zero = "0".repeat(receiver.shaLength)
   const commands = [
     "start",
-    `create ${archiveRef} ${update.oldSha}`,
+    `update ${archiveRef} ${update.oldSha}`,
     `verify ${BRANCH_PREFIX}${branch} ${zero}`,
     ...current.flatMap(([ref, value]) => (value === null ? [] : [`delete ${ref} ${value}`])),
     "prepare",
@@ -1234,8 +1283,13 @@ async function readBaseBlob(
  * Classify one branch via the caller's injected classifier, or undefined when
  * none is wired (additive, like `validateConfig`). Reads the BASE's config
  * fresh on every call — callers decide how often to call it; nothing here
- * caches, so "config edits never reclassify existing branches" is enforced
- * entirely by WHEN this is called (creation only), never by refusing to read.
+ * caches. Called from two different places for two different questions:
+ * `applyCreationClassification` (birth classification, creation only — "config
+ * edits never reclassify existing branches" is enforced entirely by never
+ * calling this again for an existing branch's draft/ignore fate) and
+ * `drainReceiverInbox`'s ongoing lane check (submit only, re-evaluated on
+ * every later push — the ONE part of classification that is deliberately NOT
+ * creation-only, by explicit design).
  */
 async function evaluateClassification(
   receiver: GitPushReceiver,
@@ -1246,6 +1300,44 @@ async function evaluateClassification(
   if (options.classifyBranch === undefined) return undefined
   const yaml = await readBaseBlob(receiver, base, ".yrd.yml", options.env)
   return options.classifyBranch(yaml, branch)
+}
+
+/**
+ * Birth classification: materializes the `auto:` block's verdict for a
+ * branch at the moment of its creation, at POST-RECEIVE — the same timing as
+ * `applyArchival`, run immediately after git's own receive-pack has already
+ * accepted the branch-creation push, not deferred to a later drain(). Review
+ * panel: "a crash must never leave a created-but-unclassified branch" — this
+ * is the same narrowing `applyArchival` already gives archival (a bounded,
+ * disclosed residual crash window within one receive-pack process's
+ * lifetime, not a full durability guarantee), now applied to classification
+ * too, in place of the original design where classification only happened
+ * if and when a LATER `drain()` call with `intake` succeeded — an unbounded
+ * wait with no guarantee it ever ran at all.
+ *
+ * An ignore verdict materializes the ignore ref; a submit verdict
+ * materializes the submit ref UNLESS the pushed tip is already an ancestor of
+ * the base — the same "nothing left to submit" no-op rule
+ * `validateSubmitRefValue` already enforces (as a refusal) for a direct
+ * submit push, reused here as a silent skip: a branch creation must never be
+ * refused merely because its content happens to already be on main. A draft
+ * verdict, or no match at all, writes nothing — draft is the default
+ * (tracked, no ref) and no-match is untracked.
+ */
+async function applyCreationClassification(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  branch: string,
+  base: string,
+  options: ReceiverHookOptions,
+): Promise<void> {
+  const verdict = await evaluateClassification(receiver, options, base, branch)
+  if (verdict === "ignore") {
+    await receiverGit(receiver, ["update-ref", `${IGNORE_REF_PREFIX}${branch}`, update.newSha], { env: options.env })
+  } else if (verdict === "submit") {
+    if (await isAncestorOfBase(receiver, update.newSha, base, options.env)) return
+    await writeSubmitRefForCarrier(receiver, branch, update.newSha, options.env)
+  }
 }
 
 type AuthorizedUpdate =
@@ -1290,6 +1382,19 @@ async function authorize(
         branchTip !== null,
         `${label} ref '${update.ref}' names branch '${branch}', which has no ref in this repository`,
       )
+      // "Submitted work can never be hidden" (review panel, phase 1b): ignore
+      // is a SCOPE decision, not an unsubmit, and must not silently make an
+      // approved change invisible. Draft carries no such rule — draft and
+      // submit are not mutually exclusive on any axis.
+      if (kind === "ignore-ref") {
+        const submitSha = await refValue(receiver, `${SUBMIT_REF_PREFIX}${branch}`, options.env)
+        if (submitSha !== null && (await isSubmitLive(receiver, update, options, branch, submitSha))) {
+          check(
+            false,
+            `cannot ignore branch '${branch}': a live submit ${submitSha.slice(0, 12)} exists on it; submitted work can never be hidden — unsubmit it first`,
+          )
+        }
+      }
     }
     return { kind, branch }
   }
@@ -1314,14 +1419,16 @@ async function authorize(
   // A branch deletion translates to archival instead of landing on the
   // intake path below — there are no new commits here for intake to process,
   // only a branch that stops existing under `refs/heads/` and starts existing
-  // under `refs/yrd/archive/` instead.
+  // under `refs/yrd/archive/` instead. No precondition to check beyond
+  // authorization: since the archive ref's own path embeds the full sha
+  // (`archiveRefFor`), there is no longer a name collision `applyArchival`'s
+  // transaction could hit — re-archiving identical content is a legal no-op.
   if (isBranch && deleting) {
     const branch = update.ref.slice(BRANCH_PREFIX.length)
     const resolved = await options.resolveTarget(branch, update, undefined)
     check(resolved, withIntakePolicy(`branch '${branch}' is not authorized for Yrd intake`, options))
     await validBranch(receiver, branch, "intake branch")
     await checkNotStale(receiver, update, stage, options.env)
-    await validateArchival(receiver, update, branch, options.env)
     return { kind: "archive", branch }
   }
 
