@@ -16,7 +16,7 @@ import {
   changeBaseSha,
   changeAdmission,
   changeComposition,
-  changeCorrelation,
+  changeProps,
   changeDeliveryState,
   changeHead,
   changeNeedsAuthor,
@@ -3011,8 +3011,9 @@ function createQueue<Shape extends ChangeShape>(
           ? Object.values(snapshot.bays.prs)
           : selectors.map((selector) => {
               const pr = resolvePR(snapshot.bays, selector)
-              if (pr === undefined)
-                {raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))}
+              if (pr === undefined) {
+                raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+              }
               return pr
             })
       return prs.flatMap((pr) => projectChangeChecks(snapshot, pr, steps))
@@ -3111,7 +3112,7 @@ function deliveryIdentity(pr: DeepReadonly<ChangeSnapshot>): YrdDeliveryIdentity
     // watch-pane grammar (`R604 PR411.2  branch (merge ✓)`) needs it.
     branch: pr.branch,
     ...(pr.issue === undefined ? {} : { issue: pr.issue }),
-    ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
+    ...(pr.props === undefined ? {} : { props: pr.props }),
   }
 }
 
@@ -3856,9 +3857,7 @@ function createQueueCommands(
           event("pr/integrated", {
             ...args,
             ...(args.issueRef !== undefined || pr.issue === undefined ? {} : { issueRef: pr.issue }),
-            ...(args.correlation !== undefined || revision.correlation === undefined
-              ? {}
-              : { correlation: revision.correlation }),
+            ...(args.props !== undefined || revision.props === undefined ? {} : { props: revision.props }),
             ...(args.submitter !== undefined || revision.submitter === undefined
               ? {}
               : { submitter: revision.submitter }),
@@ -3928,7 +3927,7 @@ function queueAuthorityNeedsAuthorEvent(
     headSha: gap.headSha,
     run: gap.consumedBy,
     ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-    ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
+    ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
     ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
     step,
     detail: message,
@@ -5203,7 +5202,7 @@ function advanceQueue(
       headSha: pr.headSha,
       run: record.id,
       ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-      ...(changeCorrelation(current) === undefined ? {} : { correlation: changeCorrelation(current) }),
+      ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
       ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
       step: planned.name,
       ...(evidence === undefined ? {} : { evidence }),
@@ -5251,7 +5250,7 @@ function advanceQueue(
             candidateSha: alreadyMerged.candidateSha,
             candidateTreeSha: alreadyMerged.candidateTreeSha,
             baseTreeSha: alreadyMerged.baseTreeSha,
-            ...(changeCorrelation(current) === undefined ? {} : { correlation: changeCorrelation(current) }),
+            ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
             ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
           }),
         )
@@ -5281,7 +5280,7 @@ function advanceQueue(
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
           changeId: revision.changeId,
-          ...(revision.correlation === undefined ? {} : { correlation: revision.correlation }),
+          ...(revision.props === undefined ? {} : { props: revision.props }),
           ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),
       )

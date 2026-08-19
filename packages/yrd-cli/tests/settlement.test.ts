@@ -58,7 +58,12 @@ function frame(events: readonly Readonly<{ name: string; data: unknown }>[]): un
   }
 }
 
-function terminal(name: string, namespace: string, id: string): Readonly<{ name: string; data: unknown }> {
+function terminal(name: string, key: string, value: string): Readonly<{ name: string; data: unknown }> {
+  return { name, data: { props: { [key]: value } } }
+}
+
+/** A pre-props journal frame: the payload spells `correlation: {namespace, id}`. */
+function legacyTerminal(name: string, namespace: string, id: string): Readonly<{ name: string; data: unknown }> {
   return { name, data: { correlation: { namespace, id } } }
 }
 
@@ -68,7 +73,7 @@ function recordingHook(overrides: Partial<YrdSettlementHook> = {}): RecordingHoo
   const settled: YrdSettlementTarget[][] = []
   const counts = { integrations: 0 }
   return {
-    namespace: "host-request",
+    key: "host-request",
     owner: "@seat/1",
     settle: (targets) => {
       settled.push([...targets])
@@ -110,32 +115,38 @@ afterEach(() => {
 })
 
 describe("terminalSettlementTargets", () => {
-  it("collects every terminal fact carrying a correlation in the asked-for namespace", () => {
+  it("collects every terminal fact carrying the asked-for prop key", () => {
     const values = [
       frame([terminal("pr/integrated", "host-request", "one")]),
       frame([terminal("pr/rejected", "host-request", "two"), terminal("pr/withdrawn", "other", "three")]),
       frame([terminal("pr/canceled", "host-request", "four")]),
     ]
     const found = terminalSettlementTargets(values, "host-request")
-    expect(found.targets.map(({ correlation }) => correlation.id)).toEqual(["one", "two", "four"])
+    expect(found.targets.map(({ value }) => value)).toEqual(["one", "two", "four"])
     expect(found.integrated).toBe(true)
   })
 
-  it("ignores non-terminal events and terminals with no correlation", () => {
+  it("settles pre-props journal frames spelled correlation: {namespace, id}", () => {
+    const values = [frame([legacyTerminal("pr/rejected", "host-request", "legacy")])]
+    const found = terminalSettlementTargets(values, "host-request")
+    expect(found.targets).toEqual([{ key: "host-request", value: "legacy", eventId: expect.any(String) }])
+  })
+
+  it("ignores non-terminal events and terminals with no props", () => {
     const values = [
-      frame([{ name: "pr/pushed", data: { correlation: { namespace: "host-request", id: "nope" } } }]),
-      frame([{ name: "pr/rejected", data: { reason: "no correlation here" } }]),
+      frame([{ name: "pr/pushed", data: { props: { "host-request": "nope" } } }]),
+      frame([{ name: "pr/rejected", data: { reason: "no props here" } }]),
     ]
     expect(terminalSettlementTargets(values, "host-request")).toEqual({ targets: [], integrated: false })
   })
 
-  it("reports an integration even when no correlation in this namespace rode with it", () => {
+  it("reports an integration even when no prop with this key rode with it", () => {
     const found = terminalSettlementTargets([frame([terminal("pr/integrated", "other", "x")])], "host-request")
     expect(found.targets).toEqual([])
     expect(found.integrated).toBe(true)
   })
 
-  it("deduplicates a correlation repeated on the same event", () => {
+  it("deduplicates a props repeated on the same event", () => {
     const repeated = frame([terminal("pr/rejected", "host-request", "one")])
     expect(terminalSettlementTargets([repeated, repeated], "host-request").targets).toHaveLength(1)
   })
@@ -184,7 +195,7 @@ describe("drainSettlements", () => {
       frame([terminal("pr/integrated", "host-request", "two")]),
     ])
     await expect(drainSettlements(drainOptions(stateDir, hook, journal))).resolves.toBeUndefined()
-    expect(hook.settled.flat().map(({ correlation }) => correlation.id)).toEqual(["one", "two"])
+    expect(hook.settled.flat().map(({ value }) => value)).toEqual(["one", "two"])
     expect(hook.integrations).toBe(1)
     await expect(readSettlementCursor(settlementCursorPath(stateDir, "@seat/1"), "@seat/1")).resolves.toBe(2)
   })
@@ -224,7 +235,7 @@ describe("drainSettlements", () => {
     const stateDir = temporaryDir("yrd-settlement-drain-ownerless-")
     const settled: YrdSettlementTarget[][] = []
     const hook: YrdSettlementHook = {
-      namespace: "host-request",
+      key: "host-request",
       settle: (targets) => {
         settled.push([...targets])
         return Promise.resolve()
@@ -245,7 +256,7 @@ describe("drainSettlements", () => {
     ])
     await writeSettlementCursor(settlementCursorPath(stateDir, "@seat/1"), "@seat/1", 1)
     await drainSettlements(drainOptions(stateDir, hook, journal))
-    expect(hook.settled.flat().map(({ correlation }) => correlation.id)).toEqual(["two"])
+    expect(hook.settled.flat().map(({ value }) => value)).toEqual(["two"])
   })
 
   it("leaves the hook open across passes, because a resident worker drains it many times", async () => {
@@ -268,9 +279,9 @@ describe("settlementStateSegments", () => {
   })
 
   it("lets a host keep an existing layout so a cutover does not rewind the cursor", () => {
-    expect(settlementStateSegments({ [YRD_SETTLEMENT_STATE_ENV]: "tent/tribe-settlements" })).toEqual([
+    expect(settlementStateSegments({ [YRD_SETTLEMENT_STATE_ENV]: "tent/wire-settlements" })).toEqual([
       "tent",
-      "tribe-settlements",
+      "wire-settlements",
     ])
   })
 

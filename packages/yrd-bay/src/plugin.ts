@@ -37,7 +37,7 @@ import {
   CheckpointBayInputSchema,
   CheckpointedBaySchema,
   CompositionV1Schema,
-  CorrelationSchema,
+  ChangePropsSchema,
   DeprovisionBayInputSchema,
   DeprovisionedBaySchema,
   GitRefSchema,
@@ -65,10 +65,11 @@ import {
   isLivePR,
   needsReview,
   normalizeV2By,
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
+  normalizeV1CorrelationToProps,
   changeBaseSha,
   changeComposition,
-  changeCorrelation,
+  changeProps,
   changeDeliveryState,
   changeForBay,
   requireLivePR,
@@ -88,7 +89,7 @@ import {
   type CheckpointBayInput,
   type CheckpointedBay,
   type CompositionV1,
-  type Correlation,
+  type ChangeProps,
   type DeprovisionBayInput,
   type DeprovisionedBay,
   type LivePR,
@@ -203,7 +204,7 @@ const SubmitArgsSchema = z.union([
     .object({
       pr: TextSchema,
       submitter: TextSchema.optional(),
-      correlation: CorrelationSchema.optional(),
+      props: ChangePropsSchema.optional(),
       flow: FlowPinSchema.optional(),
       expectedCurrent: ChangeExpectedCurrentSchema.optional(),
     })
@@ -218,7 +219,7 @@ const SubmitArgsSchema = z.union([
       issue: TextSchema.optional(),
       draft: z.boolean().optional(),
       submitter: TextSchema.optional(),
-      correlation: CorrelationSchema.optional(),
+      props: ChangePropsSchema.optional(),
       composition: CompositionV1Schema.optional(),
       reviewers: z.array(TextSchema).optional(),
       flow: FlowPinSchema.optional(),
@@ -237,7 +238,7 @@ export type SubmitSelectionOptions = Readonly<{
    * governs future revisions, which a terminal PR no longer has. */
   track?: boolean
   draft?: boolean
-  correlation?: Correlation
+  props?: ChangeProps
   composition?: CompositionV1
   resolveRevision(ref: string): Promise<string | undefined>
   /** Parent SHAs of one commit in the submission repository. The active-Bay
@@ -430,7 +431,7 @@ const LegacyChangePushedSchema = z
       .regex(/^[0-9a-f]{64}$/u)
       .optional(),
     revision: RevisionSchema,
-    correlation: CorrelationSchema.optional(),
+    props: ChangePropsSchema.optional(),
   })
   .strict()
 const ChangeRemergeLineageSchema = z
@@ -458,32 +459,38 @@ const ChangeRemergeFactSchema = ChangeRemergeReplaySchema.extend({
   submitter: TextSchema,
 }).strict()
 const ChangePushedV1Schema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   LegacyChangePushedSchema.extend({ submitter: TextSchema }).strict(),
 )
 const ChangePushedSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   LegacyChangePushedSchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict(),
 )
-const ChangePushedReplaySchema = z.union([ChangePushedV1Schema, LegacyChangePushedSchema])
+const ChangePushedReplaySchema = z.preprocess(
+  normalizeV1CorrelationToProps,
+  z.union([ChangePushedV1Schema, LegacyChangePushedSchema]),
+)
 const ChangeRevisionIdentitySchema = z
   .object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema })
   .strict()
 const LegacyChangeRevisionSchema = ChangeRevisionIdentitySchema.extend({
-  correlation: CorrelationSchema.optional(),
+  props: ChangePropsSchema.optional(),
 }).strict()
 const ChangeRevisionSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   LegacyChangeRevisionSchema.extend({ submitter: TextSchema, flow: FlowPinSchema.optional() }).strict(),
 )
-const ChangeCorrelationBoundSchema = ChangeRevisionIdentitySchema.extend({ correlation: CorrelationSchema }).strict()
+const ChangePropsBoundSchema = z.preprocess(
+  normalizeV1CorrelationToProps,
+  ChangeRevisionIdentitySchema.extend({ props: ChangePropsSchema }).strict(),
+)
 const ChangeTerminalIdentitySchema = ChangeRevisionIdentitySchema.extend({
   issueRef: TextSchema.optional(),
-  correlation: CorrelationSchema.optional(),
+  props: ChangePropsSchema.optional(),
 }).strict()
 const ChangeQueueTerminalIdentitySchema = ChangeTerminalIdentitySchema.extend({ run: TextSchema }).strict()
 export const ChangeWithdrawnSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   ChangeTerminalIdentitySchema.extend({
     reason: TextSchema.optional(),
     /** Carried so terminal ball closures can route back to the revision submitter. */
@@ -495,7 +502,7 @@ const LegacyChangeWithdrawnSchema = z
     pr: PRIdSchema,
     revision: RevisionSchema.optional(),
     headSha: GitShaSchema.optional(),
-    correlation: CorrelationSchema.optional(),
+    props: ChangePropsSchema.optional(),
   })
   .strict()
 const LegacyChangeRejectedSchema = z
@@ -503,20 +510,19 @@ const LegacyChangeRejectedSchema = z
     pr: PRIdSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema.optional(),
-    correlation: CorrelationSchema.optional(),
+    props: ChangePropsSchema.optional(),
     detail: z.string().optional(),
   })
   .strict()
 const TransitionalChangeRejectedSchema = ChangeQueueTerminalIdentitySchema.extend({
   detail: z.string().optional(),
 }).strict()
-const ChangeReplayRejectedSchema = z.union([
-  ChangeRejectedFactSchema,
-  TransitionalChangeRejectedSchema,
-  LegacyChangeRejectedSchema,
-])
+const ChangeReplayRejectedSchema = z.preprocess(
+  normalizeV1CorrelationToProps,
+  z.union([ChangeRejectedFactSchema, TransitionalChangeRejectedSchema, LegacyChangeRejectedSchema]),
+)
 const ChangeIntegratedV1Schema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   ChangeQueueTerminalIdentitySchema.extend({
     commit: GitShaSchema,
     landingSha: GitShaSchema,
@@ -531,7 +537,7 @@ const ChangeIntegratedV1Schema = z.preprocess(
     }),
 )
 export const ChangeIntegratedSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   ChangeQueueTerminalIdentitySchema.extend({
     commit: GitShaSchema,
     landingSha: GitShaSchema,
@@ -553,7 +559,7 @@ const ChangeAlreadyMergedSettlementSchema = z
   })
   .strict()
 export const ChangeAlreadyMergedSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   ChangeTerminalIdentitySchema.extend({
     run: TextSchema.optional(),
     settlement: ChangeAlreadyMergedSettlementSchema.optional(),
@@ -581,11 +587,11 @@ const LegacyChangeIntegratedSchema = z
     headSha: GitShaSchema,
     commit: GitShaSchema,
     baseSha: GitShaSchema,
-    correlation: CorrelationSchema.optional(),
+    props: ChangePropsSchema.optional(),
   })
   .strict()
 export const ChangeCanceledSchema = z.preprocess(
-  normalizeV2Submitter,
+  normalizeLegacyChangeKeys,
   ChangeQueueTerminalIdentitySchema.extend({
     by: TextSchema,
     reason: TextSchema,
@@ -594,7 +600,7 @@ export const ChangeCanceledSchema = z.preprocess(
   }).strict(),
 )
 const LegacyChangeCanceledSchema = ChangeRevisionIdentitySchema.extend({
-  correlation: CorrelationSchema.optional(),
+  props: ChangePropsSchema.optional(),
   by: TextSchema,
   reason: TextSchema,
 }).strict()
@@ -941,7 +947,7 @@ export function createBays(
   }
   const submitOperation = async (args: SubmitArgs): Promise<CommandResult> => {
     if ("pr" in args) {
-      if (args.flow !== undefined || args.correlation !== undefined || options.selectFlow === undefined) {
+      if (args.flow !== undefined || args.props !== undefined || options.selectFlow === undefined) {
         return actions.submit(args)
       }
       const pr = required(resolvePR(state(), args.pr), "PR", args.pr)
@@ -1007,15 +1013,12 @@ export function createBays(
       () => submitOperation(args),
     )
   }
-  const bindCorrelation = async (
-    pr: DeepReadonly<PR>,
-    correlation: Correlation | undefined,
-  ): Promise<DeepReadonly<PR>> => {
-    if (correlation === undefined) return pr
-    await submitOperation({ pr: pr.id, correlation })
+  const bindProps = async (pr: DeepReadonly<PR>, props: ChangeProps | undefined): Promise<DeepReadonly<PR>> => {
+    if (props === undefined) return pr
+    await submitOperation({ pr: pr.id, props })
     const bound = resolvePR(state(), pr.id)
     if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after correlation bind`)
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after props bind`)
     }
     return bound
   }
@@ -1079,8 +1082,8 @@ export function createBays(
   }
   const bindSubmission = async (
     pr: DeepReadonly<PR>,
-    submission: Pick<SubmitSelectionOptions, "issue" | "correlation">,
-  ): Promise<DeepReadonly<PR>> => bindCorrelation(await bindIssue(pr, submission.issue), submission.correlation)
+    submission: Pick<SubmitSelectionOptions, "issue" | "props">,
+  ): Promise<DeepReadonly<PR>> => bindProps(await bindIssue(pr, submission.issue), submission.props)
 
   const submitSelectionOperation = async (
     selector: string,
@@ -1248,10 +1251,10 @@ export function createBays(
         changeDeliveryState(pr) === "ready" ||
         changeDeliveryState(pr) === "needs-author")
     ) {
-      return bindCorrelation(pr, options.correlation)
+      return bindProps(pr, options.props)
     }
     if (pr !== undefined && changeDeliveryState(pr) === "pushed") {
-      pr = await bindCorrelation(pr, options.correlation)
+      pr = await bindProps(pr, options.props)
       if (options.draft === true) return pr
       await submitOperation({ pr: pr.id })
       const submitted = resolvePR(state(), pr.id)
@@ -1296,7 +1299,7 @@ export function createBays(
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.draft === true ? { draft: true } : {}),
-        ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
+        ...(options.props === undefined ? {} : { props: options.props }),
         ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
       })
       const submitted = resolvePR(state(), selector)
@@ -1401,7 +1404,10 @@ export function withBays(options: WithBaysOptions) {
         "pr/pushed": journalEvent(2, ChangePushedSchema),
         "pr/recut": journalEvent(3, ChangeRemergeFactSchema),
         "pr/submitted": journalEvent(1, ChangeRevisionSchema),
-        "pr/correlation-bound": journalEvent(1, ChangeCorrelationBoundSchema),
+        "pr/props-set": journalEvent(1, ChangePropsBoundSchema),
+        // Retired writer: only pre-props journals carry this name. The schema's
+        // read-boundary fold maps its correlation pair into props on replay.
+        "pr/correlation-bound": journalEvent(1, ChangePropsBoundSchema),
         "pr/withdrawn": journalEvent(1, ChangeWithdrawnSchema),
         "pr/needs-author": journalEvent(1, ChangeNeedsAuthorFactSchema),
         "pr/rejected": journalEvent(1, ChangeRejectedFactSchema),
@@ -1422,13 +1428,22 @@ export function withBays(options: WithBaysOptions) {
       replayEvents: {
         "pr/pushed": ChangePushedReplaySchema,
         "pr/recut": ChangeRemergeReplaySchema,
-        "pr/submitted": LegacyChangeRevisionSchema,
-        "pr/withdrawn": z.union([ChangeWithdrawnSchema, LegacyChangeWithdrawnSchema]),
+        "pr/submitted": z.preprocess(normalizeV1CorrelationToProps, LegacyChangeRevisionSchema),
+        "pr/withdrawn": z.preprocess(
+          normalizeV1CorrelationToProps,
+          z.union([ChangeWithdrawnSchema, LegacyChangeWithdrawnSchema]),
+        ),
         "pr/needs-author": ChangeNeedsAuthorFactSchema,
         "pr/rejected": ChangeReplayRejectedSchema,
-        "pr/integrated": z.union([ChangeIntegratedSchema, ChangeIntegratedV1Schema, LegacyChangeIntegratedSchema]),
+        "pr/integrated": z.preprocess(
+          normalizeV1CorrelationToProps,
+          z.union([ChangeIntegratedSchema, ChangeIntegratedV1Schema, LegacyChangeIntegratedSchema]),
+        ),
         "pr/already-landed": ChangeAlreadyMergedSchema,
-        "pr/canceled": z.union([ChangeCanceledSchema, LegacyChangeCanceledSchema]),
+        "pr/canceled": z.preprocess(
+          normalizeV1CorrelationToProps,
+          z.union([ChangeCanceledSchema, LegacyChangeCanceledSchema]),
+        ),
         "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
       projectionVersion: "bays-v13-recut-certificate",
@@ -1479,7 +1494,7 @@ function changeIdentity(pr: DeepReadonly<PR>): YrdDeliveryIdentity {
     pr: pr.id,
     revision: changeRevisionNumber(pr),
     headSha: changeHead(pr),
-    ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
+    ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
   }
 }
 
@@ -1957,7 +1972,7 @@ function submitWork(
       args.expectedCurrent === undefined
         ? requireLivePR(current, args.pr)
         : requireExpectedChangeTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
-    if (args.correlation !== undefined) return bindChangeCorrelation(pr, args.correlation)
+    if (args.props !== undefined) return bindChangeProps(pr, args.props)
     if (changeDeliveryState(pr) !== "pushed") {
       throw new Error(`yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
     }
@@ -2031,7 +2046,7 @@ function submitWork(
     base,
     headSha: args.headSha,
     ...(baseSha === undefined ? {} : { baseSha }),
-    ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
+    ...(args.props === undefined ? {} : { props: args.props }),
     ...(composition === undefined ? {} : { composition }),
     revision,
     submitter,
@@ -2048,7 +2063,7 @@ function submitWork(
               headSha: args.headSha,
               submitter,
               ...(args.flow === undefined ? {} : { flow: args.flow }),
-              ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
+              ...(args.props === undefined ? {} : { props: args.props }),
             }),
           ]),
       ...(args.reviewers === undefined || args.reviewers.length === 0
@@ -2058,39 +2073,61 @@ function submitWork(
   }
 }
 
-function correlationsEqual(left: DeepReadonly<Correlation>, right: DeepReadonly<Correlation>): boolean {
-  return left.namespace === right.namespace && left.id === right.id
+function propsEqual(left: DeepReadonly<ChangeProps>, right: DeepReadonly<ChangeProps>): boolean {
+  const entries = Object.entries(left)
+  return entries.length === Object.keys(right).length && entries.every(([key, value]) => right[key] === value)
 }
 
-function correlationLabel(correlation: DeepReadonly<Correlation>): string {
-  return `${correlation.namespace}:${correlation.id}`
+/** True when every entry of `next` is already recorded with the same value. */
+function propsCovered(current: DeepReadonly<ChangeProps> | undefined, next: DeepReadonly<ChangeProps>): boolean {
+  return current !== undefined && Object.entries(next).every(([key, value]) => current[key] === value)
 }
 
-function bindChangeCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
-  const currentCorrelation = changeCorrelation(pr)
-  if (currentCorrelation !== undefined) {
-    if (correlationsEqual(currentCorrelation, correlation)) return { events: [] }
+/** The first key `next` would overwrite with a different value, if any. */
+function propsConflictKey(
+  current: DeepReadonly<ChangeProps> | undefined,
+  next: DeepReadonly<ChangeProps>,
+): string | undefined {
+  if (current === undefined) return undefined
+  for (const [key, value] of Object.entries(next)) {
+    const existing = current[key]
+    if (existing !== undefined && existing !== value) return key
+  }
+  return undefined
+}
+
+function propsLabel(props: DeepReadonly<ChangeProps>): string {
+  return Object.entries(props)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ")
+}
+
+function bindChangeProps(pr: DeepReadonly<PR>, props: ChangeProps) {
+  const currentProps = changeProps(pr)
+  if (propsCovered(currentProps, props)) return { events: [] }
+  const conflict = propsConflictKey(currentProps, props)
+  if (conflict !== undefined) {
     raiseFailure(
       "refusal",
-      "correlation-conflict",
-      `yrd: PR '${pr.id}' is already bound to correlation '${correlationLabel(currentCorrelation)}'`,
+      "prop-conflict",
+      `yrd: PR '${pr.id}' already carries prop '${conflict}=${currentProps?.[conflict]}'; a prop is a fact, set once`,
     )
   }
   const delivery = changeDeliveryState(pr)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
     raiseFailure(
       "refusal",
-      "correlation-too-late",
-      `yrd: PR '${pr.id}' is ${delivery}; correlation can only be bound while pushed, submitted, or needs-author`,
+      "prop-too-late",
+      `yrd: PR '${pr.id}' is ${delivery}; props can only be set while pushed, submitted, or needs-author`,
     )
   }
   return {
     events: [
-      event("pr/correlation-bound", {
+      event("pr/props-set", {
         pr: pr.id,
         revision: changeRevisionNumber(pr),
         headSha: changeHead(pr),
-        correlation,
+        props,
       }),
     ],
   }
@@ -2100,7 +2137,7 @@ function revisionIdentity(pr: DeepReadonly<PR>) {
   return {
     revision: changeRevisionNumber(pr),
     headSha: changeHead(pr),
-    ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
+    ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
   }
 }
 
@@ -2132,11 +2169,11 @@ function attachedIssue(
   return requested ?? existing?.issue ?? fallback
 }
 
-function correlationPatch(pr: DeepReadonly<PR>, correlation: DeepReadonly<Correlation>) {
+function propsPatch(pr: DeepReadonly<PR>, props: DeepReadonly<ChangeProps>) {
   return {
     revs: pr.revs.map((revision) =>
       revision.n === changeRevisionNumber(pr) && revision.head === changeHead(pr)
-        ? { ...revision, correlation: { ...correlation } }
+        ? { ...revision, props: { ...props } }
         : revision,
     ),
   }
@@ -2144,10 +2181,10 @@ function correlationPatch(pr: DeepReadonly<PR>, correlation: DeepReadonly<Correl
 
 function assertTerminalApplies(
   pr: DeepReadonly<PR>,
-  terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; correlation?: Correlation }>,
+  terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; props?: ChangeProps }>,
   eventName: string,
 ): void {
-  const currentCorrelation = changeCorrelation(pr)
+  const currentProps = changeProps(pr)
   if (
     (terminal.revision !== undefined && terminal.revision !== changeRevisionNumber(pr)) ||
     (terminal.headSha !== undefined && terminal.headSha !== changeHead(pr))
@@ -2159,11 +2196,8 @@ function assertTerminalApplies(
   if (terminal.issueRef !== undefined && terminal.issueRef !== pr.issue) {
     throw new Error(`yrd: terminal issue '${terminal.issueRef}' does not match PR '${pr.id}'`)
   }
-  if (
-    terminal.correlation !== undefined &&
-    (currentCorrelation === undefined || !correlationsEqual(currentCorrelation, terminal.correlation))
-  ) {
-    throw new Error(`yrd: terminal correlation does not match PR '${pr.id}'`)
+  if (terminal.props !== undefined && (currentProps === undefined || !propsEqual(currentProps, terminal.props))) {
+    throw new Error(`yrd: terminal props does not match PR '${pr.id}'`)
   }
 }
 
@@ -2243,7 +2277,7 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSup
         revision: current.n,
         headSha: current.head,
         ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-        ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
+        ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
         ...(current.submitter === undefined ? {} : { submitter: current.submitter }),
         baseSha: args.baseSha,
         candidateSha: args.baseSha,
@@ -2443,7 +2477,7 @@ function remergePr(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defau
               revision: successor.revision,
               headSha: successor.headSha,
               submitter: successorSubmitter,
-              ...(predecessor.correlation === undefined ? {} : { correlation: predecessor.correlation }),
+              ...(predecessor.props === undefined ? {} : { props: predecessor.props }),
             }),
             event("pr/checks-requested", {
               pr: pr.id,
@@ -2882,7 +2916,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ? parsed.data
         : previous.success
           ? previous.data
-          : LegacyChangePushedSchema.parse(data)
+          : LegacyChangePushedSchema.parse(normalizeV1CorrelationToProps(data))
       const base = baseIdentity(pushed.base)
       const existing = current.prs[pushed.pr]
       const record: ChangeRev = {
@@ -2898,7 +2932,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             ? { submitter: previous.data.submitter }
             : {}),
         pushedAt: applied.ts,
-        ...(pushed.correlation === undefined ? {} : { correlation: pushed.correlation }),
+        ...(pushed.props === undefined ? {} : { props: pushed.props }),
       }
       const pr: PR =
         existing === undefined
@@ -2986,7 +3020,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ...(remerge.sources === undefined ? {} : { sources: remerge.sources }),
         ...(remerge.transition === undefined ? {} : { transition: remerge.transition }),
       }
-      const correlation = predecessor.correlation
+      const props = predecessor.props
       const submitter = remerge.submitter ?? predecessor.submitter
       // An admission is a verdict about a tree merged into a base. A rebuild
       // that lands on the identical head AND the identical certified base has
@@ -3011,7 +3045,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         base: pr.base,
         baseSha: remerge.successor.baseSha,
         ...(submitter === undefined ? {} : { submitter }),
-        ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
+        ...(props === undefined ? {} : { props: { ...props } }),
         ...(remerge.composition === undefined ? {} : { composition: remerge.composition }),
         ...(carriedAdmission === undefined ? {} : { admission: carriedAdmission }),
         recut: proof,
@@ -3059,22 +3093,21 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     }
     case "pr/submitted": {
       const parsed = ChangeRevisionSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyChangeRevisionSchema.parse(data)
+      const changed = parsed.success
+        ? parsed.data
+        : LegacyChangeRevisionSchema.parse(normalizeV1CorrelationToProps(data))
       const changedFlow = parsed.success ? parsed.data.flow : undefined
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
       if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
         throw new Error(`yrd: stale PR event for '${pr.id}'`)
       }
-      const currentCorrelation = changeCorrelation(pr)
-      if (
-        changed.correlation !== undefined &&
-        currentCorrelation !== undefined &&
-        !correlationsEqual(currentCorrelation, changed.correlation)
-      ) {
-        throw new Error(`yrd: submitted correlation does not match PR '${pr.id}'`)
+      const currentProps = changeProps(pr)
+      const submittedConflict = changed.props === undefined ? undefined : propsConflictKey(currentProps, changed.props)
+      if (submittedConflict !== undefined) {
+        throw new Error(`yrd: submitted prop '${submittedConflict}' does not match PR '${pr.id}'`)
       }
-      const correlation = changed.correlation ?? currentCorrelation
+      const props = changed.props === undefined ? currentProps : { ...currentProps, ...changed.props }
       if (
         pr.flow !== undefined &&
         changedFlow !== undefined &&
@@ -3089,7 +3122,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         return {
           ...revision,
           ...(parsed.success ? { submitter: parsed.data.submitter } : {}),
-          ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
+          ...(props === undefined ? {} : { props: { ...props } }),
         }
       })
       return patchPR(pr, {
@@ -3111,26 +3144,30 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         flow: pr.flow ?? changedFlow,
       })
     }
+    case "pr/props-set":
     case "pr/correlation-bound": {
-      const changed = ChangeCorrelationBoundSchema.parse(data)
+      const changed = ChangePropsBoundSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
       if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
-        throw new Error(`yrd: stale correlation bind for PR '${pr.id}'`)
+        throw new Error(`yrd: stale props for PR '${pr.id}'`)
       }
       const delivery = changeDeliveryState(pr)
       if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-        throw new Error(`yrd: PR '${pr.id}' is ${delivery}; correlation cannot be bound`)
+        throw new Error(`yrd: PR '${pr.id}' is ${delivery}; props cannot be set`)
       }
-      const currentCorrelation = changeCorrelation(pr)
-      if (currentCorrelation !== undefined && !correlationsEqual(currentCorrelation, changed.correlation)) {
-        throw new Error(`yrd: correlation bind conflicts with PR '${pr.id}'`)
+      const currentProps = changeProps(pr)
+      const conflict = propsConflictKey(currentProps, changed.props)
+      if (conflict !== undefined) {
+        throw new Error(`yrd: prop '${conflict}' conflicts with PR '${pr.id}'`)
       }
-      return patchPR(pr, correlationPatch(pr, changed.correlation))
+      return patchPR(pr, propsPatch(pr, { ...currentProps, ...changed.props }))
     }
     case "pr/withdrawn": {
       const parsed = ChangeWithdrawnSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyChangeWithdrawnSchema.parse(data)
+      const changed = parsed.success
+        ? parsed.data
+        : LegacyChangeWithdrawnSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3196,7 +3233,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ? parsed.data
         : v1?.success === true
           ? v1.data
-          : LegacyChangeIntegratedSchema.parse(data)
+          : LegacyChangeIntegratedSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3249,7 +3286,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     }
     case "pr/canceled": {
       const parsed = ChangeCanceledSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyChangeCanceledSchema.parse(data)
+      const changed = parsed.success
+        ? parsed.data
+        : LegacyChangeCanceledSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
       const run = parsed.success ? parsed.data.run : undefined
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)

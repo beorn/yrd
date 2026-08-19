@@ -28,7 +28,7 @@ const DEBUG_SUCCESS_LIFECYCLES = new Set(["lock", "compose"])
 export type YrdLifecycleOutcome = keyof typeof YRD_LIFECYCLE_LEVELS
 
 export type YrdDeliveryIdentity = Readonly<{
-  correlation?: Readonly<{ namespace: string; id: string }>
+  props?: Readonly<Record<string, string>>
   pr?: string
   revision?: number
   headSha?: string

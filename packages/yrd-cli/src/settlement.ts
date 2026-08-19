@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createReadStream, existsSync, mkdirSync, opendirSync, readFileSync, renameSync, rmSync } from "node:fs"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { CorrelationSchema, type Correlation } from "@yrd/bay"
+import { ChangePropsSchema, normalizeV1CorrelationToProps } from "@yrd/bay"
 import { parseJournalFrame, type Journal } from "@yrd/core"
 import { createExclusive, createReadOnlyJournal } from "@yrd/persistence"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
@@ -12,10 +12,10 @@ import { formatDuration } from "./runner-timeline.ts"
 /**
  * Background settlement of terminal delivery facts.
  *
- * Yrd commits terminal PR facts and carries opaque correlation data; it has no
- * idea what a correlation MEANS to the host that stamped it. This module owns
- * the half that is Yrd's: read the journal forward from a durable cursor, find
- * the terminal facts that carry a correlation, hand them to whoever asked to be
+ * Yrd commits terminal PR facts and carries opaque props; it has no idea what
+ * a prop MEANS to the host that stamped it. This module owns the half that is
+ * Yrd's: read the journal forward from a durable cursor, find the terminal
+ * facts that carry a prop, hand them to whoever asked to be
  * told, and advance the cursor only once they have all been acknowledged. The
  * host supplies the other half — what "settled" does — through a hook module it
  * names in {@link YRD_SETTLEMENT_HOOK_ENV}.
@@ -50,7 +50,7 @@ const RESIDENT_TICK_MS = 15_000
 const BUSY_RETRIES = 50
 const NOTICE_SCAN_CAP = 100
 
-export type YrdSettlementTarget = Readonly<{ correlation: Correlation; eventId: string }>
+export type YrdSettlementTarget = Readonly<{ key: string; value: string; eventId: string }>
 
 /**
  * The host's half of settlement.
@@ -61,8 +61,8 @@ export type YrdSettlementTarget = Readonly<{ correlation: Correlation; eventId: 
  * records observation only is for.
  */
 export type YrdSettlementHook = Readonly<{
-  /** Correlation namespace this hook settles; every other namespace is left untouched. */
-  namespace: string
+  /** Prop key this hook settles; every other key is left untouched. */
+  key: string
   owner?: string
   settle(targets: readonly YrdSettlementTarget[]): Promise<void>
   /** Called once per batch that contained an integration, after its cursor advances. */
@@ -110,7 +110,7 @@ function takeRequiredEnv(env: Record<string, string | undefined>, name: string):
  *
  * A host that already has settlement cursors on disk names their location so a
  * cutover does not silently rewind to the start of the journal and re-settle
- * every historical correlation.
+ * every historical props.
  */
 export function settlementStateSegments(env: Readonly<Record<string, string | undefined>>): readonly string[] {
   const declared = env[YRD_SETTLEMENT_STATE_ENV]?.trim()
@@ -203,15 +203,15 @@ export async function writeSettlementCursor(path: string, owner: string | undefi
 }
 
 /**
- * The terminal facts in one batch that a namespace asked to be told about.
+ * The terminal facts in one batch that a prop key asked to be told about.
  *
  * `integrated` is reported separately from the settlements because an
- * integration is a fact about the repository, not about any one correlation:
- * a batch can integrate without carrying a single correlation this hook owns.
+ * integration is a fact about the repository, not about any one prop:
+ * a batch can integrate without carrying a single prop this hook owns.
  */
 export function terminalSettlementTargets(
   values: readonly unknown[],
-  namespace: string,
+  key: string,
 ): Readonly<{ targets: readonly YrdSettlementTarget[]; integrated: boolean }> {
   const targets: YrdSettlementTarget[] = []
   const seen = new Set<string>()
@@ -222,14 +222,19 @@ export function terminalSettlementTargets(
       if (applied.name === "pr/integrated") integrated = true
       if (!TERMINAL_EVENT_NAMES.has(applied.name)) continue
       const data = applied.data as Record<string, unknown> | null
-      const correlationValue = typeof data === "object" && data !== null ? data["correlation"] : undefined
-      if (correlationValue === undefined) continue
-      const correlation = CorrelationSchema.parse(correlationValue)
-      if (correlation.namespace !== namespace) continue
-      const key = `${encodeURIComponent(correlation.namespace)}:${encodeURIComponent(correlation.id)}:${applied.id}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      targets.push(Object.freeze({ correlation, eventId: applied.id }))
+      // Pre-props journals spell the payload `correlation: {namespace, id}`;
+      // the fold turns it into a one-entry props map before the schema reads it.
+      const folded = typeof data === "object" && data !== null ? normalizeV1CorrelationToProps(data) : null
+      const propsValue =
+        typeof folded === "object" && folded !== null ? (folded as Record<string, unknown>)["props"] : undefined
+      if (propsValue === undefined) continue
+      const props = ChangePropsSchema.parse(propsValue)
+      const value_ = props[key]
+      if (value_ === undefined) continue
+      const dedup = `${encodeURIComponent(key)}=${encodeURIComponent(value_)}:${applied.id}`
+      if (seen.has(dedup)) continue
+      seen.add(dedup)
+      targets.push(Object.freeze({ key, value: value_, eventId: applied.id }))
     }
   }
   return Object.freeze({ targets: Object.freeze(targets), integrated })
@@ -260,7 +265,7 @@ export async function settleCommittedTerminals(options: SettlementDrainOptions):
   const journal = options.journal ?? createReadOnlyJournal({ dir: repository.stateDir })
   try {
     for await (const batch of journal.read(cursor)) {
-      const { targets, integrated } = terminalSettlementTargets(batch.values, hook.namespace)
+      const { targets, integrated } = terminalSettlementTargets(batch.values, hook.key)
       if (hook.owner !== undefined && targets.length > 0) await hook.settle(targets)
       // Owner cursors advance only after every terminal has an acknowledgement.
       // The ownerless cursor records observation only.
@@ -347,8 +352,8 @@ async function loadSettlementHook(
   }
   const hook = await (factory as YrdSettlementHookFactory)(context)
   if (hook === undefined) return undefined
-  if (typeof hook.namespace !== "string" || hook.namespace.trim() === "") {
-    throw new Error(`yrd: settlement hook ${specifier} returned no correlation namespace`)
+  if (typeof hook.key !== "string" || hook.key.trim() === "") {
+    throw new Error(`yrd: settlement hook ${specifier} returned no prop key`)
   }
   // A blank owner is a host bug, and the quiet reading of it — "ownerless, so
   // observe but never settle" — looks exactly like a healthy drain while every

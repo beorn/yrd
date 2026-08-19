@@ -10,7 +10,7 @@ import {
   isChangeRevisionSelector,
   parseChangeSelector,
   changeDeliveryState,
-  changeCorrelation,
+  changeProps,
   changeHead,
   changeNeedsAuthor,
   changeRevisionLineage,
@@ -18,7 +18,7 @@ import {
   changeSourceReadyAt,
   resolvePR,
   type BaysState,
-  type Correlation,
+  type ChangeProps,
   type PR,
   type ChangeDeliveryState,
   type ChangeRevClock,
@@ -869,7 +869,7 @@ export type QueueLogRow = Readonly<{
   location?: QueueLogLocation
   locations: readonly QueueLogLocationEntry[]
   integration?: IntegrationProof
-  correlation?: Correlation
+  props?: ChangeProps
   landing: string
 }>
 
@@ -5377,15 +5377,7 @@ export function QueueTopLine({
 }) {
   const shortPaths = shortUniqueQueuePaths(queues.flatMap((queue) => (queue.path === undefined ? [] : [queue.path])))
   return (
-    <Box
-      height={1}
-      flexDirection="row"
-      columnGap={2}
-      flexShrink={0}
-      minWidth={0}
-      overflow="hidden"
-      paddingLeft={1}
-    >
+    <Box height={1} flexDirection="row" columnGap={2} flexShrink={0} minWidth={0} overflow="hidden" paddingLeft={1}>
       <Text bold flexShrink={0}>
         YRD QUEUES
       </Text>
@@ -6694,7 +6686,7 @@ export function queueLogRows(
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
           error: safeText(runError),
-          ...correlationField(pr),
+          ...propsField(pr),
           locations,
           ...(showLocation === undefined
             ? {}
@@ -6761,7 +6753,7 @@ export function queueLogRows(
         isolationPart: "-",
         result: "-",
         error: "-",
-        ...correlationField(exampleResult),
+        ...propsField(exampleResult),
         locations: [],
       })
     }
@@ -6783,10 +6775,10 @@ export function queueLogRows(
   })
 }
 
-function correlationField(pr: Run["prs"][number] | PR | undefined): Readonly<{ correlation?: Correlation }> {
-  const correlation = pr === undefined ? undefined : "revs" in pr ? changeCorrelation(pr) : pr.correlation
-  if (correlation === undefined) return {}
-  return { correlation }
+function propsField(pr: Run["prs"][number] | PR | undefined): Readonly<{ props?: ChangeProps }> {
+  const props = pr === undefined ? undefined : "revs" in pr ? changeProps(pr) : pr.props
+  if (props === undefined) return {}
+  return { props }
 }
 
 function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliveryState): QueueShowRow {
@@ -7455,7 +7447,7 @@ type ChangeMetadataFact = Readonly<{ key: string; value: string; render?: () => 
  * keys muted uppercase in one fixed-width column —
  *
  *   identity — ISSUE, BY (plus the change's own annotations: NOTE, DETAIL,
- *     CORRELATION, REVIEWERS, COMPOSITION, REGRESSIONS);
+ *     one row per prop, REVIEWERS, COMPOSITION, REGRESSIONS);
  *   dates — CREATED, UPDATED, COMMITS `first … · last … · N revisions`.
  *     The clock halves are supplied by the pr-dates retrofit
  *     ([[workedat-retrofit]]); until the record carries them only the
@@ -7475,7 +7467,7 @@ function changeMetadataGroups(
   submitter: string | undefined,
 ): readonly (readonly ChangeMetadataFact[])[] {
   const retained = pr?.revs.find((candidate) => candidate.n === member.revision)
-  const correlation = retained?.correlation
+  const props = retained?.props
   const note = pr === undefined ? undefined : presentFact(pr.note)
   const detail = pr === undefined ? undefined : presentFact(pr.detail)
   const requestedReviewers = pr?.requestedReviewers ?? []
@@ -7485,7 +7477,7 @@ function changeMetadataGroups(
     ...(by === undefined ? [] : [{ key: "by", value: by }]),
     ...(note === undefined ? [] : [{ key: "note", value: note }]),
     ...(detail === undefined ? [] : [{ key: "detail", value: detail }]),
-    ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
+    ...(props === undefined ? [] : Object.entries(props).map(([key, value]) => ({ key, value }))),
     ...(requestedReviewers.length === 0 ? [] : [{ key: "reviewers", value: requestedReviewers.join(", ") }]),
     ...(retained?.composition === undefined
       ? []

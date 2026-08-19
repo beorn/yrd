@@ -297,7 +297,7 @@ describe("Yrd lifecycle records", () => {
         {
           lifecycle: "check",
           identity: {
-            correlation: { namespace: "review", id: "21125" },
+            props: { review: "21125" },
             pr: "PR7",
             revision: 3,
             run: "R2",
@@ -316,7 +316,7 @@ describe("Yrd lifecycle records", () => {
       props: {
         lifecycle: "check",
         outcome: "started",
-        correlation: { namespace: "review", id: "21125" },
+        props: { review: "21125" },
         pr: "PR7",
         revision: 3,
         run: "R2",
@@ -332,7 +332,7 @@ describe("Yrd lifecycle records", () => {
         lifecycle: "check",
         outcome: "succeeded",
         durationMs: 25,
-        correlation: { namespace: "review", id: "21125" },
+        props: { review: "21125" },
         pr: "PR7",
         revision: 3,
         run: "R2",
@@ -343,7 +343,7 @@ describe("Yrd lifecycle records", () => {
       kind: "span",
       namespace: "yrd:check",
       props: {
-        correlation: { namespace: "review", id: "21125" },
+        props: { review: "21125" },
         pr: "PR7",
         revision: 3,
         run: "R2",

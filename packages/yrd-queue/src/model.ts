@@ -1,7 +1,7 @@
 import {
   ChangeIdSchema,
   CompositionV1Schema,
-  CorrelationSchema,
+  ChangePropsSchema,
   GitPayloadPathSchema,
   GitRefSchema,
   GitShaSchema,
@@ -15,7 +15,7 @@ import {
   currentChangeRev,
   changeBaseSha,
   changeComposition,
-  changeCorrelation,
+  changeProps,
   changeHead,
   changeRemerge,
   changeRevisionNumber,
@@ -152,7 +152,7 @@ export const ChangeSnapshotSchema = z
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
-    correlation: CorrelationSchema.optional(),
+    props: ChangePropsSchema.optional(),
     composition: CompositionV1Schema.optional(),
     recut: ChangeSnapshotRemergeProofSchema.optional(),
     flow: FlowPinSchema.optional(),
@@ -1208,7 +1208,7 @@ export const Queues = Object.freeze({
       revision: changeRevisionNumber(pr),
       headSha: changeHead(pr),
       ...(baseSha === undefined ? {} : { baseSha }),
-      ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
+      ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
       ...(changeComposition(pr) === undefined ? {} : { composition: changeComposition(pr) }),
       ...(remerge === undefined
         ? {}

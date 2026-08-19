@@ -190,7 +190,7 @@ describe("queue watch user round 6", () => {
             pushedAt: "2026-07-13T10:30:00.000Z",
             submittedAt: "2026-07-13T10:30:00.000Z",
             submitter: "@ci",
-            correlation: { namespace: "tribe", id: "21514-round6-agent1" },
+            props: { request: "21514-round6-agent1" },
             terminal: { status: "integrated" as const, at: "2026-07-13T10:41:00.000Z", run: "R60" },
           },
         ],
@@ -391,10 +391,10 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("Lead title may wrap across the detail pane")
       expect(app.text).toContain("First description row")
       expect(app.text).toContain("Second description row may wrap")
-      // note / correlation / requested reviewers / check-requested render as
+      // note / props / requested reviewers / check-requested render as
       // uppercase KEY/value fact rows, not "- key: value" timeline entries.
       expect(app.text).toMatch(/NOTE\s+visual confirmation required/u)
-      expect(app.text).toMatch(/CORRELATION\s+tribe:21514-round6-agent1/u)
+      expect(app.text).toMatch(/REQUEST\s+21514-round6-agent1/u)
       expect(app.text).toMatch(/REVIEWERS\s+@chief/u)
       // Live/mechanical rows left the metadata (item 31): no CHECK REQUESTED
       // fact — the echo renders in HISTORY only when its time differs from

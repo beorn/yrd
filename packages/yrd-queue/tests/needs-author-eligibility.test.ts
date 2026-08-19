@@ -53,7 +53,7 @@ function changeFacts(pr: PR | undefined) {
     headSha: revision.head,
     base: revision.base,
     baseSha: revision.baseSha,
-    correlation: revision.correlation,
+    props: revision.props,
     composition: revision.composition,
     revisions: pr.revs.map((item) => ({
       ...item,
@@ -197,9 +197,9 @@ describe("native needs-author lifecycle", () => {
     })
     expect(app.bays.prs().map(({ id }) => id)).toContain(pr)
 
-    const correlation = { namespace: "tribe-request", id: "needs-author-repair" }
+    const props = { request: "needs-author-repair" }
     const correlated = await app.bays.submitSelection(pr, {
-      correlation,
+      props,
       resolveRevision: async (selector) => (selector === "main" ? BASE : HEAD),
       run: runtime,
     })
@@ -207,8 +207,8 @@ describe("native needs-author lifecycle", () => {
       id: pr,
       revision: 1,
       status: "needs-author",
-      correlation,
-      revisions: [{ revision: 1, correlation }],
+      props,
+      revisions: [{ revision: 1, props }],
     })
     expect(correlated.revs).toHaveLength(1)
 

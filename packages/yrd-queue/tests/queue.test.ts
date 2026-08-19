@@ -197,7 +197,7 @@ function changeFacts(pr: PR | undefined) {
     revision: revision.n,
     headSha: revision.head,
     baseSha: revision.baseSha,
-    correlation: revision.correlation,
+    props: revision.props,
     composition: revision.composition,
     recut: revision.recut,
   }
@@ -2258,7 +2258,7 @@ describe("Queue", () => {
     },
   )
 
-  it("emits one terminal run lifecycle with lossless PR revision and correlation identity", async () => {
+  it("emits one terminal run lifecycle with lossless PR revision and props identity", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createQueueApp({}, undefined, undefined, undefined, log)
@@ -2267,7 +2267,7 @@ describe("Queue", () => {
       headSha: HEAD,
       base: "main",
       baseSha: BASE,
-      correlation: { namespace: "review", id: "21125" },
+      props: { review: "21125" },
     })
 
     await expect(app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime)).resolves.toMatchObject([
@@ -2288,7 +2288,7 @@ describe("Queue", () => {
               pr: "PR1",
               revision: 1,
               headSha: HEAD,
-              correlation: { namespace: "review", id: "21125" },
+              props: { review: "21125" },
             }),
           ],
           durationMs: expect.any(Number),
@@ -2576,7 +2576,7 @@ describe("Queue", () => {
 
   it("journals exact issue joins for integrated PRs while failed Runs leave the proposal open", async () => {
     const issueRef = "@km/all/21063-steering-laser"
-    const correlation = { namespace: "tribe-request", id: "21091-terminal-join" }
+    const props = { request: "21091-terminal-join" }
 
     await using integratedApp = await createQueueApp()
     await integratedApp.bays.submit({
@@ -2585,7 +2585,7 @@ describe("Queue", () => {
       base: "main",
       baseSha: BASE,
       issue: issueRef,
-      correlation,
+      props,
     })
     await integratedApp.queue.run({ prs: ["PR1"] }, runtime)
 
@@ -2602,7 +2602,7 @@ describe("Queue", () => {
           landingSha: MERGED,
           baseSha: BASE,
           changeId: expect.stringMatching(/^I[0-9a-f]{40}$/u),
-          correlation,
+          props,
           submitter: "operator",
         },
       }),
@@ -2631,7 +2631,7 @@ describe("Queue", () => {
       base: "main",
       baseSha: BASE,
       issue: issueRef,
-      correlation,
+      props,
     })
     await rejectedApp.queue.run({ prs: ["PR1"] }, runtime)
 
@@ -2656,13 +2656,13 @@ describe("Queue", () => {
       state: "open",
       merged: false,
       issue: issueRef,
-      revs: [{ n: 1, head: HEAD, submitter: "operator", correlation }],
+      revs: [{ n: 1, head: HEAD, submitter: "operator", props }],
     })
     const rejectedRun = rejectedApp.queue.get("R1")
     expect(rejectedRun).toMatchObject({
       status: "completed",
       conclusion: "failure",
-      prs: [{ id: "PR1", revision: 1, headSha: HEAD, correlation }],
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD, props }],
     })
     expect(rejectedRun?.steps[0]).toMatchObject({
       name: "check",
@@ -3539,7 +3539,7 @@ describe("Queue", () => {
   })
 
   it("cancels the run and re-queues its correlated PR when the active Job is canceled", async () => {
-    const correlation = { namespace: "tribe-request", id: "request-20925" } as const
+    const props = { request: "request-20925" } as const
     const journal = createMemoryJournal()
     const id = ids()
     await using app = await createQueueApp({}, journal, undefined, id)
@@ -3548,7 +3548,7 @@ describe("Queue", () => {
       headSha: HEAD,
       base: "main",
       baseSha: BASE,
-      correlation,
+      props,
     })
     const pr = app.state().bays.prs.PR1
     if (pr === undefined) throw new Error("correlated PR was not recorded")
@@ -3584,7 +3584,7 @@ describe("Queue", () => {
       delivery: "submitted",
       revision: revision.n,
       headSha: revision.head,
-      correlation,
+      props,
       revs: [
         {
           n: revision.n,
@@ -3597,7 +3597,7 @@ describe("Queue", () => {
       status: "completed",
       conclusion: "cancelled",
       error: { code: "run-canceled" },
-      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
+      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
       steps: [
         expect.objectContaining({
           job: expect.objectContaining({
@@ -3618,7 +3618,7 @@ describe("Queue", () => {
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "cancelled",
-      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
+      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
     })
     expect(changeFacts(replayed.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
@@ -3629,7 +3629,7 @@ describe("Queue", () => {
         id: "R2",
         status: "completed",
         conclusion: "success",
-        prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
+        prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
       },
     ])
   })
@@ -6346,7 +6346,9 @@ describe("Queue", () => {
       { candidateId: "C5", parent: "R3" },
     ])
     for (const child of runs.slice(1)) expect(child).not.toHaveProperty("isolationPart")
-    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)]))).toEqual({
+    expect(
+      Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)])),
+    ).toEqual({
       PR1: "integrated",
       PR2: "integrated",
       PR3: "submitted",
@@ -6399,7 +6401,9 @@ describe("Queue", () => {
     ])
     expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3"])
-    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)]))).toEqual({
+    expect(
+      Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)])),
+    ).toEqual({
       PR1: "submitted",
       PR2: "integrated",
     })

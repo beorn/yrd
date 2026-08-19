@@ -81,6 +81,7 @@ pure pin advance = a change with exactly one shaset commit
 | ~~component~~ | **submodule** — the git word, everywhere |
 | ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **change whose diff is one shaset commit**; deleting this rail is scheduled work |
 | ~~merge request / pull request~~ | **change** — `mr`/`pr` remain taught aliases; ids still print as `PRnnn` |
+| ~~correlation~~ | **props** — opaque `--prop key=value` labels on a change (km's noun); the legacy journal key stays readable |
 
 ## The model — five objects, one pipeline
 
@@ -242,7 +243,7 @@ For a review-gated repository, `pr ready` records the authoritative check
 request after review approves the current revision:
 
 ```console
-$ yrd pr create issue/another-fix --correlation team-request:review-42
+$ yrd pr create issue/another-fix --prop request=review-42
 $ yrd pr review PR2 --approve --by @alice --ref verdict-42
 $ yrd pr ready PR2
 $ yrd pr checks PR2 --follow
@@ -269,7 +270,7 @@ pass; resident follow mode uses the same path. If neither runner form is active,
 the Job remains `publication-required` and `pr list` / `pr view` identify both
 the waiting Job and the exact `queue run --once` remedy. A terminal push error
 remains visible as `publication-failed`; repeating the identical `pr publish`
-request retries that same Job and preserves its correlation. Publication pushes
+request retries that same Job and preserves its props. Publication pushes
 originate in fresh staging repositories so hooks from the author's checkout do
 not inherit runner authority.
 
@@ -491,7 +492,7 @@ yrd sh [<issue>] [--issue <issue>] [--pr <selector>] [--bay <name>]
 yrd bay path <selector> [--json]
 yrd bay refresh [selector...] [--json]
 yrd bay submit [selector...] [--base <branch>]
-  [--correlation <namespace:id>] [--composition <path>] [--json]
+  [--prop <key>=<value>] [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
 
@@ -582,14 +583,15 @@ worktree:
 
 ```bash
 git push -u origin fix/release
-yrd pr create fix/release --base release/2.0
+yrd pr create fix/release --base release/2.0 --prop request=req-42
 yrd sh --pr fix/release
-yrd pr ready fix/release --correlation team-request:req-42
+yrd pr ready fix/release
 ```
 
-Both submission surfaces accept `--correlation <namespace:id>`. The namespace
-and opaque id bind to the exact PR revision and remain on its terminal facts;
-rebinding a live PR to a different correlation is refused.
+Both submission surfaces accept `--prop <key>=<value>`, repeatable. A prop is
+an opaque key=value label bound to the exact PR revision and carried on its
+terminal facts; each key is a fact, set once — resetting a key to a different
+value is refused.
 
 A branch name is a moving delivery selector, while a PR id is immutable
 evidence. Submitting an integrated or `already-landed` PR by id is idempotent;
@@ -605,10 +607,10 @@ push, and the same PR resumes automatically as its next revision.
 ```text
 yrd pr create [selector] [--base <branch>] [--issue <ref>] [--track]
   [--title <text>] [--description <text>]
-  [--correlation <namespace:id>] [--json]
+  [--prop <key>=<value>] [--json]
 yrd pr submit [selector...] [--base <branch>] [--track] [--keep-on-failure]
   [--issue <ref>] [--title <text>] [--description <text>]
-  [--correlation <namespace:id>] [--json]
+  [--prop <key>=<value>] [--json]
 yrd pr checkout <selector> [--bay <name>] [--json]
 yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <reviewer>]] [--json]
@@ -710,7 +712,7 @@ recut. `--ref` cannot combine with `--revision`.
 Without `--ref`, `pr recut` retains the ordinary mechanical base-refresh path:
 it fetches the authoritative base and records an equivalent,
 certificate-bearing successor on the same PR. `--revision` selects an older
-immutable revision; its correlation and approved-review provenance follow that
+immutable revision; its props and approved-review provenance follow that
 selected payload. When submission recorded authority newer than the source
 branch, recut derives exactly one source merge base and refuses ambiguous
 lineage. `--queue` readies only the certified revision and requests fresh
@@ -1447,8 +1449,8 @@ event journal, receiver, artifacts, and configured plugins:
 
 ```bash
 yrd sh --bay release-fix --keep
-yrd pr create task/release-fix --base release/2.0
-yrd pr ready task/release-fix --correlation team-request:release-2.0
+yrd pr create task/release-fix --base release/2.0 --prop request=release-2.0
+yrd pr ready task/release-fix
 yrd queue --base release/2.0
 ```
 
