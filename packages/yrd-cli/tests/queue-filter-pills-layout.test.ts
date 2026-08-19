@@ -65,7 +65,10 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       await app.waitForLayoutStable()
       const headerY = rowIndex(app.text, /\bTIME\b/u)
       const firstRowY = rowIndex(app.text, /pr#0\.\d/u)
-      const pillsY = rowIndex(app.text, /open.*running.*done.*failed.*all/u)
+      // `all` moved to its own centered pill, left of the status pills
+      // (operator ruling 2026-08-18, item 9) — it clears both filter kinds,
+      // so it no longer sits inside the open/running/done/failed cluster.
+      const pillsY = rowIndex(app.text, /all.*open.*running.*done.*failed/u)
       const statsY = rowIndex(app.text, /╭─ STATS /u)
 
       expect(app.text).toContain("╭─ RUNNER ")

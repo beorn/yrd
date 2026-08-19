@@ -57,7 +57,9 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       // cursor. run#7 has no running step, so its detail opens on the PR tab
       // (no RUN header there) — anchor on the title row instead, which names
       // the selected PR regardless of which tab is active.
-      const titleRow = () => app.text.split("\n")[0] ?? ""
+      // Row 0 is the watch pane's own top line (item 12, always present); the
+      // title row that used to be row 0 sits one row lower.
+      const titleRow = () => app.text.split("\n")[1] ?? ""
 
       await app.press("j")
       await app.press("j")

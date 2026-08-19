@@ -56,8 +56,12 @@ describe("queueStats calendar buckets", () => {
     ]
     const stats = queueStats(facts, now, new Date(2026, 5, 1).getTime(), 3)
 
-    expect(stats.map(({ label }) => label)).toEqual(["13", "11", "│23", "TODAY", "YESTERDAY", "WEEK", "MONTH"])
+    expect(stats.map(({ label }) => label)).toEqual(["13", "11", "23", "TODAY", "YSTRDAY", "WEEK", "MONTH"])
     expect(stats.filter(({ kind }) => kind === "hour").map(({ runs }) => runs.all)).toEqual([1, 1, 1])
+    // The day boundary is its own field, never a character fused onto the
+    // "23" label above (operator ruling 2026-08-18) — it marks the bucket
+    // immediately after the local day rolls over, and never a period bucket.
+    expect(stats.map(({ dayBoundary }) => dayBoundary)).toEqual([false, false, true, false, false, false, false])
   })
 
   it("keeps every hour bucket one real hour across local DST transitions", () => {
@@ -83,8 +87,10 @@ describe("queueStats calendar buckets", () => {
         60 * MINUTE,
       ])
     }
-    expect(spring.map(({ label }) => label)).toEqual(["03", "01", "00", "│23"])
-    expect(fall.map(({ label }) => label)).toEqual(["01b", "01a", "00", "│23"])
+    expect(spring.map(({ label }) => label)).toEqual(["03", "01", "00", "23"])
+    expect(fall.map(({ label }) => label)).toEqual(["01b", "01a", "00", "23"])
+    expect(spring.map(({ dayBoundary }) => dayBoundary)).toEqual([false, false, false, true])
+    expect(fall.map(({ dayBoundary }) => dayBoundary)).toEqual([false, false, false, true])
   })
 
   it("counts settled Runs but counts integrated PR members", () => {
@@ -167,7 +173,7 @@ describe("queueStats calendar buckets", () => {
     const byLabel = (label: string) => buckets.find((bucket) => bucket.label === label)
 
     expect(byLabel("TODAY")?.runs.all).toBe(1)
-    expect(byLabel("YESTERDAY")?.runs.all).toBe(1)
+    expect(byLabel("YSTRDAY")?.runs.all).toBe(1)
     expect(byLabel("WEEK")?.runs.all).toBe(3)
     expect(byLabel("MONTH")?.runs.all).toBe(5)
   })

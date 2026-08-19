@@ -1,6 +1,7 @@
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type React from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   baseIdentity,
   currentPRRev,
@@ -531,7 +532,13 @@ export function uncarriedFloorCount(count: number, missingUpdateClocks: number |
  * claim a healthy queue that nobody looked at.
  */
 export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
-  if (observation === undefined) return "uncarried not swept"
+  // Plain language, own label (operator ruling 2026-08-18, item 15): the old
+  // "uncarried not swept" was jargon-fused — two words with no verb between
+  // them reading as one compound term. This still says nothing was measured
+  // (never a bare 0, the same honest-absence rule the rest of this function
+  // upholds) and now names the sweep so the label cannot fuse with whatever
+  // renders next to it.
+  if (observation === undefined) return "UNCARRIED — stranded-refs sweep hasn't produced an observation yet"
   const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
   // Both halves are read off the record, not recomputed here: `≥` is not
   // decoration — the count is a floor whenever any candidate went unmeasured,
@@ -4623,7 +4630,14 @@ export function QueueStatusNotice({
   const notice = queueStatusNotice(row, data, { stepP50Ms })
   if (notice === undefined) return null
   const timingRows = data === undefined ? [] : queueDetailRunTimingRows(data, row)
-  const titleRight = data === undefined ? undefined : `RUN ${formatNounId(data.base, runIdValue(data.run))}`
+  // The queue label leads here too (operator ruling 2026-08-18, item 11 —
+  // RUN identifiers show the queue first in list AND detail): `1:main#2345`,
+  // reusing the same `queueLabelPrefix` the list rows already apply so the
+  // two surfaces can never drift onto different formats.
+  const titleRight =
+    data === undefined
+      ? undefined
+      : `RUN ${queueLabelPrefix({ queueLabel: row?.queueLabel })}${formatNounId(data.base, runIdValue(data.run))}`
   return (
     <TitledBox title="" {...(titleRight === undefined ? {} : { titleRight })} borderColor={notice.color}>
       <Box flexDirection="row" minWidth={0}>
@@ -5128,16 +5142,27 @@ function QueueRepositoryRoot({ root }: { root: string | undefined }) {
 
 export const RUNNER_STALE_MS = 15_000
 
-function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: number; uptimeMs: number }> | null {
+/**
+ * `nowMs` is the caller's — never re-derived from `projection.now` here
+ * (operator ruling 2026-08-18, items 16/17: ONE derivation for every
+ * relative age in the RUNNER box, fed by the box's own coarse re-render
+ * tick, never a second parallel clock). `projection.now` only advances once
+ * per poll (~15s); a `now` pinned to it freezes every "X ago" reading
+ * on-screen for up to that long even though real time keeps passing — the
+ * exact freeze the operator reported.
+ */
+function runnerTiming(
+  projection: QueueTimelineProjection,
+  nowMs: number,
+): Readonly<{ ageMs: number; uptimeMs: number }> | null {
   const runner = projection.runner
   if (runner === null) return null
-  const now = Date.parse(projection.now)
   const startedAt = Date.parse(runner.startedAt)
   const lastTickAt = Date.parse(runner.lastTickAt)
-  if (![now, startedAt, lastTickAt].every(Number.isFinite)) {
+  if (![nowMs, startedAt, lastTickAt].every(Number.isFinite)) {
     throw new Error("yrd: queue runner projection contains an invalid timestamp")
   }
-  return { ageMs: Math.max(0, now - lastTickAt), uptimeMs: Math.max(0, now - startedAt) }
+  return { ageMs: Math.max(0, nowMs - lastTickAt), uptimeMs: Math.max(0, nowMs - startedAt) }
 }
 
 /**
@@ -5204,6 +5229,7 @@ function queueHeadBlockDetails(
   projection: QueueTimelineProjection,
   state: BaysState | undefined,
   results: readonly QueueStatusResult[] | undefined,
+  nowMs: number,
 ): QueueHeadBlockDetails | undefined {
   const runner = projection.runner
   if (runner?.queueProgress?.state !== "stalled") return undefined
@@ -5229,8 +5255,11 @@ function queueHeadBlockDetails(
   const queuedBehind =
     position === undefined ? undefined : [...positions.values()].filter((candidate) => candidate > position).length
   const since = finding.since === undefined ? Number.NaN : Date.parse(finding.since)
-  const now = Date.parse(projection.now)
-  const blockedMs = Number.isFinite(since) && Number.isFinite(now) ? Math.max(0, now - since) : (finding.blockedMs ?? 0)
+  // `nowMs` is the caller's coarse-ticking clock (items 16/17), not a second
+  // `Date.parse(projection.now)` derivation — this age shares the same
+  // ONE-clock rule as every other relative reading in the RUNNER box.
+  const blockedMs =
+    Number.isFinite(since) && Number.isFinite(nowMs) ? Math.max(0, nowMs - since) : (finding.blockedMs ?? 0)
   const row = projection.rows.find((candidate) => candidate.pr === finding.pr)
   return {
     pr: finding.pr,
@@ -5253,15 +5282,19 @@ export type QueueHealthMarker = Readonly<{
   pulse: readonly [string, string] | null
 }>
 
-/** Missing, stale, or outcome-stalled is solid red; active is pulsing blue; idle is pulsing grey. */
-export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
-  const timing = runnerTiming(projection)
+/**
+ * Missing, stale, or outcome-stalled is solid red; active is pulsing blue;
+ * idle is pulsing grey. `nowMs` is the caller's coarse-ticking clock (items
+ * 16/17) — this stale/down detection freezes for up to a whole poll cycle
+ * otherwise, the same bug the age TEXT had.
+ */
+export function queueHealthMarker(projection: QueueTimelineProjection, nowMs: number): QueueHealthMarker {
+  const timing = runnerTiming(projection, nowMs)
   if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
     return { kind: "down", color: "$fg-error", pulse: null }
   }
   const progress = projection.runner.queueProgress
-  const progressAgeMs =
-    progress === undefined ? undefined : QueueRunnerProgress.ageMs(progress, Date.parse(projection.now))
+  const progressAgeMs = progress === undefined ? undefined : QueueRunnerProgress.ageMs(progress, nowMs)
   if (
     progress === undefined ||
     progressAgeMs === undefined ||
@@ -5427,6 +5460,39 @@ export function queueNoRunnerBanner(
 }
 
 /**
+ * A coarse, live-ticking clock for relative-time display ONLY (operator
+ * ruling 2026-08-18, items 16/17). `projection.now` is the data snapshot's
+ * own clock — it only advances once per watch poll (~15s) — so every "X ago"
+ * reading fed by it freezes on-screen for up to that long even though real
+ * time keeps passing. That is the exact bug the operator reported as
+ * "progress measured 0:05 ago" looking stuck: `now` was not ticking BETWEEN
+ * events, not the runner's own ~5s heartbeat oscillating.
+ *
+ * Anchored to `serverNowMs` (re-anchoring the instant it changes, so a fresh
+ * poll is authoritative the moment it lands) and advanced by real elapsed
+ * wall-clock time since, so it never drifts against `setInterval` jitter.
+ * Inert when `!live` (the one-shot print path has no app scope and a static
+ * print cannot tick) — returns `serverNowMs` unchanged, matching the file's
+ * existing live/static split for the activity pulse.
+ */
+function useCoarseNow(serverNowMs: number, live: boolean, tickMs = 1000): number {
+  const capturedAtRef = useRef(Date.now())
+  const seenServerNowRef = useRef(serverNowMs)
+  if (seenServerNowRef.current !== serverNowMs) {
+    seenServerNowRef.current = serverNowMs
+    capturedAtRef.current = Date.now()
+  }
+  const [, forceTick] = useState(0)
+  useEffect(() => {
+    if (!live) return
+    const id = setInterval(() => forceTick((tick) => (tick + 1) % 1_000_000), tickMs)
+    return () => clearInterval(id)
+  }, [live, tickMs])
+  if (!live) return serverNowMs
+  return serverNowMs + Math.max(0, Date.now() - capturedAtRef.current)
+}
+
+/**
  * Resident runner status is always visible in its own RUNNER frame. The
  * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
  * supersedes the separate STATUS box), the uptime/downtime timer rides the
@@ -5448,13 +5514,17 @@ function TimelineRunnerBox({
   live?: boolean
 }) {
   const runner = projection.runner
-  const timing = runnerTiming(projection)
+  // ONE derivation for every relative age in this box (items 16/17): a
+  // coarse-ticking clock, live only in the interactive pane, that every
+  // age/health computation below is fed explicitly rather than each
+  // re-deriving its own `Date.parse(projection.now)`.
+  const now = useCoarseNow(Date.parse(projection.now), live)
+  const timing = runnerTiming(projection, now)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
-  const marker = queueHealthMarker(projection)
+  const marker = queueHealthMarker(projection, now)
   const pause = projection.pause
   const pauseHealth = pause === undefined || state === undefined ? undefined : queuePauseHealth(state, pause)
   const pauseAllowed = pause === undefined ? "none" : queuePauseAllowedText(pause, pauseHealth)
-  const now = Date.parse(projection.now)
   const drained = timelineLastDrainedMs(projection)
   const lastMerge = timelineLastMergeMs(projection, state)
   const downMs =
@@ -5469,9 +5539,15 @@ function TimelineRunnerBox({
   const runnerTimer = runnerBoxTimer(marker, downMs, uptimeMs)
   const mergeTimer = runnerMergeTimer(lastMerge, now, uptimeMs, runner !== null)
   const timer = runnerTimer === undefined ? mergeTimer : `${runnerTimer} · ${mergeTimer}`
-  const headBlock = queueHeadBlockDetails(projection, state, results)
+  const headBlock = queueHeadBlockDetails(projection, state, results, now)
   const borderColor =
     marker.kind === "down" || marker.kind === "stalled" ? "$fg-error" : pause !== undefined ? "$fg-warning" : undefined
+  // While the queue is actively running, the OTHER text goes muted grey so
+  // the pulsing blue activity line carries the eye (operator ruling
+  // 2026-08-18, item 14). Scoped to the informational rails below the
+  // activity line — never the pause warning, which stays at full severity
+  // regardless of runner activity.
+  const dimOtherText = marker.kind === "processing"
   return (
     <TitledBox
       title="RUNNER"
@@ -5503,7 +5579,11 @@ function TimelineRunnerBox({
         )}
       </Box>
       {runner === null ? null : (
-        <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="truncate" minWidth={0}>
+        <Text
+          color={dimOtherText || runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"}
+          wrap="truncate"
+          minWidth={0}
+        >
           {runnerSourceLine(runner)}
         </Text>
       )}
@@ -5514,7 +5594,7 @@ function TimelineRunnerBox({
           the rail becomes noise and gets ignored, which is how the last one
           died. Coverage is carried by the TEXT, never by the colour. */}
       {runner === null ? null : (
-        <Text color={uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
+        <Text color={dimOtherText ? "$fg-muted" : uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
           {uncarriedLine(runner.uncarried, now)}
         </Text>
       )}
@@ -5749,20 +5829,21 @@ export function queueTimelineDateHeaderAt(
  * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
  * only when on; no `none`/`no`/`all` placeholders. The status buckets render as
- * pills: a pointer click or lowercase o/r/d/f SELECTS ONLY that bucket, `all`
- * (a / click) restores every bucket, and capital O/R/D/F toggles one bucket's
- * membership (power path, unadvertised) — user respec 2026-07-23.
+ * pills: a pointer click or lowercase o/r/d/f SELECTS ONLY that bucket, and
+ * capital O/R/D/F toggles one bucket's membership (power path, unadvertised)
+ * — user respec 2026-07-23. `all` no longer lives in this cluster (operator
+ * ruling 2026-08-18, item 9): it moved to its own centered pill between this
+ * group and the queue legend, since it clears both filter kinds at once and
+ * belongs to neither one alone.
  */
 function TimelineFilterLine({
   projection,
   buckets,
   onSelectBucket,
-  onShowAll,
 }: {
   projection: QueueTimelineProjection
   buckets: ReadonlySet<QueueTimelineStatusBucket>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
-  onShowAll?: () => void
 }) {
   const filters = projection.filters
   // The "FILTER" label text is deleted (item 3): the pills stand alone. The
@@ -5778,12 +5859,11 @@ function TimelineFilterLine({
     .filter(Boolean)
     .join(" ")
   // The status buckets are TogglePills labelled by their plain word with a
-  // BOLD first letter — `open`/`running`/`done`/`failed` plus `all` (user
-  // respec 2026-07-23), the bold o/r/d/f/a doubling as the hotkey hint (no
-  // `[o]` brackets). Click or lowercase key = select ONLY that bucket; `all` =
-  // every bucket; capital letters toggle membership (unadvertised). The whole
-  // cluster sits very dim and lifts together on hover (silvery TogglePillGroup).
-  const allActive = QUEUE_TIMELINE_STATUS_BUCKETS.every((bucket) => buckets.has(bucket))
+  // BOLD first letter — `open`/`running`/`done`/`failed` (user respec
+  // 2026-07-23), the bold o/r/d/f doubling as the hotkey hint (no `[o]`
+  // brackets). Click or lowercase key = select ONLY that bucket; capital
+  // letters toggle membership (unadvertised). The whole cluster sits very dim
+  // and lifts together on hover (silvery TogglePillGroup).
   return (
     <TogglePillGroup
       {...(dimensions === "" ? {} : { label: dimensions })}
@@ -5800,17 +5880,18 @@ function TimelineFilterLine({
           onToggle={() => onSelectBucket?.(bucket)}
         />
       ))}
-      <TogglePill label="all" boldFirstLetter active={allActive} onToggle={() => onShowAll?.()} />
     </TogglePillGroup>
   )
 }
 
 /**
- * The queue legend: one pill per queue, labelled `N base`, on the SAME row as
- * the status filters and left-aligned against them (user directive
- * 2026-08-13). Every queue is shown by default and its digit toggles it off —
- * the bold leading digit doubles as the hotkey hint exactly as the bold first
- * letter does on the status pills.
+ * The queue legend: one pill per queue, labelled `N:base` (operator ruling
+ * 2026-08-18, item 9 — e.g. `1:code  2:pm`), left-aligned at the START of the
+ * filter row. Every queue is shown by default and its digit FILTERS TO that
+ * queue — the same select-only idiom as the status pills' lowercase o/r/d/f —
+ * the bold leading digit doubling as the hotkey hint exactly as the bold
+ * first letter does there. `all` (its own centered pill, rendered by the
+ * caller) clears this alongside the status filters.
  *
  * A single-queue projection renders NOTHING here: there is no choice to offer,
  * and the QUEUE tab above already names it.
@@ -5818,11 +5899,11 @@ function TimelineFilterLine({
 function TimelineQueueLegend({
   queues,
   visibleQueues,
-  onToggleQueue,
+  onSelectQueue,
 }: {
   queues: readonly QueueTimelineQueue[]
   visibleQueues?: ReadonlySet<string>
-  onToggleQueue?: (base: string) => void
+  onSelectQueue?: (base: string) => void
 }) {
   if (queues.length < 2) return null
   return (
@@ -5830,10 +5911,10 @@ function TimelineQueueLegend({
       {queues.map(({ label, base }) => (
         <TogglePill
           key={base}
-          label={`${String(label)} ${base}`}
+          label={`${String(label)}:${base}`}
           boldFirstLetter
           active={visibleQueues === undefined || visibleQueues.has(base)}
-          onToggle={() => onToggleQueue?.(base)}
+          onToggle={() => onSelectQueue?.(base)}
         />
       ))}
     </TogglePillGroup>
@@ -5879,7 +5960,7 @@ function ProjectedQueueTimeline({
   expandedStorms,
   onSelectBucket,
   onShowAll,
-  onToggleQueue,
+  onSelectQueue,
   listRef,
 }: {
   repositoryRoot?: string
@@ -5902,7 +5983,7 @@ function ProjectedQueueTimeline({
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
   onShowAll?: () => void
-  onToggleQueue?: (base: string) => void
+  onSelectQueue?: (base: string) => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
@@ -5915,6 +5996,12 @@ function ProjectedQueueTimeline({
   const rows = fillHeight ? displayRows : timelineRetainedRows(displayRows, projection.display.shown)
   const hiddenDisplayRows = Math.max(0, displayRows.length - rows.length)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
+  // The centered `all` pill (item 9) is active only when NEITHER filter kind
+  // is narrowed — it clears both at once, so it only reads as "on" when both
+  // already show everything.
+  const allFiltersActive =
+    QUEUE_TIMELINE_STATUS_BUCKETS.every((bucket) => buckets.has(bucket)) &&
+    (visibleQueues === undefined || projection.queues.every(({ base }) => visibleQueues.has(base)))
   // In the fill pane the TIME cell is time-of-day only (item 1) and the day is
   // carried by YYYY-MM-DD header rows (leading + per-boundary, below). The
   // one-shot print path is pinned: it keeps the inline-date TIME cell when the
@@ -6028,23 +6115,23 @@ function ProjectedQueueTimeline({
             spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
         {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
-            order optional STATUS → header → rows → pills → STATS). The "... N more" /
-            retained coverage reads on the left, the very-dim toggle-pills
-            right-align. In fill mode the coverage degrades to EMPTY (the rows
-            virtualize and scroll, so nothing is permanently hidden — no "... 0
-            more"); the pills always render. Off fill the coverage renders as
-            W1b placed it. */}
-        <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
-          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+            order optional STATUS → header → rows → pills → STATS). Three
+            regions (operator ruling 2026-08-18, item 9): the queue legend +
+            "... N more"/retained coverage LEFT, the shared `all` pill
+            CENTERED (it clears both filter kinds, so it belongs to neither
+            cluster alone), the status pills RIGHT. In fill mode the coverage
+            degrades to EMPTY (the rows virtualize and scroll, so nothing is
+            permanently hidden — no "... 0 more"); the pills always render. */}
+        <Box height={1} flexDirection="row" minWidth={0} overflow="hidden">
+          <Box flexGrow={1} flexBasis={0} flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
             {/* The queue legend takes the left slot of this row (user
-                directive 2026-08-13) — the same line as the status filters,
-                left-aligned against their right-aligned cluster. In the live
-                fill pane both of that slot's previous occupants are
-                suppressed, so it was empty. */}
+                directive 2026-08-13) — the same line as the status filters.
+                In the live fill pane both of that slot's previous occupants
+                are suppressed, so it was empty. */}
             <TimelineQueueLegend
               queues={projection.queues}
               {...(visibleQueues === undefined ? {} : { visibleQueues })}
-              {...(onToggleQueue === undefined ? {} : { onToggleQueue })}
+              {...(onSelectQueue === undefined ? {} : { onSelectQueue })}
             />
             {fillHeight || hiddenDisplayRows === 0 ? null : (
               <Text color="$fg-muted" wrap="truncate">
@@ -6057,12 +6144,14 @@ function ProjectedQueueTimeline({
               </Text>
             )}
           </Box>
-          <TimelineFilterLine
-            projection={projection}
-            buckets={buckets}
-            onSelectBucket={onSelectBucket}
-            onShowAll={onShowAll}
-          />
+          <Box flexGrow={1} flexBasis={0} flexDirection="row" justifyContent="center" minWidth={0} flexShrink={0}>
+            <TogglePillGroup flexShrink={0}>
+              <TogglePill label="all" boldFirstLetter active={allFiltersActive} onToggle={() => onShowAll?.()} />
+            </TogglePillGroup>
+          </Box>
+          <Box flexGrow={1} flexBasis={0} flexDirection="row" justifyContent="flex-end" minWidth={0}>
+            <TimelineFilterLine projection={projection} buckets={buckets} onSelectBucket={onSelectBucket} />
+          </Box>
         </Box>
         {!fillHeight ||
         (availableRows ?? viewportRows) === 0 ||
@@ -6100,7 +6189,7 @@ export function QueueTimelineView({
   expandedStorms,
   onSelectBucket,
   onShowAll,
-  onToggleQueue,
+  onSelectQueue,
   listRef,
 }: {
   repositoryRoot?: string
@@ -6123,7 +6212,7 @@ export function QueueTimelineView({
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
   onShowAll?: () => void
-  onToggleQueue?: (base: string) => void
+  onSelectQueue?: (base: string) => void
   listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
@@ -6150,7 +6239,7 @@ export function QueueTimelineView({
         expandedStorms={expandedStorms}
         onSelectBucket={onSelectBucket}
         onShowAll={onShowAll}
-        onToggleQueue={onToggleQueue}
+        onSelectQueue={onSelectQueue}
         listRef={listRef}
       />
     )

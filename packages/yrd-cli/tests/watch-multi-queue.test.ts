@@ -63,12 +63,15 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
     const app = createRenderer({ cols: 140, rows: 40 })(createElement(QueueWatchFrame, { snapshot: twoQueues() }))
     try {
       await app.waitForLayoutStable()
-      const legendRow = app.text.split("\n").find((row) => row.includes("1 main"))
+      // `N:base` (operator ruling 2026-08-18, item 9), e.g. `1:main` — the
+      // SAME prefix shape a RUN identifier now carries (item 11), so the
+      // legend row is the one line where BOTH queues' labels co-occur; a
+      // single run row only ever carries one.
+      const legendRow = app.text.split("\n").find((row) => row.includes("1:main") && row.includes("2:release/next"))
       expect(legendRow, "the legend must render").toBeDefined()
       // Same line as the status filters, and to the LEFT of them.
-      expect(legendRow).toContain("2 release/next")
       expect(legendRow).toContain("failed")
-      expect((legendRow ?? "").indexOf("1 main")).toBeLessThan((legendRow ?? "").indexOf("failed"))
+      expect((legendRow ?? "").indexOf("1:main")).toBeLessThan((legendRow ?? "").indexOf("failed"))
     } finally {
       app.unmount()
     }
@@ -78,27 +81,41 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
     const app = createRenderer({ cols: 140, rows: 40 })(createElement(QueueWatchFrame, { snapshot: twoQueues() }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text.split("\n")[0]).toContain("QUEUES")
-      expect(app.text.split("\n")[0]).not.toContain("QUEUE main")
+      // Row 0 is the watch pane's own top line (item 12, always present:
+      // "YRD MERGE QUEUE ... for ..."); the QUEUE tab's own label sits one
+      // row lower.
+      expect(app.text.split("\n")[0]).toContain("YRD MERGE QUEUE")
+      expect(app.text.split("\n")[1]).toContain("QUEUES")
+      expect(app.text.split("\n")[1]).not.toContain("QUEUE main")
     } finally {
       app.unmount()
     }
   })
 
-  it("hides a queue's runs when its digit is pressed, and brings them back", async () => {
+  it("filters to only the pressed queue's digit, and `a` restores every queue", async () => {
+    // Select-only, the same idiom as the status pills' lowercase o/r/d/f
+    // (operator ruling 2026-08-18, item 9 — "pressing 1/2 filters TO that
+    // queue"; supersedes the 2026-08-13 toggle-off directive this replaced).
     const app = createRenderer({ cols: 140, rows: 40 })(createElement(QueueWatchFrame, { snapshot: twoQueues() }))
     try {
       await app.waitForLayoutStable()
+      expect(app.text).toContain("1:main#1")
       expect(app.text).toContain("2:release/next#7")
 
       await app.press("2")
       await app.waitForLayoutStable()
-      expect(app.text, "queue 2 is toggled off").not.toContain("2:release/next#7")
-      expect(app.text, "queue 1 is untouched").toContain("1:main#1")
+      expect(app.text, "queue 2 is the only one shown").toContain("2:release/next#7")
+      expect(app.text, "queue 1 is filtered out").not.toContain("1:main#1")
 
-      await app.press("2")
+      await app.press("1")
       await app.waitForLayoutStable()
-      expect(app.text, "the same digit restores it").toContain("2:release/next#7")
+      expect(app.text, "pressing 1 now filters to queue 1 instead").toContain("1:main#1")
+      expect(app.text, "queue 2 is filtered out").not.toContain("2:release/next#7")
+
+      await app.press("a")
+      await app.waitForLayoutStable()
+      expect(app.text, "`a` restores every queue").toContain("1:main#1")
+      expect(app.text, "`a` restores every queue").toContain("2:release/next#7")
     } finally {
       app.unmount()
     }
@@ -120,10 +137,13 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
     const app = createRenderer({ cols: 140, rows: 40 })(createElement(QueueWatchFrame, { snapshot: single }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text.split("\n")[0]).toContain("QUEUE main")
+      // Row 0 is the watch pane's own top line (item 12, always present,
+      // orthogonal to single- vs multi-queue); the QUEUE tab's own label
+      // sits one row lower.
+      expect(app.text.split("\n")[1]).toContain("QUEUE main")
       expect(app.text).toContain("main#1")
       expect(app.text, "no label prefix on a single queue").not.toContain("1:main#1")
-      expect(app.text, "no legend to offer a choice that does not exist").not.toContain("1 main")
+      expect(app.text, "no legend to offer a choice that does not exist").not.toContain("1:main")
     } finally {
       app.unmount()
     }

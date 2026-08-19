@@ -125,7 +125,9 @@ function clickRow(app: ReturnType<ReturnType<typeof createRenderer>>, needle: st
 }
 
 function detailTitle(text: string): string {
-  return text.split("\n")[0] ?? ""
+  // Row 0 is the watch pane's own top line (item 12, always present); the
+  // QUEUE tab + DETAIL title row that used to be row 0 sits one row lower.
+  return text.split("\n")[1] ?? ""
 }
 
 describe("QueueWatchFrame live-follow cursor contract", () => {

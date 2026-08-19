@@ -131,7 +131,7 @@ describe("QueueStatsPanel", () => {
     expect(app.text).toContain("╭─ STATS ")
     expect(app.text).not.toContain("╭─ FLOW ")
     expect(app.text).not.toContain("╭─ TIME ")
-    for (const header of ["TODAY", "YESTERDAY", "WEEK", "MONTH"]) {
+    for (const header of ["TODAY", "YSTRDAY", "WEEK", "MONTH"]) {
       expect(app.text).toContain(header)
     }
     expect(app.text).not.toContain("THIS WEEK")
@@ -159,11 +159,52 @@ describe("QueueStatsPanel", () => {
     const headerRow = rows.findIndex((row) => row.includes("TODAY"))
     expect(rows[headerRow]).toContain("RUNS")
     expect(rows.filter((row) => row.includes("RUNS"))).toHaveLength(1)
-    const countRows = ["ALL", "MERGED", "DUP", "PASS", "FAILS"].map((label) =>
+    // DUP sits just above FAILS (operator ruling 2026-08-18) — the two rows a
+    // landing could have gone to instead of a clean MERGED.
+    const countRows = ["ALL", "MERGED", "PASS", "DUP", "FAILS"].map((label) =>
       rows.findIndex((row) => row.includes(label)),
     )
     expect(countRows.every((index) => index >= 0)).toBe(true)
     expect(countRows).toEqual(countRows.toSorted((left, right) => left - right))
+  })
+
+  it("draws the midnight boundary as its own column running through the header and every data row", () => {
+    // Two active hours either side of LOCAL midnight: 00:10 today, 23:05
+    // yesterday. Local `Date` component constructors throughout (matching
+    // the day-boundary test in time-stats.test.ts) so the crossing is real
+    // regardless of the test runner's own TZ — a UTC ISO fixture would only
+    // land on a local midnight by coincidence of that TZ's offset.
+    const boundaryNow = new Date(2026, 6, 16, 0, 20).toISOString()
+    const facts: readonly QueueTerminalFact[] = [
+      fact({ run: "today-hour", terminalAtMs: new Date(2026, 6, 16, 0, 10).getTime(), outcome: "passed" }),
+      fact({ run: "yesterday-hour", terminalAtMs: new Date(2026, 6, 15, 23, 5).getTime(), outcome: "passed" }),
+    ]
+    const app = createRenderer({ cols: 126, rows: 30 })(
+      boxesElement({ facts, now: boundaryNow, earliestFactMs: HORIZON, width: 126 }),
+    )
+    const rows = app.text.split("\n")
+    const headerRow = rows.find((row) => row.includes("00") && row.includes("23"))
+    if (headerRow === undefined) throw new Error(`missing hour header row:\n${app.text}`)
+
+    // Never fused onto the "23" label: a bare boundary marker followed
+    // directly by the digits (no separating space) is exactly the shape
+    // this test rules out.
+    expect(headerRow).not.toContain("│23")
+
+    // Skip the box's own left border, which is the same "│" glyph.
+    const boundaryX = headerRow.indexOf("│", headerRow.indexOf("RUNS"))
+    expect(boundaryX, "the header must carry the boundary column").toBeGreaterThanOrEqual(0)
+    expect(headerRow.indexOf("00")).toBeLessThan(boundaryX)
+    expect(boundaryX).toBeLessThan(headerRow.indexOf("23"))
+
+    // The SAME column, on every data row below the header — a vertical rule,
+    // not a header-only annotation.
+    const allRow = rows.find((row) => row.includes("ALL") && !row.includes("RUNS"))
+    if (allRow === undefined) throw new Error(`missing ALL row:\n${app.text}`)
+    expect(allRow[boundaryX]).toBe("│")
+    const failsRow = rows.find((row) => row.includes("FAILS"))
+    if (failsRow === undefined) throw new Error(`missing FAILS row:\n${app.text}`)
+    expect(failsRow[boundaryX]).toBe("│")
   })
 
   it("shows Run counts, landed-PR counts, and duration averages using the compact vocabulary", () => {
@@ -221,15 +262,15 @@ describe("QueueStatsPanel", () => {
     const currentHour = String(new Date(NOW_MS).getHours()).padStart(2, "0")
     expect(header.indexOf(currentHour)).toBeGreaterThanOrEqual(0)
     expect(header.indexOf(currentHour)).toBeLessThan(header.indexOf("TODAY"))
-    expect(header.indexOf("TODAY")).toBeLessThan(header.indexOf("YESTERDAY"))
-    expect(header.indexOf("YESTERDAY")).toBeLessThan(header.indexOf("WEEK"))
+    expect(header.indexOf("TODAY")).toBeLessThan(header.indexOf("YSTRDAY"))
+    expect(header.indexOf("YSTRDAY")).toBeLessThan(header.indexOf("WEEK"))
     expect(header.indexOf("WEEK")).toBeLessThan(header.indexOf("MONTH"))
 
     const narrowRender = createRenderer({ cols: 49, rows: 30 })
     const narrow = narrowRender(boxesElement({ facts: FACTS, now: NOW, earliestFactMs: HORIZON, width: 49 }))
     const narrowHeader = rowContaining(narrow, "TODAY")
     expect(narrowHeader).not.toContain(currentHour)
-    for (const fixed of ["TODAY", "YESTERDAY", "WEEK", "MONTH"]) expect(narrowHeader).toContain(fixed)
+    for (const fixed of ["TODAY", "YSTRDAY", "WEEK", "MONTH"]) expect(narrowHeader).toContain(fixed)
 
     const hourRender = createRenderer({ cols: 55, rows: 30 })
     const hour = hourRender(boxesElement({ facts: FACTS, now: NOW, earliestFactMs: HORIZON, width: 55 }))
@@ -313,7 +354,7 @@ describe("QueueStatsPanel", () => {
       app.rerender(element)
     }
     dispatchArrow("\u001b[C")
-    expect(app.text).toContain("FAILS · YESTERDAY")
+    expect(app.text).toContain("FAILS · YSTRDAY")
     dispatchArrow("\u001b[D")
     expect(app.text).toContain("FAILS · TODAY")
 

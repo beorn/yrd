@@ -49,7 +49,9 @@ function rowIndex(rows: readonly string[], needle: string): number {
 }
 
 function detailTitleRow(text: string): string {
-  return text.split("\n")[0] ?? ""
+  // Row 0 is the watch pane's own top line (item 12, always present); the
+  // QUEUE tab + DETAIL title row that used to be row 0 sits one row lower.
+  return text.split("\n")[1] ?? ""
 }
 
 describe("queue timeline 21106 contract", () => {
@@ -68,7 +70,7 @@ describe("queue timeline 21106 contract", () => {
   it("renders one calendar STATS panel after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
-    const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
+    const pillsLine = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
     const statsLine = rowIndex(rows, "╭─ STATS ")
 
     expect(statsLine).toBeGreaterThan(pillsLine)
@@ -88,7 +90,7 @@ describe("queue timeline 21106 contract", () => {
       "RUNNING",
       "RETRIES/RUN",
       "TODAY",
-      "YESTERDAY",
+      "YSTRDAY",
       "WEEK",
       "MONTH",
     ]) {
@@ -283,7 +285,7 @@ describe("queue timeline 21106 contract", () => {
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
     // the STATS frame.
-    const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
+    const pillsLine = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
     const statsBoxLine = rowIndex(rows, "╭─ STATS ")
 
     expect(queueLine).toBeLessThan(updatedLine)
@@ -329,7 +331,7 @@ describe("queue timeline 21106 contract", () => {
       expect(statisticsText).toContain(cell)
     }
     expect(statisticsText).not.toContain("CODING")
-    for (const window of ["TODAY", "YESTERDAY", "WEEK", "MONTH"]) {
+    for (const window of ["TODAY", "YSTRDAY", "WEEK", "MONTH"]) {
       expect(statisticsText).toContain(window)
     }
   })
@@ -639,7 +641,9 @@ describe("queue timeline 21106 contract", () => {
       // tab is gone), so R42's recorded check output — the sentinel — is visible
       // without navigating tabs.
       const rows = app.text.split("\n")
-      const divider = rows[0]?.indexOf("│") ?? -1
+      // Row 0 is the watch pane's own top line (item 12, always present) and
+      // carries no divider; the SplitPane content starts one row lower.
+      const divider = rows[1]?.indexOf("│") ?? -1
       expect(divider).toBeGreaterThan(0)
       const sentinelRows = rows.filter((row) => row.includes("JSON_EDGE_SENTINEL"))
       expect(sentinelRows).toHaveLength(1)
@@ -664,7 +668,7 @@ describe("queue timeline 21106 contract", () => {
     for (const width of [120, 200]) {
       const rows = await renderTimeline(contractProjection(), width)
       const headerLine = rowIndex(rows, "TIME")
-      const pillsLine = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
+      const pillsLine = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
       // Item 2: the pills row renders BELOW the list, not above the header.
       expect(pillsLine, `width ${width}`).toBeGreaterThan(headerLine)
       const filter = rows[pillsLine]
@@ -674,7 +678,11 @@ describe("queue timeline 21106 contract", () => {
       // directive 2026-07-21). Right-aligned to the cap.
       expect(filter).not.toContain("FILTER")
       expect(filter).not.toMatch(/\[[trfd]\]/u)
-      expect(filter.trim()).toContain("since=6:00:00 open running done failed all")
+      // `all` is its own centered pill, left of the status cluster (operator
+      // ruling 2026-08-18, item 9) — no longer adjacent to `failed`.
+      expect(filter.trim()).toContain("since=6:00:00 open running done failed")
+      expect(filter.indexOf("all")).toBeGreaterThanOrEqual(0)
+      expect(filter.indexOf("all")).toBeLessThan(filter.indexOf("since="))
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
@@ -699,7 +707,7 @@ describe("queue timeline 21106 contract", () => {
     expect(runnerBottom, "the RUNNER box closes below the pause line").toBeGreaterThan(statusLine)
     // It still renders between the metadata clock and the pills row.
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
-    const pillsAt = rows.findIndex((row) => /open.*running.*done.*failed.*all/u.test(row))
+    const pillsAt = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
     expect(statusLine, "the RUNNER box sits above the pills row").toBeLessThan(pillsAt)
 
     const render = createRenderer({ cols: 120, rows: 45 })

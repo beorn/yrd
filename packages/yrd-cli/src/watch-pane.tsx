@@ -58,6 +58,12 @@ const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.52
 const QUEUE_PANE_PADDING_X = 1
+// Fixed-height chrome OUTSIDE the QUEUE/DETAIL split: the top line (item 12,
+// always present) plus the footer's reserved row (present or not, so a
+// notice appearing never reflows the panes above it). Both are `height={1}`
+// siblings of the split; every viewport-row budget below subtracts this
+// count up front rather than each caller guessing its own "-1"/"-2".
+const QUEUE_WATCH_CHROME_ROWS = 2
 
 export type QueueDetailTier = "right" | "below" | "full"
 
@@ -1286,6 +1292,28 @@ function QueueWatchFooter({
   )
 }
 
+/**
+ * The watch pane's own top line (operator ruling 2026-08-18, item 12):
+ * `YRD MERGE QUEUE` left, the repository this snapshot's Journal projects
+ * muted and right-aligned — `for /hh`. Sits above both the QUEUE and DETAIL
+ * panes (and above the QUEUE tab's own "QUEUE main"/"QUEUES" label), since it
+ * identifies the whole pane rather than either side of the split. Renders
+ * identically whether or not a projection has loaded yet, so it never
+ * flashes in partway through the first snapshot.
+ */
+function QueueWatchTopLine({ repositoryRoot }: Readonly<{ repositoryRoot?: string }>) {
+  return (
+    <Box height={1} flexDirection="row" justifyContent="space-between" flexShrink={0} minWidth={0}>
+      <Text bold>YRD MERGE QUEUE</Text>
+      {repositoryRoot === undefined ? null : (
+        <Text color="$fg-muted" wrap="truncate">
+          for {repositoryRoot}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
 export function QueueWatchFrame({
   snapshot,
   pr,
@@ -1298,7 +1326,7 @@ export function QueueWatchFrame({
   onFocusChange?: (focus: QueueWatchFocus) => void
 }) {
   const { columns, rows: viewportRows } = useWindowSize()
-  const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
+  const tier = queueDetailTier(columns, Math.max(0, viewportRows - QUEUE_WATCH_CHROME_ROWS))
   // The four operator buckets (user respec 2026-07-23): lowercase o/r/d/f and
   // pill clicks select one court, `a` restores all, and uppercase O/R/D/F
   // toggles individual membership. Initial visibility mirrors the CLI-level
@@ -1308,30 +1336,36 @@ export function QueueWatchFrame({
       ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)
       : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
   )
-  // Every queue is shown by default (user directive 2026-08-13); a digit
-  // toggles one off. Held as bases rather than labels so a snapshot that
-  // relabels (a queue appears or drains away) cannot silently move the
-  // operator's choice onto a different queue.
-  const [hiddenQueues, setHiddenQueues] = useState<ReadonlySet<string>>(() => new Set())
+  // Every queue is shown by default and a digit FILTERS TO that queue — the
+  // same select-only idiom as the status pills' lowercase o/r/d/f, not a
+  // toggle (operator ruling 2026-08-18, item 9; supersedes the 2026-08-13
+  // toggle-off directive this replaced). `undefined` means no filter is
+  // active — every queue this projection currently has, tracked dynamically
+  // — while a concrete Set is a specific choice pinned to those bases, so a
+  // snapshot that relabels (a queue appears or drains away) cannot silently
+  // move the operator's choice onto a different queue.
+  const [shownQueues, setShownQueues] = useState<ReadonlySet<string> | undefined>(undefined)
   const queues = snapshot.projection?.queues
   const visibleQueues = useMemo(
-    () => new Set((queues ?? []).filter(({ base }) => !hiddenQueues.has(base)).map(({ base }) => base)),
-    [queues, hiddenQueues],
+    () => new Set(shownQueues === undefined ? (queues ?? []).map(({ base }) => base) : shownQueues),
+    [queues, shownQueues],
   )
-  const toggleQueue = (base: string): void => {
-    setHiddenQueues((current) => {
-      const next = new Set(current)
-      if (next.has(base)) next.delete(base)
-      else next.add(base)
-      return next
-    })
+  const selectOnlyQueue = (base: string): void => {
+    setShownQueues(new Set([base]))
+  }
+  const showAllQueues = (): void => {
+    setShownQueues(undefined)
   }
   const [expandedStorms, setExpandedStorms] = useState<ReadonlySet<string>>(() => new Set())
   const selectOnlyBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets(new Set([bucket]))
   }
-  const showAllBuckets = (): void => {
+  // `a` clears BOTH filter kinds together, which otherwise operate
+  // independently (item 9) — the one keystroke/pill that resets the whole
+  // filter row back to its unfiltered default.
+  const showAll = (): void => {
     setVisibleBuckets(new Set(QUEUE_TIMELINE_STATUS_BUCKETS))
+    showAllQueues()
   }
   const toggleBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets((current) => {
@@ -1453,14 +1487,14 @@ export function QueueWatchFrame({
     if (character === "r") selectOnlyBucket("running")
     if (character === "d") selectOnlyBucket("done")
     if (character === "f") selectOnlyBucket("failed")
-    if (character === "a") showAllBuckets()
-    // 1..9 toggle a queue by its legend label — the digits the legend bolds,
-    // the same way o/r/d/f are the letters the status pills bold. Only labels
-    // this projection actually has respond, so a stray digit is inert rather
-    // than hiding rows nobody asked about.
+    if (character === "a") showAll()
+    // 1..9 select ONLY that queue by its legend label — the digits the legend
+    // bolds, the same idiom as o/r/d/f selecting only their bucket. Only
+    // labels this projection actually has respond, so a stray digit is inert
+    // rather than filtering to a queue that does not exist.
     if (/^[1-9]$/u.test(character)) {
       const queue = snapshot.projection.queues.find(({ label }) => label === Number(character))
-      if (queue !== undefined) toggleQueue(queue.base)
+      if (queue !== undefined) selectOnlyQueue(queue.base)
       return
     }
     if (character === "O") toggleBucket("open")
@@ -1528,7 +1562,7 @@ export function QueueWatchFrame({
     snapshot.projection === undefined
       ? timelineOuterColumns
       : Math.max(0, timelineOuterColumns - 2 * QUEUE_PANE_PADDING_X)
-  const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - 1), tier, detailOpen, splitRatio)
+  const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - QUEUE_WATCH_CHROME_ROWS), tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
@@ -1562,8 +1596,8 @@ export function QueueWatchFrame({
         visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={selectOnlyBucket}
-        onShowAll={showAllBuckets}
-        onToggleQueue={toggleQueue}
+        onShowAll={showAll}
+        onSelectQueue={selectOnlyQueue}
         listRef={timelineListRef}
       />
     )
@@ -1594,6 +1628,7 @@ export function QueueWatchFrame({
   if (snapshot.projection === undefined) {
     return (
       <Box position="relative" flexDirection="column">
+        <QueueWatchTopLine {...(snapshot.repositoryRoot === undefined ? {} : { repositoryRoot: snapshot.repositoryRoot })} />
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
         {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
@@ -1661,6 +1696,7 @@ export function QueueWatchFrame({
       minHeight={0}
       userSelect="text"
     >
+      <QueueWatchTopLine {...(snapshot.repositoryRoot === undefined ? {} : { repositoryRoot: snapshot.repositoryRoot })} />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>

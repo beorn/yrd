@@ -117,6 +117,25 @@ function bucketWidth(bucket: QueueStatsBucket): number {
   return bucket.kind === "hour" ? 4 : Math.max(7, bucket.label.length)
 }
 
+/**
+ * One hour bucket's day-boundary marker, its own one-character column
+ * (operator ruling 2026-08-18) rather than a glyph fused onto the hour label.
+ * Rendered by every hour-bearing row — the header and each STATS_ROWS row —
+ * keyed identically off `bucket.dayBoundary`, so the `│` lands at the same
+ * screen column on every row and reads as one vertical rule through the box.
+ * Present only where a boundary actually falls: an always-present empty
+ * column would cost two characters (width + gap) per hour, every hour, for a
+ * marker that fires at most once or twice across the visible window.
+ */
+function DayBoundaryMarker({ bucket }: Readonly<{ bucket: QueueStatsBucket }>) {
+  if (!bucket.dayBoundary) return null
+  return (
+    <Box width={1} flexShrink={0}>
+      <Text color="$fg-muted">│</Text>
+    </Box>
+  )
+}
+
 function StatsValueCell({
   bucket,
   value,
@@ -142,7 +161,12 @@ function StatsValueCell({
       width={bucketWidth(bucket)}
       minWidth={0}
       flexShrink={0}
-      alignItems="flex-end"
+      // A Box defaults to row layout, whose cross axis is vertical — so
+      // `alignItems` (the property this cell used until 2026-08-18) never
+      // touched horizontal position and every number rendered flush LEFT.
+      // `justifyContent` is the row's main-axis property; `flex-end` is what
+      // actually right-aligns the value against the cell's right edge.
+      justifyContent="flex-end"
       {...(interactive
         ? {
             mouseCursor: "pointer" as const,
@@ -193,15 +217,19 @@ const STATS_ROWS: readonly StatsRow[] = [
     value: (bucket) => countCell(bucket, bucket.runs.integrated),
   },
   {
-    label: "DUP",
-    color: "$fg-success",
-    value: (bucket) => countCell(bucket, bucket.runs.alreadyLanded),
-  },
-  {
     // Non-landing success (admission-only). Not a fail, not integrated (21801).
     label: "PASS",
     color: "$fg-success",
     value: (bucket) => countCell(bucket, bucket.runs.passed),
+  },
+  {
+    // Muted, not green (operator ruling 2026-08-18): a duplicate merge is not
+    // a fresh success the way MERGED/PASS are, so it does not earn the same
+    // success color. Ordered directly above FAILS — the two rows a landing
+    // could have gone to instead of a clean MERGED.
+    label: "DUP",
+    color: "$fg-muted",
+    value: (bucket) => countCell(bucket, bucket.runs.alreadyLanded),
   },
   {
     label: "FAILS",
@@ -282,13 +310,20 @@ export function QueueStatsPanel({
               </Box>
               {hourBuckets.length === 0 ? null : (
                 <Box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
-                  {hourBuckets.map((bucket) => (
-                    <Box key={bucket.key} width={bucketWidth(bucket)} minWidth={0} flexShrink={0} alignItems="flex-end">
+                  {hourBuckets.flatMap((bucket) => [
+                    <DayBoundaryMarker key={`${bucket.key}:boundary`} bucket={bucket} />,
+                    <Box
+                      key={bucket.key}
+                      width={bucketWidth(bucket)}
+                      minWidth={0}
+                      flexShrink={0}
+                      justifyContent="flex-end"
+                    >
                       <Text color="$fg-muted" bold wrap="truncate">
                         {bucket.label}
                       </Text>
-                    </Box>
-                  ))}
+                    </Box>,
+                  ])}
                   <Text color="$fg-muted" bold flexShrink={0}>
                     …
                   </Text>
@@ -296,7 +331,7 @@ export function QueueStatsPanel({
               )}
               <Box flexDirection="row" gap={1} flexShrink={0}>
                 {periodBuckets.map((bucket) => (
-                  <Box key={bucket.key} width={bucketWidth(bucket)} minWidth={0} flexShrink={0} alignItems="flex-end">
+                  <Box key={bucket.key} width={bucketWidth(bucket)} minWidth={0} flexShrink={0} justifyContent="flex-end">
                     <Text color="$fg-muted" bold wrap="truncate">
                       {bucket.label}
                     </Text>
@@ -345,7 +380,8 @@ export function QueueStatsPanel({
                 </Box>
                 {hourBuckets.length === 0 ? null : (
                   <Box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
-                    {hourBuckets.map((bucket) => (
+                    {hourBuckets.flatMap((bucket) => [
+                      <DayBoundaryMarker key={`${bucket.key}:boundary`} bucket={bucket} />,
                       <StatsValueCell
                         key={bucket.key}
                         bucket={bucket}
@@ -359,8 +395,8 @@ export function QueueStatsPanel({
                           const selected = buckets.find((candidate) => key.endsWith(`\0${candidate.key}`))
                           if (selected !== undefined) setKeyboardBucketKey(selected.key)
                         }}
-                      />
-                    ))}
+                      />,
+                    ])}
                     <Text color="$fg-muted" flexShrink={0}>
                       ·
                     </Text>

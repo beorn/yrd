@@ -1560,7 +1560,8 @@ export async function startResidentRunnerHeartbeat(
     /** Exact policy already resolved by the mutable journal; never re-derived here. */
     retention?: JournalRetentionPolicy
     /** Last uncarried sweep, if one has completed. Returning undefined is a
-     * real answer — the rail says "not swept" rather than 0. */
+     * real answer — the rail says the sweep hasn't produced an observation
+     * yet rather than 0. */
     uncarried?: () => UncarriedObservation | undefined
     driver?: Readonly<{
       queueId: string
@@ -7459,7 +7460,8 @@ const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
  * The heartbeat writer is synchronous and the sweep is seconds of git I/O, so
  * this keeps the last OBSERVATION and refreshes it out of band. `observe()`
  * never blocks a tick and never invents a value: before the first sweep lands
- * it returns undefined, which the rail renders as "not swept" rather than 0.
+ * it returns undefined, which the rail renders as an honest "no observation
+ * yet" rather than 0.
  *
  * A failing sweep is deliberately NOT swallowed into a fresh-looking number —
  * the previous observation keeps its original observedAt, so a sweeper that has

@@ -69,7 +69,7 @@ describe("queue watch user round 6", () => {
       expect(app.text).not.toContain("METRIC")
       expect(app.text).toContain("╭─ STATS ")
       expect(app.text).toContain("TODAY")
-      expect(app.text).toContain("YESTERDAY")
+      expect(app.text).toContain("YSTRDAY")
       expect(app.text).toContain("WEEK")
       expect(app.text).toContain("MONTH")
       expect(app.text).toContain("AVG TIME")
@@ -488,7 +488,9 @@ describe("queue watch user round 6", () => {
       // The merge tab's step content (below the tab bar) carries the run-level
       // COMMIT/PARENTS, never a repeated PR-id block — the pr#id now lives only in
       // the persistent identity title above the tabs.
-      const divider = app.text.split("\n")[0]?.indexOf("│") ?? -1
+      // Row 0 is the watch pane's own top line (item 12, always present) and
+      // carries no divider; the SplitPane content starts one row lower.
+      const divider = app.text.split("\n")[1]?.indexOf("│") ?? -1
       const stepRows = app.text.split("\n")
       const mergeTabRow = stepRows.findIndex((row) => row.includes("1: merge"))
       const mergeDetail = stepRows
@@ -705,7 +707,9 @@ describe("queue watch user round 6", () => {
       expect(jobY).toBeGreaterThanOrEqual(0)
       expect(commandY).toBeGreaterThan(jobY)
       expect(outputY).toBeGreaterThan(commandY)
-      const divider = rows[0]?.indexOf("│") ?? -1
+      // Row 0 is the watch pane's own top line (item 12, always present) and
+      // carries no divider; the SplitPane content starts one row lower.
+      const divider = rows[1]?.indexOf("│") ?? -1
       expect(rows[commandY - 1]?.slice(divider + 1).trim(), "one blank row separates metadata from execution").toBe("")
       expect(app.text).not.toContain("runner-herdr-07")
       expect(app.text).not.toContain("DETAILS")
