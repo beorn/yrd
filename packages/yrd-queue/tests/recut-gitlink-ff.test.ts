@@ -420,7 +420,7 @@ describe("recut fast-forward gitlink resolution", () => {
       failure: {
         kind: "refusal",
         code: "merge-tip-carrier",
-        message: expect.stringMatching(/submit each component advance.*Queue owns the root carrier/iu),
+        message: expect.stringMatching(/submit each submodule advance.*Queue owns the root carrier/iu),
       },
     })
   })
@@ -557,7 +557,7 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
   })
 
-  it("patch-extracts a source-only carrier onto a disjoint current component pin", async () => {
+  it("patch-extracts a source-only carrier onto a disjoint current submodule pin", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const { moduleB, moduleC } = await disjointModulePins(module, moduleA)
     await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-row", "base-row"])
@@ -652,7 +652,7 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await git(join(repo, "dep"), ["rev-parse", occupiedRef!])).toBe(moduleC)
   })
 
-  it("patch-extracts a source-only merge-tip carrier onto a disjoint current component pin", async () => {
+  it("patch-extracts a source-only merge-tip carrier onto a disjoint current submodule pin", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const { moduleB, moduleC } = await disjointModulePins(module, moduleA)
     expect(await git(module, ["merge-base", moduleB, moduleC])).toBe(moduleA)

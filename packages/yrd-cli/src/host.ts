@@ -1306,8 +1306,8 @@ async function requireSubmitLinearTip(
     "refusal",
     "merge-tip-carrier",
     `yrd: ${identity}. The submitted branch tip is a merge commit with ${parents.length} parents; ` +
-      `Yrd requires a linear root carrier. linear rebuild required: merge inside the affected component repository, ` +
-      `fast-forward that component's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
+      `Yrd requires a linear root carrier. linear rebuild required: merge inside the affected submodule repository, ` +
+      `fast-forward that submodule's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
       `then run 'yrd pr submit ${branch}'`,
   )
 }

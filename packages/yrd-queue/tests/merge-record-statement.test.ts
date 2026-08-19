@@ -35,7 +35,7 @@ const merged: MergeRecordBody = MergeRecordBodySchema.parse({
       },
     ],
   },
-  pins: [{ path: "vendor/component", before: SHA_PIN_BEFORE, after: SHA_PIN_AFTER }],
+  pins: [{ path: "vendor/submodule", before: SHA_PIN_BEFORE, after: SHA_PIN_AFTER }],
 })
 
 describe("mergeRecordToStatement", () => {
@@ -50,7 +50,7 @@ describe("mergeRecordToStatement", () => {
     expect(materials).toEqual([
       { uri: "git+change:PR1@1", digest: { sha1: SHA_SUBMITTED } },
       { uri: "git+base:main", digest: { sha1: SHA_BASE } },
-      { uri: "git+pin:vendor/component", digest: { sha1: SHA_PIN_BEFORE } },
+      { uri: "git+pin:vendor/submodule", digest: { sha1: SHA_PIN_BEFORE } },
     ])
   })
 
@@ -92,7 +92,7 @@ describe("mergeRecordToStatement", () => {
   it("skips a pin with no prior sha", () => {
     const firstPin = MergeRecordBodySchema.parse({
       ...merged,
-      pins: [{ path: "vendor/component", before: null, after: SHA_PIN_AFTER }],
+      pins: [{ path: "vendor/submodule", before: null, after: SHA_PIN_AFTER }],
     })
     expect(mergeRecordToStatement(firstPin, "queue:main")?.predicate.materials).toEqual([
       { uri: "git+change:PR1@1", digest: { sha1: SHA_SUBMITTED } },

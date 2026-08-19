@@ -62,7 +62,7 @@ const VALID_BODY: MergeRecordBody = {
       },
     ],
   },
-  pins: [{ path: "vendor/component", before: SHA_PIN_BEFORE, after: SHA_PIN_AFTER }],
+  pins: [{ path: "vendor/submodule", before: SHA_PIN_BEFORE, after: SHA_PIN_AFTER }],
 }
 
 describe("parseMergeRecordTolerant reads exactly what parseMergeRecord reads", () => {

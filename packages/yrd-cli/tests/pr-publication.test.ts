@@ -1,5 +1,5 @@
 /**
- * @failure PR publication grows a second fetch/push engine or publishes the root before its recorded component commit.
+ * @failure PR publication grows a second fetch/push engine or publishes the root before its recorded submodule commit.
  * @level l1
  * @consumer @yrd/cli credential-bearing PR publisher
  */
@@ -37,40 +37,40 @@ async function repository(path: string): Promise<void> {
 }
 
 describe("PR publication Git transport", () => {
-  it("discovers changed pins via git-super and judges each against its component's main", async () => {
+  it("discovers changed pins via git-super and judges each against its submodule's main", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-availability-"))
     roots.push(fixture)
-    const submodule = join(fixture, "component")
-    const submoduleRemote = join(fixture, "component.git")
+    const submodule = join(fixture, "submodule")
+    const submoduleRemote = join(fixture, "submodule.git")
     const root = join(fixture, "root")
 
     await repository(submodule)
-    await writeFile(join(submodule, "component.txt"), "one\n")
-    await git(submodule, ["add", "component.txt"])
-    await git(submodule, ["commit", "-qm", "component one"])
+    await writeFile(join(submodule, "submodule.txt"), "one\n")
+    await git(submodule, ["add", "submodule.txt"])
+    await git(submodule, ["commit", "-qm", "submodule one"])
     await git(fixture, ["init", "-q", "--bare", "-b", "main", submoduleRemote])
     await git(submodule, ["remote", "add", "origin", submoduleRemote])
     await git(submodule, ["push", "-q", "-u", "origin", "main"])
 
     await repository(root)
     await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
-    await git(root, ["commit", "-qam", "record component one"])
+    await git(root, ["commit", "-qam", "record submodule one"])
     const baseSha = await git(root, ["rev-parse", "HEAD"])
     await git(join(root, "dep"), ["remote", "set-url", "origin", submoduleRemote])
 
-    await writeFile(join(submodule, "component.txt"), "two\n")
-    await git(submodule, ["commit", "-qam", "component two"])
+    await writeFile(join(submodule, "submodule.txt"), "two\n")
+    await git(submodule, ["commit", "-qam", "submodule two"])
     const pin = await git(submodule, ["rev-parse", "HEAD"])
     await git(join(root, "dep"), ["fetch", "-q", submodule, pin])
     await git(join(root, "dep"), ["checkout", "-q", pin])
     await git(root, ["add", "dep"])
-    await git(root, ["commit", "-qm", "record component two"])
+    await git(root, ["commit", "-qm", "record submodule two"])
     const headSha = await git(root, ["rev-parse", "HEAD"])
 
     await using process = createProcess()
     const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
     expect(changed).toEqual([{ path: "dep", pin, repository: join(root, "dep") }])
-    // Before the component lands the commit on its main: off it, with main's sha named.
+    // Before the submodule lands the commit on its main: off it, with main's sha named.
     const mainBefore = await git(submoduleRemote, ["rev-parse", "refs/heads/main"])
     await expect(submodulePinPublications({ process, pins: changed })).resolves.toEqual([
       { state: "off-component-main", pin: changed[0], mainSha: mainBefore },
@@ -82,32 +82,32 @@ describe("PR publication Git transport", () => {
     ])
   })
 
-  it("reports an unreachable component origin as undetermined, never as off-main", async () => {
+  it("reports an unreachable submodule origin as undetermined, never as off-main", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-undetermined-"))
     roots.push(fixture)
-    const submodule = join(fixture, "component")
+    const submodule = join(fixture, "submodule")
     const root = join(fixture, "root")
 
     await repository(submodule)
-    await writeFile(join(submodule, "component.txt"), "one\n")
-    await git(submodule, ["add", "component.txt"])
-    await git(submodule, ["commit", "-qm", "component one"])
+    await writeFile(join(submodule, "submodule.txt"), "one\n")
+    await git(submodule, ["add", "submodule.txt"])
+    await git(submodule, ["commit", "-qm", "submodule one"])
 
     await repository(root)
     await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
-    await git(root, ["commit", "-qam", "record component one"])
+    await git(root, ["commit", "-qam", "record submodule one"])
     const baseSha = await git(root, ["rev-parse", "HEAD"])
 
-    await writeFile(join(submodule, "component.txt"), "two\n")
-    await git(submodule, ["commit", "-qam", "component two"])
+    await writeFile(join(submodule, "submodule.txt"), "two\n")
+    await git(submodule, ["commit", "-qam", "submodule two"])
     const pin = await git(submodule, ["rev-parse", "HEAD"])
     await git(join(root, "dep"), ["fetch", "-q", submodule, pin])
     await git(join(root, "dep"), ["checkout", "-q", pin])
     await git(root, ["add", "dep"])
-    await git(root, ["commit", "-qm", "record component two"])
+    await git(root, ["commit", "-qm", "record submodule two"])
     const headSha = await git(root, ["rev-parse", "HEAD"])
 
-    // The component's origin stops existing between the author's fetch and the gate's probe.
+    // The submodule's origin stops existing between the author's fetch and the gate's probe.
     await git(join(root, "dep"), ["remote", "set-url", "origin", join(fixture, "gone.git")])
 
     await using process = createProcess()
@@ -115,11 +115,11 @@ describe("PR publication Git transport", () => {
     const publications = await submodulePinPublications({ process, pins: changed })
 
     // "Could not tell" and "not on main" have opposite remedies — one says land the commit,
-    // the other says the probe never reached the component — so the state must say which.
+    // the other says the probe never reached the submodule — so the state must say which.
     expect(publications).toHaveLength(1)
     expect(publications[0]).toMatchObject({ state: "undetermined", pin: changed[0] })
     const undetermined = publications[0] as Extract<(typeof publications)[number], { state: "undetermined" }>
-    expect(undetermined.reason).toContain("could not refresh component main")
+    expect(undetermined.reason).toContain("could not refresh submodule main")
   })
 
   it("delegates exact component-first and root-last publication to git-super", async () => {
@@ -129,20 +129,20 @@ describe("PR publication Git transport", () => {
     const rootSource = join(fixture, "root-source")
     const submoduleDestination = join(fixture, "component-destination")
     const rootDestination = join(fixture, "root-destination")
-    const submoduleRemote = join(fixture, "component.git")
+    const submoduleRemote = join(fixture, "submodule.git")
     const rootRemote = join(fixture, "root.git")
 
     await repository(submoduleSource)
-    await writeFile(join(submoduleSource, "component.txt"), "published\n")
-    await git(submoduleSource, ["add", "component.txt"])
-    await git(submoduleSource, ["commit", "-qm", "component"])
+    await writeFile(join(submoduleSource, "submodule.txt"), "published\n")
+    await git(submoduleSource, ["add", "submodule.txt"])
+    await git(submoduleSource, ["commit", "-qm", "submodule"])
     const submodulePin = await git(submoduleSource, ["rev-parse", "HEAD"])
 
     await repository(rootSource)
     await git(rootSource, ["commit", "-qm", "base", "--allow-empty"])
     const baseSha = await git(rootSource, ["rev-parse", "HEAD"])
     await git(rootSource, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submoduleSource, "dep"])
-    await git(rootSource, ["commit", "-qam", "record component"])
+    await git(rootSource, ["commit", "-qam", "record submodule"])
     const headSha = await git(rootSource, ["rev-parse", "HEAD"])
 
     await git(fixture, ["init", "-q", "--bare", "-b", "main", submoduleRemote])
@@ -217,7 +217,7 @@ describe("addedSubmodulePins", () => {
 
     await repository(root)
     await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submoduleA, "dep-a"])
-    await git(root, ["commit", "-qam", "record component a"])
+    await git(root, ["commit", "-qam", "record submodule a"])
     const baseSha = await git(root, ["rev-parse", "HEAD"])
 
     // Base changes: an EXISTING gitlink (dep-a) advances, and a NEW gitlink (dep-b) is added.
@@ -242,7 +242,7 @@ describe("addedSubmodulePins", () => {
   it("reports nothing added when every changed pin already existed at the base", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-pin-added-none-"))
     roots.push(fixture)
-    const submodule = join(fixture, "component")
+    const submodule = join(fixture, "submodule")
     const root = join(fixture, "root")
 
     await repository(submodule)
@@ -252,7 +252,7 @@ describe("addedSubmodulePins", () => {
 
     await repository(root)
     await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
-    await git(root, ["commit", "-qam", "record component"])
+    await git(root, ["commit", "-qam", "record submodule"])
     const baseSha = await git(root, ["rev-parse", "HEAD"])
 
     await writeFile(join(submodule, "c.txt"), "two\n")

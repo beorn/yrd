@@ -89,8 +89,8 @@ describe("actionable failure projection", () => {
     }
   })
 
-  it("does not project an unexecutable pin intent for a component addition or deletion", () => {
-    for (const change of ["new component 'vendor/new'", "component 'vendor/old' is deleted"]) {
+  it("does not project an unexecutable pin intent for a submodule addition or deletion", () => {
+    for (const change of ["new submodule 'vendor/new'", "submodule 'vendor/old' is deleted"]) {
       const projected = actionableFailure({
         code: "authored-gitlink",
         message:
@@ -108,14 +108,14 @@ describe("actionable failure projection", () => {
       code: "merge-tip-carrier",
       message:
         "yrd: change 'PR42' root branch tip 'deadbeef' is a merge commit with 2 parents; " +
-        "merge inside the affected component repository, fast-forward that component's main, rebuild the root " +
+        "merge inside the affected submodule repository, fast-forward that submodule's main, rebuild the root " +
         "carrier as one linear pin-bump commit, then run 'yrd pr submit <branch>' and " +
         "'yrd pr recut PR42 --preflight --queue --apply'",
     })
 
     expect(failure).toMatchObject({
       code: "merge-tip-carrier",
-      cause: expect.stringMatching(/merge inside.*component.*linear pin-bump/iu),
+      cause: expect.stringMatching(/merge inside.*submodule.*linear pin-bump/iu),
       resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue --apply"],
     })
   })

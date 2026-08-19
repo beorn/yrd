@@ -33,7 +33,7 @@ export type GatherOptions = Readonly<{
 }>
 
 /**
- * Which way a component pin moves, answered IN THE COMPONENT REPO.
+ * Which way a submodule pin moves, answered IN THE COMPONENT REPO.
  *
  * Running this from the superproject is the trap that cost two seats an evening:
  * the superproject's object store cannot read submodule objects at all — not the

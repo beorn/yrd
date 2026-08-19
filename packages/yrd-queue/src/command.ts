@@ -1124,7 +1124,7 @@ function createGit(
       // Failing to START git is not the same event as git failing, and until now only the second
       // one was survivable: every call passes `cwd: repo` as well as `git -C repo`, so a directory
       // that does not exist makes posix_spawn throw ENOENT before git runs. `allowFailure` promises
-      // its callers a RESULT to classify — a tolerant probe of an unmaterialized component checkout
+      // its callers a RESULT to classify — a tolerant probe of an unmaterialized submodule checkout
       // was instead killing the whole process (the recovery scan that meets exactly that estate).
       // Same treatment as the timeout below: a failed result for tolerant callers, a named throw
       // for the rest.
@@ -1802,7 +1802,7 @@ export async function findRepositoryMergeRecords(
             outcome: "unverifiable",
             note,
             status: "repository-incomplete",
-            reason: `merge-record '${note}' cannot inspect component checkout '${pin.path}'`,
+            reason: `merge-record '${note}' cannot inspect submodule checkout '${pin.path}'`,
             classification: "other",
             merge: parsed.record.merge.id,
             checksum: parsed.checksum,
@@ -2560,7 +2560,7 @@ async function sourceOnlyCarrierComposition(
       // source-only composition", and it is the FAIL-SAFE direction — six
       // sibling bail-outs above return it for ordinary non-qualifying inputs,
       // and the caller then takes the normal, more conservative recut path.
-      // An unresolvable component path means we cannot certify, so declining is
+      // An unresolvable submodule path means we cannot certify, so declining is
       // correct; throwing would turn a non-qualifying candidate into an error.
       return undefined
     }
@@ -3549,7 +3549,7 @@ async function prepareCandidateMembers(
       if (currentPin === undefined) {
         return candidateFailure(
           "intent-component-unknown",
-          `yrd: intent component '${pr.intent.authored.component}' is not a gitlink at '${authoritativeBase}'`,
+          `yrd: intent submodule '${pr.intent.authored.component}' is not a gitlink at '${authoritativeBase}'`,
           pr.intent.authored.component,
           [pr.intent.authored.component],
         )
@@ -3593,7 +3593,7 @@ async function prepareCandidateMembers(
       // against a base that already contains it. Re-checking its recut patch
       // against itself produces an empty patch and a false certificate drift.
       // Source-only compositions are excluded: their root head intentionally
-      // equals the base while their component payload still needs applying.
+      // equals the base while their submodule payload still needs applying.
       if (await isAncestor(git, path, pr.headSha, "HEAD")) {
         recordChange(pr, pr.headSha)
         continue
@@ -4184,14 +4184,14 @@ async function intentSubmissionWorkflow(
       const target = await readGitlink(git, repo, headSha, submodule)
       if (previous === undefined) {
         return (
-          `component '${submodule}' is a new component; a change's gitlink diff can only bump an ` +
-          "existing component, never add one; authorize the component-model addition as an ordinary code change"
+          `submodule '${submodule}' is a new submodule; a change's gitlink diff can only bump an ` +
+          "existing submodule, never add one; authorize the component-model addition as an ordinary code change"
         )
       }
       if (target === undefined) {
         return (
-          `component '${submodule}' is deleted; a change's gitlink diff can only bump an existing ` +
-          "component, never remove one; restore it, or authorize the component-model deletion as an ordinary code change"
+          `submodule '${submodule}' is deleted; a change's gitlink diff can only bump an existing ` +
+          "submodule, never remove one; restore it, or authorize the component-model deletion as an ordinary code change"
         )
       }
       return (
@@ -4204,7 +4204,7 @@ async function intentSubmissionWorkflow(
 }
 
 function submoduleIntentWorkflow(): string {
-  return "submit each component advance as its own ordinary change whose diff is only the gitlink bump; Queue owns the root carrier"
+  return "submit each submodule advance as its own ordinary change whose diff is only the gitlink bump; Queue owns the root carrier"
 }
 
 type BaseContainment =
@@ -4259,12 +4259,12 @@ function linearRebuildRemedy(scope: string, base: string): string {
   return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', then recut and requeue the root branch`
 }
 
-/** Resolve the component checkout that can answer ancestry for a gitlink path.
+/** Resolve the submodule checkout that can answer ancestry for a gitlink path.
  *
  * `join(root, path)` alone is not enough, and failing silently here is how this
  * check first went wrong: an uninitialized submodule directory still exists, so
  * every `git -C` against it walks UP and is answered by the superproject, which
- * knows none of the component's shas. It reports "not an ancestor" for a pin
+ * knows none of the submodule's shas. It reports "not an ancestor" for a pin
  * that plainly is one. The toplevel comparison is what makes the wrong repo
  * loud instead of merely wrong. */
 async function submoduleCheckout(git: Git, root: string, path: string): Promise<string | undefined> {
@@ -4275,11 +4275,11 @@ async function submoduleCheckout(git: Git, root: string, path: string): Promise<
     return (await realpath(toplevel.stdout)) === (await realpath(submodule)) ? submodule : undefined
   } catch {
     // silent-fallback-allow: the declared contract is `string | undefined`, and
-    // undefined means "this path is not its own component checkout". The line
+    // undefined means "this path is not its own submodule checkout". The line
     // above already returns undefined for the resolvable-but-not-a-checkout
     // case, so the catch is the same answer for the unresolvable one. Declining
     // to name a checkout is the safe direction; the caller treats absence as
-    // "no component here" rather than assuming one.
+    // "no submodule here" rather than assuming one.
     return undefined
   }
 }
@@ -4296,8 +4296,8 @@ async function submoduleCheckout(git: Git, root: string, path: string): Promise<
  *
  * The pair is authored pin against THE PIN THE AUTHORITATIVE BASE CARRIES, which
  * is the containment `absorbedAuthoredGitlinks` already calls absorbed. Reading
- * it against component main instead answers a different question and gets this
- * exactly backwards: component main can hold the work while root main's gitlink
+ * it against submodule main instead answers a different question and gets this
+ * exactly backwards: submodule main can hold the work while root main's gitlink
  * still points before it, and that carrier is the one that would perform the
  * promotion. Measured — with root's gitlink behind, a rebuild still delivers the
  * gitlink; with root's gitlink containing the pin, it delivers nothing. Only the
@@ -4327,8 +4327,8 @@ async function spentGitlinkCarrier(
     }
     // Below this line every failure keeps the existing refusal rather than
     // upgrading the verdict: an unprovable claim of spentness is not a reason to
-    // tell an author their work landed. Only the component can answer ancestry
-    // between two component shas.
+    // tell an author their work landed. Only the submodule can answer ancestry
+    // between two submodule shas.
     const submodule = await submoduleCheckout(git, repo, path)
     if (submodule === undefined) return undefined
     if (!(await isAncestor(git, submodule, carrierPin, basePin))) return undefined
@@ -4357,7 +4357,7 @@ async function carrierDropsMergedFailure(
   if (spent !== undefined) {
     return candidateFailure(
       "carrier-pin-already-landed",
-      `change '${pr}' branch '${headSha}' authors component pins only, and every one of them already landed: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
+      `change '${pr}' branch '${headSha}' authors submodule pins only, and every one of them already landed: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
     )
   }
   return candidateFailure(
@@ -4894,7 +4894,7 @@ async function composePR(
   if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
     return candidateFailure(
       "composition-invalid",
-      `PR '${pr.id}' composition head '${pr.headSha}' contains root changes; root code must be submitted separately from component pin intents`,
+      `PR '${pr.id}' composition head '${pr.headSha}' contains root changes; root code must be submitted separately from submodule pin intents`,
     )
   }
 
@@ -5862,7 +5862,7 @@ async function authoredGitlinkPaths(
     return candidateFailure(
       "gitlink-inspection",
       `could not inspect authored gitlinks for '${headSha}': ${base.detail}; ` +
-        "restore readable history before declaring component pin intents",
+        "restore readable history before declaring submodule pin intents",
     )
   }
   const paths = await changedPaths(git, repo, base.sha, headSha)
@@ -6117,7 +6117,7 @@ async function planSubmoduleMainPromotionGroup(
   await mkdir(repository, { recursive: true })
   const initialized = await git.run(repository, ["init", "--bare"], true)
   if (initialized.code !== 0) {
-    const message = `could not initialize component ancestry probe for '${origin}': ${
+    const message = `could not initialize submodule ancestry probe for '${origin}': ${
       initialized.stderr || initialized.stdout || "git init failed"
     }`
     return {
@@ -6173,7 +6173,7 @@ async function planSubmoduleMainPromotionGroup(
       continue
     }
     if (reached.code !== 1) {
-      const message = `could not compare merged pin '${pin.sha}' for '${pin.path}' with component main '${
+      const message = `could not compare merged pin '${pin.sha}' for '${pin.path}' with submodule main '${
         submoduleMain.sha
       }': ${reached.stderr || reached.stdout || "git merge-base failed"}`
       const unresolved = orderedPins.filter((candidate) => !results.some((result) => result.path === candidate.path))
@@ -6191,7 +6191,7 @@ async function planSubmoduleMainPromotionGroup(
   }
 
   let targetSha = submoduleMain.sha
-  let targetPath = "component main"
+  let targetPath = "submodule main"
   for (const pin of pendingPins) {
     const covered = await git.run(repository, ["merge-base", "--is-ancestor", pin.sha, targetSha], true)
     if (covered.code === 0) continue
@@ -6231,7 +6231,7 @@ async function planSubmoduleMainPromotionGroup(
     }
     const containment = await inspectBaseContainment(git, repository, targetSha, pin.sha)
     if (containment.status === "inspection-failed") {
-      const message = `could not inspect merged pin '${pin.sha}' for '${pin.path}' against planned component target '${targetSha}': ${containment.detail}`
+      const message = `could not inspect merged pin '${pin.sha}' for '${pin.path}' against planned submodule target '${targetSha}': ${containment.detail}`
       return {
         status: "failed",
         error: submoduleMainFailure(
@@ -6243,7 +6243,7 @@ async function planSubmoduleMainPromotionGroup(
       }
     }
     if (containment.status === "drops-landed") {
-      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned component target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`component work for '${pin.path}'`, targetSha)}`
+      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned submodule target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`submodule work for '${pin.path}'`, targetSha)}`
       return {
         status: "failed",
         error: submoduleMainFailure(
@@ -6254,7 +6254,7 @@ async function planSubmoduleMainPromotionGroup(
         ),
       }
     }
-    const message = `NON-ANCESTRAL component lineage at '${origin}': ${targetPath} '${targetSha}' and merged pin '${pin.path}' '${pin.sha}' diverge; compose the divergent component histories before retrying`
+    const message = `NON-ANCESTRAL submodule lineage at '${origin}': ${targetPath} '${targetSha}' and merged pin '${pin.path}' '${pin.sha}' diverge; compose the divergent submodule histories before retrying`
     return {
       status: "failed",
       error: submoduleMainFailure(
@@ -6269,7 +6269,7 @@ async function planSubmoduleMainPromotionGroup(
 
   const untrusted = pendingPins.map((pin) => pin.path).filter((path) => untrustedOrigins.has(path))
   if (untrusted.length > 0) {
-    const message = `new component [${untrusted.join(", ")}] requires main to advance at '${origin}'; review the new remote before granting main-update authority`
+    const message = `new submodule [${untrusted.join(", ")}] requires main to advance at '${origin}'; review the new remote before granting main-update authority`
     return {
       status: "failed",
       error: submoduleMainFailure(
@@ -6313,13 +6313,13 @@ async function planSubmoduleMainPromotions(
     if (baseSha !== undefined && (await readGitlink(git, repo, baseSha, pin.path)) === pin.sha) continue
     const basePin = basePins.get(pin.path)
     if (baseSha === undefined) {
-      // A landed root tree is the authority for its own component registry.
+      // A landed root tree is the authority for its own submodule registry.
       // Reconciliation therefore trusts its standing .gitmodules origins and
       // audits every pin, including gaps left by earlier failed actuators.
     } else if (basePin === undefined) {
       untrustedOrigins.add(pin.path)
     } else if (basePin.origin !== pin.origin) {
-      const message = `component origin for '${pin.path}' changed from '${basePin.origin}' to '${pin.origin}'; review the new remote before granting main-update authority`
+      const message = `submodule origin for '${pin.path}' changed from '${basePin.origin}' to '${pin.origin}'; review the new remote before granting main-update authority`
       directFailure ??= submoduleMainFailure("component-main-origin-changed", message)
       directRefusals.push(...submoduleMainRefusals([pin], "component-main-origin-changed", message))
       continue
@@ -6391,7 +6391,7 @@ async function applySubmoduleMainPromotions(
       /refusing to update checked out branch/iu.test(pushDetail)
     ) {
       // Local integration fixtures and single-user repositories can use a
-      // non-bare component origin. updateInstead is the receiver's safe mode:
+      // non-bare submodule origin. updateInstead is the receiver's safe mode:
       // it updates a clean checked-out branch atomically and refuses dirt.
       pushed = await pushRefUpdates({
         root: promotion.repository,
@@ -6421,7 +6421,7 @@ async function applySubmoduleMainPromotions(
 
     const refreshed = await fetchSubmoduleMain(git, promotion.repository, promotion.origin)
     if (refreshed.status === "failed") {
-      const message = `component main promotion for [${promotion.pins.map((pin) => pin.path).join(", ")}] ${
+      const message = `submodule main promotion for [${promotion.pins.map((pin) => pin.path).join(", ")}] ${
         pushed.state
       } but its result could not be verified: ${refreshed.error.message}`
       failure ??= submoduleMainFailure("component-main-promotion-failed", message)
@@ -6451,7 +6451,7 @@ async function applySubmoduleMainPromotions(
       continue
     }
     if (reached.code !== 1) {
-      const message = `could not verify component main after promoting [${promotion.pins
+      const message = `could not verify submodule main after promoting [${promotion.pins
         .map((pin) => pin.path)
         .join(", ")}]: ${reached.stderr || reached.stdout || "git merge-base failed"}`
       failure ??= submoduleMainFailure("component-main-promotion-failed", message)
@@ -6464,7 +6464,7 @@ async function applySubmoduleMainPromotions(
       true,
     )
     if (stillFastForward.code === 1) {
-      const message = `NON-ANCESTRAL component lineage at '${promotion.origin}': component main '${
+      const message = `NON-ANCESTRAL submodule lineage at '${promotion.origin}': submodule main '${
         refreshed.sha
       }' diverged from merged pin '${promotion.targetSha}' for [${promotion.pins
         .map((pin) => pin.path)
@@ -6477,10 +6477,10 @@ async function applySubmoduleMainPromotions(
     }
     const message =
       stillFastForward.code === 0
-        ? `could not fast-forward component main from '${promotion.mainSha}' to '${promotion.targetSha}' for [${promotion.pins
+        ? `could not fast-forward submodule main from '${promotion.mainSha}' to '${promotion.targetSha}' for [${promotion.pins
             .map((pin) => pin.path)
             .join(", ")}]: ${pushDetail}`
-        : `could not compare refreshed component main '${refreshed.sha}' with '${promotion.targetSha}' for [${promotion.pins
+        : `could not compare refreshed submodule main '${refreshed.sha}' with '${promotion.targetSha}' for [${promotion.pins
             .map((pin) => pin.path)
             .join(", ")}]: ${stillFastForward.stderr || stillFastForward.stdout || "git merge-base failed"}`
     failure ??= submoduleMainFailure("component-main-promotion-failed", message)
@@ -6571,7 +6571,7 @@ async function submoduleMainPromotionsIn(
     const planned = await planSubmoduleMainPromotions(git, repo, baseSha, candidateSha, root)
     if (planned.status === "failed" && options.settleSafePromotions !== true) {
       const abortMessage =
-        "component main promotion was not attempted because another changed component failed preflight"
+        "submodule main promotion was not attempted because another changed submodule failed preflight"
       const aborted = planned.promotions.flatMap((promotion) =>
         submoduleMainRefusals(promotion.pins, "component-main-preflight-aborted", abortMessage, promotion.mainSha),
       )
@@ -6595,7 +6595,7 @@ async function submoduleMainPromotionsIn(
           outcome.output.componentMains ?? [],
         )
         if (missing.length > 0) {
-          const message = `component main action produced no result or refusal for [${missing
+          const message = `submodule main action produced no result or refusal for [${missing
             .map(({ path }) => path)
             .join(", ")}]`
           outcome = submoduleMainFailureResult(
@@ -6619,7 +6619,7 @@ async function submoduleMainPromotionsIn(
     cleanupFailure = messageOf(cause)
   }
   if (operationFailure !== undefined) throw operationFailure
-  if (outcome === undefined) throw new Error("component main promotion produced no result")
+  if (outcome === undefined) throw new Error("submodule main promotion produced no result")
   if ((outcome.status === "completed" && outcome.conclusion === "failure") || cleanupFailure === undefined) {
     return outcome
   }
@@ -8256,7 +8256,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
             await recordMergeAttempt(git, repo, input, context, checked)
             return withSubmoduleMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
               // Component mains are promoted explicitly around this root push.
-              // A caller's recursive-push config would replay the root-only SHA refspec inside each component.
+              // A caller's recursive-push config would replay the root-only SHA refspec inside each submodule.
               const pushed = await pushRefUpdates({
                 root: path,
                 git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
@@ -8283,7 +8283,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
                 )
               }
               // The changed-pin plan above preserves the pre-landing trust
-              // boundary for new or changed component origins. Once root is
+              // boundary for new or changed submodule origins. Once root is
               // authoritative, audit every pin so this landing also converges
               // gaps left by an earlier actuator.
               return withSubmoduleMainPromotions(
