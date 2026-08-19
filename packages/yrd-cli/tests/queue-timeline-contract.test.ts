@@ -608,9 +608,14 @@ describe("queue timeline 21106 contract", () => {
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["YRD QUEUES", "16:40:00 ○ ready", "╭─ STATS"]) {
+    for (const anchor of ["16:40:00 ○ ready", "╭─ STATS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
+    // The `YRD QUEUES` title is the one deliberate exception (operator,
+    // 2026-08-19): it carries a single leading column, as the heading it
+    // replaced did. Asserted exactly, so neither a second space nor a
+    // regression back to flush passes silently.
+    expect(wide[rowIndex(wide, "YRD QUEUES")]?.indexOf("YRD QUEUES")).toBe(1)
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
 
     const narrow = await renderTimeline(contractProjection(), 100)

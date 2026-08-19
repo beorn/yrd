@@ -1311,14 +1311,10 @@ function QueueWatchTopLine({
   snapshot,
   visibleQueues,
   onToggleQueue,
-  onShowAll,
-  allActive,
 }: Readonly<{
   snapshot: QueueWatchSnapshot
   visibleQueues: ReadonlySet<string>
   onToggleQueue: (base: string) => void
-  onShowAll: () => void
-  allActive: boolean
 }>) {
   // A projection built before the loader threaded repositoryRoot still has
   // the snapshot-level root; pills prefer the queue's own path and fall back
@@ -1329,13 +1325,7 @@ function QueueWatchTopLine({
       : queue,
   )
   return (
-    <QueueTopLine
-      queues={queues}
-      visibleQueues={visibleQueues}
-      onToggleQueue={onToggleQueue}
-      onShowAll={onShowAll}
-      allActive={allActive}
-    />
+    <QueueTopLine queues={queues} visibleQueues={visibleQueues} onToggleQueue={onToggleQueue} />
   )
 }
 
@@ -1635,6 +1625,8 @@ export function QueueWatchFrame({
         visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={selectOnlyBucket}
+        onShowAll={showAll}
+        allFiltersActive={allFiltersActive}
         listRef={timelineListRef}
       />
     )
@@ -1666,13 +1658,7 @@ export function QueueWatchFrame({
   if (snapshot.projection === undefined) {
     return (
       <Box position="relative" flexDirection="column">
-        <QueueWatchTopLine
-          snapshot={snapshot}
-          visibleQueues={visibleQueues}
-          onToggleQueue={toggleQueue}
-          onShowAll={showAll}
-          allActive={allFiltersActive}
-        />
+        <QueueWatchTopLine snapshot={snapshot} visibleQueues={visibleQueues} onToggleQueue={toggleQueue} />
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
         {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
@@ -1739,13 +1725,7 @@ export function QueueWatchFrame({
       minHeight={0}
       userSelect="text"
     >
-      <QueueWatchTopLine
-        snapshot={snapshot}
-        visibleQueues={visibleQueues}
-        onToggleQueue={toggleQueue}
-        onShowAll={showAll}
-        allActive={allFiltersActive}
-      />
+      <QueueWatchTopLine snapshot={snapshot} visibleQueues={visibleQueues} onToggleQueue={toggleQueue} />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>

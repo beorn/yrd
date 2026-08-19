@@ -5314,31 +5314,45 @@ function QueueRepositoryRoot({ root }: { root: string | undefined }) {
 /**
  * The one top line every queue surface leads with (operator rulings
  * 2026-08-18, items 30/32/32b/33/36): the `YRD QUEUES` title, then the queue
- * pills. Each pill is `digit label path ⎇ branch` — the digit filter
+ * tabs. Each tab is `digit label path ⎇ branch` — the digit filter
  * accelerator, the config handle when one is declared, and the pretty
  * rendering of the queue's FQN identity pair (shortest unique friendly
- * path). ON pills are bright, OFF muted; a digit or click TOGGLES its queue,
- * and the trailing `all` pill (interactive surfaces only) clears both filter
- * kinds. The old `QUEUE main` / `ROOT /hh` header row is deleted — the pills
+ * path). The old `QUEUE main` / `ROOT /hh` header row is deleted — the tabs
  * ARE the queue identity now, so no second line repeats it.
+ *
+ * These read as TABS, not as the bottom status pills (operator, 2026-08-19):
+ * the selected queue is lit by the same `$bg-selected` surface the detail
+ * pane's step tabs use, and an unselected one sits on `$bg-surface-subtle`,
+ * so "which queue am I looking at" is answered by a filled background rather
+ * than by a shade of foreground text. The title is indented one column to
+ * match the heading it replaced. Selection stays a TOGGLE underneath — a
+ * digit or a click still turns one queue on or off.
+ *
+ * `all` is deliberately NOT here (operator, 2026-08-19). It clears both
+ * filter kinds, so it belongs with the status pills at the bottom, where it
+ * lived before; the `a` key is unchanged and the watch help still teaches it.
  */
 export function QueueTopLine({
   queues,
   visibleQueues,
   onToggleQueue,
-  onShowAll,
-  allActive = true,
 }: {
   queues: readonly QueueTimelineQueue[]
   /** Bases currently shown; undefined means every queue (the default). */
   visibleQueues?: ReadonlySet<string>
   onToggleQueue?: (base: string) => void
-  onShowAll?: () => void
-  allActive?: boolean
 }) {
   const shortPaths = shortUniqueQueuePaths(queues.flatMap((queue) => (queue.path === undefined ? [] : [queue.path])))
   return (
-    <Box height={1} flexDirection="row" columnGap={2} flexShrink={0} minWidth={0} overflow="hidden">
+    <Box
+      height={1}
+      flexDirection="row"
+      columnGap={2}
+      flexShrink={0}
+      minWidth={0}
+      overflow="hidden"
+      paddingLeft={1}
+    >
       <Text bold flexShrink={0}>
         YRD QUEUES
       </Text>
@@ -5347,19 +5361,23 @@ export function QueueTopLine({
           {queues.map((queue) => {
             const pretty = queuePrettyName(queue, queue.path === undefined ? undefined : shortPaths.get(queue.path))
             const handle = queue.name === undefined ? "" : `${queue.name} `
+            const selected = visibleQueues === undefined || visibleQueues.has(queue.base)
             return (
-              <TogglePill
+              <Box
                 key={`${queue.path ?? ""}@${queue.base}`}
-                label={`${String(queue.label)} ${handle}${pretty}`}
-                boldFirstLetter
-                active={visibleQueues === undefined || visibleQueues.has(queue.base)}
-                onToggle={() => onToggleQueue?.(queue.base)}
-              />
+                backgroundColor={selected ? "$bg-selected" : "$bg-surface-subtle"}
+                paddingX={1}
+                flexShrink={0}
+              >
+                <TogglePill
+                  label={`${String(queue.label)} ${handle}${pretty}`}
+                  boldFirstLetter
+                  active={selected}
+                  onToggle={() => onToggleQueue?.(queue.base)}
+                />
+              </Box>
             )
           })}
-          {onShowAll === undefined ? null : (
-            <TogglePill label="all" boldFirstLetter active={allActive} onToggle={() => onShowAll()} />
-          )}
         </TogglePillGroup>
       )}
     </Box>
@@ -6085,19 +6103,23 @@ export function queueTimelineDateHeaderAt(
  * only when on; no `none`/`no`/`all` placeholders. The status buckets render as
  * pills: a pointer click or lowercase o/r/d/f SELECTS ONLY that bucket, and
  * capital O/R/D/F toggles one bucket's membership (power path, unadvertised)
- * — user respec 2026-07-23. `all` no longer lives in this cluster (operator
- * ruling 2026-08-18, item 9): it moved to its own centered pill between this
- * group and the queue legend, since it clears both filter kinds at once and
- * belongs to neither one alone.
+ * — user respec 2026-07-23. `all` is back in this cluster (operator,
+ * 2026-08-19), where it sat before item 9 moved it out: it clears both filter
+ * kinds, and the queue selector at the top now reads as tabs, which is no
+ * place for a pill that is not a queue.
  */
 function TimelineFilterLine({
   projection,
   buckets,
   onSelectBucket,
+  onShowAll,
+  allActive = true,
 }: {
   projection: QueueTimelineProjection
   buckets: ReadonlySet<QueueTimelineStatusBucket>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  onShowAll?: () => void
+  allActive?: boolean
 }) {
   const filters = projection.filters
   // The "FILTER" label text is deleted (item 3): the pills stand alone. The
@@ -6134,6 +6156,9 @@ function TimelineFilterLine({
           onToggle={() => onSelectBucket?.(bucket)}
         />
       ))}
+      {onShowAll === undefined ? null : (
+        <TogglePill label="all" boldFirstLetter active={allActive} onToggle={() => onShowAll()} />
+      )}
     </TogglePillGroup>
   )
 }
@@ -6201,6 +6226,8 @@ function ProjectedQueueTimeline({
   visibleQueues,
   expandedStorms,
   onSelectBucket,
+  onShowAll,
+  allFiltersActive = true,
   listRef,
 }: {
   repositoryRoot?: string
@@ -6222,6 +6249,9 @@ function ProjectedQueueTimeline({
   visibleQueues?: ReadonlySet<string>
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  /** Clears both filter kinds; renders the `all` pill beside the status pills. */
+  onShowAll?: () => void
+  allFiltersActive?: boolean
   listRef?: React.Ref<ListViewHandle>
 }) {
   // Fold the complete visible set before applying the one-shot row cap. A
@@ -6381,7 +6411,13 @@ function ProjectedQueueTimeline({
             )}
           </Box>
           <Box flexDirection="row" justifyContent="flex-end" minWidth={0} flexShrink={0}>
-            <TimelineFilterLine projection={projection} buckets={buckets} onSelectBucket={onSelectBucket} />
+            <TimelineFilterLine
+              projection={projection}
+              buckets={buckets}
+              onSelectBucket={onSelectBucket}
+              {...(onShowAll === undefined ? {} : { onShowAll })}
+              allActive={allFiltersActive}
+            />
           </Box>
         </Box>
         {!fillHeight ||
@@ -6419,6 +6455,8 @@ export function QueueTimelineView({
   visibleQueues,
   expandedStorms,
   onSelectBucket,
+  onShowAll,
+  allFiltersActive = true,
   listRef,
 }: {
   repositoryRoot?: string
@@ -6440,6 +6478,9 @@ export function QueueTimelineView({
   visibleQueues?: ReadonlySet<string>
   expandedStorms?: ReadonlySet<string>
   onSelectBucket?: (bucket: QueueTimelineStatusBucket) => void
+  /** Clears both filter kinds; renders the `all` pill beside the status pills. */
+  onShowAll?: () => void
+  allFiltersActive?: boolean
   listRef?: React.Ref<ListViewHandle>
 }) {
   if (projection !== undefined) {
@@ -6465,6 +6506,8 @@ export function QueueTimelineView({
         visibleQueues={visibleQueues}
         expandedStorms={expandedStorms}
         onSelectBucket={onSelectBucket}
+        {...(onShowAll === undefined ? {} : { onShowAll })}
+        allFiltersActive={allFiltersActive}
         listRef={listRef}
       />
     )
