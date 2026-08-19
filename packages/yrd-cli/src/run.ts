@@ -173,6 +173,7 @@ import {
 import { reconcileChangeMerges, type ChangeMerge } from "./pr-landing.ts"
 import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
+import { applyChangeState, changeStateDeps, type ChangeState } from "./change-state.ts"
 import { lifecycleStatus } from "./status-presentation.ts"
 import {
   classifyBayStatus,
@@ -11166,6 +11167,57 @@ function buildProgram(
     .description("brief the current Yrd delivery state")
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
+
+  // The branch-state verbs. `draft`, `archive` and `ignore` are bare
+  // top-level verbs because those names are free; `submit` is NOT, and
+  // deliberately so — root `yrd submit` is the everyday merge-request verb,
+  // with converged help words a test pins (live-work-visibility.test.ts
+  // "root submit help speaks the converged words"). `change submit` is the
+  // same verb again: `change`/`mr`/`pr` are one noun by operator ruling
+  // (2026-08-18), and that noun is the merge-request RECORD.
+  //
+  // So the quartet is spelled `yrd branch <state>`, which is what these verbs
+  // actually target — a ref under `refs/heads/`, with no record of any kind.
+  // Whether `branch` and `change` should stay two nouns at all is the open
+  // product question the branch-is-change model exists to answer; until it is
+  // answered, giving `submit` a second meaning is not a wiring decision.
+  const CHANGE_STATE_HELP = {
+    draft: "move branches into draft — the default state, and how a submitted branch is unsubmitted",
+    submit: "approve branches to land, naming each branch's current tip as the approved commit",
+    archive: "shelve branches — deletes each branch, which the receiver files under refs/yrd/archive/",
+    ignore: "keep branches out of the queue's view without archiving them",
+  } as const satisfies Record<ChangeState, string>
+
+  const registerChangeStateVerb = (target: CliCommand, state: ChangeState): void => {
+    const verb = target
+      .command(`${state} [selector...]`)
+      .description(CHANGE_STATE_HELP[state])
+      .option("--dry-run", "print the resolved branches and the exact git command without pushing")
+    if (state === "archive") {
+      verb
+        .option("-m, --message <text>", "why this branch is being archived")
+        .option("-F, --file <path>", "read the message from a file, or from stdin with '-'")
+    }
+    type ChangeStateVerbOptions = Readonly<{ dryRun?: boolean; message?: string; file?: string }>
+    verb.action(async (selectors: readonly string[], options: ChangeStateVerbOptions) =>
+      setExit(
+        await applyChangeState(
+          state,
+          selectors,
+          { dryRun: options.dryRun, message: options.message, messageFile: options.file },
+          io,
+          changeStateDeps(io, () => currentGitBranch(io.cwd ?? process.cwd(), io)),
+        ),
+      ),
+    )
+  }
+
+  const branch = program.command("branch").description("move a branch into a delivery state")
+  branch.helpCommand(false)
+  for (const state of ["draft", "submit", "archive", "ignore"] as const) {
+    registerChangeStateVerb(branch, state)
+    if (state !== "submit") registerChangeStateVerb(program, state)
+  }
 
   const deployment = program.command("deployment").description("manage immutable runtime deployments")
   deployment.helpCommand(false)

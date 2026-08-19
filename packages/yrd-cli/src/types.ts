@@ -149,6 +149,27 @@ export type YrdCliServices = Readonly<{
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The
  * default implementation shells out to Git plumbing in the invocation
  * repository; tests inject deterministic facts through YrdCliIO.pruneGit. */
+/**
+ * Git facts the branch-state verbs (`draft`/`submit`/`archive`/`ignore`)
+ * need; defaults to real Git plumbing in `cwd`. Deliberately three
+ * capabilities and no more — this surface selects branches and pushes refs,
+ * and every RULE about which pushes are legal belongs to the receiver.
+ */
+export type ChangeStateGitFacts = Readonly<{
+  /** Local branch names — `git for-each-ref --format=%(refname:short) refs/heads`. */
+  branches(): readonly string[] | Promise<readonly string[]>
+  /** The remote's value for one ref, or undefined when it is not set there. */
+  remoteRef(ref: string): string | undefined | Promise<string | undefined>
+  /**
+   * Run one `git <args>` push. A rejected push is a RESULT, not a throw: its
+   * `output` carries the receiver's own refusal, which the caller prints
+   * unaltered.
+   */
+  push(
+    args: readonly string[],
+  ): Readonly<{ ok: boolean; output: string }> | Promise<Readonly<{ ok: boolean; output: string }>>
+}>
+
 export type PruneGitFacts = Readonly<{
   /** Full commit SHA for a ref or SHA, or undefined when it is not a commit here. */
   resolveCommit(ref: string): string | undefined | Promise<string | undefined>
@@ -241,6 +262,8 @@ export type YrdCliIO = {
   /** Git facts for `pr prune` and `pr recut --preflight`; defaults to real Git
    * plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
+  /** Git facts for the branch-state verbs; defaults to real Git plumbing in `cwd`. */
+  changeStateGit?(cwd: string): ChangeStateGitFacts
   /** Resolve a submodule's upstream default branch for `yrd admin submodule
    * init`; defaults to `git ls-remote --symref`. Tests inject a resolver to
    * avoid the network. */

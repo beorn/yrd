@@ -14,6 +14,7 @@ export { runYrd } from "./run.ts"
 export type { QueueReadModel } from "./queue-read-model.ts"
 export type { RemergePreflightResult, RemergePreflightVerdict } from "./pr-withdraw.ts"
 export type {
+  ChangeStateGitFacts,
   PruneGitFacts,
   QueueAuditEmission,
   QueueAuditFinding,
