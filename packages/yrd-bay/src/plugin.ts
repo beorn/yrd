@@ -1616,6 +1616,13 @@ function openBay(
   const id = nextId("B", current.byId)
   const base = baseIdentity(args.base ?? defaultBase)
   const branch = args.branch ?? args.from ?? defaultBayBranch(args.name)
+  if (baseIdentity(branch) === base) {
+    raiseFailure(
+      "refusal",
+      "bay-branch-equals-base",
+      `yrd: a bay's branch must differ from its base; got branch=${branch} base=${base}`,
+    )
+  }
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.branch === branch)) {
     throw new Error(`yrd: branch '${branch}' is already open in another bay`)
   }

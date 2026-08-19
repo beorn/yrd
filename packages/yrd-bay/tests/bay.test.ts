@@ -1362,6 +1362,17 @@ describe("withBays", () => {
     await expect(app.bays.open({ name: "missing-owner" })).rejects.toThrow("Bay open requires non-empty 'by'")
   })
 
+  it("refuses to open a Bay whose branch equals its base", async () => {
+    await using app = (await createHarness()).app
+
+    await expect(app.bays.open({ name: "mainline-writer", branch: "main", base: "main", by: "test" })).rejects.toThrow(
+      "a bay's branch must differ from its base; got branch=main base=main",
+    )
+    await expect(
+      app.bays.open({ name: "mainline-writer-origin", branch: "main", base: "origin/main", by: "test" }),
+    ).rejects.toThrow("a bay's branch must differ from its base; got branch=main base=main")
+  })
+
   it("does not infer a lifecycle submitter from Bay process ownership", async () => {
     await using app = (await createHarness()).app
     const opened = await app.bays.open({ name: "unknown-submitter", by: "yrd:4242" })
