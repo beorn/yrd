@@ -103,6 +103,15 @@ async function installHookHost(
   root: string,
   targets: Record<string, ReceiverTarget>,
   intakePolicy?: string,
+  // A marker string, not the real @yrd/cli schema: @yrd/bay's own tests must
+  // not depend on @yrd/cli (the same cycle the production receiver avoids by
+  // taking `validateConfig` as an injected callback rather than a schema
+  // import — see validatePushedYrdConfig in @yrd/cli/config.ts, covered by
+  // its own red/PR1337-shape and green tests there). This only proves the
+  // RECEIVER'S plumbing: it reads the pushed head's `.yrd.yml`, hands it to
+  // whatever validator the caller wired, and refuses the push before
+  // acceptance when that validator throws.
+  rejectConfigContaining?: string,
 ): Promise<Env> {
   const bin = join(root, "bin")
   const targetFile = join(root, "targets.json")
@@ -123,7 +132,11 @@ async function installHookHost(
       // the ref itself — so the fake resolver keys those on the parsed intent,
       // exactly as the production resolver keys them on the bay it opens.
       "const resolveTarget = async (branch, update, intent) => targets[intent === undefined ? branch : `for:${intent.base}/${intent.name}`] ?? null",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY })",
+      "const marker = process.env.YRD_TEST_REJECT_CONFIG_CONTAINING",
+      "const validateConfig = marker === undefined ? undefined : (yaml) => {",
+      "  if (yaml !== undefined && yaml.includes(marker)) throw new Error(`yrd: config rejects marker '${marker}'`)",
+      "}",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig })",
       "",
     ].join("\n"),
   )
@@ -133,6 +146,7 @@ async function installHookHost(
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     YRD_TEST_TARGETS: targetFile,
     ...(intakePolicy === undefined ? {} : { YRD_TEST_INTAKE_POLICY: intakePolicy }),
+    ...(rejectConfigContaining === undefined ? {} : { YRD_TEST_REJECT_CONFIG_CONTAINING: rejectConfigContaining }),
   }
 }
 
@@ -317,6 +331,69 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(deletion.code).not.toBe(0)
     expect(deletion.stderr).toContain("ref deletion is not accepted")
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/main")).toBe(f.baseSha)
+  })
+
+  /**
+   * The queue's own submission/admission gate for `.yrd.yml` (@yrd/cli's
+   * validatePushedYrdConfig, PR1337 2026-08-19): a pushed config the queue's
+   * schema would refuse must be unlandable, refused at the push itself,
+   * before it can ever reach `pr/pushed` or a base ref config read. This
+   * proves the RECEIVER half — it reads the pushed head's OWN `.yrd.yml`
+   * (never the base's, never a working-tree file) and refuses before
+   * acceptance when the injected validator throws; @yrd/cli's own tests
+   * prove the real schema catches the PR1337 shape.
+   */
+  it("refuses a push whose OWN .yrd.yml the injected config validator rejects", async () => {
+    const f = await fixture("config-gate")
+    await git(f.mainRepo, "switch", "-qc", "issue/bad-config")
+    await writeFile(join(f.mainRepo, ".yrd.yml"), "checks: [typecheck]\nFORBIDDEN-marker: true\n")
+    await git(f.mainRepo, "add", ".yrd.yml")
+    // NOT the `commit()` fixture helper: it (re)writes its `name` argument's
+    // CONTENT to be the filename itself, which would clobber the config text
+    // just staged above. This test needs to commit exactly what was written.
+    await git(f.mainRepo, "commit", "-qm", "bad config")
+    const headSha = await git(f.mainRepo, "rev-parse", "HEAD")
+    const env = await installHookHost(
+      f.root,
+      { "issue/bad-config": target(f.baseSha) },
+      undefined,
+      "FORBIDDEN-marker",
+    )
+
+    const refused = await push(f, "issue/bad-config:refs/heads/issue/bad-config", env)
+    expect(refused.code, refused.stderr).not.toBe(0)
+    expect(refused.stderr).toContain("yrd: config rejects marker 'FORBIDDEN-marker'")
+    // Refused BEFORE acceptance: no ref, no inbox result — an admission gate
+    // that only complained after accepting the push would already be too
+    // late (the exact shape PR1337 fell through).
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/heads/issue/bad-config")).toBe("")
+    expect(await inboxFiles(f.receiver)).toEqual([])
+
+    // The commit differs only in its second line — this second push proves
+    // the gate reads content, not just "does .yrd.yml exist": a clean config
+    // at a DIFFERENT commit on the same branch is admitted normally.
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "branch", "-qD", "issue/bad-config")
+    await git(f.mainRepo, "switch", "-qc", "issue/bad-config")
+    await writeFile(join(f.mainRepo, ".yrd.yml"), "checks: [typecheck]\n")
+    await git(f.mainRepo, "add", ".yrd.yml")
+    await git(f.mainRepo, "commit", "-qm", "clean config")
+    const cleanHeadSha = await git(f.mainRepo, "rev-parse", "HEAD")
+    expect(cleanHeadSha).not.toBe(headSha)
+    const admitted = await push(f, "issue/bad-config:refs/heads/issue/bad-config", env)
+    expect(admitted.code, admitted.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/bad-config")).toBe(cleanHeadSha)
+  })
+
+  it("admits a pushed tree with no .yrd.yml at all — the config validator sees undefined, not an empty string", async () => {
+    const f = await fixture("config-gate-absent")
+    await git(f.mainRepo, "switch", "-qc", "issue/no-config")
+    const headSha = await commit(f.mainRepo, "no-config.txt")
+    const env = await installHookHost(f.root, { "issue/no-config": target(f.baseSha) }, undefined, "FORBIDDEN-marker")
+
+    const result = await push(f, "issue/no-config:refs/heads/issue/no-config", env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/no-config")).toBe(headSha)
   })
 
   it("tells an unauthorized push what the intake actually requires, not just that it was refused", async () => {

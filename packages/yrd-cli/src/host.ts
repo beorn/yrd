@@ -120,7 +120,13 @@ import {
 import { ensureWorkspaceDependencies, type LockfileRegenerationEvidence } from "./workspace-provisioning.ts"
 import { submoduleManifestDrift } from "./submodule-manifest-drift.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
-import { loadYrdConfig, stepGateMode, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
+import {
+  loadYrdConfig,
+  stepGateMode,
+  validatePushedYrdConfig,
+  type ResolvedYrdProjectConfig,
+  type YrdStepConfig,
+} from "./config.ts"
 import { classifyFailure, resolveInvocation, type RuntimePosture } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
@@ -2823,6 +2829,11 @@ async function runReceiverHook(
       resolveTarget: receiverTarget(runtimeApp, runtimeProcess, repository.repo),
       intakePolicy: INTAKE_POLICY,
       intake: (result) => intakeResult(runtimeApp, result, runtimeProcess, repository.repo),
+      // The queue's own admission gate: an invalid pushed `.yrd.yml` is refused
+      // at the push itself, so it can never reach the base ref queue.audit /
+      // loadYrdConfig reads. See validatePushedYrdConfig's doc for the PR1337
+      // incident this closes.
+      validateConfig: validatePushedYrdConfig,
     })
   } finally {
     await closeRuntime(app, runtimeProcess, scope)
