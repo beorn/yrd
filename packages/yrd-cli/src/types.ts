@@ -202,6 +202,9 @@ export type YrdCliIO = {
   healthServiceName?: string
   /** Host-resolved primary repository whose shared Journal this command projects. */
   repositoryRoot?: string
+  /** Composition-declared handle for that repository (`code`, `pm`) — the
+   * queue label run names lead with (watch redesign item 36). */
+  repositoryLabel?: string
   /** Probe whether a resident runner holds the drain lease in `cwd`. When it
    * reports true, `pr recut --queue` dispatches admission enqueue-only for the
    * resident to settle instead of becoming a second driver. */

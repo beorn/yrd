@@ -6615,6 +6615,13 @@ async function buildQueueListSnapshot(
     state: state.bays,
     runner,
     ...(runnerAbsence === undefined ? {} : { runnerAbsence }),
+    ...(io.repositoryRoot === undefined ? {} : { repositoryRoot: io.repositoryRoot }),
+    // The composition host's declared handle names its configured base's
+    // queue (`code`, `pm`); other bases in the same journal stay unnamed
+    // until per-queue config labels land (item 36 / the 37i machinery).
+    ...(io.repositoryLabel === undefined
+      ? {}
+      : { queueNames: new Map([[baseIdentity(requestedBase), io.repositoryLabel]]) }),
   })
   const projection = clock.projection
   // `--json` must answer the SAME question the human renderer answers. The

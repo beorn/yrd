@@ -2440,7 +2440,13 @@ export type YrdHostOptions = Readonly<{
   afterCommand?: () => void
 }>
 
-export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | "defaultSubmitter" | "afterCommand">
+export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | "defaultSubmitter" | "afterCommand"> &
+  Readonly<{
+    /** The composition host's declared handle for the selected repository
+     * (`code`, `pm`) — the queue LABEL run names lead with (item 36). Absent
+     * for standalone invocations, which have no config handles yet. */
+    repositoryLabel?: string
+  }>
 
 type YrdRuntimeHostOptions = YrdHostOptions &
   Readonly<{
@@ -3100,6 +3106,7 @@ async function runYrdProcessHost(
           io: {
             cwd: activeHost.repository.worktree,
             repositoryRoot: activeHost.repository.repo,
+            ...(options.repositoryLabel === undefined ? {} : { repositoryLabel: options.repositoryLabel }),
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
             stateDir: activeHost.repository.stateDir,
             ...(runner === undefined ? {} : { runner: runner.id }),
@@ -3301,6 +3308,7 @@ export async function runYrdExecutable(): Promise<never> {
   if (resident) settlement?.spawn(true)
   const exitCode = await runYrdProcessHost(plan === undefined ? argv : composeYrdArgv(argv, plan.args), io, true, {
     ...options,
+    ...(plan?.kind === "repository" ? { repositoryLabel: plan.repository.name } : {}),
     ...(settlement === undefined || resident ? {} : { afterCommand: () => settlement?.spawn(false) }),
   })
   globalThis.process.exit(exitCode)
