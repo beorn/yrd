@@ -178,8 +178,8 @@ describe("an aliased repository read reaches the multi-queue listing (@yrd/cli/q
     const { args } = normalizeYrdRepositoryAliasInvocation(["queue", "code"], DECLARATIONS)
     const payload = await listAs(app, args)
     expect(payload.projection.queues).toEqual([
-      { label: 1, base: "main" },
-      { label: 2, base: "release/next" },
+      { label: 1, base: "main", address: "main" },
+      { label: 2, base: "release/next", address: "release/next" },
     ])
   })
 
@@ -187,7 +187,9 @@ describe("an aliased repository read reaches the multi-queue listing (@yrd/cli/q
     const app = await createCliApp()
     const { args } = normalizeYrdRepositoryAliasInvocation(["queue", "code", "--base", "release/next"], DECLARATIONS)
     expect(args).toEqual(["--repo", "/repo", "queue", "list", "--base", "release/next"])
-    expect((await listAs(app, args)).projection.queues).toEqual([{ label: 1, base: "release/next" }])
+    expect((await listAs(app, args)).projection.queues).toEqual([
+      { label: 1, base: "release/next", address: "release/next" },
+    ])
   })
 
   it("puts the repository's CONFIGURED base first when nobody named one", async () => {
@@ -198,8 +200,8 @@ describe("an aliased repository read reaches the multi-queue listing (@yrd/cli/q
     const app = await createCliApp()
     const { args } = normalizeYrdRepositoryAliasInvocation(["queue", "code"], DECLARATIONS)
     expect((await listAs(app, args, { base: "release/next" })).projection.queues).toEqual([
-      { label: 1, base: "release/next" },
-      { label: 2, base: "main" },
+      { label: 1, base: "release/next", address: "release/next" },
+      { label: 2, base: "main", address: "main" },
     ])
   })
 })
