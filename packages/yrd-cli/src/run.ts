@@ -505,16 +505,18 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
   raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
 }
 
-/** `staleDrafts` is a plain finding array (unlike `queueProgress`, no wrapping
- * state/observedAt envelope) — presence already means "measured", and an empty
- * array is a real, common answer ("no stale drafts"), so it is never coerced to
- * undefined the way an empty `queueProgress.findings` would be nonsensical. */
-function parseStaleDraftFindings(value: unknown): readonly QueueAuditFinding[] | undefined {
+/** Shared by every resident-status field that carries a plain array of
+ * findings (unlike `queueProgress`, no wrapping state/observedAt envelope) —
+ * presence already means "measured", and an empty array is a real, common
+ * answer ("no stale drafts", "nothing needs a person"), so it is never
+ * coerced to undefined the way an empty `queueProgress.findings` would be
+ * nonsensical. `field` names the record key in every raised message. */
+function parseFindingsField(value: unknown, field: string): readonly QueueAuditFinding[] | undefined {
   if (value === undefined) return undefined
   if (!Array.isArray(value)) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner staleDrafts is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${field} is invalid`)
   }
-  return value.map((finding) => parseQueueAuditFinding(finding, "staleDrafts finding"))
+  return value.map((finding) => parseQueueAuditFinding(finding, `${field} finding`))
 }
 
 function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
@@ -713,7 +715,8 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   const driver = parseQueueDriverEpoch(record.driver)
   const uncarried = parseUncarriedObservation(record.uncarried)
   const retention = parseJournalRetentionObservation(record.retention)
-  const staleDrafts = parseStaleDraftFindings(record.staleDrafts)
+  const staleDrafts = parseFindingsField(record.staleDrafts, "staleDrafts")
+  const needsPerson = parseFindingsField(record.needsPerson, "needsPerson")
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -754,6 +757,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(uncarried === undefined ? {} : { uncarried }),
     ...(retention === undefined ? {} : { retention }),
     ...(staleDrafts === undefined ? {} : { staleDrafts }),
+    ...(needsPerson === undefined ? {} : { needsPerson }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -1182,6 +1186,29 @@ export function staleDraftWarnings(findings: readonly QueueAuditFinding[]): stri
   return findings.map((finding) => `[draft-stranded] ${finding.message}`)
 }
 
+/**
+ * `needs-person` findings, projected from the canonical audit exactly like
+ * {@link staleDraftFindings} — so the queue-list/watch/health surfaces and
+ * `queue audit` can never disagree about which merge requests are parked
+ * waiting on a human (@i/10-merge-queue/22918-needs-person-unowned: the
+ * judgment half of a refusal remedy used to settle `needs-person` and then
+ * disappear from every surface, discovered only by accident).
+ *
+ * No age threshold, unlike `staleDraftFindings`: a settlement already only
+ * happens after the queue exhausted its own retries or mechanical remedy
+ * (22474), so it is page-worthy the moment it exists — there is no
+ * legitimate "give it a few minutes" window the way a fresh push has one.
+ */
+export function needsPersonFindings(app: Pick<YrdCliApp, "queue">, now: string): readonly QueueAuditFinding[] {
+  return app.queue.audit({ now }).findings.filter((finding) => finding.code === "needs-person")
+}
+
+/** One scannable warning line per needs-person merge request, in the same
+ * `[code] message` shape {@link staleDraftWarnings} already established. */
+export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): string[] {
+  return findings.map((finding) => `[needs-person] ${finding.message}`)
+}
+
 /** Exact latest landing driven for one queue. The epoch heartbeat publishes
  * this content so a probe can distinguish the right driver from an unrelated
  * resident process with the same service name. */
@@ -1549,12 +1576,17 @@ async function checkQueueRunner(
     ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
     ...gitLines,
   ].join("\n")
-  // Non-fatal by construction: a stale draft never flips `state`/`exitCode` —
-  // draft WIP is first-class (operator ruling) and this is detection only —
-  // but it must still reach whoever reads this command, JSON or human, which
+  // Non-fatal by construction: a stale draft (or an unrouted needs-person
+  // merge request) never flips `state`/`exitCode` — draft WIP is first-class
+  // (operator ruling) and a parked PR does not mean the queue itself is
+  // stalled (@i/10-merge-queue/22918-needs-person-unowned) — but it must
+  // still reach whoever reads this command, JSON or human, which
   // `printResultWithWarnings` already does uniformly for every other advisory
   // finding in this CLI (queuePauseWarnings, queue-read failures).
-  const warnings = staleDraftWarnings(result.payload.facts.runner?.staleDrafts ?? [])
+  const warnings = [
+    ...staleDraftWarnings(result.payload.facts.runner?.staleDrafts ?? []),
+    ...needsPersonWarnings(result.payload.facts.runner?.needsPerson ?? []),
+  ]
   await printResultWithWarnings(io, jsonEnabled(options), result.payload, human, warnings)
   return result.exitCode
 }
@@ -1652,6 +1684,9 @@ export async function startResidentRunnerHeartbeat(
      * journal, and cannot afford either) can prove them from the status file
      * instead of re-deriving draft state itself. */
     staleDrafts?: (now: string) => readonly QueueAuditFinding[]
+    /** `needs-person` findings, re-derived every tick exactly like
+     * `staleDrafts` (@i/10-merge-queue/22918-needs-person-unowned). */
+    needsPerson?: (now: string) => readonly QueueAuditFinding[]
   }> = {},
 ): Promise<ResidentRunnerHeartbeat> {
   const cwd = io.cwd ?? process.cwd()
@@ -1700,6 +1735,7 @@ export async function startResidentRunnerHeartbeat(
     const queueProgress = recordedProgress ?? options.queueProgress?.(lastTickAt)
     const uncarried = options.uncarried?.()
     const staleDrafts = options.staleDrafts?.(lastTickAt)
+    const needsPerson = options.needsPerson?.(lastTickAt)
     const status: QueueTimelineRunner = {
       pid: process.pid,
       startedAt,
@@ -1712,6 +1748,7 @@ export async function startResidentRunnerHeartbeat(
       // ("no stale drafts") and is written as such — only a caller that never
       // wired the option at all (an older resident) omits the key.
       ...(staleDrafts === undefined ? {} : { staleDrafts }),
+      ...(needsPerson === undefined ? {} : { needsPerson }),
       ...(options.retention === undefined || driverEpoch === undefined
         ? {}
         : {
@@ -6722,6 +6759,9 @@ async function buildQueueListSnapshot(
     new Date(now).toISOString(),
     draftPageThresholdMs((await loadYrdConfig({ repo: io.cwd ?? process.cwd(), defaultBase: requestedBase })).config),
   )
+  // Computed directly from `app`, exactly like `staleDrafts` above — watch has
+  // the journal in hand and can always afford this (@i/10-merge-queue/22918-needs-person-unowned).
+  const needsPerson = needsPersonFindings(app, new Date(now).toISOString())
   const clock = createQueueTimelineProjectionClock(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -6762,6 +6802,7 @@ async function buildQueueListSnapshot(
       projection,
       ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
       ...(staleDrafts.length === 0 ? {} : { staleDrafts }),
+      ...(needsPerson.length === 0 ? {} : { needsPerson }),
     },
     reclock: clock.reclock,
   }
@@ -7002,6 +7043,7 @@ async function listQueues(
     [
       ...queuePauseWarnings(snapshot.state, snapshot.results),
       ...staleDraftWarnings(snapshot.staleDrafts ?? []),
+      ...needsPersonWarnings(snapshot.needsPerson ?? []),
       ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
     ],
   )
@@ -9965,6 +10007,7 @@ export async function followQueueRuns(
         queueProgress: (now) => residentQueueProgress(app, now),
         uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
         staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
+        needsPerson: (now) => needsPersonFindings(app, now),
         ...(io.journalRetentionPolicy === undefined ? {} : { retention: io.journalRetentionPolicy }),
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
@@ -10241,6 +10284,7 @@ async function watchQueue(
       [
         ...queuePauseWarnings(snapshot.state, snapshot.results),
         ...staleDraftWarnings(snapshot.staleDrafts ?? []),
+        ...needsPersonWarnings(snapshot.needsPerson ?? []),
         ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure, true)]),
       ],
     )

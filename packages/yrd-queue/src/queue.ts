@@ -6185,6 +6185,7 @@ function auditQueues(
   const queued = admissionQueue(state, steps)
   const refusalFindings = admissionRefusalAuditFindings(state, queued, progress)
   findings.push(...refusalFindings)
+  findings.push(...needsPersonAuditFindings(state))
   findings.push(
     ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
   )
@@ -6228,6 +6229,65 @@ function admissionRefusalAuditFindings(
       count: sameCodeCount,
       since: sameCodeFirstAt,
       blockedMs,
+    })
+  }
+  return findings
+}
+
+/**
+ * `needs-person` findings — one per merge request whose admission refusal
+ * settled `needs-person` (22474's judgment half, plus a structurally
+ * permanent refusal settled on its first occurrence, above).
+ * `admissionRefusalAuditFindings` above deliberately drops a refusal the
+ * instant it settles — the LOOP it detects is over, and re-firing
+ * `admission-refusal-loop` for a PR the queue has already stopped retrying
+ * would blame the wrong thing. But dropping it left nothing in its place:
+ * the disposition existed and nothing watched it
+ * (@i/10-merge-queue/22918-needs-person-unowned). This walk is that
+ * replacement, keyed on settlement rather than on being blocked at the head
+ * — a parked PR still needs a person regardless of queue position, and
+ * settling never removes it from the ledger (only a new push/recut does).
+ *
+ * No age threshold, unlike `draft-stranded`: a settlement already only
+ * happens after the queue exhausted its own retries or mechanical remedy, so
+ * it is page-worthy the moment it exists.
+ */
+function needsPersonAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditFindingEmission[] {
+  const findings: QueueAuditFindingEmission[] = []
+  for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
+    compareNatural(left.pr, right.pr),
+  )) {
+    const settlement = refusal.settlement
+    if (settlement === undefined) continue
+    const pr = state.bays.prs[refusal.pr]
+    // The ledger is retained past its PR (compaction drops streaks for PRs the
+    // state no longer holds); a settlement with no PR names nothing to route.
+    if (pr === undefined) continue
+    // The submitter RECORDED on the exact revision this settlement names —
+    // never a seat, a branch owner or a git author guessed at read time
+    // (same attribution precedent as `draft-stranded`, above). A settlement
+    // only ever targets the PR's CURRENT revision — `queue/admission/settled`
+    // refuses a stale one — so the current revision's submitter IS the
+    // submitter of the exact revision this settlement names.
+    const submitter = currentChangeRev(pr).submitter
+    findings.push({
+      code: "needs-person",
+      // The empty owner slot must show, not vanish: unlike `draft-stranded`,
+      // which silently omits the "by X" clause when no submitter is
+      // recorded, this finding names the gap explicitly and names a durable
+      // fallback so a settled judgment call is never addressed to nobody —
+      // even when the role that would ordinarily own it (integration/CI) is
+      // not currently staffed (@i/10-merge-queue/22918-needs-person-unowned).
+      message:
+        `merge request '${refusal.pr}' settled needs-person and nothing routes it: ${settlement.reason}` +
+        (submitter === undefined
+          ? " — UNOWNED: no recorded submitter to route to; @chief owns unattributed merge-request judgment calls"
+          : ` — route to ${submitter}, its recorded submitter`),
+      pr: refusal.pr,
+      specimen: `pr:${refusal.pr}:needs-person`,
+      refusal: refusal.code,
+      since: settlement.settledAt,
+      ...(submitter === undefined ? {} : { submitter }),
     })
   }
   return findings

@@ -8049,6 +8049,198 @@ describe("runYrd", () => {
     }
   })
 
+  /**
+   * The same consumption gap as the draft-stranded family above, for the
+   * OTHER disposition nothing watched (@i/10-merge-queue/22918-needs-person-unowned):
+   * `applyRefusalRemedies`' judgment half already settles a refusal
+   * `needs-person` (22474), but the ONE finding that used to mark it —
+   * `admission-refusal-loop` — is deliberately dropped the instant it
+   * settles (the loop is over), and nothing replaced it. These three tests
+   * prove the settlement reaches a live seat exactly like a stale draft does:
+   * the resident heartbeat (this test), `queue list --check` (the fleet
+   * health surface), and `queue list` / `queue list --watch` (the same
+   * loader `yrd watch` renders). Unlike a draft, there is no page-after
+   * grace: a settlement already only happens once the queue gave up on its
+   * own retries or mechanical remedy, so it is page-worthy immediately.
+   */
+  it("writes an unrouted needs-person merge request into the resident heartbeat", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-needs-person-"))
+    execFileSync("git", ["init", "-q", repo])
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
+    try {
+      await app.bays.intake({
+        branch: "issue/permanent-refusal",
+        headSha: "3".repeat(40),
+        base: "main",
+        baseSha: BASE_SHA,
+        submitter: "@dev/11",
+        submit: true,
+      })
+      const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/permanent-refusal")
+      if (pr === undefined) throw new Error("intake did not record the PR")
+      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
+      // Structurally permanent: settles to needs-person on its FIRST refusal,
+      // same as the yrd-queue unit coverage (admission-refusal-oracle.test.ts).
+      await app.queue.recordAdmissionRefusal({
+        pr: pr.id,
+        code: "recut-gitlink-conflict",
+        kind: "refusal",
+        reason: "two fixed gitlink commits are non-ancestral",
+      })
+
+      const heartbeat = await runInternals.startResidentRunnerHeartbeat(
+        outputIO({
+          cwd: repo,
+          runner: `yrd-cli:${process.pid}`,
+          now: () => Date.parse("2026-07-09T12:05:00.000Z"),
+        }).io,
+        {
+          intervalMs: 60_000,
+          needsPerson: (now) => runInternals.needsPersonFindings(app, now),
+          driver: { queueId: `${repo}#main`, lastMerged: () => null },
+        },
+      )
+      try {
+        const written = JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ needsPerson: unknown }>
+        expect(written.needsPerson).toMatchObject([
+          {
+            code: "needs-person",
+            pr: pr.id,
+            refusal: "recut-gitlink-conflict",
+            submitter: "@dev/11",
+          },
+        ])
+        // Must never disagree with queue audit's own reading of the identical
+        // PR — the resident projects the canonical audit, never a second
+        // derivation of it.
+        expect(app.queue.audit({ now: "2026-07-09T12:05:00.000Z" }).findings).toContainEqual(
+          expect.objectContaining({ code: "needs-person", pr: pr.id }),
+        )
+        heartbeat.check()
+      } finally {
+        await heartbeat.close(true)
+      }
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
+  it("surfaces a resident-observed needs-person merge request as a non-fatal warning in `queue list --check`", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-needs-person-"))
+    execFileSync("git", ["init", "-q", "-b", "main", repo])
+    execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
+    execFileSync("git", ["-C", repo, "config", "user.email", "yrd@example.invalid"])
+    writeFileSync(join(repo, "README.md"), "base\n")
+    execFileSync("git", ["-C", repo, "add", "README.md"])
+    execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
+    const stateDir = join(repo, ".git", "yrd", "resident-runner")
+    mkdirSync(stateDir, { recursive: true })
+    const finding = {
+      code: "needs-person",
+      message:
+        "merge request 'PR1' settled needs-person and nothing routes it: two fixed gitlink commits are " +
+        "non-ancestral — route to @dev/7, its recorded submitter",
+      pr: "PR1",
+      specimen: "pr:PR1:needs-person",
+      refusal: "recut-gitlink-conflict",
+      since: "2026-07-09T12:00:00.000Z",
+      submitter: "@dev/7",
+    }
+    writeFileSync(
+      join(stateDir, "status.json"),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: "2026-07-09T12:00:00.000Z",
+        lastTickAt: "2026-07-09T12:05:00.000Z",
+        needsPerson: [finding],
+      }),
+    )
+    const app = await createApp()
+    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings: [] }) } }
+    try {
+      // Deliberately the "absent" health state (no lease, no queued work on
+      // THIS app) rather than "healthy" — an unrouted needs-person merge
+      // request must page regardless of whether anything else about the
+      // runner is fine or broken, exactly like a stale draft.
+      const json = outputIO({ cwd: repo, now: () => Date.parse("2026-07-09T12:05:10.000Z") })
+      const jsonExit = await runYrd(app, yrd("queue", "list", "--check", "--json"), json.io, services)
+      const body = JSON.parse(json.stdout()) as Readonly<{
+        state: unknown
+        facts: Readonly<{ runner: Readonly<{ needsPerson: unknown }> }>
+        warnings: unknown
+      }>
+      expect(jsonExit, JSON.stringify(body)).toBe(1)
+      expect(body.state).toBe("absent")
+      expect(body.facts.runner.needsPerson).toEqual([finding])
+      expect(body.warnings).toEqual([`[needs-person] ${finding.message}`])
+
+      const human = outputIO({ cwd: repo, now: () => Date.parse("2026-07-09T12:05:10.000Z") })
+      expect(await runYrd(app, yrd("queue", "list", "--check"), human.io, services), human.stderr()).toBe(1)
+      expect(human.stderr()).toContain("[needs-person]")
+      expect(human.stderr()).toContain("@dev/7")
+      expect(human.stderr()).toContain("PR1")
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
+  it("surfaces a needs-person merge request in `queue list` — the same loader `yrd watch` renders", async () => {
+    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
+    try {
+      await app.bays.intake({
+        branch: "issue/needs-person-in-watch",
+        headSha: "5".repeat(40),
+        base: "main",
+        baseSha: BASE_SHA,
+        submitter: "@dev/7",
+        submit: true,
+      })
+      const pr = Object.values(app.state().bays.prs).find(
+        (candidate) => candidate.branch === "issue/needs-person-in-watch",
+      )
+      if (pr === undefined) throw new Error("intake did not record the PR")
+      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
+      await app.queue.recordAdmissionRefusal({
+        pr: pr.id,
+        code: "recut-gitlink-conflict",
+        kind: "refusal",
+        reason: "two fixed gitlink commits are non-ancestral",
+      })
+
+      // No grace period, unlike a draft: the very next read already pages.
+      const listing = outputIO({ now: () => Date.parse("2026-07-09T12:05:00.000Z") })
+      expect(await runYrd(app, yrd("queue", "list", "--json"), listing.io), listing.stderr()).toBe(0)
+      const body = JSON.parse(listing.stdout()) as Readonly<{ warnings: readonly string[] }>
+      expect(body.warnings).toHaveLength(1)
+      expect(body.warnings[0]).toContain("[needs-person]")
+      expect(body.warnings[0]).toContain("@dev/7")
+      expect(body.warnings[0]).toContain(pr.id)
+
+      const humanListing = outputIO({ now: () => Date.parse("2026-07-09T12:05:00.000Z"), columns: 120 })
+      expect(await runYrd(app, yrd("queue", "list"), humanListing.io), humanListing.stderr()).toBe(0)
+      expect(humanListing.stderr()).toContain("[needs-person]")
+      expect(humanListing.stderr()).toContain("@dev/7")
+
+      // The interactive `yrd watch` pane and its --json twin share this exact
+      // snapshot builder (buildQueueListSnapshot) — proving the data reaches
+      // it here proves it reaches the pane's footer notice too.
+      const snapshot = await runInternals.queueListSnapshot(
+        app,
+        [],
+        {},
+        outputIO({ now: () => Date.parse("2026-07-09T12:05:00.000Z") }).io,
+        { queueReadModel: testQueueReadModel(app) },
+      )
+      expect(snapshot.needsPerson).toHaveLength(1)
+      expect(snapshot.needsPerson?.[0]?.submitter).toBe("@dev/7")
+    } finally {
+      await app.close()
+    }
+  })
+
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])

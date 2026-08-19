@@ -635,6 +635,21 @@ export type QueueTimelineRunner = Readonly<{
    * matching every other resident-observed fact on this type.
    */
   staleDrafts?: readonly QueueAuditFinding[]
+  /**
+   * `needs-person` findings (@yrd/queue `auditQueues`) — merge requests whose
+   * admission refusal settled `needs-person` and stopped being retried, so
+   * the one finding that used to mark them (`admission-refusal-loop`) goes
+   * silent the instant they most need a human
+   * (@i/10-merge-queue/22918-needs-person-unowned). Projected by the
+   * resident from the canonical audit exactly like {@link staleDrafts},
+   * immediately — no age threshold, since a settlement already only happens
+   * after the queue exhausted its own retries or mechanical remedy.
+   *
+   * Absent means NOT MEASURED (a status record written before this field
+   * existed) or measured-and-empty; both render as "nothing needs a person"
+   * today, matching every other resident-observed fact on this type.
+   */
+  needsPerson?: readonly QueueAuditFinding[]
 }>
 
 export type QueueRunnerRefusal = Readonly<{
