@@ -2534,6 +2534,7 @@ checks: [{check: {run: "true"}}]
     expect(attestation.manifest.edges).toEqual([
       { from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3", to: attestation.manifest.targetIdentity },
       { from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25", to: attestation.manifest.targetIdentity },
+      { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: attestation.manifest.targetIdentity },
       { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: attestation.manifest.targetIdentity },
       { from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8", to: attestation.manifest.targetIdentity },
     ])

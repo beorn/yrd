@@ -211,6 +211,16 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
   "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
   "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3",
+  // The PRODUCTION composition's intents-v2 identity — what /hh's live
+  // journal actually stored after yrdpin#401 migrated it. The entry above is
+  // the TEST-app composition's value for the same contract; identities are
+  // per-composition (initialState + registered events differ by host
+  // options), so a retained edge measured in a harness does not cover a
+  // deployment. 2026-08-18: PR1305 shipped with only the harness value and
+  // every production boot refused (R2732) until this entry landed — measure
+  // retained edges from the production journal's stored identity, never a
+  // test app.
+  "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
