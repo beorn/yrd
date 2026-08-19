@@ -78,21 +78,6 @@ import {
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
 import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@yrd/config"
-import {
-  IntentAttemptFailureSchema,
-  IntentParkArgsSchema,
-  PinIntentEvaluationFactSchema,
-  PinIntentRefusalSchema,
-  intentKey,
-  intentParkVerdict,
-  renderRemedyStep,
-  type IntentAttemptFailure,
-  type IntentPark,
-  type IntentsState,
-  type PinIntent,
-  type PinIntentAdmission,
-  type PinTombstone,
-} from "@yrd/intent"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { CandidateFailureReceiptEvidenceSchema, candidateFailureReceiptEvidence } from "./check-attribution.ts"
@@ -224,18 +209,8 @@ const QueueRunArgsSchema = z
     baseSha: GitShaSchema.optional(),
     /** Immutable Candidate facts prepared by the effectful Queue facade. */
     candidate: CandidateCreatedSchema.optional(),
-    /** Carrier-free intent snapshot supplied by the effectful Queue facade. */
-    intent: PRSnapshotSchema.optional(),
   })
   .strict()
-  .superRefine((args, context) => {
-    if (args.intent !== undefined && args.intent.intent === undefined) {
-      context.addIssue({ code: "custom", path: ["intent"], message: "intent run requires intent snapshot evidence" })
-    }
-    if (args.intent !== undefined && args.prs !== undefined) {
-      context.addIssue({ code: "custom", message: "one queue run cannot select both PRs and an intent" })
-    }
-  })
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
 const QueueRunReuseCoveredSchema = z
@@ -648,13 +623,6 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   prepareCandidate?: CandidatePreparer
   /** Repository-truth sink for one immutable terminal merge record. */
   recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
-  evaluateIntent?: (
-    input: Readonly<{
-      intent: PinIntent
-      baseSha: string
-      tombstones: readonly PinTombstone[]
-    }>,
-  ) => PinIntentAdmission | Promise<PinIntentAdmission>
   runner?: (jobs: Jobs) => Runner
   /** Live base-authority flows used for drift warnings and resume refusal. */
   flows?: YrdConfig
@@ -722,7 +690,7 @@ export type PreparedCandidate = Omit<Candidate, "createdAt" | "mergeability"> &
 export type CandidatePreparer = (input: CandidatePreparationInput) => PreparedCandidate | Promise<PreparedCandidate>
 
 type QueueState = Readonly<{ queues: QueuesState }>
-type QueueHostState = Readonly<{ bays: BaysState; jobs: JobsState; intents?: DeepReadonly<IntentsState> }>
+type QueueHostState = Readonly<{ bays: BaysState; jobs: JobsState }>
 export type QueueRuntimeState = QueueHostState & QueueState
 type RuntimeState = QueueRuntimeState
 type QueueStart = Omit<QueueRecord, "startedAt" | "failure">
@@ -755,8 +723,6 @@ export type QueueCommands = Readonly<{
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
-    recordIntentEvaluation: CommandHandler<z.infer<typeof PinIntentEvaluationFactSchema>, RuntimeState>
-    parkIntent: CommandHandler<z.infer<typeof IntentParkArgsSchema>, RuntimeState>
     reconcileLanding: CommandHandler<z.infer<typeof PRIntegratedSchema>, RuntimeState>
   }>
 }>
@@ -864,17 +830,6 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   history(): Promise<readonly Run[]>
   status(base: string): QueueSummary
 }>
-
-type QueueIntentRunArgs = Readonly<{
-  intent: PinIntent
-  base: string
-  /** Exact base is optional only when Queue has an injected base resolver. */
-  baseSha?: string
-  steps?: readonly string[]
-}>
-type QueueIntentRunResult =
-  | Readonly<{ outcome: "run"; run: Run }>
-  | Readonly<{ outcome: "noop" | "refused" | "parked"; intent: PinIntent }>
 
 export type QuiesceLegacyRootsOptions = Readonly<{
   /** ISO timestamp used to decide whether a legacy root's writer lease is still live. */
@@ -1019,8 +974,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
-              recordIntentEvaluation: (args) => yrd.dispatch(commands.queue.recordIntentEvaluation, args),
-              parkIntent: (args) => yrd.dispatch(commands.queue.parkIntent, args),
               reconcileLanding: (args) => yrd.dispatch(commands.queue.reconcileLanding, args),
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
@@ -1031,7 +984,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.resolveBaseSha,
             options.prepareCandidate,
             options.recordMerge,
-            options.evaluateIntent,
             configuredRunner,
             options.flows,
             progress,
@@ -1067,8 +1019,6 @@ type QueueActions = Readonly<{
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
-  recordIntentEvaluation(args: z.infer<typeof PinIntentEvaluationFactSchema>): Promise<CommandResult>
-  parkIntent(args: z.infer<typeof IntentParkArgsSchema>): Promise<CommandResult>
   reconcileLanding(args: z.infer<typeof PRIntegratedSchema>): Promise<CommandResult>
 }>
 
@@ -1253,7 +1203,6 @@ function createQueue<Shape extends PRShape>(
   resolveBaseSha: QueueOptions<readonly AnyStepDef[]>["resolveBaseSha"],
   prepareCandidate: CandidatePreparer | undefined,
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
-  evaluateIntent: QueueOptions<readonly AnyStepDef[]>["evaluateIntent"],
   configuredRunner: Runner | undefined,
   flows: YrdConfig | undefined,
   progress: QueueProgressPolicy,
@@ -2203,112 +2152,6 @@ function createQueue<Shape extends PRShape>(
     return [...admitted].toSorted(compareNatural)
   }
 
-  const runIntent = async (args: QueueIntentRunArgs, runOptions: QueueRunOptions): Promise<QueueIntentRunResult> => {
-    await actions.refresh()
-    const currentIntent = runtime().intents?.records[args.intent.id]
-    if (currentIntent === undefined) {
-      raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent.id}'`)
-    }
-    const active = activeQueueRuns(runtime().queues, runtime().jobs).find((run) =>
-      run.prs.some((snapshot) => snapshot.intent?.id === currentIntent.id),
-    )
-    if (active !== undefined) return { outcome: "run", run: await settle(active.id, runOptions) }
-    if (currentIntent.status !== "open") {
-      raiseFailure(
-        "refusal",
-        "intent-terminal",
-        `yrd: intent '${currentIntent.id}' is already ${currentIntent.status}; it cannot start a Queue run`,
-      )
-    }
-    const intent = currentIntent as PinIntent
-    // Before spending another turn on it: has this record already told us, three
-    // times in identical terms, that it cannot land? Parking is checked HERE,
-    // ahead of evaluation, because the specimens both passed evaluation and
-    // died at the landing — a predicate behind the evaluator would never run.
-    const park = deadIntentPark(runtime(), intent)
-    if (park !== undefined) {
-      await actions.parkIntent({ intent: intent.id, park })
-      const parked = runtime().intents?.records[intent.id]
-      if (parked === undefined) throw new Error(`yrd: the parked intent '${intent.id}' disappeared`)
-      return { outcome: "parked", intent: parked as PinIntent }
-    }
-    const base = baseIdentity(args.base)
-    const baseSha = args.baseSha ?? (resolveBaseSha === undefined ? undefined : await resolveBaseSha(base))
-    if (baseSha === undefined) {
-      throw new Error(`yrd: intent '${intent.id}' requires an exact base SHA or an injected base resolver`)
-    }
-    if (evaluateIntent === undefined) {
-      throw new Error("yrd: Queue has no merge-time intent evaluator")
-    }
-    const tombstones = Object.values(runtime().intents?.tombstoneRecords ?? {}).filter(
-      (record) => record.component === intent.component,
-    ) as PinTombstone[]
-    const evaluation = await evaluateIntent({ intent, baseSha, tombstones })
-    if (!evaluation.admitted) {
-      const { admitted: _admitted, ...rawRefusal } = evaluation
-      const refusal = PinIntentRefusalSchema.parse(rawRefusal)
-      await actions.recordIntentEvaluation({
-        intent: intent.id,
-        baseSha,
-        outcome: "refused",
-        refusal,
-      })
-      const refused = runtime().intents?.records[intent.id]
-      if (refused === undefined) throw new Error(`yrd: the failed intent '${intent.id}' disappeared`)
-      return { outcome: "refused", intent: refused as PinIntent }
-    }
-    if (evaluation.relation === "deferred" || evaluation.target === undefined) {
-      throw new Error(`yrd: merge-time evaluation left intent '${intent.id}' target deferred`)
-    }
-    const evaluated = { priorPin: evaluation.currentPin, target: evaluation.target }
-    await actions.recordIntentEvaluation({
-      intent: intent.id,
-      baseSha,
-      outcome: evaluation.relation,
-      evaluated,
-    })
-    if (evaluation.relation === "noop") {
-      const noop = runtime().intents?.records[intent.id]
-      if (noop === undefined) throw new Error(`yrd: noop intent '${intent.id}' disappeared`)
-      return { outcome: "noop", intent: noop as PinIntent }
-    }
-    const snapshot = PRSnapshotSchema.parse({
-      id: intent.id,
-      branch: `intent/${intent.id}`,
-      base,
-      issue: intent.issue.id,
-      revision: 1,
-      // There is deliberately no authored carrier. The immutable member is
-      // anchored to the exact base against which Queue synthesizes it.
-      headSha: baseSha,
-      baseSha,
-      intent: {
-        id: intent.id,
-        authored: {
-          intentId: intent.intentId,
-          issue: intent.issue,
-          component: intent.component,
-          ...(intent.target === undefined ? {} : { target: intent.target }),
-        },
-        evaluated,
-      },
-    })
-    const candidate = await candidateFactsForSnapshots([snapshot], baseSha)
-    const started = await actions.run({
-      intent: snapshot,
-      ...(args.steps === undefined ? {} : { steps: [...args.steps] }),
-      baseSha,
-      ...(candidate === undefined ? {} : { candidate }),
-    })
-    const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-    if (startedEvent === undefined) {
-      reportZeroEventRun(started.value)
-      throw new Error(`yrd: intent '${intent.id}' did not start a Queue run`)
-    }
-    const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
-    return { outcome: "run", run: await settle(id, runOptions) }
-  }
-
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
@@ -2487,71 +2330,13 @@ function createQueue<Shape extends PRShape>(
           await actions.refresh()
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
-          let intentCutoff: QueuePosition | undefined
-          if (selectorless) {
-            // Head-of-line release, keyed by component. An attempt that ends
-            // WITHOUT resolving its intent leaves that intent open, so the same
-            // head would be selected forever; release its component for the rest
-            // of this turn and walk on to the next component's head instead.
-            // Serialization within a component is untouched — a component's
-            // second intent is never tried while its own head is still open.
-            //
-            // Termination mirrors the admission drain's release at
-            // `dispatchAdmissions` above: every iteration either resolves an open
-            // intent (the open set strictly shrinks) or adds a component to
-            // `released` (bounded by the components of the open intents, and
-            // never removed from within the turn). Neither branch can repeat
-            // without consuming one of those two finite budgets.
-            const released = new Set<string>()
-            const intentRuns: Run[] = []
-            while (true) {
-              const heads = queuedIntentHeads(queuedIntents(runtime()))
-              if (heads.length === 0) break
-              // The lane's queue position is its EARLIEST live head, released or
-              // not: a PR submitted after that head must never jump it. With a
-              // single component this is the lane head itself, as before.
-              const intentPosition = heads
-                .map(intentQueuePosition)
-                .reduce((earliest, position) => (compareQueuePosition(position, earliest) < 0 ? position : earliest))
-              const queuedPR = runnablePRs(runtime(), args, steps, new Set(), { explicitStepAuthority })[0]
-              if (queuedPR !== undefined && compareQueuePosition(prQueuePosition(queuedPR), intentPosition) <= 0) {
-                intentCutoff = intentPosition
-                break
-              }
-              const intent = heads.find((head) => !released.has(head.component))
-              if (intent === undefined) {
-                // Every live component has had its turn. The lane still holds its
-                // position, so PRs behind it stay behind it.
-                intentCutoff = intentPosition
-                break
-              }
-              if (defaultBase === undefined) {
-                throw new Error("yrd: selectorless intent drain requires a configured default base")
-              }
-              const outcome = await runIntent(
-                {
-                  intent,
-                  base: defaultBase,
-                  ...(args.steps === undefined ? {} : { steps: args.steps }),
-                },
-                runOptions,
-              )
-              // Terminal noops/refusals release their position in the same frame,
-              // so the same turn keeps walking until it reaches live work.
-              if (outcome.outcome === "run") {
-                intentRuns.push(outcome.run)
-                // One synthesized landing is one serial-head turn, and a run that
-                // is still live owns the base until it settles. Either way the
-                // turn ends here: two intent runs never overlap, which is what
-                // keeps the unconditional per-base `runningQueue` conflict from
-                // firing out of this drain.
-                const attempted = runtime().intents?.records[intent.id]
-                if (attempted?.status !== "open" || !Queues.terminal(outcome.run)) return intentRuns
-                released.add(intent.component)
-              }
-            }
-            if (intentRuns.length > 0) return intentRuns
-          }
+          // The intent lane that used to interleave here with a head-of-line
+          // release (keyed by component) is retired along with the rest of the
+          // intent rail — there is no longer a second lane of queue members to
+          // arbitrate against, so this compose always proceeds straight to PR
+          // selection below. `intentCutoff` stays declared (always `undefined`
+          // now) because `requestedPRs` still takes it as a general parameter.
+          const intentCutoff: QueuePosition | undefined = undefined
           let snapshot = runtime()
           const resumable = resumableQueueRoots(snapshot, args, steps)
           const roots: RunId[] = resumable.map((run) => run.id)
@@ -3582,41 +3367,6 @@ function createQueueCommands(
         args.steps === undefined ? "configured" : "explicit",
       )
       const explicitStepAuthority = selection.authority === "explicit"
-      if (args.intent !== undefined) {
-        const snapshot = args.intent
-        const base = baseIdentity(snapshot.base)
-        const active = runningQueue(state.queues, state.jobs, base)
-        if (active !== undefined) throw new QueueRunningConflict(base, active.id)
-        const candidateBaseSha = args.baseSha ?? requiredCandidateBaseSha([snapshot])
-        const candidateSnapshots = pinCandidateBaseSha([snapshot], candidateBaseSha)
-        validateSequence(selected, false)
-        if (requiresPreparedCandidate && args.candidate === undefined) {
-          throw new Error("yrd: intent queue run requires prepared Candidate facts")
-        }
-        const reuse = explicitStepAuthority
-          ? undefined
-          : reusableIntentPrefix(state, candidateSnapshots, args.candidate?.treeSha, selected)
-        const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
-        if (remaining.length === 0 && reuse !== undefined) {
-          return {
-            events: [],
-            value: queueRunReuseCovered([snapshot.id], selected, "queue-run", reuse.run),
-          }
-        }
-        return startRun(
-          state.queues,
-          Queues.nextId(state.queues),
-          candidateSnapshots,
-          candidateBaseSha,
-          args.candidate,
-          remaining,
-          selection,
-          reuse?.shape ?? prShape(candidateSnapshots),
-          undefined,
-          {},
-          reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
-        )
-      }
       const selectionResult = runnablePRSelection(state, args, steps, new Set(), { explicitStepAuthority })
       const prs = selectionResult.prs
       if (prs.length === 0) {
@@ -4039,30 +3789,6 @@ function createQueueCommands(
     },
   })
 
-  const recordIntentEvaluation = command({
-    title: "Record one authoritative merge-time intent evaluation",
-    params: PinIntentEvaluationFactSchema,
-    apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof PinIntentEvaluationFactSchema>) {
-      const record = state.intents?.records[args.intent]
-      if (record === undefined) {
-        raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}' to evaluate`)
-      }
-      return { events: [event("intent/evaluation-recorded", args)] }
-    },
-  })
-
-  const parkIntent = command({
-    title: "Park one intent whose attempts repeat a single failure fingerprint",
-    params: IntentParkArgsSchema,
-    apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof IntentParkArgsSchema>) {
-      const record = state.intents?.records[args.intent]
-      if (record === undefined) {
-        raiseFailure("refusal", "intent-not-found", `yrd: no intent '${args.intent}' to park`)
-      }
-      return { events: [event("intent/parked", args)] }
-    },
-  })
-
   const reconcileLanding = command({
     title: "Reconcile one repository-proven landing into the journal index",
     params: PRIntegratedSchema,
@@ -4134,8 +3860,6 @@ function createQueueCommands(
       associateTerminals,
       admissionRefused,
       settleAdmissionRefusal,
-      recordIntentEvaluation,
-      parkIntent,
       reconcileLanding,
     },
   }
@@ -5431,60 +5155,6 @@ function advanceQueue(
     }
     const failed = queueFailedEvent(state, record, failure, job)
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
-    const intent = pr?.intent
-    if (intent !== undefined && planned.kind === "check" && !isIntegrated(before)) {
-      const priorFailures = intentCheckFailures(state, intent.id, record.id)
-      if (priorFailures >= AUTOMATIC_INTENT_CHECK_RETRIES) {
-        const candidate = state.queues.candidates[record.candidateId]
-        if (candidate?.sha === undefined) {
-          throw new Error(`yrd: failed intent Candidate '${record.candidateId}' carries no synthesized commit`)
-        }
-        const attempts = priorFailures + 1
-        return {
-          events: [
-            failed,
-            event(
-              "intent/evaluation-recorded",
-              PinIntentEvaluationFactSchema.parse({
-                intent: intent.id,
-                baseSha: candidate.baseSha,
-                outcome: "refused",
-                refusal: {
-                  code: "intent-checks-failed",
-                  message: `Intent '${intent.id}' synthesized candidate failed '${planned.name}' after ${attempts} attempts: ${failure.message}`,
-                  evidence: {
-                    component: intent.authored.component,
-                    target: intent.evaluated.target,
-                    currentPin: intent.evaluated.priorPin,
-                    candidate: candidate.sha,
-                    run: record.id,
-                    step: planned.name,
-                    attempts,
-                  },
-                  remedy: [
-                    { argv: ["yrd", "intent", "show", intent.id] },
-                    {
-                      argv: [
-                        "yrd",
-                        "intent",
-                        "submit",
-                        "--component",
-                        intent.authored.component,
-                        "--target",
-                        intent.evaluated.target,
-                        "--issue",
-                        intent.authored.issue.id,
-                      ],
-                      note: "Fix the failing root or component change before resubmitting.",
-                    },
-                  ],
-                },
-              }),
-            ),
-          ],
-        }
-      }
-    }
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
     const revision =
       pr === undefined
@@ -5525,40 +5195,12 @@ function advanceQueue(
   const events: EventDraft[] = []
   if (planned.kind === "merge") {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
-    for (const snapshot of record.prs.filter((member) => member.intent !== undefined)) {
-      const intent = snapshot.intent
-      if (intent === undefined) continue
-      const currentIntent = state.intents?.records[intent.id]
-      if (
-        currentIntent?.status === "integrated" &&
-        currentIntent.integration?.landing.run === record.id &&
-        currentIntent.integration.landing.commit === shape.integration.commit
-      ) {
-        continue
-      }
-      const candidate = state.queues.candidates[record.candidateId]
-      if (candidate === undefined) {
-        throw new Error(`yrd: intent run '${record.id}' names missing Candidate '${record.candidateId}'`)
-      }
-      if (candidate.treeSha === undefined) {
-        throw new Error(`yrd: intent Candidate '${candidate.id}' carries no checked tree identity`)
-      }
-      events.push(
-        event("intent/integrated", {
-          intent: intent.id,
-          authored: intent.authored,
-          evaluated: intent.evaluated,
-          landing: {
-            candidate: candidate.id,
-            run: record.id,
-            baseSha: candidate.baseSha,
-            commit: shape.integration.commit,
-            treeSha: candidate.treeSha,
-            componentPin: intent.evaluated.target,
-          },
-        }),
-      )
-    }
+    // A landed member's `.intent` field, when set, is a historical "carrier-free
+    // pin intent" — a shape the retired intent rail minted and this Run record
+    // stored verbatim. No live code produces one anymore, and the intent rail's
+    // own bookkeeping (`state.intents`) is gone, so there is nothing left to
+    // record it against; the merge lands exactly as it would for any other
+    // member, and only the ordinary PR-landing bookkeeping below applies to it.
     const prSnapshots = record.prs.filter((member) => member.intent === undefined)
     for (const current of samePayloadPRs(state.bays, prSnapshots)) {
       const alreadyLanded = shape.integration.alreadyLanded
@@ -6549,99 +6191,7 @@ function auditQueues(
   findings.push(
     ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
   )
-  // The refusal ledger above covers PRs only. An intent lane can hold the same
-  // shape with none of the same records — the specimens of 2026-08-14 blocked
-  // eight intents for hours and produced `findings: []`.
-  findings.push(...intentLaneAuditFindings(state))
   return { findings }
-}
-
-/**
- * The intent lane's own stall and its aftermath, in one code.
- *
- * TWO shapes, deliberately not two codes. The first is the live block: an open
- * intent at the head of the lane whose attempts already repeat one fingerprint,
- * which is what the specimens looked like for the hours nobody was paged. The
- * second is the parked record itself — because parking CLEARS the first shape
- * within one drain turn, and an audit that only reported the live block would
- * reliably observe nothing at all. A resident draining every 30s and an audit
- * running every few minutes never overlap.
- *
- * The parked shape clears when its (issue, component) key has a later open or
- * successful successor — the owner resubmitted and that replacement may
- * already have integrated — or when the owner withdraws the parked record.
- * Those are the two acts that finish the work, and each is one command printed
- * in the finding's own resolution.
- */
-function intentLaneAuditFindings(state: DeepReadonly<RuntimeState>): QueueAuditFindingEmission[] {
-  const intents = state.intents
-  if (intents === undefined) return []
-  const findings: QueueAuditFindingEmission[] = []
-  const head = queuedIntents(state)[0]
-  if (head !== undefined) {
-    const stalled = deadIntentPark(state, head)
-    if (stalled !== undefined) {
-      findings.push({
-        code: "intent-lane-stalled",
-        message:
-          `intent '${head.id}' submitted by '${head.submitter}' at the head of the intent lane ` +
-          `failed '${stalled.failure.code}' ` +
-          `${stalled.attempts} consecutive times with an identical failure fingerprint for component ` +
-          `'${stalled.failure.component}'; every intent behind it is blocked, including other components'. ` +
-          stalled.remedySummary,
-        resolution: stalled.remedy.map(renderRemedyStep),
-        specimen: `intent:${head.id}:fingerprint:${stalled.fingerprint}`,
-        count: stalled.attempts,
-        since: stalled.since,
-        blockedMs: stalled.blockedMs,
-      })
-    }
-  }
-  for (const id of intents.order) {
-    const record = intents.records[id]
-    if (record?.status !== "parked" || record.parked === undefined) continue
-    if (replacementIntentForKey(intents, record) !== undefined) continue
-    findings.push({
-      code: "intent-lane-stalled",
-      message:
-        `intent '${record.id}' submitted by '${record.submitter}' is parked after ${record.parked.attempts} identical ` +
-        `'${record.parked.failure.code}' failures and nothing has replaced it. ${record.parked.remedySummary}`,
-      resolution: [
-        ...record.parked.remedy.map(renderRemedyStep),
-        `yrd intent withdraw ${record.id} --reason "no longer wanted"`,
-      ],
-      specimen: `intent:${record.id}:parked:${record.parked.fingerprint}`,
-      count: record.parked.attempts,
-      since: record.parked.since,
-      blockedMs: record.parked.blockedMs,
-    })
-  }
-  return findings
-}
-
-/** A later open or successful record holding this record's key, if any. */
-function replacementIntentForKey(
-  intents: DeepReadonly<IntentsState>,
-  record: DeepReadonly<PinIntent>,
-): DeepReadonly<PinIntent> | undefined {
-  const key = intentKey(record.issue as PinIntent["issue"], record.component)
-  let afterRecord = false
-  for (const id of intents.order) {
-    if (id === record.id) {
-      afterRecord = true
-      continue
-    }
-    if (!afterRecord) continue
-    const candidate = intents.records[id]
-    if (
-      candidate === undefined ||
-      (candidate.status !== "open" && candidate.status !== "integrated" && candidate.status !== "noop")
-    ) {
-      continue
-    }
-    if (intentKey(candidate.issue as PinIntent["issue"], candidate.component) === key) return candidate
-  }
-  return undefined
 }
 
 function admissionRefusalAuditFindings(
@@ -6876,33 +6426,8 @@ function prQueuePosition(pr: DeepReadonly<PR>): QueuePosition {
   return { at: submittedAt, identity: `0:pr:${pr.id}` }
 }
 
-function intentQueuePosition(intent: DeepReadonly<PinIntent>): QueuePosition {
-  return { at: intent.submittedAt, identity: `1:intent:${intent.id}` }
-}
-
 function compareQueuePosition(left: QueuePosition, right: QueuePosition): number {
   return left.at.localeCompare(right.at) || compareNatural(left.identity, right.identity)
-}
-
-function queuedIntents(state: DeepReadonly<RuntimeState>): PinIntent[] {
-  const intents = state.intents
-  if (intents === undefined) return []
-  return intents.order.flatMap((id) => {
-    const intent = intents.records[id]
-    return intent?.status === "open" ? [intent as PinIntent] : []
-  })
-}
-
-/**
- * One head per component instead of one head for the whole lane: the first open
- * intent of each component, in lane order. Pure derivation from the same walk —
- * `intents.order` remains the lane's total order, and no reducer consults it, so
- * this changes selection only and never what a replay produces.
- */
-function queuedIntentHeads(intents: readonly PinIntent[]): PinIntent[] {
-  const heads = new Map<string, PinIntent>()
-  for (const intent of intents) if (!heads.has(intent.component)) heads.set(intent.component, intent)
-  return [...heads.values()]
 }
 
 function requestedPRs(
@@ -7060,79 +6585,6 @@ function checkRunStatus(run: Run, selectedCount: number): PREligibility["checks"
 }
 
 const AUTOMATIC_ADMISSION_RETRIES = 1
-const AUTOMATIC_INTENT_CHECK_RETRIES = 1
-
-function intentCheckFailures(state: DeepReadonly<RuntimeState>, intent: string, excluding: RunId): number {
-  return Queues.values(state.queues).filter((record) => {
-    if (record.id === excluding || !record.prs.some((snapshot) => snapshot.intent?.id === intent)) return false
-    const run = materializeRun(record, state.jobs)
-    return (
-      Queues.failed(run) &&
-      run.steps.some((step) => step.kind === "check" && step.job !== undefined && jobFailed(step.job))
-    )
-  }).length
-}
-
-/**
- * Every failed Queue run that carried one intent, oldest first, reduced to the
- * facts a fingerprint is computed from.
- *
- * DERIVED, never journalled separately. The run records already are the durable
- * ledger of what was attempted and how it failed, so a parallel attempt log
- * could only drift from them — and, worse, would start counting at deploy time,
- * blind to the very journals that hold the specimens this exists for. A replay
- * of an existing journal parks a record that was already dead.
- *
- * `intentCheckFailures` above counts a NARROWER thing (check-step failures, for
- * the automatic re-check budget) and is not this. The specimens failed at merge
- * and at candidate composition, which that counter never sees.
- */
-function intentAttemptFailures(state: DeepReadonly<RuntimeState>, intent: string): readonly IntentAttemptFailure[] {
-  const failures: IntentAttemptFailure[] = []
-  for (const record of Queues.values(state.queues).toSorted((left, right) => compareNatural(left.id, right.id))) {
-    const snapshot = record.prs.find((member) => member.intent?.id === intent)?.intent
-    if (snapshot === undefined) continue
-    const run = materializeRun(record, state.jobs)
-    if (!Queues.failed(run)) continue
-    const step = run.steps.find((candidate) => candidate.job !== undefined && jobFailed(candidate.job))
-    // A run can fail before any step owns the failure (composition, lease
-    // loss). That is still an attempt, and its typed code still fingerprints —
-    // dropping it here is how a whole failure family becomes unparkable.
-    const failure = step?.job === undefined ? run.error : jobFailure(step.job)
-    if (failure === undefined) continue
-    failures.push(
-      IntentAttemptFailureSchema.parse({
-        code: failure.code,
-        ...(step === undefined ? {} : { step: step.name }),
-        component: snapshot.authored.component,
-        target: snapshot.evaluated.target,
-        priorPin: snapshot.evaluated.priorPin,
-        reason: failure.message,
-        at: run.finishedAt ?? run.startedAt,
-      }),
-    )
-  }
-  return failures
-}
-
-/**
- * The park verdict for one open intent, or `undefined` while retrying can still
- * change the answer.
- *
- * The predicate is the FINGERPRINT repeating, never a list of codes known to be
- * deterministic. Two specimens one night apart refused with different codes
- * (`carrier-drops-landed`, then a diverged component main); an enumeration
- * would have caught the first, missed the second, and missed the third by
- * construction. Attempts with differing fingerprints keep retrying, which is
- * what makes a genuinely flaky infrastructure failure safe here.
- */
-function deadIntentPark(state: DeepReadonly<RuntimeState>, intent: DeepReadonly<PinIntent>): IntentPark | undefined {
-  return intentParkVerdict(
-    { id: intent.id, issue: intent.issue as PinIntent["issue"] },
-    intentAttemptFailures(state, intent.id),
-  )
-}
-
 function automaticAdmissionAttemptsExhausted(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
@@ -7765,31 +7217,6 @@ function reusablePrefix(
   return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
 }
 
-function reusableIntentPrefix(
-  state: DeepReadonly<RuntimeState>,
-  snapshots: readonly DeepReadonly<PRSnapshot>[],
-  treeSha: string | undefined,
-  selected: readonly RuntimeStep[],
-): Readonly<{ run: RunId; count: number; shape: PRShape }> | undefined {
-  const first = snapshots[0]
-  if (first?.intent === undefined || treeSha === undefined) return undefined
-  const boundary = selected.findIndex((step) => step.kind === "merge")
-  const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
-  if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
-  const record = Queues.values(state.queues).findLast((candidateRun) => {
-    const candidate = state.queues.candidates[candidateRun.candidateId]
-    if (candidate?.treeSha !== treeSha || candidate.queueId !== queueIdentity(first)) return false
-    if (!samePlan(candidateRun.steps.slice(0, prefix.length), prefix)) return false
-    const jobs = queueJobs(candidateRun, state.jobs)
-    return prefix.every((_step, index) => {
-      const job = jobs[index]
-      return job !== undefined && jobSucceeded(job)
-    })
-  })
-  if (record === undefined) return undefined
-  return { run: record.id, count: prefix.length, shape: shapeThrough(record, state.jobs, prefix.length) }
-}
-
 type RunnablePRDecision = Readonly<{ pr: PR; eligibility: PREligibility }>
 
 function runnablePRSelection(
@@ -8255,27 +7682,15 @@ function pinnedPRError(
   for (const snapshot of snapshots) {
     const intent = snapshot.intent
     if (intent !== undefined) {
-      const current = state.intents?.records[intent.id]
-      if (current?.status === "integrated" && current.integration?.landing.run === runId) continue
-      const evaluation = current?.evaluation
-      const ownsKey =
-        current?.status === "open" &&
-        current.intentId === intent.authored.intentId &&
-        current.issue.source === intent.authored.issue.source &&
-        current.issue.id === intent.authored.issue.id &&
-        current.component === intent.authored.component &&
-        current.target === intent.authored.target &&
-        evaluation?.outcome === "advance" &&
-        evaluation.baseSha === snapshot.baseSha &&
-        evaluation.evaluated.priorPin === intent.evaluated.priorPin &&
-        evaluation.evaluated.target === intent.evaluated.target
-      if (!ownsKey) {
-        return {
-          code: current?.status === "superseded" ? "intent-superseded" : "stale-intent",
-          message: `Intent '${intent.id}' changed after queue run pinned ${intent.evaluated.target} (${current?.status ?? "missing"})`,
-        }
+      // The retired intent rail's own bookkeeping (`state.intents`) is gone, so
+      // there is nothing left to verify a historical "carrier-free pin intent"
+      // member against. Fail loud rather than silently trust or silently drop
+      // it: any run still carrying one from before the rail's deletion ends
+      // here, cleanly, instead of hanging or corrupting a landing.
+      return {
+        code: "stale-intent",
+        message: `Intent '${intent.id}' can no longer be verified: the intent rail that tracked it is retired`,
       }
-      continue
     }
     const current = state.bays.prs[snapshot.id]
     if (

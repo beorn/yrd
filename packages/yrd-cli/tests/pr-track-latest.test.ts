@@ -16,7 +16,6 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
-import { withIntents } from "@yrd/intent"
 import type { ProcessRequest } from "@yrd/process"
 import { withIssues } from "@yrd/issue"
 import { createLogger } from "loggily"
@@ -145,7 +144,6 @@ async function createCliApp(behavior: Readonly<{ failingCheck?: boolean }> = {})
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withIntents(),
     withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
   )
   return createYrd(contests(queue(base)), {

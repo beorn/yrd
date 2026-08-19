@@ -65,6 +65,7 @@ import {
   isQueueRunningConflict,
   CANDIDATE_REF_RETENTION_MS,
   candidateRefDenominator,
+  IntentRecordIdSchema,
   MERGE_RECORD_REF,
   mergeJoinedNothing,
   mergeRecordToStatement,
@@ -232,7 +233,6 @@ import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
-import { IntentRecordIdSchema } from "@yrd/intent"
 import {
   addedSubmodulePins,
   authoredSubmodulePinBase,
@@ -7655,7 +7655,6 @@ type IndexRebuildSkip = Readonly<{
   reason:
     | "already-indexed"
     | "intent-carrier"
-    | "intent-unknown"
     | "pr-unknown"
     | "legacy-no-change-id"
     | "revision-superseded"
@@ -7796,11 +7795,12 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   // kind of member landed. Asking the journal for a PR under an intent id can only ever answer
   // "unknown", which is why most of this repository's landings reported a PR gap that was never a
   // PR — 58 of the 115 merged records under the live merge-record ref carry an intent id
-  // (`I102`…`yrdpin#181`), 57 a PR id, none anything else (read 2026-08-14). The intent index is a
-  // different index; whether the journal still holds the intent RECORD is the second, separate
-  // fact, and it decides gap from no-gap.
-  const intentComponents = new Map(app.intents.list().map((intent) => [intent.id, intent.component]))
-
+  // (`I102`…`yrdpin#181`), 57 a PR id, none anything else (read 2026-08-14). The intent RAIL that
+  // once held those records as `app.intents` is retired (2026-08-18) — there is no live lookup
+  // left to name which component a given intent id advanced — but the id SHAPE alone is still
+  // sufficient: any id this schema accepts is a pin-intent landing by construction (the mint that
+  // wrote it never wrote anything else), so it never carries a `pr/integrated` row and is never a
+  // gap.
   const rebuilt: { pr: string; revision: number; run: string; commit: string }[] = []
   const skipped: IndexRebuildSkip[] = []
   for (const [prId, { record, change }] of latest) {
@@ -7812,18 +7812,10 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     // one hides every landing behind it, and the estate it runs on is damaged by definition.
     try {
       if (IntentRecordIdSchema.safeParse(prId).success) {
-        const component = intentComponents.get(prId)
-        if (component !== undefined) {
-          skip(
-            "intent-carrier",
-            `queue member is pin intent '${prId}' for component '${component}'; a pin landing carries no pr/integrated row`,
-          )
-        } else {
-          skip(
-            "intent-unknown",
-            `record carries intent id '${prId}', but the journal holds no intent record for it; repo truth cannot recreate one`,
-          )
-        }
+        skip(
+          "intent-carrier",
+          `queue member is pin intent '${prId}'; a pin landing carries no pr/integrated row`,
+        )
         continue
       }
       const pr = app.bays.pr(prId)
@@ -9765,12 +9757,7 @@ export async function residentRecoverySweep(
  * baseline before composing.
  */
 function preparationBaselineChanged(before: YrdCliState, after: YrdCliState): boolean {
-  if (
-    before.bays !== after.bays ||
-    before.jobs !== after.jobs ||
-    before.contests !== after.contests ||
-    before.intents !== after.intents
-  ) {
+  if (before.bays !== after.bays || before.jobs !== after.jobs || before.contests !== after.contests) {
     return true
   }
   const keys = Object.keys(before.queues) as (keyof YrdCliState["queues"])[]

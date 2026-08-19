@@ -19,7 +19,6 @@ import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
-import { withIntents } from "@yrd/intent"
 import { withIssues } from "@yrd/issue"
 import {
   withContests,
@@ -133,7 +132,6 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withIntents(),
     withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
   )
   return createYrd(contests(queue(base)), {

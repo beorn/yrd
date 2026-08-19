@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { currentPRRev, prBaseSha, prDeliveryState } from "@yrd/bay"
-import { createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
+import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
@@ -1330,6 +1330,205 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(historicalRun === undefined ? undefined : restored.queue.get(historicalRun.id)?.batchSize).toBe(10)
   })
 
+  it("drops the retired intent rail's stale state slice while migrating a retained checkpoint", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string; cursor: number }, []>(
+        "SELECT checkpoint_json, cursor FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    const checkpointValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(checkpoint.checkpoint_json))
+    // A checkpoint written before the intent rail's deletion (2026-08-18) still carries a
+    // populated `intents` slice — the shape a real intents-v1/v2 checkpoint held. Nothing reads
+    // it anymore; the migrate path must drop it rather than let it leak into every future
+    // checkpoint forever.
+    const staleIntents = {
+      records: { "yrdpin#9": { id: "yrdpin#9", status: "open", component: "vendor/yrd" } },
+      order: ["yrdpin#9"],
+      tombstoneRecords: {},
+      tombstoneOrder: [],
+      unreadable: [],
+    }
+    const retainedIdentity = "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3"
+    const retainedCheckpoint = JSON.stringify({
+      ...checkpointValue,
+      value: { ...checkpointValue.value, state: { ...checkpointValue.value.state, intents: staleIntents } },
+      identity: retainedIdentity,
+    })
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+
+    // Boot succeeds past the stale slice, and the surviving state carries no trace of it.
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expect(restored.state()).not.toHaveProperty("intents")
+    await restored.close()
+
+    // The drop is durable: the checkpoint THIS boot writes back to disk does not carry the
+    // stale slice forward either — one migration is the only chance to shed it, since nothing
+    // downstream owns the key anymore to prune it on a later pass.
+    using redatabase = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
+    const rewritten = redatabase
+      .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton = 1")
+      .get()
+    if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
+    const rewrittenValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(rewritten.checkpoint_json))
+    expect(rewrittenValue.value.state).not.toHaveProperty("intents")
+  })
+
+  it("boots past historical pin-intent and tombstone events, quarantining them by name, while the shape their ids mint still parses", async () => {
+    // Positional replay proof (queue-member-id-no-discrimination discipline): raw, positional
+    // frames in the intent rail's OLD shapes, copied verbatim as DATA from the deleted
+    // `@yrd/intent` package's own schemas — never imported, since the package is gone. A real
+    // journal from before 2026-08-18 holds exactly these two event names, and this journal never
+    // ran a single command through the (also gone) `withIntents()` plugin; it is written the way
+    // a five-year-old journal actually is, by direct positional append, not by shape.
+    const { repo } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const journal = testJournal(stateDir)
+
+    const submitCommand = { id: "00000000-0000-7000-8000-0000000f0001", op: "fixture.intent-submitted" }
+    expect(
+      await journal.append(
+        {
+          command: submitCommand,
+          cause: {
+            id: "00000000-0000-7000-8000-0000000f0011",
+            commandId: submitCommand.id,
+            op: submitCommand.op,
+            commandHash: Command.hash(submitCommand),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-8000-0000000f0021",
+              name: "intent/submitted",
+              ts: "2026-08-13T00:00:00.000Z",
+              data: {
+                schema: "yrd.intent.pin-advance.v1",
+                id: "yrdpin#164",
+                intentId: "00000000-0000-7000-8000-0000000f0031",
+                issue: { source: "km", id: "@yrd/core/legacy-fixture" },
+                component: "vendor/yrd",
+                target: "1".repeat(40),
+                preconditions: { targetPublished: true, targetDescendsFromCurrentPin: true },
+                submitter: "operator",
+              },
+            },
+          ],
+        },
+        0,
+      ),
+    ).toMatchObject({ appended: true })
+    const tombstoneCommand = { id: "00000000-0000-7000-8000-0000000f0002", op: "fixture.pin-tombstoned" }
+    expect(
+      await journal.append(
+        {
+          command: tombstoneCommand,
+          cause: {
+            id: "00000000-0000-7000-8000-0000000f0012",
+            commandId: tombstoneCommand.id,
+            op: tombstoneCommand.op,
+            commandHash: Command.hash(tombstoneCommand),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-8000-0000000f0022",
+              name: "intent/pin-tombstoned",
+              ts: "2026-08-13T00:00:01.000Z",
+              data: {
+                schema: "yrd.intent.pin-tombstone.v1",
+                id: "T1",
+                tombstoneId: "00000000-0000-7000-8000-0000000f0032",
+                issue: { source: "km", id: "@yrd/core/legacy-fixture" },
+                component: "vendor/yrd",
+                sha: "2".repeat(40),
+                submitter: "operator",
+                recordedAt: "2026-08-13T00:00:01.000Z",
+              },
+            },
+          ],
+        },
+        1,
+      ),
+    ).toMatchObject({ appended: true })
+
+    // Boot succeeds — this is the PR1128 shape the quarantine exists to prevent: without it,
+    // `canonicalEvent` throws over the very first unregistered name and takes the whole app's
+    // replay down with it, over one stray journal frame nothing has read since 2026-08-13.
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config: {
+        base: "main",
+        batch: 1,
+        steps: ["check", "merge"],
+        requires: [],
+        definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+        contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+      },
+    })
+
+    const unknown = restored.unknownEventNames()
+    expect(unknown.map((entry) => entry.name)).toEqual(["intent/pin-tombstoned", "intent/submitted"])
+    expect(unknown.every((entry) => entry.count === 1)).toBe(true)
+
+    const snapshot = await restored.historySnapshot()
+    expect(snapshot.asOf.cursor).toBeGreaterThanOrEqual(2)
+
+    // Stored member ids from those quarantined records still parse and print — the intent
+    // rail's own kind-discrimination survives, relocated into @yrd/queue, even though the
+    // records themselves are now unreadable.
+    const { IntentRecordIdSchema, queueMemberKind } = await import("@yrd/queue")
+    expect(IntentRecordIdSchema.safeParse("yrdpin#164").success).toBe(true)
+    expect(queueMemberKind("yrdpin#164")).toBe("gitlink")
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
@@ -2330,8 +2529,10 @@ checks: [{check: {run: "true"}}]
     // Every durable production predecessor keeps a declared path to the
     // CURRENT identity — a dropped edge is the queue's R2732
     // checkpoint-migration-path-missing refusal (2026-08-18: the intents-v2
-    // identity change shipped without one).
+    // identity change shipped without one; the intent rail's deletion, same
+    // day, is the second edge this same lock caught).
     expect(attestation.manifest.edges).toEqual([
+      { from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3", to: attestation.manifest.targetIdentity },
       { from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25", to: attestation.manifest.targetIdentity },
       { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: attestation.manifest.targetIdentity },
       { from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8", to: attestation.manifest.targetIdentity },

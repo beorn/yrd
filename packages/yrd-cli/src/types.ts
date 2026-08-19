@@ -11,7 +11,6 @@ import type {
   QueuesState,
   RepositoryMergeRecordSearchResult,
 } from "@yrd/queue"
-import type { HasIntents, IntentCommands, IntentsState } from "@yrd/intent"
 import type { HasIssues } from "@yrd/issue"
 import type {
   JournalVersionBumpResult,
@@ -107,10 +106,9 @@ export type YrdCliState = Readonly<{
   bays: BaysState
   queues: QueuesState
   contests: ContestsState
-  intents: IntentsState
 }>
 
-export type YrdCliCommands = JobCommands & BayCommands & QueueCommands & ContestCommands & IntentCommands
+export type YrdCliCommands = JobCommands & BayCommands & QueueCommands & ContestCommands
 
 export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
   HasJobs &
@@ -119,8 +117,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
   Partial<HasDeployments> &
   HasQueue &
   HasIssues &
-  HasContests &
-  HasIntents
+  HasContests
 
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
