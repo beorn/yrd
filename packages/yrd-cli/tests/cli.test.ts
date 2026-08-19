@@ -7919,6 +7919,27 @@ describe("runYrd", () => {
     }
   })
 
+  it("offers only reversible submission for a stranded draft, never payload destruction", async () => {
+    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
+    try {
+      await app.bays.intake({
+        branch: "issue/stranded-draft",
+        headSha: "3".repeat(40),
+        base: "main",
+        baseSha: BASE_SHA,
+        submitter: "@dev/11",
+      })
+
+      const audit = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
+      expect(await runYrd(app, yrd("queue", "audit"), audit.io), audit.stderr()).toBe(1)
+      expect(audit.stdout()).toContain("resolve: yrd pr submit issue/stranded-draft --issue <ref>")
+      expect(audit.stdout()).not.toContain("withdraw")
+      expect(audit.stdout()).not.toContain("--burn-payload")
+    } finally {
+      await app.close()
+    }
+  })
+
   it("surfaces a resident-observed stale draft as a non-fatal warning in `queue list --check`", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-stale-drafts-"))
     execFileSync("git", ["init", "-q", "-b", "main", repo])
@@ -7940,7 +7961,7 @@ describe("runYrd", () => {
       blockedMs: 16_200_000,
       submitter: "@dev/7",
       reviewCertification: "unreviewed",
-      resolution: ["yrd pr submit issue/stranded --issue <ref>", "or withdraw it: yrd pr withdraw PR1 --burn-payload"],
+      resolution: ["yrd pr submit issue/stranded --issue <ref>"],
     }
     writeFileSync(
       join(stateDir, "status.json"),
@@ -15635,4 +15656,3 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 const SUBMODULE = "components/alpha"
 const CURRENT_PIN = "a".repeat(40)
 const TARGET_SHA = "b".repeat(40)
-
