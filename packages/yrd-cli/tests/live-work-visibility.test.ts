@@ -17,7 +17,7 @@ import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
-import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
+import { runYrd, type YrdCliIO } from "@yrd/cli"
 import { createLogger } from "loggily"
 import { timelineRetainedRows, type QueueTimelineDisplayRow } from "../src/queue-status-view.tsx"
 
@@ -109,16 +109,6 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     ...overrides,
   }
   return { io, stdout: () => stdout, stderr: () => stderr }
-}
-
-const noRequiredChecks: YrdCliServices = {
-  checks: {
-    names: [],
-    install: async () => "/repo/.git/yrd/hooks/pre-submit",
-    run: async () => {
-      throw new Error("no configured required check should run")
-    },
-  },
 }
 
 function yrd(...args: string[]): string[] {
@@ -233,32 +223,44 @@ describe("queue timeline display cap never evicts live rows", () => {
 // 3. Root `yrd submit` — the everyday verb exists at the top level.
 
 describe("root yrd submit", () => {
-  it("submits a branch exactly like pr submit", async () => {
+  /**
+   * The visibility contract that put this verb at the top level SURVIVES:
+   * the draft→ready step must never hide behind `yrd pr submit`. What the
+   * verb DOES changed (@cto 2026-08-19, cliverbs ruling-a) — root `submit` is
+   * now the branch-state verb, approving a branch by pushing
+   * `refs/yrd/submit/<branch>` rather than aliasing the PR path. The two are
+   * the same intent at two phases: the receiver already dual-writes that ref
+   * on carrier push. `yrd pr submit` is untouched and still drives the PR
+   * path, with all of its options.
+   */
+  it("exists at the top level and approves the current branch", async () => {
     const app = await createCliApp()
-    const out = outputIO()
-    expect(
-      await runYrd(
-        app as CliApp,
-        yrd("submit", "topic/root-verb", "--base", "main", "--keep-on-failure"),
-        out.io,
-        noRequiredChecks,
-      ),
-      out.stderr(),
-    ).toBe(0)
-    const pr = app.bays.pr("topic/root-verb")
-    expect(pr).toBeDefined()
-    expect(pr?.state).toBe("open")
-    // Submitted, not a draft: the revision carries a submission clock.
-    expect(pr?.revs.at(-1)?.submittedAt ?? pr?.submittedAt).toBeDefined()
+    const pushes: string[][] = []
+    const out = outputIO({
+      currentBranch: () => "topic/root-verb",
+      changeStateGit: () => ({
+        branches: () => ["main", "topic/root-verb"],
+        remoteRef: () => undefined,
+        push: (args) => {
+          pushes.push([...args])
+          return { ok: true, output: "" }
+        },
+      }),
+    })
+
+    expect(await runYrd(app as CliApp, yrd("submit"), out.io), out.stderr()).toBe(0)
+
+    expect(pushes).toEqual([["push", "--atomic", "origin", "topic/root-verb:refs/yrd/submit/topic/root-verb"]])
   })
 
-  it("root submit help speaks the converged words", async () => {
+  it("root submit help speaks the branch-state words", async () => {
     const app = await createCliApp()
     const out = outputIO()
     await runYrd(app as CliApp, yrd("submit", "--help"), out.io)
     const help = out.stdout() + out.stderr()
-    expect(help.toLowerCase()).toContain("merge request")
-    expect(help).toContain("--keep-on-failure")
-    expect(help.toLowerCase()).not.toContain("submission")
+    expect(help.toLowerCase()).toContain("approve")
+    expect(help).toContain("--dry-run")
+    // The merge-request vocabulary moved with the act, to `yrd pr submit`.
+    expect(help.toLowerCase()).not.toContain("merge request")
   })
 })

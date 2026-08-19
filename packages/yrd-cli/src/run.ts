@@ -11131,29 +11131,6 @@ function buildProgram(
     })
 
   program
-    .command("submit [selector...]")
-    .description("submit a merge request (also called a pull request or PR) into the merge queue")
-    .option("--base <branch>", "base branch for a direct branch submit")
-    .option("--queue <branch>", "alias for --base")
-    .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
-    .option(
-      "--reviewer <reviewer>",
-      "request a review from <reviewer> right after submit (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) =>
-      setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
-    )
-
-  program
     .command("cancel <selector>")
     .description(
       "stop the current attempt for a merge request or run — members re-queue and the merge request stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
@@ -11168,19 +11145,16 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
 
-  // The branch-state verbs. `draft`, `archive` and `ignore` are bare
-  // top-level verbs because those names are free; `submit` is NOT, and
-  // deliberately so — root `yrd submit` is the everyday merge-request verb,
-  // with converged help words a test pins (live-work-visibility.test.ts
-  // "root submit help speaks the converged words"). `change submit` is the
-  // same verb again: `change`/`mr`/`pr` are one noun by operator ruling
-  // (2026-08-18), and that noun is the merge-request RECORD.
+  // The branch-state verbs. `yrd branch <state>` is the complete quartet, and
+  // all four states are bare top-level verbs too.
   //
-  // So the quartet is spelled `yrd branch <state>`, which is what these verbs
-  // actually target — a ref under `refs/heads/`, with no record of any kind.
-  // Whether `branch` and `change` should stay two nouns at all is the open
-  // product question the branch-is-change model exists to answer; until it is
-  // answered, giving `submit` a second meaning is not a wiring decision.
+  // Root `yrd submit` IS this verb (@cto 2026-08-19, cliverbs ruling-a): it
+  // used to be an alias for `yrd pr submit`, which stays untouched as the PR
+  // path. The two are the same user intent at two phases — the receiver
+  // already dual-writes `refs/yrd/submit/<branch>` on carrier push
+  // (`writeSubmitRefForCarrier`, commented "phase 2 re-points readers at this
+  // ref alone") — so the everyday spelling now names the phase-2 act directly.
+  // `change`/`mr`/`pr` remain one noun for the merge-request RECORD.
   const CHANGE_STATE_HELP = {
     draft: "move branches into draft — the default state, and how a submitted branch is unsubmitted",
     submit: "approve branches to land, naming each branch's current tip as the approved commit",
@@ -11216,7 +11190,7 @@ function buildProgram(
   branch.helpCommand(false)
   for (const state of ["draft", "submit", "archive", "ignore"] as const) {
     registerChangeStateVerb(branch, state)
-    if (state !== "submit") registerChangeStateVerb(program, state)
+    registerChangeStateVerb(program, state)
   }
 
   const deployment = program.command("deployment").description("manage immutable runtime deployments")
