@@ -1,6 +1,13 @@
 import { execFileSync } from "node:child_process"
 import { createElement } from "react"
-import { currentChangeRev, isLivePR, changeDeliveryState, changeNeedsAuthor, changeNotFoundMessage, type PR } from "@yrd/bay"
+import {
+  currentChangeRev,
+  isLivePR,
+  changeDeliveryState,
+  changeNeedsAuthor,
+  changeNotFoundMessage,
+  type PR,
+} from "@yrd/bay"
 import { raiseFailure, requireLinearRootTip } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -18,10 +25,7 @@ const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
 /** Commits per `rev-list` invocation, so a listing with thousands of candidate
  * heads cannot overflow the argument vector. */
 const REV_LIST_BATCH = 400
-const CONSUMED_QUEUE_AUTHORITY_RESULTS = new Set([
-  "queue-submit-authority-consumed",
-  "queue-checks-authority-consumed",
-])
+const CONSUMED_QUEUE_AUTHORITY_RESULTS = new Set(["queue-submit-authority-consumed", "queue-checks-authority-consumed"])
 
 function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
@@ -77,7 +81,7 @@ function spendLine(spend: PayloadSpend): string {
   return `${spend.pr} r${spend.revision} head ${spend.headSha} on '${spend.branch}'`
 }
 
-/** Closing an unlanded merge request is not housekeeping: it spends the
+/** Closing an unlanded change is not housekeeping: it spends the
  * payload identity, and every other branch is barred from that commit
  * afterwards. The verb reads reversible, so the spend is stated and
  * acknowledged BEFORE the first event — never a silent success. The

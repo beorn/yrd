@@ -348,7 +348,7 @@ existing PR branch. Resolution has three product nouns:
 | ------------------ | ------------------------------------------------------------------- |
 | **Issue**          | Unit of intent from km, GitHub, another tracker, or a direct caller |
 | **Workspace**      | Named isolated Git worktree for one implementation attempt          |
-| **PR**             | Local pull request containing one immutable submitted revision      |
+| **Change**         | One immutable submitted revision; `mr`/`pr` are taught aliases      |
 | **Queue**          | Ordered integration process attached to a base branch               |
 | **Step**           | Typed queue transition such as check, review, merge, or deploy      |
 | **Job**            | Durable executable work; retries are attempts on the same Job       |

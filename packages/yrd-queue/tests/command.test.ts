@@ -653,7 +653,9 @@ function remergeProposedCodeCarrier(
 ) {
   // The production input has not grown this P1a seam yet. Keep the RED at
   // runtime so the failure proves replay rather than stopping at transpilation.
-  return remerger.recut({ ...input, proposedHeadSha } as Parameters<ReturnType<typeof createGitChangeRemerger>["recut"]>[0])
+  return remerger.recut({ ...input, proposedHeadSha } as Parameters<
+    ReturnType<typeof createGitChangeRemerger>["recut"]
+  >[0])
 }
 
 function observeGitMutations(process: Pick<Process, "run">): {
@@ -850,11 +852,7 @@ async function checkedQueue(
       : {}),
     recordMerge: gitMergeRecorder({ inject: { process }, repo }),
   })
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ jobs: bayJobs }),
-  )
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), log: options.log ?? createLogger("test", [{ level: "silent" }]) },
   })
@@ -1581,7 +1579,10 @@ describe("Queue command adapters", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message: expect.stringMatching(
-            new RegExp(`${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary merge request`, "su"),
+            new RegExp(
+              `${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary change`,
+              "su",
+            ),
           ),
         },
         mutations: [],
@@ -1847,7 +1848,9 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "authored-gitlink",
-        message: expect.stringMatching(new RegExp(`'dep' expected '${fixture.floorPin}', actual '${fixture.initialSha}'`)),
+        message: expect.stringMatching(
+          new RegExp(`'dep' expected '${fixture.floorPin}', actual '${fixture.initialSha}'`),
+        ),
       },
     })
   })
@@ -1943,9 +1946,7 @@ describe("Queue command adapters", () => {
       ffSha,
     )
 
-    expect(await git(fixture.repo, ["ls-tree", "--format=%(objectname)", ffSha, "--", "dep"])).toBe(
-      fixture.advancedPin,
-    )
+    expect(await git(fixture.repo, ["ls-tree", "--format=%(objectname)", ffSha, "--", "dep"])).toBe(fixture.advancedPin)
     expect(ffResult.patchId).toBe(verbatimResult.patchId)
     // Cross-checked independently: the exclusion pathspec this certificate
     // uses (see excludingGitlinks in command.ts) applied directly.
@@ -2793,7 +2794,7 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "merge-tip-carrier",
-        message: expect.stringContaining("submit each component advance as its own ordinary merge request"),
+        message: expect.stringContaining("submit each component advance as its own ordinary change"),
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
@@ -3560,7 +3561,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "authored-gitlink",
-        message: expect.stringMatching(/'dep''s own main, then submit an ordinary merge request/u),
+        message: expect.stringMatching(/'dep''s own main, then submit an ordinary change/u),
       },
     })
     expect(run.error?.message).not.toContain("yrd pr recut")
@@ -3826,7 +3827,7 @@ describe("Queue command adapters", () => {
         failure: {
           kind: "refusal",
           code: "authored-gitlink",
-          message: expect.stringMatching(/dep''s own main, then submit an ordinary merge request/iu),
+          message: expect.stringMatching(/dep''s own main, then submit an ordinary change/iu),
         },
       },
     })
@@ -4046,8 +4047,6 @@ describe("Queue command adapters", () => {
     expect(
       await git(repo, ["diff", "--no-renames", "--diff-filter=D", "--name-only", authoredBase, carrierHead, "--"]),
     ).toBe("")
-
-
 
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({

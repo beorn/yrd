@@ -279,7 +279,9 @@ const ChangeEditArgsSchema = z
   )
 export type ChangeEditArgs = z.infer<typeof ChangeEditArgsSchema>
 
-const ChangeReadyArgsSchema = z.object({ pr: TextSchema, expectedCurrent: ChangeExpectedCurrentSchema.optional() }).strict()
+const ChangeReadyArgsSchema = z
+  .object({ pr: TextSchema, expectedCurrent: ChangeExpectedCurrentSchema.optional() })
+  .strict()
 export type ChangeReadyArgs = z.infer<typeof ChangeReadyArgsSchema>
 const ChangeRemergeExpectedCurrentSchema = z
   .object({
@@ -451,7 +453,10 @@ const ChangeRemergeReplaySchema = z
     transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-const ChangeRemergeFactSchema = ChangeRemergeReplaySchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict()
+const ChangeRemergeFactSchema = ChangeRemergeReplaySchema.extend({
+  changeId: ChangeIdSchema,
+  submitter: TextSchema,
+}).strict()
 const ChangePushedV1Schema = z.preprocess(
   normalizeV2Submitter,
   LegacyChangePushedSchema.extend({ submitter: TextSchema }).strict(),
@@ -461,8 +466,12 @@ const ChangePushedSchema = z.preprocess(
   LegacyChangePushedSchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict(),
 )
 const ChangePushedReplaySchema = z.union([ChangePushedV1Schema, LegacyChangePushedSchema])
-const ChangeRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const LegacyChangeRevisionSchema = ChangeRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
+const ChangeRevisionIdentitySchema = z
+  .object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema })
+  .strict()
+const LegacyChangeRevisionSchema = ChangeRevisionIdentitySchema.extend({
+  correlation: CorrelationSchema.optional(),
+}).strict()
 const ChangeRevisionSchema = z.preprocess(
   normalizeV2Submitter,
   LegacyChangeRevisionSchema.extend({ submitter: TextSchema, flow: FlowPinSchema.optional() }).strict(),
@@ -501,7 +510,11 @@ const LegacyChangeRejectedSchema = z
 const TransitionalChangeRejectedSchema = ChangeQueueTerminalIdentitySchema.extend({
   detail: z.string().optional(),
 }).strict()
-const ChangeReplayRejectedSchema = z.union([ChangeRejectedFactSchema, TransitionalChangeRejectedSchema, LegacyChangeRejectedSchema])
+const ChangeReplayRejectedSchema = z.union([
+  ChangeRejectedFactSchema,
+  TransitionalChangeRejectedSchema,
+  LegacyChangeRejectedSchema,
+])
 const ChangeIntegratedV1Schema = z.preprocess(
   normalizeV2Submitter,
   ChangeQueueTerminalIdentitySchema.extend({
@@ -1046,7 +1059,7 @@ export function createBays(
     if (trackChanged && !trackable) {
       const warning =
         `PR '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
-        "Tracking governs future rebuilds, and this merge request has none."
+        "Tracking governs future rebuilds, and this change has none."
       metadata.warnings?.push(warning)
       log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
     }
@@ -1101,7 +1114,10 @@ export function createBays(
     //    delivery PR (revision 1) via the direct-branch path below, so no
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
     //  - addressed by its id, it stays idempotent.
-    if (pr !== undefined && (changeDeliveryState(pr) === "integrated" || changeDeliveryState(pr) === "already-landed")) {
+    if (
+      pr !== undefined &&
+      (changeDeliveryState(pr) === "integrated" || changeDeliveryState(pr) === "already-landed")
+    ) {
       // Addressed by its canonical id, an integrated PR is frozen evidence:
       // idempotent. Addressed by a moving alias (its branch), a new head mints a
       // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
@@ -1228,7 +1244,9 @@ export function createBays(
     if (pr !== undefined && isLivePR(pr)) pr = await bindIssue(pr, options.issue)
     if (
       pr !== undefined &&
-      (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready" || changeDeliveryState(pr) === "needs-author")
+      (changeDeliveryState(pr) === "submitted" ||
+        changeDeliveryState(pr) === "ready" ||
+        changeDeliveryState(pr) === "needs-author")
     ) {
       return bindCorrelation(pr, options.correlation)
     }
@@ -1590,7 +1608,8 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
       publish: command({
         title: "Request immutable PR publication",
         params: ChangePublicationInputSchema,
-        apply: (state: BayState, args: ChangePublicationInput) => requestChangePublication(state, args, jobs["pr.publish"]),
+        apply: (state: BayState, args: ChangePublicationInput) =>
+          requestChangePublication(state, args, jobs["pr.publish"]),
       }),
     },
   }
@@ -1827,7 +1846,9 @@ function intakePR(
   const branch = args.branch ?? bay?.branch
   if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
   const expected =
-    args.expectedCurrent === undefined ? undefined : requireExpectedChangeCurrent(current, args.expectedCurrent, "intake")
+    args.expectedCurrent === undefined
+      ? undefined
+      : requireExpectedChangeCurrent(current, args.expectedCurrent, "intake")
   if (expected !== undefined && expected.branch !== branch) {
     raiseFailure(
       "refusal",
@@ -1867,7 +1888,8 @@ function intakePR(
   const replayComposition = args.composition ?? (existing === undefined ? undefined : changeComposition(existing))
   refuseDuplicatePayload(current, args.headSha, base, replayComposition, existing?.id)
   const resumesSubmission =
-    existing !== undefined && (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
+    existing !== undefined &&
+    (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
   const submitsRevision = args.submit === true || resumesSubmission
   if (
     existing !== undefined &&
@@ -1953,7 +1975,8 @@ function submitWork(
 
   const existing = resolvePR(current, args.branch)
   const resumesSubmission =
-    existing !== undefined && (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
+    existing !== undefined &&
+    (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
   const base = baseIdentity(args.base ?? (resumesSubmission ? existing.base : defaultBase))
   if (
     existing !== undefined &&
@@ -2242,7 +2265,7 @@ function remergePr(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defau
     raiseFailure(
       "refusal",
       "terminal-target",
-      `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; a finished merge request cannot be rebuilt`,
+      `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; a finished change cannot be rebuilt`,
     )
   }
   const predecessor = pr.revs.find((revision) => revision.n === args.fromRevision)
@@ -2855,7 +2878,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/pushed": {
       const parsed = ChangePushedSchema.safeParse(data)
       const previous = ChangePushedV1Schema.safeParse(data)
-      const pushed = parsed.success ? parsed.data : previous.success ? previous.data : LegacyChangePushedSchema.parse(data)
+      const pushed = parsed.success
+        ? parsed.data
+        : previous.success
+          ? previous.data
+          : LegacyChangePushedSchema.parse(data)
       const base = baseIdentity(pushed.base)
       const existing = current.prs[pushed.pr]
       const record: ChangeRev = {
@@ -2938,7 +2965,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const parsed = ChangeRemergeFactSchema.safeParse(data)
       const remerge = parsed.success ? parsed.data : ChangeRemergeReplaySchema.parse(data)
       const pr = current.prs[remerge.pr]
-      if (pr === undefined) throw new Error(`yrd: no merge request '${remerge.pr}' to rebuild`)
+      if (pr === undefined) throw new Error(`yrd: no change '${remerge.pr}' to rebuild`)
       const predecessor = pr.revs.find(
         (revision) => revision.n === remerge.predecessor.revision && revision.head === remerge.predecessor.headSha,
       )
@@ -2948,7 +2975,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         predecessor.baseSha !== remerge.predecessor.baseSha ||
         remerge.successor.revision !== changeRevisionNumber(pr) + 1
       ) {
-        throw new Error(`yrd: rebuild history does not match merge request '${pr.id}'`)
+        throw new Error(`yrd: rebuild history does not match change '${pr.id}'`)
       }
       const proof: ChangeRemergeProof = {
         fromRevision: remerge.fromRevision,
@@ -3283,7 +3310,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         changed.issue !== undefined &&
         pr !== undefined &&
         pr.issue === undefined &&
-        (changeDeliveryState(pr) === "pushed" || changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready")
+        (changeDeliveryState(pr) === "pushed" ||
+          changeDeliveryState(pr) === "submitted" ||
+          changeDeliveryState(pr) === "ready")
       return pr === undefined
         ? state
         : patchPR(pr, {

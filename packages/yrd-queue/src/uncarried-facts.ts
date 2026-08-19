@@ -22,7 +22,7 @@ export type GatherOptions = Readonly<{
   base: string
   /** Ref-local observation/update clock selected once by the enumerator. */
   observedAtMs: number
-  /** Refs already carried by a merge request, so the sweep can skip them. */
+  /** Refs already carried by a change, so the sweep can skip them. */
   carriedBranches: ReadonlySet<string>
   /** Gitlink paths standing on the base, discovered from tree mode 160000 —
    * never guessed from a path shape. */

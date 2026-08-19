@@ -510,7 +510,7 @@ describe("pr withdraw", () => {
     expect(await runYrd(app, yrd("pr", "withdraw", "nope"), unknown.io)).toBe(1)
     // Two PRs exist here, so `searched 2` proves the index was populated and
     // still did not match — the discrimination an empty answer cannot make.
-    expect(unknown.stderr()).toBe("error: no PR 'nope' — searched 2 pull request(s)\n")
+    expect(unknown.stderr()).toBe("error: no PR 'nope' — searched 2 change(s)\n")
 
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
     const terminal = outputIO()
@@ -574,7 +574,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 
-  it("root cancel stops the attempt and leaves the merge request open", async () => {
+  it("root cancel stops the attempt and leaves the change open", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
@@ -585,7 +585,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
       output.stderr(),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "queue.cancel" })
-    // Attempt-scoped: the run is canceled, the merge request is NOT withdrawn.
+    // Attempt-scoped: the run is canceled, the change is NOT withdrawn.
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
   })
@@ -602,7 +602,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 })
 
 /**
- * Closing an unlanded merge request spends its payload identity: the commit can
+ * Closing an unlanded change spends its payload identity: the commit can
  * never be offered again on another branch. The verb reads like housekeeping,
  * so the spend is disclosed and acknowledged BEFORE any event is emitted.
  */

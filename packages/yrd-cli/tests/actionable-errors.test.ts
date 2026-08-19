@@ -125,7 +125,7 @@ describe("actionable failure projection", () => {
     const failure = actionableFailure({
       code: "merge-tip-carrier",
       message:
-        "yrd: merge request 'PR42' root branch tip 'deadbeef' is a merge commit with 2 parents; " +
+        "yrd: change 'PR42' root branch tip 'deadbeef' is a merge commit with 2 parents; " +
         "merge inside the affected component repository, fast-forward that component's main, rebuild the root " +
         "carrier as one linear pin-bump commit, then run 'yrd pr submit <branch>' and " +
         "'yrd pr recut PR42 --preflight --queue --apply'",

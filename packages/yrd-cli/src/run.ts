@@ -1192,7 +1192,7 @@ export function staleDraftWarnings(findings: readonly QueueAuditFinding[]): stri
  * `admission-refusal-needs-person` findings, projected from the canonical
  * audit exactly like {@link staleDraftFindings} — never re-derived from
  * refusal state directly, so the queue-list/watch/health surfaces and
- * `queue audit` can never disagree about which merge requests are parked
+ * `queue audit` can never disagree about which changes are parked
  * waiting on a human (@i/10-merge-queue/22918-needs-person-unowned: settling
  * a refusal `needs-person` used to stop the REPORT along with the retry, and
  * the settlement vanished from every surface).
@@ -1206,7 +1206,7 @@ export function needsPersonFindings(app: Pick<YrdCliApp, "queue">, now: string):
   return app.queue.audit({ now }).findings.filter((finding) => finding.code === "admission-refusal-needs-person")
 }
 
-/** One scannable warning line per needs-person merge request, in the same
+/** One scannable warning line per needs-person change, in the same
  * `[code] message` shape {@link staleDraftWarnings} already established — the
  * finding's own `message` already names the refusal, its reason and its owner
  * (@yrd/queue `auditQueues`), so this never re-derives that text. */
@@ -1582,7 +1582,7 @@ async function checkQueueRunner(
     ...gitLines,
   ].join("\n")
   // Non-fatal by construction: a stale draft (or an unrouted needs-person
-  // merge request) never flips `state`/`exitCode` — draft WIP is first-class
+  // change) never flips `state`/`exitCode` — draft WIP is first-class
   // (operator ruling) and a parked PR does not mean the queue itself is
   // stalled (@i/10-merge-queue/22918-needs-person-unowned) — but it must
   // still reach whoever reads this command, JSON or human, which
@@ -3991,11 +3991,7 @@ function shellQuote(value: string): string {
  * that machinery is update-only — as does a DELETED, off-main, or unpublished one.
  * See tests/authored-gitlink-admission.test.ts and @i/10-merge-queue/shaset-model.
  */
-export async function requireQueueableSubmodulePins(
-  pr: PR,
-  services: YrdCliServices,
-  io: YrdCliIO,
-): Promise<void> {
+export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
   if (services.process === undefined) return
   const repo = io.cwd ?? process.cwd()
   const headSha = changeHead(pr)
@@ -4043,7 +4039,7 @@ export async function requireQueueableSubmodulePins(
           ({ path, pin, repository }) =>
             `submodule '${path}' pin '${pin}' is on zero refs fetched from origin; whoever holds this commit in ` +
             `'${repository}' must publish it through that component's own git workflow, then get it onto that ` +
-            `submodule's main and submit an ordinary merge request whose diff is the gitlink bump`,
+            `submodule's main and submit an ordinary change whose diff is the gitlink bump`,
         )
         .join("\n")
       raiseFailure(
@@ -4091,7 +4087,7 @@ export async function requireQueueableSubmodulePins(
         ({ pin: { path, pin, repository }, mainSha }) =>
           `submodule '${path}' pin '${pin}' is not on that component's main ('${mainSha}'); whoever holds this ` +
           `commit in '${repository}' must publish it through that component's own git workflow, then get it ` +
-          "onto that submodule's main and submit an ordinary merge request whose diff is the gitlink bump",
+          "onto that submodule's main and submit an ordinary change whose diff is the gitlink bump",
       )
       .join("\n")
     raiseFailure(
@@ -4134,7 +4130,9 @@ type PublicationProjection = Readonly<{
 
 function publicationJob(app: YrdCliApp, pr: PR): Job | undefined {
   const revision = currentChangeRev(pr)
-  const current = app.jobs.getByKey(changePublicationJobKey({ pr: pr.id, revision: revision.n, headSha: revision.head }))
+  const current = app.jobs.getByKey(
+    changePublicationJobKey({ pr: pr.id, revision: revision.n, headSha: revision.head }),
+  )
   if (current !== undefined) return current
   return Object.values(stateOf(app).jobs.byId)
     .filter((job) => job.definition === "pr.publish" && ChangePublicationInputSchema.parse(job.input).pr === pr.id)
@@ -4466,11 +4464,7 @@ async function executeRemergePr(
     delivery === "withdrawn" ||
     delivery === "canceled"
   ) {
-    raiseFailure(
-      "refusal",
-      "terminal-target",
-      `yrd: PR '${pr.id}' is ${delivery}; a finished merge request cannot be recut`,
-    )
+    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; a finished change cannot be recut`)
   }
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
@@ -5112,7 +5106,7 @@ async function refuseSubmitWithoutMergeAuthority(
   // cannot help.
   const message =
     `'${repo}' declares no landing authority (selected config 'landing: none'), so its queue has no runner and ` +
-    "nothing will ever drain this merge request; merge the work through whatever authority that repository does " +
+    "nothing will ever drain this change; merge the work through whatever authority that repository does " +
     "have, or set 'landing: expected' once a runner exists"
   if (jsonEnabled(options)) {
     io.stderr(
@@ -6115,7 +6109,7 @@ async function preparePublicationQueueCycle(
 
 /** Root `yrd cancel <selector>` — stop the CURRENT ATTEMPT (chief ruling,
  * I23): resolve a merge-request selector to its running or waiting run and
- * cancel that run; members re-queue and the merge request stays open. Cancel
+ * cancel that run; members re-queue and the change stays open. Cancel
  * never withdraws — "stop delivering this" is `mr close --reason`; run both
  * for both effects. A run selector passes through unchanged. */
 async function cancelAttempt(
@@ -6132,7 +6126,7 @@ async function cancelAttempt(
       raiseFailure(
         "refusal",
         "no-active-attempt",
-        `yrd: merge request '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, use 'yrd mr close --reason <text> --burn-payload'`,
+        `yrd: change '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, use 'yrd mr close --reason <text> --burn-payload'`,
       )
     }
     return cancelQueueRun(app, active.id, options, io)
@@ -6547,7 +6541,12 @@ export function queueChangeDiff(cwd: string, pr: PR, revision = changeRevisionNu
   return queueChangeDiffResult(pr, revision, numstat, patch)
 }
 
-async function queueChangeDiffAsync(cwd: string, pr: PR, revision: number, runGit: QueueGitRunner): Promise<QueueChangeDiff> {
+async function queueChangeDiffAsync(
+  cwd: string,
+  pr: PR,
+  revision: number,
+  runGit: QueueGitRunner,
+): Promise<QueueChangeDiff> {
   const source = queueChangeDiffSource(pr, revision)
   if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
   await runGit(cwd, ["rev-parse", "--git-dir"])
@@ -7791,7 +7790,7 @@ async function queueUncarried(
 ): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? globalThis.process.cwd()
   const base = options.base ?? "main"
-  // A branch is carried if any merge request names it — including terminal
+  // A branch is carried if any change names it — including terminal
   // ones. A ref whose PR was withdrawn is not stranded work waiting to be
   // found; it is work someone already decided about.
   const carriedBranches = new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch))
@@ -7999,7 +7998,11 @@ function mergeRepair(record: MergeRecordBody, pr: JournalPR): MergeRepair {
       detail: `merge-record '${record.merge.id}' reports a merged result with no merged commit`,
     }
   }
-  if (changeDeliveryState(pr) === "integrated" && pr.terminalRun === record.merge.id && pr.integration?.commit === commit) {
+  if (
+    changeDeliveryState(pr) === "integrated" &&
+    pr.terminalRun === record.merge.id &&
+    pr.integration?.commit === commit
+  ) {
     return { status: "already-indexed", detail: `pr/integrated already records ${record.merge.id} at ${commit}` }
   }
   return {
@@ -8073,10 +8076,7 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     // one hides every landing behind it, and the estate it runs on is damaged by definition.
     try {
       if (IntentRecordIdSchema.safeParse(prId).success) {
-        skip(
-          "intent-carrier",
-          `queue member is pin intent '${prId}'; a pin landing carries no pr/integrated row`,
-        )
+        skip("intent-carrier", `queue member is pin intent '${prId}'; a pin landing carries no pr/integrated row`)
         continue
       }
       const pr = app.bays.pr(prId)
@@ -10855,7 +10855,7 @@ function addExamples(program: CliCommand, name: string): void {
   ]
   examples.push(
     [`$ ${name} pr list`, "inspect active PRs"],
-    [`$ ${name} submit`, "submit the current branch as a merge request"],
+    [`$ ${name} submit`, "submit the current branch as a change"],
     [`$ ${name} pr create topic/fix`, "create a draft before you submit"],
     [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
     [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
@@ -10882,7 +10882,7 @@ function addAuthoredCarrierWorkflow<
   ArgumentRecord extends Record<string, unknown>,
 >(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
   command.addHelpSection("Authored root branch:", [
-    [`$ ${name} pr create <branch>`, "record the authored root branch as a draft merge request"],
+    [`$ ${name} pr create <branch>`, "record the authored root branch as a draft change"],
     [
       `$ ${name} pr recut <PR> --preflight --queue --apply`,
       "classify from pinned evidence and execute its queue-safe verdict; no composition manifest or manual triage",
@@ -10994,14 +10994,14 @@ function buildProgram(
   program.version(YRD_VERSION, "-V, --version")
   program.addHelpSection(
     "Model:",
-    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nmerge requests queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed result.",
+    "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nchanges queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed result.",
   )
   program.addHelpSection("Objects:", [
     ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
     ["bay", "isolated Git workspace managed through the yrd bay subtree"],
-    ["pr", "merge request, also called a pull request; draft until submitted; the queue's unit"],
-    ["contest", "competing implementations; winner promotes to a PR"],
-    ["queue", "the merge queue: one per base; verifies and merges merge requests serially"],
+    ["change", "the queue's unit; draft until submitted; mr and pr are taught aliases"],
+    ["contest", "competing implementations; winner promotes to a change"],
+    ["queue", "the merge queue: one per base; verifies and merges changes serially"],
   ])
   program.addHelpSection(
     "Boundaries:",
@@ -11184,7 +11184,7 @@ function buildProgram(
   program
     .command("cancel <selector>")
     .description(
-      "stop the current attempt for a merge request or run — members re-queue and the merge request stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
+      "stop the current attempt for a change or run — members re-queue and the change stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
     )
     .option("--reason <text>", "human-readable cancellation reason")
     .option("--json", "emit stable JSON")
@@ -11337,7 +11337,7 @@ function buildProgram(
     .action(async (options) => setExit(await queueCandidateRefs(installed(), options, io)))
   queue
     .command("uncarried")
-    .description("find refs pushed to the remote that no merge request carries")
+    .description("find refs pushed to the remote that no change carries")
     .option("--base <branch>", "base branch the refs are judged against")
     .option("--namespace <ref>", "ref namespace to sweep")
     .option("--json", "emit stable JSON")
@@ -11457,7 +11457,7 @@ function buildProgram(
     .alias("mr")
     .alias("pr")
     .description(
-      "manage changes, also called merge requests or pull requests (a branch selector targets the live delivery; address a terminal change by its id, printed as PRnnn; mr/pr accepted)",
+      "manage changes (a branch selector targets the live delivery; address a terminal change by its id, printed as PRnnn; mr/pr accepted)",
     )
   pr.helpCommand(false)
   const list = pr

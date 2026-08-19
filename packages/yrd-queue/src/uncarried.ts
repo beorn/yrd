@@ -4,8 +4,8 @@
  *
  * The name is deliberate, and not the one the bead uses. "Unsubmitted" is
  * already taken on the status view, where it means a REGISTERED PR sitting at
- * bay status `pushed` — a merge request that exists and has not been submitted.
- * This module's population is the opposite end: a ref with NO merge request at
+ * bay status `pushed` — a change that exists and has not been submitted.
+ * This module's population is the opposite end: a ref with NO change at
  * all, which by construction has no candidate and so cannot be found by looking
  * at candidates. Two populations under one word would have put two disagreeing
  * counts on one dashboard, both correct.
@@ -214,7 +214,7 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
     equivalentCommits: fact.equivalentCommits,
     pinDirection: fact.pinDirection,
     absorbedRevisions: fact.absorbedRevisions,
-    message: `ref '${fact.ref}' was observed locally ${formatAge(ageMs)} ago and no merge request carries it; ${detail}${absorbed}`,
+    message: `ref '${fact.ref}' was observed locally ${formatAge(ageMs)} ago and no change carries it; ${detail}${absorbed}`,
   })
 
   // DIVERGED outranks every commit count. Each side holds something the other
