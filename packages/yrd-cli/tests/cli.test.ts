@@ -15178,7 +15178,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       },
       changes: [{ pr: member, revision: 1, submittedHead: HEAD_SHA }],
       evidence: { jobs: [] },
-      pins: [{ path: COMPONENT, before: CURRENT_PIN, after: TARGET_SHA }],
+      pins: [{ path: SUBMODULE, before: CURRENT_PIN, after: TARGET_SHA }],
     })
 
     it("buckets a landed intent carrier as a healthy skip, never a PR gap", async () => {
@@ -15333,7 +15333,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
  * @level    l2 (buildProgram over an injected app; git is a stubbed process)
  * @consumer @yrd/core/21679-integration-model-v2/22668-admit-intents
  */
-const COMPONENT = "components/alpha"
+const SUBMODULE = "components/alpha"
 const CURRENT_PIN = "a".repeat(40)
 const TARGET_SHA = "b".repeat(40)
 

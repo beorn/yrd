@@ -6,7 +6,7 @@
 import { expect, it } from "vitest"
 import type { JobResult } from "@yrd/job"
 import type { IntegrationProof } from "../src/model.ts"
-import { componentMainScratchCleanupFailure } from "../src/component-main-outcome.ts"
+import { submoduleMainScratchCleanupFailure } from "../src/component-main-outcome.ts"
 
 const sha = (digit: string): string => digit.repeat(40)
 
@@ -30,7 +30,7 @@ it("preserves successful per-pin results when scratch cleanup fails", () => {
     },
   }
 
-  expect(componentMainScratchCleanupFailure(outcome, "cleanup denied")).toMatchObject({
+  expect(submoduleMainScratchCleanupFailure(outcome, "cleanup denied")).toMatchObject({
     status: "completed",
     conclusion: "failure",
     error: {

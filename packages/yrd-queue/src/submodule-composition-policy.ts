@@ -23,7 +23,7 @@ import type { GitSuperResult } from "git-super/result"
  * only failed later. Naming it once is the seam that lets admission ask the merge path's
  * question instead of a weaker one of its own.
  */
-export const COMPONENT_MAIN_REF = "refs/heads/main"
+export const SUBMODULE_MAIN_REF = "refs/heads/main"
 
 /**
  * The private ref a component's main is fetched into before anything asks it a question.
@@ -31,15 +31,15 @@ export const COMPONENT_MAIN_REF = "refs/heads/main"
  * Never a caller-supplied name: the whole point is that both stages probe the same place,
  * and a ref the caller chooses is a ref two callers can choose differently.
  */
-export const COMPONENT_MAIN_PROBE_REF = "refs/yrd/component-main"
+export const SUBMODULE_MAIN_PROBE_REF = "refs/yrd/component-main"
 
 /** The one git call shape this probe needs, so both stages can supply their own runner. */
-export type ComponentMainGit = (
+export type SubmoduleMainGit = (
   repository: string,
   args: readonly string[],
 ) => Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
 
-export type ComponentMainResolution =
+export type SubmoduleMainResolution =
   | Readonly<{ status: "resolved"; sha: string }>
   | Readonly<{ status: "unavailable"; message: string }>
 
@@ -58,18 +58,18 @@ export type ComponentMainResolution =
  * Returns a RESULT rather than throwing: both callers are probes that must classify a
  * missing origin loudly, and neither can afford a throw from inside a gate.
  */
-export async function resolveComponentMain(
-  run: ComponentMainGit,
+export async function resolveSubmoduleMain(
+  run: SubmoduleMainGit,
   repository: string,
   origin: string,
-): Promise<ComponentMainResolution> {
+): Promise<SubmoduleMainResolution> {
   const fetched = await run(repository, [
     "fetch",
     "--quiet",
     "--no-tags",
     "--no-recurse-submodules",
     origin,
-    `+${COMPONENT_MAIN_REF}:${COMPONENT_MAIN_PROBE_REF}`,
+    `+${SUBMODULE_MAIN_REF}:${SUBMODULE_MAIN_PROBE_REF}`,
   ])
   if (fetched.code !== 0) {
     return {
@@ -83,14 +83,14 @@ export async function resolveComponentMain(
     "rev-parse",
     "--verify",
     "--end-of-options",
-    `${COMPONENT_MAIN_PROBE_REF}^{commit}`,
+    `${SUBMODULE_MAIN_PROBE_REF}^{commit}`,
   ])
   const sha = resolved.stdout.trim()
   if (resolved.code !== 0 || sha === "") {
     return {
       status: "unavailable",
       message:
-        `fetched '${COMPONENT_MAIN_REF}' from '${origin}' but could not resolve it: ` +
+        `fetched '${SUBMODULE_MAIN_REF}' from '${origin}' but could not resolve it: ` +
         `${resolved.stderr.trim() || resolved.stdout.trim() || "git rev-parse failed"}`,
     }
   }

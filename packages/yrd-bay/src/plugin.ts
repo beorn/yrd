@@ -322,7 +322,7 @@ const ChangeRequestReviewArgsSchema = z
   .strict()
 export type ChangeRequestReviewArgs = z.infer<typeof ChangeRequestReviewArgsSchema>
 
-const ChangePublicationComponentSchema = z.object({ path: TextSchema, pin: GitShaSchema }).strict()
+const ChangePublicationSubmoduleSchema = z.object({ path: TextSchema, pin: GitShaSchema }).strict()
 export const ChangePublicationInputSchema = z
   .object({
     pr: PRIdSchema,
@@ -331,7 +331,7 @@ export const ChangePublicationInputSchema = z
     baseSha: GitShaSchema,
     branch: GitRefSchema,
     sourceRoot: TextSchema,
-    components: z.array(ChangePublicationComponentSchema).readonly(),
+    components: z.array(ChangePublicationSubmoduleSchema).readonly(),
     continuation: z.enum(["none", "queue"]),
   })
   .strict()

@@ -42,13 +42,13 @@ export type GatherOptions = Readonly<{
  */
 async function pinDirection(
   git: RefGit,
-  componentRepo: string,
+  submoduleRepo: string,
   basePin: string,
   branchPin: string,
 ): Promise<PinDirection> {
   if (basePin === branchPin) return "aligned"
   const contains = async (ancestor: string, descendant: string): Promise<boolean | undefined> => {
-    const out = await git.optional(componentRepo, ["merge-base", "--is-ancestor", ancestor, descendant])
+    const out = await git.optional(submoduleRepo, ["merge-base", "--is-ancestor", ancestor, descendant])
     return out === undefined ? undefined : true
   }
   // A missing object is NOT a direction. If either side is unreadable here the

@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
 import { adaptProcessGit, type Process, type ProcessResult } from "@yrd/process"
-import { resolveComponentMain, type ComponentMainGit } from "@yrd/queue"
+import { resolveSubmoduleMain, type SubmoduleMainGit } from "@yrd/queue"
 import { changedCommitGitlinks, readCommitGitlinks } from "git-super/commit-graph"
 import { remoteContainsCommit } from "git-super/push"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -14,7 +14,7 @@ export type UnpublishedSubmodulePin = Readonly<{
   repository: string
 }>
 
-function componentRepository(repo: string, path: string): string {
+function submoduleRepository(repo: string, path: string): string {
   const repository = resolve(repo, path)
   const fromRoot = relative(repo, repository)
   if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
@@ -82,7 +82,7 @@ export async function submodulePinPublications(options: {
   process: Pick<Process, "run">
   pins: readonly UnpublishedSubmodulePin[]
 }): Promise<readonly SubmodulePinPublication[]> {
-  const run: ComponentMainGit = async (repository, args) => {
+  const run: SubmoduleMainGit = async (repository, args) => {
     const result: ProcessResult = await options.process.run({
       argv: ["git", "-C", repository, ...args],
       cwd: repository,
@@ -95,7 +95,7 @@ export async function submodulePinPublications(options: {
 
   const publications: SubmodulePinPublication[] = []
   for (const pin of options.pins) {
-    const main = await resolveComponentMain(run, pin.repository, "origin")
+    const main = await resolveSubmoduleMain(run, pin.repository, "origin")
     if (main.status === "unavailable") {
       publications.push({ state: "undetermined", pin, reason: main.message })
       continue
@@ -181,7 +181,7 @@ export async function changedSubmodulePins(options: {
   return Object.freeze(
     changed
       .map((entry) =>
-        Object.freeze({ path: entry.path, pin: entry.target, repository: componentRepository(repo, entry.path) }),
+        Object.freeze({ path: entry.path, pin: entry.target, repository: submoduleRepository(repo, entry.path) }),
       )
       .sort((left, right) => left.path.localeCompare(right.path)),
   )

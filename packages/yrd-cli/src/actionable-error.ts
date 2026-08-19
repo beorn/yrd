@@ -130,7 +130,7 @@ function redeliverySteps(pr: string, delivery: ChangeDeliveryState | undefined):
   return [recordCommand(delivery), ...remergeSteps(pr, delivery)]
 }
 
-function authoredGitlinkComponents(message: string): readonly string[] {
+function authoredGitlinkSubmodules(message: string): readonly string[] {
   const raw = /generated-only gitlinks \[([^\]]*)\]/iu.exec(message)?.[1]
   return raw === undefined
     ? []
@@ -142,15 +142,15 @@ function authoredGitlinkComponents(message: string): readonly string[] {
 
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
   const embedded = embeddedYrdCommands(failure.message).filter((command) => command.startsWith("yrd intent submit "))
-  const generated = authoredGitlinkComponents(failure.message).map(
-    (component) => `yrd intent submit --component ${component} --issue <issue-ref>`,
+  const generated = authoredGitlinkSubmodules(failure.message).map(
+    (submodule) => `yrd intent submit --component ${submodule} --issue <issue-ref>`,
   )
-  const componentModelChange = failure.message.includes("pin intents advance existing components only")
+  const submoduleModelChange = failure.message.includes("pin intents advance existing components only")
   return Object.freeze({
     code: failure.code,
     cause,
     resolution: Object.freeze(
-      componentModelChange
+      submoduleModelChange
         ? ["Escalate the component-model addition or deletion; yrd intent submit only advances an existing gitlink."]
         : embedded.length > 0
           ? embedded

@@ -3429,7 +3429,7 @@ checks: [{check: {run: "true"}}]
 
   it("refuses a docs submission before queuing its incidental changed submodule pin", async () => {
     const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
-    const component = await realpath(join(repo, "dep"))
+    const submodule = await realpath(join(repo, "dep"))
     await writeFile(join(repo, "README.md"), "root documentation\n")
     await git(repo, "add", "README.md")
     await git(repo, "commit", "-qm", "document the root project")
@@ -3459,7 +3459,7 @@ checks: [{check: {run: "true"}}]
     expect(stderr).toContain(pin)
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
-    expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
+    expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
     expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
 
     let listed = ""
@@ -3626,7 +3626,7 @@ checks: [{check: {run: "true"}}]
 
   it("keeps a draft pushed when pr ready refuses an unpublished changed submodule pin", async () => {
     const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
-    const component = await realpath(join(repo, "dep"))
+    const submodule = await realpath(join(repo, "dep"))
     let stdout = ""
     let stderr = ""
 
@@ -3671,7 +3671,7 @@ checks: [{check: {run: "true"}}]
     })
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
-    expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
+    expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
     expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
 
     let listed = ""
@@ -3696,7 +3696,7 @@ checks: [{check: {run: "true"}}]
 
   it("refuses pr recut --queue when the recut revision retains an unpublished changed submodule pin", async () => {
     const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
-    const component = await realpath(join(repo, "dep"))
+    const submodule = await realpath(join(repo, "dep"))
     let stdout = ""
     let stderr = ""
 
@@ -3752,7 +3752,7 @@ checks: [{check: {run: "true"}}]
     })
     // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
-    expect(stderr).toContain(`whoever holds this commit in '${component}' must publish it`)
+    expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
     expect(stderr).toContain("ordinary merge request whose diff is the gitlink bump")
 
     let listed = ""
@@ -3919,10 +3919,10 @@ checks: [{check: {run: "true"}}]
     const { repo, rootRemote, moduleRemote, branch, pin } = await unpublishedSubmodulePinRepository()
     const head = await git(repo, "rev-parse", branch)
     const rootHookMarker = join(repo, "root-pre-push-hook-ran")
-    const componentHookMarker = join(repo, "component-pre-push-hook-ran")
+    const submoduleHookMarker = join(repo, "component-pre-push-hook-ran")
     for (const [repository, marker] of [
       [repo, rootHookMarker],
-      [join(repo, "dep"), componentHookMarker],
+      [join(repo, "dep"), submoduleHookMarker],
     ] as const) {
       const gitDir = await git(repository, "rev-parse", "--absolute-git-dir")
       await writeFile(join(gitDir, "hooks", "pre-push"), `#!/bin/sh\nprintf ran > '${marker}'\nexit 99\n`, {
@@ -3953,7 +3953,7 @@ checks: [{check: {run: "true"}}]
     expect(await git(moduleRemote, "rev-parse", `refs/heads/${branch}`)).toBe(pin)
     expect(await git(rootRemote, "rev-parse", `refs/heads/${branch}`)).toBe(head)
     expect(existsSync(rootHookMarker)).toBe(false)
-    expect(existsSync(componentHookMarker)).toBe(false)
+    expect(existsSync(submoduleHookMarker)).toBe(false)
   })
 
   it("keeps a failed publication visible on the PR after queue run --once exits red", async () => {

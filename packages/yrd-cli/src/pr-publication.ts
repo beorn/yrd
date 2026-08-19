@@ -26,7 +26,7 @@ async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly
   return result.stdout.trim()
 }
 
-function componentRepository(root: string, path: string): string {
+function submoduleRepository(root: string, path: string): string {
   const repository = resolve(root, path)
   const fromRoot = relative(root, repository)
   if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
@@ -102,15 +102,15 @@ export function createChangePublicationService(options: {
         }
 
         const refs: Array<{ path: string; sha: string; ref: string }> = []
-        for (const component of input.components) {
+        for (const submodule of input.components) {
           await publishRef(
             options.process,
-            componentRepository(sourceRoot, component.path),
-            componentRepository(repo, component.path),
-            component.pin,
+            submoduleRepository(sourceRoot, submodule.path),
+            submoduleRepository(repo, submodule.path),
+            submodule.pin,
             input.branch,
           )
-          refs.push({ path: component.path, sha: component.pin, ref: `refs/heads/${input.branch}` })
+          refs.push({ path: submodule.path, sha: submodule.pin, ref: `refs/heads/${input.branch}` })
         }
         await publishRef(options.process, sourceRoot, repo, input.headSha, input.branch)
         refs.push({ path: ".", sha: input.headSha, ref: `refs/heads/${input.branch}` })

@@ -60,29 +60,29 @@ async function superprojectWithHandBumpedPin(): Promise<{
 }> {
   const fixture = await mkdtemp(join(tmpdir(), "yrd-authored-gitlink-"))
   roots.push(fixture)
-  const component = join(fixture, "component")
-  const componentRemote = join(fixture, "component.git")
+  const submodule = join(fixture, "component")
+  const submoduleRemote = join(fixture, "component.git")
   const root = join(fixture, "root")
 
-  await repository(component)
-  await writeFile(join(component, "component.txt"), "one\n")
-  await git(component, ["add", "component.txt"])
-  await git(component, ["commit", "-qm", "component one"])
-  await git(fixture, ["init", "-q", "--bare", "-b", "main", componentRemote])
-  await git(component, ["remote", "add", "origin", componentRemote])
-  await git(component, ["push", "-q", "-u", "origin", "main"])
+  await repository(submodule)
+  await writeFile(join(submodule, "component.txt"), "one\n")
+  await git(submodule, ["add", "component.txt"])
+  await git(submodule, ["commit", "-qm", "component one"])
+  await git(fixture, ["init", "-q", "--bare", "-b", "main", submoduleRemote])
+  await git(submodule, ["remote", "add", "origin", submoduleRemote])
+  await git(submodule, ["push", "-q", "-u", "origin", "main"])
 
   await repository(root)
-  await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep"])
+  await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
   await git(root, ["commit", "-qam", "record component one"])
-  await git(join(root, "dep"), ["remote", "set-url", "origin", componentRemote])
+  await git(join(root, "dep"), ["remote", "set-url", "origin", submoduleRemote])
 
-  await writeFile(join(component, "component.txt"), "two\n")
-  await git(component, ["commit", "-qam", "component two"])
-  const pin = await git(component, ["rev-parse", "HEAD"])
+  await writeFile(join(submodule, "component.txt"), "two\n")
+  await git(submodule, ["commit", "-qam", "component two"])
+  const pin = await git(submodule, ["rev-parse", "HEAD"])
 
   await git(root, ["checkout", "-q", "-b", "task/hand-bump"])
-  await git(join(root, "dep"), ["fetch", "-q", component, pin])
+  await git(join(root, "dep"), ["fetch", "-q", submodule, pin])
   await git(join(root, "dep"), ["checkout", "-q", pin])
   await git(root, ["add", "dep"])
   await git(root, ["commit", "-qm", "bump dep by hand"])
@@ -93,10 +93,10 @@ async function superprojectWithHandBumpedPin(): Promise<{
     headSha,
     pin,
     publish: async () => {
-      await git(component, ["push", "-q", "origin", "main"])
+      await git(submodule, ["push", "-q", "origin", "main"])
     },
     publishToSideBranchOnly: async () => {
-      await git(component, ["push", "-q", "origin", `${pin}:refs/heads/someones-wip`])
+      await git(submodule, ["push", "-q", "origin", `${pin}:refs/heads/someones-wip`])
     },
   }
 }
@@ -110,17 +110,17 @@ async function superprojectWithHandBumpedPin(): Promise<{
 async function superprojectWithHandAddedPin(): Promise<{ root: string; headSha: string }> {
   const fixture = await mkdtemp(join(tmpdir(), "yrd-authored-gitlink-added-"))
   roots.push(fixture)
-  const component = join(fixture, "component")
-  const componentRemote = join(fixture, "component.git")
+  const submodule = join(fixture, "component")
+  const submoduleRemote = join(fixture, "component.git")
   const root = join(fixture, "root")
 
-  await repository(component)
-  await writeFile(join(component, "component.txt"), "one\n")
-  await git(component, ["add", "component.txt"])
-  await git(component, ["commit", "-qm", "component one"])
-  await git(fixture, ["init", "-q", "--bare", "-b", "main", componentRemote])
-  await git(component, ["remote", "add", "origin", componentRemote])
-  await git(component, ["push", "-q", "-u", "origin", "main"])
+  await repository(submodule)
+  await writeFile(join(submodule, "component.txt"), "one\n")
+  await git(submodule, ["add", "component.txt"])
+  await git(submodule, ["commit", "-qm", "component one"])
+  await git(fixture, ["init", "-q", "--bare", "-b", "main", submoduleRemote])
+  await git(submodule, ["remote", "add", "origin", submoduleRemote])
+  await git(submodule, ["push", "-q", "-u", "origin", "main"])
 
   await repository(root)
   await writeFile(join(root, "root.txt"), "root\n")
@@ -128,7 +128,7 @@ async function superprojectWithHandAddedPin(): Promise<{ root: string; headSha: 
   await git(root, ["commit", "-qm", "root, no component yet"])
 
   await git(root, ["checkout", "-q", "-b", "task/hand-add"])
-  await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", component, "dep"])
+  await git(root, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "dep"])
   await git(root, ["commit", "-qm", "add dep by hand"])
   const headSha = await git(root, ["rev-parse", "HEAD"])
   return { root, headSha }

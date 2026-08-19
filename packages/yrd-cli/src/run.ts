@@ -4052,7 +4052,7 @@ async function publishPr(
   const baseSha = changeBaseSha(pr)
   if (baseSha === undefined) raiseFailure("refusal", "pr-base-missing", `yrd: PR '${pr.id}' has no immutable base SHA`)
   const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
-  const components = await changedSubmodulePins({
+  const submodules = await changedSubmodulePins({
     process,
     repo: sourceRoot,
     baseSha,
@@ -4065,7 +4065,7 @@ async function publishPr(
     baseSha,
     branch: pr.branch,
     sourceRoot,
-    components: components.map(({ path, pin }) => ({ path, pin })),
+    components: submodules.map(({ path, pin }) => ({ path, pin })),
     continuation: options.queue === true ? "queue" : "none",
   }
   const key = changePublicationJobKey(input)

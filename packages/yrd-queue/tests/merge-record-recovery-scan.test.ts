@@ -43,7 +43,7 @@ async function git(repo: string, args: readonly string[], stdin?: string): Promi
  * real repository truth while `<repo>/dep` does not exist — the same shape a `--no-checkout` clone,
  * a partially materialized habitat, or a working tree older than the commit that introduced the
  * component presents to the scan. */
-async function unmaterializedComponentRepository(): Promise<
+async function unmaterializedSubmoduleRepository(): Promise<
   Readonly<{ repo: string; baseSha: string; moduleA: string; moduleB: string }>
 > {
   const root = await mkdtemp(join(tmpdir(), "yrd-recovery-scan-"))
@@ -112,7 +112,7 @@ async function publishPoisoned(repo: string, id: string): Promise<void> {
 
 describe("bulk merge-record scan over a damaged estate", () => {
   it("reports a component checkout it cannot inspect instead of crashing on spawn", async () => {
-    const { repo, baseSha, moduleA } = await unmaterializedComponentRepository()
+    const { repo, baseSha, moduleA } = await unmaterializedSubmoduleRepository()
     // The pin the record authored differs from the one the base carries, so the scan must ask the
     // component for ancestry — and `<repo>/dep` does not exist.
     await publish(
@@ -142,7 +142,7 @@ describe("bulk merge-record scan over a damaged estate", () => {
   })
 
   it("reports one unverifiable record and finishes the scan over the rest", async () => {
-    const { repo, baseSha } = await unmaterializedComponentRepository()
+    const { repo, baseSha } = await unmaterializedSubmoduleRepository()
     await publish(repo, mergedRecord("R-good", "PR1", baseSha))
     await publishPoisoned(repo, "R-poisoned")
     await using process = createProcess()
@@ -164,7 +164,7 @@ describe("bulk merge-record scan over a damaged estate", () => {
   })
 
   it("keeps the all-or-nothing verdict for the single-selector read", async () => {
-    const { repo, baseSha } = await unmaterializedComponentRepository()
+    const { repo, baseSha } = await unmaterializedSubmoduleRepository()
     await publish(repo, mergedRecord("R-good", "PR1", baseSha))
     await publishPoisoned(repo, "R-poisoned")
     await using process = createProcess()
@@ -198,7 +198,7 @@ async function publishWithUnknownField(repo: string, record: MergeRecordBody): P
 
 describe("the bulk scan tolerates a record from a newer writer instead of misreading it as corrupt", () => {
   it("verifies a checksum-authentic record even though it carries an unrecognized field", async () => {
-    const { repo, baseSha } = await unmaterializedComponentRepository()
+    const { repo, baseSha } = await unmaterializedSubmoduleRepository()
     await publishWithUnknownField(repo, mergedRecord("R-newer", "PR1", baseSha))
     await using process = createProcess()
 
@@ -209,7 +209,7 @@ describe("the bulk scan tolerates a record from a newer writer instead of misrea
   })
 
   it("surfaces the unknown field on the record instead of dropping it silently", async () => {
-    const { repo, baseSha } = await unmaterializedComponentRepository()
+    const { repo, baseSha } = await unmaterializedSubmoduleRepository()
     await publishWithUnknownField(repo, mergedRecord("R-newer", "PR1", baseSha))
     await using process = createProcess()
 

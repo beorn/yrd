@@ -358,7 +358,7 @@ export const AlreadyMergedEvidenceSchema = z
     path: ["candidateTreeSha"],
   }) as z.ZodType<AlreadyMergedEvidence>
 
-export type ComponentMainResult = Readonly<{
+export type SubmoduleMainResult = Readonly<{
   path: string
   origin: string
   pinSha: string
@@ -367,7 +367,7 @@ export type ComponentMainResult = Readonly<{
   action: "verified" | "fast-forwarded"
 }>
 
-export const ComponentMainResultSchema = z
+export const SubmoduleMainResultSchema = z
   .object({
     path: z.string().min(1),
     origin: z.string().min(1),
@@ -376,9 +376,9 @@ export const ComponentMainResultSchema = z
     mainAfterSha: GitShaSchema,
     action: z.enum(["verified", "fast-forwarded"]),
   })
-  .strict() as z.ZodType<ComponentMainResult>
+  .strict() as z.ZodType<SubmoduleMainResult>
 
-export type ComponentMainRefusal = Readonly<{
+export type SubmoduleMainRefusal = Readonly<{
   path: string
   origin: string
   pinSha: string
@@ -387,7 +387,7 @@ export type ComponentMainRefusal = Readonly<{
   message: string
 }>
 
-export const ComponentMainRefusalSchema = z
+export const SubmoduleMainRefusalSchema = z
   .object({
     path: z.string().min(1),
     origin: z.string().min(1),
@@ -396,21 +396,21 @@ export const ComponentMainRefusalSchema = z
     code: z.string().min(1),
     message: z.string().min(1),
   })
-  .strict() as z.ZodType<ComponentMainRefusal>
+  .strict() as z.ZodType<SubmoduleMainRefusal>
 
-export type ComponentMainOutcomes = Readonly<{
+export type SubmoduleMainOutcomes = Readonly<{
   kind: "component-main-outcomes"
-  results: readonly ComponentMainResult[]
-  refusals: readonly ComponentMainRefusal[]
+  results: readonly SubmoduleMainResult[]
+  refusals: readonly SubmoduleMainRefusal[]
 }>
 
-export const ComponentMainOutcomesSchema = z
+export const SubmoduleMainOutcomesSchema = z
   .object({
     kind: z.literal("component-main-outcomes"),
-    results: z.array(ComponentMainResultSchema),
-    refusals: z.array(ComponentMainRefusalSchema),
+    results: z.array(SubmoduleMainResultSchema),
+    refusals: z.array(SubmoduleMainRefusalSchema),
   })
-  .strict() as z.ZodType<ComponentMainOutcomes>
+  .strict() as z.ZodType<SubmoduleMainOutcomes>
 
 export type IntegrationProof = Readonly<{
   commit: string
@@ -418,7 +418,7 @@ export type IntegrationProof = Readonly<{
   alreadyMerged?: AlreadyMergedEvidence
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
-  componentMains?: readonly ComponentMainResult[]
+  componentMains?: readonly SubmoduleMainResult[]
 }>
 
 export const IntegrationProofSchema = z
@@ -429,7 +429,7 @@ export const IntegrationProofSchema = z
     alreadyMerged: AlreadyMergedEvidenceSchema.optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
-    componentMains: z.array(ComponentMainResultSchema).min(1).optional(),
+    componentMains: z.array(SubmoduleMainResultSchema).min(1).optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 

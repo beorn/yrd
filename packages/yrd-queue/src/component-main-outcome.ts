@@ -1,6 +1,6 @@
 import type { JobResult } from "@yrd/job"
 import type { IntegrationProof } from "./model.ts"
-import { ComponentMainOutcomesSchema } from "./model.ts"
+import { SubmoduleMainOutcomesSchema } from "./model.ts"
 
 /**
  * A cleanup failure changes the terminal verdict, but it must not erase the
@@ -8,7 +8,7 @@ import { ComponentMainOutcomesSchema } from "./model.ts"
  * on the failure so retries and operators can distinguish settled pins from
  * work that still needs an actuator.
  */
-export function componentMainScratchCleanupFailure(
+export function submoduleMainScratchCleanupFailure(
   outcome: JobResult<IntegrationProof>,
   message: string,
 ): JobResult<IntegrationProof> {
@@ -23,7 +23,7 @@ export function componentMainScratchCleanupFailure(
       ...(results.length === 0
         ? {}
         : {
-            evidence: ComponentMainOutcomesSchema.parse({
+            evidence: SubmoduleMainOutcomesSchema.parse({
               kind: "component-main-outcomes",
               results,
               refusals: [],

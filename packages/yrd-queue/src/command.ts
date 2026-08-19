@@ -20,9 +20,9 @@ import * as z from "zod"
 import type {
   AlreadyMergedEvidence,
   Candidate,
-  ComponentMainOutcomes,
-  ComponentMainResult,
-  ComponentMainRefusal,
+  SubmoduleMainOutcomes,
+  SubmoduleMainResult,
+  SubmoduleMainRefusal,
   CandidateChange,
   IntegratedShape,
   IntegrationProof,
@@ -33,14 +33,14 @@ import type {
   SourceRewrite,
 } from "./model.ts"
 import {
-  ComponentMainOutcomesSchema,
+  SubmoduleMainOutcomesSchema,
   CandidateChangeSchema,
   IntegrationProofSchema,
   QueueSubmoduleResolutionEvidenceSchema,
   SourceRewriteSchema,
 } from "./model.ts"
 import { candidateRefFor, sourceCandidateRefFor } from "./candidate-refs.ts"
-import { componentMainScratchCleanupFailure } from "./component-main-outcome.ts"
+import { submoduleMainScratchCleanupFailure } from "./component-main-outcome.ts"
 import {
   describeScratchReap,
   isStorageExhaustion,
@@ -59,10 +59,10 @@ import type {
   StepRunner,
 } from "./queue.ts"
 import {
-  COMPONENT_MAIN_REF,
+  SUBMODULE_MAIN_REF,
   executeQueueSubmoduleComposition,
   planQueueSubmoduleComposition,
-  resolveComponentMain,
+  resolveSubmoduleMain,
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition-policy.ts"
@@ -1794,8 +1794,8 @@ export async function findRepositoryMergeRecords(
           })
         }
         if (current === pin.after) continue
-        const component = await componentCheckout(git, options.repo, pin.path)
-        if (component === undefined) {
+        const submodule = await submoduleCheckout(git, options.repo, pin.path)
+        if (submodule === undefined) {
           return {
             outcome: "unverifiable",
             note,
@@ -1806,7 +1806,7 @@ export async function findRepositoryMergeRecords(
             checksum: parsed.checksum,
           }
         }
-        if (!(await isAncestor(git, component, pin.after, current))) {
+        if (!(await isAncestor(git, submodule, pin.after, current))) {
           return corrupt(`merge-record '${note}' pin '${pin.after}' is not contained by '${pin.path}' at '${current}'`, {
             merge: parsed.record.merge.id,
             checksum: parsed.checksum,
@@ -4163,23 +4163,23 @@ async function intentSubmissionWorkflow(
   issue = "<issue-ref>",
 ): Promise<string> {
   const steps = await Promise.all(
-    paths.map(async (component) => {
-      const previous = await readGitlink(git, repo, baseSha, component)
-      const target = await readGitlink(git, repo, headSha, component)
+    paths.map(async (submodule) => {
+      const previous = await readGitlink(git, repo, baseSha, submodule)
+      const target = await readGitlink(git, repo, headSha, submodule)
       if (previous === undefined) {
         return (
-          `component '${component}' is a new component; a merge request's gitlink diff can only bump an ` +
+          `component '${submodule}' is a new component; a merge request's gitlink diff can only bump an ` +
           "existing component, never add one; authorize the component-model addition as an ordinary code change"
         )
       }
       if (target === undefined) {
         return (
-          `component '${component}' is deleted; a merge request's gitlink diff can only bump an existing ` +
+          `component '${submodule}' is deleted; a merge request's gitlink diff can only bump an existing ` +
           "component, never remove one; restore it, or authorize the component-model deletion as an ordinary code change"
         )
       }
       return (
-        `get commit '${target}' onto '${component}''s own main, then submit an ordinary merge request whose ` +
+        `get commit '${target}' onto '${submodule}''s own main, then submit an ordinary merge request whose ` +
         `diff is the gitlink bump (issue ${issue})`
       )
     }),
@@ -4187,7 +4187,7 @@ async function intentSubmissionWorkflow(
   return steps.join("; ")
 }
 
-function componentIntentWorkflow(): string {
+function submoduleIntentWorkflow(): string {
   return "submit each component advance as its own ordinary merge request whose diff is only the gitlink bump; Queue owns the root carrier"
 }
 
@@ -4251,12 +4251,12 @@ function linearRebuildRemedy(scope: string, base: string): string {
  * knows none of the component's shas. It reports "not an ancestor" for a pin
  * that plainly is one. The toplevel comparison is what makes the wrong repo
  * loud instead of merely wrong. */
-async function componentCheckout(git: Git, root: string, path: string): Promise<string | undefined> {
-  const component = join(root, path)
-  const toplevel = await git.run(component, ["rev-parse", "--show-toplevel"], true)
+async function submoduleCheckout(git: Git, root: string, path: string): Promise<string | undefined> {
+  const submodule = join(root, path)
+  const toplevel = await git.run(submodule, ["rev-parse", "--show-toplevel"], true)
   if (toplevel.code !== 0 || toplevel.stdout === "") return undefined
   try {
-    return (await realpath(toplevel.stdout)) === (await realpath(component)) ? component : undefined
+    return (await realpath(toplevel.stdout)) === (await realpath(submodule)) ? submodule : undefined
   } catch {
     // silent-fallback-allow: the declared contract is `string | undefined`, and
     // undefined means "this path is not its own component checkout". The line
@@ -4313,9 +4313,9 @@ async function spentGitlinkCarrier(
     // upgrading the verdict: an unprovable claim of spentness is not a reason to
     // tell an author their work landed. Only the component can answer ancestry
     // between two component shas.
-    const component = await componentCheckout(git, repo, path)
-    if (component === undefined) return undefined
-    if (!(await isAncestor(git, component, carrierPin, basePin))) return undefined
+    const submodule = await submoduleCheckout(git, repo, path)
+    if (submodule === undefined) return undefined
+    if (!(await isAncestor(git, submodule, carrierPin, basePin))) return undefined
     merges.push(`pin '${carrierPin}' for '${path}' is already contained in the base's pin '${basePin}'`)
   }
   return { merges }
@@ -4622,7 +4622,7 @@ async function mergeTipCarrierFailure(
   return parents.length > 1
     ? candidateFailure(
         "merge-tip-carrier",
-        `merge request '${pr}' root branch tip '${headSha}' is a merge commit with ${parents.length} parents; ${componentIntentWorkflow()}`,
+        `merge request '${pr}' root branch tip '${headSha}' is a merge commit with ${parents.length} parents; ${submoduleIntentWorkflow()}`,
       )
     : undefined
 }
@@ -4751,9 +4751,9 @@ export async function synthesizeGitlinkWrapper(
   return { status: "passed", output: { commit, treeSha, generatedPaths: provisionedPaths } }
 }
 
-function pinIntentCommitMessage(component: string, target: string, issue: string): string {
+function pinIntentCommitMessage(submodule: string, target: string, issue: string): string {
   return (
-    `chore(${component.split("/").at(-1) ?? component}): advance pin to ${target.slice(0, 12)} [${issue}]\n\n` +
+    `chore(${submodule.split("/").at(-1) ?? submodule}): advance pin to ${target.slice(0, 12)} [${issue}]\n\n` +
     `Substrate-Pair: [[${issue}]]`
   )
 }
@@ -4829,7 +4829,7 @@ async function fillAuthoredGitlinksFromMain(
       continue
     }
     const submoduleRepo = join(repo, gitlink)
-    const main = await resolveComponentMain(
+    const main = await resolveSubmoduleMain(
       (repository, args) => git.run(repository, args, true),
       submoduleRepo,
       "origin",
@@ -5890,31 +5890,31 @@ async function refusedPayloadPaths(
 }
 
 type CandidateSubmodulePin = Readonly<{ path: string; sha: string; origin: string }>
-type ComponentMainPromotion = Readonly<{
+type SubmoduleMainPromotion = Readonly<{
   origin: string
   repository: string
   mainSha: string
   targetSha: string
   pins: readonly CandidateSubmodulePin[]
 }>
-type ComponentMainPromotionFailure = Readonly<{
+type SubmoduleMainPromotionFailure = Readonly<{
   code: string
   message: string
-  results: readonly ComponentMainResult[]
-  refusals: readonly ComponentMainRefusal[]
+  results: readonly SubmoduleMainResult[]
+  refusals: readonly SubmoduleMainRefusal[]
 }>
-type ComponentMainPromotionPlan =
+type SubmoduleMainPromotionPlan =
   | Readonly<{
       status: "passed"
-      promotions: readonly ComponentMainPromotion[]
-      results: readonly ComponentMainResult[]
+      promotions: readonly SubmoduleMainPromotion[]
+      results: readonly SubmoduleMainResult[]
     }>
   | Readonly<{
       status: "failed"
-      error: ComponentMainPromotionFailure
+      error: SubmoduleMainPromotionFailure
       /** Independent origins that remain safe to fast-forward despite the refusal. */
-      promotions: readonly ComponentMainPromotion[]
-      results: readonly ComponentMainResult[]
+      promotions: readonly SubmoduleMainPromotion[]
+      results: readonly SubmoduleMainResult[]
     }>
 
 const FILTER_UNSUPPORTED =
@@ -5998,12 +5998,12 @@ async function candidateSubmodulePins(
   })
 }
 
-function componentMainRefusals(
+function submoduleMainRefusals(
   pins: readonly CandidateSubmodulePin[],
   code: string,
   message: string,
   mainSha?: string,
-): readonly ComponentMainRefusal[] {
+): readonly SubmoduleMainRefusal[] {
   const rendered = message.startsWith("yrd: ") ? message : `yrd: ${message}`
   return pins.map((pin) => ({
     path: pin.path,
@@ -6015,12 +6015,12 @@ function componentMainRefusals(
   }))
 }
 
-function componentMainFailure(
+function submoduleMainFailure(
   code: string,
   message: string,
-  results: readonly ComponentMainResult[] = [],
-  refusals: readonly ComponentMainRefusal[] = [],
-): ComponentMainPromotionFailure {
+  results: readonly SubmoduleMainResult[] = [],
+  refusals: readonly SubmoduleMainRefusal[] = [],
+): SubmoduleMainPromotionFailure {
   return {
     code,
     message: message.startsWith("yrd: ") ? message : `yrd: ${message}`,
@@ -6029,43 +6029,43 @@ function componentMainFailure(
   }
 }
 
-function componentMainOutcomes(
-  results: readonly ComponentMainResult[],
-  refusals: readonly ComponentMainRefusal[],
-): ComponentMainOutcomes {
-  return ComponentMainOutcomesSchema.parse({
+function submoduleMainOutcomes(
+  results: readonly SubmoduleMainResult[],
+  refusals: readonly SubmoduleMainRefusal[],
+): SubmoduleMainOutcomes {
+  return SubmoduleMainOutcomesSchema.parse({
     kind: "component-main-outcomes",
     results,
     refusals,
   })
 }
 
-async function fetchComponentMain(
+async function fetchSubmoduleMain(
   git: Git,
   repository: string,
   origin: string,
 ): Promise<
-  Readonly<{ status: "passed"; sha: string }> | Readonly<{ status: "failed"; error: ComponentMainPromotionFailure }>
+  Readonly<{ status: "passed"; sha: string }> | Readonly<{ status: "failed"; error: SubmoduleMainPromotionFailure }>
 > {
   // The probe lives beside COMPONENT_MAIN_REF so admission can ask it too. Resolving the
   // fetched ref used to go through the throwing rev-parse helper; a gate cannot afford a throw
   // from inside a probe, and this file's own git wrapper already promises tolerant callers a
   // result to classify. Same information, now survivable.
-  const resolved = await resolveComponentMain((repo, args) => git.run(repo, args, true), repository, origin)
+  const resolved = await resolveSubmoduleMain((repo, args) => git.run(repo, args, true), repository, origin)
   if (resolved.status === "unavailable") {
     return {
       status: "failed",
-      error: componentMainFailure("component-main-inspection-failed", resolved.message),
+      error: submoduleMainFailure("component-main-inspection-failed", resolved.message),
     }
   }
   return { status: "passed", sha: resolved.sha }
 }
 
-async function fetchComponentPin(
+async function fetchSubmodulePin(
   git: Git,
   repository: string,
   pin: CandidateSubmodulePin,
-): Promise<ComponentMainPromotionFailure | undefined> {
+): Promise<SubmoduleMainPromotionFailure | undefined> {
   try {
     await ensureCommitObject({
       repository,
@@ -6076,14 +6076,14 @@ async function fetchComponentPin(
     })
     return undefined
   } catch (cause) {
-    return componentMainFailure(
+    return submoduleMainFailure(
       "component-main-inspection-failed",
       `could not load merged pin '${pin.sha}' for '${pin.path}' from '${pin.origin}': ${messageOf(cause)}`,
     )
   }
 }
 
-async function planComponentMainPromotionGroup(
+async function planSubmoduleMainPromotionGroup(
   git: Git,
   origin: string,
   pins: readonly CandidateSubmodulePin[],
@@ -6092,10 +6092,10 @@ async function planComponentMainPromotionGroup(
 ): Promise<
   | Readonly<{
       status: "passed"
-      promotion?: ComponentMainPromotion
-      results: readonly ComponentMainResult[]
+      promotion?: SubmoduleMainPromotion
+      results: readonly SubmoduleMainResult[]
     }>
-  | Readonly<{ status: "failed"; error: ComponentMainPromotionFailure }>
+  | Readonly<{ status: "failed"; error: SubmoduleMainPromotionFailure }>
 > {
   const orderedPins = pins.toSorted((left, right) => left.path.localeCompare(right.path))
   await mkdir(repository, { recursive: true })
@@ -6106,75 +6106,75 @@ async function planComponentMainPromotionGroup(
     }`
     return {
       status: "failed",
-      error: componentMainFailure(
+      error: submoduleMainFailure(
         "component-main-inspection-failed",
         message,
         [],
-        componentMainRefusals(orderedPins, "component-main-inspection-failed", message),
+        submoduleMainRefusals(orderedPins, "component-main-inspection-failed", message),
       ),
     }
   }
-  const componentMain = await fetchComponentMain(git, repository, origin)
-  if (componentMain.status === "failed") {
+  const submoduleMain = await fetchSubmoduleMain(git, repository, origin)
+  if (submoduleMain.status === "failed") {
     return {
       status: "failed",
-      error: componentMainFailure(
-        componentMain.error.code,
-        componentMain.error.message,
+      error: submoduleMainFailure(
+        submoduleMain.error.code,
+        submoduleMain.error.message,
         [],
-        componentMainRefusals(orderedPins, componentMain.error.code, componentMain.error.message),
+        submoduleMainRefusals(orderedPins, submoduleMain.error.code, submoduleMain.error.message),
       ),
     }
   }
 
-  const results: ComponentMainResult[] = []
+  const results: SubmoduleMainResult[] = []
   const pendingPins: CandidateSubmodulePin[] = []
   for (const pin of orderedPins) {
-    const missing = await fetchComponentPin(git, repository, pin)
+    const missing = await fetchSubmodulePin(git, repository, pin)
     if (missing !== undefined) {
       const unresolved = orderedPins.filter((candidate) => !results.some((result) => result.path === candidate.path))
       return {
         status: "failed",
-        error: componentMainFailure(
+        error: submoduleMainFailure(
           missing.code,
           missing.message,
           results,
-          componentMainRefusals(unresolved, missing.code, missing.message, componentMain.sha),
+          submoduleMainRefusals(unresolved, missing.code, missing.message, submoduleMain.sha),
         ),
       }
     }
 
-    const reached = await git.run(repository, ["merge-base", "--is-ancestor", pin.sha, componentMain.sha], true)
+    const reached = await git.run(repository, ["merge-base", "--is-ancestor", pin.sha, submoduleMain.sha], true)
     if (reached.code === 0) {
       results.push({
         path: pin.path,
         origin: pin.origin,
         pinSha: pin.sha,
-        mainBeforeSha: componentMain.sha,
-        mainAfterSha: componentMain.sha,
+        mainBeforeSha: submoduleMain.sha,
+        mainAfterSha: submoduleMain.sha,
         action: "verified",
       })
       continue
     }
     if (reached.code !== 1) {
       const message = `could not compare merged pin '${pin.sha}' for '${pin.path}' with component main '${
-        componentMain.sha
+        submoduleMain.sha
       }': ${reached.stderr || reached.stdout || "git merge-base failed"}`
       const unresolved = orderedPins.filter((candidate) => !results.some((result) => result.path === candidate.path))
       return {
         status: "failed",
-        error: componentMainFailure(
+        error: submoduleMainFailure(
           "component-main-inspection-failed",
           message,
           results,
-          componentMainRefusals(unresolved, "component-main-inspection-failed", message, componentMain.sha),
+          submoduleMainRefusals(unresolved, "component-main-inspection-failed", message, submoduleMain.sha),
         ),
       }
     }
     pendingPins.push(pin)
   }
 
-  let targetSha = componentMain.sha
+  let targetSha = submoduleMain.sha
   let targetPath = "component main"
   for (const pin of pendingPins) {
     const covered = await git.run(repository, ["merge-base", "--is-ancestor", pin.sha, targetSha], true)
@@ -6185,11 +6185,11 @@ async function planComponentMainPromotionGroup(
       }`
       return {
         status: "failed",
-        error: componentMainFailure(
+        error: submoduleMainFailure(
           "component-main-inspection-failed",
           message,
           results,
-          componentMainRefusals(pendingPins, "component-main-inspection-failed", message, componentMain.sha),
+          submoduleMainRefusals(pendingPins, "component-main-inspection-failed", message, submoduleMain.sha),
         ),
       }
     }
@@ -6205,11 +6205,11 @@ async function planComponentMainPromotionGroup(
       }`
       return {
         status: "failed",
-        error: componentMainFailure(
+        error: submoduleMainFailure(
           "component-main-inspection-failed",
           message,
           results,
-          componentMainRefusals(pendingPins, "component-main-inspection-failed", message, componentMain.sha),
+          submoduleMainRefusals(pendingPins, "component-main-inspection-failed", message, submoduleMain.sha),
         ),
       }
     }
@@ -6218,11 +6218,11 @@ async function planComponentMainPromotionGroup(
       const message = `could not inspect merged pin '${pin.sha}' for '${pin.path}' against planned component target '${targetSha}': ${containment.detail}`
       return {
         status: "failed",
-        error: componentMainFailure(
+        error: submoduleMainFailure(
           "component-main-inspection-failed",
           message,
           results,
-          componentMainRefusals(pendingPins, "component-main-inspection-failed", message, componentMain.sha),
+          submoduleMainRefusals(pendingPins, "component-main-inspection-failed", message, submoduleMain.sha),
         ),
       }
     }
@@ -6230,37 +6230,37 @@ async function planComponentMainPromotionGroup(
       const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned component target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`component work for '${pin.path}'`, targetSha)}`
       return {
         status: "failed",
-        error: componentMainFailure(
+        error: submoduleMainFailure(
           "carrier-drops-landed",
           message,
           results,
-          componentMainRefusals(pendingPins, "carrier-drops-landed", message, componentMain.sha),
+          submoduleMainRefusals(pendingPins, "carrier-drops-landed", message, submoduleMain.sha),
         ),
       }
     }
     const message = `NON-ANCESTRAL component lineage at '${origin}': ${targetPath} '${targetSha}' and merged pin '${pin.path}' '${pin.sha}' diverge; compose the divergent component histories before retrying`
     return {
       status: "failed",
-      error: componentMainFailure(
+      error: submoduleMainFailure(
         "component-main-non-ancestral",
         message,
         results,
-        componentMainRefusals(pendingPins, "component-main-non-ancestral", message, componentMain.sha),
+        submoduleMainRefusals(pendingPins, "component-main-non-ancestral", message, submoduleMain.sha),
       ),
     }
   }
-  if (targetSha === componentMain.sha) return { status: "passed", results }
+  if (targetSha === submoduleMain.sha) return { status: "passed", results }
 
   const untrusted = pendingPins.map((pin) => pin.path).filter((path) => untrustedOrigins.has(path))
   if (untrusted.length > 0) {
     const message = `new component [${untrusted.join(", ")}] requires main to advance at '${origin}'; review the new remote before granting main-update authority`
     return {
       status: "failed",
-      error: componentMainFailure(
+      error: submoduleMainFailure(
         "component-main-origin-untrusted",
         message,
         results,
-        componentMainRefusals(pendingPins, "component-main-origin-untrusted", message, componentMain.sha),
+        submoduleMainRefusals(pendingPins, "component-main-origin-untrusted", message, submoduleMain.sha),
       ),
     }
   }
@@ -6269,7 +6269,7 @@ async function planComponentMainPromotionGroup(
     promotion: {
       origin,
       repository,
-      mainSha: componentMain.sha,
+      mainSha: submoduleMain.sha,
       targetSha,
       pins: pendingPins,
     },
@@ -6277,13 +6277,13 @@ async function planComponentMainPromotionGroup(
   }
 }
 
-async function planComponentMainPromotions(
+async function planSubmoduleMainPromotions(
   git: Git,
   repo: string,
   baseSha: string | undefined,
   candidateSha: string,
   scratchRoot: string,
-): Promise<ComponentMainPromotionPlan> {
+): Promise<SubmoduleMainPromotionPlan> {
   const candidatePins = await candidateSubmodulePins(git, repo, repo, candidateSha)
   const basePins =
     baseSha === undefined
@@ -6291,8 +6291,8 @@ async function planComponentMainPromotions(
       : new Map((await candidateSubmodulePins(git, repo, repo, baseSha)).map((pin) => [pin.path, pin] as const))
   const changed: CandidateSubmodulePin[] = []
   const untrustedOrigins = new Set<string>()
-  const directRefusals: ComponentMainRefusal[] = []
-  let directFailure: ComponentMainPromotionFailure | undefined
+  const directRefusals: SubmoduleMainRefusal[] = []
+  let directFailure: SubmoduleMainPromotionFailure | undefined
   for (const pin of candidatePins) {
     if (baseSha !== undefined && (await readGitlink(git, repo, baseSha, pin.path)) === pin.sha) continue
     const basePin = basePins.get(pin.path)
@@ -6304,8 +6304,8 @@ async function planComponentMainPromotions(
       untrustedOrigins.add(pin.path)
     } else if (basePin.origin !== pin.origin) {
       const message = `component origin for '${pin.path}' changed from '${basePin.origin}' to '${pin.origin}'; review the new remote before granting main-update authority`
-      directFailure ??= componentMainFailure("component-main-origin-changed", message)
-      directRefusals.push(...componentMainRefusals([pin], "component-main-origin-changed", message))
+      directFailure ??= submoduleMainFailure("component-main-origin-changed", message)
+      directRefusals.push(...submoduleMainRefusals([pin], "component-main-origin-changed", message))
       continue
     }
     changed.push(pin)
@@ -6313,15 +6313,15 @@ async function planComponentMainPromotions(
   const groups = new Map<string, CandidateSubmodulePin[]>()
   for (const pin of changed) groups.set(pin.origin, [...(groups.get(pin.origin) ?? []), pin])
 
-  const promotions: ComponentMainPromotion[] = []
-  const results: ComponentMainResult[] = []
-  const refusals: ComponentMainRefusal[] = [...directRefusals]
+  const promotions: SubmoduleMainPromotion[] = []
+  const results: SubmoduleMainResult[] = []
+  const refusals: SubmoduleMainRefusal[] = [...directRefusals]
   let failure = directFailure
   let groupIndex = 0
   for (const [origin, pins] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
     const repository = join(scratchRoot, `component-${String(groupIndex)}`)
     groupIndex += 1
-    const planned = await planComponentMainPromotionGroup(git, origin, pins, untrustedOrigins, repository)
+    const planned = await planSubmoduleMainPromotionGroup(git, origin, pins, untrustedOrigins, repository)
     if (planned.status === "failed") {
       failure ??= planned.error
       results.push(...planned.error.results)
@@ -6341,24 +6341,24 @@ async function planComponentMainPromotions(
       }
 }
 
-async function applyComponentMainPromotions(
+async function applySubmoduleMainPromotions(
   git: Git,
-  promotions: readonly ComponentMainPromotion[],
-  initialResults: readonly ComponentMainResult[],
+  promotions: readonly SubmoduleMainPromotion[],
+  initialResults: readonly SubmoduleMainResult[],
 ): Promise<
-  | Readonly<{ status: "passed"; results: readonly ComponentMainResult[] }>
-  | Readonly<{ status: "failed"; error: ComponentMainPromotionFailure }>
+  | Readonly<{ status: "passed"; results: readonly SubmoduleMainResult[] }>
+  | Readonly<{ status: "failed"; error: SubmoduleMainPromotionFailure }>
 > {
   const results = [...initialResults]
-  const refusals: ComponentMainRefusal[] = []
-  let failure: ComponentMainPromotionFailure | undefined
+  const refusals: SubmoduleMainRefusal[] = []
+  let failure: SubmoduleMainPromotionFailure | undefined
   const transport = adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS })
   for (const promotion of promotions) {
     const update = {
       repository: promotion.repository,
       remote: promotion.origin,
       source: promotion.targetSha,
-      destination: COMPONENT_MAIN_REF,
+      destination: SUBMODULE_MAIN_REF,
       expectedDestination: { state: "oid", oid: promotion.mainSha } as const,
     }
     let pushed = await pushRefUpdates({
@@ -6390,7 +6390,7 @@ async function applyComponentMainPromotions(
     if (pushed.state === "updated" || pushed.state === "unchanged") {
       results.push(
         ...promotion.pins.map(
-          (pin): ComponentMainResult => ({
+          (pin): SubmoduleMainResult => ({
             path: pin.path,
             origin: pin.origin,
             pinSha: pin.sha,
@@ -6403,14 +6403,14 @@ async function applyComponentMainPromotions(
       continue
     }
 
-    const refreshed = await fetchComponentMain(git, promotion.repository, promotion.origin)
+    const refreshed = await fetchSubmoduleMain(git, promotion.repository, promotion.origin)
     if (refreshed.status === "failed") {
       const message = `component main promotion for [${promotion.pins.map((pin) => pin.path).join(", ")}] ${
         pushed.state
       } but its result could not be verified: ${refreshed.error.message}`
-      failure ??= componentMainFailure("component-main-promotion-failed", message)
+      failure ??= submoduleMainFailure("component-main-promotion-failed", message)
       refusals.push(
-        ...componentMainRefusals(promotion.pins, "component-main-promotion-failed", message, promotion.mainSha),
+        ...submoduleMainRefusals(promotion.pins, "component-main-promotion-failed", message, promotion.mainSha),
       )
       continue
     }
@@ -6422,7 +6422,7 @@ async function applyComponentMainPromotions(
     if (reached.code === 0) {
       results.push(
         ...promotion.pins.map(
-          (pin): ComponentMainResult => ({
+          (pin): SubmoduleMainResult => ({
             path: pin.path,
             origin: pin.origin,
             pinSha: pin.sha,
@@ -6438,8 +6438,8 @@ async function applyComponentMainPromotions(
       const message = `could not verify component main after promoting [${promotion.pins
         .map((pin) => pin.path)
         .join(", ")}]: ${reached.stderr || reached.stdout || "git merge-base failed"}`
-      failure ??= componentMainFailure("component-main-promotion-failed", message)
-      refusals.push(...componentMainRefusals(promotion.pins, "component-main-promotion-failed", message, refreshed.sha))
+      failure ??= submoduleMainFailure("component-main-promotion-failed", message)
+      refusals.push(...submoduleMainRefusals(promotion.pins, "component-main-promotion-failed", message, refreshed.sha))
       continue
     }
     const stillFastForward = await git.run(
@@ -6453,9 +6453,9 @@ async function applyComponentMainPromotions(
       }' diverged from merged pin '${promotion.targetSha}' for [${promotion.pins
         .map((pin) => pin.path)
         .join(", ")}]; compose the divergent histories`
-      failure ??= componentMainFailure("component-main-diverged-after-landing", message)
+      failure ??= submoduleMainFailure("component-main-diverged-after-landing", message)
       refusals.push(
-        ...componentMainRefusals(promotion.pins, "component-main-diverged-after-landing", message, refreshed.sha),
+        ...submoduleMainRefusals(promotion.pins, "component-main-diverged-after-landing", message, refreshed.sha),
       )
       continue
     }
@@ -6467,8 +6467,8 @@ async function applyComponentMainPromotions(
         : `could not compare refreshed component main '${refreshed.sha}' with '${promotion.targetSha}' for [${promotion.pins
             .map((pin) => pin.path)
             .join(", ")}]: ${stillFastForward.stderr || stillFastForward.stdout || "git merge-base failed"}`
-    failure ??= componentMainFailure("component-main-promotion-failed", message)
-    refusals.push(...componentMainRefusals(promotion.pins, "component-main-promotion-failed", message, refreshed.sha))
+    failure ??= submoduleMainFailure("component-main-promotion-failed", message)
+    refusals.push(...submoduleMainRefusals(promotion.pins, "component-main-promotion-failed", message, refreshed.sha))
   }
   return failure === undefined
     ? { status: "passed", results }
@@ -6482,16 +6482,16 @@ async function applyComponentMainPromotions(
       }
 }
 
-function componentMainFailureResult(error: ComponentMainPromotionFailure): JobResult<never> {
-  return failedWithEvidence(error.code, error.message, componentMainOutcomes(error.results, error.refusals))
+function submoduleMainFailureResult(error: SubmoduleMainPromotionFailure): JobResult<never> {
+  return failedWithEvidence(error.code, error.message, submoduleMainOutcomes(error.results, error.refusals))
 }
 
-function componentMainEvidence(result: JobResult<IntegrationProof>): ComponentMainOutcomes | undefined {
+function submoduleMainEvidence(result: JobResult<IntegrationProof>): SubmoduleMainOutcomes | undefined {
   if (result.status === "completed" && result.conclusion === "success") {
-    return componentMainOutcomes(result.output.componentMains ?? [], [])
+    return submoduleMainOutcomes(result.output.componentMains ?? [], [])
   }
   if (result.status !== "completed" || result.conclusion !== "failure") return undefined
-  const parsed = ComponentMainOutcomesSchema.safeParse(result.error.evidence)
+  const parsed = SubmoduleMainOutcomesSchema.safeParse(result.error.evidence)
   return parsed.success ? parsed.data : undefined
 }
 
@@ -6508,10 +6508,10 @@ function nativeRootPushFailureEvidence(result: JobResult<IntegrationProof>): boo
   return NativeRootPushFailureEvidenceSchema.safeParse(result.error.evidence).success
 }
 
-function missingComponentMainOutcomes(
-  promotions: readonly ComponentMainPromotion[],
-  plannedResults: readonly ComponentMainResult[],
-  recordedResults: readonly ComponentMainResult[],
+function missingSubmoduleMainOutcomes(
+  promotions: readonly SubmoduleMainPromotion[],
+  plannedResults: readonly SubmoduleMainResult[],
+  recordedResults: readonly SubmoduleMainResult[],
 ): readonly CandidateSubmodulePin[] {
   const recorded = new Set(recordedResults.map(({ origin, path, pinSha }) => `${origin}\0${path}\0${pinSha}`))
   const expected = [
@@ -6521,30 +6521,30 @@ function missingComponentMainOutcomes(
   return expected.filter(({ origin, path, sha }) => !recorded.has(`${origin}\0${path}\0${sha}`))
 }
 
-async function withComponentMainPromotions(
+async function withSubmoduleMainPromotions(
   git: Git,
   repo: string,
   baseSha: string | undefined,
   candidateSha: string,
   run: (
-    promotions: readonly ComponentMainPromotion[],
-    results: readonly ComponentMainResult[],
+    promotions: readonly SubmoduleMainPromotion[],
+    results: readonly SubmoduleMainResult[],
   ) => Promise<JobResult<IntegrationProof>>,
   options: Readonly<{ settleSafePromotions?: boolean }> = {},
 ): Promise<JobResult<IntegrationProof>> {
   return withScratchRoot(git, repo, "yrd-component-main-", undefined, (root) =>
-    componentMainPromotionsIn(git, repo, baseSha, candidateSha, run, options, root),
+    submoduleMainPromotionsIn(git, repo, baseSha, candidateSha, run, options, root),
   )
 }
 
-async function componentMainPromotionsIn(
+async function submoduleMainPromotionsIn(
   git: Git,
   repo: string,
   baseSha: string | undefined,
   candidateSha: string,
   run: (
-    promotions: readonly ComponentMainPromotion[],
-    results: readonly ComponentMainResult[],
+    promotions: readonly SubmoduleMainPromotion[],
+    results: readonly SubmoduleMainResult[],
   ) => Promise<JobResult<IntegrationProof>>,
   options: Readonly<{ settleSafePromotions?: boolean }>,
   root: string,
@@ -6552,28 +6552,28 @@ async function componentMainPromotionsIn(
   let outcome: JobResult<IntegrationProof> | undefined
   let operationFailure: unknown
   try {
-    const planned = await planComponentMainPromotions(git, repo, baseSha, candidateSha, root)
+    const planned = await planSubmoduleMainPromotions(git, repo, baseSha, candidateSha, root)
     if (planned.status === "failed" && options.settleSafePromotions !== true) {
       const abortMessage =
         "component main promotion was not attempted because another changed component failed preflight"
       const aborted = planned.promotions.flatMap((promotion) =>
-        componentMainRefusals(promotion.pins, "component-main-preflight-aborted", abortMessage, promotion.mainSha),
+        submoduleMainRefusals(promotion.pins, "component-main-preflight-aborted", abortMessage, promotion.mainSha),
       )
-      outcome = componentMainFailureResult({
+      outcome = submoduleMainFailureResult({
         ...planned.error,
         refusals: [...planned.error.refusals, ...aborted],
       })
     } else {
       outcome = await run(planned.promotions, planned.results)
       if (planned.status === "failed") {
-        const settled = componentMainEvidence(outcome)
-        outcome = componentMainFailureResult({
+        const settled = submoduleMainEvidence(outcome)
+        outcome = submoduleMainFailureResult({
           ...planned.error,
           results: settled?.results ?? planned.results,
           refusals: [...planned.error.refusals, ...(settled?.refusals ?? [])],
         })
       } else if (outcome.status === "completed" && outcome.conclusion === "success") {
-        const missing = missingComponentMainOutcomes(
+        const missing = missingSubmoduleMainOutcomes(
           planned.promotions,
           planned.results,
           outcome.output.componentMains ?? [],
@@ -6582,12 +6582,12 @@ async function componentMainPromotionsIn(
           const message = `component main action produced no result or refusal for [${missing
             .map(({ path }) => path)
             .join(", ")}]`
-          outcome = componentMainFailureResult(
-            componentMainFailure(
+          outcome = submoduleMainFailureResult(
+            submoduleMainFailure(
               "component-main-outcome-missing",
               message,
               outcome.output.componentMains ?? [],
-              componentMainRefusals(missing, "component-main-outcome-missing", message),
+              submoduleMainRefusals(missing, "component-main-outcome-missing", message),
             ),
           )
         }
@@ -6607,7 +6607,7 @@ async function componentMainPromotionsIn(
   if ((outcome.status === "completed" && outcome.conclusion === "failure") || cleanupFailure === undefined) {
     return outcome
   }
-  return componentMainScratchCleanupFailure(outcome, cleanupFailure)
+  return submoduleMainScratchCleanupFailure(outcome, cleanupFailure)
 }
 
 type CandidateSubmoduleConflictResult =
@@ -8197,14 +8197,14 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
         const recovering = (await mergeAttemptRefs(git, repo, input, checked)).length > 0
-        return await withComponentMainPromotions(
+        return await withSubmoduleMainPromotions(
           git,
           repo,
           undefined,
           baseSha,
           async (promotions, results) => {
-            const settlement = await applyComponentMainPromotions(git, promotions, results)
-            if (settlement.status === "failed") return componentMainFailureResult(settlement.error)
+            const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+            if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
             return {
               status: "completed",
               conclusion: "success",
@@ -8238,7 +8238,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
             const cancellation = mergeAuthorityCancellation(context)
             if (cancellation !== undefined) return cancellation
             await recordMergeAttempt(git, repo, input, context, checked)
-            return withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
+            return withSubmoduleMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
               // Component mains are promoted explicitly around this root push.
               // A caller's recursive-push config would replay the root-only SHA refspec inside each component.
               const pushed = await pushRefUpdates({
@@ -8270,14 +8270,14 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
               // boundary for new or changed component origins. Once root is
               // authoritative, audit every pin so this landing also converges
               // gaps left by an earlier actuator.
-              return withComponentMainPromotions(
+              return withSubmoduleMainPromotions(
                 git,
                 repo,
                 undefined,
                 checked.candidateSha,
                 async (promotions, results) => {
-                  const settlement = await applyComponentMainPromotions(git, promotions, results)
-                  if (settlement.status === "failed") return componentMainFailureResult(settlement.error)
+                  const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+                  if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
                   return {
                     status: "completed",
                     conclusion: "success",
@@ -8309,7 +8309,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
           if (
             attempted.status === "completed" &&
             attempted.conclusion === "failure" &&
-            componentMainEvidence(attempted) !== undefined
+            submoduleMainEvidence(attempted) !== undefined
           ) {
             return attempted
           }
@@ -8318,13 +8318,13 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
             attempted.conclusion === "failure" &&
             nativeRootPushFailureEvidence(attempted)
           ) {
-            const reconciled = await withComponentMainPromotions(
+            const reconciled = await withSubmoduleMainPromotions(
               git,
               repo,
               undefined,
               merge.sha,
               async (promotions, results) => {
-                const settlement = await applyComponentMainPromotions(git, promotions, results)
+                const settlement = await applySubmoduleMainPromotions(git, promotions, results)
                 return settlement.status === "passed"
                   ? {
                       status: "completed" as const,
@@ -8339,7 +8339,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
                         settlement.results,
                       ),
                     }
-                  : componentMainFailureResult(settlement.error)
+                  : submoduleMainFailureResult(settlement.error)
               },
               { settleSafePromotions: true },
             )
@@ -8358,7 +8358,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
         if (attempted.status === "waiting") throw new Error("native merge cannot wait")
         return failed("merge-verification-failed", `merged '${branch}' does not contain '${missing}'`)
       }
-      return await withComponentMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
+      return await withSubmoduleMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
         const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
         if (checkedOut !== undefined) {
           const status = await git.run(checkedOut, ["status", "--porcelain"])
@@ -8410,14 +8410,14 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
             return failed("stale-base", moved.stderr || "base branch moved")
           }
         }
-        return withComponentMainPromotions(
+        return withSubmoduleMainPromotions(
           git,
           repo,
           undefined,
           checked.candidateSha,
           async (promotions, results) => {
-            const settlement = await applyComponentMainPromotions(git, promotions, results)
-            if (settlement.status === "failed") return componentMainFailureResult(settlement.error)
+            const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+            if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
             return {
               status: "completed",
               conclusion: "success",
@@ -8463,14 +8463,14 @@ export function configuredMergeStep<Shape extends ChangeShape>(
         const cancellation = mergeAuthorityCancellation(context)
         if (cancellation !== undefined) return cancellation
         const recovering = (await mergeAttemptRefs(git, repo, input, candidate.checked)).length > 0
-        return await withComponentMainPromotions(
+        return await withSubmoduleMainPromotions(
           git,
           repo,
           undefined,
           candidate.base.sha,
           async (promotions, results) => {
-            const settlement = await applyComponentMainPromotions(git, promotions, results)
-            if (settlement.status === "failed") return componentMainFailureResult(settlement.error)
+            const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+            if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
             return {
               status: "completed",
               conclusion: "success",
@@ -8509,7 +8509,7 @@ export function configuredMergeStep<Shape extends ChangeShape>(
         }),
       })
 
-      return await withComponentMainPromotions(
+      return await withSubmoduleMainPromotions(
         git,
         repo,
         candidate.checked.baseSha,
@@ -8544,14 +8544,14 @@ export function configuredMergeStep<Shape extends ChangeShape>(
               await clearMergeAttempts(git, repo, input, candidate.checked)
               return failed("invalid-candidate", sourceRefError)
             }
-            return withComponentMainPromotions(
+            return withSubmoduleMainPromotions(
               git,
               repo,
               undefined,
               merge.sha,
               async (promotions, results) => {
-                const settlement = await applyComponentMainPromotions(git, promotions, results)
-                if (settlement.status === "failed") return componentMainFailureResult(settlement.error)
+                const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+                if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
                 return {
                   status: "completed",
                   conclusion: "success",
@@ -8707,17 +8707,17 @@ async function physicalIntegrationProof(
   _context: JobContext,
   commit: string,
   checked: PinnedCandidate,
-  componentMains: readonly ComponentMainResult[] = [],
+  submoduleMains: readonly SubmoduleMainResult[] = [],
 ): Promise<IntegrationProof> {
   await clearMergeAttempts(git, repo, input, checked)
-  return integrationProof(commit, checked, undefined, componentMains)
+  return integrationProof(commit, checked, undefined, submoduleMains)
 }
 
 function integrationProof(
   commit: string,
   checked: PinnedCandidate,
   alreadyMerged?: AlreadyMergedEvidence,
-  componentMains: readonly ComponentMainResult[] = [],
+  submoduleMains: readonly SubmoduleMainResult[] = [],
 ): IntegrationProof {
   return IntegrationProofSchema.parse({
     commit,
@@ -8725,7 +8725,7 @@ function integrationProof(
     ...(alreadyMerged === undefined ? {} : { alreadyMerged }),
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
     ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
-    ...(componentMains.length === 0 ? {} : { componentMains }),
+    ...(submoduleMains.length === 0 ? {} : { componentMains: submoduleMains }),
   })
 }
 
