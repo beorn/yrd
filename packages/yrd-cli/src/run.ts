@@ -10811,7 +10811,7 @@ function buildProgram(
     })
   bay
     .command("path <selector>")
-    .description("print an active bay workspace path")
+    .description("print an active bay path")
     .option("--json", "emit stable JSON")
     .action((selector, options) => pathBay(installed(), selector, options, io))
   bay
@@ -11142,10 +11142,10 @@ function buildProgram(
   pr.helpCommand(false)
   const list = pr
     .command("list")
-    .description("list pull requests")
-    .option("--base <branch>", "scope PRs to one base")
-    .option("--state <state>", "scope PRs to one native or projected state")
-    .option("--issue <ref>", "scope PRs to one issue reference")
+    .description("list changes")
+    .option("--base <branch>", "scope changes to one base")
+    .option("--state <state>", "scope changes to one native or projected state")
+    .option("--issue <ref>", "scope changes to one issue reference")
     .option("--needs-review", "show revisions needing approval")
     .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
@@ -11153,18 +11153,18 @@ function buildProgram(
   list.addHelpSection(
     "Status fields:",
     [
-      "state — answers: is the PR record open or closed? tense: current",
+      "state — answers: is the change record open or closed? tense: current",
       "status — answers: what delivery result should a reader act on? tense: current",
       "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
       "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
       "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
       "mergedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
-      "--state needs-author — answers: does this PR currently need author action? tense: current",
+      "--state needs-author — answers: does this change currently need author action? tense: current",
     ].join("\n"),
   )
   const create = pr
     .command("create [selector]")
-    .description("create a draft PR without requesting required checks")
+    .description("create a draft change without requesting required checks")
     .option("--base <branch>", "base branch for a direct branch create")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -11194,7 +11194,7 @@ function buildProgram(
     )
   addAuthoredCarrierWorkflow(create, name)
   pr.command("submit [selector...]")
-    .description("submit PR revisions after the managed local required-check hook")
+    .description("submit change revisions after the managed local required-check hook")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -11215,7 +11215,7 @@ function buildProgram(
       setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
     )
   pr.command("view <selector>")
-    .description("show a PR and its runs")
+    .description("show a change and its runs")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => viewPr(installed(), selector, options, io, installedServices()))
   pr.command("runs <selector>")
@@ -11228,12 +11228,12 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => diffPr(installed(), selector, options, io))
   pr.command("checkout <selector>")
-    .description("materialize a bay from a PR revision head (detached HEAD)")
+    .description("materialize a bay from a change revision head (detached HEAD)")
     .option("--bay <name>", "name the new bay")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => checkoutPr(installed(), selector, options, io))
   pr.command("status")
-    .description("show the current bay or branch PR")
+    .description("show the current bay or branch change")
     .option("--json", "emit stable JSON")
     .action(async (options) => statusPr(installed(), options, io, installedServices()))
   pr.command("edit <selector>")
@@ -11250,7 +11250,7 @@ function buildProgram(
   // again"); the verb keeps working for the flows that learned it.
   const remerge = pr
     .command("recut <selector>", { hidden: true })
-    .description("recut a merge request revision onto the current base")
+    .description("recut a change revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--ref <ref>", "certify an independently authored candidate commit")
     .option("--preflight", "classify recut, withdraw, force, or no-op without changing anything")
@@ -11264,12 +11264,12 @@ function buildProgram(
   addAuthoredCarrierWorkflow(remerge, name)
   // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
   pr.command("publish <selector>", { hidden: true })
-    .description("request credential-bearing publication of one immutable PR revision")
+    .description("request credential-bearing publication of one immutable change revision")
     .option("--queue", "recut and queue the revision after publishing succeeds")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
   pr.command("ready <selector>", { hidden: true })
-    .description("submit a pushed PR revision and request configured checks")
+    .description("submit a pushed change revision and request configured checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(await readyPr(installed(), installedServices(), selector, options, io)),
@@ -11284,7 +11284,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => reviewPr(installed(), selector, options, io))
   pr.command("request-review <selector> [reviewers...]")
-    .description("replace the requested reviewers for a PR (declarative set)")
+    .description("replace the requested reviewers for a change (declarative set)")
     .option("--clear", "clear the requested reviewer set")
     .option("--by <identity>", "requesting identity")
     .option("--json", "emit stable JSON")
@@ -11297,7 +11297,7 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => commentPr(installed(), selector, options, io))
   pr.command("checks <selector...>")
-    .description("show required-check evidence for current PR revisions")
+    .description("show required-check evidence for current change revisions")
     .option("--follow", "follow active checks to a terminal result")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await changeChecks(installed(), selectors, options, io)))
@@ -11316,7 +11316,7 @@ function buildProgram(
       recordChangeRegression(installed(), selector, options as unknown as ChangeRegressionOptions, io),
     )
   pr.command("close [selector...]")
-    .description("close a live merge request without merging — records why, leaves the queue")
+    .description("close a live change without merging — records why, leaves the queue")
     .option("--reason <text>", "close rationale recorded on each pr/withdrawn event")
     .option("--burn-payload", "acknowledge that closing spends the payload identity permanently")
     .option("--json", "emit stable JSON")
@@ -11324,7 +11324,7 @@ function buildProgram(
   // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
   // keeps its stable pr.withdraw name for journal consumers.
   pr.command("withdraw <selector...>", { hidden: true })
-    .description("withdraw live PRs from delivery, recording the reason")
+    .description("withdraw live changes from delivery, recording the reason")
     .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
     .option("--burn-payload", "acknowledge that withdrawing spends the payload identity permanently")
     .option("--json", "emit stable JSON")
@@ -11338,7 +11338,7 @@ function buildProgram(
   migrate.helpCommand(false)
   migrate
     .command("terminal-associations")
-    .description("prove and append legacy rejected-PR Queue run associations")
+    .description("prove and append legacy rejected-change Queue run associations")
     .option("--apply", "append every uniquely proven association")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await migrateTerminalAssociations(installed(), options, io)))
@@ -11380,7 +11380,7 @@ function buildProgram(
     .option("--apply", "actually close PRUNE bays (default is dry-run)")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
-  const adminPr = admin.command("pr").description("administer pull requests")
+  const adminPr = admin.command("pr").description("administer changes")
   adminPr
     .command("prune")
     .description("withdraw live PRs whose content their base branch already contains")
@@ -11423,7 +11423,7 @@ function buildProgram(
     .action(async (issueId, options) => listIssues(installed(), options, io, issueId))
   issue
     .command("ensure <issue>")
-    .description("ensure one issue-owned Bay and one tracked draft PR")
+    .description("ensure one issue-owned Bay and one tracked draft change")
     .option("--json", "emit stable JSON")
     .action(async (issueId, options) => setExit(await ensureIssueDelivery(installed(), issueId, options, io)))
 

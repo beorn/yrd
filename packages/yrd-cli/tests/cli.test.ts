@@ -986,7 +986,7 @@ describe("runYrd", () => {
     const help = outputIO({ columns: 120 })
 
     expect(await runYrd(app, yrd("pr", "list", "--help"), help.io), help.stderr()).toBe(0)
-    expect(help.stdout()).toContain("state — answers: is the PR record open or closed? tense: current")
+    expect(help.stdout()).toContain("state — answers: is the change record open or closed? tense: current")
     expect(help.stdout()).toContain("status — answers: what delivery result should a reader act on? tense: current")
     expect(help.stdout()).toContain(
       "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
@@ -1001,7 +1001,7 @@ describe("runYrd", () => {
       "mergedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
     )
     expect(help.stdout()).toContain(
-      "--state needs-author — answers: does this PR currently need author action? tense: current",
+      "--state needs-author — answers: does this change currently need author action? tense: current",
     )
   })
 
