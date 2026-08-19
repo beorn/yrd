@@ -184,14 +184,21 @@ const ProgressSchema = z
  * `expected` when absent — every repository that predates this key keeps
  * behaving exactly as it did, and only a repository that says `none` refuses.
  */
-const LandingSchema = z.enum(["expected", "none"]).optional()
+const MergeSchema = z.enum(["expected", "none"]).optional()
 
 const ProjectFields = {
   base: TextSchema.optional(),
   batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
   checks: ChecksSchema,
   guards: GuardsSchema,
-  landing: LandingSchema,
+  merge: MergeSchema,
+  /** Renamed to `merge:` 2026-08-18 (same values, same `expected` default) --
+   * the merge-queue record noun is "change", not "PR", and `landing:` named
+   * the killed vocabulary. Read-only compatibility: still parsed so existing
+   * checked-in `.yrd.yml` files keep working; write `merge:` going forward.
+   * Remove this key once no committed config still sets `landing:` (grep
+   * `^landing:` across hh + vendor/* .yrd.yml before deleting). */
+  landing: MergeSchema,
   requires: RequirementsSchema.optional(),
   contest: ContestSchema,
   progress: ProgressSchema,
@@ -207,7 +214,7 @@ export type YrdProjectConfig = Readonly<{
   batch?: false | number
   checks: readonly z.infer<typeof CheckEntrySchema>[]
   guards: readonly z.infer<typeof GuardEntrySchema>[]
-  landing?: "expected" | "none"
+  merge?: "expected" | "none"
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
   progress: Readonly<z.infer<typeof ProgressSchema>>
@@ -226,9 +233,9 @@ export type ResolvedYrdProjectConfig = Readonly<{
   guardDefinitions?: Readonly<Record<string, YrdGuardConfig>>
   /** Internal Queue execution plan: configured checks plus built-in merge. */
   steps: readonly string[]
-  /** Declared, never inferred — see LandingSchema. `loadYrdConfig` always sets
+  /** Declared, never inferred — see MergeSchema. `loadYrdConfig` always sets
    * it; absent (hand-built configs) reads as "expected", same as an unset key. */
-  landing?: "expected" | "none"
+  merge?: "expected" | "none"
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
@@ -255,13 +262,21 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, guards, landing, requires, contest, progress } = parsed.data
+    const { base, batch, checks, guards, merge, landing, requires, contest, progress } = parsed.data
+    if (merge !== undefined && landing !== undefined && merge !== landing) {
+      throw createFailure({
+        kind: "configuration",
+        code: "invalid-config",
+        message: `yrd: config merge ('${merge}') and landing ('${landing}') disagree; landing: is a deprecated alias for merge: — keep only one`,
+      })
+    }
+    const resolvedMerge = merge ?? landing
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       checks,
       guards,
-      ...(landing === undefined ? {} : { landing }),
+      ...(resolvedMerge === undefined ? {} : { merge: resolvedMerge }),
       ...(requires === undefined ? {} : { requires }),
       contest,
       progress,
@@ -399,7 +414,7 @@ export async function loadYrdConfig(options: {
       guards: parsed.guards.map(guardName),
       guardDefinitions: Object.fromEntries(parsed.guards.map(resolveGuard)),
       steps,
-      landing: parsed.landing ?? "expected",
+      merge: parsed.merge ?? "expected",
       requires: parsed.requires ?? [],
       definitions: resolvedDefinitions,
       contest: {

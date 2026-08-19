@@ -101,7 +101,11 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
     })
   })
 
-  it.each(["steps", "journal", "refuse", "do", "merge", "notify", "shared-main", "typecheck-admission"])(
+  // "merge" was a deleted key here once (an unrelated, older feature); it is
+  // now the live key name for the merge-authority setting (formerly
+  // `landing:`), so it no longer belongs in this deleted-keys list -- see
+  // the `merge`/`landing` read-both coverage below instead.
+  it.each(["steps", "journal", "refuse", "do", "notify", "shared-main", "typecheck-admission"])(
     "refuses deleted config key '%s' loudly",
     (key) => {
       const value =
@@ -117,6 +121,26 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
       expect(() => parseYrdConfig(value)).toThrow(`yrd: config ${key} is not supported`)
     },
   )
+
+  it("accepts 'merge:' as the live key and 'landing:' as its deprecated read-only alias, identically", () => {
+    const viaMerge = parseYrdConfig({ merge: "none" })
+    const viaLanding = parseYrdConfig({ landing: "none" })
+    expect(viaMerge.merge).toBe("none")
+    expect(viaLanding.merge).toBe("none")
+    expect(viaMerge).toEqual(viaLanding)
+    // Unset stays unset (not defaulted) at the parse layer; loadYrdConfig applies the "expected" default.
+    expect(parseYrdConfig({}).merge).toBeUndefined()
+  })
+
+  it("refuses loudly when 'merge:' and 'landing:' disagree, naming both", () => {
+    expect(() => parseYrdConfig({ merge: "expected", landing: "none" })).toThrow(
+      "yrd: config merge ('expected') and landing ('none') disagree; landing: is a deprecated alias for merge: — keep only one",
+    )
+  })
+
+  it("does not refuse when 'merge:' and 'landing:' agree", () => {
+    expect(parseYrdConfig({ merge: "expected", landing: "expected" }).merge).toBe("expected")
+  })
 
   it("refuses unknown bare check names and teaches the inline run escape hatch", async () => {
     await expect(
