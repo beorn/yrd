@@ -2322,7 +2322,10 @@ checks: [{check: {run: "true"}}]
         },
       },
     )
-    const body = JSON.parse(stdout || "{}")
+    const body = JSON.parse(stdout || "{}") as Readonly<{
+      facts?: Readonly<{ git?: Readonly<{ cwd?: string }> }>
+      error?: Readonly<{ code?: string; cause?: string }>
+    }>
     expect(exitCode, `stdout=${stdout} stderr=${stderr}`).toBe(2)
     expect(body.facts?.git?.cwd, "facts must name the --repo-selected directory, not the ambient one").toBe(selected)
     expect(body.error?.code).toBe("check-definition-missing")

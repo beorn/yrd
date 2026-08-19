@@ -906,6 +906,36 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/archive-me")).toBe("")
   })
 
+  it("refuses to re-archive a branch resurrected at the identical sha it was already archived at", async () => {
+    // The collision class @yrd/queue/candidate-refs.ts's header (22332) fixed
+    // by naming refs off composed content instead of a pre-evidence id: here
+    // the "id" (the shortsha suffix) is ALREADY content-addressed by
+    // construction, so a resurrection at the same content lands on the SAME
+    // archive name on purpose — and must be a loud pre-receive refusal, never
+    // a silent overwrite or a second, shadowing entry.
+    const f = await fixture("archive-resurrect-collision")
+    await git(f.mainRepo, "switch", "-qc", "issue/archive-twice")
+    const headSha = await commit(f.mainRepo, "archive-twice.txt")
+    const env = await installHookHost(f.root, { "issue/archive-twice": target(f.baseSha) })
+    expect((await push(f, "issue/archive-twice:refs/heads/issue/archive-twice", env)).code).toBe(0)
+    expect((await push(f, ":refs/heads/issue/archive-twice", env)).code).toBe(0)
+    const archiveRef = `refs/yrd/archive/issue/archive-twice-${headSha.slice(0, 12)}`
+    expect(await git(f.receiver.receiverPath, "rev-parse", archiveRef)).toBe(headSha)
+
+    // Resurrect the branch at the EXACT same sha (its object already lives in
+    // the receiver's own store from the first, successful push) the way this
+    // file's fixtures always simulate out-of-band ref state — a direct
+    // update-ref, never a push — then try to archive it again.
+    await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/archive-twice", headSha)
+    const result = await push(f, ":refs/heads/issue/archive-twice", env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("would collide with the existing archive entry")
+    // Refused before git deletes anything: the resurrected branch survives,
+    // and the original archive entry is untouched.
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/archive-twice")).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "rev-parse", archiveRef)).toBe(headSha)
+  })
+
   it("refuses to archive a branch no active bay tracks, leaving it untouched", async () => {
     const f = await fixture("archive-unauthorized")
     await git(f.mainRepo, "switch", "-qc", "issue/archive-unauth")
