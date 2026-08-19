@@ -124,10 +124,17 @@ function clickRow(app: ReturnType<ReturnType<typeof createRenderer>>, needle: st
   app.click(x, y)
 }
 
-function detailTitle(text: string): string {
-  // Row 0 is the watch pane's own top line (item 12, always present); the
-  // QUEUE tab + DETAIL title row that used to be row 0 sits one row lower.
-  return text.split("\n")[1] ?? ""
+/** The detail pane has no identity title row (operator ruling 2026-08-18,
+ * item 23) — it names its change through the change-list bullet and the
+ * member-box `pr#N.1 ⎇ branch` header. Scoped RIGHT of the split divider so
+ * a list row's own id (or a `·` run continuation) can never masquerade. */
+function detailShows(text: string, id: string): boolean {
+  const rows = text.split("\n")
+  const divider = (rows[1] ?? "").indexOf("│")
+  return rows.some((row) => {
+    const right = divider > 0 ? row.slice(divider) : row
+    return right.includes(`· ${id}`) || right.includes(`${id} ⎇`)
+  })
 }
 
 describe("QueueWatchFrame live-follow cursor contract", () => {
@@ -135,14 +142,14 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     const render = createRenderer({ cols: 200, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([integratedItem(1), queuedItem(2)]) }))
     try {
-      await waitFor(() => detailTitle(app.text).includes("pr#2.1"))
+      await waitFor(() => detailShows(app.text, "pr#2.1"))
 
       app.rerender(
         createElement(QueueWatchFrame, {
           snapshot: snapshot([integratedItem(1), queuedItem(2), draftItem(3)]),
         }),
       )
-      await waitFor(() => detailTitle(app.text).includes("pr#3.1"))
+      await waitFor(() => detailShows(app.text, "pr#3.1"))
     } finally {
       app.unmount()
     }
@@ -155,14 +162,14 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     try {
       await app.waitForLayoutStable()
       clickRow(app, "pr#25.1")
-      await waitFor(() => detailTitle(app.text).includes("pr#25.1"))
+      await waitFor(() => detailShows(app.text, "pr#25.1"))
 
       const nextItems = Array.from({ length: 50 }, (_, index) => integratedItem(index + 1))
       app.rerender(createElement(QueueWatchFrame, { snapshot: snapshot(nextItems) }))
       await app.waitForLayoutStable()
 
       expect(rowIndexOf(app.text, "pr#50.1"), "the newest row remains visible without input").toBeGreaterThanOrEqual(0)
-      expect(detailTitle(app.text), "inserting rows above does not steal the settled selection").toContain("pr#25.1")
+      expect(detailShows(app.text, "pr#25.1"), "inserting rows above does not steal the settled selection").toBe(true)
       expect(app.text).not.toMatch(/new runs?|G jumps/u)
     } finally {
       app.unmount()
@@ -179,16 +186,16 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     try {
       await app.waitForLayoutStable()
       clickRow(app, "pr#10.1")
-      await waitFor(() => detailTitle(app.text).includes("pr#10.1"))
+      await waitFor(() => detailShows(app.text, "pr#10.1"))
 
       await app.press("g")
-      await waitFor(() => detailTitle(app.text).includes("pr#80.1"))
+      await waitFor(() => detailShows(app.text, "pr#80.1"))
 
       await app.press("g")
-      await waitFor(() => detailTitle(app.text).includes("pr#200.1"))
+      await waitFor(() => detailShows(app.text, "pr#200.1"))
 
       await app.press("g")
-      await waitFor(() => detailTitle(app.text).includes("pr#80.1"))
+      await waitFor(() => detailShows(app.text, "pr#80.1"))
     } finally {
       app.unmount()
     }
@@ -204,13 +211,13 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     try {
       await app.waitForLayoutStable()
       clickRow(app, "pr#10.1")
-      await waitFor(() => detailTitle(app.text).includes("pr#10.1"))
+      await waitFor(() => detailShows(app.text, "pr#10.1"))
 
       await app.press("g")
-      await waitFor(() => detailTitle(app.text).includes("pr#60.1"))
+      await waitFor(() => detailShows(app.text, "pr#60.1"))
 
       await app.press("g")
-      await waitFor(() => detailTitle(app.text).includes("pr#200.1"))
+      await waitFor(() => detailShows(app.text, "pr#200.1"))
     } finally {
       app.unmount()
     }
@@ -224,7 +231,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     try {
       await app.waitForLayoutStable()
       await app.press("G")
-      await waitFor(() => detailTitle(app.text).includes("pr#20.1"))
+      await waitFor(() => detailShows(app.text, "pr#20.1"))
 
       const live = runningItem(30, 30)
       app.rerender(
@@ -233,7 +240,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
         }),
       )
       await app.waitForLayoutStable()
-      expect(detailTitle(app.text), "a manual bottom jump pauses live follow").toContain("pr#20.1")
+      expect(detailShows(app.text, "pr#20.1"), "a manual bottom jump pauses live follow").toBe(true)
     } finally {
       app.unmount()
     }
@@ -244,7 +251,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     const render = createRenderer({ cols: 200, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([followed]) }))
     try {
-      await waitFor(() => detailTitle(app.text).includes("pr#80.1"))
+      await waitFor(() => detailShows(app.text, "pr#80.1"))
 
       const laterStart = runningItem(82, 100)
       const nextByStart = runningItem(81, 90)
@@ -253,7 +260,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
           snapshot: snapshot([finishItem(followed, 85), laterStart, nextByStart]),
         }),
       )
-      await waitFor(() => detailTitle(app.text).includes("pr#81.1"))
+      await waitFor(() => detailShows(app.text, "pr#81.1"))
 
       app.rerender(
         createElement(QueueWatchFrame, {
@@ -261,7 +268,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
         }),
       )
       await app.waitForLayoutStable()
-      expect(detailTitle(app.text), "the last followed row is held when the queue becomes idle").toContain("pr#81.1")
+      expect(detailShows(app.text, "pr#81.1"), "the last followed row is held when the queue becomes idle").toBe(true)
     } finally {
       app.unmount()
     }
@@ -274,16 +281,16 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     try {
       await app.waitForLayoutStable()
       clickRow(app, "pr#11.1")
-      await waitFor(() => detailTitle(app.text).includes("pr#11.1"))
+      await waitFor(() => detailShows(app.text, "pr#11.1"))
 
       app.rerender(
         createElement(QueueWatchFrame, {
           snapshot: snapshot([integratedItem(10), integratedItem(12), integratedItem(13)]),
         }),
       )
-      await waitFor(() => detailTitle(app.text).includes("pr#12.1"))
+      await waitFor(() => detailShows(app.text, "pr#12.1"))
 
-      expect(detailTitle(app.text), "a missing middle row never falls through to newest row 0").not.toContain("pr#13.1")
+      expect(detailShows(app.text, "pr#13.1"), "a missing middle row never falls through to newest row 0").toBe(false)
       const notice = app.text.match(/selection moved.*pr#11\.1.*pr#12\.1/iu)?.[0]
       expect(notice).toBeDefined()
       expect(notice?.match(/pr#[a-z0-9_-]+\.\d+/giu)?.map((token) => parseChangeSelector(token))).toEqual([

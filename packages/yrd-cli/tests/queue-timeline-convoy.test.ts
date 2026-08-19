@@ -16,7 +16,7 @@ const MERGED_AT = "2026-07-13T11:45:00.000Z"
 
 /** The R2649 specimen: three PRs admitted together and landed by ONE run. */
 const CONVOY = ["PR151", "PR152", "PR153"] as const
-const CONVOY_BRANCHES = CONVOY.map((id) => `topic/${id.toLocaleLowerCase()}`)
+const CONVOY_TITLES = CONVOY.map((id) => `Convoy ${id}`)
 
 /**
  * The dash signature of the reported defect: a row whose TIME, STATUS and RUN
@@ -68,18 +68,31 @@ describe("convoy visibility — every member of a co-landing renders its own out
   it("lands three PRs in one run and renders all three as merged", async () => {
     const rows = await timelineRows(convoySnapshot().projection)
 
-    for (const branch of CONVOY_BRANCHES) {
-      const row = rowFor(rows, branch)
-      expect(row, branch).toContain("merged")
-      expect(row, branch).not.toMatch(DASH_ROW)
+    for (const title of CONVOY_TITLES) {
+      const row = rowFor(rows, title)
+      expect(row, title).toContain("merged")
+      expect(row, title).not.toMatch(DASH_ROW)
     }
   })
 
-  it("gives every convoy member its own landing run, not just the lead", async () => {
+  it("marks every convoy member's shared run — id on the lead, membership dots behind it", async () => {
+    // Item 38 reshaped the RUN cell: the id renders bright on the FIRST
+    // member row and the rest carry a muted `·` continuation. The 22925
+    // defect stays impossible: every member row keeps its own TIME and
+    // merged STATUS, so a landed member can never print as the dash row a
+    // never-attempted PR prints.
     const rows = await timelineRows(convoySnapshot().projection)
-
-    for (const branch of CONVOY_BRANCHES) {
-      expect(rowFor(rows, branch), branch).toContain("#2649")
+    const memberRows = CONVOY_TITLES.map((title) => rowFor(rows, title))
+    const withRunId = memberRows.filter((row) => row.includes("#2649"))
+    expect(withRunId, "exactly one member row spells the shared run id").toHaveLength(1)
+    for (const row of memberRows) {
+      expect(row).toContain("✓ merged")
+      expect(row).not.toMatch(DASH_ROW)
+    }
+    const continuations = memberRows.filter((row) => !row.includes("#2649"))
+    expect(continuations).toHaveLength(2)
+    for (const row of continuations) {
+      expect(row, "membership continuation dot").toMatch(/merged\s+·\s/u)
     }
   })
 
@@ -94,7 +107,7 @@ describe("convoy visibility — every member of a co-landing renders its own out
 
     for (const member of members) {
       expect(member.timestamp, member.pr).not.toBeNull()
-      expect(rowFor(rows, member.branch), member.pr).not.toMatch(/^-\s/u)
+      expect(rowFor(rows, member.subject), member.pr).not.toMatch(/^-\s/u)
     }
   })
 
@@ -102,12 +115,17 @@ describe("convoy visibility — every member of a co-landing renders its own out
     const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot: convoySnapshot() }))
     try {
       await app.waitForLayoutStable()
-      const rows = app.text.split("\n").map((row) => row.trimEnd())
+      // The split panes share terminal lines and the DETAIL side names the
+      // members too (change list + boxes) — scope to the LEFT half.
+      const frame = app.text.split("\n")
+      const divider = (frame[1] ?? "").indexOf("│")
+      expect(divider).toBeGreaterThan(0)
+      const rows = frame.map((row) => row.slice(0, divider).trimEnd())
 
-      for (const branch of CONVOY_BRANCHES) {
-        const row = rowFor(rows, branch)
-        expect(row, branch).toContain("merged")
-        expect(row, branch).not.toMatch(DASH_ROW)
+      for (const title of CONVOY_TITLES) {
+        const row = rowFor(rows, title)
+        expect(row, title).toContain("merged")
+        expect(row, title).not.toMatch(DASH_ROW)
       }
     } finally {
       app.unmount()

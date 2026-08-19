@@ -1,9 +1,11 @@
 /**
- * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
+ * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16;
+ * reshaped by the 2026-08-18 operator rulings, items 23/25).
  *
- * Pins the reshaped detail surface: the PR-scoped identity title
- * (`pr#<id>.<rev>`), the linked ISSUE primitive, one composite run header,
- * one truthful status notice, and separate JOB/RUNNER facts.
+ * Pins the reshaped detail surface: the RUN status box AS the pane's top
+ * (no identity title row above it), every member box carrying its own
+ * `pr#id.rev ⎇ branch` header, one truthful status notice, and separate
+ * JOB/RUNNER facts.
  */
 
 import { createElement } from "react"
@@ -19,7 +21,6 @@ import {
   fixtureStep,
 } from "../dev/queue-timeline-fixtures.ts"
 import {
-  QueueDetailTitle,
   QueueShowView,
   queueStatusNotice,
   queueShowData,
@@ -115,83 +116,48 @@ function deltaRun(): QueueShowData {
   return queueShowData(run, [run])
 }
 
-function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: number): number {
-  for (let column = 0; column < app.width; column += 1) {
-    if (app.cell(column, row).char === BRANCH_GLYPH) return column
-  }
-  return -1
-}
-
-describe("detail title row — target identity emphasis + right-aligned outcome", () => {
-  it("emphasizes the identity, right-aligns STATUS/OUTCOME, and omits corner time", () => {
+describe("detail pane top — the RUN status box, no identity title above it (item 23)", () => {
+  it("opens the detail on the status box border and gives the cursor member its own boxed header", async () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:55:00.000Z",
     })
-    const snapshot = fixtureSnapshot(fixtureResult([pr], [run]))
-    const row = snapshot.projection.rows.find((candidate) => candidate.run === "R42")
-    const data = snapshot.projection.details.find((candidate) => candidate.run === "R42")
-    if (row === undefined || data === undefined) throw new Error("fixture is missing the R42 projection")
-
-    const app = createRenderer({ cols: 120, rows: 6 })(
-      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
-    )
-    const projectedOnly = createRenderer({ cols: 120, rows: 6 })(
-      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
+    const app = createRenderer({ cols: 180, rows: 50 })(
+      createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [run])) }),
     )
     try {
-      // The title is PR-scoped. Run identity, timing, and status belong to the
-      // composite header + notice below it.
-      expect(app.text).toContain("pr#42.1")
-      expect(app.text).not.toContain("RUN main#42")
-      expect(app.text).not.toContain("topic/pr42")
-      expect(app.text).not.toContain(`${data.glyph} passed, merged`)
-
-      const titleRow = app.text.split("\n").findIndex((text) => text.includes("pr#42.1"))
-      expect(titleRow).toBeGreaterThanOrEqual(0)
-
-      // Identity is emphasized like the QUEUE tab: warning-colored.
-      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("pr#42.1") ?? -1
-      const identityCell = app.cell(identityColumn, titleRow)
-      expect(identityCell.fg).not.toBeNull()
-
-      expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the title").toBe(-1)
-
-      expect(app.text).not.toContain("15m00s")
-      expect(projectedOnly.text).toContain("pr#42.1")
-      expect(projectedOnly.text).not.toContain("CANDIDATE")
-      expect(projectedOnly.text).not.toContain("RUN main#42")
-    } finally {
-      app.unmount()
-      projectedOnly.unmount()
-    }
-  })
-
-  it("does not put live elapsed time in the title corner", () => {
-    const pr = fixturePr("PR43", "submitted", "2026-07-13T11:30:00.000Z", "Still running")
-    const run = fixtureRun("R43", [pr], "running", "2026-07-13T11:40:00.000Z", {
-      steps: [fixtureStep("check", fixtureJob("J43-check", "running"))],
-    })
-    const snapshot = fixtureSnapshot(fixtureResult([pr], [run]))
-    const row = snapshot.projection.rows.find((candidate) => candidate.run === "R43")
-    const data = snapshot.projection.details.find((candidate) => candidate.run === "R43")
-    if (row === undefined || data === undefined) throw new Error("fixture is missing the live R43 projection")
-    expect(data.totalDuration).toBe("-")
-    expect(row.totalMs).toBe(20 * 60_000)
-
-    const app = createRenderer({ cols: 120, rows: 4 })(
-      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
-    )
-    try {
-      expect(app.text).not.toContain("20m00s")
+      await app.waitForLayoutStable()
+      // The default cursor follows the newest (pre-run) row; select the run
+      // row so the box carries the run identity.
+      await app.press("j")
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const divider = rows[1]?.indexOf("│") ?? -1
+      expect(divider).toBeGreaterThan(0)
+      const detailRows = rows.map((row) => row.slice(divider + 1))
+      // The FIRST detail row is the status box's top border, its right side
+      // carrying the run identity — no pr#id title row above it.
+      const borderY = detailRows.findIndex((row) => row.includes("RUN main#42"))
+      expect(borderY, "status box border carries the run identity").toBeGreaterThanOrEqual(0)
+      expect(detailRows[borderY]).toContain("╭")
+      const firstContentY = detailRows.findIndex((row) => row.trim() !== "")
+      expect(firstContentY, "nothing renders above the status box").toBe(borderY)
+      // The cursor member's own box still carries its identity + branch
+      // header (item 25 — the skip-own-id rule died with the title).
+      expect(app.text).toContain("pr#42.1 ⎇ topic/pr42")
+      // And the change list bullet names it beneath the box (item 24).
+      expect(app.text).toContain("· pr#42.1")
     } finally {
       app.unmount()
     }
   })
 
-  it("renders the no-selection placeholder when no row is selected", () => {
-    const app = createRenderer({ cols: 60, rows: 4 })(createElement(QueueDetailTitle, {}))
+  it("renders the no-selection placeholder when the projection has no rows", async () => {
+    const app = createRenderer({ cols: 180, rows: 40 })(
+      createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([], [])) }),
+    )
     try {
+      await app.waitForLayoutStable()
       expect(app.text).toContain("No queue row selected.")
     } finally {
       app.unmount()
@@ -296,9 +262,20 @@ describe("watch detail composite header + status notice", () => {
       expect(app.text).toContain("automatically; the author")
       expect(app.text).toContain("author must fix the branch and resubmit")
       expect(app.text).not.toMatch(/^(?:ERROR|CAUSE|RESOLVE|LOST|NEXT)\b/mu)
-      const titleY = rows.findIndex((line) => line.includes("pr#9.1"))
-      const detailX = rows[titleY]?.indexOf("pr#9.1") ?? -1
-      const detailText = rows.map((line) => line.slice(detailX)).join("\n")
+      // The failed step line carries its remedy inline on the status box
+      // (item 39), severity-colored.
+      expect(app.text).toMatch(/× check.*err=check-failed/u)
+      // The member boxes live on the Changes tab; the failed step tab is the
+      // default, so switch left to reach them.
+      await app.press("h")
+      await app.waitForLayoutStable()
+      const changeRows = app.text.split("\n")
+      const headerY = changeRows.findIndex((line) => line.includes("pr#9.1 ⎇"))
+      expect(headerY, "the member box header carries the identity").toBeGreaterThanOrEqual(0)
+      const detailX = changeRows[headerY]?.indexOf("pr#9.1") ?? -1
+      const detailText = changeRows.map((line) => line.slice(detailX)).join("\n")
+      // The ISSUE metadata row owns the issue; the description's own
+      // `Issue: …` line stays deduplicated — exactly one occurrence.
       expect(detailText.match(/@yrd\/core\/21096-cli-ux\/21751-watch-detail-status-dry/gu)).toHaveLength(1)
     } finally {
       app.unmount()
