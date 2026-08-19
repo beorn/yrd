@@ -143,17 +143,22 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
 // A pure pin advance is an ordinary change: fast-forward the component's own
 // main to the target commit, then submit the root branch like any other
 // change — the queue fills the shaset in itself. `yrd intent submit`, the
-// mechanical per-component verb this used to print, is retired (23000); the
-// remedy is always derived here, never trusted from upstream message prose.
+// mechanical per-component verb this used to print, is retired (23000).
+//
+// The fast-forward step is intentionally NOT constructed here as a literal
+// hand-push command: remedy-banned-actions-guard.test.ts bans printing a raw
+// git-push-to-a-component's-branch-ref line anywhere in this tool surface,
+// because that instruction is real advice only for a landing:none vendor
+// component and wrong everywhere else this projection is reused — a
+// distinction no static remedy string can carry. `intentSubmissionWorkflow`
+// (yrd-queue/src/command.ts) already says "get commit onto main" as prose in
+// the failure message itself, and `oneLineCause` already preserves that
+// prose into `cause` untouched (no quoted 'yrd ...' command follows it, so
+// nothing strips it) — so it is surfaced for free, without this function
+// re-deriving or discarding it. `resolution` carries only the one step that
+// is safe to print as a literal, mechanical command everywhere: submit.
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
   const submodules = authoredGitlinkSubmodules(failure.message)
-  const generated =
-    submodules.length === 0
-      ? []
-      : [
-          ...submodules.map((submodule) => `git -C ${submodule} push origin <target-sha>:main`),
-          "yrd pr submit <branch>",
-        ]
   const submoduleModelChange = failure.message.includes("pin intents advance existing components only")
   return Object.freeze({
     code: failure.code,
@@ -164,8 +169,8 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
             "Escalate the component-model addition or deletion; a gitlink bump only advances an existing " +
               "component, never adds or removes one.",
           ]
-        : generated.length > 0
-          ? generated
+        : submodules.length > 0
+          ? ["yrd pr submit <branch>"]
           : [GENERIC_RESOLUTION],
     ),
     reference: "README.md#pr-eligibility-and-checks",
