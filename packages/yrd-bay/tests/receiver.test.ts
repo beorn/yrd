@@ -298,7 +298,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
   })
 
-  it("rejects unknown branches, deletes, and commits outside the pinned base", async () => {
+  it("rejects unknown branches and commits outside the pinned base", async () => {
     const f = await fixture("reject")
     await git(f.mainRepo, "switch", "--orphan", "issue/unrelated")
     await run(["git", "-C", f.mainRepo, "rm", "-qrf", "."], f.mainRepo)
@@ -323,14 +323,6 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect((await push(f, "issue/unknown:refs/heads/issue/unknown", env)).stderr).toContain(
       "is not authorized for Yrd intake",
     )
-
-    await git(f.mainRepo, "switch", "-q", "main")
-    const mainEnv = await installHookHost(f.root, { main: target(f.baseSha) })
-    expect((await push(f, "main:refs/heads/main", mainEnv)).code).toBe(0)
-    const deletion = await push(f, ":refs/heads/main", mainEnv)
-    expect(deletion.code).not.toBe(0)
-    expect(deletion.stderr).toContain("ref deletion is not accepted")
-    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/main")).toBe(f.baseSha)
   })
 
   /**
@@ -709,6 +701,220 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const result = await push(f, "work:refs/for/main/orphan", env)
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain("carrier branch")
+  })
+
+  // ── branch-is-change: refs/yrd/submit/* and refs/yrd/archive/* ─────────────
+  //
+  // bead-branch-is-change phase 1. `refs/yrd/submit/<branch>` is the approval
+  // fact — pushing it names the exact commit its author approves to land —
+  // validated against the two structural facts the model doc names verbatim:
+  // reachable from the branch's own tip, and not already landed on the base
+  // ("a dangling sha and an already-landed sha are different refusals").
+  // `refs/yrd/archive/*` is the shelf a deleted branch moves to, atomically,
+  // so a branch deletion never just erases the change.
+
+  it("accepts a push to refs/yrd/submit/<branch> naming a commit reachable from the branch's tip", async () => {
+    const f = await fixture("submitref-ok")
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-ok")
+    const headSha = await commit(f.mainRepo, "submit-ok.txt")
+    const env = await installHookHost(f.root, { "issue/submit-ok": target(f.baseSha) })
+    expect((await push(f, "issue/submit-ok:refs/heads/issue/submit-ok", env)).code).toBe(0)
+
+    const result = await push(f, `${headSha}:refs/yrd/submit/issue/submit-ok`, env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/submit-ok")).toBe(headSha)
+  })
+
+  it("refuses a submit ref naming a commit not reachable from the branch's own tip (dangling)", async () => {
+    const f = await fixture("submitref-dangling")
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-dangling")
+    await commit(f.mainRepo, "submit-dangling.txt")
+    const env = await installHookHost(f.root, { "issue/submit-dangling": target(f.baseSha) })
+    expect((await push(f, "issue/submit-dangling:refs/heads/issue/submit-dangling", env)).code).toBe(0)
+
+    // A commit that never touched issue/submit-dangling's history at all —
+    // "dangling" in the model doc's own word, distinct from "already landed".
+    await git(f.mainRepo, "switch", "--orphan", "unrelated-for-submit")
+    await run(["git", "-C", f.mainRepo, "rm", "-qrf", "."], f.mainRepo)
+    const unrelated = await commit(f.mainRepo, "unrelated-for-submit.txt")
+
+    const result = await push(f, `${unrelated}:refs/yrd/submit/issue/submit-dangling`, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("not reachable from branch 'issue/submit-dangling'")
+    expect(result.stderr).not.toContain("already an ancestor")
+  })
+
+  it("refuses a submit ref for a branch with no ref in this repository at all", async () => {
+    const f = await fixture("submitref-noref")
+    await git(f.mainRepo, "switch", "-qc", "issue/never-pushed")
+    const headSha = await commit(f.mainRepo, "never-pushed.txt")
+    const env = await installHookHost(f.root, { "issue/never-pushed": target(f.baseSha) })
+
+    // The branch itself was never pushed to this receiver — no tip to check
+    // reachability against, a distinct cause from "pushed but unrelated".
+    const result = await push(f, `${headSha}:refs/yrd/submit/issue/never-pushed`, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("has no ref in this repository")
+  })
+
+  it("refuses a submit ref naming a commit already an ancestor of the base branch", async () => {
+    const f = await fixture("submitref-landed")
+    // No new commits: the branch sits exactly at the base tip, which is
+    // trivially both reachable from itself AND already on 'main'.
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-landed")
+    const env = await installHookHost(f.root, { "issue/submit-landed": target(f.baseSha) })
+    expect((await push(f, "issue/submit-landed:refs/heads/issue/submit-landed", env)).code).toBe(0)
+
+    const result = await push(f, `${f.baseSha}:refs/yrd/submit/issue/submit-landed`, env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("already an ancestor of base branch 'main'")
+    expect(result.stderr).not.toContain("not reachable")
+  })
+
+  it("refuses a submit ref for a branch no active bay tracks", async () => {
+    const f = await fixture("submitref-unauthorized")
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-unauth")
+    const headSha = await commit(f.mainRepo, "submit-unauth.txt")
+    expect(
+      (
+        await push(
+          f,
+          "issue/submit-unauth:refs/heads/issue/submit-unauth",
+          await installHookHost(f.root, { "issue/submit-unauth": target(f.baseSha) }),
+        )
+      ).code,
+    ).toBe(0)
+
+    // A DIFFERENT env for the submit itself: no active bay tracks the branch
+    // (closed since, or a submit attempted out of band) — the same policy a
+    // branch push is refused under, reused rather than reinvented.
+    const result = await push(f, `${headSha}:refs/yrd/submit/issue/submit-unauth`, await installHookHost(f.root, {}))
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("is not authorized for Yrd intake")
+  })
+
+  it("accepts deleting a submit ref — unsubmit", async () => {
+    const f = await fixture("submitref-unsubmit")
+    await git(f.mainRepo, "switch", "-qc", "issue/unsubmit")
+    const headSha = await commit(f.mainRepo, "unsubmit.txt")
+    const env = await installHookHost(f.root, { "issue/unsubmit": target(f.baseSha) })
+    expect((await push(f, "issue/unsubmit:refs/heads/issue/unsubmit", env)).code).toBe(0)
+    expect((await push(f, `${headSha}:refs/yrd/submit/issue/unsubmit`, env)).code).toBe(0)
+
+    const result = await push(f, ":refs/yrd/submit/issue/unsubmit", env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/unsubmit")).toBe("")
+  })
+
+  it("translates a refs/heads/ branch deletion into an atomic archival: archive created, branch gone, submit swept", async () => {
+    const f = await fixture("archive-branch")
+    await git(f.mainRepo, "switch", "-qc", "issue/archive-me")
+    const headSha = await commit(f.mainRepo, "archive-me.txt")
+    const env = await installHookHost(f.root, { "issue/archive-me": target(f.baseSha) })
+    expect((await push(f, "issue/archive-me:refs/heads/issue/archive-me", env)).code).toBe(0)
+    // Submit it first, so the deletion has something live to sweep — the
+    // "atomically" claim is only meaningful with all three refs in play.
+    expect((await push(f, `${headSha}:refs/yrd/submit/issue/archive-me`, env)).code).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/archive-me")).toBe(headSha)
+
+    const result = await push(f, ":refs/heads/issue/archive-me", env)
+    expect(result.code, result.stderr).toBe(0)
+
+    // All three post-states, the model doc's own inventory for one branch.
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/heads/issue/archive-me")).toBe("")
+    expect(
+      await git(f.receiver.receiverPath, "rev-parse", `refs/yrd/archive/issue/archive-me-${headSha.slice(0, 12)}`),
+    ).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/archive-me")).toBe("")
+  })
+
+  it("refuses to archive a branch no active bay tracks, leaving it untouched", async () => {
+    const f = await fixture("archive-unauthorized")
+    await git(f.mainRepo, "switch", "-qc", "issue/archive-unauth")
+    const headSha = await commit(f.mainRepo, "archive-unauth.txt")
+    expect(
+      (
+        await push(
+          f,
+          "issue/archive-unauth:refs/heads/issue/archive-unauth",
+          await installHookHost(f.root, { "issue/archive-unauth": target(f.baseSha) }),
+        )
+      ).code,
+    ).toBe(0)
+
+    // Refused at PRE-RECEIVE, before git deletes anything — a branch that
+    // fails authorization for archival must never vanish either.
+    const result = await push(f, ":refs/heads/issue/archive-unauth", await installHookHost(f.root, {}))
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("is not authorized for Yrd intake")
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/archive-unauth")).toBe(headSha)
+  })
+
+  it("refuses a direct write to the archive shelf, create or delete", async () => {
+    const f = await fixture("archive-direct-write")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const headSha = await commit(f.mainRepo, "direct.txt")
+    const env = await installHookHost(f.root, { work: target(f.baseSha) })
+    const archiveRef = `refs/yrd/archive/some-branch-${headSha.slice(0, 12)}`
+    // An ordinary accepted push first — an object must actually exist in the
+    // RECEIVER's own store (not just f.mainRepo's) before a low-level
+    // update-ref against receiverPath can name it below; a push a pre-receive
+    // hook refuses never transfers its objects out of quarantine at all.
+    expect((await push(f, "work:refs/heads/work", env)).code).toBe(0)
+
+    const created = await push(f, `${headSha}:${archiveRef}`, env)
+    expect(created.code).not.toBe(0)
+    expect(created.stderr).toContain("archive shelf")
+    expect(created.stderr).toContain("never by a direct push")
+    expect(await git(f.receiver.receiverPath, "for-each-ref", archiveRef)).toBe("")
+
+    // A pre-existing shelf entry, written directly against the receiver's own
+    // repo the way fixture setup always does elsewhere in this file (never
+    // through a push) — proving the refusal reaches deletion too, not merely
+    // "you can't create one".
+    await git(f.receiver.receiverPath, "update-ref", archiveRef, headSha)
+    const deleted = await push(f, `:${archiveRef}`, env)
+    expect(deleted.code).not.toBe(0)
+    expect(deleted.stderr).toContain("archive shelf")
+    expect(await git(f.receiver.receiverPath, "rev-parse", archiveRef)).toBe(headSha)
+  })
+
+  it("re-points refs/yrd/submit/<branch> at the pushed tip on every refs/for push, creating then updating it", async () => {
+    const f = await fixture("submit-dual-write")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const firstHead = await commit(f.mainRepo, "first.txt")
+    const env = await installHookHost(f.root, {
+      "for:main/dual-write": target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
+    })
+    expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
+    expect(
+      (
+        await f.receiver.drain({
+          resolveTarget: async (_branch, _update, intent) =>
+            intent === undefined ? null : target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
+          intake: async () => {},
+        })
+      ).failed,
+    ).toEqual([])
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(firstHead)
+
+    // Model the first result's carrier materialization (see "refuses a
+    // rewritten submit patchset" above for why a SECOND refs/for push needs
+    // this), then add a commit that descends from it — "every refs/for push
+    // RE-submits", not just the first.
+    await git(f.mainRepo, "update-ref", "refs/heads/issue/dual-write", firstHead)
+    const secondHead = await commit(f.mainRepo, "second.txt")
+    expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
+    expect(
+      (
+        await f.receiver.drain({
+          resolveTarget: async (_branch, _update, intent) =>
+            intent === undefined ? null : target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
+          intake: async () => {},
+        })
+      ).failed,
+    ).toEqual([])
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(secondHead)
   })
 
   // Passes before this change as well as after, deliberately: opening one

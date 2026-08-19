@@ -18,6 +18,22 @@ const BRANCH_PREFIX = "refs/heads/"
  * that is pushed but unsubmitted has no representation at all.
  */
 const SUBMIT_PREFIX = "refs/for/"
+/**
+ * The branch-is-change model's approval fact (bead-branch-is-change, phase 1).
+ * `refs/yrd/submit/<branch>` names the exact commit its author approves to
+ * land — pushing it IS the API, exactly like `refs/for/` is for Gerrit-shaped
+ * submission. Distinct from `SUBMIT_PREFIX` above: that namespace names a
+ * CHANGE that predates its branch; this one approves a commit on a branch
+ * that already exists.
+ */
+const SUBMIT_REF_PREFIX = "refs/yrd/submit/"
+/**
+ * The branch-is-change model's shelf: a deleted branch is never gone, it is
+ * moved here (`<branch>-<old-tip-shortsha>`). Permanent — the receiver
+ * refuses every direct write, create or delete; the only way onto or off of
+ * this namespace is `authorize()` translating a `refs/heads/` deletion.
+ */
+const ARCHIVE_REF_PREFIX = "refs/yrd/archive/"
 const ZERO_SHA = /^0+$/u
 const HEX_SHA = /^[0-9a-f]+$/u
 const REPOSITORY_ENV =
@@ -316,7 +332,15 @@ async function prepareReceiverUpdates(
   try {
     for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
       const update = ReceiverRefUpdateSchema.parse(value)
-      const result = makeResult(update, await authorize(receiver, update, options, "before"), clock)
+      const authorized = await authorize(receiver, update, options, "before")
+      // A submit-ref write/delete or a branch-deletion archival is fully
+      // validated here (that IS the point of running at pre-receive), but
+      // produces no inbox result: there are no new commits for `intake` to
+      // process, only a git ref fact the push itself (or, for archival, the
+      // post-receive translation) already carries. See `finalizeReceiverUpdates`
+      // for where an "archive" kind performs its actual ref-transaction.
+      if (authorized.kind !== "intake") continue
+      const result = makeResult(update, authorized, clock)
       const stored = await storeResult(receiver, "prepared", result)
       if (stored.created) created.push(stored.path)
       results.push(result)
@@ -340,7 +364,7 @@ async function finalizeReceiverUpdates(
     const update = ReceiverRefUpdateSchema.parse(value)
     const id = resultId(update)
     const path = resultPath(receiver, "prepared", id)
-    let result: ReceiverResult
+    let result: ReceiverResult | undefined
     if (await entry(path)) {
       result = await readResult(path, id)
       const stored = updateOf(result)
@@ -355,11 +379,30 @@ async function finalizeReceiverUpdates(
       )
       await validateStored(receiver, result, options)
     } else {
-      result = makeResult(update, await authorize(receiver, update, options, "after"), clock)
-      await storeResult(receiver, "prepared", result)
+      // No prepared entry exists — either pre-receive never ran (a recovery/
+      // direct-call edge case) or this update's `authorize()` never stores one
+      // by design (submit-ref, archive). Either way it must be authorized
+      // fresh, now against the POST-receive state (`stage: "after"`), before
+      // any of its effects — inbox result, or an archival's ref transaction —
+      // are allowed to happen.
+      const authorized = await authorize(receiver, update, options, "after")
+      if (authorized.kind === "archive") {
+        // Post-receive is deliberately when this runs: git's own receive-pack
+        // has already applied the branch deletion the push requested (see
+        // `applyArchival`'s doc for why the hook itself never performs that
+        // delete), so the transaction below is racing nothing.
+        await applyArchival(receiver, update, authorized.branch, options.env)
+      } else if (authorized.kind === "intake") {
+        result = makeResult(update, authorized, clock)
+        await storeResult(receiver, "prepared", result)
+      }
+      // "submit-ref": git's own ref update already applied the write (or the
+      // delete); there is nothing further to do at post-receive.
     }
-    await moveResult(receiver, result, "prepared", "pending")
-    results.push(result)
+    if (result !== undefined) {
+      await moveResult(receiver, result, "prepared", "pending")
+      results.push(result)
+    }
   }
   if (options.intake) await receiver.drain({ ...options, intake: options.intake })
   return results
@@ -389,6 +432,15 @@ async function drainReceiverInbox(
       try {
         await validateStored(receiver, result, options)
         await options.intake(result)
+        // A `refs/for/` result IS a submission — re-point the submit ref at
+        // this tip (dual-write, phase 1: `result.intake.submit` above already
+        // carries the fact for the caller's own bay/journal; phase 2 re-points
+        // readers here instead). After intake, not before: a failed intake
+        // retries the whole result on the next drain, and this write should
+        // not have happened for a result nothing downstream has accepted yet.
+        if (result.change !== undefined) {
+          await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
+        }
         await rm(path)
         await syncDir(receiver.inboxDir)
         drain.delivered.push(result.id)
@@ -415,7 +467,7 @@ export async function runReceiverHookFromEnvironment(
 }
 
 type Result = { code: number; stdout: string; stderr: string }
-type ExecOptions = { env?: Environment; allowFailure?: boolean }
+type ExecOptions = { env?: Environment; allowFailure?: boolean; stdin?: string }
 type StoredResult = { path: string; result: ReceiverResult }
 const GIT_TIMEOUT_MS = 30_000
 
@@ -439,7 +491,13 @@ async function exec(
   cwd: string,
   options: ExecOptions = {},
 ): Promise<Result> {
-  const completed = await process.run({ argv, cwd, env: options.env ?? gitEnv(), timeoutMs: GIT_TIMEOUT_MS })
+  const completed = await process.run({
+    argv,
+    cwd,
+    env: options.env ?? gitEnv(),
+    timeoutMs: GIT_TIMEOUT_MS,
+    ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+  })
   if (completed.timedOut) throw new Error(`yrd: ${argv.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
   const result = { code: completed.exitCode, stdout: completed.stdout.trim(), stderr: completed.stderr.trim() }
   check(
@@ -534,7 +592,12 @@ function receiverConfig(receiver: GitPushReceiver): ReadonlyArray<readonly [stri
     ["yrd.mainRepo", receiver.mainRepo],
     ["yrd.inboxDir", receiver.inboxDir],
     ["receive.advertisePushOptions", "true"],
-    ["receive.denyDeletes", "true"],
+    // Git-level deletion is allowed; `authorize()` is the actual policy — it
+    // translates a `refs/heads/` deletion into archival, allows unsubmitting
+    // (`refs/yrd/submit/*` deletion), and refuses everything else, exactly as
+    // `receive.denyNonFastForwards: false` already delegates non-fast-forward
+    // policy to the hooks rather than a blanket git-level rule.
+    ["receive.denyDeletes", "false"],
     ["receive.denyNonFastForwards", "false"],
     ["receive.fsckObjects", "true"],
     ["transfer.fsckObjects", "true"],
@@ -833,20 +896,240 @@ async function validateQueueConfig(
   await options.validateConfig(await readPushedBlob(receiver, update.newSha, ".yrd.yml", options.env))
 }
 
+/**
+ * The generic "did this ref actually move the way the push claims" check,
+ * applicable to any ref this receiver accepts — intake branches, `refs/for`
+ * submits, `refs/yrd/submit/*`, and a `refs/heads/*` deletion alike. Not a
+ * reimplementation of git's own old-value CAS (git already refuses the wire
+ * update if the ref moved out from under it); this is the receiver's own
+ * belt-and-suspenders re-read, run at both hook stages like every other check
+ * in `authorize()`, and — now that deletion is a real, accepted outcome —
+ * correctly normalizes a zero sha to "no ref" on EITHER side of the update.
+ */
+async function checkNotStale(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  stage: "before" | "after",
+  env?: Environment,
+): Promise<void> {
+  const current = await refValue(receiver, update.ref, env)
+  const relevant = stage === "after" ? update.newSha : update.oldSha
+  const expected = ZERO_SHA.test(relevant) ? null : relevant
+  check(
+    current === expected,
+    `stale ${stage === "before" ? "push" : "post-receive"} for '${update.ref}': expected ${expected ?? "no ref"}, found ${current ?? "no ref"}`,
+  )
+}
+
+/**
+ * The two structural facts a `refs/yrd/submit/<branch>` write must satisfy
+ * (bead-branch-is-change): (a) reachable from the branch's own current tip —
+ * a submit approves a commit that was actually pushed, not one invented out
+ * of thin air — and (b) not already an ancestor of the base branch — a submit
+ * approves work still worth landing, not history already on main. The two
+ * failures are named distinctly per the model doc ("a dangling sha and an
+ * already-landed sha are different refusals"). Deletion (unsubmit) skips this
+ * entirely — retracting an approval is unconditional, and git's own old-value
+ * CAS on the ref update is all the locking it needs.
+ */
+async function validateSubmitRefValue(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  branch: string,
+  options: ReceiverHookOptions,
+): Promise<void> {
+  const branchTip = await refValue(receiver, `${BRANCH_PREFIX}${branch}`, options.env)
+  check(
+    branchTip !== null,
+    `submit ref '${update.ref}' names ${update.newSha.slice(0, 12)} but branch '${branch}' has no ref in this repository; push the branch before submitting it`,
+  )
+  const reachable = await receiverGit(receiver, ["merge-base", "--is-ancestor", update.newSha, branchTip], {
+    env: options.env,
+    allowFailure: true,
+  })
+  check(
+    reachable.code === 0,
+    `submit ref '${update.ref}' names ${update.newSha.slice(0, 12)}, which is not reachable from branch ` +
+      `'${branch}''s current tip ${branchTip.slice(0, 12)} (equal or an ancestor); push the branch first`,
+  )
+  const resolved = await options.resolveTarget(branch, update, undefined)
+  check(resolved, withIntakePolicy(`branch '${branch}' is not authorized for Yrd intake`, options))
+  const target = normalizeTarget(resolved, receiver)
+  await validBranch(receiver, target.base, "base branch")
+  const baseTip = await mainGit(
+    receiver.process,
+    receiver.mainRepo,
+    ["rev-parse", "--verify", `refs/heads/${target.base}^{commit}`],
+    { env: options.env, allowFailure: true },
+  )
+  check(baseTip.code === 0, `base branch '${target.base}' does not resolve in the main repository`)
+  const landed = await receiverGit(receiver, ["merge-base", "--is-ancestor", update.newSha, baseTip.stdout], {
+    env: options.env,
+    allowFailure: true,
+    includeMainObjects: true,
+  })
+  check(
+    landed.code !== 0,
+    `submit ref '${update.ref}' names ${update.newSha.slice(0, 12)}, which is already an ancestor of base branch '${target.base}'; nothing left to submit`,
+  )
+}
+
+/**
+ * The archive shelf name a deleted branch lands on — the branch name plus the
+ * old tip's 12-char abbreviation, the format the model doc names verbatim
+ * (`refs/yrd/archive/task/fix-drain-<sha>`). Centralized so the precondition
+ * check (`validateArchival`) and the transaction that actually creates it
+ * (`applyArchival`) can never compute two different names for the same event.
+ */
+function archiveRefFor(branch: string, oldSha: string): string {
+  return `${ARCHIVE_REF_PREFIX}${branch}-${oldSha.slice(0, 12)}`
+}
+
+/**
+ * Everything that must hold before a `refs/heads/<branch>` deletion is
+ * allowed to proceed at all: the archive name it will land on must not
+ * already be taken. Run at BOTH hook stages, same as pin/carrier/config
+ * above — pre-receive is what actually protects the branch, since only
+ * pre-receive can still refuse the push before git deletes anything; once
+ * accepted, git applies the deletion itself (the hook never deletes the
+ * branch ref — see `applyArchival`), so a failure caught only at post-receive
+ * would mean the branch is already gone with nothing archived. This check
+ * existing at both stages narrows that race, it does not close it — the same
+ * residual window every other dual-stage check in this file already accepts.
+ */
+async function validateArchival(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  branch: string,
+  env?: Environment,
+): Promise<void> {
+  const archiveRef = archiveRefFor(branch, update.oldSha)
+  const existing = await refValue(receiver, archiveRef, env)
+  check(
+    existing === null,
+    `archiving branch '${branch}' at ${update.oldSha.slice(0, 12)} would collide with the existing archive entry '${archiveRef}'`,
+  )
+}
+
+/**
+ * The archival translation itself, run at post-receive once git has already
+ * applied the branch deletion the push requested. One atomic
+ * `git update-ref --stdin` transaction (verified empirically: a plain
+ * multi-line batch, and explicitly with `start`/`prepare`/`commit`, both
+ * apply all-or-nothing — a bad or unmet command anywhere in the batch leaves
+ * every ref in the batch untouched) that:
+ *
+ *   - creates the archive shelf entry at the branch's old tip,
+ *   - VERIFIES (never deletes) that `refs/heads/<branch>` is gone — git's own
+ *     receive-pack already deleted it as part of accepting this push, before
+ *     post-receive ever runs; doing that deletion here too, or doing it in
+ *     pre-receive to "help", would race git's own ref transaction (whichever
+ *     writes second finds a value that no longer matches its expected old
+ *     value and fails) — so this only asserts the fact and aborts the whole
+ *     transaction loudly if it somehow does not hold, rather than archiving a
+ *     branch that is still alive,
+ *   - sweeps a live submit ref for the same branch, if one exists.
+ *
+ * `delete <ref> <old>` on an already-nonexistent ref fails ("does not
+ * exist") rather than no-op'ing — confirmed empirically — which is exactly
+ * why the branch ref gets `verify`, and why the submit-ref delete line is
+ * included only when a current value was actually read.
+ */
+async function applyArchival(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  branch: string,
+  env?: Environment,
+): Promise<void> {
+  const archiveRef = archiveRefFor(branch, update.oldSha)
+  const submitRef = `${SUBMIT_REF_PREFIX}${branch}`
+  const submitCurrent = await refValue(receiver, submitRef, env)
+  const zero = "0".repeat(receiver.shaLength)
+  const commands = [
+    "start",
+    `create ${archiveRef} ${update.oldSha}`,
+    `verify ${BRANCH_PREFIX}${branch} ${zero}`,
+    ...(submitCurrent === null ? [] : [`delete ${submitRef} ${submitCurrent}`]),
+    "prepare",
+    "commit",
+    "",
+  ].join("\n")
+  await receiverGit(receiver, ["update-ref", "--stdin"], { env, stdin: commands })
+}
+
+/**
+ * Every `refs/for/<base>/<change>` push re-submits its tip (model doc: "push
+ * IS submit" applies on every push, not just the first). Dual-written
+ * alongside the existing `result.intake.submit` fact this drain step already
+ * records for the caller's own bay/journal — phase 1 keeps both writes; phase
+ * 2 re-points readers at this ref alone. No CAS against the ref's previous
+ * value: a fresh submission supersedes whatever was submitted before, or
+ * nothing at all, unconditionally.
+ */
+async function writeSubmitRefForCarrier(
+  receiver: GitPushReceiver,
+  branch: string,
+  headSha: string,
+  env?: Environment,
+): Promise<void> {
+  await receiverGit(receiver, ["update-ref", `${SUBMIT_REF_PREFIX}${branch}`, headSha], { env })
+}
+
+type AuthorizedUpdate =
+  | Readonly<{ kind: "intake"; branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent }>
+  | Readonly<{ kind: "submit-ref"; branch: string }>
+  | Readonly<{ kind: "archive"; branch: string }>
+
 async function authorize(
   receiver: GitPushReceiver,
   update: ReceiverRefUpdate,
   options: ReceiverHookOptions,
   stage: "before" | "after",
-): Promise<{ branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent }> {
+): Promise<AuthorizedUpdate> {
   validSha(update.oldSha, receiver.shaLength, "old commit id", true)
   validSha(update.newSha, receiver.shaLength, "new commit id", true)
-  check(!ZERO_SHA.test(update.newSha), `ref deletion is not accepted for '${update.ref}'`)
-  const isSubmit = update.ref.startsWith(SUBMIT_PREFIX)
+  const deleting = ZERO_SHA.test(update.newSha)
+
+  // The shelf is permanent: written only by `applyArchival` translating a
+  // branch deletion, never by a direct push in either direction.
   check(
-    isSubmit || (update.ref.startsWith(BRANCH_PREFIX) && update.ref.length > BRANCH_PREFIX.length),
+    !update.ref.startsWith(ARCHIVE_REF_PREFIX),
+    `refs under '${ARCHIVE_REF_PREFIX}' are the archive shelf; they are written only by archiving a branch ` +
+      `(deleting its '${BRANCH_PREFIX}' ref), never by a direct push`,
+  )
+
+  if (update.ref.startsWith(SUBMIT_REF_PREFIX)) {
+    const branch = update.ref.slice(SUBMIT_REF_PREFIX.length)
+    check(branch.length > 0, `submit ref '${update.ref}' names no branch`)
+    await validBranch(receiver, branch, "submit branch")
+    await checkNotStale(receiver, update, stage, options.env)
+    if (!deleting) await validateSubmitRefValue(receiver, update, branch, options)
+    return { kind: "submit-ref", branch }
+  }
+
+  const isSubmit = update.ref.startsWith(SUBMIT_PREFIX)
+  const isBranch = update.ref.startsWith(BRANCH_PREFIX) && update.ref.length > BRANCH_PREFIX.length
+  check(
+    isSubmit || isBranch,
     `only branch refs under ${BRANCH_PREFIX} and submit refs under ${SUBMIT_PREFIX} are accepted, got '${update.ref}'`,
   )
+
+  // A branch deletion translates to archival instead of landing on the
+  // intake path below — there are no new commits here for intake to process,
+  // only a branch that stops existing under `refs/heads/` and starts existing
+  // under `refs/yrd/archive/` instead.
+  if (isBranch && deleting) {
+    const branch = update.ref.slice(BRANCH_PREFIX.length)
+    const resolved = await options.resolveTarget(branch, update, undefined)
+    check(resolved, withIntakePolicy(`branch '${branch}' is not authorized for Yrd intake`, options))
+    await validBranch(receiver, branch, "intake branch")
+    await checkNotStale(receiver, update, stage, options.env)
+    await validateArchival(receiver, update, branch, options.env)
+    return { kind: "archive", branch }
+  }
+
+  check(!deleting, `ref deletion is not accepted for '${update.ref}'`)
+
   // A submit push predates its bay by construction, so it cannot be authorized
   // by "an active bay tracks this branch" — the ref carries the intent instead,
   // and the resolver's job becomes opening the bay rather than finding one.
@@ -874,16 +1157,11 @@ async function authorize(
     intent === undefined || target.base === intent.base,
     `submit ref '${update.ref}' targets base '${intent?.base ?? ""}' but intake resolved base '${target.base}'`,
   )
-  const current = await refValue(receiver, update.ref, options.env)
-  const expected = stage === "after" ? update.newSha : ZERO_SHA.test(update.oldSha) ? null : update.oldSha
-  check(
-    current === expected,
-    `stale ${stage === "before" ? "push" : "post-receive"} for '${update.ref}': expected ${expected ?? "no ref"}, found ${current ?? "no ref"}`,
-  )
+  await checkNotStale(receiver, update, stage, options.env)
   await validatePin(receiver, update, target, options.env)
   if (intent !== undefined) await validateSubmitCarrier(receiver, update, branch, options.env)
   await validateQueueConfig(receiver, update, options)
-  return intent === undefined ? { branch, target } : { branch, target, intent }
+  return intent === undefined ? { kind: "intake", branch, target } : { kind: "intake", branch, target, intent }
 }
 
 function resultId(update: ReceiverRefUpdate): string {
@@ -892,7 +1170,7 @@ function resultId(update: ReceiverRefUpdate): string {
 
 function makeResult(
   update: ReceiverRefUpdate,
-  authorized: { branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent },
+  authorized: Readonly<{ kind: "intake"; branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent }>,
   clock: () => string,
 ): ReceiverResult {
   const { branch, target, intent } = authorized
