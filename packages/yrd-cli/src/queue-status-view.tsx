@@ -620,6 +620,21 @@ export type QueueTimelineRunner = Readonly<{
    * confident zero.
    */
   sourceBehind?: number
+  /**
+   * `draft-stranded` findings (@yrd/queue `auditQueues`) old enough to page —
+   * projected by the resident from the canonical audit exactly like
+   * {@link QueueRunnerProgress}, so the probe never re-derives draft state
+   * itself (the fast, journal-free health path cannot afford to). Age-gated by
+   * `.yrd.yml` `drafts.pageAfterHours` at the point this is computed, so
+   * presence here already means "page-worthy" — a shorter-lived draft is a
+   * real `queue audit` finding but is deliberately absent here, or every
+   * ordinary push-review-submit pause would page.
+   *
+   * Absent means NOT MEASURED (a status record written before this field
+   * existed) or measured-and-empty; both render as "no stale drafts" today,
+   * matching every other resident-observed fact on this type.
+   */
+  staleDrafts?: readonly QueueAuditFinding[]
 }>
 
 export type QueueRunnerRefusal = Readonly<{

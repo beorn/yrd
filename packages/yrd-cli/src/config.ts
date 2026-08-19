@@ -171,6 +171,27 @@ const ProgressSchema = z
   .strict()
   .default({})
 
+/** Built-in hours a pushed-but-unsubmitted draft may sit before health checks
+ * and `yrd watch` surface it as a page-worthy warning. Distinct from — and much
+ * longer than — `queue audit`'s own DRAFT_STRANDED_GRACE_MS (@yrd/queue,
+ * 15 minutes): that grace is how soon the finding exists at all, long enough
+ * to allow a deliberate push-review-submit pause; this is how long it may sit
+ * unpaged before a live seat should actually be interrupted. Live specimens
+ * that motivated the finding sat 9-22 hours (@i/10-merge-queue/drafts-strand-silently);
+ * a default in between catches those long before they age out a full day
+ * without paging on every short pause. */
+export const DEFAULT_DRAFT_PAGE_AFTER_HOURS = 4
+
+const DraftsSchema = z
+  .object({
+    /** Hours, not ms — the config surface is for repository owners, and every
+     * live incident this exists to catch is hours-scale. Unset keeps
+     * {@link DEFAULT_DRAFT_PAGE_AFTER_HOURS}. */
+    pageAfterHours: z.number().positive().optional(),
+  })
+  .strict()
+  .default({})
+
 /**
  * Whether anything in this repository is ever going to drain its queue.
  *
@@ -202,6 +223,7 @@ const ProjectFields = {
   requires: RequirementsSchema.optional(),
   contest: ContestSchema,
   progress: ProgressSchema,
+  drafts: DraftsSchema,
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -218,6 +240,7 @@ export type YrdProjectConfig = Readonly<{
   requires?: readonly "review"[]
   contest: Readonly<z.infer<typeof ContestSchema>>
   progress: Readonly<z.infer<typeof ProgressSchema>>
+  drafts: Readonly<z.infer<typeof DraftsSchema>>
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -240,6 +263,11 @@ export type ResolvedYrdProjectConfig = Readonly<{
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
   progress?: QueueProgressPolicy
+  /** Optional, like `progress`, for the same reason: `loadYrdConfig` always
+   * populates it, but hand-built fixtures throughout the test suite construct
+   * this type directly without it. Absent means "use the built-in default" —
+   * see {@link DEFAULT_DRAFT_PAGE_AFTER_HOURS} — never "drafts never page". */
+  drafts?: Readonly<{ pageAfterHours: number }>
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -262,7 +290,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, guards, merge, landing, requires, contest, progress } = parsed.data
+    const { base, batch, checks, guards, merge, landing, requires, contest, progress, drafts } = parsed.data
     if (merge !== undefined && landing !== undefined && merge !== landing) {
       throw createFailure({
         kind: "configuration",
@@ -280,6 +308,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       ...(requires === undefined ? {} : { requires }),
       contest,
       progress,
+      drafts,
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -311,7 +340,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "checks", "requires", "contest", "progress"].includes(path)
+    !["base", "batch", "checks", "requires", "contest", "progress", "drafts"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -326,6 +355,7 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["progress.noLandingMs", "must be an integer >= 1"],
     ["progress.refusalCount", "must be an integer >= 1"],
     ["progress.minAdmissionChecks", "must be an integer >= 1"],
+    ["drafts.pageAfterHours", "must be a positive number"],
   ])
   const message =
     known.get(path) ??
@@ -426,6 +456,9 @@ export async function loadYrdConfig(options: {
         noLandingMs: parsed.progress.noLandingMs ?? DEFAULT_QUEUE_PROGRESS_POLICY.noLandingMs,
         refusalCount: parsed.progress.refusalCount ?? DEFAULT_QUEUE_PROGRESS_POLICY.refusalCount,
         minAdmissionChecks: parsed.progress.minAdmissionChecks ?? DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks,
+      },
+      drafts: {
+        pageAfterHours: parsed.drafts.pageAfterHours ?? DEFAULT_DRAFT_PAGE_AFTER_HOURS,
       },
       flows: flows.flows,
     },

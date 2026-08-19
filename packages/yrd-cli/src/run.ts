@@ -85,7 +85,12 @@ import {
   type Run,
 } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
-import { loadYrdConfig, renderYrdConfigScaffold } from "./config.ts"
+import {
+  DEFAULT_DRAFT_PAGE_AFTER_HOURS,
+  loadYrdConfig,
+  renderYrdConfigScaffold,
+  type ResolvedYrdProjectConfig,
+} from "./config.ts"
 import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
@@ -428,6 +433,58 @@ function residentRunnerTimestamp(value: unknown, field: string): string {
   return value
 }
 
+/** One resident-observed {@link QueueAuditFinding}, validated field-by-field.
+ * Shared by every status-file field that carries findings verbatim from the
+ * canonical audit (`queueProgress.findings`, `staleDrafts`) so the wire
+ * contract for "what is a valid finding" cannot drift between them. `context`
+ * names the owning field in every raised message. */
+function parseQueueAuditFinding(value: unknown, context: string): QueueAuditFinding {
+  if (typeof value !== "object" || value === null) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${context} is invalid`)
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.code !== "string" || typeof record.message !== "string") {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      `yrd: resident runner ${context} identity is invalid`,
+    )
+  }
+  for (const field of ["run", "pr", "specimen", "step", "refusal", "submitter", "reviewCertification"] as const) {
+    if (record[field] !== undefined && typeof record[field] !== "string") {
+      raiseFailure(
+        "infrastructure",
+        "resident-runner-status-invalid",
+        `yrd: resident runner ${context} ${field} is invalid`,
+      )
+    }
+  }
+  if (
+    record.resolution !== undefined &&
+    (!Array.isArray(record.resolution) || record.resolution.some((step) => typeof step !== "string"))
+  ) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      `yrd: resident runner ${context} resolution is invalid`,
+    )
+  }
+  if (record.count !== undefined && (!Number.isSafeInteger(record.count) || (record.count as number) < 0)) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${context} count is invalid`)
+  }
+  if (record.since !== undefined && (typeof record.since !== "string" || !Number.isFinite(Date.parse(record.since)))) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${context} since is invalid`)
+  }
+  if (record.blockedMs !== undefined && (!Number.isSafeInteger(record.blockedMs) || (record.blockedMs as number) < 0)) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      `yrd: resident runner ${context} blockedMs is invalid`,
+    )
+  }
+  return record as QueueAuditFinding
+}
+
 function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "object" || value === null) {
@@ -442,73 +499,22 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
   // contract remain readable, but their un-timestamped belief is not health.
   if (progress.state === "healthy") return observedAt === undefined ? undefined : { state: "healthy", observedAt }
   if (progress.state === "stalled" && Array.isArray(progress.findings) && progress.findings.length > 0) {
-    const findings = progress.findings.map((finding): QueueAuditFinding => {
-      if (typeof finding !== "object" || finding === null) {
-        raiseFailure(
-          "infrastructure",
-          "resident-runner-status-invalid",
-          "yrd: resident runner queueProgress finding is invalid",
-        )
-      }
-      const record = finding as Record<string, unknown>
-      if (typeof record.code !== "string" || typeof record.message !== "string") {
-        raiseFailure(
-          "infrastructure",
-          "resident-runner-status-invalid",
-          "yrd: resident runner queueProgress finding identity is invalid",
-        )
-      }
-      for (const field of ["run", "pr", "specimen", "step", "refusal"] as const) {
-        if (record[field] !== undefined && typeof record[field] !== "string") {
-          raiseFailure(
-            "infrastructure",
-            "resident-runner-status-invalid",
-            `yrd: resident runner queueProgress finding ${field} is invalid`,
-          )
-        }
-      }
-      if (
-        record.resolution !== undefined &&
-        (!Array.isArray(record.resolution) || record.resolution.some((step) => typeof step !== "string"))
-      ) {
-        raiseFailure(
-          "infrastructure",
-          "resident-runner-status-invalid",
-          "yrd: resident runner queueProgress finding resolution is invalid",
-        )
-      }
-      if (record.count !== undefined && (!Number.isSafeInteger(record.count) || (record.count as number) < 0)) {
-        raiseFailure(
-          "infrastructure",
-          "resident-runner-status-invalid",
-          "yrd: resident runner queueProgress finding count is invalid",
-        )
-      }
-      if (
-        record.since !== undefined &&
-        (typeof record.since !== "string" || !Number.isFinite(Date.parse(record.since)))
-      ) {
-        raiseFailure(
-          "infrastructure",
-          "resident-runner-status-invalid",
-          "yrd: resident runner queueProgress finding since is invalid",
-        )
-      }
-      if (
-        record.blockedMs !== undefined &&
-        (!Number.isSafeInteger(record.blockedMs) || (record.blockedMs as number) < 0)
-      ) {
-        raiseFailure(
-          "infrastructure",
-          "resident-runner-status-invalid",
-          "yrd: resident runner queueProgress finding blockedMs is invalid",
-        )
-      }
-      return record as QueueAuditFinding
-    })
+    const findings = progress.findings.map((finding) => parseQueueAuditFinding(finding, "queueProgress finding"))
     return observedAt === undefined ? undefined : { state: "stalled", observedAt, findings }
   }
   raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
+}
+
+/** `staleDrafts` is a plain finding array (unlike `queueProgress`, no wrapping
+ * state/observedAt envelope) — presence already means "measured", and an empty
+ * array is a real, common answer ("no stale drafts"), so it is never coerced to
+ * undefined the way an empty `queueProgress.findings` would be nonsensical. */
+function parseStaleDraftFindings(value: unknown): readonly QueueAuditFinding[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner staleDrafts is invalid")
+  }
+  return value.map((finding) => parseQueueAuditFinding(finding, "staleDrafts finding"))
 }
 
 function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
@@ -707,6 +713,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   const driver = parseQueueDriverEpoch(record.driver)
   const uncarried = parseUncarriedObservation(record.uncarried)
   const retention = parseJournalRetentionObservation(record.retention)
+  const staleDrafts = parseStaleDraftFindings(record.staleDrafts)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -746,6 +753,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(driver === undefined ? {} : { driver }),
     ...(uncarried === undefined ? {} : { uncarried }),
     ...(retention === undefined ? {} : { retention }),
+    ...(staleDrafts === undefined ? {} : { staleDrafts }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -1135,6 +1143,45 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
   return findings.length === 0 ? { state: "healthy", observedAt: now } : { state: "stalled", observedAt: now, findings }
 }
 
+/** Hours to milliseconds for `.yrd.yml` `drafts.pageAfterHours`. Named rather
+ * than inlined `* 3_600_000` at each of its two call sites (resident heartbeat
+ * setup, watch snapshot build) so both read the identical config the identical
+ * way. */
+function draftPageThresholdMs(config: Pick<ResolvedYrdProjectConfig, "drafts">): number {
+  return (config.drafts?.pageAfterHours ?? DEFAULT_DRAFT_PAGE_AFTER_HOURS) * 3_600_000
+}
+
+/**
+ * `draft-stranded` findings old enough to page, projected from the canonical
+ * audit exactly like {@link residentQueueProgress} — never re-derived from PR
+ * state directly, so the finding a watcher or health check sees and the one
+ * `queue audit` prints for the same draft can never disagree.
+ *
+ * Age-gated by `thresholdMs` HERE, not by the caller: `draft-stranded` already
+ * exists the moment `queue audit` runs (DRAFT_STRANDED_GRACE_MS, 15 minutes —
+ * long enough for a deliberate push-review-submit pause), which is far too
+ * eager a bar for an unattended surface a live seat did not ask to check. A
+ * shorter-lived draft is a real, correct `queue audit` finding; it is
+ * deliberately absent from this narrower, page-worthy set.
+ */
+export function staleDraftFindings(
+  app: Pick<YrdCliApp, "queue">,
+  now: string,
+  thresholdMs: number,
+): readonly QueueAuditFinding[] {
+  return app.queue
+    .audit({ now })
+    .findings.filter((finding) => finding.code === "draft-stranded" && (finding.blockedMs ?? 0) >= thresholdMs)
+}
+
+/** One scannable warning line per stale draft, in the same `[code] message`
+ * shape {@link queuePauseWarnings} already established — the finding's own
+ * `message` already names the branch, submitter and review certification
+ * (@yrd/queue `auditQueues`), so this never re-derives that text. */
+export function staleDraftWarnings(findings: readonly QueueAuditFinding[]): string[] {
+  return findings.map((finding) => `[draft-stranded] ${finding.message}`)
+}
+
 /** Exact latest landing driven for one queue. The epoch heartbeat publishes
  * this content so a probe can distinguish the right driver from an unrelated
  * resident process with the same service name. */
@@ -1502,7 +1549,13 @@ async function checkQueueRunner(
     ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
     ...gitLines,
   ].join("\n")
-  await printResult(io, jsonEnabled(options), result.payload, human)
+  // Non-fatal by construction: a stale draft never flips `state`/`exitCode` —
+  // draft WIP is first-class (operator ruling) and this is detection only —
+  // but it must still reach whoever reads this command, JSON or human, which
+  // `printResultWithWarnings` already does uniformly for every other advisory
+  // finding in this CLI (queuePauseWarnings, queue-read failures).
+  const warnings = staleDraftWarnings(result.payload.facts.runner?.staleDrafts ?? [])
+  await printResultWithWarnings(io, jsonEnabled(options), result.payload, human, warnings)
   return result.exitCode
 }
 
@@ -1594,6 +1647,11 @@ export async function startResidentRunnerHeartbeat(
       epoch?: string
       lastMerged: () => QueueDriverEpoch["lastMerged"]
     }>
+    /** Page-worthy `draft-stranded` findings, re-derived every tick exactly
+     * like `queueProgress` — so the health probe (which has no app and no
+     * journal, and cannot afford either) can prove them from the status file
+     * instead of re-deriving draft state itself. */
+    staleDrafts?: (now: string) => readonly QueueAuditFinding[]
   }> = {},
 ): Promise<ResidentRunnerHeartbeat> {
   const cwd = io.cwd ?? process.cwd()
@@ -1641,6 +1699,7 @@ export async function startResidentRunnerHeartbeat(
     const lastTickAt = nowIso()
     const queueProgress = recordedProgress ?? options.queueProgress?.(lastTickAt)
     const uncarried = options.uncarried?.()
+    const staleDrafts = options.staleDrafts?.(lastTickAt)
     const status: QueueTimelineRunner = {
       pid: process.pid,
       startedAt,
@@ -1649,6 +1708,10 @@ export async function startResidentRunnerHeartbeat(
       // Omitted, never zeroed: absent means not measured, and the rail must be
       // able to tell that from a swept-and-clean queue.
       ...(uncarried === undefined ? {} : { uncarried }),
+      // Unlike `uncarried`, an EMPTY array is a meaningful, common measurement
+      // ("no stale drafts") and is written as such — only a caller that never
+      // wired the option at all (an older resident) omits the key.
+      ...(staleDrafts === undefined ? {} : { staleDrafts }),
       ...(options.retention === undefined || driverEpoch === undefined
         ? {}
         : {
@@ -6626,6 +6689,16 @@ async function buildQueueListSnapshot(
   const primaryBase = baseIdentity(requestedBase)
   const base = results.some((result) => result.base === primaryBase) ? primaryBase : (results[0]?.base ?? primaryBase)
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
+  // Computed directly from `app`, like `runnerRefusal` above — never read back
+  // off a resident's heartbeat, which may be stale or (watching a repository
+  // with no resident yet) simply absent. Watch has the journal in hand and can
+  // always afford this; the health PROBE cannot, which is why it reads the
+  // resident-precomputed field instead (queueRunnerHealth in this file).
+  const staleDrafts = staleDraftFindings(
+    app,
+    new Date(now).toISOString(),
+    draftPageThresholdMs((await loadYrdConfig({ repo: io.cwd ?? process.cwd(), defaultBase: requestedBase })).config),
+  )
   const clock = createQueueTimelineProjectionClock(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -6665,6 +6738,7 @@ async function buildQueueListSnapshot(
       now,
       projection,
       ...(runnerRefusal === undefined ? {} : { runnerRefusal }),
+      ...(staleDrafts.length === 0 ? {} : { staleDrafts }),
     },
     reclock: clock.reclock,
   }
@@ -6904,6 +6978,7 @@ async function listQueues(
     }),
     [
       ...queuePauseWarnings(snapshot.state, snapshot.results),
+      ...staleDraftWarnings(snapshot.staleDrafts ?? []),
       ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure)]),
     ],
   )
@@ -9853,10 +9928,20 @@ export async function followQueueRuns(
   // once it writes, the departed pid is lost. The exclusive resident lock guarantees
   // that prior resident is not concurrently running as a resident.
   if (resident) await reclaimDeadResidentRunner(app, io)
+  // Loaded once at startup, never per-tick — the same tradeoff `queueProgress`
+  // and `uncarried` already make for resident-side facts that do not need to
+  // react to a config edit mid-run. A restarted resident picks up a changed
+  // `drafts.pageAfterHours` the same way it picks up any other config change.
+  const draftThresholdMs = resident
+    ? draftPageThresholdMs(
+        (await loadYrdConfig({ repo: io.cwd ?? process.cwd(), defaultBase: base })).config,
+      )
+    : 0
   const heartbeat = resident
     ? await startResidentRunnerHeartbeat(io, {
         queueProgress: (now) => residentQueueProgress(app, now),
         uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
+        staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
         ...(io.journalRetentionPolicy === undefined ? {} : { retention: io.journalRetentionPolicy }),
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
@@ -10132,6 +10217,7 @@ async function watchQueue(
       }),
       [
         ...queuePauseWarnings(snapshot.state, snapshot.results),
+        ...staleDraftWarnings(snapshot.staleDrafts ?? []),
         ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure, true)]),
       ],
     )

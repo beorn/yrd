@@ -7787,6 +7787,203 @@ describe("runYrd", () => {
     }
   })
 
+  /**
+   * The consumption half of the same gap the previous test's neighbor
+   * describes (@i/10-merge-queue/drafts-strand-silently): the DETECTOR is not
+   * new (queue.audit's draft-stranded finding, proven above and in
+   * orphaned-run-recovery.test.ts), but nothing that watches the queue ever
+   * read it — 22 drafts sat a day unnoticed despite an audit that had the
+   * answer the whole time. These three tests prove the finding actually
+   * reaches a live seat: the resident heartbeat (this test), `queue list
+   * --check` (the fleet health surface), and `queue list` / `queue list
+   * --watch` (the same loader `yrd watch` renders).
+   */
+  it("writes page-worthy stale drafts into the resident heartbeat, gated by the page threshold", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-stale-drafts-"))
+    execFileSync("git", ["init", "-q", repo])
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
+    const fourHourThresholdMs = 4 * 60 * 60_000
+    try {
+      await app.bays.intake({
+        branch: "issue/stranded-draft",
+        headSha: "3".repeat(40),
+        base: "main",
+        baseSha: BASE_SHA,
+        submitter: "@dev/11",
+      })
+      const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/stranded-draft")
+      if (pr === undefined) throw new Error("intake did not record the PR")
+      expect(pr.revs.at(-1)?.submittedAt, "the fixture must be a true draft, never submitted").toBeUndefined()
+
+      // One hour on: a real draft-stranded finding exists (past queue audit's
+      // own 15-minute existence grace) but well under the 4-hour default page
+      // threshold. It must stay OUT of the heartbeat, or every ordinary
+      // push-review-submit pause would page.
+      const stillQuiet = await runInternals.startResidentRunnerHeartbeat(
+        outputIO({
+          cwd: repo,
+          runner: `yrd-cli:${process.pid}`,
+          now: () => Date.parse("2026-07-09T13:00:00.000Z"),
+        }).io,
+        {
+          intervalMs: 60_000,
+          staleDrafts: (now) => runInternals.staleDraftFindings(app, now, fourHourThresholdMs),
+          driver: { queueId: `${repo}#main`, lastMerged: () => null },
+        },
+      )
+      try {
+        expect(
+          JSON.parse(readFileSync(statusPath, "utf8")).staleDrafts,
+          "a real finding exists at +1h, but must stay quiet below the page threshold",
+        ).toEqual([])
+      } finally {
+        await stillQuiet.close(true)
+      }
+
+      // 4.5 hours on: past the page threshold. Must reach the heartbeat WITH
+      // owner attribution, and must never disagree with queue audit's own
+      // reading of the identical PR at the identical clock.
+      const paging = await runInternals.startResidentRunnerHeartbeat(
+        outputIO({
+          cwd: repo,
+          runner: `yrd-cli:${process.pid}`,
+          now: () => Date.parse("2026-07-09T16:30:00.000Z"),
+        }).io,
+        {
+          intervalMs: 60_000,
+          staleDrafts: (now) => runInternals.staleDraftFindings(app, now, fourHourThresholdMs),
+          driver: { queueId: `${repo}#main`, lastMerged: () => null },
+        },
+      )
+      try {
+        const written = JSON.parse(readFileSync(statusPath, "utf8"))
+        expect(written.staleDrafts).toMatchObject([
+          {
+            code: "draft-stranded",
+            pr: pr.id,
+            submitter: "@dev/11",
+            blockedMs: Date.parse("2026-07-09T16:30:00.000Z") - Date.parse("2026-07-09T12:00:00.000Z"),
+          },
+        ])
+        expect(app.queue.audit({ now: "2026-07-09T16:30:00.000Z" }).findings).toContainEqual(
+          expect.objectContaining({ code: "draft-stranded", pr: pr.id }),
+        )
+        paging.check()
+      } finally {
+        await paging.close(true)
+      }
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
+  it("surfaces a resident-observed stale draft as a non-fatal warning in `queue list --check`", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-stale-drafts-"))
+    execFileSync("git", ["init", "-q", "-b", "main", repo])
+    execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
+    execFileSync("git", ["-C", repo, "config", "user.email", "yrd@example.invalid"])
+    writeFileSync(join(repo, "README.md"), "base\n")
+    execFileSync("git", ["-C", repo, "add", "README.md"])
+    execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
+    const stateDir = join(repo, ".git", "yrd", "resident-runner")
+    mkdirSync(stateDir, { recursive: true })
+    const finding = {
+      code: "draft-stranded",
+      message:
+        "PR 'PR1' (issue/stranded) was pushed at 2026-07-09T12:00:00.000Z by @dev/7, review: unreviewed, and " +
+        "nothing has submitted it; it is invisible to the queue until someone does",
+      pr: "PR1",
+      specimen: "pr:PR1",
+      since: "2026-07-09T12:00:00.000Z",
+      blockedMs: 16_200_000,
+      submitter: "@dev/7",
+      reviewCertification: "unreviewed",
+      resolution: ["yrd pr submit issue/stranded --issue <ref>", "or withdraw it: yrd pr withdraw PR1 --burn-payload"],
+    }
+    writeFileSync(
+      join(stateDir, "status.json"),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: "2026-07-09T12:00:00.000Z",
+        lastTickAt: "2026-07-09T16:30:00.000Z",
+        staleDrafts: [finding],
+      }),
+    )
+    const app = await createApp()
+    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings: [] }) } }
+    try {
+      // Deliberately the "absent" health state (no lease, no queued work on
+      // THIS app) rather than "healthy" — a stale draft must page regardless
+      // of whether anything else about the runner is fine or broken.
+      const json = outputIO({ cwd: repo, now: () => Date.parse("2026-07-09T16:30:10.000Z") })
+      const jsonExit = await runYrd(app, yrd("queue", "list", "--check", "--json"), json.io, services)
+      const body = JSON.parse(json.stdout())
+      expect(jsonExit, JSON.stringify(body)).toBe(1)
+      expect(body.state).toBe("absent")
+      expect(body.facts.runner.staleDrafts).toEqual([finding])
+      expect(body.warnings).toEqual([`[draft-stranded] ${finding.message}`])
+
+      const human = outputIO({ cwd: repo, now: () => Date.parse("2026-07-09T16:30:10.000Z") })
+      expect(await runYrd(app, yrd("queue", "list", "--check"), human.io, services), human.stderr()).toBe(1)
+      expect(human.stderr()).toContain("[draft-stranded]")
+      expect(human.stderr()).toContain("@dev/7")
+      expect(human.stderr()).toContain("issue/stranded")
+    } finally {
+      await app.close()
+      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
+  it("pages a stranded draft past the threshold in `queue list`, quiet below it — the same loader `yrd watch` renders", async () => {
+    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
+    try {
+      await app.bays.intake({
+        branch: "issue/stranded-in-watch",
+        headSha: "5".repeat(40),
+        base: "main",
+        baseSha: BASE_SHA,
+        submitter: "@dev/7",
+      })
+
+      const quiet = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
+      expect(await runYrd(app, yrd("queue", "list", "--json"), quiet.io), quiet.stderr()).toBe(0)
+      expect(
+        JSON.parse(quiet.stdout()).warnings,
+        "a real finding at +1h must stay quiet below the 4h default page threshold",
+      ).toBeUndefined()
+
+      const paging = outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z") })
+      expect(await runYrd(app, yrd("queue", "list", "--json"), paging.io), paging.stderr()).toBe(0)
+      const pagingBody = JSON.parse(paging.stdout())
+      expect(pagingBody.warnings).toHaveLength(1)
+      expect(pagingBody.warnings[0]).toContain("[draft-stranded]")
+      expect(pagingBody.warnings[0]).toContain("@dev/7")
+      expect(pagingBody.warnings[0]).toContain("issue/stranded-in-watch")
+
+      const humanPaging = outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z"), columns: 120 })
+      expect(await runYrd(app, yrd("queue", "list"), humanPaging.io), humanPaging.stderr()).toBe(0)
+      expect(humanPaging.stderr()).toContain("[draft-stranded]")
+      expect(humanPaging.stderr()).toContain("@dev/7")
+
+      // The interactive `yrd watch` pane and its --json twin share this exact
+      // snapshot builder (buildQueueListSnapshot) — proving the data reaches
+      // it here proves it reaches the pane's footer notice too.
+      const snapshot = await runInternals.queueListSnapshot(
+        app,
+        [],
+        {},
+        outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z") }).io,
+        { queueReadModel: testQueueReadModel(app) },
+      )
+      expect(snapshot.staleDrafts).toHaveLength(1)
+      expect(snapshot.staleDrafts?.[0]?.submitter).toBe("@dev/7")
+    } finally {
+      await app.close()
+    }
+  })
+
   it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])

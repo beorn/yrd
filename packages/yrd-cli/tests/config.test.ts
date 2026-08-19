@@ -6,7 +6,13 @@
  */
 import { describe, expect, it } from "vitest"
 import { DEFAULT_QUEUE_BATCH_SIZE, DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/queue"
-import { loadYrdConfig, parseYrdConfig, renderYrdConfigScaffold, stepGateMode } from "../src/config.ts"
+import {
+  DEFAULT_DRAFT_PAGE_AFTER_HOURS,
+  loadYrdConfig,
+  parseYrdConfig,
+  renderYrdConfigScaffold,
+  stepGateMode,
+} from "../src/config.ts"
 
 describe("Yrd v4 config", () => {
   it("loads the one-line checks vocabulary and installs merge as landing machinery", async () => {
@@ -65,6 +71,29 @@ describe("Yrd v4 config", () => {
     ).toThrow("yrd: config progress.notify is not supported")
     expect(() => parseYrdConfig({ checks: [], progress: { noLandingMs: 0, refusalCount: 3 } })).toThrow(
       "yrd: config progress.noLandingMs must be an integer >= 1",
+    )
+  })
+
+  it("resolves drafts.pageAfterHours, defaulting when absent and rejecting unknown drafts keys", async () => {
+    const undeclared = await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      read: async () => "checks: [typecheck]\n",
+    })
+    expect(undeclared.config.drafts).toEqual({ pageAfterHours: DEFAULT_DRAFT_PAGE_AFTER_HOURS })
+
+    const declared = await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      read: async () => "checks: [typecheck]\ndrafts: {pageAfterHours: 8}\n",
+    })
+    expect(declared.config.drafts).toEqual({ pageAfterHours: 8 })
+
+    expect(() => parseYrdConfig({ checks: [], drafts: { pageAfterHours: 0 } })).toThrow(
+      "yrd: config drafts.pageAfterHours must be a positive number",
+    )
+    expect(() => parseYrdConfig({ checks: [], drafts: { pageAfterHours: 4, notify: "@chief" } })).toThrow(
+      "yrd: config drafts.notify is not supported",
     )
   })
 

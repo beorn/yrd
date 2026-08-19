@@ -22,6 +22,7 @@ import {
   type ListViewHandle,
 } from "silvery"
 import { formatChangeRevisionSelector, changeRevisionNumber, type BaysState, type PR } from "@yrd/bay"
+import type { QueueAuditFinding } from "@yrd/queue"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailChangeList,
@@ -153,6 +154,12 @@ export type QueueWatchSnapshot = Readonly<{
   diffs?: readonly QueueChangeDiff[]
   /** Resolved project commands for the live step headers. */
   commands?: Readonly<Record<string, string>>
+  /** `draft-stranded` findings old enough to page (`.yrd.yml`
+   * `drafts.pageAfterHours`) — a visible row, never only a `queue audit`
+   * record nobody ran. Absent/empty both mean "no stale drafts"; the pane
+   * never distinguishes not-yet-measured from measured-and-clean here, unlike
+   * the resident status file, because a live watch snapshot always measures. */
+  staleDrafts?: readonly QueueAuditFinding[]
 }>
 
 /** The one immutable row identity whose expensive detail data watch may load. */
@@ -1265,16 +1272,32 @@ function QueueWatchHelp({ onClose }: { onClose: () => void }) {
   )
 }
 
+/** One footer-width line for however many page-worthy stale drafts the
+ * snapshot carries: the oldest (first — `staleDraftFindings` filters, never
+ * reorders, so array order is audit order) leads with its owner, and the rest
+ * collapse to a count rather than truncating mid-list. Undefined for none,
+ * matching every other footer notice's absent-means-nothing contract. */
+function staleDraftFooterNotice(findings: readonly QueueAuditFinding[]): string | undefined {
+  const [first, ...rest] = findings
+  if (first === undefined) return undefined
+  const owner = first.submitter === undefined ? "no recorded owner" : first.submitter
+  const pr = first.pr === undefined ? "a draft" : `PR ${first.pr}`
+  const more = rest.length === 0 ? "" : `, +${rest.length} more`
+  return `${pr} stranded (owner=${owner}${more}) — yrd queue audit for detail, yrd pr submit or withdraw to clear`
+}
+
 function QueueWatchFooter({
   cancelArmed,
   selectedRun,
   readFailure,
   cursorNotice,
+  staleDrafts,
 }: Readonly<{
   cancelArmed: boolean
   selectedRun?: string
   readFailure?: QueueReadFailure
   cursorNotice?: string
+  staleDrafts?: readonly QueueAuditFinding[]
 }>) {
   if (cancelArmed && selectedRun !== undefined) {
     return (
@@ -1285,7 +1308,14 @@ function QueueWatchFooter({
       </Box>
     )
   }
-  const notice = readFailure === undefined ? cursorNotice : queueReadFailureMessage(readFailure, true)
+  // Priority, highest first: an active read failure is a broken surface right
+  // now; a cursor notice means the row the operator was on just disappeared,
+  // both more urgent than a background fact that has been true for hours by
+  // the time it can appear here at all (drafts.pageAfterHours, default 4h).
+  const notice =
+    readFailure === undefined
+      ? (cursorNotice ?? staleDraftFooterNotice(staleDrafts ?? []))
+      : queueReadFailureMessage(readFailure, true)
   if (notice === undefined) return null
   return (
     <Box height={1} flexShrink={0}>
@@ -1766,13 +1796,16 @@ export function QueueWatchFrame({
         )}
       </Box>
       {/* The keybinding footer was removed (user directive 2026-07-15). Bottom
-          chrome is reserved for explicit state changes: run cancellation and
-          a loud cursor recovery when the selected row disappears. */}
+          chrome is reserved for explicit state changes: run cancellation, a
+          loud cursor recovery when the selected row disappears, and — lowest
+          priority, since it is a background fact rather than something this
+          render just did — a page-worthy stale draft. */}
       <QueueWatchFooter
         cancelArmed={cancelArmed}
         {...(selectedRow?.run === undefined ? {} : { selectedRun: selectedRow.run })}
         {...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure })}
         {...(resolvedCursorState.notice === undefined ? {} : { cursorNotice: resolvedCursorState.notice })}
+        {...(snapshot.staleDrafts === undefined ? {} : { staleDrafts: snapshot.staleDrafts })}
       />
       {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
     </Box>
