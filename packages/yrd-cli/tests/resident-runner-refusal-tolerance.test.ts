@@ -191,8 +191,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
             createFailure({
               kind: "refusal",
               code,
-              message:
-                "yrd: PR 'PR1579' changes generated-only gitlinks [km]; submit pin work as 'yrd intent submit --component km --target 1111111111111111111111111111111111111111 --issue <issue-ref>'",
+              message: "yrd: PR 'PR1579' changes generated-only gitlinks [km]",
             }),
           ),
         () => {

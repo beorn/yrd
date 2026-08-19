@@ -140,23 +140,33 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
         .filter(Boolean)
 }
 
+// A pure pin advance is an ordinary change: fast-forward the component's own
+// main to the target commit, then submit the root branch like any other
+// change — the queue fills the shaset in itself. `yrd intent submit`, the
+// mechanical per-component verb this used to print, is retired (23000); the
+// remedy is always derived here, never trusted from upstream message prose.
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
-  const embedded = embeddedYrdCommands(failure.message).filter((command) => command.startsWith("yrd intent submit "))
-  const generated = authoredGitlinkSubmodules(failure.message).map(
-    (submodule) => `yrd intent submit --component ${submodule} --issue <issue-ref>`,
-  )
+  const submodules = authoredGitlinkSubmodules(failure.message)
+  const generated =
+    submodules.length === 0
+      ? []
+      : [
+          ...submodules.map((submodule) => `git -C ${submodule} push origin <target-sha>:main`),
+          "yrd pr submit <branch>",
+        ]
   const submoduleModelChange = failure.message.includes("pin intents advance existing components only")
   return Object.freeze({
     code: failure.code,
     cause,
     resolution: Object.freeze(
       submoduleModelChange
-        ? ["Escalate the component-model addition or deletion; yrd intent submit only advances an existing gitlink."]
-        : embedded.length > 0
-          ? embedded
-          : generated.length > 0
-            ? generated
-            : [GENERIC_RESOLUTION],
+        ? [
+            "Escalate the component-model addition or deletion; a gitlink bump only advances an existing " +
+              "component, never adds or removes one.",
+          ]
+        : generated.length > 0
+          ? generated
+          : [GENERIC_RESOLUTION],
     ),
     reference: "README.md#pr-eligibility-and-checks",
   })

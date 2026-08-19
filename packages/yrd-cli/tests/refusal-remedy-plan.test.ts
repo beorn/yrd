@@ -28,9 +28,7 @@ function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): Qu
     pr: id,
     code: "authored-gitlink",
     kind: "refusal",
-    reason:
-      `yrd: PR '${id}' changes generated-only gitlinks [km]; use ` +
-      "'yrd intent submit --component km --target 1111111111111111111111111111111111111111 --issue one'",
+    reason: `yrd: PR '${id}' changes generated-only gitlinks [km]`,
     count: 3,
     firstAt: "2026-07-27T15:00:00.000Z",
     lastAt: "2026-07-27T15:51:00.000Z",

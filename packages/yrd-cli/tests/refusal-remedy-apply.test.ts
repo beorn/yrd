@@ -159,9 +159,7 @@ describe("resident refusal remedies — only PR-local drills are self-applied", 
   it("settles authored-gitlink as needs-person without mutating the PR", async () => {
     const h = harness({
       code: "authored-gitlink",
-      reason:
-        "yrd: PR 'PR1791' changes generated-only gitlinks [km]; use " +
-        "'yrd intent submit --component km --target 1111111111111111111111111111111111111111 --issue one'",
+      reason: "yrd: PR 'PR1791' changes generated-only gitlinks [km]",
     })
 
     const outcomes = await applyRefusalRemedies(h.app, h.services, h.io, new Set())
