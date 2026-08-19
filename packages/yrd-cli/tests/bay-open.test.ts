@@ -769,12 +769,22 @@ printf '%s' "$$" > cwd-guest.pid
     }
   })
 
-  it("fails the launch loudly when a Bay's dependencies cannot be installed", async () => {
+  it("fails the launch loudly when a Bay's dependencies cannot be installed, as infrastructure rather than a branch refusal (22917)", async () => {
     const fixture = await packagedRepository()
     const tools = await packageManagerShim({ install: "fails" })
     try {
       const run = output(fixture.repo)
-      expect(await yrd(fixture.repo, run.io, "bay", "run", CLAIM, "--", "ag")).toBe(1)
+      // Exit 3 (infrastructure), never 1 (refusal). `bay run` has no --json
+      // option to read the structured failure fact back, but this codebase's
+      // classifyFailure() is exhaustive over exactly four kinds — usage and
+      // configuration both exit 2, refusal exits 1, and infrastructure is the
+      // ONLY kind that exits 3 — so this exit code IS the kind, not a proxy
+      // for it (see cli.test.ts's own `.toBe(3)` assertions for the same
+      // convention). The queue's own throwaway workspace failed to provision,
+      // which is nothing the branch did; exiting 1 here blames the branch for
+      // a machine problem and sends the author chasing a bug that was never
+      // theirs.
+      expect(await yrd(fixture.repo, run.io, "bay", "run", CLAIM, "--", "ag")).toBe(3)
       const stderr = run.stderr()
       expect(stderr).toContain("could not install its dependencies")
       expect(stderr).toContain("bun install --frozen-lockfile --ignore-scripts")
