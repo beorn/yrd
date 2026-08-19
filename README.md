@@ -733,7 +733,7 @@ therefore performs no Git work and appends nothing.
 Patch drift and gitlink pins that require authored composition remain loud,
 typed refusals; an independent PR can still refresh in the same cycle.
 Likewise, a tracked revision whose preflight proves `SUBSUMED-WITHDRAW` records
-one revision-bound machine comment and stays out of admission until an operator
+one revision-bound machine comment and is not queued until an operator
 decides; later resident cycles do not repeat the same warning, while a new
 branch push creates a new revision and is evaluated normally.
 Separately, selectorless composition ejects a PR whose exact submit/check

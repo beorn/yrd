@@ -3933,7 +3933,7 @@ function shellQuote(value: string): string {
  * without flipping the backstop, deliberately: "its deletion ships with the provisioner lift
  * or not at all" (shaset-model.md). The provisioner lift shipped in step (b), so step (d) is
  * that flip: a published, on-main, single-update authored gitlink is now admitted, and the
- * queue's own composition-time fill (`fillAuthoredGitlinksFromMain`, unchanged) derives its
+ * queue's own composition-time fill (`fillAuthoredGitlinksFromMain`, unchanged) fills in its
  * shaset value from the submodule's main. An ADDED gitlink still refuses unconditionally —
  * that machinery is update-only — as does a DELETED, off-main, or unpublished one.
  * See tests/authored-gitlink-admission.test.ts and @i/10-merge-queue/shaset-model.
@@ -3998,9 +3998,9 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
     return
   }
 
-  // A min commit is a floor on an EXISTING component: the shaset-commit writer is
+  // A min commit is a floor on an EXISTING submodule: the shaset-commit writer is
   // update-only, so an added (or, structurally invisible to changedSubmodulePins today,
-  // deleted) gitlink can never be derived the way an updated one can — always refuse.
+  // deleted) gitlink can never be filled in the way an updated one can — always refuse.
   const added = await addedSubmodulePins({ process: services.process, repo, baseSha, pins: changed })
   if (added.length > 0) {
     raiseFailure(
@@ -4044,7 +4044,7 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
     )
   }
   // Every remaining pin is a straightforward update, published and on its submodule's main —
-  // admitted. The queue's own composition-time fill derives the shaset value at merge; this
+  // admitted. The queue's own composition-time fill writes the shaset value at merge; this
   // gate's only job was to stop refusing what that machinery can now safely process.
 }
 

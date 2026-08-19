@@ -197,7 +197,7 @@ export async function changedSubmodulePins(options: {
  * function's output at all — a pre-existing gap this function does not attempt to close.
  *
  * Distinguishing an addition matters because a min commit is a floor on an EXISTING
- * component: the shaset-commit writer (`synthesizeGitlinkWrapper`) is update-only (comma-form
+ * submodule: the shaset-commit writer (`synthesizeGitlinkWrapper`) is update-only (comma-form
  * `--cacheinfo` cannot add a path), so admitting an added gitlink here would let a request
  * through that composition can never actually satisfy.
  */
