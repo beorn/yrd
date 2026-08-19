@@ -2272,6 +2272,64 @@ checks: [{check: {run: "true"}}]
     expect(await readFile(join(stateDir, "journal.sqlite"), "utf8")).toBe("not a sqlite database")
   })
 
+  /**
+   * `--repo`/`--config` DO govern config resolution for the normal command
+   * path (verified directly: `--repo`/`--config` pointed at a repository whose
+   * `.yrd.yml` a built-in check name cannot resolve correctly fails `yrd queue
+   * list` with that repository's own config error). But `queue list --check`
+   * runs through SEPARATE bootstrap machinery — the cheap, journal-free probe
+   * (`bootstrap.probe`, host.ts) that a Hab-style supervisor polls frequently —
+   * and that machinery used to set `io.cwd` to the `--repo`-selected
+   * repository only AFTER `bootstrap.probe()` returned successfully. When the
+   * SELECTED repository's own config is exactly what makes probe() throw (the
+   * PR1337 shape), the assignment never ran, and the process-level catch
+   * handler re-ran the health check against `io` with its cwd still unset —
+   * silently falling back to `process.cwd()`, the ambient directory, and
+   * reporting a misleading "not a Git queue repository" about THAT directory
+   * instead of naming the real config problem in the repository --repo
+   * actually selected. A flag's authority must hold on the error path too.
+   */
+  it("keeps --repo's authority on the queue list --check error path, naming the real config problem", async () => {
+    const ambient = await repository()
+    const root = await mkdtemp(join(tmpdir(), "yrd-check-repo-flag-"))
+    roots.push(root)
+    const selectedPath = join(root, "selected")
+    await git(root, "init", "-q", "-b", "main", selectedPath)
+    const selected = await realpath(selectedPath)
+    await git(selected, "config", "user.name", "Yrd Test")
+    await git(selected, "config", "user.email", "yrd@example.invalid")
+    // `lint` has no built-in definition (config.ts's resolveCheck) — a real,
+    // named config error, distinct from "not a Git repository" and from
+    // `ambient`'s own (valid) config, so which repository's facts came back
+    // is unambiguous.
+    await writeFile(join(selected, ".yrd.yml"), "checks: [lint]\n")
+    await git(selected, "add", ".yrd.yml")
+    await git(selected, "commit", "-qm", "invalid config")
+
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", selected, "queue", "list", "--check", "--json"],
+      {
+        // The ambient cwd is a DIFFERENT, valid repository — proving the
+        // reported facts follow --repo, never silently fall back to cwd.
+        cwd: ambient.repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    const body = JSON.parse(stdout || "{}")
+    expect(exitCode, `stdout=${stdout} stderr=${stderr}`).toBe(2)
+    expect(body.facts?.git?.cwd, "facts must name the --repo-selected directory, not the ambient one").toBe(selected)
+    expect(body.error?.code).toBe("check-definition-missing")
+    expect(body.error?.cause).toContain("required check 'lint' has no built-in definition")
+    expect(body.error?.cause).not.toContain("is not a Git queue repository")
+  })
+
   it("preserves every Yrd state byte while listing a populated PR journal", async () => {
     const { repo, featureSha } = await repository()
     await commitYrdConfig(

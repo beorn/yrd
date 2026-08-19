@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { DEFAULT_QUEUE_BATCH_SIZE, DEFAULT_QUEUE_PROGRESS_POLICY } from "@yrd/queue"
-import { loadYrdConfig, parseYrdConfig, renderYrdConfigScaffold, stepGateMode } from "../src/config.ts"
+import { loadYrdConfig, parseYrdConfig, renderYrdConfigScaffold, stepGateMode, validatePushedYrdConfig } from "../src/config.ts"
 
 describe("Yrd v4 config", () => {
   it("loads the one-line checks vocabulary and installs merge as landing machinery", async () => {
@@ -66,6 +66,33 @@ describe("Yrd v4 config", () => {
     expect(() => parseYrdConfig({ checks: [], progress: { noLandingMs: 0, refusalCount: 3 } })).toThrow(
       "yrd: config progress.noLandingMs must be an integer >= 1",
     )
+  })
+
+  // The submission/admission gate this queue's Git receiver runs BEFORE a push
+  // is even accepted (@yrd/bay's ReceiverHookOptions.validateConfig — @yrd/bay
+  // cannot import this schema directly, so the receiver only reads the pushed
+  // blob and hands it here). PR1337 (2026-08-19): this exact invalid key
+  // passed typecheck, lockfile and manifest gates — none of them parse
+  // `.yrd.yml` — then wedged the resident for 31 minutes once its config load
+  // (always from the base ref) hit the newly-landed key.
+  describe("validatePushedYrdConfig — the queue's own admission gate for a pushed .yrd.yml", () => {
+    it("refuses the PR1337 shape: a comparison value the schema does not accept", () => {
+      expect(() =>
+        validatePushedYrdConfig("checks: [typecheck, {test-fast: {comparison: gate-residuals}}]\n"),
+      ).toThrow('yrd: config test-fast.comparison Invalid input: expected "diagnostics"')
+    })
+
+    it("admits the current config unchanged", () => {
+      expect(() => validatePushedYrdConfig("checks: [typecheck]\n")).not.toThrow()
+    })
+
+    it("admits a pushed tree with no .yrd.yml at all — the built-in defaults, not a skip", () => {
+      expect(() => validatePushedYrdConfig(undefined)).not.toThrow()
+    })
+
+    it("refuses malformed YAML loudly rather than treating it as absent", () => {
+      expect(() => validatePushedYrdConfig("checks: [typecheck\n")).toThrow()
+    })
   })
 
   it("keeps a one-line run escape hatch inside the checks list", async () => {
