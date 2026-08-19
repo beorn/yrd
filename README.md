@@ -43,13 +43,13 @@ A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstr
 
 The **shaset** is the set of submodule commits a superproject commit records; every merge writes a new one. In one paragraph:
 
-> A merge request's gitlinks are **min commits** — *at least this commit*. Before queueing, the queue checks each min commit is **on that submodule's main**; if not, the request **parks** until the submodule lands it. At merge, the queue **fills in** each submodule's final commit from its main and writes the **shaset** — authored gitlinks never land as-is. Nothing to merge = **nothing new**.
+> A change's gitlinks are **min commits** — *at least this commit*. Before queueing, the queue checks each min commit is **on that submodule's main**; if not, the change **parks** until the submodule lands it. At merge, the queue **fills in** each submodule's final commit from its main and writes the **shaset** — authored gitlinks never land as-is. Nothing to merge = **nothing new**.
 
 Standard git words — **submodule · gitlink · superproject** — mean exactly what git means by them; **shaset** is the one coined term.
 
 ### Content commits and shaset commits
 
-A merge request's history holds exactly two commit species:
+A change's history holds exactly two commit species:
 
 | | **Content commit** | **Shaset commit** |
 |---|---|---|
@@ -58,16 +58,16 @@ A merge request's history holds exactly two commit species:
 | Gitlinks | never | always |
 
 ```text
-merge request
+change
 ├─ content commit   "add feature"                     (author)
 ├─ content commit   "fix tests"                       (author)
 └─ shaset commit    gitlinks + lock — the version     (queue)
                     checks ran against
 
-pure pin advance = a merge request with exactly one shaset commit
+pure pin advance = a change with exactly one shaset commit
 ```
 
-- Each time the queue moves the request's shaset up — a submodule's main advanced, the base moved — it writes a **new shaset commit**; no invisible rebase.
+- Each time the queue moves the change's shaset up — a submodule's main advanced, the base moved — it writes a **new shaset commit**; no invisible rebase.
 - Only versions **checks actually ran against** are kept; superseded ones are pruned.
 - Payoffs: `git log` answers *which shaset did this run prove?* with a commit ref · review reads content diffs with zero gitlink noise · the machine half is machine-checkable.
 
@@ -79,7 +79,8 @@ pure pin advance = a merge request with exactly one shaset commit
 | ~~derivation / derived~~ | the queue **fills in** the values and **writes the shaset** |
 | ~~demand~~ | **min commit** |
 | ~~component~~ | **submodule** — the git word, everywhere |
-| ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **merge request whose diff is one shaset commit**; deleting this rail is scheduled work |
+| ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **change whose diff is one shaset commit**; deleting this rail is scheduled work |
+| ~~merge request / pull request~~ | **change** — `mr`/`pr` remain taught aliases; ids still print as `PRnnn` |
 
 ## The model — five objects, one pipeline
 
