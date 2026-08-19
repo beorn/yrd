@@ -160,6 +160,16 @@ async function hookedSubmoduleRepository(options: {
    * submodule's main COMPOSES (the queue writes the shaset from main), so
    * refusal-path tests need a floor that is genuinely not on main. */
   candidateOffMain?: boolean
+  /** Which halves of the coupled unit the carrier actually carries.
+   *
+   * Default (undefined) is `"both"` and is byte-identical to this fixture's
+   * long-standing behaviour: the gitlink bump and the root consumer ride
+   * together. `"pin-only"` and `"code-only"` exist so a gate that reads BOTH
+   * halves can be shown to REFUSE when either is missing — the "where either
+   * half alone is red" arm of @i/10-merge-queue/coupled-pin-and-code, which no
+   * test expressed before. Landing green is not the claim; landing green under
+   * a gate that could have failed is. */
+  carry?: "both" | "pin-only" | "code-only"
 }): Promise<{ repo: string; remote: string; baseSha: string; featureSha: string; moduleSha: string }> {
   const { repo } = await repository()
   const module = join(repo, "..", "module")
@@ -180,13 +190,25 @@ async function hookedSubmoduleRepository(options: {
   const moduleSha = await git(module, ["rev-parse", "HEAD"])
   if (options.candidateOffMain === true) await git(module, ["switch", "-q", "main"])
   await git(repo, ["switch", "-qc", "issue/feature"])
-  await git(join(repo, "dep"), ["fetch", "-q", "origin"])
-  await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
-  await git(repo, ["add", "dep"])
-  if (options.splitCarrier === true) await git(repo, ["commit", "-qm", "feature dependency"])
-  await writeFile(join(repo, "feature.txt"), "feature\n")
-  await git(repo, ["add", "feature.txt"])
-  await git(repo, ["commit", "-qm", "feature"])
+  const carry = options.carry ?? "both"
+  if (carry !== "code-only") {
+    await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+    await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
+    await git(repo, ["add", "dep"])
+    if (options.splitCarrier === true) await git(repo, ["commit", "-qm", "feature dependency"])
+  }
+  if (carry === "pin-only") {
+    // splitCarrier already committed the gitlink above; without it the gitlink
+    // is still staged and this is the commit that carries it. Committing twice
+    // would fail on an empty index rather than produce a pin-only carrier.
+    // Named for what it is rather than reusing "feature", which would make a
+    // pin-only carrier read like a coupled one in any log-based assertion.
+    if (options.splitCarrier !== true) await git(repo, ["commit", "-qm", "feature dependency"])
+  } else {
+    await writeFile(join(repo, "feature.txt"), "feature\n")
+    await git(repo, ["add", "feature.txt"])
+    await git(repo, ["commit", "-qm", "feature"])
+  }
   const featureSha = await git(repo, ["rev-parse", "HEAD"])
   await git(repo, ["switch", "-q", "main"])
   await git(repo, ["submodule", "update", "--init", "--recursive"])
@@ -2822,6 +2844,89 @@ describe("Queue command adapters", () => {
     expect(run.conclusion).toBe("success")
     await git(repo, ["fetch", "-q", "origin", "main"])
     expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).toBe(await git(repo, ["ls-tree", remerge.headSha, "dep"]))
+  })
+
+  // @i/10-merge-queue/coupled-pin-and-code box 4: "a regression proves the unit
+  // lands green WHERE EITHER HALF ALONE IS RED."
+  //
+  // The coupled landing test directly above gates its run with ["true"] — a
+  // check that cannot fail — and then asserts only `ls-tree dep`. So it proves
+  // the gitlink survived a gate incapable of judging it, and says nothing about
+  // the root half at all. Landing green is not the claim the bead makes;
+  // landing green under a gate that COULD have failed is.
+  //
+  // These three share one coupling-sensitive gate that reads the submodule's
+  // content AND a root file. The green below is only worth anything because the
+  // two reds use the same gate: together they show the gate can tell the halves
+  // apart, which is what "gated as a unit" means.
+  const couplingSensitiveGate = shellCommand(
+    "git -c protocol.file.allow=always submodule update --init --recursive && " +
+      'test "$(cat dep/version.txt)" = candidate && ' +
+      "test -f feature.txt",
+  )
+
+  it("lands a coupled gitlink and root change as one unit under a gate that reads both halves", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, couplingSensitiveGate)
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
+
+    const run = (await app.queue.run({ prs: [pr.id] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion).toBe("success")
+    await git(repo, ["fetch", "-q", "origin", "main"])
+    // BOTH halves on main, not just the gitlink. The older test asserts only the
+    // first of these, so a merge that silently dropped the root file would pass
+    // it — the exact silent split box 5 forbids.
+    expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).not.toBe(await git(repo, ["ls-tree", baseSha, "dep"]))
+    expect(await git(repo, ["ls-tree", "-r", "--name-only", "FETCH_HEAD"])).toContain("feature.txt")
+  })
+
+  it("refuses the pin half alone under the same gate, and leaves main untouched", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      carry: "pin-only",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, couplingSensitiveGate)
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
+    const mainBefore = await git(repo, ["rev-parse", "origin/main"])
+
+    const run = (await app.queue.run({ prs: [pr.id] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
+    await git(repo, ["fetch", "-q", "origin", "main"])
+    expect(await git(repo, ["rev-parse", "origin/main"])).toBe(mainBefore)
+  })
+
+  it("refuses the code half alone under the same gate, and leaves main untouched", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "base",
+      carry: "code-only",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, couplingSensitiveGate)
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
+    const mainBefore = await git(repo, ["rev-parse", "origin/main"])
+
+    const run = (await app.queue.run({ prs: [pr.id] }, runtime))[0]!
+
+    // The carrier never raises dep, so the queue leaves main's own entry in
+    // place — base — and the gate's submodule clause fails. This also pins the
+    // derive rule itself: an unraised submodule must NOT be advanced to its
+    // main tip just because a newer commit exists there.
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
+    await git(repo, ["fetch", "-q", "origin", "main"])
+    expect(await git(repo, ["rev-parse", "origin/main"])).toBe(mainBefore)
   })
 
   it("recuts one composition revision onto the authoritative root and returns its exact certificate", async () => {
