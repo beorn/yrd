@@ -2984,7 +2984,7 @@ async function runBayChild(
     ownedPath?: boolean
   }> = {},
 ): Promise<ProcessResult> {
-  if (bay.path === undefined) refusal(`bay '${bay.id}' has no active workspace path`)
+  if (bay.path === undefined) refusal(`bay '${bay.id}' has no active worktree path`)
   await ensureBayDependencies(processService, bay, bay.path, io, options.env)
   const output = io.interactive === true ? undefined : childOutput(io)
   try {
@@ -3164,7 +3164,7 @@ async function prepareOwnedBay(
             `  ${guestAttachCommand(refreshed, preResolved.guestArgv)}`,
         )
       }
-      if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' has no workspace path`)
+      if (refreshed.path === undefined) refusal(`Bay '${refreshed.id}' has no worktree path`)
       logBayResolution(app, identity)
       return { identity, bay: refreshed }
     }
@@ -3237,7 +3237,7 @@ async function prepareResolvedIssueBay(
   })
   if (opened === undefined) refusal(`Bay for issue '${issue}' was interrupted before it could be used`)
   const path = opened.bay.path
-  if (path === undefined) refusal(`Bay '${opened.bay.id}' opened without a workspace path`)
+  if (path === undefined) refusal(`Bay '${opened.bay.id}' opened without a worktree path`)
   return { ...opened, bay: { ...opened.bay, path } }
 }
 
@@ -3250,7 +3250,7 @@ async function openPersistentBay(
 ): Promise<YrdCliExitCode> {
   const opened = await prepareOwnedBay(app, arg, options, io)
   if (opened === undefined) return 1
-  if (opened.bay.path === undefined) throw new Error(`yrd: Bay '${opened.bay.id}' opened without a workspace path`)
+  if (opened.bay.path === undefined) throw new Error(`yrd: Bay '${opened.bay.id}' opened without a worktree path`)
   await services.checks?.install(opened.bay.path)
   printBayResolution(io, opened.identity, opened.identity.reattached ? "reattached" : "new", io.stderr)
   io.stdout(`${opened.bay.path}\n`)
@@ -3966,13 +3966,13 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
 
   // Two kinds of changed gitlink, two questions — and the KIND must be decided first.
   //
-  // Queue-carried pins (a composition or a recut) are not author demands: the queue's own
+  // Queue-carried pins (a composition or a recut) are not author min commits: the queue's own
   // publication job pushes the commit to a branch ref, and submodule main is PROMOTED at
   // merge. Asking main-ancestry at admission would deadlock that pipeline by construction —
   // the pin cannot be on main until the very merge being admitted — so the whole question
   // there is reachability: can the queue fetch this commit from the submodule's origin?
   //
-  // Authored pins are the shaset model's demands, and the demand is submodule-main-first:
+  // Authored pins are the shaset model's min commits, and the min commit is submodule-main-first:
   // the submodule's own workflow must have landed the commit on that submodule's MAIN.
   // Reachability was the old oracle for these too, which is exactly the gap it left — a pin
   // on someone's unmerged side branch counted as published, and only the authored-gitlink
@@ -5344,7 +5344,7 @@ function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdC
     )
   }
   if (bay.path === undefined || !isAbsolute(bay.path)) {
-    refusal(`bay '${bay.id}' has no absolute workspace path; run 'yrd bay --json' to inspect it before recreating it`)
+    refusal(`bay '${bay.id}' has no absolute worktree path; run 'yrd bay --json' to inspect it before recreating it`)
   }
   const projection = { command: "bay.path", bay: bay.id, path: bay.path }
   io.stdout(jsonEnabled(options) ? stableJson(projection) : `${bay.path}\n`)

@@ -50,7 +50,7 @@ export type BayStatusFacts = Readonly<{
   name: string
   branch: string
   path?: string
-  /** Historical provision failure that never recorded a workspace path. */
+  /** Historical provision failure that never recorded a worktree path. */
   closedDegenerate?: boolean
   /** Parsed PID from `:<PID>` address when present; undefined if no handle. */
   ownerPid?: number
@@ -171,7 +171,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     const lines: readonly BayStatusLine[] = [
       { class: "owner", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace owner" },
       { class: "consumer", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace consumer" },
-      { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no workspace path was ever recorded" },
+      { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no worktree path was ever recorded" },
       { class: "commits", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace tip to preserve" },
       { class: "stash", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace stash" },
       { class: "pr", verdict: "PASS", evidence: "closed-degenerate Bay can release its branch identity" },
@@ -260,7 +260,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       verdict: facts.path === undefined ? "UNKNOWN" : "PASS",
       evidence:
         facts.path === undefined
-          ? "no workspace path recorded"
+          ? "no worktree path recorded"
           : `path missing on disk (${facts.path}) — nothing local to lose`,
     })
   } else if (facts.worktreeDirty === undefined) {
