@@ -5379,6 +5379,26 @@ function changeListRetainedRows<T extends Readonly<{ id: string; state: string }
   return matching.filter((pr) => kept.has(pr.id))
 }
 
+// Every value the row filter below actually tests `options.state` against:
+// the full ChangeDeliveryState union, plus "rejected" doubles as a read-
+// compatible alias for "needs-author" (v1 clients' only author-fix bucket) —
+// already a real member on its own, so the alias adds no new value here.
+// An unrecognized value used to fall through to an always-false filter —
+// PR count 0 for every candidate, indistinguishable from "no PRs in that
+// state" — the exact silent-empty-list shape this list exists to name.
+const CHANGE_LIST_STATES: readonly ChangeDeliveryState[] = [
+  "pushed",
+  "submitted",
+  "ready",
+  "needs-author",
+  "rejected",
+  "integrated",
+  "already-landed",
+  "withdrawn",
+  "canceled",
+]
+const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
+
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
@@ -5386,6 +5406,9 @@ async function listPrs(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
+  if (options.state !== undefined && !CHANGE_LIST_STATES.includes(options.state as ChangeDeliveryState)) {
+    usage(`--state '${options.state}' is invalid; expected one of ${CHANGE_LIST_STATE_HELP}`)
+  }
   const state = stateOf(app)
   const base = options.base === undefined ? undefined : selectedBase(state, options.base)
   const explicitlyFiltered =

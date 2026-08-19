@@ -5474,6 +5474,46 @@ describe("runYrd", () => {
     expect(reviewerWithoutInbox.stderr()).toContain("--reviewer requires --needs-review")
   })
 
+  // An unrecognized --state used to fall through to a row filter that matches
+  // nothing — `prs: []`, exit 0 — indistinguishable from "no PRs currently in
+  // that state" for a typo like `--state pushed ` (trailing space) or a
+  // half-remembered v1 name. The filter must refuse loudly instead: it names
+  // the exact value it rejected and the full valid set, and a real state
+  // value keeps listing exactly as before.
+  it("refuses an unrecognized pr list --state value, naming the valid set", async () => {
+    const app = await createApp()
+    await app.bays.intake({ branch: "issue/state-value", headSha: HEAD_SHA, base: "main" })
+
+    const invalid = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "bogus-value", "--json"), invalid.io)).toBe(2)
+    expect(invalid.stderr()).toContain(
+      "--state 'bogus-value' is invalid; expected one of pushed, submitted, ready, needs-author, rejected, " +
+        "integrated, already-landed, withdrawn, canceled",
+    )
+    // A refusal must never silently pass through as an empty success either —
+    // confirm no `pr.list` result reached stdout at all.
+    expect(invalid.stdout()).toBe("")
+  })
+
+  it("still lists PRs in a valid state after the --state value is validated", async () => {
+    const app = await createApp()
+    await app.bays.intake({ branch: "issue/state-value", headSha: HEAD_SHA, base: "main" })
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
+
+    const matching = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), matching.io), matching.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(matching.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1" }] })
+
+    const nonMatching = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "list", "--state", "integrated", "--json"), nonMatching.io),
+      nonMatching.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(nonMatching.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+  })
+
   it("keeps pr checks --follow read-only when no check fact was requested", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
