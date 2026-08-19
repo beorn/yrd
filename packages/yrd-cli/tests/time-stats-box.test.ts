@@ -250,7 +250,64 @@ describe("QueueStatsPanel", () => {
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestFactMs: NOW_MS - 5 * MINUTE, width: 126 }))
     expect(rowContaining(app, "ALL")).not.toMatch(/ALL\s+2\b/u)
     expect(rowContaining(app, "ALL")).toContain("—")
+    // An uncovered bucket is NOT a measured zero: it keeps the em dash and
+    // must never borrow the "-" that means "measured, and it was zero".
+    expect(rowContaining(app, "ALL")).not.toContain("-")
     expect(rowContaining(app, "TOTAL")).not.toContain("~2:00")
+  })
+
+  it("renders a measured zero as a muted hyphen while a nonzero keeps its row color", () => {
+    const render = createRenderer({ cols: 126, rows: 30 })
+    const app = render(boxesElement({ facts: FACTS, now: NOW, earliestFactMs: HORIZON, width: 126 }))
+    const rows = app.text.split("\n")
+    const header = rows.findIndex((row) => row.includes("YSTRDAY"))
+    const failsY = rows.findIndex((row) => row.includes("FAILS"))
+    const yesterdayX = rows[header]!.indexOf("YSTRDAY") + "YSTRDAY".length - 1
+    const todayX = rows[header]!.indexOf("TODAY") + "TODAY".length - 1
+
+    // The row label is the panel's own muted tone; the hyphen must match it
+    // rather than FAILS' error red, so a measured zero never reads as a fail.
+    const muted = app.cell(rows[failsY]!.indexOf("FAILS"), failsY).fg
+    expect(app.cell(yesterdayX, failsY).char, "yesterday measured zero fails").toBe("-")
+    expect(app.cell(yesterdayX, failsY).fg, "the zero hyphen is muted, not error red").toEqual(muted)
+
+    // The measured nonzero in the same row is untouched, color included.
+    expect(app.cell(todayX, failsY).char, "today measured one fail").toBe("1")
+    expect(app.cell(todayX, failsY).fg, "a nonzero keeps the row's error color").not.toEqual(muted)
+
+    // Rows that are all zeros carry no digit at all.
+    expect(rowContaining(app, "PASS")).not.toContain("0")
+    expect(rowContaining(app, "DUP")).not.toContain("0")
+    expect(rowContaining(app, "PASS")).toContain("-")
+  })
+
+  it("keeps the no-data em dash distinct from the measured-zero hyphen in one row", () => {
+    // One integrated run whose only member retried zero times — the retry
+    // distribution samples integrated members only, so the outcome matters.
+    // Its buckets average exactly 0 while the unsampled ones have no average
+    // at all: the two states the panel must not conflate.
+    const noRetries = fact({
+      run: "clean",
+      terminalAtMs: NOW_MS - 3 * MINUTE,
+      outcome: "integrated",
+      members: [
+        {
+          pr: "PR9",
+          revision: 1,
+          totalMs: MINUTE,
+          totalApproximate: false,
+          codingMs: null,
+          jobRunMs: MINUTE,
+          retries: 0,
+        },
+      ],
+    })
+    const render = createRenderer({ cols: 126, rows: 30 })
+    const app = render(boxesElement({ facts: [noRetries], now: NOW, earliestFactMs: HORIZON, width: 126 }))
+    const retries = rowContaining(app, "RETRIES/RUN")
+    expect(retries, "sampled average of 0 renders as the hyphen").toContain("-")
+    expect(retries, "an unsampled covered bucket keeps the em dash").toContain("—")
+    expect(retries, "no bare zero survives anywhere in the row").not.toContain("0")
   })
 
   it("adapts only the newest-first local hour columns while retaining all fixed periods", () => {
