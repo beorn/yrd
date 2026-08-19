@@ -2,7 +2,7 @@
 // @level l2
 // @consumer @yrd/cli
 
-import { prDeliveryState, type PR } from "@yrd/bay"
+import { changeDeliveryState, type PR } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
@@ -128,7 +128,7 @@ function result(prs: readonly PR[], finished: readonly Run[] = []): QueueStatusR
     prs: [...prs],
     admissionOrder: prs
       .filter((pr) => {
-        const state = prDeliveryState(pr)
+        const state = changeDeliveryState(pr)
         return state === "submitted" || state === "ready"
       })
       .map((pr) => pr.id),

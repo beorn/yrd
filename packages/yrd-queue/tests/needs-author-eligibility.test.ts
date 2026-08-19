@@ -10,10 +10,10 @@ import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import {
   createBayJobDefs,
-  currentPRRev,
-  prAdmission,
-  prDeliveryState,
-  prNeedsAuthor,
+  currentChangeRev,
+  changeAdmission,
+  changeDeliveryState,
+  changeNeedsAuthor,
   withBays,
   type BayWorkspace,
   type PR,
@@ -27,7 +27,7 @@ import {
   withQueue,
   withStep,
   type AddStepResult,
-  type PRShape,
+  type changeShape,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
@@ -43,12 +43,12 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-function prFacts(pr: PR | undefined) {
+function changeFacts(pr: PR | undefined) {
   if (pr === undefined) throw new Error("expected PR")
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return {
     ...pr,
-    status: prDeliveryState(pr),
+    status: changeDeliveryState(pr),
     revision: revision.n,
     headSha: revision.head,
     base: revision.base,
@@ -85,7 +85,7 @@ function workspace(): BayWorkspace {
   }
 }
 
-async function createQueueApp(check?: StepRunner<PRShape, CheckResult>) {
+async function createQueueApp(check?: StepRunner<changeShape, CheckResult>) {
   const checkStep = withStep(
     "check",
     (input: StepExecution, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
@@ -105,7 +105,7 @@ async function createQueueApp(check?: StepRunner<PRShape, CheckResult>) {
   })
 }
 
-type CheckedShape = AddStepResult<PRShape, "check", CheckResult>
+type CheckedShape = AddStepResult<changeShape, "check", CheckResult>
 
 /** A check(passes) → merge(integrating) queue, so a composition refusal can be
  * placed SOLELY on the integrating step while a passed check record is also
@@ -162,7 +162,7 @@ describe("native needs-author lifecycle", () => {
 
     const current = app.bays.pr(pr)
     if (current === undefined) throw new Error("expected refused PR")
-    const refused = prAdmission(current)
+    const refused = changeAdmission(current)
     expect(refused).toMatchObject({
       status: "refused",
       kind: "refusal",
@@ -173,11 +173,11 @@ describe("native needs-author lifecycle", () => {
       },
     })
 
-    expect(prFacts(app.bays.pr(pr))).toMatchObject({
+    expect(changeFacts(app.bays.pr(pr))).toMatchObject({
       id: pr,
       status: "needs-author",
     })
-    expect(prNeedsAuthor(current)).toMatchObject({
+    expect(changeNeedsAuthor(current)).toMatchObject({
       run: refused?.status === "refused" ? refused.steps[0]?.job : undefined,
       step: "check",
       receipt: {
@@ -185,8 +185,8 @@ describe("native needs-author lifecycle", () => {
         message: "PR 'PR1' composition head contains root changes",
       },
     })
-    expect(prFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
-    expect(prFacts(app.bays.pr(pr)).revisions[0]?.terminal).toBeUndefined()
+    expect(changeFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
+    expect(changeFacts(app.bays.pr(pr)).revisions[0]?.terminal).toBeUndefined()
     const events = await Array.fromAsync(app.events())
     expect(events.map(({ name }) => name)).toContain("pr/admission-recorded")
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
@@ -203,7 +203,7 @@ describe("native needs-author lifecycle", () => {
       resolveRevision: async (selector) => (selector === "main" ? BASE : HEAD),
       run: runtime,
     })
-    expect(prFacts(correlated)).toMatchObject({
+    expect(changeFacts(correlated)).toMatchObject({
       id: pr,
       revision: 1,
       status: "needs-author",
@@ -230,7 +230,7 @@ describe("native needs-author lifecycle", () => {
       baseSha: BASE,
     })
     expect(replay.events).toEqual([])
-    expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
+    expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
     expect(await Array.fromAsync(app.events())).toEqual(beforeReplay)
 
     const recutReplay = await app.bays.recut({
@@ -243,13 +243,13 @@ describe("native needs-author lifecycle", () => {
       reviewCarried: false,
     })
     expect(recutReplay.events).toEqual([])
-    expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
+    expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
 
     // A fix push advances this already-submitted PR in place and re-requests
     // checks. There is no withdraw/new-PR or submit-again ceremony.
     const fixedHead = "2".repeat(40)
     await app.bays.intake({ branch: "topic/authored-root", headSha: fixedHead, base: "main", baseSha: BASE })
-    expect(prFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 2, headSha: fixedHead, status: "submitted" })
+    expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 2, headSha: fixedHead, status: "submitted" })
     expect(app.bays.checksRequested(pr)).toBe(true)
     expect(app.queue.eligibility(pr).checks.status).toBe("queued")
     expect(app.bays.pr(pr)?.revs[0]?.admission).toMatchObject({
@@ -286,7 +286,7 @@ describe("native needs-author lifecycle", () => {
     })
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, runtime)
-    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ revision: 1, status: "needs-author" })
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ revision: 1, status: "needs-author" })
 
     const before = await Array.fromAsync(app.events())
     const omitted = await app.bays.intake({
@@ -301,7 +301,7 @@ describe("native needs-author lifecycle", () => {
 
     expect(omitted.events).toEqual([])
     expect(changedMetadata.events).toEqual([])
-    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 1,
       headSha: HEAD,
       status: "needs-author",
@@ -324,7 +324,7 @@ describe("native needs-author lifecycle", () => {
       composition: changedComposition,
     })
     expect(authoredChange.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
-    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 2,
       headSha: HEAD,
       status: "submitted",
@@ -346,7 +346,7 @@ describe("native needs-author lifecycle", () => {
     })
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, runtime)
-    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 1,
       status: "submitted",
       base: "release/2.0",
@@ -357,7 +357,7 @@ describe("native needs-author lifecycle", () => {
     const replay = await app.bays.intake({ branch: "topic/legacy-replay", headSha: HEAD })
 
     expect(replay.events).toEqual([])
-    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 1,
       status: "submitted",
       base: "release/2.0",
@@ -434,7 +434,7 @@ describe("native needs-author lifecycle", () => {
     await started.promise
 
     const duringRun = await submitWithChecks(app, "topic/during-run", "2".repeat(40))
-    expect(prFacts(app.bays.pr(duringRun))).toMatchObject({ status: "submitted", branch: "topic/during-run" })
+    expect(changeFacts(app.bays.pr(duringRun))).toMatchObject({ status: "submitted", branch: "topic/during-run" })
     expect(app.bays.checksRequested(duringRun)).toBe(true)
 
     release.resolve()
@@ -447,7 +447,7 @@ describe("native needs-author lifecycle", () => {
       expiresAt: "2026-01-01T01:00:00.000Z",
     })
     const duringPause = await submitWithChecks(app, "topic/during-pause", "3".repeat(40))
-    expect(prFacts(app.bays.pr(duringPause))).toMatchObject({ status: "submitted", branch: "topic/during-pause" })
+    expect(changeFacts(app.bays.pr(duringPause))).toMatchObject({ status: "submitted", branch: "topic/during-pause" })
     expect(app.bays.checksRequested(duringPause)).toBe(true)
 
     expect(app.queue.eligibility(duringRun).checks.status).toBe("queued")

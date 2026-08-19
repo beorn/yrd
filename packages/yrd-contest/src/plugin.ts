@@ -1,9 +1,9 @@
 import {
   defaultBayBranch,
-  prDeliveryState,
-  prForBay,
-  prHead,
-  prRevisionNumber,
+  changeDeliveryState,
+  changeForBay,
+  changeHead,
+  changeRevisionNumber,
   resolveBay,
   type Bay,
   type HasBays,
@@ -374,7 +374,7 @@ function createContestCommands(
       if (pr === undefined || !exactPR(pr, promotion.pin, record.base)) {
         throw new Error(`yrd: PR '${args.pr}' does not contain the selected contest commit`)
       }
-      const delivery = prDeliveryState(pr)
+      const delivery = changeDeliveryState(pr)
       if (delivery !== "submitted" && delivery !== "ready" && delivery !== "integrated") {
         throw new Error(`yrd: PR '${pr.id}' is ${delivery}, not submitted`)
       }
@@ -383,7 +383,7 @@ function createContestCommands(
           event("contest/promoted", {
             contest: record.id,
             pr: pr.id,
-            revision: prRevisionNumber(pr),
+            revision: changeRevisionNumber(pr),
             commit: promotion.pin.commit,
           }),
         ],
@@ -616,27 +616,27 @@ async function ensureExactPR(
   pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>,
   options: Parameters<typeof createContests>[0],
 ): Promise<DeepReadonly<PR>> {
-  let pr = prForBay(options.runtime().bays, pin.bay)
-  if (pr === undefined || !exactPR(pr, pin, record.base) || prDeliveryState(pr) === "rejected") {
+  let pr = changeForBay(options.runtime().bays, pin.bay)
+  if (pr === undefined || !exactPR(pr, pin, record.base) || changeDeliveryState(pr) === "rejected") {
     // Promotion intake trusts the verified write-once pin and intentionally re-drives a rejected winner.
     await options.bays.intake({
       bay: pin.bay,
       headSha: pin.commit,
       ...(pin.baseSha === undefined ? {} : { baseSha: pin.baseSha }),
     })
-    pr = prForBay(options.runtime().bays, pin.bay)
+    pr = changeForBay(options.runtime().bays, pin.bay)
   }
   if (pr === undefined || !exactPR(pr, pin, record.base)) {
     throw new Error(`yrd: selected Bay '${pin.bay}' did not produce the exact contest PR`)
   }
-  if (prDeliveryState(pr) === "pushed") {
+  if (changeDeliveryState(pr) === "pushed") {
     await options.bays.submit({ pr: pr.id })
-    pr = prForBay(options.runtime().bays, pin.bay)
+    pr = changeForBay(options.runtime().bays, pin.bay)
   }
   if (
     pr === undefined ||
     !exactPR(pr, pin, record.base) ||
-    (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "ready" && prDeliveryState(pr) !== "integrated")
+    (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready" && changeDeliveryState(pr) !== "integrated")
   ) {
     throw new Error(`yrd: selected contest commit was not submitted`)
   }
@@ -701,7 +701,7 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
     const job = jobByKey(state, promotionKey(record.id))
     const pr =
       record.promotion.result === undefined
-        ? prForBay(state.bays, record.promotion.pin.bay)
+        ? changeForBay(state.bays, record.promotion.pin.bay)
         : state.bays.prs[record.promotion.result.pr]
     promotion = {
       attempt: record.promotion.attempt,
@@ -894,7 +894,7 @@ function exactPR(pr: DeepReadonly<PR>, pin: DeepReadonly<z.infer<typeof GitRevis
     pr.bay === pin.bay &&
     pr.branch === pin.branch &&
     pr.base === base &&
-    prHead(pr).toLowerCase() === pin.commit.toLowerCase()
+    changeHead(pr).toLowerCase() === pin.commit.toLowerCase()
   )
 }
 

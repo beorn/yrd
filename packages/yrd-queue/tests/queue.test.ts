@@ -8,9 +8,9 @@ import { createLogger, type ConditionalLogger, type Event as LogEvent } from "lo
 import {
   checkRequest,
   createBayJobDefs,
-  currentPRRev,
-  prAdmission,
-  prDeliveryState,
+  currentChangeRev,
+  changeAdmission,
+  changeDeliveryState,
   withBays,
   type BayWorkspace,
   type PR,
@@ -41,7 +41,7 @@ import {
   withStep,
   Queues,
   QueueRecordSchema,
-  PRSnapshotSchema,
+  ChangeSnapshotSchema,
   ReplayQueueRecordSchema,
   type AddStepResult,
   type IntegrationProof,
@@ -50,7 +50,7 @@ import {
   type QueueProjectionLookup,
   type QueueProjectionLookupNode,
   type QueueRecord,
-  type PRShape,
+  type changeShape,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
@@ -182,17 +182,17 @@ function observeProjectionLookup<Value>(
 type CheckResult = z.infer<typeof CheckResultSchema>
 type ReviewResult = z.infer<typeof ReviewResultSchema>
 type DeployResult = z.infer<typeof DeployResultSchema>
-type CheckedShape = AddStepResult<PRShape, "check", CheckResult>
+type CheckedShape = AddStepResult<changeShape, "check", CheckResult>
 type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 type MergedShape = ReviewedShape & IntegratedShape
 type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 
-function prFacts(pr: PR | undefined) {
+function changeFacts(pr: PR | undefined) {
   if (pr === undefined) throw new Error("expected PR")
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return {
     ...pr,
-    delivery: prDeliveryState(pr),
+    delivery: changeDeliveryState(pr),
     current: revision,
     revision: revision.n,
     headSha: revision.head,
@@ -204,7 +204,7 @@ function prFacts(pr: PR | undefined) {
 }
 
 function deliveryOf(pr: PR | undefined): string | undefined {
-  return pr === undefined ? undefined : prDeliveryState(pr)
+  return pr === undefined ? undefined : changeDeliveryState(pr)
 }
 
 function ids(initial = 0): () => string {
@@ -576,7 +576,7 @@ function workspace(): BayWorkspace {
 function queuePlugin(
   options: Readonly<{
     batch?: false | number
-    check?: StepRunner<PRShape, CheckResult>
+    check?: StepRunner<changeShape, CheckResult>
     merge?: (input: StepExecution<ReviewedShape>) => JobResult<IntegrationProof> | Promise<JobResult<IntegrationProof>>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
@@ -700,7 +700,7 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
   await app.bays.submit({ branch, headSha: digit.repeat(40), base, baseSha: BASE })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
-  return prFacts(pr)
+  return changeFacts(pr)
 }
 
 async function replaySameHeadCandidateRecut() {
@@ -730,7 +730,7 @@ async function replaySameHeadCandidateRecut() {
     reviewCarried: false,
   })
   await original.bays.ready({ pr: pr.id })
-  expect(prFacts(original.state().bays.prs[pr.id])).toMatchObject({
+  expect(changeFacts(original.state().bays.prs[pr.id])).toMatchObject({
     revision: 2,
     headSha: pr.headSha,
     delivery: "submitted",
@@ -844,7 +844,7 @@ describe("Queue", () => {
       },
     })
     expect(
-      PRSnapshotSchema.safeParse({
+      ChangeSnapshotSchema.safeParse({
         ...snapshot,
         recut: {
           ...snapshot.recut,
@@ -853,7 +853,7 @@ describe("Queue", () => {
       }).success,
     ).toBe(false)
     expect(
-      PRSnapshotSchema.safeParse({
+      ChangeSnapshotSchema.safeParse({
         ...snapshot,
         recut: {
           ...snapshot.recut,
@@ -875,10 +875,10 @@ describe("Queue", () => {
         sources: [{ repo: "dep", fromHeadSha: pr.headSha, toHeadSha: UPDATED, patchId, rangeDiff: "=" as const }],
       },
     ]) {
-      expect(PRSnapshotSchema.safeParse({ ...snapshot, recut }).success).toBe(false)
+      expect(ChangeSnapshotSchema.safeParse({ ...snapshot, recut }).success).toBe(false)
     }
     expect(
-      PRSnapshotSchema.safeParse({
+      ChangeSnapshotSchema.safeParse({
         ...snapshot,
         recut: {
           fromRevision: pr.revision,
@@ -2546,7 +2546,7 @@ describe("Queue", () => {
 
     const check = withStep(
       "check",
-      (_input: StepExecution<PRShape>) => ({
+      (_input: StepExecution<changeShape>) => ({
         status: "completed",
         conclusion: "success" as const,
         output: { checked: true },
@@ -3038,7 +3038,7 @@ describe("Queue", () => {
 
     await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: "main" })
     await app.bays.submit({ pr: pr.id })
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       revision: 2,
       delivery: "submitted",
       headSha: UPDATED,
@@ -3054,7 +3054,7 @@ describe("Queue", () => {
       expect.objectContaining({ id: "R2", status: "waiting" }),
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       revision: 2,
       delivery: "submitted",
       headSha: UPDATED,
@@ -3482,7 +3482,7 @@ describe("Queue", () => {
     expect(retried).toMatchObject([
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] },
     ])
-    expect(prFacts(replayed.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(replayed.state().bays.prs.PR1)).toMatchObject({
       delivery: "integrated",
       revision: 1,
       headSha: HEAD,
@@ -3547,7 +3547,7 @@ describe("Queue", () => {
     })
     const pr = app.state().bays.prs.PR1
     if (pr === undefined) throw new Error("correlated PR was not recorded")
-    const revision = currentPRRev(pr)
+    const revision = currentChangeRev(pr)
     await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check"] })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("Queue did not request a Job")
@@ -3575,7 +3575,7 @@ describe("Queue", () => {
         },
       },
     ])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       revision: revision.n,
       headSha: revision.head,
@@ -3615,7 +3615,7 @@ describe("Queue", () => {
       conclusion: "cancelled",
       prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
     })
-    expect(prFacts(replayed.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(replayed.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       revs: [{ terminal: undefined }],
     })
@@ -3773,11 +3773,11 @@ describe("Queue", () => {
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
     expect(reconciled.events).toEqual([])
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       delivery: "integrated",
       integration: run?.integration,
     })
-    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({
       delivery: "submitted",
       integration: undefined,
     })
@@ -3786,7 +3786,7 @@ describe("Queue", () => {
   it("repairs a repository merge record whose pr/integrated index row is missing exactly once", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/receipt-index-gap")
-    const changeId = currentPRRev(app.bays.pr(pr.id)!).changeId
+    const changeId = currentChangeRev(app.bays.pr(pr.id)!).changeId
     if (changeId === undefined) throw new Error("expected current PR Change-Id")
     const fact = {
       pr: pr.id,
@@ -3802,7 +3802,7 @@ describe("Queue", () => {
     await app.queue.reconcileLanding(fact)
     await app.queue.reconcileLanding(fact)
 
-    expect(prFacts(app.bays.pr(pr.id))).toMatchObject({
+    expect(changeFacts(app.bays.pr(pr.id))).toMatchObject({
       delivery: "integrated",
       integration: { commit: MERGED, baseSha: BASE, changeId },
     })
@@ -3875,7 +3875,7 @@ describe("Queue", () => {
       .map((applied) => (applied.data as { pr: string }).pr)
 
     expect(integrated).toEqual([current.id])
-    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "canceled", canceledBy: "@chief" })
+    expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "canceled", canceledBy: "@chief" })
   })
 
   it("does not reconcile a same-root PR with a different source composition", async () => {
@@ -3908,11 +3908,11 @@ describe("Queue", () => {
     const run = (await app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime))[0]
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       delivery: "integrated",
       integration: run?.integration,
     })
-    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "submitted" })
+    expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "submitted" })
     expect(app.state().bays.prs.PR2?.integration).toBeUndefined()
   })
 
@@ -4033,7 +4033,7 @@ describe("Queue", () => {
     })
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
     expect(checks).toBe(1)
-    expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({
       status: "passed",
       baseSha: BASE,
       steps: [
@@ -4066,7 +4066,7 @@ describe("Queue", () => {
     const pr = await submitBranch(app, "issue/covered-pr")
     await app.bays.requestChecks({ pr: pr.id })
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
-    expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
 
     const result = await app.dispatch(app.commands.queue.run, { prs: [pr.id], baseSha: BASE })
 
@@ -4254,7 +4254,7 @@ describe("Queue", () => {
     // recut's fromRevision to equal the incoming one, and the stored one lags by
     // exactly one cycle, so the no-op short-circuit cannot fire in a loop.
     await app.bays.recut({ pr: pr.id, fromRevision: 2, ...rebuilt, reviewCarried: false })
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ revision: 3, headSha: pr.headSha })
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({ revision: 3, headSha: pr.headSha })
 
     // The claim: a rebuild that moved nothing did not stop the code from
     // passing, so it must not discard the evidence that it passes. Admission is
@@ -4305,7 +4305,7 @@ describe("Queue", () => {
     // Its live request matches this revision and this head exactly, so the base
     // is the only thing that differs — PR943's shape precisely.
     await app.bays.requestChecks({ pr: stranded.id, baseSha: BASE })
-    expect(prFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
+    expect(changeFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
 
     await app.queue.run({}, runtime)
 
@@ -4316,12 +4316,12 @@ describe("Queue", () => {
     expect(checkRequest(app.bays.pr(stranded.id)!)).toMatchObject({ baseSha: MOVED })
     expect(checkRequest(app.bays.pr(submitted.id)!)).toMatchObject({ baseSha: MOVED })
 
-    expect(prAdmission(app.bays.pr(submitted.id)!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr(submitted.id)!)).toMatchObject({
       status: "passed",
       baseSha: MOVED,
       requestCount: 1,
     })
-    expect(prAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
       status: "passed",
       baseSha: MOVED,
       requestCount: 1,
@@ -4358,7 +4358,7 @@ describe("Queue", () => {
       reviewCarried: false,
     })
     await app.bays.requestChecks({ pr: stranded.id, baseSha: BASE })
-    expect(prFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
+    expect(changeFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
 
     await app.queue.run({}, runtime)
 
@@ -4368,7 +4368,7 @@ describe("Queue", () => {
     // base — it was refreshed — and yet no verdict exists for it, because the
     // loop that would write one never ran.
     expect(checkRequest(app.bays.pr(stranded.id)!)).toMatchObject({ baseSha: MOVED })
-    expect(prAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
       status: "passed",
       baseSha: MOVED,
       requestCount: 1,
@@ -4395,7 +4395,7 @@ describe("Queue", () => {
 
     expect(checkRequest(app.bays.pr(asked.id)!)).toMatchObject({ baseSha: MOVED })
     expect(app.bays.pr(silent.id)!.checkRequests).toEqual([])
-    expect(prAdmission(app.bays.pr(silent.id)!)).toBeUndefined()
+    expect(changeAdmission(app.bays.pr(silent.id)!)).toBeUndefined()
   })
 
   it("counts the check requests a byte-identical rebuild carried into a new ordinal", async () => {
@@ -4424,7 +4424,7 @@ describe("Queue", () => {
     const specimen = await submitBranch(app, "issue/rebuilt-at-a-new-ordinal")
     await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
     await app.queue.run({ prs: [specimen.id] }, runtime)
-    expect(prAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
       status: "refused",
       baseSha: BASE,
       requestCount: 1,
@@ -4443,7 +4443,7 @@ describe("Queue", () => {
       reviewCarried: false,
     })
     await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
-    expect(prFacts(app.bays.pr(specimen.id))).toMatchObject({ revision: 2, delivery: "pushed" })
+    expect(changeFacts(app.bays.pr(specimen.id))).toMatchObject({ revision: 2, delivery: "pushed" })
 
     // A second carrier so the selectorless drain has a submitted PR to enter
     // on; the specimen is reached from the admission queue, as in production.
@@ -4457,9 +4457,9 @@ describe("Queue", () => {
     // this tree against this base and only one authority has been spent, so the
     // carrier is admitted again. Under the ordinal it read one against one and
     // stayed refused for good.
-    expect(prAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(app.queue.eligibility(specimen.id)).toMatchObject({ checks: { status: "passed" } })
-    expect(prAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ requestCount: 2 })
+    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ requestCount: 2 })
     expect(checks).toBe(3)
   })
 
@@ -4471,7 +4471,7 @@ describe("Queue", () => {
     const ready = await submitBranch(app, "issue/merge-ready")
     await app.bays.requestChecks({ pr: ready.id })
     await expect(app.queue.admit({ prs: [ready.id] }, runtime)).resolves.toEqual([ready.id])
-    expect(prAdmission(app.bays.pr(ready.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(ready.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(app.queue.eligibility(ready.id)).toMatchObject({ runnable: true })
 
     // PR B's admission Job is claimed by a FOREIGN runner holding a live
@@ -4543,7 +4543,7 @@ describe("Queue", () => {
         reason: { code: "required-check-failed" },
         checks: { status: "failed" },
       })
-      expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({
+      expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({
         status: "refused",
         kind: "failure",
         step: "check",
@@ -4626,7 +4626,7 @@ describe("Queue", () => {
     await operator.queue.resume("main")
     await runner.refresh()
     expect(await runner.queue.admit({ prs: [pr.id] }, runtime)).toEqual([])
-    expect(prAdmission(runner.bays.pr(pr.id)!)).toMatchObject({ status: "refused", kind: "failure", step: "check" })
+    expect(changeAdmission(runner.bays.pr(pr.id)!)).toMatchObject({ status: "refused", kind: "failure", step: "check" })
     expect(checks).toBe(1)
   })
 
@@ -4645,7 +4645,7 @@ describe("Queue", () => {
     expect(await app.queue.admit({ prs: [waiting.id] }, runtime)).toEqual([waiting.id])
     expect(app.queue.waitingAdmission(waiting.id)?.step.job).toMatchObject({ status: "waiting" })
     expect(await app.queue.admit({ prs: [healthy.id] }, runtime)).toEqual([healthy.id])
-    expect(prAdmission(app.bays.pr(healthy.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(healthy.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(app.queue.eligibility(waiting.id)).toMatchObject({ checks: { status: "checking" } })
     expect(app.queue.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
   })
@@ -4695,7 +4695,7 @@ describe("Queue", () => {
     const pr = await submitBranch(app, "issue/base-keyed-cache")
     await app.bays.requestChecks({ pr: pr.id })
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
-    expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(checks).toBe(1)
 
     baseSha = UPDATED
@@ -4757,7 +4757,7 @@ describe("Queue", () => {
 
     expect(mainHealth).toBe("clear")
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
-    expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(mainHealth).toBe("green")
     expect(checks).toBe(1)
 
@@ -4771,10 +4771,10 @@ describe("Queue", () => {
       job: { status: "completed", conclusion: "failure", error: { code: "base-red" } },
     })
     expect(refused[0]).not.toHaveProperty("reusedFrom")
-    expect(prAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
     expect(checks).toBe(2)
     expect(merges).toBe(0)
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "ready",
       state: "open",
       merged: false,
@@ -4798,7 +4798,7 @@ describe("Queue", () => {
     expect(app.jobs.get(job.id)).toMatchObject({ status: "queued" })
     expect(await app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).toEqual([])
     expect(app.jobs.get(job.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(prAdmission(app.bays.pr(pr.id)!)).toBeUndefined()
+    expect(changeAdmission(app.bays.pr(pr.id)!)).toBeUndefined()
     expect(app.queue.checks([pr.id])).toEqual(
       expect.arrayContaining([expect.objectContaining({ pr: pr.id, revision: 1, step: "check", status: "failed" })]),
     )
@@ -5018,7 +5018,7 @@ describe("Queue", () => {
           prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
         },
       ])
-      expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
         delivery: "submitted",
         revision: pr.revision,
         headSha: pr.headSha,
@@ -5056,7 +5056,7 @@ describe("Queue", () => {
         prs: [{ id: "PR1", revision: 1, headSha: HEAD }],
       },
     ])
-    expect(prFacts(replayed.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(replayed.state().bays.prs.PR1)).toMatchObject({
       delivery: "integrated",
       revision: 1,
       headSha: HEAD,
@@ -5084,7 +5084,7 @@ describe("Queue", () => {
     expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure", error: { code: "merge-conflict" } },
     ])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       state: "open",
       merged: false,
@@ -5114,7 +5114,7 @@ describe("Queue", () => {
         },
       },
     ])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "needs-author",
       revision: pr.revision,
       headSha: pr.headSha,
@@ -5123,7 +5123,7 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(1)
 
     await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       revision: 2,
       headSha: UPDATED,
@@ -5136,7 +5136,7 @@ describe("Queue", () => {
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] },
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "integrated",
       revision: 2,
       headSha: UPDATED,
@@ -5179,7 +5179,7 @@ describe("Queue", () => {
     ])
     // A base race is environmental, not a PR-content fault: the PR must stay
     // submitted (re-admissible), NOT be terminally rejected like merge-conflict.
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       revision: pr.revision,
       headSha: pr.headSha,
@@ -5205,7 +5205,7 @@ describe("Queue", () => {
         prs: [{ id: pr.id, revision: 1, headSha: pr.headSha }],
       },
     ])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
     expect(mergeCalls).toBe(2)
   })
@@ -5243,7 +5243,7 @@ describe("Queue", () => {
         prs: [{ id: pr.id, revision: pr.revision }],
       },
     ])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
       revision: pr.revision,
       headSha: pr.headSha,
@@ -5263,7 +5263,7 @@ describe("Queue", () => {
     expect(retried).toMatchObject([
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 1 }] },
     ])
-    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
+    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
     expect(mergeCalls).toBe(2)
   })
 
@@ -5489,7 +5489,7 @@ describe("Queue", () => {
       })
       await original.bays.submit({ pr: stale.id })
       await original.bays.requestChecks({ pr: stale.id, baseSha: BASE })
-      expect(prFacts(original.state().bays.prs[stale.id])).toMatchObject({ revision: 2, headSha: UPDATED })
+      expect(changeFacts(original.state().bays.prs[stale.id])).toMatchObject({ revision: 2, headSha: UPDATED })
       await original.close()
 
       let cursor = 0
@@ -5547,7 +5547,7 @@ describe("Queue", () => {
     if (admitted === undefined) throw new Error("expected an admitted PR id")
     expect(admitted).toBe("PR1")
     expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toEqual(["PR1"])
-    expect(prAdmission(app.bays.pr("PR1")!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "refused",
       kind: "failure",
       step: "check",
@@ -5573,7 +5573,7 @@ describe("Queue", () => {
     const readmitted = (await app.queue.admit({ prs: ["PR1"] }, runtime))[0]
     if (readmitted === undefined) throw new Error("expected an explicitly reauthorized admitted PR id")
     expect(readmitted).toBe("PR1")
-    expect(prAdmission(app.bays.pr("PR1")!)).toMatchObject({
+    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
       status: "passed",
       baseSha: BASE,
       steps: expect.arrayContaining([expect.objectContaining({ name: "check", status: "passed" })]),
@@ -6007,14 +6007,14 @@ describe("Queue", () => {
       error: { code: "check-failed" },
     })
     expect(merged).toBe(false)
-    expect(prFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
+    expect(changeFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
       delivery: "submitted",
       state: "open",
       merged: false,
     })
     await rejectedApp.bays.intake({ branch: "issue/rejected", headSha: UPDATED, base: "main" })
     await rejectedApp.bays.submit({ pr: rejected.id })
-    expect(prFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
+    expect(changeFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
       delivery: "submitted",
       revision: 2,
       headSha: UPDATED,
@@ -6118,7 +6118,7 @@ describe("Queue", () => {
       ),
     ).rejects.toThrow("no waiting 'check' step")
     expect(merges).toBe(1)
-    expect(prFacts(app.state().bays.prs[remote.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[remote.id])).toMatchObject({
       revision: 2,
       headSha: UPDATED,
       delivery: "pushed",
@@ -6341,7 +6341,7 @@ describe("Queue", () => {
       { candidateId: "C5", parent: "R3" },
     ])
     for (const child of runs.slice(1)) expect(child).not.toHaveProperty("isolationPart")
-    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, prDeliveryState(pr)]))).toEqual({
+    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)]))).toEqual({
       PR1: "integrated",
       PR2: "integrated",
       PR3: "submitted",
@@ -6394,7 +6394,7 @@ describe("Queue", () => {
     ])
     expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3"])
-    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, prDeliveryState(pr)]))).toEqual({
+    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)]))).toEqual({
       PR1: "submitted",
       PR2: "integrated",
     })
@@ -6430,7 +6430,7 @@ describe("Queue", () => {
       },
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3", "R4"])
-    expect(prFacts(app.state().bays.prs[first.id])).toMatchObject({
+    expect(changeFacts(app.state().bays.prs[first.id])).toMatchObject({
       delivery: "integrated",
       revision: first.revision,
       headSha: first.headSha,

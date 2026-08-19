@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createProcess, type Process } from "@yrd/process"
 import { afterEach, describe, expect, it } from "vitest"
-import { createPrPublicationService } from "../src/pr-publication.ts"
+import { createChangePublicationService } from "../src/pr-publication.ts"
 import { addedSubmodulePins, changedSubmodulePins, submodulePinPublications } from "../src/pr-submodule-publication.ts"
 
 const roots: string[] = []
@@ -165,7 +165,7 @@ describe("PR publication Git transport", () => {
         return local.run(request)
       },
     }
-    const service = createPrPublicationService({ repo: rootDestination, process })
+    const service = createChangePublicationService({ repo: rootDestination, process })
 
     const result = await service.publish(
       {

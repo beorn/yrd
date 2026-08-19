@@ -42,15 +42,15 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
-  PRFreshnessTransitionSchema,
-  PRAdmissionRecordedFactSchema,
-  PRRecutCertificateSchema,
-  PRRecutSourceSchema,
-  PRReviewDecisionSchema,
-  PRReviewSchema,
-  PRNeedsAuthorFactSchema,
-  PRRejectedFactSchema,
-  PRTerminalAssociationSchema,
+  ChangeFreshnessTransitionSchema,
+  ChangeAdmissionRecordedFactSchema,
+  ChangeRecutCertificateSchema,
+  ChangeRecutSourceSchema,
+  ChangeReviewDecisionSchema,
+  ChangeReviewSchema,
+  ChangeNeedsAuthorFactSchema,
+  ChangeRejectedFactSchema,
+  ChangeTerminalAssociationSchema,
   ProvisionBayInputSchema,
   ProvisionedBaySchema,
   RefreshBayInputSchema,
@@ -59,28 +59,28 @@ import {
   baseIdentity,
   defaultBayBranch,
   checksRequested,
-  currentPRRev,
+  currentChangeRev,
   emptyBaysState,
   isLivePR,
   needsReview,
   normalizeV2By,
   normalizeV2Submitter,
-  prBaseSha,
-  prComposition,
-  prCorrelation,
-  prDeliveryState,
-  prForBay,
+  changeBaseSha,
+  changeComposition,
+  changeCorrelation,
+  changeDeliveryState,
+  changeForBay,
   requireLivePR,
-  prHead,
-  prNeedsAuthor,
-  prRecut,
-  prRevisionNumber,
-  PrCheckabilityConflict,
+  changeHead,
+  changeNeedsAuthor,
+  changeRecut,
+  changeRevisionNumber,
+  ChangeCheckabilityConflict,
   projectBranchLifecycles,
   reviewState,
   resolveBay,
   resolvePR,
-  resolvePRMatch,
+  resolveChangeMatch,
   type Bay,
   type BranchLifecycle,
   type BaysState,
@@ -92,14 +92,14 @@ import {
   type DeprovisionedBay,
   type LivePR,
   type PR,
-  type PRAdmissionRecordedFact,
-  type PRComment,
-  type PRRegression,
-  type PRRecutProof,
-  type PRReview,
-  type PRReviewState,
-  type PRRev,
-  type PRRevClock,
+  type ChangeAdmissionRecordedFact,
+  type ChangeComment,
+  type ChangeRegression,
+  type ChangeRecutProof,
+  type ChangeReview,
+  type ChangeReviewState,
+  type ChangeRev,
+  type ChangeRevClock,
   type ProvisionBayInput,
   type ProvisionedBay,
   type RefreshBayInput,
@@ -162,7 +162,7 @@ const BayHandoffCertifiedSchema = z
   .object({ bay: BayIdSchema, branch: GitRefSchema, headSha: GitShaSchema, evidence: TextSchema })
   .strict()
 
-const PRExpectedCurrentSchema = z
+const ChangeExpectedCurrentSchema = z
   .object({
     pr: TextSchema,
     revision: RevisionSchema,
@@ -170,9 +170,9 @@ const PRExpectedCurrentSchema = z
     track: z.boolean().optional(),
   })
   .strict()
-type PRExpectedCurrent = Readonly<z.infer<typeof PRExpectedCurrentSchema>>
+type ChangeExpectedCurrent = Readonly<z.infer<typeof ChangeExpectedCurrentSchema>>
 
-const IntakePRArgsSchema = z
+const IntakeChangeArgsSchema = z
   .object({
     bay: TextSchema.optional(),
     name: TextSchema.optional(),
@@ -189,13 +189,13 @@ const IntakePRArgsSchema = z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
       .optional(),
-    expectedCurrent: PRExpectedCurrentSchema.optional(),
+    expectedCurrent: ChangeExpectedCurrentSchema.optional(),
   })
   .strict()
   .refine(({ bay, branch }) => bay !== undefined || branch !== undefined, {
     message: "'bay' or 'branch' is required",
   })
-export type IntakePRArgs = z.infer<typeof IntakePRArgsSchema>
+export type IntakeChangeArgs = z.infer<typeof IntakeChangeArgsSchema>
 
 const SubmitArgsSchema = z.union([
   z
@@ -204,7 +204,7 @@ const SubmitArgsSchema = z.union([
       submitter: TextSchema.optional(),
       correlation: CorrelationSchema.optional(),
       flow: FlowPinSchema.optional(),
-      expectedCurrent: PRExpectedCurrentSchema.optional(),
+      expectedCurrent: ChangeExpectedCurrentSchema.optional(),
     })
     .strict(),
   z
@@ -251,9 +251,9 @@ export type SubmitSelectionOptions = Readonly<{
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
 export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 
-const PrCloseArgsSchema = z.object({ pr: TextSchema, reason: TextSchema.optional() }).strict()
-export type PrCloseArgs = z.infer<typeof PrCloseArgsSchema>
-const PrEditArgsSchema = z
+const ChangeCloseArgsSchema = z.object({ pr: TextSchema, reason: TextSchema.optional() }).strict()
+export type ChangeCloseArgs = z.infer<typeof ChangeCloseArgsSchema>
+const ChangeEditArgsSchema = z
   .object({
     pr: TextSchema,
     issue: TextSchema.optional(),
@@ -272,20 +272,20 @@ const PrEditArgsSchema = z
       track !== undefined,
     { message: "'issue', 'note', 'title', 'description', or 'track' is required" },
   )
-export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
+export type ChangeEditArgs = z.infer<typeof ChangeEditArgsSchema>
 
-const PrReadyArgsSchema = z.object({ pr: TextSchema, expectedCurrent: PRExpectedCurrentSchema.optional() }).strict()
-export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
-const PrRecutExpectedCurrentSchema = z
+const ChangeReadyArgsSchema = z.object({ pr: TextSchema, expectedCurrent: ChangeExpectedCurrentSchema.optional() }).strict()
+export type ChangeReadyArgs = z.infer<typeof ChangeReadyArgsSchema>
+const ChangeRecutExpectedCurrentSchema = z
   .object({
     revision: RevisionSchema,
     headSha: GitShaSchema,
     track: z.boolean().optional(),
-    effectiveReview: PRReviewSchema.optional(),
+    effectiveReview: ChangeReviewSchema.optional(),
     checksPassed: z.boolean().optional(),
   })
   .strict()
-const PrRecutArgsSchema = z
+const ChangeRecutArgsSchema = z
   .object({
     pr: TextSchema,
     fromRevision: RevisionSchema,
@@ -294,15 +294,15 @@ const PrRecutArgsSchema = z
     treeSha: GitShaSchema,
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
-    certificate: PRRecutCertificateSchema.optional(),
-    sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
+    certificate: ChangeRecutCertificateSchema.optional(),
+    sources: z.array(ChangeRecutSourceSchema).min(1).readonly().optional(),
     composition: CompositionV1Schema.optional(),
-    expectedCurrent: PrRecutExpectedCurrentSchema.optional(),
-    transition: PRFreshnessTransitionSchema.optional(),
+    expectedCurrent: ChangeRecutExpectedCurrentSchema.optional(),
+    transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-export type PrRecutArgs = z.infer<typeof PrRecutArgsSchema>
-const PrSettleSupersededArgsSchema = z
+export type ChangeRecutArgs = z.infer<typeof ChangeRecutArgsSchema>
+const ChangeSettleSupersededArgsSchema = z
   .object({
     pr: TextSchema,
     revision: RevisionSchema,
@@ -312,18 +312,18 @@ const PrSettleSupersededArgsSchema = z
     patchId: GitShaSchema,
   })
   .strict()
-export type PrSettleSupersededArgs = z.infer<typeof PrSettleSupersededArgsSchema>
-const PrRequestChecksArgsSchema = z
-  .object({ pr: TextSchema, baseSha: GitShaSchema.optional(), expectedCurrent: PRExpectedCurrentSchema.optional() })
+export type ChangeSettleSupersededArgs = z.infer<typeof ChangeSettleSupersededArgsSchema>
+const ChangeRequestChecksArgsSchema = z
+  .object({ pr: TextSchema, baseSha: GitShaSchema.optional(), expectedCurrent: ChangeExpectedCurrentSchema.optional() })
   .strict()
-export type PrRequestChecksArgs = z.infer<typeof PrRequestChecksArgsSchema>
-const PrRequestReviewArgsSchema = z
+export type ChangeRequestChecksArgs = z.infer<typeof ChangeRequestChecksArgsSchema>
+const ChangeRequestReviewArgsSchema = z
   .object({ pr: TextSchema, reviewers: z.array(TextSchema), by: TextSchema.optional() })
   .strict()
-export type PrRequestReviewArgs = z.infer<typeof PrRequestReviewArgsSchema>
+export type ChangeRequestReviewArgs = z.infer<typeof ChangeRequestReviewArgsSchema>
 
-const PrPublicationComponentSchema = z.object({ path: TextSchema, pin: GitShaSchema }).strict()
-export const PrPublicationInputSchema = z
+const ChangePublicationComponentSchema = z.object({ path: TextSchema, pin: GitShaSchema }).strict()
+export const ChangePublicationInputSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
@@ -331,57 +331,57 @@ export const PrPublicationInputSchema = z
     baseSha: GitShaSchema,
     branch: GitRefSchema,
     sourceRoot: TextSchema,
-    components: z.array(PrPublicationComponentSchema).readonly(),
+    components: z.array(ChangePublicationComponentSchema).readonly(),
     continuation: z.enum(["none", "queue"]),
   })
   .strict()
-export type PrPublicationInput = z.infer<typeof PrPublicationInputSchema>
+export type ChangePublicationInput = z.infer<typeof ChangePublicationInputSchema>
 const PublishedRefSchema = z.object({ path: TextSchema, sha: GitShaSchema, ref: GitRefSchema }).strict()
-export const PrPublicationOutputSchema = z
+export const ChangePublicationOutputSchema = z
   .object({ pr: PRIdSchema, revision: RevisionSchema, refs: z.array(PublishedRefSchema).readonly() })
   .strict()
-export type PrPublicationOutput = z.infer<typeof PrPublicationOutputSchema>
-export type PrPublicationService = Readonly<{
+export type ChangePublicationOutput = z.infer<typeof ChangePublicationOutputSchema>
+export type ChangePublicationService = Readonly<{
   revision: string
   publish(
-    input: PrPublicationInput,
+    input: ChangePublicationInput,
     context: JobContext,
-  ): JobResult<PrPublicationOutput> | Promise<JobResult<PrPublicationOutput>>
+  ): JobResult<ChangePublicationOutput> | Promise<JobResult<ChangePublicationOutput>>
 }>
 
-export function prPublicationJobKey(identity: Pick<PrPublicationInput, "pr" | "revision" | "headSha">): string {
+export function changePublicationJobKey(identity: Pick<ChangePublicationInput, "pr" | "revision" | "headSha">): string {
   return `pr-publication:${identity.pr}:${String(identity.revision)}:${identity.headSha}`
 }
 
-const PrReviewArgsSchema = z
+const ChangeReviewArgsSchema = z
   .object({
     pr: TextSchema,
     by: TextSchema,
-    decision: PRReviewDecisionSchema,
+    decision: ChangeReviewDecisionSchema,
     ref: TextSchema.optional(),
     note: TextSchema.optional(),
   })
   .strict()
-export type PrReviewArgs = z.infer<typeof PrReviewArgsSchema>
+export type ChangeReviewArgs = z.infer<typeof ChangeReviewArgsSchema>
 
-const PrCommentArgsSchema = z
+const ChangeCommentArgsSchema = z
   .object({
     pr: TextSchema,
     by: TextSchema,
     note: TextSchema,
     ref: TextSchema.optional(),
-    expectedCurrent: PRExpectedCurrentSchema.optional(),
+    expectedCurrent: ChangeExpectedCurrentSchema.optional(),
   })
   .strict()
-export type PrCommentArgs = z.infer<typeof PrCommentArgsSchema>
+export type ChangeCommentArgs = z.infer<typeof ChangeCommentArgsSchema>
 
-const PRRegressionSeveritySchema = z.enum(["low", "medium", "high", "critical"])
-const PrRegressionArgsSchema = z
+const ChangeRegressionSeveritySchema = z.enum(["low", "medium", "high", "critical"])
+const ChangeRegressionArgsSchema = z
   .object({
     pr: TextSchema,
     run: TextSchema,
     detectedAt: z.iso.datetime({ offset: true }),
-    severity: PRRegressionSeveritySchema,
+    severity: ChangeRegressionSeveritySchema,
     evidence: TextSchema,
     implementationRunRef: TextSchema,
     reviewRef: TextSchema,
@@ -389,7 +389,7 @@ const PrRegressionArgsSchema = z
     repairRun: TextSchema,
   })
   .strict()
-export type PrRegressionArgs = z.infer<typeof PrRegressionArgsSchema>
+export type ChangeRegressionArgs = z.infer<typeof ChangeRegressionArgsSchema>
 
 const BayOpenedSchema = z.preprocess(
   normalizeV2By,
@@ -407,7 +407,7 @@ const BayOpenedSchema = z.preprocess(
     .strict(),
 )
 const BayClosingSchema = z.object({ bay: BayIdSchema }).strict()
-const LegacyPRPushedSchema = z
+const LegacyChangePushedSchema = z
   .object({
     pr: PRIdSchema,
     bay: BayIdSchema.optional(),
@@ -426,10 +426,10 @@ const LegacyPRPushedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const PRRecutLineageSchema = z
+const ChangeRecutLineageSchema = z
   .object({ revision: RevisionSchema, headSha: GitShaSchema, baseSha: GitShaSchema.optional() })
   .strict()
-const PRRecutReplaySchema = z
+const ChangeRecutReplaySchema = z
   .object({
     pr: PRIdSchema,
     fromRevision: RevisionSchema,
@@ -437,46 +437,46 @@ const PRRecutReplaySchema = z
     baseSha: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
-    certificate: PRRecutCertificateSchema.optional(),
+    certificate: ChangeRecutCertificateSchema.optional(),
     submitter: TextSchema.optional(),
-    sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
-    predecessor: PRRecutLineageSchema,
-    successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
+    sources: z.array(ChangeRecutSourceSchema).min(1).readonly().optional(),
+    predecessor: ChangeRecutLineageSchema,
+    successor: ChangeRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
     composition: CompositionV1Schema.optional(),
-    transition: PRFreshnessTransitionSchema.optional(),
+    transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-const PRRecutFactSchema = PRRecutReplaySchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict()
-const PRPushedV1Schema = z.preprocess(
+const ChangeRecutFactSchema = ChangeRecutReplaySchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict()
+const ChangePushedV1Schema = z.preprocess(
   normalizeV2Submitter,
-  LegacyPRPushedSchema.extend({ submitter: TextSchema }).strict(),
+  LegacyChangePushedSchema.extend({ submitter: TextSchema }).strict(),
 )
-const PRPushedSchema = z.preprocess(
+const ChangePushedSchema = z.preprocess(
   normalizeV2Submitter,
-  LegacyPRPushedSchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict(),
+  LegacyChangePushedSchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict(),
 )
-const PRPushedReplaySchema = z.union([PRPushedV1Schema, LegacyPRPushedSchema])
-const PRRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const LegacyPRRevisionSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
-const PRRevisionSchema = z.preprocess(
+const ChangePushedReplaySchema = z.union([ChangePushedV1Schema, LegacyChangePushedSchema])
+const ChangeRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
+const LegacyChangeRevisionSchema = ChangeRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
+const ChangeRevisionSchema = z.preprocess(
   normalizeV2Submitter,
-  LegacyPRRevisionSchema.extend({ submitter: TextSchema, flow: FlowPinSchema.optional() }).strict(),
+  LegacyChangeRevisionSchema.extend({ submitter: TextSchema, flow: FlowPinSchema.optional() }).strict(),
 )
-const PRCorrelationBoundSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema }).strict()
-const PRTerminalIdentitySchema = PRRevisionIdentitySchema.extend({
+const ChangeCorrelationBoundSchema = ChangeRevisionIdentitySchema.extend({ correlation: CorrelationSchema }).strict()
+const ChangeTerminalIdentitySchema = ChangeRevisionIdentitySchema.extend({
   issueRef: TextSchema.optional(),
   correlation: CorrelationSchema.optional(),
 }).strict()
-const PRQueueTerminalIdentitySchema = PRTerminalIdentitySchema.extend({ run: TextSchema }).strict()
-export const PRWithdrawnSchema = z.preprocess(
+const ChangeQueueTerminalIdentitySchema = ChangeTerminalIdentitySchema.extend({ run: TextSchema }).strict()
+export const ChangeWithdrawnSchema = z.preprocess(
   normalizeV2Submitter,
-  PRTerminalIdentitySchema.extend({
+  ChangeTerminalIdentitySchema.extend({
     reason: TextSchema.optional(),
     /** Carried so terminal ball closures can route back to the revision submitter. */
     submitter: TextSchema.optional(),
   }).strict(),
 )
-const LegacyPRWithdrawnSchema = z
+const LegacyChangeWithdrawnSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema.optional(),
@@ -484,7 +484,7 @@ const LegacyPRWithdrawnSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const LegacyPRRejectedSchema = z
+const LegacyChangeRejectedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
@@ -493,13 +493,13 @@ const LegacyPRRejectedSchema = z
     detail: z.string().optional(),
   })
   .strict()
-const TransitionalPRRejectedSchema = PRQueueTerminalIdentitySchema.extend({
+const TransitionalChangeRejectedSchema = ChangeQueueTerminalIdentitySchema.extend({
   detail: z.string().optional(),
 }).strict()
-const PRReplayRejectedSchema = z.union([PRRejectedFactSchema, TransitionalPRRejectedSchema, LegacyPRRejectedSchema])
-const PRIntegratedV1Schema = z.preprocess(
+const ChangeReplayRejectedSchema = z.union([ChangeRejectedFactSchema, TransitionalChangeRejectedSchema, LegacyChangeRejectedSchema])
+const ChangeIntegratedV1Schema = z.preprocess(
   normalizeV2Submitter,
-  PRQueueTerminalIdentitySchema.extend({
+  ChangeQueueTerminalIdentitySchema.extend({
     commit: GitShaSchema,
     landingSha: GitShaSchema,
     baseSha: GitShaSchema,
@@ -512,9 +512,9 @@ const PRIntegratedV1Schema = z.preprocess(
       path: ["landingSha"],
     }),
 )
-export const PRIntegratedSchema = z.preprocess(
+export const ChangeIntegratedSchema = z.preprocess(
   normalizeV2Submitter,
-  PRQueueTerminalIdentitySchema.extend({
+  ChangeQueueTerminalIdentitySchema.extend({
     commit: GitShaSchema,
     landingSha: GitShaSchema,
     baseSha: GitShaSchema,
@@ -527,18 +527,18 @@ export const PRIntegratedSchema = z.preprocess(
       path: ["landingSha"],
     }),
 )
-const PRAlreadyLandedSettlementSchema = z
+const ChangeAlreadyLandedSettlementSchema = z
   .object({
     kind: z.literal("refresh-superseded"),
     proof: z.literal("payload-already-contained"),
     patchId: GitShaSchema,
   })
   .strict()
-export const PRAlreadyLandedSchema = z.preprocess(
+export const ChangeAlreadyLandedSchema = z.preprocess(
   normalizeV2Submitter,
-  PRTerminalIdentitySchema.extend({
+  ChangeTerminalIdentitySchema.extend({
     run: TextSchema.optional(),
-    settlement: PRAlreadyLandedSettlementSchema.optional(),
+    settlement: ChangeAlreadyLandedSettlementSchema.optional(),
     baseSha: GitShaSchema,
     candidateSha: GitShaSchema,
     candidateTreeSha: GitShaSchema,
@@ -556,7 +556,7 @@ export const PRAlreadyLandedSchema = z.preprocess(
       path: ["candidateTreeSha"],
     }),
 )
-const LegacyPRIntegratedSchema = z
+const LegacyChangeIntegratedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
@@ -566,22 +566,22 @@ const LegacyPRIntegratedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-export const PRCanceledSchema = z.preprocess(
+export const ChangeCanceledSchema = z.preprocess(
   normalizeV2Submitter,
-  PRQueueTerminalIdentitySchema.extend({
+  ChangeQueueTerminalIdentitySchema.extend({
     by: TextSchema,
     reason: TextSchema,
     /** Carried so terminal ball closures can route back to the revision submitter. */
     submitter: TextSchema.optional(),
   }).strict(),
 )
-const LegacyPRCanceledSchema = PRRevisionIdentitySchema.extend({
+const LegacyChangeCanceledSchema = ChangeRevisionIdentitySchema.extend({
   correlation: CorrelationSchema.optional(),
   by: TextSchema,
   reason: TextSchema,
 }).strict()
-type PRRegressionFact = Omit<PRRegression, "recordedAt">
-const PRRegressionSchema: z.ZodType<PRRegressionFact> = z
+type ChangeRegressionFact = Omit<ChangeRegression, "recordedAt">
+const ChangeRegressionSchema: z.ZodType<ChangeRegressionFact> = z
   .object({
     pr: PRIdSchema,
     issueRef: TextSchema,
@@ -590,7 +590,7 @@ const PRRegressionSchema: z.ZodType<PRRegressionFact> = z
     run: TextSchema,
     landingSha: GitShaSchema,
     detectedAt: z.iso.datetime({ offset: true }),
-    severity: PRRegressionSeveritySchema,
+    severity: ChangeRegressionSeveritySchema,
     evidence: TextSchema,
     implementationRunRef: TextSchema,
     reviewRef: TextSchema,
@@ -600,11 +600,11 @@ const PRRegressionSchema: z.ZodType<PRRegressionFact> = z
     repairLandingSha: GitShaSchema,
   })
   .strict()
-const PRReviewFactSchema = z.preprocess(
+const ChangeReviewFactSchema = z.preprocess(
   normalizeV2By,
-  PRReviewSchema.omit({ at: true, carriedFrom: true }).extend({ pr: PRIdSchema }).strict(),
+  ChangeReviewSchema.omit({ at: true, carriedFrom: true }).extend({ pr: PRIdSchema }).strict(),
 )
-const PRCommentFactSchema = z.preprocess(
+const ChangeCommentFactSchema = z.preprocess(
   normalizeV2By,
   z
     .object({
@@ -620,12 +620,12 @@ const PRCommentFactSchema = z.preprocess(
 /** Read-only decoders for journals written before Hab session ownership left
  * Yrd. No command can append these facts and projection deliberately ignores
  * them after validation. */
-const RetiredPRSessionStartedFactSchema = z.object({ pr: PRIdSchema, launchId: TextSchema }).strict()
-const RetiredPRSessionEndedFactSchema = RetiredPRSessionStartedFactSchema.extend({
+const RetiredChangeSessionStartedFactSchema = z.object({ pr: PRIdSchema, launchId: TextSchema }).strict()
+const RetiredChangeSessionEndedFactSchema = RetiredChangeSessionStartedFactSchema.extend({
   outcome: z.enum(["completed", "withdrawn", "crashed", "superseded"]),
 }).strict()
-const PRCheckRequestFactSchema = PRRevisionIdentitySchema.extend({ baseSha: GitShaSchema.optional() }).strict()
-const PRReviewRequestFactSchema = z
+const ChangeCheckRequestFactSchema = ChangeRevisionIdentitySchema.extend({ baseSha: GitShaSchema.optional() }).strict()
+const ChangeReviewRequestFactSchema = z
   .object({ pr: PRIdSchema, reviewers: z.array(TextSchema), requestedBy: TextSchema })
   .strict()
 
@@ -651,15 +651,15 @@ export type BayJobDefs = Readonly<{
   "bay.refresh": JobDef<RefreshBayInput, RefreshedBay>
   "bay.checkpoint": JobDef<CheckpointBayInput, CheckpointedBay>
   "bay.deprovision": JobDef<DeprovisionBayInput, DeprovisionedBay>
-  "pr.publish": JobDef<PrPublicationInput, PrPublicationOutput>
+  "pr.publish": JobDef<ChangePublicationInput, ChangePublicationOutput>
 }>
 
-export function createBayJobDefs(workspace: BayWorkspace, publication?: PrPublicationService): BayJobDefs {
-  const publisher: PrPublicationService =
+export function createBayJobDefs(workspace: BayWorkspace, publication?: ChangePublicationService): BayJobDefs {
+  const publisher: ChangePublicationService =
     publication ??
     Object.freeze({
       revision: "publication-unavailable-v1",
-      publish: (): JobResult<PrPublicationOutput> => ({
+      publish: (): JobResult<ChangePublicationOutput> => ({
         status: "completed",
         conclusion: "failure",
         error: { code: "publication-unavailable", message: "PR publication service is not installed" },
@@ -702,8 +702,8 @@ export function createBayJobDefs(workspace: BayWorkspace, publication?: PrPublic
       name: "pr.publish",
       title: "Publish an immutable PR revision",
       revision: publisher.revision,
-      input: PrPublicationInputSchema,
-      output: PrPublicationOutputSchema,
+      input: ChangePublicationInputSchema,
+      output: ChangePublicationOutputSchema,
       observe: (input) => ({
         lifecycle: "publication",
         identity: { pr: input.pr, revision: input.revision, headSha: input.headSha },
@@ -723,23 +723,23 @@ export type BayCommands = Readonly<{
     checkpoint: CommandHandler<CheckpointBayArgs, BayState>
     orphan: CommandHandler<OrphanBayArgs, BayState>
     certifyHandoff: CommandHandler<CertifyHandoffArgs, BayState>
-    intake: CommandHandler<IntakePRArgs, BayState>
+    intake: CommandHandler<IntakeChangeArgs, BayState>
     submit: CommandHandler<SubmitArgs, BayState>
     close: CommandHandler<CloseBayArgs, BayState>
   }>
   pr: Readonly<{
-    close: CommandHandler<PrCloseArgs, BayState>
-    edit: CommandHandler<PrEditArgs, BayState>
-    recut: CommandHandler<PrRecutArgs, BayState>
-    settleSuperseded: CommandHandler<PrSettleSupersededArgs, BayState>
-    ready: CommandHandler<PrReadyArgs, BayState>
-    review: CommandHandler<PrReviewArgs, BayState>
-    comment: CommandHandler<PrCommentArgs, BayState>
-    requestChecks: CommandHandler<PrRequestChecksArgs, BayState>
-    recordAdmission: CommandHandler<PRAdmissionRecordedFact, BayState>
-    requestReview: CommandHandler<PrRequestReviewArgs, BayState>
-    regression: CommandHandler<PrRegressionArgs, BayState>
-    publish: CommandHandler<PrPublicationInput, BayState>
+    close: CommandHandler<ChangeCloseArgs, BayState>
+    edit: CommandHandler<ChangeEditArgs, BayState>
+    recut: CommandHandler<ChangeRecutArgs, BayState>
+    settleSuperseded: CommandHandler<ChangeSettleSupersededArgs, BayState>
+    ready: CommandHandler<ChangeReadyArgs, BayState>
+    review: CommandHandler<ChangeReviewArgs, BayState>
+    comment: CommandHandler<ChangeCommentArgs, BayState>
+    requestChecks: CommandHandler<ChangeRequestChecksArgs, BayState>
+    recordAdmission: CommandHandler<ChangeAdmissionRecordedFact, BayState>
+    requestReview: CommandHandler<ChangeRequestReviewArgs, BayState>
+    regression: CommandHandler<ChangeRegressionArgs, BayState>
+    publish: CommandHandler<ChangePublicationInput, BayState>
   }>
 }>
 
@@ -750,7 +750,7 @@ export type Bays = Readonly<{
   branchLifecycles(): readonly DeepReadonly<BranchLifecycle>[]
   pr(selector: string): DeepReadonly<PR> | undefined
   prs(): readonly DeepReadonly<PR>[]
-  reviewState(selector: string): DeepReadonly<PRReviewState>
+  reviewState(selector: string): DeepReadonly<ChangeReviewState>
   needsReview(selector: string, reviewer?: string): boolean
   checksRequested(selector: string): boolean
   open(args: OpenBayArgs): Promise<CommandResult>
@@ -758,22 +758,22 @@ export type Bays = Readonly<{
   checkpoint(args: CheckpointBayArgs): Promise<CommandResult>
   orphan(args: OrphanBayArgs): Promise<CommandResult>
   certifyHandoff(args: CertifyHandoffArgs): Promise<CommandResult>
-  intake(args: IntakePRArgs): Promise<CommandResult>
+  intake(args: IntakeChangeArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
   close(args: CloseBayArgs): Promise<CommandResult>
-  closePr(args: PrCloseArgs): Promise<CommandResult>
-  editPr(args: PrEditArgs): Promise<CommandResult>
-  recut(args: PrRecutArgs): Promise<CommandResult>
-  settleSuperseded(args: PrSettleSupersededArgs): Promise<CommandResult>
-  ready(args: PrReadyArgs): Promise<CommandResult>
-  review(args: PrReviewArgs): Promise<CommandResult>
-  comment(args: PrCommentArgs): Promise<CommandResult>
-  requestChecks(args: PrRequestChecksArgs): Promise<CommandResult>
-  recordAdmission(args: PRAdmissionRecordedFact): Promise<CommandResult>
-  requestReview(args: PrRequestReviewArgs): Promise<CommandResult>
-  recordRegression(args: PrRegressionArgs): Promise<CommandResult>
-  requestPublication(args: PrPublicationInput): Promise<CommandResult>
+  closePr(args: ChangeCloseArgs): Promise<CommandResult>
+  editPr(args: ChangeEditArgs): Promise<CommandResult>
+  recut(args: ChangeRecutArgs): Promise<CommandResult>
+  settleSuperseded(args: ChangeSettleSupersededArgs): Promise<CommandResult>
+  ready(args: ChangeReadyArgs): Promise<CommandResult>
+  review(args: ChangeReviewArgs): Promise<CommandResult>
+  comment(args: ChangeCommentArgs): Promise<CommandResult>
+  requestChecks(args: ChangeRequestChecksArgs): Promise<CommandResult>
+  recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
+  requestReview(args: ChangeRequestReviewArgs): Promise<CommandResult>
+  recordRegression(args: ChangeRegressionArgs): Promise<CommandResult>
+  requestPublication(args: ChangePublicationInput): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
@@ -886,7 +886,7 @@ export function createBays(
     )
     return actions.open({ ...args, ...resolved })
   }
-  const intake = async (args: IntakePRArgs): Promise<CommandResult> => {
+  const intake = async (args: IntakeChangeArgs): Promise<CommandResult> => {
     const selectedPR = (): DeepReadonly<PR> | undefined => {
       const snapshot = state()
       const bay = args.bay === undefined ? undefined : resolveBay(snapshot, args.bay)
@@ -894,20 +894,20 @@ export function createBays(
         ? args.branch === undefined
           ? undefined
           : resolvePR(snapshot, args.branch)
-        : prForBay(snapshot, bay.id)
+        : changeForBay(snapshot, bay.id)
     }
     const before = selectedPR()
     return observe(
       {
         lifecycle: "intake",
-        identity: before === undefined ? undefined : prIdentity(before),
+        identity: before === undefined ? undefined : changeIdentity(before),
         attributes: {
           ...(args.bay === undefined ? {} : { bay: args.bay }),
           ...(args.branch === undefined ? {} : { branch: args.branch }),
         },
         resultAttributes: () => {
           const selected = selectedPR()
-          return selected === undefined ? {} : prIdentity(selected)
+          return selected === undefined ? {} : changeIdentity(selected)
         },
       },
       async () => {
@@ -915,7 +915,7 @@ export function createBays(
         const recorded = selectedPR()
         const resolved = await target(
           args.base ?? bay?.base ?? recorded?.base,
-          args.baseSha ?? bay?.baseSha ?? (recorded === undefined ? undefined : prBaseSha(recorded)),
+          args.baseSha ?? bay?.baseSha ?? (recorded === undefined ? undefined : changeBaseSha(recorded)),
         )
         return actions.intake({ ...args, ...resolved })
       },
@@ -930,8 +930,8 @@ export function createBays(
       const selected = options.selectFlow({
         base: pr.base,
         branch: pr.branch,
-        head: prHead(pr),
-        ...(prComposition(pr) === undefined ? {} : { composition: prComposition(pr) }),
+        head: changeHead(pr),
+        ...(changeComposition(pr) === undefined ? {} : { composition: changeComposition(pr) }),
         ...(pr.bay === undefined ? {} : { bay: pr.bay }),
         ...(pr.issue === undefined ? {} : { issue: pr.issue }),
       })
@@ -979,11 +979,11 @@ export function createBays(
     return observe(
       {
         lifecycle: "submit",
-        identity: before === undefined ? undefined : prIdentity(before),
+        identity: before === undefined ? undefined : changeIdentity(before),
         attributes: { selector },
         resultAttributes: () => {
           const selected = resolvePR(state(), selector)
-          return selected === undefined ? {} : prIdentity(selected)
+          return selected === undefined ? {} : changeIdentity(selected)
         },
       },
       () => submitOperation(args),
@@ -1010,7 +1010,7 @@ export function createBays(
         `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
       )
     }
-    const delivery = prDeliveryState(pr)
+    const delivery = changeDeliveryState(pr)
     if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
       raiseFailure(
         "refusal",
@@ -1040,7 +1040,7 @@ export function createBays(
     const trackChanged = metadata.track !== undefined && metadata.track !== (pr.track ?? false)
     if (trackChanged && !trackable) {
       const warning =
-        `PR '${pr.id}' is ${prDeliveryState(pr)}; --track was NOT recorded. ` +
+        `PR '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
         "Tracking governs future rebuilds, and this merge request has none."
       metadata.warnings?.push(warning)
       log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
@@ -1071,7 +1071,7 @@ export function createBays(
     const requestedComposition =
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
-    const resolved = resolvePRMatch(snapshot, selector)
+    const resolved = resolveChangeMatch(snapshot, selector)
     if (resolved?.revision !== undefined) requireLivePR(snapshot, selector)
     const selectedBay = resolveBay(snapshot, selector)
     let pr = resolved?.value ?? (selectedBay === undefined ? undefined : resolvePR(snapshot, selectedBay.branch))
@@ -1096,7 +1096,7 @@ export function createBays(
     //    delivery PR (revision 1) via the direct-branch path below, so no
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
     //  - addressed by its id, it stays idempotent.
-    if (pr !== undefined && (prDeliveryState(pr) === "integrated" || prDeliveryState(pr) === "already-landed")) {
+    if (pr !== undefined && (changeDeliveryState(pr) === "integrated" || changeDeliveryState(pr) === "already-landed")) {
       // Addressed by its canonical id, an integrated PR is frozen evidence:
       // idempotent. Addressed by a moving alias (its branch), a new head mints a
       // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
@@ -1105,7 +1105,7 @@ export function createBays(
       if (landedHead === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
-      if (landedHead === prHead(pr)) return bindSubmission(pr, options)
+      if (landedHead === changeHead(pr)) return bindSubmission(pr, options)
       // A new head on a landed branch mints a fresh delivery identity below.
     }
 
@@ -1136,9 +1136,9 @@ export function createBays(
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
       }
-      pr = prForBay(snapshot, bay.id) ?? resolvePR(snapshot, bay.branch)
-      const composition = requestedComposition ?? (pr === undefined ? undefined : prComposition(pr))
-      if (pr === undefined || prHead(pr) !== bay.headSha || !sameComposition(composition, prComposition(pr))) {
+      pr = changeForBay(snapshot, bay.id) ?? resolvePR(snapshot, bay.branch)
+      const composition = requestedComposition ?? (pr === undefined ? undefined : changeComposition(pr))
+      if (pr === undefined || changeHead(pr) !== bay.headSha || !sameComposition(composition, changeComposition(pr))) {
         await intake({
           bay: bay.id,
           headSha: bay.headSha,
@@ -1146,7 +1146,7 @@ export function createBays(
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(composition === undefined ? {} : { composition }),
         })
-        pr = prForBay(state(), bay.id) ?? resolvePR(state(), bay.branch)
+        pr = changeForBay(state(), bay.id) ?? resolvePR(state(), bay.branch)
       }
     }
 
@@ -1160,25 +1160,25 @@ export function createBays(
     // exit 0 and an automated driver concluded the carrier matched its branch when it did not.
     if (
       pr !== undefined &&
-      (prDeliveryState(pr) === "submitted" ||
-        prDeliveryState(pr) === "ready" ||
-        prDeliveryState(pr) === "needs-author" ||
-        prDeliveryState(pr) === "pushed") &&
+      (changeDeliveryState(pr) === "submitted" ||
+        changeDeliveryState(pr) === "ready" ||
+        changeDeliveryState(pr) === "needs-author" ||
+        changeDeliveryState(pr) === "pushed") &&
       bay?.status !== "active"
     ) {
       const headSha = await options.resolveRevision(pr.branch)
-      if (headSha === undefined && (prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready")) {
+      if (headSha === undefined && (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready")) {
         // A submitted PR whose branch no longer resolves cannot be re-submitted from a tip.
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${pr.branch}'`)
       }
       if (headSha !== undefined) {
         const resolved = await target(options.base ?? pr.base, undefined)
-        const composition = requestedComposition ?? prComposition(pr)
+        const composition = requestedComposition ?? changeComposition(pr)
         if (
-          headSha !== prHead(pr) ||
+          headSha !== changeHead(pr) ||
           resolved.base !== pr.base ||
-          resolved.baseSha !== prBaseSha(pr) ||
-          !sameComposition(composition, prComposition(pr))
+          resolved.baseSha !== changeBaseSha(pr) ||
+          !sameComposition(composition, changeComposition(pr))
         ) {
           await intake({
             branch: pr.branch,
@@ -1206,11 +1206,11 @@ export function createBays(
     if (pr !== undefined && isLivePR(pr)) pr = await bindIssue(pr, options.issue)
     if (
       pr !== undefined &&
-      (prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready" || prDeliveryState(pr) === "needs-author")
+      (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready" || changeDeliveryState(pr) === "needs-author")
     ) {
       return bindCorrelation(pr, options.correlation)
     }
-    if (pr !== undefined && prDeliveryState(pr) === "pushed") {
+    if (pr !== undefined && changeDeliveryState(pr) === "pushed") {
       pr = await bindCorrelation(pr, options.correlation)
       if (options.draft === true) return pr
       await submitOperation({ pr: pr.id })
@@ -1229,17 +1229,17 @@ export function createBays(
       const resolved = await target(options.base, undefined)
       const live = Object.values(snapshot.prs).find(
         (candidate) =>
-          (prDeliveryState(candidate) === "pushed" ||
-            prDeliveryState(candidate) === "submitted" ||
-            prDeliveryState(candidate) === "ready" ||
-            prDeliveryState(candidate) === "needs-author") &&
-          prHead(candidate) === headSha &&
+          (changeDeliveryState(candidate) === "pushed" ||
+            changeDeliveryState(candidate) === "submitted" ||
+            changeDeliveryState(candidate) === "ready" ||
+            changeDeliveryState(candidate) === "needs-author") &&
+          changeHead(candidate) === headSha &&
           candidate.base === resolved.base &&
-          sameComposition(prComposition(candidate), requestedComposition),
+          sameComposition(changeComposition(candidate), requestedComposition),
       )
       if (live !== undefined) {
         const correlated = await bindSubmission(live, options)
-        if (prDeliveryState(correlated) === "submitted" || prDeliveryState(correlated) === "ready") {
+        if (changeDeliveryState(correlated) === "submitted" || changeDeliveryState(correlated) === "ready") {
           return correlated
         }
         if (options.draft === true) return correlated
@@ -1276,7 +1276,7 @@ export function createBays(
     if (pr === undefined) {
       raiseFailure("infrastructure", "pr-state-invalid", `yrd: bay '${bay.id}' intake did not create a PR`)
     }
-    raiseFailure("refusal", "pr-not-pushed", `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}, not pushed`)
+    raiseFailure("refusal", "pr-not-pushed", `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
   }
 
   const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
@@ -1284,9 +1284,9 @@ export function createBays(
     return observe(
       {
         lifecycle: "submit",
-        identity: before === undefined ? undefined : prIdentity(before),
+        identity: before === undefined ? undefined : changeIdentity(before),
         attributes: { selector },
-        resultAttributes: prIdentity,
+        resultAttributes: changeIdentity,
       },
       // Bind the resolved title/description in one seam AFTER the PR is
       // materialized, so every submit path (bay, direct branch, resubmit,
@@ -1358,38 +1358,38 @@ export function withBays(options: WithBaysOptions) {
         "bay/closing": journalEvent(1, BayClosingSchema),
         "bay/orphaned": journalEvent(1, BayOrphanedSchema),
         "bay/handoff-certified": journalEvent(1, BayHandoffCertifiedSchema),
-        "pr/pushed": journalEvent(2, PRPushedSchema),
-        "pr/recut": journalEvent(3, PRRecutFactSchema),
-        "pr/submitted": journalEvent(1, PRRevisionSchema),
-        "pr/correlation-bound": journalEvent(1, PRCorrelationBoundSchema),
-        "pr/withdrawn": journalEvent(1, PRWithdrawnSchema),
-        "pr/needs-author": journalEvent(1, PRNeedsAuthorFactSchema),
-        "pr/rejected": journalEvent(1, PRRejectedFactSchema),
-        "pr/terminal-associated": journalEvent(1, PRTerminalAssociationSchema),
-        "pr/integrated": journalEvent(2, PRIntegratedSchema),
-        "pr/already-landed": journalEvent(1, PRAlreadyLandedSchema),
-        "pr/canceled": journalEvent(1, PRCanceledSchema),
-        "pr/regression-recorded": journalEvent(1, PRRegressionSchema),
-        "pr/edited": journalEvent(1, PrEditArgsSchema),
-        "pr/reviewed": journalEvent(1, PRReviewFactSchema),
-        "pr/commented": journalEvent(1, PRCommentFactSchema),
-        "pr/session-started": journalEvent(1, RetiredPRSessionStartedFactSchema),
-        "pr/session-ended": journalEvent(1, RetiredPRSessionEndedFactSchema),
-        "pr/checks-requested": journalEvent(1, PRCheckRequestFactSchema),
-        "pr/admission-recorded": journalEvent(2, PRAdmissionRecordedFactSchema),
-        "pr/review-requested": journalEvent(1, PRReviewRequestFactSchema),
+        "pr/pushed": journalEvent(2, ChangePushedSchema),
+        "pr/recut": journalEvent(3, ChangeRecutFactSchema),
+        "pr/submitted": journalEvent(1, ChangeRevisionSchema),
+        "pr/correlation-bound": journalEvent(1, ChangeCorrelationBoundSchema),
+        "pr/withdrawn": journalEvent(1, ChangeWithdrawnSchema),
+        "pr/needs-author": journalEvent(1, ChangeNeedsAuthorFactSchema),
+        "pr/rejected": journalEvent(1, ChangeRejectedFactSchema),
+        "pr/terminal-associated": journalEvent(1, ChangeTerminalAssociationSchema),
+        "pr/integrated": journalEvent(2, ChangeIntegratedSchema),
+        "pr/already-landed": journalEvent(1, ChangeAlreadyLandedSchema),
+        "pr/canceled": journalEvent(1, ChangeCanceledSchema),
+        "pr/regression-recorded": journalEvent(1, ChangeRegressionSchema),
+        "pr/edited": journalEvent(1, ChangeEditArgsSchema),
+        "pr/reviewed": journalEvent(1, ChangeReviewFactSchema),
+        "pr/commented": journalEvent(1, ChangeCommentFactSchema),
+        "pr/session-started": journalEvent(1, RetiredChangeSessionStartedFactSchema),
+        "pr/session-ended": journalEvent(1, RetiredChangeSessionEndedFactSchema),
+        "pr/checks-requested": journalEvent(1, ChangeCheckRequestFactSchema),
+        "pr/admission-recorded": journalEvent(2, ChangeAdmissionRecordedFactSchema),
+        "pr/review-requested": journalEvent(1, ChangeReviewRequestFactSchema),
       },
       replayEvents: {
-        "pr/pushed": PRPushedReplaySchema,
-        "pr/recut": PRRecutReplaySchema,
-        "pr/submitted": LegacyPRRevisionSchema,
-        "pr/withdrawn": z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema]),
-        "pr/needs-author": PRNeedsAuthorFactSchema,
-        "pr/rejected": PRReplayRejectedSchema,
-        "pr/integrated": z.union([PRIntegratedSchema, PRIntegratedV1Schema, LegacyPRIntegratedSchema]),
-        "pr/already-landed": PRAlreadyLandedSchema,
-        "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
-        "pr/admission-recorded": PRAdmissionRecordedFactSchema,
+        "pr/pushed": ChangePushedReplaySchema,
+        "pr/recut": ChangeRecutReplaySchema,
+        "pr/submitted": LegacyChangeRevisionSchema,
+        "pr/withdrawn": z.union([ChangeWithdrawnSchema, LegacyChangeWithdrawnSchema]),
+        "pr/needs-author": ChangeNeedsAuthorFactSchema,
+        "pr/rejected": ChangeReplayRejectedSchema,
+        "pr/integrated": z.union([ChangeIntegratedSchema, ChangeIntegratedV1Schema, LegacyChangeIntegratedSchema]),
+        "pr/already-landed": ChangeAlreadyLandedSchema,
+        "pr/canceled": z.union([ChangeCanceledSchema, LegacyChangeCanceledSchema]),
+        "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
       projectionVersion: "bays-v13-recut-certificate",
       project: projectBays,
@@ -1434,12 +1434,12 @@ export function withBays(options: WithBaysOptions) {
     })
 }
 
-function prIdentity(pr: DeepReadonly<PR>): YrdDeliveryIdentity {
+function changeIdentity(pr: DeepReadonly<PR>): YrdDeliveryIdentity {
   return {
     pr: pr.id,
-    revision: prRevisionNumber(pr),
-    headSha: prHead(pr),
-    ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
+    revision: changeRevisionNumber(pr),
+    headSha: changeHead(pr),
+    ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
   }
 }
 
@@ -1484,8 +1484,8 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
       }),
       intake: command({
         title: "Record pushed revision",
-        params: IntakePRArgsSchema,
-        apply: (state: BayState, args: IntakePRArgs, context) =>
+        params: IntakeChangeArgsSchema,
+        apply: (state: BayState, args: IntakeChangeArgs, context) =>
           intakePR(state, args, defaultBase, defaultSubmitter, context.command.id),
       }),
       submit: command({
@@ -1506,83 +1506,83 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
       close: command({
         title: "Close a PR",
         visibility: "public",
-        params: PrCloseArgsSchema,
-        apply: (state: BayState, args: PrCloseArgs) => closePr(state, args),
+        params: ChangeCloseArgsSchema,
+        apply: (state: BayState, args: ChangeCloseArgs) => closePr(state, args),
       }),
       edit: command({
         title: "Edit a PR",
         visibility: "public",
-        params: PrEditArgsSchema,
-        apply: (state: BayState, args: PrEditArgs) => editPr(state, args),
+        params: ChangeEditArgsSchema,
+        apply: (state: BayState, args: ChangeEditArgs) => editPr(state, args),
       }),
       recut: command({
         title: "Record a mechanically equivalent PR recut",
         visibility: "public",
-        params: PrRecutArgsSchema,
-        apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args, defaultSubmitter),
+        params: ChangeRecutArgsSchema,
+        apply: (state: BayState, args: ChangeRecutArgs) => recutPr(state, args, defaultSubmitter),
       }),
       settleSuperseded: command({
         title: "Settle a queued PR whose payload current main already contains",
-        params: PrSettleSupersededArgsSchema,
-        apply: (state: BayState, args: PrSettleSupersededArgs) => settleSupersededPr(state, args),
+        params: ChangeSettleSupersededArgsSchema,
+        apply: (state: BayState, args: ChangeSettleSupersededArgs) => settleSupersededPr(state, args),
       }),
       ready: command({
         title: "Mark a PR ready",
         visibility: "public",
-        params: PrReadyArgsSchema,
-        apply: (state: BayState, args: PrReadyArgs) => readyPr(state, args, defaultSubmitter),
+        params: ChangeReadyArgsSchema,
+        apply: (state: BayState, args: ChangeReadyArgs) => readyPr(state, args, defaultSubmitter),
       }),
       review: command({
         title: "Review a PR revision",
         visibility: "public",
-        params: PrReviewArgsSchema,
-        apply: (state: BayState, args: PrReviewArgs) => reviewPr(state, args),
+        params: ChangeReviewArgsSchema,
+        apply: (state: BayState, args: ChangeReviewArgs) => reviewPr(state, args),
       }),
       comment: command({
         title: "Comment on a PR revision",
         visibility: "public",
-        params: PrCommentArgsSchema,
-        apply: (state: BayState, args: PrCommentArgs) => commentPr(state, args),
+        params: ChangeCommentArgsSchema,
+        apply: (state: BayState, args: ChangeCommentArgs) => commentPr(state, args),
       }),
       requestChecks: command({
         title: "Request checks for a PR revision",
-        params: PrRequestChecksArgsSchema,
-        apply: (state: BayState, args: PrRequestChecksArgs) => requestPrChecks(state, args),
+        params: ChangeRequestChecksArgsSchema,
+        apply: (state: BayState, args: ChangeRequestChecksArgs) => requestChangeChecks(state, args),
       }),
       recordAdmission: command({
         title: "Record admission evidence for a PR revision",
-        params: PRAdmissionRecordedFactSchema,
-        apply: (state: BayState, args: PRAdmissionRecordedFact) => recordPrAdmission(state, args),
+        params: ChangeAdmissionRecordedFactSchema,
+        apply: (state: BayState, args: ChangeAdmissionRecordedFact) => recordChangeAdmission(state, args),
       }),
       requestReview: command({
         title: "Replace the requested reviewers for a PR",
         visibility: "public",
-        params: PrRequestReviewArgsSchema,
-        apply: (state: BayState, args: PrRequestReviewArgs) => requestPrReview(state, args, defaultSubmitter),
+        params: ChangeRequestReviewArgsSchema,
+        apply: (state: BayState, args: ChangeRequestReviewArgs) => requestChangeReview(state, args, defaultSubmitter),
       }),
       regression: command({
         title: "Record a completed escaped regression",
-        params: PrRegressionArgsSchema,
-        apply: (state: BayState, args: PrRegressionArgs) => recordPrRegression(state, args),
+        params: ChangeRegressionArgsSchema,
+        apply: (state: BayState, args: ChangeRegressionArgs) => recordChangeRegression(state, args),
       }),
       publish: command({
         title: "Request immutable PR publication",
-        params: PrPublicationInputSchema,
-        apply: (state: BayState, args: PrPublicationInput) => requestPrPublication(state, args, jobs["pr.publish"]),
+        params: ChangePublicationInputSchema,
+        apply: (state: BayState, args: ChangePublicationInput) => requestChangePublication(state, args, jobs["pr.publish"]),
       }),
     },
   }
 }
 
-function requestPrPublication(
+function requestChangePublication(
   state: DeepReadonly<BayState>,
-  args: PrPublicationInput,
+  args: ChangePublicationInput,
   publication: BayJobDefs["pr.publish"],
 ) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
-  const revision = currentPRRev(pr)
-  if (prDeliveryState(pr) !== "pushed") {
-    raiseFailure("refusal", "publication-pr-not-draft", `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}, not pushed`)
+  const revision = currentChangeRev(pr)
+  if (changeDeliveryState(pr) !== "pushed") {
+    raiseFailure("refusal", "publication-pr-not-draft", `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
   }
   if (revision.n !== args.revision || revision.head !== args.headSha || pr.branch !== args.branch) {
     raiseFailure(
@@ -1592,14 +1592,14 @@ function requestPrPublication(
         `revision ${args.revision} head '${args.headSha}' on '${args.branch}'`,
     )
   }
-  if (prBaseSha(pr) !== args.baseSha) {
+  if (changeBaseSha(pr) !== args.baseSha) {
     raiseFailure(
       "refusal",
       "publication-base-moved",
-      `yrd: PR '${pr.id}' base is '${prBaseSha(pr) ?? "missing"}', not requested '${args.baseSha}'`,
+      `yrd: PR '${pr.id}' base is '${changeBaseSha(pr) ?? "missing"}', not requested '${args.baseSha}'`,
     )
   }
-  return { events: [publication.request(args, { key: prPublicationJobKey(args) })] }
+  return { events: [publication.request(args, { key: changePublicationJobKey(args) })] }
 }
 
 function openBay(
@@ -1724,23 +1724,23 @@ function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffAr
   }
 }
 
-function requireExpectedPRCurrent(
+function requireExpectedChangeCurrent(
   state: DeepReadonly<BaysState>,
-  expected: PRExpectedCurrent,
+  expected: ChangeExpectedCurrent,
   operation: "intake" | "submit" | "ready" | "request-checks" | "comment",
 ): LivePR {
   const pr = resolvePR(state, expected.pr)
   const matches =
     pr !== undefined &&
     isLivePR(pr) &&
-    prRevisionNumber(pr) === expected.revision &&
-    prHead(pr) === expected.headSha &&
+    changeRevisionNumber(pr) === expected.revision &&
+    changeHead(pr) === expected.headSha &&
     (expected.track === undefined || (pr.track ?? false) === expected.track)
   if (matches) return pr as LivePR
   const actual =
     pr === undefined
       ? "missing"
-      : `${prDeliveryState(pr)} revision ${prRevisionNumber(pr)}@${prHead(pr)} track=${String(pr.track ?? false)}`
+      : `${changeDeliveryState(pr)} revision ${changeRevisionNumber(pr)}@${changeHead(pr)} track=${String(pr.track ?? false)}`
   const expectedTracking = expected.track === undefined ? "" : ` track=${String(expected.track)}`
   raiseFailure(
     "refusal",
@@ -1750,13 +1750,13 @@ function requireExpectedPRCurrent(
   )
 }
 
-function requireExpectedPRTargetCurrent(
+function requireExpectedChangeTargetCurrent(
   state: DeepReadonly<BaysState>,
   target: string,
-  expected: PRExpectedCurrent,
+  expected: ChangeExpectedCurrent,
   operation: "submit" | "ready" | "request-checks" | "comment",
 ): LivePR {
-  const pr = requireExpectedPRCurrent(state, expected, operation)
+  const pr = requireExpectedChangeCurrent(state, expected, operation)
   const targetPr = resolvePR(state, target)
   if (targetPr?.id === pr.id) return pr
   raiseFailure(
@@ -1768,7 +1768,7 @@ function requireExpectedPRTargetCurrent(
 
 function changeIdForRevision(existing: DeepReadonly<PR> | undefined, commandId: string): ChangeId {
   if (existing === undefined) return changeIdForCommand(commandId)
-  const changeId = currentPRRev(existing).changeId
+  const changeId = currentChangeRev(existing).changeId
   if (changeId !== undefined) return changeId
   raiseFailure(
     "refusal",
@@ -1779,7 +1779,7 @@ function changeIdForRevision(existing: DeepReadonly<PR> | undefined, commandId: 
 
 function intakePR(
   state: DeepReadonly<BayState>,
-  args: IntakePRArgs,
+  args: IntakeChangeArgs,
   defaultBase: string,
   defaultSubmitter: string,
   commandId: string,
@@ -1790,7 +1790,7 @@ function intakePR(
   const branch = args.branch ?? bay?.branch
   if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
   const expected =
-    args.expectedCurrent === undefined ? undefined : requireExpectedPRCurrent(current, args.expectedCurrent, "intake")
+    args.expectedCurrent === undefined ? undefined : requireExpectedChangeCurrent(current, args.expectedCurrent, "intake")
   if (expected !== undefined && expected.branch !== branch) {
     raiseFailure(
       "refusal",
@@ -1798,7 +1798,7 @@ function intakePR(
       `yrd: expected PR '${expected.id}' branch '${expected.branch}' does not match intake branch '${branch}'`,
     )
   }
-  const associated = bay === undefined ? undefined : prForBay(current, bay.id)
+  const associated = bay === undefined ? undefined : changeForBay(current, bay.id)
   const branchPR = resolvePR(current, branch)
   const existing = associated ?? (branchPR !== undefined && isLivePR(branchPR) ? branchPR : undefined)
   // An omitted receiver base belongs to the recorded PR before the process
@@ -1819,25 +1819,25 @@ function intakePR(
     }
   }
   if (existing !== undefined && !isLivePR(existing)) {
-    throw new Error(`yrd: PR '${existing.id}' is ${prDeliveryState(existing)}; start a new bay`)
+    throw new Error(`yrd: PR '${existing.id}' is ${changeDeliveryState(existing)}; start a new bay`)
   }
   const issue = attachedIssue(existing, args.issue, bay?.issue)
   const name = args.name ?? bay?.name ?? existing?.name
   // Omitted receiver fields inherit the recorded payload for idempotence, while
   // an explicit base/composition delta remains an authored recut and may resume
   // the PR. Display-name drift alone never mints a content revision.
-  const replayBaseSha = args.baseSha ?? (existing === undefined ? undefined : prBaseSha(existing))
-  const replayComposition = args.composition ?? (existing === undefined ? undefined : prComposition(existing))
+  const replayBaseSha = args.baseSha ?? (existing === undefined ? undefined : changeBaseSha(existing))
+  const replayComposition = args.composition ?? (existing === undefined ? undefined : changeComposition(existing))
   refuseDuplicatePayload(current, args.headSha, base, replayComposition, existing?.id)
   const resumesSubmission =
-    existing !== undefined && (prNeedsAuthor(existing) !== undefined || prDeliveryState(existing) === "rejected")
+    existing !== undefined && (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
   const submitsRevision = args.submit === true || resumesSubmission
   if (
     existing !== undefined &&
-    prHead(existing) === args.headSha &&
+    changeHead(existing) === args.headSha &&
     baseIdentity(existing.base) === base &&
-    prBaseSha(existing) === replayBaseSha &&
-    sameComposition(prComposition(existing), replayComposition) &&
+    changeBaseSha(existing) === replayBaseSha &&
+    sameComposition(changeComposition(existing), replayComposition) &&
     existing.issue === issue
   ) {
     return { events: [] }
@@ -1845,7 +1845,7 @@ function intakePR(
   const id = existing?.id ?? nextId("PR", current.prs)
   const changeId = changeIdForRevision(existing, commandId)
   const submitter = args.submitter ?? defaultSubmitter
-  const revision = (existing === undefined ? 0 : prRevisionNumber(existing)) + 1
+  const revision = (existing === undefined ? 0 : changeRevisionNumber(existing)) + 1
   const pushed = {
     pr: id,
     changeId,
@@ -1897,10 +1897,10 @@ function submitWork(
     const pr: LivePR =
       args.expectedCurrent === undefined
         ? requireLivePR(current, args.pr)
-        : requireExpectedPRTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
-    if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
-    if (prDeliveryState(pr) !== "pushed") {
-      throw new Error(`yrd: PR '${pr.id}' is ${prDeliveryState(pr)}, not pushed`)
+        : requireExpectedChangeTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
+    if (args.correlation !== undefined) return bindChangeCorrelation(pr, args.correlation)
+    if (changeDeliveryState(pr) !== "pushed") {
+      throw new Error(`yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
     }
     return {
       events: [
@@ -1916,25 +1916,25 @@ function submitWork(
 
   const existing = resolvePR(current, args.branch)
   const resumesSubmission =
-    existing !== undefined && (prNeedsAuthor(existing) !== undefined || prDeliveryState(existing) === "rejected")
+    existing !== undefined && (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
   const base = baseIdentity(args.base ?? (resumesSubmission ? existing.base : defaultBase))
   if (
     existing !== undefined &&
     !resumesSubmission &&
-    (prDeliveryState(existing) === "pushed" ||
-      prDeliveryState(existing) === "submitted" ||
-      prDeliveryState(existing) === "ready")
+    (changeDeliveryState(existing) === "pushed" ||
+      changeDeliveryState(existing) === "submitted" ||
+      changeDeliveryState(existing) === "ready")
   ) {
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
-  const baseSha = args.baseSha ?? (resumesSubmission ? prBaseSha(existing) : undefined)
-  const composition = args.composition ?? (resumesSubmission ? prComposition(existing) : undefined)
+  const baseSha = args.baseSha ?? (resumesSubmission ? changeBaseSha(existing) : undefined)
+  const composition = args.composition ?? (resumesSubmission ? changeComposition(existing) : undefined)
   if (
     resumesSubmission &&
-    prHead(existing) === args.headSha &&
+    changeHead(existing) === args.headSha &&
     baseIdentity(existing.base) === base &&
-    prBaseSha(existing) === baseSha &&
-    sameComposition(prComposition(existing), composition)
+    changeBaseSha(existing) === baseSha &&
+    sameComposition(changeComposition(existing), composition)
   ) {
     return { events: [] }
   }
@@ -1948,9 +1948,9 @@ function submitWork(
   // the terminal-branch guard before this path (its redelivery is parked).
   const resubmitted =
     existing !== undefined &&
-    (prNeedsAuthor(existing) !== undefined ||
+    (changeNeedsAuthor(existing) !== undefined ||
       (["rejected", "withdrawn", "canceled"] as const).includes(
-        prDeliveryState(existing) as "rejected" | "withdrawn" | "canceled",
+        changeDeliveryState(existing) as "rejected" | "withdrawn" | "canceled",
       ))
       ? existing
       : undefined
@@ -1959,7 +1959,7 @@ function submitWork(
     raiseFailure("infrastructure", "change-id-command-missing", "yrd: change creation requires its durable command id")
   }
   const changeId = changeIdForRevision(resubmitted, commandId)
-  const revision = (resubmitted === undefined ? 0 : prRevisionNumber(resubmitted)) + 1
+  const revision = (resubmitted === undefined ? 0 : changeRevisionNumber(resubmitted)) + 1
   const issue = attachedIssue(resubmitted, args.issue)
   const submitter = args.submitter ?? defaultSubmitter
   const pushed = {
@@ -2006,8 +2006,8 @@ function correlationLabel(correlation: DeepReadonly<Correlation>): string {
   return `${correlation.namespace}:${correlation.id}`
 }
 
-function bindPRCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
-  const currentCorrelation = prCorrelation(pr)
+function bindChangeCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
+  const currentCorrelation = changeCorrelation(pr)
   if (currentCorrelation !== undefined) {
     if (correlationsEqual(currentCorrelation, correlation)) return { events: [] }
     raiseFailure(
@@ -2016,7 +2016,7 @@ function bindPRCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
       `yrd: PR '${pr.id}' is already bound to correlation '${correlationLabel(currentCorrelation)}'`,
     )
   }
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
     raiseFailure(
       "refusal",
@@ -2028,8 +2028,8 @@ function bindPRCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
     events: [
       event("pr/correlation-bound", {
         pr: pr.id,
-        revision: prRevisionNumber(pr),
-        headSha: prHead(pr),
+        revision: changeRevisionNumber(pr),
+        headSha: changeHead(pr),
         correlation,
       }),
     ],
@@ -2038,14 +2038,14 @@ function bindPRCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
 
 function revisionIdentity(pr: DeepReadonly<PR>) {
   return {
-    revision: prRevisionNumber(pr),
-    headSha: prHead(pr),
-    ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
+    revision: changeRevisionNumber(pr),
+    headSha: changeHead(pr),
+    ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
   }
 }
 
 function currentRevisionSubmitter(pr: DeepReadonly<PR>): string | undefined {
-  return currentPRRev(pr).submitter
+  return currentChangeRev(pr).submitter
 }
 
 function terminalIdentity(pr: DeepReadonly<PR>) {
@@ -2075,7 +2075,7 @@ function attachedIssue(
 function correlationPatch(pr: DeepReadonly<PR>, correlation: DeepReadonly<Correlation>) {
   return {
     revs: pr.revs.map((revision) =>
-      revision.n === prRevisionNumber(pr) && revision.head === prHead(pr)
+      revision.n === changeRevisionNumber(pr) && revision.head === changeHead(pr)
         ? { ...revision, correlation: { ...correlation } }
         : revision,
     ),
@@ -2087,13 +2087,13 @@ function assertTerminalApplies(
   terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; correlation?: Correlation }>,
   eventName: string,
 ): void {
-  const currentCorrelation = prCorrelation(pr)
+  const currentCorrelation = changeCorrelation(pr)
   if (
-    (terminal.revision !== undefined && terminal.revision !== prRevisionNumber(pr)) ||
-    (terminal.headSha !== undefined && terminal.headSha !== prHead(pr))
+    (terminal.revision !== undefined && terminal.revision !== changeRevisionNumber(pr)) ||
+    (terminal.headSha !== undefined && terminal.headSha !== changeHead(pr))
   ) {
     throw new Error(
-      `yrd: stale terminal '${eventName}' for PR '${pr.id}' targets ${terminal.revision ?? "unknown"}@${terminal.headSha ?? "unknown"}; current is ${prRevisionNumber(pr)}@${prHead(pr)}`,
+      `yrd: stale terminal '${eventName}' for PR '${pr.id}' targets ${terminal.revision ?? "unknown"}@${terminal.headSha ?? "unknown"}; current is ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
     )
   }
   if (terminal.issueRef !== undefined && terminal.issueRef !== pr.issue) {
@@ -2131,9 +2131,9 @@ function associateRejectedTerminalRun(
   if (!found) {
     throw new Error(`yrd: PR '${pr.id}' has no revision ${identity.revision}@${identity.headSha} to associate`)
   }
-  const current = prRevisionNumber(pr) === identity.revision && prHead(pr) === identity.headSha
-  if (current && prDeliveryState(pr) !== "rejected") {
-    throw new Error(`yrd: current PR '${pr.id}' is ${prDeliveryState(pr)}, not rejected`)
+  const current = changeRevisionNumber(pr) === identity.revision && changeHead(pr) === identity.headSha
+  if (current && changeDeliveryState(pr) !== "rejected") {
+    throw new Error(`yrd: current PR '${pr.id}' is ${changeDeliveryState(pr)}, not rejected`)
   }
   if (current && pr.terminalRun !== undefined && pr.terminalRun !== run) {
     throw new Error(`yrd: current PR '${pr.id}' is already associated with '${pr.terminalRun}'`)
@@ -2141,18 +2141,18 @@ function associateRejectedTerminalRun(
   return { ...pr, revs: revisions, ...(current ? { terminalRun: run } : {}) }
 }
 
-function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultSubmitter: string) {
+function readyPr(state: DeepReadonly<BayState>, args: ChangeReadyArgs, defaultSubmitter: string) {
   const pr: LivePR =
     args.expectedCurrent === undefined
       ? requireLivePR(state.bays, args.pr)
-      : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "ready")
-  if (prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready") return { events: [] }
+      : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "ready")
+  if (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready") return { events: [] }
   return submitWork(state, args, "main", defaultSubmitter)
 }
 
-function settleSupersededPr(state: DeepReadonly<BayState>, args: PrSettleSupersededArgs) {
+function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSupersededArgs) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
-  const current = currentPRRev(pr)
+  const current = currentChangeRev(pr)
   if (current.n !== args.revision || current.head !== args.headSha) {
     raiseFailure(
       "refusal",
@@ -2161,7 +2161,7 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: PrSettleSuperse
         `to ${current.n}@${current.head} while the refresh proof was computed`,
     )
   }
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if ((delivery !== "submitted" && delivery !== "ready") || !checksRequested(pr)) {
     raiseFailure(
       "refusal",
@@ -2183,7 +2183,7 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: PrSettleSuperse
         revision: current.n,
         headSha: current.head,
         ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-        ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
+        ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
         ...(current.submitter === undefined ? {} : { submitter: current.submitter }),
         baseSha: args.baseSha,
         candidateSha: args.baseSha,
@@ -2199,13 +2199,13 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: PrSettleSuperse
   }
 }
 
-function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmitter: string) {
+function recutPr(state: DeepReadonly<BayState>, args: ChangeRecutArgs, defaultSubmitter: string) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (!isLivePR(pr)) {
     raiseFailure(
       "refusal",
       "terminal-target",
-      `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; a finished merge request cannot be rebuilt`,
+      `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; a finished merge request cannot be rebuilt`,
     )
   }
   const predecessor = pr.revs.find((revision) => revision.n === args.fromRevision)
@@ -2232,11 +2232,11 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       )
     }
   }
-  const recut = prRecut(pr)
+  const recut = changeRecut(pr)
   const payloadUnchanged =
-    prHead(pr) === args.headSha &&
-    prBaseSha(pr) === args.baseSha &&
-    sameComposition(prComposition(pr), args.composition)
+    changeHead(pr) === args.headSha &&
+    changeBaseSha(pr) === args.baseSha &&
+    sameComposition(changeComposition(pr), args.composition)
   const unchanged =
     payloadUnchanged &&
     recut?.fromRevision === args.fromRevision &&
@@ -2257,14 +2257,14 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
   }
   if (
     args.expectedCurrent !== undefined &&
-    (prRevisionNumber(pr) !== args.expectedCurrent.revision || prHead(pr) !== args.expectedCurrent.headSha) &&
+    (changeRevisionNumber(pr) !== args.expectedCurrent.revision || changeHead(pr) !== args.expectedCurrent.headSha) &&
     !(unchanged && args.certificate === undefined)
   ) {
     raiseFailure(
       "refusal",
       "recut-current-changed",
       `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
-        ` to ${prRevisionNumber(pr)}@${prHead(pr)} while the rebuild was being computed`,
+        ` to ${changeRevisionNumber(pr)}@${changeHead(pr)} while the rebuild was being computed`,
     )
   }
   if (
@@ -2278,7 +2278,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
     )
   }
   if (args.expectedCurrent?.checksPassed !== undefined) {
-    const checksPassed = currentPRRev(pr).admission?.status === "passed"
+    const checksPassed = currentChangeRev(pr).admission?.status === "passed"
     if (checksPassed !== args.expectedCurrent.checksPassed) {
       if (checksPassed) {
         raiseFailure(
@@ -2297,7 +2297,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
   // Only Queue authority-consumption receipts make an identical recut an
   // author reauthorization act. Authored-content failures need new bytes;
   // minting the same bytes would manufacture the same refusal at revision N+1.
-  const needsAuthorCode = prNeedsAuthor(pr)?.receipt.code
+  const needsAuthorCode = changeNeedsAuthor(pr)?.receipt.code
   const reauthorizesConsumedQueueAuthority =
     needsAuthorCode === "queue-submit-authority-consumed" || needsAuthorCode === "queue-checks-authority-consumed"
   if (!reauthorizesConsumedQueueAuthority && (unchanged || (needsAuthorCode !== undefined && payloadUnchanged))) {
@@ -2313,14 +2313,14 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       )
     }
     if (
-      (prDeliveryState(pr) !== "submitted" && prDeliveryState(pr) !== "ready") ||
+      (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready") ||
       !checksRequested(pr) ||
-      args.fromRevision !== prRevisionNumber(pr)
+      args.fromRevision !== changeRevisionNumber(pr)
     ) {
       raiseFailure(
         "refusal",
         "recut-transition-not-admitted",
-        `yrd: PR '${pr.id}' revision ${prRevisionNumber(pr)} is not the accepted revision selected for refresh`,
+        `yrd: PR '${pr.id}' revision ${changeRevisionNumber(pr)} is not the accepted revision selected for refresh`,
       )
     }
     if (predecessor.recut !== undefined && predecessor.recut.patchId !== args.patchId) {
@@ -2343,7 +2343,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
       `yrd: PR '${pr.id}' revision ${predecessor.n} has no approval to carry`,
     )
   }
-  const successor = { revision: prRevisionNumber(pr) + 1, headSha: args.headSha, baseSha: args.baseSha }
+  const successor = { revision: changeRevisionNumber(pr) + 1, headSha: args.headSha, baseSha: args.baseSha }
   const changeId = predecessor.changeId
   if (changeId === undefined) {
     raiseFailure(
@@ -2396,9 +2396,9 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultSubmit
   }
 }
 
-function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArgs, defaultSubmitter: string) {
+function requestChangeReview(state: DeepReadonly<BayState>, args: ChangeRequestReviewArgs, defaultSubmitter: string) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
     raiseFailure(
       "refusal",
@@ -2418,12 +2418,12 @@ function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArg
   }
 }
 
-function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
+function reviewPr(state: DeepReadonly<BayState>, args: ChangeReviewArgs) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
-  const fact = PRReviewFactSchema.parse({
+  const fact = ChangeReviewFactSchema.parse({
     pr: pr.id,
-    revision: prRevisionNumber(pr),
-    headSha: prHead(pr),
+    revision: changeRevisionNumber(pr),
+    headSha: changeHead(pr),
     by: args.by,
     decision: args.decision,
     ...(args.ref === undefined ? {} : { ref: args.ref }),
@@ -2432,15 +2432,15 @@ function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
   return reviewFact(pr, fact, "review")
 }
 
-function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
+function commentPr(state: DeepReadonly<BayState>, args: ChangeCommentArgs) {
   const pr: LivePR =
     args.expectedCurrent === undefined
       ? requireLivePR(state.bays, args.pr)
-      : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "comment")
-  const fact = PRCommentFactSchema.parse({
+      : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "comment")
+  const fact = ChangeCommentFactSchema.parse({
     pr: pr.id,
-    revision: prRevisionNumber(pr),
-    headSha: prHead(pr),
+    revision: changeRevisionNumber(pr),
+    headSha: changeHead(pr),
     by: args.by,
     note: args.note,
     ...(args.ref === undefined ? {} : { ref: args.ref }),
@@ -2448,12 +2448,12 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
   return reviewFact(pr, fact, "comment")
 }
 
-function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
+function requestChangeChecks(state: DeepReadonly<BayState>, args: ChangeRequestChecksArgs) {
   const pr: LivePR =
     args.expectedCurrent === undefined
       ? requireLivePR(state.bays, args.pr)
-      : requireExpectedPRTargetCurrent(state.bays, args.pr, args.expectedCurrent, "request-checks")
-  const delivery = prDeliveryState(pr)
+      : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "request-checks")
+  const delivery = changeDeliveryState(pr)
   if (
     delivery !== "pushed" &&
     delivery !== "submitted" &&
@@ -2461,35 +2461,35 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
     delivery !== "rejected" &&
     delivery !== "needs-author"
   ) {
-    throw new PrCheckabilityConflict(pr.id, delivery)
+    throw new ChangeCheckabilityConflict(pr.id, delivery)
   }
-  const baseSha = args.baseSha ?? prBaseSha(pr)
+  const baseSha = args.baseSha ?? changeBaseSha(pr)
   return {
     events: [
       event("pr/checks-requested", {
         pr: pr.id,
-        revision: prRevisionNumber(pr),
-        headSha: prHead(pr),
+        revision: changeRevisionNumber(pr),
+        headSha: changeHead(pr),
         ...(baseSha === undefined ? {} : { baseSha }),
       }),
     ],
   }
 }
 
-function recordPrAdmission(state: DeepReadonly<BayState>, args: PRAdmissionRecordedFact) {
+function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmissionRecordedFact) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
-  if (prRevisionNumber(pr) !== args.revision || prHead(pr) !== args.headSha) {
+  if (changeRevisionNumber(pr) !== args.revision || changeHead(pr) !== args.headSha) {
     raiseFailure(
       "refusal",
       "stale-pr",
       `yrd: entry checks target stale revision ${args.revision} (${args.headSha}) of PR '${pr.id}'`,
     )
   }
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-    throw new PrCheckabilityConflict(pr.id, delivery)
+    throw new ChangeCheckabilityConflict(pr.id, delivery)
   }
-  const prior = currentPRRev(pr).admission
+  const prior = currentChangeRev(pr).admission
   if (
     prior !== undefined &&
     JSON.stringify({ ...prior, at: undefined }) === JSON.stringify({ ...args.admission, at: undefined })
@@ -2499,16 +2499,16 @@ function recordPrAdmission(state: DeepReadonly<BayState>, args: PRAdmissionRecor
   return { events: [event("pr/admission-recorded", args)] }
 }
 
-function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArgs) {
+function recordChangeRegression(state: DeepReadonly<BayState>, args: ChangeRegressionArgs) {
   const original: LivePR = requireLivePR(state.bays, args.pr)
   const repair = resolvePR(state.bays, args.repairPr)
   if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
   if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
   if (!original.merged || original.integration === undefined) {
-    throw new Error(`yrd: original PR '${original.id}' is ${prDeliveryState(original)}, not integrated`)
+    throw new Error(`yrd: original PR '${original.id}' is ${changeDeliveryState(original)}, not integrated`)
   }
   if (!repair.merged || repair.integration === undefined) {
-    throw new Error(`yrd: repair PR '${repair.id}' is ${prDeliveryState(repair)}, not integrated`)
+    throw new Error(`yrd: repair PR '${repair.id}' is ${changeDeliveryState(repair)}, not integrated`)
   }
   if (original.issue === undefined) throw new Error(`yrd: original PR '${original.id}' has no issue reference`)
   if (repair.issue === undefined) throw new Error(`yrd: repair PR '${repair.id}' has no issue reference`)
@@ -2524,7 +2524,7 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     raiseFailure(
       "refusal",
       "regression-run-mismatch",
-      `yrd: queue run '${args.run}' does not prove integrated revision ${prRevisionNumber(original)} of PR '${original.id}'`,
+      `yrd: queue run '${args.run}' does not prove integrated revision ${changeRevisionNumber(original)} of PR '${original.id}'`,
     )
   }
   const repairRun = resolveSelector(
@@ -2536,7 +2536,7 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     raiseFailure(
       "refusal",
       "regression-repair-run-mismatch",
-      `yrd: queue run '${args.repairRun}' does not prove integrated revision ${prRevisionNumber(repair)} of repair PR '${repair.id}'`,
+      `yrd: queue run '${args.repairRun}' does not prove integrated revision ${changeRevisionNumber(repair)} of repair PR '${repair.id}'`,
     )
   }
 
@@ -2553,11 +2553,11 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     )
   }
 
-  const fact = PRRegressionSchema.parse({
+  const fact = ChangeRegressionSchema.parse({
     pr: original.id,
     issueRef: original.issue,
-    revision: prRevisionNumber(original),
-    headSha: prHead(original),
+    revision: changeRevisionNumber(original),
+    headSha: changeHead(original),
     run,
     landingSha: original.integration.commit,
     detectedAt,
@@ -2576,7 +2576,7 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
   return { events: [event("pr/regression-recorded", fact)], value: fact }
 }
 
-function regressionKey(fact: PRRegressionFact | PRRegression): string {
+function regressionKey(fact: ChangeRegressionFact | ChangeRegression): string {
   return JSON.stringify([
     fact.pr,
     fact.issueRef,
@@ -2598,7 +2598,7 @@ function regressionKey(fact: PRRegressionFact | PRRegression): string {
 
 function reviewFact(
   pr: DeepReadonly<PR>,
-  fact: z.infer<typeof PRReviewFactSchema> | z.infer<typeof PRCommentFactSchema>,
+  fact: z.infer<typeof ChangeReviewFactSchema> | z.infer<typeof ChangeCommentFactSchema>,
   kind: "review" | "comment",
 ) {
   if (fact.ref !== undefined) {
@@ -2626,7 +2626,7 @@ function reviewFact(
  * live or landed duplicate has no such door, so it keeps the bare refusal
  * rather than a remedy its state would refuse. */
 function duplicatePayloadRemedy(duplicate: DeepReadonly<PR>): string {
-  const delivery = prDeliveryState(duplicate)
+  const delivery = changeDeliveryState(duplicate)
   if (delivery !== "withdrawn" && delivery !== "canceled") return ""
   const at = delivery === "withdrawn" ? duplicate.withdrawnAt : duplicate.canceledAt
   return (
@@ -2647,9 +2647,9 @@ function refuseDuplicatePayload(
   const duplicate = Object.values(state.prs).find(
     (pr) =>
       pr.id !== except &&
-      prHead(pr) === headSha &&
+      changeHead(pr) === headSha &&
       baseIdentity(pr.base) === identity &&
-      sameComposition(prComposition(pr), composition),
+      sameComposition(changeComposition(pr), composition),
   )
   if (duplicate !== undefined) {
     throw new Error(
@@ -2666,10 +2666,10 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
     throw new Error(`yrd: bay '${bay.id}' is ${bay.status}; wait for its workspace job`)
   }
   if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
-  const pr = prForBay(current, bay.id) ?? resolvePR(current, bay.branch)
-  if (pr !== undefined && prDeliveryState(pr) !== "pushed" && isLivePR(pr) && args.withdraw !== true) {
+  const pr = changeForBay(current, bay.id) ?? resolvePR(current, bay.branch)
+  if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLivePR(pr) && args.withdraw !== true) {
     throw new Error(
-      `yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
+      `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
     )
   }
   return {
@@ -2688,10 +2688,10 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
 }
 
-function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
+function closePr(state: DeepReadonly<BayState>, args: ChangeCloseArgs) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (!isLivePR(pr)) {
-    throw new Error(`yrd: PR '${pr.id}' is ${prDeliveryState(pr)}; only a live PR can be closed`)
+    throw new Error(`yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; only a live PR can be closed`)
   }
   return {
     events: [
@@ -2704,7 +2704,7 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
   }
 }
 
-function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
+function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
   const issueChanged = args.issue !== undefined && args.issue !== pr.issue
   if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
@@ -2714,7 +2714,7 @@ function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
       `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
     )
   }
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if (issueChanged && delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
     raiseFailure(
       "refusal",
@@ -2754,8 +2754,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   const patchBay = (bay: Bay, patch: Partial<Bay>): BayState => saveBay({ ...bay, ...patch })
   const patchPR = (pr: PR, patch: Partial<PR>): BayState =>
     bayState({ ...current, prs: { ...current.prs, [pr.id]: { ...pr, ...patch } } })
-  const patchRevisionClock = (pr: PR, patch: Partial<PRRevClock>): readonly PRRev[] => {
-    const currentRevision = currentPRRev(pr)
+  const patchRevisionClock = (pr: PR, patch: Partial<ChangeRevClock>): readonly ChangeRev[] => {
+    const currentRevision = currentChangeRev(pr)
     let found = false
     const revisions = pr.revs.map((revision) => {
       if (revision.n !== currentRevision.n || revision.head !== currentRevision.head) return revision
@@ -2816,12 +2816,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/pushed": {
-      const parsed = PRPushedSchema.safeParse(data)
-      const previous = PRPushedV1Schema.safeParse(data)
-      const pushed = parsed.success ? parsed.data : previous.success ? previous.data : LegacyPRPushedSchema.parse(data)
+      const parsed = ChangePushedSchema.safeParse(data)
+      const previous = ChangePushedV1Schema.safeParse(data)
+      const pushed = parsed.success ? parsed.data : previous.success ? previous.data : LegacyChangePushedSchema.parse(data)
       const base = baseIdentity(pushed.base)
       const existing = current.prs[pushed.pr]
-      const record: PRRev = {
+      const record: ChangeRev = {
         n: pushed.revision,
         ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
         head: pushed.headSha,
@@ -2898,8 +2898,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
     }
     case "pr/recut": {
-      const parsed = PRRecutFactSchema.safeParse(data)
-      const recut = parsed.success ? parsed.data : PRRecutReplaySchema.parse(data)
+      const parsed = ChangeRecutFactSchema.safeParse(data)
+      const recut = parsed.success ? parsed.data : ChangeRecutReplaySchema.parse(data)
       const pr = current.prs[recut.pr]
       if (pr === undefined) throw new Error(`yrd: no merge request '${recut.pr}' to rebuild`)
       const predecessor = pr.revs.find(
@@ -2909,11 +2909,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         predecessor === undefined ||
         recut.fromRevision !== recut.predecessor.revision ||
         predecessor.baseSha !== recut.predecessor.baseSha ||
-        recut.successor.revision !== prRevisionNumber(pr) + 1
+        recut.successor.revision !== changeRevisionNumber(pr) + 1
       ) {
         throw new Error(`yrd: rebuild history does not match merge request '${pr.id}'`)
       }
-      const proof: PRRecutProof = {
+      const proof: ChangeRecutProof = {
         fromRevision: recut.fromRevision,
         patchId: recut.patchId,
         treeSha: recut.treeSha,
@@ -2940,7 +2940,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         recut.successor.headSha === predecessor.head && recut.successor.baseSha === predecessor.baseSha
           ? predecessor.admission
           : undefined
-      const revision: PRRev = {
+      const revision: ChangeRev = {
         n: recut.successor.revision,
         ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
         head: recut.successor.headSha,
@@ -2960,7 +2960,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (recut.reviewCarried && approval === undefined) {
         throw new Error(`yrd: PR '${pr.id}' rebuild carries a missing approval`)
       }
-      const carriedReview: PRReview | undefined =
+      const carriedReview: ChangeReview | undefined =
         recut.reviewCarried && approval !== undefined
           ? {
               revision: revision.n,
@@ -2994,15 +2994,15 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/submitted": {
-      const parsed = PRRevisionSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyPRRevisionSchema.parse(data)
+      const parsed = ChangeRevisionSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyChangeRevisionSchema.parse(data)
       const changedFlow = parsed.success ? parsed.data.flow : undefined
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
-      if (prRevisionNumber(pr) !== changed.revision || prHead(pr) !== changed.headSha) {
+      if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
         throw new Error(`yrd: stale PR event for '${pr.id}'`)
       }
-      const currentCorrelation = prCorrelation(pr)
+      const currentCorrelation = changeCorrelation(pr)
       if (
         changed.correlation !== undefined &&
         currentCorrelation !== undefined &&
@@ -3021,7 +3021,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         throw new Error(`yrd: submitted flow does not match PR '${pr.id}'`)
       }
       const revisions = patchRevisionClock(pr, { submittedAt: applied.ts, terminal: undefined }).map((revision) => {
-        if (revision.n !== prRevisionNumber(pr) || revision.head !== prHead(pr)) return revision
+        if (revision.n !== changeRevisionNumber(pr) || revision.head !== changeHead(pr)) return revision
         return {
           ...revision,
           ...(parsed.success ? { submitter: parsed.data.submitter } : {}),
@@ -3048,25 +3048,25 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/correlation-bound": {
-      const changed = PRCorrelationBoundSchema.parse(data)
+      const changed = ChangeCorrelationBoundSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
-      if (prRevisionNumber(pr) !== changed.revision || prHead(pr) !== changed.headSha) {
+      if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
         throw new Error(`yrd: stale correlation bind for PR '${pr.id}'`)
       }
-      const delivery = prDeliveryState(pr)
+      const delivery = changeDeliveryState(pr)
       if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
         throw new Error(`yrd: PR '${pr.id}' is ${delivery}; correlation cannot be bound`)
       }
-      const currentCorrelation = prCorrelation(pr)
+      const currentCorrelation = changeCorrelation(pr)
       if (currentCorrelation !== undefined && !correlationsEqual(currentCorrelation, changed.correlation)) {
         throw new Error(`yrd: correlation bind conflicts with PR '${pr.id}'`)
       }
       return patchPR(pr, correlationPatch(pr, changed.correlation))
     }
     case "pr/withdrawn": {
-      const parsed = PRWithdrawnSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyPRWithdrawnSchema.parse(data)
+      const parsed = ChangeWithdrawnSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyChangeWithdrawnSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3079,11 +3079,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/needs-author": {
-      const changed = PRNeedsAuthorFactSchema.parse(data)
+      const changed = ChangeNeedsAuthorFactSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
-      const delivery = prDeliveryState(pr)
+      const delivery = changeDeliveryState(pr)
       if (delivery !== "submitted" && delivery !== "ready") {
         throw new Error(`yrd: PR '${pr.id}' is ${delivery}; '${applied.name}' requires a submitted revision`)
       }
@@ -3102,7 +3102,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/rejected": {
-      const changed = PRReplayRejectedSchema.parse(data)
+      const changed = ChangeReplayRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3120,19 +3120,19 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, "run" in changed ? associateRejectedTerminalRun(rejected, changed, changed.run) : rejected)
     }
     case "pr/terminal-associated": {
-      const associated = PRTerminalAssociationSchema.parse(data)
+      const associated = ChangeTerminalAssociationSchema.parse(data)
       const pr = current.prs[associated.pr]
       if (pr === undefined) throw new Error(`yrd: no PR '${associated.pr}' for terminal association`)
       return patchPR(pr, associateRejectedTerminalRun(pr, associated, associated.run))
     }
     case "pr/integrated": {
-      const parsed = PRIntegratedSchema.safeParse(data)
-      const v1 = parsed.success ? undefined : PRIntegratedV1Schema.safeParse(data)
+      const parsed = ChangeIntegratedSchema.safeParse(data)
+      const v1 = parsed.success ? undefined : ChangeIntegratedV1Schema.safeParse(data)
       const changed = parsed.success
         ? parsed.data
         : v1?.success === true
           ? v1.data
-          : LegacyPRIntegratedSchema.parse(data)
+          : LegacyChangeIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3155,7 +3155,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/already-landed": {
-      const changed = PRAlreadyLandedSchema.parse(data)
+      const changed = ChangeAlreadyLandedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
@@ -3184,8 +3184,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/canceled": {
-      const parsed = PRCanceledSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyPRCanceledSchema.parse(data)
+      const parsed = ChangeCanceledSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyChangeCanceledSchema.parse(data)
       const pr = current.prs[changed.pr]
       const run = parsed.success ? parsed.data.run : undefined
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
@@ -3203,7 +3203,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/regression-recorded": {
-      const fact = PRRegressionSchema.parse(data)
+      const fact = ChangeRegressionSchema.parse(data)
       const pr = current.prs[fact.pr]
       const repair = current.prs[fact.repairPr]
       if (
@@ -3212,8 +3212,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         !pr.merged ||
         !repair.merged ||
         pr.issue !== fact.issueRef ||
-        prRevisionNumber(pr) !== fact.revision ||
-        prHead(pr) !== fact.headSha ||
+        changeRevisionNumber(pr) !== fact.revision ||
+        changeHead(pr) !== fact.headSha ||
         pr.terminalRun !== fact.run ||
         pr.integration?.commit !== fact.landingSha ||
         repair.issue !== fact.repairIssueRef ||
@@ -3240,13 +3240,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, { regressions: [...(pr.regressions ?? []), { ...fact, recordedAt: applied.ts }] })
     }
     case "pr/edited": {
-      const changed = PrEditArgsSchema.parse(data)
+      const changed = ChangeEditArgsSchema.parse(data)
       const pr = current.prs[changed.pr]
       const attachIssue =
         changed.issue !== undefined &&
         pr !== undefined &&
         pr.issue === undefined &&
-        (prDeliveryState(pr) === "pushed" || prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready")
+        (changeDeliveryState(pr) === "pushed" || changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready")
       return pr === undefined
         ? state
         : patchPR(pr, {
@@ -3258,39 +3258,39 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           })
     }
     case "pr/reviewed": {
-      const reviewed = PRReviewFactSchema.parse(data)
+      const reviewed = ChangeReviewFactSchema.parse(data)
       const { pr: prId, ...fact } = reviewed
       const pr = current.prs[prId]
       if (pr === undefined) return state
-      const review: PRReview = { ...fact, at: applied.ts }
+      const review: ChangeReview = { ...fact, at: applied.ts }
       return patchPR(pr, { reviews: [...pr.reviews, review] })
     }
     case "pr/commented": {
-      const commented = PRCommentFactSchema.parse(data)
+      const commented = ChangeCommentFactSchema.parse(data)
       const pr = current.prs[commented.pr]
       if (pr === undefined) return state
-      const comment: PRComment = { ...commented, at: applied.ts }
+      const comment: ChangeComment = { ...commented, at: applied.ts }
       return patchPR(pr, { comments: [...pr.comments, comment] })
     }
     case "pr/session-started": {
-      RetiredPRSessionStartedFactSchema.parse(data)
+      RetiredChangeSessionStartedFactSchema.parse(data)
       return state
     }
     case "pr/session-ended": {
-      RetiredPRSessionEndedFactSchema.parse(data)
+      RetiredChangeSessionEndedFactSchema.parse(data)
       return state
     }
     case "pr/review-requested": {
-      const requested = PRReviewRequestFactSchema.parse(data)
+      const requested = ChangeReviewRequestFactSchema.parse(data)
       const pr = current.prs[requested.pr]
       if (pr === undefined) return state
       return patchPR(pr, { requestedReviewers: requested.reviewers })
     }
     case "pr/checks-requested": {
-      const requested = PRCheckRequestFactSchema.parse(data)
+      const requested = ChangeCheckRequestFactSchema.parse(data)
       const pr = current.prs[requested.pr]
       if (pr === undefined) return state
-      if (prRevisionNumber(pr) !== requested.revision || prHead(pr) !== requested.headSha) return state
+      if (changeRevisionNumber(pr) !== requested.revision || changeHead(pr) !== requested.headSha) return state
       return patchPR(pr, {
         checkRequests: [
           ...pr.checkRequests,
@@ -3304,10 +3304,10 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/admission-recorded": {
-      const recorded = PRAdmissionRecordedFactSchema.parse(data)
+      const recorded = ChangeAdmissionRecordedFactSchema.parse(data)
       const pr = current.prs[recorded.pr]
       if (pr === undefined) return state
-      if (prRevisionNumber(pr) !== recorded.revision || prHead(pr) !== recorded.headSha) return state
+      if (changeRevisionNumber(pr) !== recorded.revision || changeHead(pr) !== recorded.headSha) return state
       return patchPR(pr, {
         needsAuthor: undefined,
         revs: pr.revs.map((revision) =>

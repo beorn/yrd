@@ -11,11 +11,11 @@
  * "the branch moved" is a deterministic fact rather than a Git race.
  */
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentPRRev, prAdmission, prDeliveryState, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, changeAdmission, changeDeliveryState, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
-import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import type { ProcessRequest } from "@yrd/process"
 import { withIssues } from "@yrd/issue"
 import { createLogger } from "loggily"
@@ -129,7 +129,7 @@ async function createCliApp(behavior: Readonly<{ failingCheck?: boolean }> = {})
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<PRShape>,
+      _input: StepExecution<changeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",
@@ -290,7 +290,7 @@ describe("implicit recut of a moved branch", () => {
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), refused.io)).toBe(1)
     expect(failureMessage(refused.stderr())).toBe(staleHeadRefusal(1, RECORDED_HEAD))
     expect((await Array.fromAsync(app.events())).length).toBe(before)
-    expect(currentPRRev(app.bays.pr("PR1")!).n).toBe(1)
+    expect(currentChangeRev(app.bays.pr("PR1")!).n).toBe(1)
   })
 
   it("prints a complete recovery that records and queues a moved draft without another remedy", async () => {
@@ -317,7 +317,7 @@ describe("implicit recut of a moved branch", () => {
       await runYrd(app, yrd("pr", "create", BRANCH, "--json"), refreshed.io, noRequiredChecks),
       refreshed.stderr(),
     ).toBe(0)
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
 
     const recut = vi.fn(async () => ({
       headSha: RECUT_HEAD,
@@ -336,7 +336,7 @@ describe("implicit recut of a moved branch", () => {
     ).toBe(0)
     expect(JSON.parse(queued.stdout())).toMatchObject({ pr: "PR1", revision: 3 })
     expect(recut).toHaveBeenCalledWith(expect.objectContaining({ id: "PR1", revision: 2, headSha: LIVE_HEAD }))
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 
@@ -344,7 +344,7 @@ describe("implicit recut of a moved branch", () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
     await submitBranch(app, () => head, "--track")
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
 
     head = LIVE_HEAD
     const tracked = outputIO(() => head)
@@ -357,8 +357,8 @@ describe("implicit recut of a moved branch", () => {
     expect(tracked.stderr()).not.toContain("will not silently replay stale work")
 
     const recorded = app.bays.pr("PR1")!
-    expect(currentPRRev(recorded)).toMatchObject({ n: 1, head: RECORDED_HEAD })
-    expect(prDeliveryState(recorded)).toBe("submitted")
+    expect(currentChangeRev(recorded)).toMatchObject({ n: 1, head: RECORDED_HEAD })
+    expect(changeDeliveryState(recorded)).toBe("submitted")
     expect(recorded.track).toBe(true)
     expect(JSON.parse(tracked.stdout())).toMatchObject({
       pr: "PR1",
@@ -441,7 +441,7 @@ describe("implicit recut of a moved branch", () => {
       `recorded revision 1 tree '${RECORDED_TREE}' differs from live branch '${BRANCH}' tree '${LIVE_TREE}'`,
     )
     expect(replay.stderr()).not.toContain("tracks")
-    expect(currentPRRev(app.bays.pr("PR1")!).n).toBe(1)
+    expect(currentChangeRev(app.bays.pr("PR1")!).n).toBe(1)
     expect(replay.stdout()).toBe("")
   })
 })
@@ -512,7 +512,7 @@ describe("resident merge-into-latest", () => {
       resolveRevision: async () => head,
       run: { runner: "track-test", leaseMs: 60_000 },
     })
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
     expect(app.bays.checksRequested("PR1")).toBe(false)
 
     const output = outputIO(() => head)
@@ -556,7 +556,7 @@ describe("resident merge-into-latest", () => {
       runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, output.io),
     ).resolves.toEqual([])
     expect(recut).not.toHaveBeenCalled()
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
   })
 
   it("preserves an authored push that arrives while the tracked recut is computing", async () => {
@@ -594,7 +594,7 @@ describe("resident merge-into-latest", () => {
         code: "recut-current-changed",
       },
     ])
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
 
     await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toMatchObject([
       {
@@ -654,7 +654,7 @@ describe("resident merge-into-latest", () => {
       },
     ])
     expect(recut).not.toHaveBeenCalled()
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
   })
 
   it("does not apply a RECUT verdict after tracking is disabled while the recut is computing", async () => {
@@ -687,7 +687,7 @@ describe("resident merge-into-latest", () => {
       },
     ])
     expect(app.bays.pr("PR1")?.track).toBe(false)
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
   })
 
   it("does not cancel a successor by PR wildcard when it arrives during pin inspection", async () => {
@@ -749,7 +749,7 @@ describe("resident merge-into-latest", () => {
       },
     ])
     expect(broadCancel).not.toHaveBeenCalled()
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: NEXT_LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: NEXT_LIVE_HEAD })
   })
 
   it("does not route direct tracked certification through authored submit", async () => {
@@ -791,7 +791,7 @@ describe("resident merge-into-latest", () => {
     expect(recut).toHaveBeenCalledWith(
       expect.objectContaining({ revision: 1, headSha: RECORDED_HEAD, proposedHeadSha: LIVE_HEAD }),
     )
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: RECUT_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: RECUT_HEAD })
   })
 
   it("does not record stale tracking intent when --untrack wins during branch observation", async () => {
@@ -822,7 +822,7 @@ describe("resident merge-into-latest", () => {
       runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, io),
     ).resolves.toMatchObject([{ status: "deferred", pr: "PR1", code: "recut-current-changed" }])
     expect(app.bays.pr("PR1")?.track).toBe(false)
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
     expect(recut).not.toHaveBeenCalled()
   })
 
@@ -892,7 +892,7 @@ describe("resident merge-into-latest", () => {
         code: "comment-current-changed",
       },
     ])
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
     expect(app.bays.pr("PR1")?.comments).toEqual([])
   })
 
@@ -917,7 +917,7 @@ describe("resident merge-into-latest", () => {
     })
     await app.bays.submit({ pr: "PR1" })
     head = RECUT_HEAD
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: RECUT_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: RECUT_HEAD })
     expect(app.bays.checksRequested("PR1")).toBe(false)
 
     const output = outputIO(() => head)
@@ -955,7 +955,7 @@ describe("resident merge-into-latest", () => {
         code: "recut-current-changed",
       },
     ])
-    expect(currentPRRev(app.bays.pr("PR1")!)).toMatchObject({ n: 4, head: NEXT_LIVE_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 4, head: NEXT_LIVE_HEAD })
     expect(app.bays.checksRequested("PR1")).toBe(false)
   })
 
@@ -976,12 +976,12 @@ describe("resident merge-into-latest", () => {
     await expect(app.queue.run({ prs: ["PR1"] }, { runner: "track-test", leaseMs: 60_000 })).resolves.toEqual([])
     const failed = app.bays.pr("PR1")
     if (failed === undefined) throw new Error("expected PR1")
-    expect(prAdmission(failed)).toMatchObject({
+    expect(changeAdmission(failed)).toMatchObject({
       status: "refused",
       kind: "failure",
       receipt: { code: "authored-failure" },
     })
-    expect(prDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
     await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-after-failure-r1" })
 

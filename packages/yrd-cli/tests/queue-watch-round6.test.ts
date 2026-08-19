@@ -15,7 +15,7 @@ import {
   queueTimelineStories,
 } from "../dev/queue-timeline-fixtures.ts"
 import {
-  QueueDetailRunPrBlocks,
+  QueueDetailRunChangeBlocks,
   type QueueTerminalFact,
   queueShowData,
   queueTimelineAdmissionTimes,
@@ -44,7 +44,7 @@ function pointOf(text: string, needle: string): readonly [number, number] {
 
 // Renamed from the "PR" tab (operator spec item 3: the first tab is now
 // "Changes").
-async function selectPrTab(app: ReturnType<ReturnType<typeof createRenderer>>): Promise<void> {
+async function selectChangeTab(app: ReturnType<ReturnType<typeof createRenderer>>): Promise<void> {
   const rows = app.text.split("\n")
   const y = rows.findIndex((row) => row.includes("Changes") && row.includes("1: prepare"))
   const divider = rows[y]?.indexOf("│") ?? -1
@@ -318,7 +318,7 @@ describe("queue watch user round 6", () => {
     if (olderRow === undefined) throw new Error("missing older activity row")
     const allRuns = [...rejectedRuns, run]
     const olderActivity = createRenderer({ cols: 120, rows: 40 })(
-      h(QueueDetailRunPrBlocks, {
+      h(QueueDetailRunChangeBlocks, {
         data: queueShowData(olderRun, allRuns),
         row: olderRow,
         rows: activityProjection.rows,
@@ -341,9 +341,9 @@ describe("queue watch user round 6", () => {
 
       const initialRows = app.text.split("\n")
       const tabsY = initialRows.findIndex((row) => row.includes("Changes") && row.includes("1: merge"))
-      const prTabX = initialRows[tabsY]?.indexOf("Changes") ?? -1
+      const changeTabX = initialRows[tabsY]?.indexOf("Changes") ?? -1
       expect(tabsY, "detail tab bar renders").toBeGreaterThanOrEqual(0)
-      await app.click(prTabX, tabsY)
+      await app.click(changeTabX, tabsY)
       await app.waitForLayoutStable()
 
       const rows = app.text.split("\n")
@@ -427,8 +427,8 @@ describe("queue watch user round 6", () => {
       )
       expect(app.cell(branchX, branchY).dim).toBe(true)
 
-      const prY = rows.findIndex((row) => row.slice(detailX).includes("pr#60.4"))
-      const prX = rows[prY]?.indexOf("pr#60.4") ?? -1
+      const changeY = rows.findIndex((row) => row.slice(detailX).includes("pr#60.4"))
+      const changeX = rows[changeY]?.indexOf("pr#60.4") ?? -1
       // Skip the item-2 PR-list row above the tabs — it ALSO shows this bold
       // title (next to "pr#60.4"), so anchor on the per-change box's own
       // title-only line instead (nothing else shares that row).
@@ -438,10 +438,10 @@ describe("queue watch user round 6", () => {
       const titleX = rows[titleBlockY]?.indexOf("Lead title") ?? -1
       const bodyY = rows.findIndex((row) => row.slice(detailX).includes("First description row"))
       const bodyX = rows[bodyY]?.indexOf("First description row") ?? -1
-      expect(app.cell(prX, prY).fg).not.toEqual(app.cell(branchTextX, branchY).fg)
-      expect(app.cell(prX, prY).bold).not.toBe(true)
-      expect(app.cell(prX + 3, prY).bold).toBe(true)
-      expect(app.cell(prX + 5, prY).bold).not.toBe(true)
+      expect(app.cell(changeX, changeY).fg).not.toEqual(app.cell(branchTextX, branchY).fg)
+      expect(app.cell(changeX, changeY).bold).not.toBe(true)
+      expect(app.cell(changeX + 3, changeY).bold).toBe(true)
+      expect(app.cell(changeX + 5, changeY).bold).not.toBe(true)
       expect(app.cell(titleX, titleBlockY).bold).toBe(true)
       expect(app.cell(bodyX, bodyY).bold).not.toBe(true)
 

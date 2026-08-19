@@ -2,10 +2,10 @@
 // @level l1
 // @consumer @yrd/cli
 
-import { prBaseSha, prHead, prRevisionNumber, type PR } from "@yrd/bay"
+import { changeBaseSha, changeHead, changeRevisionNumber, type PR } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { describe, expect, test } from "vitest"
-import { prDetailData } from "../src/queue-status-view.tsx"
+import { changeDetailData } from "../src/queue-status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 
@@ -43,9 +43,9 @@ function fixtureRun(
       name: pr.name,
       branch: pr.branch,
       base: pr.base,
-      revision: prRevisionNumber(pr),
-      headSha: prHead(pr),
-      baseSha: prBaseSha(pr),
+      revision: changeRevisionNumber(pr),
+      headSha: changeHead(pr),
+      baseSha: changeBaseSha(pr),
     })),
     base: "main",
     jobs: [],
@@ -67,14 +67,14 @@ describe("prDetailData related runs", () => {
   const runs = [pr1RetryRun, pr2Run, pr1LatestRun]
 
   test("includes only runs the PR is a member of, keeping order", () => {
-    const detail = prDetailData(pr1, runs)
+    const detail = changeDetailData(pr1, runs)
 
     expect(detail.runs.map((run) => run.run)).toEqual(["R1", "R3"])
     expect(detail.run?.run).toBe("R3")
   })
 
   test("a sibling PR sees only its own runs", () => {
-    const detail = prDetailData(pr2, runs)
+    const detail = changeDetailData(pr2, runs)
 
     expect(detail.runs.map((run) => run.run)).toEqual(["R2"])
     expect(detail.run?.run).toBe("R2")

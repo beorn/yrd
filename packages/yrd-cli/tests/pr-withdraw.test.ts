@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, currentPRRev, prDeliveryState, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, changeDeliveryState, withBays } from "@yrd/bay"
 import {
   createFailure,
   createMemoryJournal,
@@ -37,7 +37,7 @@ import {
   withQueue,
   withStep,
   type CandidatePreparer,
-  type PRShape,
+  type changeShape,
   type SourceRewrite,
   type StepExecution,
 } from "@yrd/queue"
@@ -155,7 +155,7 @@ async function createCliApp(
     journal?: Journal<unknown>
     resolveBase?: (ref: string) => Readonly<{ base: string; baseSha: string }>
     merge?: (
-      input: StepExecution<PRShape>,
+      input: StepExecution<changeShape>,
     ) => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>
     prepareCandidate?: CandidatePreparer
   } = {},
@@ -173,7 +173,7 @@ async function createCliApp(
   const merge = withMerge(
     options.merge ??
       (async (
-        _input: StepExecution<PRShape>,
+        _input: StepExecution<changeShape>,
       ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
         status: "completed",
         conclusion: "success",
@@ -460,7 +460,7 @@ describe("pr withdraw", () => {
         },
       ],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(app.state().bays.prs.PR1).toMatchObject({ withdrawReason: "superseded by rework" })
     expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
       expect.objectContaining({ pr: "PR1", revision: 1, headSha: HEAD_SHA, reason: "superseded by rework" }),
@@ -518,7 +518,7 @@ describe("pr withdraw", () => {
     const mixed = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "PR2"), mixed.io)).toBe(1)
     expect(mixed.stderr()).toContain("PR 'PR2' is withdrawn")
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
   })
 })
@@ -543,7 +543,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
       reason: "superseded by rework",
       prs: [{ id: "PR1", state: "closed", merged: false }],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
       expect.objectContaining({ pr: "PR1", reason: "superseded by rework" }),
     ])
@@ -568,7 +568,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
       ),
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.withdraw", reason: "old spelling" })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 
   it("root cancel stops the attempt and leaves the merge request open", async () => {
@@ -583,7 +583,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
     ).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ command: "queue.cancel" })
     // Attempt-scoped: the run is canceled, the merge request is NOT withdrawn.
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
   })
 
@@ -617,7 +617,7 @@ describe("pre-spend disclosure on mr close", () => {
     expect(output.stderr()).toContain("topic/one")
     expect(output.stderr()).toContain("--burn-payload")
     // Nothing was spent.
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
   })
 
@@ -634,7 +634,7 @@ describe("pre-spend disclosure on mr close", () => {
     expect(output.stderr()).toContain(HEAD_SHA)
     // The one door that stays open, named at the moment it is being shut.
     expect(output.stderr()).toContain("yrd pr submit topic/one")
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
   })
 
@@ -675,7 +675,7 @@ describe("pre-spend disclosure on mr close", () => {
 
     const spent = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--burn-payload"), spent.io), spent.stderr()).toBe(0)
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 
   it("admin pr prune keeps spending on its own content proof, with no acknowledgement", async () => {
@@ -686,7 +686,7 @@ describe("pre-spend disclosure on mr close", () => {
 
     const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })
     expect(await runYrd(app, yrd("admin", "pr", "prune"), output.io), output.stderr()).toBe(0)
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 })
 
@@ -808,7 +808,7 @@ describe("pr recut --preflight", () => {
       result: { revision: 2, headSha: HEAD2_SHA, delivery: "submitted" },
     })
     expect(recutInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
-    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
+    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 
@@ -862,7 +862,7 @@ describe("pr recut --preflight", () => {
       ),
       initialRecut.stderr(),
     ).toBe(0)
-    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD_SHA })
+    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD_SHA })
 
     await app.queue.run({ prs: ["PR1"] }, runtime)
     await app.queue.run({}, runtime)
@@ -1167,7 +1167,7 @@ describe("pr recut --preflight", () => {
         [1, fixture.approvedSha],
         [2, fixture.proposedSha],
       ])
-      expect(currentPRRev(pr)).toMatchObject({
+      expect(currentChangeRev(pr)).toMatchObject({
         n: 2,
         head: fixture.proposedSha,
         recut: { fromRevision: 1, reviewCarried: true },
@@ -1247,7 +1247,7 @@ describe("pr recut --preflight", () => {
       [1, HEAD_SHA],
       [2, HEAD2_SHA],
     ])
-    expect(currentPRRev(pr)).toMatchObject({
+    expect(currentChangeRev(pr)).toMatchObject({
       n: 2,
       head: HEAD2_SHA,
       recut: {
@@ -1332,7 +1332,7 @@ describe("pr recut --preflight", () => {
       [1, HEAD_SHA],
       [2, HEAD2_SHA],
     ])
-    expect(currentPRRev(pr)).toMatchObject({
+    expect(currentChangeRev(pr)).toMatchObject({
       n: 2,
       head: HEAD2_SHA,
       recut: { fromRevision: 1, reviewCarried: true, certificate: "frozen-code-carrier-v1" },
@@ -1416,7 +1416,7 @@ describe("pr recut --preflight", () => {
       [1, HEAD_SHA],
       [2, HEAD2_SHA],
     ])
-    expect(currentPRRev(pr)).toMatchObject({
+    expect(currentChangeRev(pr)).toMatchObject({
       n: 2,
       head: HEAD2_SHA,
       recut: { fromRevision: 1, reviewCarried: true, certificate: "frozen-code-carrier-v1" },
@@ -1516,7 +1516,7 @@ describe("pr recut --preflight", () => {
       revisions: app.state().bays.prs.PR1!.revs.length,
       reviews: app.state().bays.prs.PR1!.reviews.length,
     }).toEqual(beforeRetry)
-    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({
+    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({
       n: 2,
       head: HEAD2_SHA,
       recut: { fromRevision: 1, reviewCarried: true, certificate: "frozen-code-carrier-v1" },
@@ -1555,7 +1555,7 @@ describe("pr recut --preflight", () => {
         result: { revision: 2, headSha: fixture.targetSha, delivery: "submitted" },
       })
 
-      const revision = currentPRRev(app.state().bays.prs.PR1!)
+      const revision = currentChangeRev(app.state().bays.prs.PR1!)
       expect(revision).toMatchObject({
         n: 2,
         head: fixture.targetSha,
@@ -1770,7 +1770,7 @@ describe("pr recut --preflight", () => {
       },
     })
     expect((await Array.fromAsync(app.events())).length).toBe(before)
-    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 1, head: HEAD_SHA })
+    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 1, head: HEAD_SHA })
   })
 
   it.each([
@@ -2259,7 +2259,7 @@ describe("pr prune", () => {
       summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
       withdrawn: [],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
 
     await app.jobs.run(mergeJob.id, { runner: "cli-test", leaseMs: 60_000 })
@@ -2268,7 +2268,7 @@ describe("pr prune", () => {
       conclusion: "success",
       steps: [{ kind: "merge", job: { status: "completed", conclusion: "success" } }],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
 
     const completedOutput = outputIO({
       pruneGit: () => pruneGit({ isAncestor: () => true }),
@@ -2281,12 +2281,12 @@ describe("pr prune", () => {
       summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
       withdrawn: [],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
 
     expect(
       await app.queue.run({ prs: ["PR1"], steps: ["merge"] }, { runner: "cli-test", leaseMs: 60_000 }),
     ).toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
   })
 
   it("rechecks merge ownership after content proof before withdrawing", async () => {
@@ -2308,7 +2308,7 @@ describe("pr prune", () => {
       summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
       withdrawn: [],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(app.queue.get("R1")).toMatchObject({
       status: "queued",
       steps: [{ kind: "merge", job: { status: "queued" } }],
@@ -2369,7 +2369,7 @@ describe("pr prune", () => {
       summary: { checked: 1, withdrawn: 1, kept: 0, errors: 0 },
       withdrawn: [{ id: "PR1", taskStatus: "dropped" }],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
     expect(app.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -2446,7 +2446,7 @@ describe("pr prune", () => {
       ],
       withdrawn: [{ id: "PR1", state: "closed", merged: false, taskStatus: "dropped" }],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 
   it("keeps live PRs and prints the exact check behind every verdict", async () => {
@@ -2469,9 +2469,9 @@ describe("pr prune", () => {
       ],
       withdrawn: [],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(prDeliveryState(app.state().bays.prs.PR2!)).toBe("submitted")
-    expect(prDeliveryState(app.state().bays.prs.PR3!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR2!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR3!)).toBe("submitted")
 
     const human = outputIO({ pruneGit: () => facts, columns: 400 })
     expect(await runYrd(app, yrd("admin", "pr", "prune"), human.io), human.stderr()).toBe(0)
@@ -2497,7 +2497,7 @@ describe("pr prune", () => {
       checked: [{ pr: "PR1", verdict: "would-withdraw", reason: `superseded: content already in ${BASE_SHA}` }],
       withdrawn: [],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect((await Array.fromAsync(app.events())).length).toBe(before)
   })
 })

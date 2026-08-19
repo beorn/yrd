@@ -6,19 +6,19 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
-  PRRecutCertificateSchema,
-  PRRecutProofSchema,
-  type PRDeliveryState,
-  type PRTerminalAssociation,
+  ChangeRecutCertificateSchema,
+  ChangeRecutProofSchema,
+  type ChangeDeliveryState,
+  type ChangeTerminalAssociation,
   baseIdentity,
   checkRequest,
-  currentPRRev,
-  prBaseSha,
-  prComposition,
-  prCorrelation,
-  prHead,
-  prRecut,
-  prRevisionNumber,
+  currentChangeRev,
+  changeBaseSha,
+  changeComposition,
+  changeCorrelation,
+  changeHead,
+  changeRecut,
+  changeRevisionNumber,
   type PR,
   type PRId,
 } from "@yrd/bay"
@@ -52,9 +52,9 @@ const FlowPinSchema = z
   })
   .strict()
 
-const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
+const ChangeSnapshotRecutProofSchema = ChangeRecutProofSchema.extend({
   /** Current exact carrier certificate. Absence is accepted only for replaying legacy queue records. */
-  certificate: PRRecutCertificateSchema.optional(),
+  certificate: ChangeRecutCertificateSchema.optional(),
   /** Immutable base certified by this recut revision. Optional only for replaying legacy queue records. */
   baseSha: GitShaSchema.optional(),
   /** Immutable approved-source endpoints. Both are absent only for legacy queue records. */
@@ -139,7 +139,7 @@ export const QueueIntentSnapshotSchema = z
   .strict()
 export type QueueIntentSnapshot = Readonly<z.infer<typeof QueueIntentSnapshotSchema>>
 
-export const PRSnapshotSchema = z
+export const ChangeSnapshotSchema = z
   .object({
     id: QueueMemberIdSchema,
     /** Missing only while replaying pre-identity Queue records and for pin intents. */
@@ -154,7 +154,7 @@ export const PRSnapshotSchema = z
     baseSha: GitShaSchema.optional(),
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
-    recut: PRSnapshotRecutProofSchema.optional(),
+    recut: ChangeSnapshotRecutProofSchema.optional(),
     flow: FlowPinSchema.optional(),
     /** Present only for a carrier-free pin intent materialized by Queue. */
     intent: QueueIntentSnapshotSchema.optional(),
@@ -200,7 +200,7 @@ export const PRSnapshotSchema = z
   })
 /** answers: Which immutable PR revision did this Queue record select? tense: historical.
  * A snapshot deliberately carries identity and content, never mutable delivery status. */
-export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
+export type changeSnapshot = Readonly<z.infer<typeof ChangeSnapshotSchema>>
 
 export type SourceRewrite = Readonly<{
   repo: string
@@ -433,13 +433,13 @@ export const IntegrationProofSchema = z
   })
   .strict() as z.ZodType<IntegrationProof>
 
-export type PRShape = Readonly<{
+export type changeShape = Readonly<{
   results: Readonly<Record<string, JsonValue>>
 }>
 
-export type IntegratedShape = PRShape & Readonly<{ integration: IntegrationProof }>
+export type IntegratedShape = changeShape & Readonly<{ integration: IntegrationProof }>
 
-export type AddStepResult<Shape extends PRShape, Name extends string, Output extends JsonValue> = Omit<
+export type AddStepResult<Shape extends changeShape, Name extends string, Output extends JsonValue> = Omit<
   Shape,
   "results"
 > & {
@@ -519,7 +519,7 @@ export type QueueUnassociatedTerminal = Readonly<{
   headSha?: string
 }>
 
-export type QueueTerminalAssociation = PRTerminalAssociation
+export type QueueTerminalAssociation = ChangeTerminalAssociation
 
 export type QueueTerminalAssociations = Readonly<{
   pending: Readonly<Record<string, QueueUnassociatedTerminal>>
@@ -529,7 +529,7 @@ export type QueueTerminalAssociations = Readonly<{
 export type QueueAuthorityState = Readonly<{
   // Same nine values as PRDeliveryState (@yrd/bay); imported rather than
   // re-spelled so the two authorities cannot drift apart silently.
-  statuses: Readonly<Record<string, PRDeliveryState>>
+  statuses: Readonly<Record<string, ChangeDeliveryState>>
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
@@ -559,7 +559,7 @@ export type QueueRecord = Readonly<{
   candidateId: CandidateId
   /** Immutable execution receipt. Candidate owns the ordered revision identity;
    * projection rejects any receipt that diverges from it. */
-  prs: readonly PRSnapshot[]
+  prs: readonly changeSnapshot[]
   /** Queue-target receipt; Candidate owns the exact base SHA. */
   base: string
   /** Effective Queue batch size when this Run started. Absent only on legacy journal records. */
@@ -608,7 +608,7 @@ export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "s
     /** Durable Job identities in literal Flow order. */
     jobs: readonly string[]
     steps: readonly QueueStep[]
-    shape: PRShape | IntegratedShape
+    shape: changeShape | IntegratedShape
     /** answers: When did this Run enter a terminal status? tense: historical. */
     finishedAt?: string
     /** answers: Why did this Run finish without success? tense: historical. */
@@ -686,7 +686,7 @@ export type QueuesState = Readonly<{
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
 }>
 
-export type PREligibilityReason = Readonly<{
+export type ChangeEligibilityReason = Readonly<{
   /** answers: Why can the current PR revision not run now? tense: current. */
   code:
     | "draft"
@@ -709,12 +709,12 @@ export type PREligibilityReason = Readonly<{
   receipt?: JobError
 }>
 
-export type PREligibility = Readonly<{
+export type changeEligibility = Readonly<{
   pr: string
   revision: number
   /** answers: Can this exact PR revision enter a Queue run now? tense: current. */
   runnable: boolean
-  reason?: PREligibilityReason
+  reason?: ChangeEligibilityReason
   review: Readonly<{
     required: boolean
     approved: boolean
@@ -732,10 +732,10 @@ export type PREligibility = Readonly<{
   }>
 }>
 
-export type PRCheckRecord = Readonly<{
+export type ChangeCheckRecord = Readonly<{
   pr: string
   revision: number
-  status: PREligibility["checks"]["status"]
+  status: changeEligibility["checks"]["status"]
   run?: RunId
   job?: string
   step?: StepName
@@ -1017,7 +1017,7 @@ const queueRecordShape = {
   id: z.string().trim().min(1),
   queueId: GitRefSchema,
   candidateId: z.string().regex(/^C\d+$/u),
-  prs: z.array(PRSnapshotSchema).min(1),
+  prs: z.array(ChangeSnapshotSchema).min(1),
   base: GitRefSchema,
   batchSize: z.number().int().min(1),
   flow: FlowPinSchema.optional(),
@@ -1171,17 +1171,17 @@ export const Queues = Object.freeze({
     return `C${Math.max(0, ...values) + 1}`
   },
 
-  snapshot(pr: PR): PRSnapshot {
-    const revision = currentPRRev(pr)
-    const baseSha = checkRequest(pr)?.baseSha ?? prBaseSha(pr)
-    const recut = prRecut(pr)
+  snapshot(pr: PR): changeSnapshot {
+    const revision = currentChangeRev(pr)
+    const baseSha = checkRequest(pr)?.baseSha ?? changeBaseSha(pr)
+    const recut = changeRecut(pr)
     const frozen = recut?.certificate === "frozen-code-carrier-v1"
     const sourceRevision = recut === undefined ? undefined : pr.revs.find(({ n }) => n === recut.fromRevision)
     const sourceEndpoints =
       !frozen || sourceRevision?.baseSha === undefined
         ? {}
         : { sourceBaseSha: sourceRevision.baseSha, sourceHeadSha: sourceRevision.head }
-    return PRSnapshotSchema.parse({
+    return ChangeSnapshotSchema.parse({
       id: pr.id,
       ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -1189,17 +1189,17 @@ export const Queues = Object.freeze({
       branch: pr.branch,
       base: baseIdentity(pr.base),
       ...(pr.issue === undefined ? {} : { issue: pr.issue }),
-      revision: prRevisionNumber(pr),
-      headSha: prHead(pr),
+      revision: changeRevisionNumber(pr),
+      headSha: changeHead(pr),
       ...(baseSha === undefined ? {} : { baseSha }),
-      ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
-      ...(prComposition(pr) === undefined ? {} : { composition: prComposition(pr) }),
+      ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
+      ...(changeComposition(pr) === undefined ? {} : { composition: changeComposition(pr) }),
       ...(recut === undefined
         ? {}
         : {
             recut: {
               ...recut,
-              ...(prBaseSha(pr) === undefined ? {} : { baseSha: prBaseSha(pr) }),
+              ...(changeBaseSha(pr) === undefined ? {} : { baseSha: changeBaseSha(pr) }),
               ...sourceEndpoints,
             },
           }),

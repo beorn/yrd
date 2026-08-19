@@ -8,7 +8,7 @@ import { renderString } from "silvery"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
-import { projectedPrStatus, QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
+import { projectedChangeStatus, QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const SUBMITTED_AT = "2026-07-13T11:30:00.000Z"
@@ -120,7 +120,7 @@ describe("withdrawn PRs — a stale refusal never outranks a settled close", () 
     const pr = withdrawnAfterRefusal()
     // The sibling projection already reads the close first; the timeline's
     // pre-run status is the one that did not.
-    expect(projectedPrStatus(pr)).toBe("withdrawn")
+    expect(projectedChangeStatus(pr)).toBe("withdrawn")
 
     const snapshot = fixtureSnapshot(fixtureResult([pr], []))
     expect(snapshot.projection.rows.map((row) => row.status)).not.toContain("rev")

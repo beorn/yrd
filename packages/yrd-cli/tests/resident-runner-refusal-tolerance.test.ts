@@ -4,7 +4,7 @@
  * @consumer @yrd/cli resident runner
  */
 import { describe, expect, it } from "vitest"
-import { PrCheckabilityConflict } from "@yrd/bay"
+import { ChangeCheckabilityConflict } from "@yrd/bay"
 import { createFailure } from "@yrd/core"
 import { QueueRunningConflict } from "@yrd/queue"
 import { followQueueRuns } from "../src/run.ts"
@@ -133,7 +133,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
     const h = harness([
       // Cycle 1: a peer withdrew a candidate PR between this runner's compose
       // snapshot and its check request — the throw that exited the resident.
-      () => Promise.reject(new PrCheckabilityConflict("PR364", "withdrawn")),
+      () => Promise.reject(new ChangeCheckabilityConflict("PR364", "withdrawn")),
       // Cycle 2: the withdrawn PR is gone from the submitted set; the remaining
       // runnable PRs compose normally, then the watch stops.
       () => {
@@ -153,7 +153,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
   })
 
   it("still dies on a not-checkable refusal for a one-shot targeted run", async () => {
-    const h = harness([() => Promise.reject(new PrCheckabilityConflict("PR364", "withdrawn"))])
+    const h = harness([() => Promise.reject(new ChangeCheckabilityConflict("PR364", "withdrawn"))])
     await expect(followQueueRuns(h.app, ["PR364"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
       "PR 'PR364' is withdrawn, not checkable",
     )
@@ -164,7 +164,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
     // Multi-driver / same-runner race: PR lands between snapshot and the next
     // admit/run; "integrated, not admissible" must not kill the resident.
     const h = harness([
-      () => Promise.reject(new PrCheckabilityConflict("PR1578", "integrated")),
+      () => Promise.reject(new ChangeCheckabilityConflict("PR1578", "integrated")),
       () => {
         h.drain()
         return Promise.resolve([])
@@ -263,7 +263,7 @@ describe("resident runner — tolerated skips are loggily-only (Defect 3)", () =
 
   it("emits NO bare 'yrd:' stderr echo when it skips a withdrawn-PR cycle", async () => {
     const h = harness([
-      () => Promise.reject(new PrCheckabilityConflict("PR364", "withdrawn")),
+      () => Promise.reject(new ChangeCheckabilityConflict("PR364", "withdrawn")),
       () => {
         h.drain()
         return Promise.resolve([])

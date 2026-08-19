@@ -4,33 +4,33 @@ import type React from "react"
 import { useEffect, useRef, useState } from "react"
 import {
   baseIdentity,
-  currentPRRev,
-  formatPRRevisionSelector,
-  isNonCheckablePRState,
-  isPRRevisionSelector,
-  parsePRSelector,
-  prDeliveryState,
-  prCorrelation,
-  prHead,
-  prNeedsAuthor,
-  prRevisionLineage,
-  prRevisionNumber,
-  prSourceReadyAt,
+  currentChangeRev,
+  formatChangeRevisionSelector,
+  isNonCheckableChangeState,
+  isChangeRevisionSelector,
+  parseChangeSelector,
+  changeDeliveryState,
+  changeCorrelation,
+  changeHead,
+  changeNeedsAuthor,
+  changeRevisionLineage,
+  changeRevisionNumber,
+  changeSourceReadyAt,
   resolvePR,
   type BaysState,
   type Correlation,
   type PR,
-  type PRDeliveryState,
-  type PRRevClock,
-  type PRRevTerminal,
+  type ChangeDeliveryState,
+  type ChangeRevClock,
+  type ChangeRevTerminal,
 } from "@yrd/bay"
 import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type {
   Candidate,
   IntegrationProof,
-  PRCheckRecord,
-  PREligibility,
+  ChangeCheckRecord,
+  changeEligibility,
   QueueAuditFinding,
   QueueMemberKind,
   Run,
@@ -69,7 +69,7 @@ import {
 import { formatLocalClock, TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
 import {
   formatDuration,
-  PRStatusView,
+  ChangeStatusView,
   statusVariant,
   StatusValue,
   TaskStatusGlyph,
@@ -96,7 +96,7 @@ import { failureSlug } from "./failure-slug.ts"
 import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
-  prTaskStatusOf,
+  changeTaskStatusOf,
   runTaskStatusOf,
   stepTaskStatusOf,
   taskStatusFields,
@@ -121,7 +121,7 @@ export { TitledBox, timelineMetric } from "./queue-view-primitives.tsx"
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
 function prIdValue(pr: string): string {
-  return (parsePRSelector(pr)?.pr ?? pr).replace(/^PR/iu, "")
+  return (parseChangeSelector(pr)?.pr ?? pr).replace(/^PR/iu, "")
 }
 
 /**
@@ -138,9 +138,9 @@ function retrySuffix(times: number | undefined): string {
   return times !== undefined && times > 1 ? `×${times}` : ""
 }
 
-export function formatQueuePrId(pr: string, revision: number | string, times?: number): string {
+export function formatQueueChangeId(pr: string, revision: number | string, times?: number): string {
   const parsedRevision = typeof revision === "number" ? revision : Number(revision)
-  return `${formatPRRevisionSelector(pr, parsedRevision)}${retrySuffix(times)}`
+  return `${formatChangeRevisionSelector(pr, parsedRevision)}${retrySuffix(times)}`
 }
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
@@ -152,7 +152,7 @@ type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "valu
  * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). Both halves ask the same
  * exported question, so they cannot disagree about what a record is.
  */
-function QueuePrId({
+function QueueChangeId({
   pr,
   revision,
   times,
@@ -162,10 +162,10 @@ function QueuePrId({
   const number = typeof revision === "number" ? revision : Number(revision)
   return (
     <>
-      {isPRRevisionSelector(pr) ? (
+      {isChangeRevisionSelector(pr) ? (
         <NounId noun="pr" value={prIdValue(pr)} revision={revision} {...props} />
       ) : (
-        <Text {...props}>{formatPRRevisionSelector(pr, number)}</Text>
+        <Text {...props}>{formatChangeRevisionSelector(pr, number)}</Text>
       )}
       {suffix === "" ? null : <Text {...props}>{suffix}</Text>}
     </>
@@ -196,12 +196,12 @@ export type QueueStatusResult = QueueSummary &
     prs: PR[]
     admissionOrder: readonly string[]
     candidates?: readonly Candidate[]
-    eligibilities?: readonly PREligibility[]
+    eligibilities?: readonly changeEligibility[]
   }>
 
 type QueuePauseAllowListMember = Readonly<{
   id: string
-  status: PRDeliveryState | "unknown"
+  status: ChangeDeliveryState | "unknown"
 }>
 
 type QueuePauseHealth = Readonly<{
@@ -212,12 +212,12 @@ type QueuePauseHealth = Readonly<{
 function queuePauseHealth(state: BaysState, pause: NonNullable<QueueSummary["pause"]>): QueuePauseHealth {
   const members = pause.allowedPRs.map((id) => {
     const pr = resolvePR(state, id)
-    return { id, status: pr === undefined ? ("unknown" as const) : prDeliveryState(pr) }
+    return { id, status: pr === undefined ? ("unknown" as const) : changeDeliveryState(pr) }
   })
   return {
     members,
     blocksAll:
-      members.length > 0 && members.every(({ status }) => status !== "unknown" && isNonCheckablePRState(status)),
+      members.length > 0 && members.every(({ status }) => status !== "unknown" && isNonCheckableChangeState(status)),
   }
 }
 
@@ -834,19 +834,19 @@ export type QueueAttempt = QueueLogAttempt &
 type RequestedJob = Readonly<{ run: string; step: string; index: number; requestedAt: string; revision: string }>
 type StartedAttempt = Readonly<{ attempt: number; runner: string; startedAt: string }>
 
-type PinnedPRRevision = Readonly<{ id: string; revision: number; headSha: string; intent?: unknown }>
+type PinnedChangeRevision = Readonly<{ id: string; revision: number; headSha: string; intent?: unknown }>
 
-export function queueRevisionKey(revision: PinnedPRRevision): string {
+export function queueRevisionKey(revision: PinnedChangeRevision): string {
   return JSON.stringify([revision.id, revision.revision, revision.headSha])
 }
 
-export function queueRunRevisionKey(run: Pick<Run, "id">, revision: PinnedPRRevision): string {
+export function queueRunRevisionKey(run: Pick<Run, "id">, revision: PinnedChangeRevision): string {
   return JSON.stringify([run.id, revision.id, revision.revision, revision.headSha])
 }
 
-export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<Run>): Map<string, PRRunRevisionClock> {
+export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<Run>): Map<string, ChangeRunRevisionClock> {
   const byId = new Map([...prs].map((pr) => [pr.id, pr]))
-  const clocks = new Map<string, PRRunRevisionClock>()
+  const clocks = new Map<string, ChangeRunRevisionClock>()
   for (const run of runs) {
     for (const revision of run.prs) {
       const pr = byId.get(revision.id)
@@ -947,7 +947,7 @@ async function scanQueueLogAttempts(events: AsyncIterable<Event> | Iterable<Even
 
 type Row = Readonly<{
   pr: string
-  prHref?: string
+  changeHref?: string
   state: string
   target: string
   age: string
@@ -967,12 +967,12 @@ export type HumanFailureProjection = ActionableFailure &
     evidence?: Readonly<{ text: string; href?: string }>
   }>
 
-export type HumanPRProjection = Row &
+export type HumanChangeProjection = Row &
   Readonly<{
     revision: number
     branch: string
     subject: string
-    nativeStatus: PRDeliveryState
+    nativeStatus: ChangeDeliveryState
     taskStatus: TaskStatus
     glyph: StatusGlyph
     candidateId?: string
@@ -995,9 +995,9 @@ export type HumanQueueProjection = Readonly<{
   pause?: QueueSummary["pause"]
   active?: WatchActiveRow
   oldestOpen: string
-  queue: readonly (HumanPRProjection & Readonly<{ position: number }>)[]
+  queue: readonly (HumanChangeProjection & Readonly<{ position: number }>)[]
   queueOverflow: number
-  recent: readonly HumanPRProjection[]
+  recent: readonly HumanChangeProjection[]
 }>
 
 type QueueShowRow = Readonly<{
@@ -1070,25 +1070,25 @@ export type QueueShowData = Readonly<{
   isolationPart: "0" | "1" | "-"
   failure?: HumanFailureProjection
   prs: Run["prs"]
-  revisionClock?: PRRunRevisionClock
+  revisionClock?: ChangeRunRevisionClock
   attempts: readonly (QueueAttempt & TaskStatusFields)[]
   steps: readonly QueueShowRow[]
 }>
 
-export type PRRevisionHistoryClock = Readonly<{
+export type ChangeRevisionHistoryClock = Readonly<{
   pr: string
   revision: number
   headSha: string
 }> &
-  PRRevClock
+  ChangeRevClock
 
-export type PRRunRevisionClock =
-  | (PRRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
-  | (PRRevisionHistoryClock & Readonly<{ admittedBy: "check-request"; checkRequestedAt: string }>)
+export type ChangeRunRevisionClock =
+  | (ChangeRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
+  | (ChangeRevisionHistoryClock & Readonly<{ admittedBy: "check-request"; checkRequestedAt: string }>)
 
-export type PRRunsData = Readonly<{
+export type ChangeRunsData = Readonly<{
   pr: PR
-  eligibility?: PREligibility
+  eligibility?: changeEligibility
   runs: readonly QueueShowData[]
 }>
 
@@ -1128,9 +1128,9 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
 }
 
 export function latestRunForCurrentRevision(pr: PR, summary: QueueSummary): Run | undefined {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   const current = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   const currentSubmission =
     delivery === "submitted" || delivery === "ready" ? (revision.submittedAt ?? pr.submittedAt) : undefined
   return [...summary.running, ...summary.waiting, ...summary.finished]
@@ -1146,7 +1146,7 @@ export function latestRunForCurrentRevision(pr: PR, summary: QueueSummary): Run 
 }
 
 function latestCandidateForCurrentRevision(result: QueueStatusResult, pr: PR): Candidate | undefined {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return result.candidates
     ?.filter((candidate) =>
       candidate.revs.some((member) => member.pr === pr.id && member.n === revision.n && member.head === revision.head),
@@ -1155,19 +1155,19 @@ function latestCandidateForCurrentRevision(result: QueueStatusResult, pr: PR): C
     .at(-1)
 }
 
-function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): PREligibility | undefined {
-  const revision = prRevisionNumber(pr)
+function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): changeEligibility | undefined {
+  const revision = changeRevisionNumber(pr)
   return result.eligibilities?.find((eligibility) => eligibility.pr === pr.id && eligibility.revision === revision)
 }
 
 /** The submitter handle recorded on one exact immutable PR revision, or
  * undefined for revisions journaled before submitter identity was recorded. */
-function revisionSubmitter(pr: PR, revision = prRevisionNumber(pr), headSha = prHead(pr)): string | undefined {
+function revisionSubmitter(pr: PR, revision = changeRevisionNumber(pr), headSha = changeHead(pr)): string | undefined {
   return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.submitter
 }
 
-function currentTerminalFact(pr: PR): PRRevTerminal | undefined {
-  const delivery = prDeliveryState(pr)
+function currentTerminalFact(pr: PR): ChangeRevTerminal | undefined {
+  const delivery = changeDeliveryState(pr)
   let at: string | undefined
   switch (delivery) {
     case "rejected":
@@ -1190,7 +1190,7 @@ function currentTerminalFact(pr: PR): PRRevTerminal | undefined {
   }
   if (at === undefined) {
     throw new Error(
-      `yrd: PR '${pr.id}' current revision ${prRevisionNumber(pr)}@${prHead(pr)} has no ${delivery} timestamp`,
+      `yrd: PR '${pr.id}' current revision ${changeRevisionNumber(pr)}@${changeHead(pr)} has no ${delivery} timestamp`,
     )
   }
   return { kind: delivery, at }
@@ -1339,7 +1339,7 @@ export function queueTimelineRows(
   })
 }
 
-function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {
+function validateRevisionClock(pr: PR, clock: ChangeRevisionHistoryClock): ChangeRevisionHistoryClock {
   const pushed = Date.parse(clock.pushedAt)
   if (!Number.isFinite(pushed)) {
     throw new Error(
@@ -1371,7 +1371,7 @@ function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisio
     }
   }
 
-  if (clock.revision !== prRevisionNumber(pr) || clock.headSha !== prHead(pr)) return clock
+  if (clock.revision !== changeRevisionNumber(pr) || clock.headSha !== changeHead(pr)) return clock
   const expected = currentTerminalFact(pr)
   if (expected === undefined) {
     if (clock.terminal !== undefined) {
@@ -1394,7 +1394,7 @@ function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisio
   return clock
 }
 
-function revisionHistoryClock(pr: PR, revision: PR["revs"][number]): PRRevisionHistoryClock {
+function revisionHistoryClock(pr: PR, revision: PR["revs"][number]): ChangeRevisionHistoryClock {
   return {
     pr: pr.id,
     revision: revision.n,
@@ -1405,15 +1405,15 @@ function revisionHistoryClock(pr: PR, revision: PR["revs"][number]): PRRevisionH
   }
 }
 
-export function prRevisionClocks(pr: PR): readonly PRRevisionHistoryClock[] {
+export function changeRevisionClocks(pr: PR): readonly ChangeRevisionHistoryClock[] {
   const clocks = pr.revs.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
-  if (!clocks.some((clock) => clock.revision === prRevisionNumber(pr) && clock.headSha === prHead(pr))) {
-    throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${prRevisionNumber(pr)}@${prHead(pr)}`)
+  if (!clocks.some((clock) => clock.revision === changeRevisionNumber(pr) && clock.headSha === changeHead(pr))) {
+    throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${changeRevisionNumber(pr)}@${changeHead(pr)}`)
   }
   return clocks
 }
 
-function revisionCheckRequests(pr: PR, clock: PRRevisionHistoryClock): readonly PR["checkRequests"][number][] {
+function revisionCheckRequests(pr: PR, clock: ChangeRevisionHistoryClock): readonly PR["checkRequests"][number][] {
   return pr.checkRequests
     .filter((request) => request.revision === clock.revision && request.headSha === clock.headSha)
     .map((request) => {
@@ -1437,7 +1437,7 @@ function timestamp(value: string, subject: string): number {
   return parsed
 }
 
-export function runRevisionClock(pr: PR, run: Run): PRRunRevisionClock {
+export function runRevisionClock(pr: PR, run: Run): ChangeRunRevisionClock {
   const pinned = run.prs.find((member) => member.id === pr.id)
   if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain PR '${pr.id}'`)
   const revision = pr.revs.find((revision) => revision.n === pinned.revision && revision.head === pinned.headSha)
@@ -1829,7 +1829,7 @@ function queueState(pr: PR, run: Run | undefined): string {
   if (run?.status === "queued" || run?.status === "in_progress") return "checking"
   if (run?.status === "waiting") return "waiting"
   if (run?.status === "completed") return terminalProjection(run).display
-  return projectedPrStatus(pr)
+  return projectedChangeStatus(pr)
 }
 
 /**
@@ -1861,9 +1861,9 @@ export type QueueDisplayState = Readonly<{
    * withdrawn and nothing open-only can still be true of it. */
   terminal: boolean
   /** The record's own delivery state, before any eligibility overlay. */
-  native: PRDeliveryState
+  native: ChangeDeliveryState
   /** The delivery state a surface shows, `needs-author` included. */
-  delivery: PRDeliveryState | "needs-author"
+  delivery: ChangeDeliveryState | "needs-author"
   /** The pre-run timeline band, or undefined when the record is settled or
    * belongs to no pre-run band at all. */
   preRun: "draft" | "rev" | "ready" | undefined
@@ -1871,10 +1871,10 @@ export type QueueDisplayState = Readonly<{
 
 export function queueDisplayState(
   pr: PR,
-  options: Readonly<{ eligibility?: PREligibility; runs?: readonly Run[] }> = {},
+  options: Readonly<{ eligibility?: changeEligibility; runs?: readonly Run[] }> = {},
 ): QueueDisplayState {
   const kind = queueMemberKind(pr.id)
-  const native = prDeliveryState(pr)
+  const native = changeDeliveryState(pr)
   // `needs-author` is an OPEN-only value, and `PR.needsAuthor` is cleared by
   // recut, submitted, admission-recorded and already-landed but never by
   // withdrawn, integrated or canceled — so a stored refusal outlives every
@@ -1906,7 +1906,7 @@ export function queueDisplayState(
  * Terminal records never reach here — {@link queueDisplayState} returns before
  * calling it — which is the whole point of the guard living in one place.
  */
-function preRunBand(pr: PR, native: PRDeliveryState, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
+function preRunBand(pr: PR, native: ChangeDeliveryState, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
   if (native === "needs-author") return "rev"
   if (native === "submitted" || native === "ready") return "ready"
   if (native === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
@@ -1919,7 +1919,7 @@ function preRunBand(pr: PR, native: PRDeliveryState, runs: readonly Run[]): "dra
 
 /** Thin consumer of {@link queueDisplayState} — kept as the named surface every
  * status caller already reads, but no longer a second derivation of it. */
-export function projectedPrStatus(pr: PR, eligibility?: PREligibility): PRDeliveryState | "needs-author" {
+export function projectedChangeStatus(pr: PR, eligibility?: changeEligibility): ChangeDeliveryState | "needs-author" {
   return queueDisplayState(pr, eligibility === undefined ? {} : { eligibility }).delivery
 }
 
@@ -2140,7 +2140,7 @@ function failureFact(run: Run | undefined, step: QueueStep | undefined): { code:
 function projectFailure(
   fact: FailureLike,
   evidence?: HumanFailureProjection["evidence"],
-  delivery?: PRDeliveryState,
+  delivery?: ChangeDeliveryState,
 ): HumanFailureProjection {
   const failure = actionableFailure(fact, delivery === undefined ? {} : { delivery })
   return {
@@ -2257,7 +2257,7 @@ function timelineMemberSubject(
 ): string {
   const current = result.prs.find((candidate) => candidate.id === member.id)
   const isCurrent =
-    current !== undefined && prRevisionNumber(current) === member.revision && prHead(current) === member.headSha
+    current !== undefined && changeRevisionNumber(current) === member.revision && changeHead(current) === member.headSha
   const bayPath = isCurrent && current?.bay !== undefined ? state?.byId[current.bay]?.path : undefined
   return boundedQueue(
     bayPath ??
@@ -2270,18 +2270,18 @@ function timelineMemberSubject(
   )
 }
 
-function timelineRevisionLineage(pr: PR, revision = prRevisionNumber(pr)): QueueTimelineRevisionLineage {
+function timelineRevisionLineage(pr: PR, revision = changeRevisionNumber(pr)): QueueTimelineRevisionLineage {
   const retained = pr.revs.some((candidate) => candidate.n === revision)
   if (retained !== true) {
     return {
       pr: pr.id,
       revisions: [revision],
-      ...(revision === prRevisionNumber(pr) && pr.submittedAt !== undefined ? { sourceReadyAt: pr.submittedAt } : {}),
+      ...(revision === changeRevisionNumber(pr) && pr.submittedAt !== undefined ? { sourceReadyAt: pr.submittedAt } : {}),
     }
   }
-  const revisions = prRevisionLineage(pr, revision)
+  const revisions = changeRevisionLineage(pr, revision)
   const registeredAt = revisions[0]?.pushedAt
-  const sourceReadyAt = prSourceReadyAt(pr, revision)
+  const sourceReadyAt = changeSourceReadyAt(pr, revision)
   return {
     pr: pr.id,
     revisions: revisions.map((candidate) => candidate.n),
@@ -2297,7 +2297,7 @@ function timelineLineageLabel(lineages: readonly QueueTimelineRevisionLineage[])
     .map(({ pr, revisions }) => {
       const path = revisions.map((revision) => `rev${revision}`).join("→")
       const currentRevision = revisions.at(-1) ?? 1
-      return recuts.length === 1 ? path : `${formatQueuePrId(pr, currentRevision)} ${path}`
+      return recuts.length === 1 ? path : `${formatQueueChangeId(pr, currentRevision)} ${path}`
     })
     .join(" · ")
 }
@@ -2466,7 +2466,7 @@ function timelineNonIntegratedRows(
   const positions = queueAdmissionPositions(result.admissionOrder)
   const runs = [...result.running, ...result.waiting, ...result.finished]
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
-    const revision = currentPRRev(pr)
+    const revision = currentChangeRev(pr)
     const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
     const display = queueDisplayState(pr, { runs })
     const status = display.preRun
@@ -2615,7 +2615,7 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
           )
         }
       }
-      const current = currentPRRev(pr)
+      const current = currentChangeRev(pr)
       const submittedAt = current?.submittedAt ?? pr.submittedAt
       if (submittedAt !== undefined) {
         submissionTimes.set(queueRevisionKey({ id: pr.id, revision: current.n, headSha: current.head }), submittedAt)
@@ -3082,24 +3082,24 @@ function projectPR(
   now: number,
   runOverride?: Run,
   candidateOverride?: Candidate,
-  eligibility?: PREligibility,
-): HumanPRProjection {
+  eligibility?: changeEligibility,
+): HumanChangeProjection {
   const run = runOverride ?? latestRunForCurrentRevision(pr, result)
   const candidate = candidateOverride
   const step = relevantStep(run)
   const job = step?.job
   const path = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
-  const revisionClocks = prRevisionClocks(pr)
+  const revisionClocks = changeRevisionClocks(pr)
   const revision =
     run === undefined
       ? revisionClocks.find(
-          (candidate) => candidate.revision === prRevisionNumber(pr) && candidate.headSha === prHead(pr),
+          (candidate) => candidate.revision === changeRevisionNumber(pr) && candidate.headSha === changeHead(pr),
         )
       : runRevisionClock(pr, run)
   const isCurrentRevision =
-    revision === undefined || (revision.revision === prRevisionNumber(pr) && revision.headSha === prHead(pr))
+    revision === undefined || (revision.revision === changeRevisionNumber(pr) && revision.headSha === changeHead(pr))
   const submittedAt = revision?.submittedAt ?? (run === undefined && isCurrentRevision ? pr.submittedAt : undefined)
-  const projectedRevision = revision?.revision ?? prRevisionNumber(pr)
+  const projectedRevision = revision?.revision ?? changeRevisionNumber(pr)
   const lineage = timelineRevisionLineage(pr, projectedRevision)
   const sourceReadyAt = lineage.sourceReadyAt
   const revisionLineage = lineage.revisions
@@ -3139,7 +3139,7 @@ function projectPR(
   const artifact = artifactHref(artifacts[0])
   const candidateConflict =
     run === undefined && eligibility?.runnable === false && eligibility.reason?.code === "candidate-conflicting"
-  const projectedState = projectedPrStatus(pr, eligibility)
+  const projectedState = projectedChangeStatus(pr, eligibility)
   const stateLabel = candidateConflict
     ? eligibility.reason.code
     : projectedState === "needs-author"
@@ -3148,7 +3148,7 @@ function projectPR(
   const taskStatus = candidateConflict
     ? "blocked"
     : runOverride === undefined || run === undefined
-      ? prTaskStatusOf(pr)
+      ? changeTaskStatusOf(pr)
       : runTaskStatusOf(run)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
@@ -3156,15 +3156,15 @@ function projectPR(
     revision?.terminal?.at ??
     runOverride?.finishedAt ??
     (isCurrentRevision
-      ? prDeliveryState(pr) === "needs-author"
-        ? prNeedsAuthor(pr)?.at
-        : prDeliveryState(pr) === "rejected"
+      ? changeDeliveryState(pr) === "needs-author"
+        ? changeNeedsAuthor(pr)?.at
+        : changeDeliveryState(pr) === "rejected"
           ? pr.rejectedAt
-          : prDeliveryState(pr) === "integrated"
+          : changeDeliveryState(pr) === "integrated"
             ? pr.integratedAt
-            : prDeliveryState(pr) === "already-landed"
+            : changeDeliveryState(pr) === "already-landed"
               ? pr.alreadyLandedAt
-              : prDeliveryState(pr) === "withdrawn"
+              : changeDeliveryState(pr) === "withdrawn"
                 ? pr.withdrawnAt
                 : undefined
       : undefined)
@@ -3175,10 +3175,10 @@ function projectPR(
   return {
     pr: pr.id,
     revision: projectedRevision,
-    ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
+    ...(path === undefined ? {} : { changeHref: pathToFileURL(path).href, path }),
     branch: pr.branch,
     subject: boundedQueue(pr.title ?? pr.name ?? pr.branch, 80),
-    nativeStatus: prDeliveryState(pr),
+    nativeStatus: changeDeliveryState(pr),
     state: stateLabel,
     ...taskStatusFields(taskStatus),
     ...(candidateId === undefined ? {} : { candidateId }),
@@ -3204,7 +3204,7 @@ function projectPR(
   }
 }
 
-function projectedPRRows(state: BaysState | undefined, result: QueueStatusResult, now: number): HumanPRProjection[] {
+function projectedChangeRows(state: BaysState | undefined, result: QueueStatusResult, now: number): HumanChangeProjection[] {
   return result.prs.map((pr) =>
     projectPR(
       state,
@@ -3218,7 +3218,7 @@ function projectedPRRows(state: BaysState | undefined, result: QueueStatusResult
   )
 }
 
-function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): number {
+function byTouchedNewest(left: HumanChangeProjection, right: HumanChangeProjection): number {
   const order = (right.touchedAt ?? "").localeCompare(left.touchedAt ?? "")
   return order === 0 ? compareNatural(left.pr, right.pr) : order
 }
@@ -3238,7 +3238,7 @@ export function humanQueueProjection(
   }> = {},
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
-  const rows = projectedPRRows(options.state, result, now)
+  const rows = projectedChangeRows(options.state, result, now)
   const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
@@ -3248,7 +3248,7 @@ export function humanQueueProjection(
       const pr = result.prs.find((candidate) => candidate.id === member.id)
       if (pr === undefined) return []
       if (selected.size === 0 && (run.status !== "completed" || run.conclusion !== "failure")) return []
-      const delivery = prDeliveryState(pr)
+      const delivery = changeDeliveryState(pr)
       if (selected.size > 0 && (!selected.has(pr.id) || delivery === "submitted" || delivery === "ready")) {
         return []
       }
@@ -3323,7 +3323,7 @@ export function QueueRecoveryView({
 }: {
   runs: readonly Run[]
   findings: readonly QueueAuditFinding[]
-  blocked: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[]
+  blocked: readonly Readonly<{ pr: PR; eligibility: changeEligibility }>[]
 }) {
   if (findings.length === 0 && blocked.length === 0) return <QueueRunsView runs={runs} />
   return (
@@ -3375,7 +3375,7 @@ function queueRunSteps(run: Run): string {
   }).join(" ")
 }
 
-export type PRListRow = Readonly<{
+export type ChangeListRow = Readonly<{
   pr: string
   state: string
   stateLabel: string
@@ -3398,20 +3398,20 @@ const checkLabels = {
   checking: "run",
   passed: "pass",
   failed: "fail",
-} as const satisfies Record<PREligibility["checks"]["status"], PRListRow["checks"]>
+} as const satisfies Record<changeEligibility["checks"]["status"], ChangeListRow["checks"]>
 
-function reviewLabel(eligibility: PREligibility): PRListRow["review"] {
+function reviewLabel(eligibility: changeEligibility): ChangeListRow["review"] {
   if (!eligibility.review.required) return "n/a"
   if (eligibility.review.decision === "reject") return "reject"
   return eligibility.review.approved && !eligibility.review.stale ? "ok" : "need"
 }
 
-export function prListRows(
-  entries: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[],
+export function changeListRows(
+  entries: readonly Readonly<{ pr: PR; eligibility: changeEligibility }>[],
   runs: readonly Run[],
   now: number,
   landings: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
-): PRListRow[] {
+): ChangeListRow[] {
   const summary: QueueSummary = {
     base: "*",
     running: runs.filter((run) => run.status === "queued" || run.status === "in_progress"),
@@ -3419,7 +3419,7 @@ export function prListRows(
     finished: runs.filter((run) => run.status === "completed"),
   }
   return entries.map(({ pr, eligibility }) => {
-    const revision = prRevisionNumber(pr)
+    const revision = changeRevisionNumber(pr)
     if (eligibility.pr !== pr.id || eligibility.revision !== revision) {
       throw new Error(
         `yrd: PR '${pr.id}' revision ${revision} has mismatched eligibility for '${eligibility.pr}' revision ${eligibility.revision}`,
@@ -3434,7 +3434,7 @@ export function prListRows(
     // Showing the later write as the whole truth sends the author back to
     // re-cut a branch that is already on the base branch (22376).
     const landing = landings.get(pr.id)
-    const state = landing === undefined ? projectedPrStatus(pr, eligibility) : "already-landed"
+    const state = landing === undefined ? projectedChangeStatus(pr, eligibility) : "already-landed"
     const glyph = landing === undefined ? projected.glyph : "✓"
     return {
       pr: projected.pr,
@@ -3461,7 +3461,7 @@ export function prListRows(
  * Table's own default cell has: shrinkable, capped at the track, truncating
  * rather than wrapping. The live specimen is 22376 — two `already-landed`
  * labels one cell too wide for the STATE track hid the two NEWEST PRs. */
-function PRStateValue({ row }: { row: PRListRow }) {
+function ChangeStateValue({ row }: { row: ChangeListRow }) {
   const variant = statusVariant(row.state)
   return (
     <Text bold color={variant === "default" ? "$fg" : `$fg-${variant}`} minWidth={0} maxWidth="100%" wrap="truncate">
@@ -3474,24 +3474,24 @@ function PRStateValue({ row }: { row: PRListRow }) {
  * `hidden` is not decoration: a listing that withheld rows must say so and say
  * how many, because an inventory that reads complete and is not is worse than
  * an error (22376). */
-export type PRListWindow = Readonly<{ hidden: number; total: number }>
+export type ChangeListWindow = Readonly<{ hidden: number; total: number }>
 
-export function PRListView({
+export function ChangeListView({
   rows,
   columns: terminalColumns,
   window: listWindow,
 }: {
-  rows: readonly PRListRow[]
+  rows: readonly ChangeListRow[]
   columns: number
-  window?: PRListWindow
+  window?: ChangeListWindow
 }) {
-  const base: TableColumn<PRListRow> = { header: "BASE", key: "target", minWidth: 6, maxWidth: 14 }
-  const submitter: TableColumn<PRListRow> = { header: "BY", key: "submitter", minWidth: 4, maxWidth: 10 }
-  const ageColumn: TableColumn<PRListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
-  const changed: TableColumn<PRListRow> = { header: "CHANGED", key: "touched", minWidth: 9, maxWidth: 9 }
-  const prWidth = Math.min(
+  const base: TableColumn<ChangeListRow> = { header: "BASE", key: "target", minWidth: 6, maxWidth: 14 }
+  const submitter: TableColumn<ChangeListRow> = { header: "BY", key: "submitter", minWidth: 4, maxWidth: 10 }
+  const ageColumn: TableColumn<ChangeListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
+  const changed: TableColumn<ChangeListRow> = { header: "CHANGED", key: "touched", minWidth: 9, maxWidth: 9 }
+  const changeWidth = Math.min(
     16,
-    rows.reduce((width, row) => Math.max(width, formatQueuePrId(row.pr, row.revision).length + 2), 8),
+    rows.reduce((width, row) => Math.max(width, formatQueueChangeId(row.pr, row.revision).length + 2), 8),
   )
   // Track padding is 2, so a label needs label.length + 2 of track before the
   // Table's own cell would have to cut it. Sizing from the widest label present
@@ -3507,20 +3507,20 @@ export function PRListView({
     25,
     rows.reduce((width, row) => Math.max(width, row.why.length + 2), 18),
   )
-  const columns: TableColumn<PRListRow>[] = [
+  const columns: TableColumn<ChangeListRow>[] = [
     {
       header: "PR",
       key: "pr",
-      minWidth: prWidth,
+      minWidth: changeWidth,
       maxWidth: 16,
-      render: (row: PRListRow) => <QueuePrId pr={row.pr} revision={row.revision} wrap="truncate" />,
+      render: (row: ChangeListRow) => <QueueChangeId pr={row.pr} revision={row.revision} wrap="truncate" />,
     },
     {
       header: "STATE",
       key: "stateLabel",
       minWidth: stateWidth,
       maxWidth: stateWidth,
-      render: (row: PRListRow) => <PRStateValue row={row} />,
+      render: (row: ChangeListRow) => <ChangeStateValue row={row} />,
     },
     { header: "HISTORY", key: "lineage", minWidth: 8, maxWidth: 10 },
     ...(terminalColumns >= 110 ? [submitter] : []),
@@ -3546,7 +3546,7 @@ export function PRListView({
   )
 }
 
-export type PRCheckViewRecord = PRCheckRecord
+export type ChangeCheckViewRecord = ChangeCheckRecord
 
 function explicitArtifactHref(artifact: string): string {
   return /^[a-z][a-z0-9+.-]*:\/\//iu.test(artifact) ? artifact : pathToFileURL(resolve(artifact)).href
@@ -3565,7 +3565,7 @@ function checkDiagnosticText(value: unknown): string {
   )
 }
 
-export function PRChecksView({ records, now = Date.now() }: { records: readonly PRCheckViewRecord[]; now?: number }) {
+export function ChangeChecksView({ records, now = Date.now() }: { records: readonly ChangeCheckViewRecord[]; now?: number }) {
   const data = records.map((record) => {
     const taskStatus = checkTaskStatusOf(record)
     return {
@@ -3589,7 +3589,7 @@ export function PRChecksView({ records, now = Date.now() }: { records: readonly 
       <Table
         data={data}
         columns={[
-          { header: "PR", key: "pr", render: (row) => <QueuePrId pr={row.pr} revision={row.revision} /> },
+          { header: "PR", key: "pr", render: (row) => <QueueChangeId pr={row.pr} revision={row.revision} /> },
           { header: "CHECK", key: "check" },
           {
             header: "STATE",
@@ -3617,14 +3617,14 @@ export function PRChecksView({ records, now = Date.now() }: { records: readonly 
         .filter((row) => row.state === "failed")
         .map((row) => (
           <Text key={`${row.pr}:${row.revision}:${row.check}`}>
-            {`FAIL ${formatQueuePrId(row.pr, row.revision)} ${row.check} COMMAND ${row.command} DIAGNOSTIC ${row.diagnostic}${row.artifact === undefined ? "" : ` ARTIFACT ${row.artifact}`}`}
+            {`FAIL ${formatQueueChangeId(row.pr, row.revision)} ${row.check} COMMAND ${row.command} DIAGNOSTIC ${row.diagnostic}${row.artifact === undefined ? "" : ` ARTIFACT ${row.artifact}`}`}
           </Text>
         ))}
     </Box>
   )
 }
 
-export function PRResultView({
+export function ChangeResultView({
   prs,
   runs,
   checks,
@@ -3633,13 +3633,13 @@ export function PRResultView({
 }: {
   prs: readonly PR[]
   runs: readonly Run[]
-  checks?: readonly PRCheckViewRecord[]
-  eligibilities?: readonly PREligibility[]
+  checks?: readonly ChangeCheckViewRecord[]
+  eligibilities?: readonly changeEligibility[]
   now?: number
 }) {
   return (
     <Box flexDirection="column">
-      <PRStatusView prs={prs} eligibilities={eligibilities} />
+      <ChangeStatusView prs={prs} eligibilities={eligibilities} />
       {checks === undefined && runs.length > 0 && (
         <Box marginTop={1}>
           <QueueRunsView runs={runs} />
@@ -3647,38 +3647,38 @@ export function PRResultView({
       )}
       {checks !== undefined && (
         <Box marginTop={1}>
-          <PRChecksView records={checks} now={now} />
+          <ChangeChecksView records={checks} now={now} />
         </Box>
       )}
     </Box>
   )
 }
 
-function latestPRRun(pr: PR, runs: readonly Run[]): Run | undefined {
+function latestChangeRun(pr: PR, runs: readonly Run[]): Run | undefined {
   return runs
     .filter((run) => run.prs.some((member) => member.id === pr.id))
     .toSorted(byRunStarted)
     .at(-1)
 }
 
-export type PRDetailData = Readonly<{
+export type changeDetailData = Readonly<{
   pr: PR
   runs: readonly QueueShowData[]
   run?: QueueShowData
 }>
 
-export function prDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): PRDetailData {
+export function changeDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): changeDetailData {
   const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts, undefined, delivery))
-  const latest = latestPRRun(pr, matchingRuns)
+  const latest = latestChangeRun(pr, matchingRuns)
   const run = latest === undefined ? undefined : details.find((detail) => detail.run === latest.id)
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
 }
 
 function diagnosticBlocker(pr: PR, run: Run | undefined, step: QueueStep | undefined, now: number): string | undefined {
   const job = step?.job
-  const context = { delivery: prDeliveryState(pr) }
+  const context = { delivery: changeDeliveryState(pr) }
   if (job?.status === "completed" && job.conclusion === "failure") {
     return actionableFailureSummary(actionableFailure(job.error, context))
   }
@@ -3751,7 +3751,7 @@ export function collapseRecomposedSources(
   return out
 }
 
-export function PRDetailView({
+export function ChangeDetailView({
   pr,
   eligibility,
   runs,
@@ -3760,13 +3760,13 @@ export function PRDetailView({
   position,
 }: {
   pr: PR
-  eligibility?: PREligibility
+  eligibility?: changeEligibility
   runs: readonly Run[]
   attempts?: readonly QueueAttempt[]
   now: number
   position?: number
 }) {
-  const run = latestPRRun(pr, runs)
+  const run = latestChangeRun(pr, runs)
   const runMember = run?.prs.find((member) => member.id === pr.id)
   // The newest run for this PR may have executed against a now-superseded
   // revision (e.g. rev 1 was rejected while rev 2 sits pending with no run of
@@ -3775,25 +3775,25 @@ export function PRDetailView({
   // the current revision's real state is stated above it (user-reported
   // 2026-07-16). A superseded run implies the current revision has no run yet:
   // any run against it would sort newer and be selected here instead.
-  const revision = currentPRRev(pr)
-  const delivery = prDeliveryState(pr)
+  const revision = currentChangeRev(pr)
+  const delivery = changeDeliveryState(pr)
   const supersededRunRevision =
     run !== undefined && runMember !== undefined && runMember.revision !== revision.n ? runMember.revision : undefined
   const currentStateWord = delivery === "submitted" ? "pending" : delivery
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
-  const detail = prDetailData(pr, runs, attempts)
+  const detail = changeDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
   const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
-  const recomposedSources = prRevisionLineage(pr).flatMap((candidate) => candidate.recut?.sources ?? [])
-  const taskStatus = prTaskStatusOf(pr)
+  const recomposedSources = changeRevisionLineage(pr).flatMap((candidate) => candidate.recut?.sources ?? [])
+  const taskStatus = changeTaskStatusOf(pr)
   const projectionFields = taskStatusFields(taskStatus)
 
   return (
     <Box flexDirection="column">
       <Text>
-        <QueuePrId pr={pr.id} revision={revision.n} /> <Text bold>STATUS</Text> <StatusValue value={delivery} />{" "}
+        <QueueChangeId pr={pr.id} revision={revision.n} /> <Text bold>STATUS</Text> <StatusValue value={delivery} />{" "}
         <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
@@ -3872,7 +3872,7 @@ export function queueStatusRows(
   selected: ReadonlySet<string>,
   now: number,
 ): Row[] {
-  return projectedPRRows(state, result, now).filter(
+  return projectedChangeRows(state, result, now).filter(
     (row) =>
       selected.has(row.pr) ||
       (row.nativeStatus !== "integrated" && row.nativeStatus !== "already-landed" && row.nativeStatus !== "withdrawn"),
@@ -3922,7 +3922,7 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
     <Box height={1}>
       <Text wrap="truncate">
         <Text bold>ACTIVE RUN </Text>
-        <RunId base={active.base} run={active.run} /> <QueuePrId pr={active.pr} revision={active.revision} />{" "}
+        <RunId base={active.base} run={active.run} /> <QueueChangeId pr={active.pr} revision={active.revision} />{" "}
         {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps}{" "}
         {active.elapsed}
       </Text>
@@ -3930,17 +3930,17 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
   )
 }
 
-function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?: number }) {
+function ProjectedChangeQueue({ row, position }: { row: HumanChangeProjection; position?: number }) {
   return (
     <Box height={1}>
       <Text wrap="truncate">
         {position === undefined ? "" : `${position}. `}
         <TaskStatusGlyph taskStatus={row.taskStatus} glyph={row.glyph} />{" "}
-        {row.prHref === undefined ? (
-          <QueuePrId pr={row.pr} revision={row.revision} />
+        {row.changeHref === undefined ? (
+          <QueueChangeId pr={row.pr} revision={row.revision} />
         ) : (
-          <Link href={row.prHref}>
-            <QueuePrId pr={row.pr} revision={row.revision} />
+          <Link href={row.changeHref}>
+            <QueueChangeId pr={row.pr} revision={row.revision} />
           </Link>
         )}{" "}
         {row.candidateId === undefined ? null : (
@@ -4027,7 +4027,7 @@ function ProjectionRows({
             <Text bold>{queueHeading}</Text>
           </Box>
           {projection.queue.map((row) => (
-            <ProjectedPRQueue key={row.pr} row={row} position={row.position} />
+            <ProjectedChangeQueue key={row.pr} row={row} position={row.position} />
           ))}
           {projection.queueOverflow === 0 ? null : (
             <Box height={1}>
@@ -4045,7 +4045,7 @@ function ProjectionRows({
           </Box>
           {projection.recent.map((row, index) => (
             <Box key={`${row.pr}:${row.runId ?? index}`} flexDirection="column">
-              <ProjectedPRQueue row={row} />
+              <ProjectedChangeQueue row={row} />
               {row.failure === undefined ? null : <FailureQueues failure={row.failure} />}
             </Box>
           ))}
@@ -4200,7 +4200,7 @@ export function QueueWatchView({
           .map((run) => [run.id, run] as const),
       ).values(),
     ]
-    return <PRDetailView pr={selected.pr} eligibility={selected.eligibility} runs={runs} now={now} />
+    return <ChangeDetailView pr={selected.pr} eligibility={selected.eligibility} runs={runs} now={now} />
   }
 
   return (
@@ -4226,9 +4226,9 @@ export function QueueWatchView({
 }
 
 function queueLogSubmissionTime(
-  revisionClocks: ReadonlyMap<string, PRRunRevisionClock> | undefined,
+  revisionClocks: ReadonlyMap<string, ChangeRunRevisionClock> | undefined,
   run: Run,
-  pr: PinnedPRRevision,
+  pr: PinnedChangeRevision,
 ): string | undefined {
   if (revisionClocks === undefined) return undefined
   const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
@@ -4328,7 +4328,7 @@ export function QueueDetailTitle({ row, issue }: { row?: QueueTimelineProjectedR
   const presentIssue = presentFact(issue)
   return (
     <Box flexDirection="row" width="100%" minWidth={0} overflow="hidden" flexShrink={0}>
-      <QueuePrId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
+      <QueueChangeId pr={row.pr} revision={row.revision} color="$fg-warning" flexShrink={0} />
       {presentIssue === undefined ? null : (
         <>
           <Text flexShrink={0}> </Text>
@@ -5060,7 +5060,7 @@ function TimelineProjectedRow({
         // The PR+revision id stays bold (item F); the parenthesized suffix is
         // the live step (running) or terminal failure code, colorized by state.
         <>
-          <QueuePrId pr={row.pr} revision={row.revision} color={forcedFg} flexShrink={0} />
+          <QueueChangeId pr={row.pr} revision={row.revision} color={forcedFg} flexShrink={0} />
           {row.repeat?.collapsed === true ? (
             <Text color={forcedFg ?? "$fg-warning"} flexShrink={0}>
               {` ${timelineRepeatLabel(row.repeat)}`}
@@ -5196,7 +5196,7 @@ function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysSta
   if (state !== undefined) {
     return Object.values(state.prs).reduce<number | null>((latest, pr) => {
       if (baseIdentity(pr.base) !== baseIdentity(projection.base)) return latest
-      const terminal = currentPRRev(pr).terminal
+      const terminal = currentChangeRev(pr).terminal
       if (terminal?.kind !== "integrated") return latest
       const at = Date.parse(terminal.at)
       if (!Number.isFinite(at)) return latest
@@ -6278,7 +6278,7 @@ export function QueueTimelineView({
               <Text wrap="truncate">
                 {meta.isCursor ? "> " : "  "}
                 <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text>{" "}
-                <QueuePrId pr={row.pr} revision={row.revision} />{" "}
+                <QueueChangeId pr={row.pr} revision={row.revision} />{" "}
                 {row.run === undefined ? "-" : <RunId base={row.base} run={row.run} />} {row.subject}{" "}
                 <Text color="$fg-muted">{row.detail}</Text>
               </Text>
@@ -6293,11 +6293,11 @@ export function QueueTimelineView({
 export function queueLogRows(
   results: readonly QueueLogResult[],
   selectedPrs: ReadonlySet<string>,
-  prFilter: string | undefined,
-  prStatus?: ReadonlyMap<string, PRDeliveryState>,
+  changeFilter: string | undefined,
+  changeStatus?: ReadonlyMap<string, ChangeDeliveryState>,
   attempts: readonly QueueLogAttempt[] = [],
   revisionSubjects: ReadonlyMap<string, string> = new Map(),
-  revisionClocks?: ReadonlyMap<string, PRRunRevisionClock>,
+  revisionClocks?: ReadonlyMap<string, ChangeRunRevisionClock>,
 ): QueueLogRow[] {
   const rows: QueueLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
@@ -6306,7 +6306,7 @@ export function queueLogRows(
     for (const run of result.finished) {
       for (const pr of run.prs) {
         if (selectedPrs.size > 0 && !selectedPrs.has(pr.id)) continue
-        if (prFilter !== undefined && pr.id !== prFilter) continue
+        if (changeFilter !== undefined && pr.id !== changeFilter) continue
         const outcome = queueOutcome(run)
         if (outcome === "running" || outcome === "waiting") continue
 
@@ -6351,7 +6351,7 @@ export function queueLogRows(
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
         const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr)
         const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
-        const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
+        const showLocation = changeStatus?.get(pr.id) === "withdrawn" ? undefined : location
         const taskStatus = runTaskStatusOf(run)
         rows.push({
           run: run.id,
@@ -6405,23 +6405,23 @@ export function queueLogRows(
     }
   }
 
-  if (prFilter !== undefined) {
-    const runPrs = prStatus
-    const status = runPrs?.get(prFilter)
-    const matching = rows.filter((row) => row.pr === prFilter)
+  if (changeFilter !== undefined) {
+    const runPrs = changeStatus
+    const status = runPrs?.get(changeFilter)
+    const matching = rows.filter((row) => row.pr === changeFilter)
     if (status === "withdrawn" && matching.length === 0) {
-      const currentPr = results.flatMap((result) => result.prs ?? []).find((pr) => pr.id === prFilter)
+      const currentPr = results.flatMap((result) => result.prs ?? []).find((pr) => pr.id === changeFilter)
       const exampleResult =
         currentPr ??
         Array.from(results)
           .flatMap((result) => result.finished)
           .flatMap((run) => run.prs)
-          .find((candidate) => candidate.id === prFilter)
+          .find((candidate) => candidate.id === changeFilter)
       const exampleRevision =
         exampleResult === undefined
           ? undefined
           : "revs" in exampleResult
-            ? currentPRRev(exampleResult)
+            ? currentChangeRev(exampleResult)
             : { n: exampleResult.revision, head: exampleResult.headSha, baseSha: exampleResult.baseSha }
       const headSha = (exampleRevision?.head ?? "-").slice(0, 40)
       const baseSha = (exampleRevision?.baseSha ?? "-").slice(0, 40)
@@ -6433,12 +6433,12 @@ export function queueLogRows(
       rows.push({
         run: "-",
         base: exampleResult?.base ?? "-",
-        pr: prFilter,
+        pr: changeFilter,
         branch: exampleResult?.branch ?? "-",
         subject:
           (exampleKey === undefined ? undefined : revisionSubjects.get(exampleKey)) ??
           exampleResult?.branch ??
-          prFilter,
+          changeFilter,
         ...taskStatusFields(taskStatus),
         revision: String(exampleRevision?.n ?? 0),
         headSha,
@@ -6483,12 +6483,12 @@ export function queueLogRows(
 }
 
 function correlationField(pr: Run["prs"][number] | PR | undefined): Readonly<{ correlation?: Correlation }> {
-  const correlation = pr === undefined ? undefined : "revs" in pr ? prCorrelation(pr) : pr.correlation
+  const correlation = pr === undefined ? undefined : "revs" in pr ? changeCorrelation(pr) : pr.correlation
   if (correlation === undefined) return {}
   return { correlation }
 }
 
-function queueShowStepRow(run: Run, step: QueueStep, delivery?: PRDeliveryState): QueueShowRow {
+function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliveryState): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const command = stepCommand(step)
@@ -6534,7 +6534,7 @@ function queueShowStepRow(run: Run, step: QueueStep, delivery?: PRDeliveryState)
   }
 }
 
-function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: PRDeliveryState): QueueShowRow {
+function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: ChangeDeliveryState): QueueShowRow {
   const step = run.steps[attempt.index] ?? run.steps.find((candidate) => candidate.name === attempt.step)
   if (step?.job?.id === attempt.job && step.job.attempt === attempt.attempt) {
     return {
@@ -6604,7 +6604,7 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: PRDeliv
 function queueShowRows(
   run: Run,
   attempts: readonly QueueAttempt[],
-  delivery?: PRDeliveryState,
+  delivery?: ChangeDeliveryState,
 ): readonly QueueShowRow[] {
   const terminalStepIndex = run.steps.findIndex((step) => {
     const job = step.job
@@ -6635,8 +6635,8 @@ export function queueShowData(
   run: Run,
   allRuns: readonly Run[] = [],
   attempts: readonly QueueAttempt[] = [],
-  revisionClock?: PRRunRevisionClock,
-  delivery?: PRDeliveryState,
+  revisionClock?: ChangeRunRevisionClock,
+  delivery?: ChangeDeliveryState,
 ): QueueShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "completed")
   const runAttempts = attempts
@@ -6730,7 +6730,7 @@ export function QueueLogView({
       key: "pr" as const,
       minWidth: compact ? 8 : 10,
       maxWidth: compact ? 12 : 16,
-      render: (row: (typeof tableRows)[number]) => <QueuePrId pr={row.pr} revision={row.revision} />,
+      render: (row: (typeof tableRows)[number]) => <QueueChangeId pr={row.pr} revision={row.revision} />,
     },
     { header: "RUN", key: "runIdentity" as const, minWidth: compact ? 8 : 10, maxWidth: compact ? 12 : 18 },
     { header: "OUTCOME", key: "outcome" as const, maxWidth: 13 },
@@ -6802,7 +6802,7 @@ function QueueShowMembersValue({ data, highlightPr }: { data: QueueShowData; hig
       {data.prs.map((pr, index) => (
         <Text key={pr.id} color={pr.id === highlightPr ? "$fg-warning" : undefined}>
           {index === 0 ? "" : ","}
-          <QueuePrId pr={pr.id} revision={pr.revision} />:{pr.headSha.slice(0, 12)}
+          <QueueChangeId pr={pr.id} revision={pr.revision} />:{pr.headSha.slice(0, 12)}
         </Text>
       ))}
     </>
@@ -6816,7 +6816,7 @@ function QueueShowIdentityChain({ data }: { data: QueueShowData }) {
       {data.prs.map((pr, index) => (
         <Text key={pr.id} color="inherit">
           {index === 0 ? "" : ","}
-          <QueuePrId pr={pr.id} revision={pr.revision} color="inherit" />
+          <QueueChangeId pr={pr.id} revision={pr.revision} color="inherit" />
         </Text>
       ))}
       {" → "}
@@ -6952,17 +6952,17 @@ export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
   )
 }
 
-function prReviewLine(review: PR["reviews"][number]): string {
+function changeReviewLine(review: PR["reviews"][number]): string {
   const note = presentFact(review.note)
   return `REVIEW ${review.decision} ${review.by} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
-function prCommentLine(comment: PR["comments"][number]): string {
+function changeCommentLine(comment: PR["comments"][number]): string {
   const note = presentFact(comment.note)
   return `COMMENT ${comment.by} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
-type PrActivityEntry = Readonly<{
+type ChangeActivityEntry = Readonly<{
   at: string
   rank: number
   text: string
@@ -6978,12 +6978,12 @@ function runActivityState(data: QueueShowData): StatusNoticeState {
   return data.conclusion === "cancelled" ? "canceled" : "failed"
 }
 
-function prTerminalLineageEntries(
+function changeTerminalLineageEntries(
   pr: PR,
   memberRevision: number,
   runDetails: readonly QueueShowData[],
-): readonly PrActivityEntry[] {
-  const terminal = prRevisionClocks(pr)
+): readonly ChangeActivityEntry[] {
+  const terminal = changeRevisionClocks(pr)
     .filter((clock) => clock.revision <= memberRevision)
     .flatMap((clock) => {
       if (clock.terminal === undefined) return []
@@ -7007,12 +7007,12 @@ function prTerminalLineageEntries(
   )
 }
 
-function prActivityEntries(
+function changeActivityEntries(
   pr: PR,
   runDetails: readonly QueueShowData[],
   currentRow: QueueTimelineProjectedRow | undefined,
-): readonly PrActivityEntry[] {
-  const entries: PrActivityEntry[] = []
+): readonly ChangeActivityEntry[] {
+  const entries: ChangeActivityEntry[] = []
   const revisions = pr.revs
   for (const revision of revisions) {
     const submitted = revision.submittedAt !== undefined
@@ -7108,7 +7108,7 @@ function prActivityEntries(
   )
 }
 
-function QueuePrActivity({ entries }: { entries: readonly PrActivityEntry[] }) {
+function QueueChangeActivity({ entries }: { entries: readonly ChangeActivityEntry[] }) {
   if (entries.length === 0) return null
   return (
     <Box flexDirection="column" minWidth={0}>
@@ -7150,7 +7150,7 @@ function descriptionWithoutDuplicatedIssue(
   )
 }
 
-function prAgeLabel(
+function changeAgeLabel(
   pr: PR | undefined,
   revision: number,
   row: QueueTimelineProjectedRow | undefined,
@@ -7171,7 +7171,7 @@ function prAgeLabel(
   return `${countLabel} · ${total} · r${revision} ${currentLabel} ${mediaDuration(row.queueWaitMs)}`
 }
 
-function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
+function changeDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
   const retained = pr.revs.find((candidate) => candidate.n === revision)
   const checkRequest = pr.checkRequests.findLast(
     (request) => request.revision === revision && request.headSha === retained?.head,
@@ -7184,7 +7184,7 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
     ...(note === undefined ? [] : [{ key: "note", value: note }]),
     ...(detail === undefined ? [] : [{ key: "detail", value: detail }]),
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
-    { key: "head", value: retained?.head ?? prHead(pr) },
+    { key: "head", value: retained?.head ?? changeHead(pr) },
     { key: "base", value: retained?.base ?? pr.base },
     ...(retained?.composition === undefined
       ? []
@@ -7200,7 +7200,7 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
   return facts
 }
 
-/** Shared by {@link QueueDetailPrList} and {@link QueueDetailRunPrBlocks}: the
+/** Shared by {@link QueueDetailChangeList} and {@link QueueDetailRunChangeBlocks}: the
  * one subject-resolution fallback chain, so the summary line and the full
  * per-change box can never show two different titles for the same PR. */
 function memberSubject(
@@ -7216,9 +7216,9 @@ function memberSubject(
  * member — `· pr#id.rev` then its bold title, ellipsis-truncated to width.
  * This is the "what's in this run" overview; full per-change detail (branch,
  * description, history, diff) lives in the Changes tab's boxes below
- * ({@link QueueDetailRunPrBlocks}), which shares this exact subject fallback.
+ * ({@link QueueDetailRunChangeBlocks}), which shares this exact subject fallback.
  */
-export function QueueDetailPrList({
+export function QueueDetailChangeList({
   data,
   rows,
   prs,
@@ -7243,7 +7243,7 @@ export function QueueDetailPrList({
         return (
           <Box key={`${member.id}:${member.revision}:${member.headSha}`} flexDirection="row" minWidth={0}>
             <Text flexShrink={0}>{"· "}</Text>
-            <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" flexShrink={0} />
+            <QueueChangeId pr={member.id} revision={member.revision} color="$fg-warning" flexShrink={0} />
             <Text flexShrink={0}> </Text>
             {subject === undefined ? null : (
               <Text bold wrap="truncate" minWidth={0} bgConflict="ignore">
@@ -7265,7 +7265,7 @@ export function QueueDetailPrList({
  * KEY/value facts. `titleAbove` drops the identity row when the pane title (see
  * QueueDetailTitle) already owns it.
  */
-export function QueueDetailRunPrBlocks({
+export function QueueDetailRunChangeBlocks({
   data,
   row,
   rows,
@@ -7326,10 +7326,10 @@ export function QueueDetailRunPrBlocks({
                     text: `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
                   },
                 ]
-            : data?.status === "completed" && member.revision === prRevisionNumber(pr)
-              ? prTerminalLineageEntries(pr, member.revision, runDetails)
-              : prActivityEntries(pr, runDetails, memberRow ?? row)
-        const age = prAgeLabel(pr, member.revision, memberRow ?? row)
+            : data?.status === "completed" && member.revision === changeRevisionNumber(pr)
+              ? changeTerminalLineageEntries(pr, member.revision, runDetails)
+              : changeActivityEntries(pr, runDetails, memberRow ?? row)
+        const age = changeAgeLabel(pr, member.revision, memberRow ?? row)
         // Key:value metadata, all rendered one uniform way (operator spec item
         // 4.e): every row is an upper-cased padded KEY then its value, `issue`
         // included — only the value's element differs (a hyperlink instead of
@@ -7339,7 +7339,7 @@ export function QueueDetailRunPrBlocks({
           ...(position === undefined ? [] : [{ key: "position", value: String(position) }]),
           ...(issue === undefined ? [] : [{ key: "issue", value: issue, render: () => <IssueValue issue={issue} /> }]),
           ...(age === undefined ? [] : [{ key: "age", value: age }]),
-          ...(pr === undefined ? [] : prDetailFacts(pr, member.revision)),
+          ...(pr === undefined ? [] : changeDetailFacts(pr, member.revision)),
         ]
         const factKeyWidth = Math.max(0, ...facts.map((fact) => fact.key.length)) + 2
         // `titleAbove` means the pane's own title (QueueDetailTitle) already
@@ -7353,7 +7353,7 @@ export function QueueDetailRunPrBlocks({
             <Box flexDirection="row" minWidth={0}>
               {isTitledMember ? null : (
                 <>
-                  <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
+                  <QueueChangeId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" flexShrink={0} />
                   <Text flexShrink={0}> </Text>
                 </>
               )}
@@ -7376,7 +7376,7 @@ export function QueueDetailRunPrBlocks({
             {activity.length === 0 ? null : (
               <>
                 <Box height={1} flexShrink={0} />
-                <QueuePrActivity entries={activity} />
+                <QueueChangeActivity entries={activity} />
               </>
             )}
             {facts.length === 0 ? null : (
@@ -7411,7 +7411,7 @@ export function QueueDetailRunPrBlocks({
 // on the run's `PRSnapshot`, so they are threaded from the full status PRs.
 // Timestamps use the local detail clock; only present facts render; every row
 // carrying an author-authored string sets `bgConflict="ignore"`.
-export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
+export function QueueDetailChangeFacts({ prs }: { prs: readonly PR[] }) {
   if (prs.length === 0) return null
   return (
     <Box flexDirection="column" minWidth={0}>
@@ -7421,11 +7421,11 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
         const issue = presentFact(pr.issue)
         const note = presentFact(pr.note)
         const description = presentFact(pr.description)
-        const clocks = prRevisionClocks(pr)
+        const clocks = changeRevisionClocks(pr)
         return (
           <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
             <Text wrap="truncate" bgConflict="ignore">
-              <QueuePrId pr={pr.id} revision={prRevisionNumber(pr)} />
+              <QueueChangeId pr={pr.id} revision={changeRevisionNumber(pr)} />
               {name === undefined ? "" : ` ${name}`}
             </Text>
             {title === undefined ? null : (
@@ -7451,12 +7451,12 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
             )}
             {pr.reviews.map((review, reviewIndex) => (
               <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">
-                {prReviewLine(review)}
+                {changeReviewLine(review)}
               </Text>
             ))}
             {pr.comments.map((comment, commentIndex) => (
               <Text key={`comment:${commentIndex}`} wrap="truncate" bgConflict="ignore">
-                {prCommentLine(comment)}
+                {changeCommentLine(comment)}
               </Text>
             ))}
             {pr.checkRequests.map((request, requestIndex) => (
@@ -7611,7 +7611,7 @@ function CompactQueueShowView({
           ) : null}
           {data.retries > 1 && data.prs[0] !== undefined ? (
             <Text wrap="truncate">
-              <QueuePrId pr={data.prs[0].id} revision={data.prs[0].revision} times={data.retries} />
+              <QueueChangeId pr={data.prs[0].id} revision={data.prs[0].revision} times={data.retries} />
             </Text>
           ) : null}
           {!showTiming || timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
@@ -7916,13 +7916,13 @@ function RevisionClockView({
   clock,
   checkRequests,
 }: {
-  clock: PRRevisionHistoryClock
+  clock: ChangeRevisionHistoryClock
   checkRequests: readonly string[]
 }) {
   return (
     <Box flexDirection="column">
       <Text wrap="wrap">
-        REVISION CLOCK <QueuePrId pr={clock.pr} revision={clock.revision} /> HEAD {clock.headSha}
+        REVISION CLOCK <QueueChangeId pr={clock.pr} revision={clock.revision} /> HEAD {clock.headSha}
       </Text>
       <Text wrap="wrap">PUSHED {clock.pushedAt}</Text>
       <Text wrap="wrap">SUBMITTED {clock.submittedAt ?? "-"}</Text>
@@ -7945,12 +7945,12 @@ function RunAdmissionClockView({ run }: { run: QueueShowData }) {
   )
 }
 
-export function PRRunsView({ data }: { data: PRRunsData }) {
-  const clocks = prRevisionClocks(data.pr)
+export function ChangeRunsView({ data }: { data: ChangeRunsData }) {
+  const clocks = changeRevisionClocks(data.pr)
   if (clocks.length === 0) return <Text color="$fg-muted">No revision history recorded.</Text>
-  const projectedStatus = projectedPrStatus(data.pr, data.eligibility)
+  const projectedStatus = projectedChangeStatus(data.pr, data.eligibility)
   const eligibilityRefusal = data.eligibility?.reason?.code === "needs-author" ? data.eligibility.reason : undefined
-  const revisionRefusal = prNeedsAuthor(data.pr)
+  const revisionRefusal = changeNeedsAuthor(data.pr)
   const needsAuthor =
     eligibilityRefusal ??
     (revisionRefusal === undefined
@@ -7959,11 +7959,11 @@ export function PRRunsView({ data }: { data: PRRunsData }) {
           message: revisionRefusal.detail ?? revisionRefusal.receipt.message,
           receipt: revisionRefusal.receipt,
         })
-  const currentRevision = currentPRRev(data.pr)
+  const currentRevision = currentChangeRev(data.pr)
   return (
     <Box flexDirection="column">
       <Text wrap="wrap">
-        <QueuePrId pr={data.pr.id} revision={currentRevision.n} /> STATUS <StatusValue value={projectedStatus} />
+        <QueueChangeId pr={data.pr.id} revision={currentRevision.n} /> STATUS <StatusValue value={projectedStatus} />
       </Text>
       {needsAuthor === undefined ? null : (
         <>

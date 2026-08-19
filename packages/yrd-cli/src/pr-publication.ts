@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { JobResult } from "@yrd/job"
-import type { PrPublicationInput, PrPublicationOutput, PrPublicationService } from "@yrd/bay"
+import type { ChangePublicationInput, ChangePublicationOutput, ChangePublicationService } from "@yrd/bay"
 import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
 import { pushRefUpdates } from "git-super/push"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -65,7 +65,7 @@ async function publishRef(
   }
 }
 
-function publicationFailure(cause: unknown): JobResult<PrPublicationOutput> {
+function publicationFailure(cause: unknown): JobResult<ChangePublicationOutput> {
   return {
     status: "completed",
     conclusion: "failure",
@@ -76,14 +76,14 @@ function publicationFailure(cause: unknown): JobResult<PrPublicationOutput> {
   }
 }
 
-export function createPrPublicationService(options: {
+export function createChangePublicationService(options: {
   repo: string
   process: Pick<Process, "run">
-}): PrPublicationService {
+}): ChangePublicationService {
   const repo = resolve(options.repo)
   return Object.freeze({
     revision: "pr-publication-v1",
-    async publish(input: PrPublicationInput): Promise<JobResult<PrPublicationOutput>> {
+    async publish(input: ChangePublicationInput): Promise<JobResult<ChangePublicationOutput>> {
       try {
         const sourceRoot = resolve(input.sourceRoot)
         const actual = await changedSubmodulePins({

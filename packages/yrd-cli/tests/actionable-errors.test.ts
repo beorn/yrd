@@ -6,7 +6,7 @@
  */
 
 import { createElement } from "react"
-import type { PRDeliveryState } from "@yrd/bay"
+import type { ChangeDeliveryState } from "@yrd/bay"
 import { createFailure } from "@yrd/core"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
@@ -18,7 +18,7 @@ import {
   type ActionableFailure,
 } from "../src/actionable-error.ts"
 import { diagnostic } from "../src/output.tsx"
-import { prDetailData, QueueShowView, queueShowData } from "../src/queue-status-view.tsx"
+import { changeDetailData, QueueShowView, queueShowData } from "../src/queue-status-view.tsx"
 
 const BASE_ROOT = "a".repeat(40)
 const AUTHORED_ROOT = "b".repeat(40)
@@ -45,7 +45,7 @@ const DIVERGED_RECUT_BASE = {
     "which never descended from it; the certificate cannot become valid without a fresh revision",
 } as const
 
-const ALL_DELIVERY_STATES: readonly PRDeliveryState[] = [
+const ALL_DELIVERY_STATES: readonly ChangeDeliveryState[] = [
   "pushed",
   "submitted",
   "needs-author",
@@ -56,7 +56,7 @@ const ALL_DELIVERY_STATES: readonly PRDeliveryState[] = [
   "canceled",
 ]
 
-const RECUT_REFUSING: ReadonlySet<PRDeliveryState> = new Set<PRDeliveryState>([
+const RECUT_REFUSING: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
   "integrated",
   "already-landed",
   "withdrawn",
@@ -68,7 +68,7 @@ const RECUT_REFUSING: ReadonlySet<PRDeliveryState> = new Set<PRDeliveryState>([
  * (pushed) PR — applyPrSelectionVerb refuses every other state twice — and
  * `yrd pr recut` refuses a terminal PR outright (executeRecutPr
  * `terminal-target`). `yrd pr submit <branch>` is refused by no state. */
-function refusedBy(delivery: PRDeliveryState, command: string): boolean {
+function refusedBy(delivery: ChangeDeliveryState, command: string): boolean {
   if (command.startsWith("yrd pr create")) return delivery !== "pushed"
   if (command.startsWith("yrd pr recut")) return RECUT_REFUSING.has(delivery)
   return false
@@ -271,7 +271,7 @@ describe("22396 — state-aware remedies", () => {
       steps: [fixtureStep("merge", fixtureJob("J42", "failed", { error: { ...AUTHORED_GITLINK } }))],
     })
 
-    const detail = prDetailData(pr, [run])
+    const detail = changeDetailData(pr, [run])
     const projected = detail.runs[0]
     expect(projected?.failure?.resolution).toEqual(["yrd intent submit --component vendor/yrd --issue <issue-ref>"])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)

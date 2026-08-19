@@ -26,8 +26,8 @@ import type {
   CandidateChange,
   IntegratedShape,
   IntegrationProof,
-  PRShape,
-  PRSnapshot,
+  changeShape,
+  changeSnapshot,
   QueueSubmoduleResolutionEvidence,
   Run,
   SourceRewrite,
@@ -349,7 +349,7 @@ type ProgressResult = Readonly<{
   lastProgressBytes?: number
 }>
 
-export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency &
+export type ConfiguredCommandOptions<Shape extends changeShape> = ProcessDependency &
   Readonly<{
     command: readonly string[]
     cwd: string | ((input: StepExecution<Shape>) => string | Promise<string>)
@@ -368,7 +368,7 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
   }>
 
-export type ConfiguredWaitingCommandOptions<Shape extends PRShape> = ConfiguredCommandOptions<Shape>
+export type ConfiguredWaitingCommandOptions<Shape extends changeShape> = ConfiguredCommandOptions<Shape>
 
 const RETIRED_PLACEHOLDERS = new Map([
   ["{name}", "$YRD_ISSUE"],
@@ -379,19 +379,19 @@ const RETIRED_PLACEHOLDERS = new Map([
   ["{base}", "$YRD_BASE"],
 ])
 
-export function configuredCommandStep<Shape extends PRShape>(
+export function configuredCommandStep<Shape extends changeShape>(
   options: ConfiguredCommandOptions<Shape>,
 ): StepRunner<Shape, CommandEvidence> {
   return configuredCommand(options, false)
 }
 
-export function configuredWaitingCommandStep<Shape extends PRShape>(
+export function configuredWaitingCommandStep<Shape extends changeShape>(
   options: ConfiguredWaitingCommandOptions<Shape>,
 ): StepRunner<Shape, CommandEvidence> {
   return configuredCommand(options, true)
 }
 
-function configuredCommand<Shape extends PRShape>(
+function configuredCommand<Shape extends changeShape>(
   options: ConfiguredCommandOptions<Shape>,
   waiting: boolean,
 ): StepRunner<Shape, CommandEvidence> {
@@ -2068,12 +2068,12 @@ export type GitQueueTarget = Readonly<{
   diverged: boolean
 }>
 
-export type PRRecutInput = PRSnapshot &
+export type ChangeRecutInput = changeSnapshot &
   Readonly<{
     /** CLI-resolved immutable code-carrier candidate. Queue never resolves a symbolic proposal ref. */
     proposedHeadSha?: string
     /** Same-issue source integrations already present on the authoritative root history, newest first. */
-    currentCompositions?: readonly NonNullable<PRSnapshot["composition"]>[]
+    currentCompositions?: readonly NonNullable<changeSnapshot["composition"]>[]
     current?: Readonly<{
       revision: number
       headSha: string
@@ -2081,21 +2081,21 @@ export type PRRecutInput = PRSnapshot &
       treeSha?: string
       patchId?: string
       fromRevision?: number
-      composition?: PRSnapshot["composition"]
+      composition?: changeSnapshot["composition"]
     }>
   }>
 
-export type PRRecutResult = Readonly<{
+export type ChangeRecutResult = Readonly<{
   headSha: string
   baseSha: string
   treeSha: string
   patchId: string
   unchanged: boolean
-  composition?: PRSnapshot["composition"]
+  composition?: changeSnapshot["composition"]
   sourceRewrites?: readonly SourceRewrite[]
 }>
 
-export type GitPRRecutter = Readonly<{ recut(input: PRRecutInput): Promise<PRRecutResult> }>
+export type GitPRRecutter = Readonly<{ recut(input: ChangeRecutInput): Promise<ChangeRecutResult> }>
 
 /**
  * Base-independent composite patch identity for a composition's source rewrites.
@@ -2123,10 +2123,10 @@ export function createGitPRRecutter(options: {
 }): GitPRRecutter {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return Object.freeze({ recut: (input: PRRecutInput) => recutPR(git, repo, input) })
+  return Object.freeze({ recut: (input: ChangeRecutInput) => recutPR(git, repo, input) })
 }
 
-async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRRecutResult> {
+async function recutPR(git: Git, repo: string, input: ChangeRecutInput): Promise<ChangeRecutResult> {
   if (input.proposedHeadSha !== undefined) {
     const certificateGit = createGit(git.process, git.env, { noLazyFetch: true })
     const target = await inspectLiveQueueBase(certificateGit, repo, input.base)
@@ -2180,7 +2180,7 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
   }
   const declared = recutInput.composition
   if (declared === undefined) throw new Error("source-only carrier conversion produced no composition")
-  const outcome = await withScratch<PRRecutResult>(git, repo, target.sha, undefined, async (path) => {
+  const outcome = await withScratch<ChangeRecutResult>(git, repo, target.sha, undefined, async (path) => {
     const composed = await composePR(git, repo, path, recutInput, localSourceTips)
     if (composed.status === "failed") {
       throw createFailure({ kind: "refusal", code: composed.error.code, message: composed.error.message })
@@ -2424,9 +2424,9 @@ async function certifyProposedCodeCarrier(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: PRRecutInput,
+  input: ChangeRecutInput,
   proposedHeadSha: string,
-): Promise<PRRecutResult> {
+): Promise<ChangeRecutResult> {
   const sourceBaseSha = input.baseSha
   if (sourceBaseSha === undefined) {
     throw codeCarrierRefusal(
@@ -2506,7 +2506,7 @@ async function certifyProposedCodeCarrier(
 
 type SourceOnlyCarrierComposition = Readonly<{
   sourceBase: string
-  composition: NonNullable<PRSnapshot["composition"]>
+  composition: NonNullable<changeSnapshot["composition"]>
 }>
 
 /**
@@ -2520,7 +2520,7 @@ async function sourceOnlyCarrierComposition(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: PRRecutInput,
+  input: ChangeRecutInput,
 ): Promise<SourceOnlyCarrierComposition | undefined> {
   const oldBase = input.baseSha
   if (
@@ -2540,7 +2540,7 @@ async function sourceOnlyCarrierComposition(
   if (mergeTipFailure !== undefined && mergeTipFailure.error.code !== "merge-tip-carrier") return undefined
   const mergeTip = mergeTipFailure?.error.code === "merge-tip-carrier"
   let hasDivergentPin = false
-  const sources: NonNullable<PRSnapshot["composition"]>["sources"][number][] = []
+  const sources: NonNullable<changeSnapshot["composition"]>["sources"][number][] = []
   for (const path of rootPayload) {
     const basePin = await readGitlink(git, repo, sourceBase, path)
     const authoredPin = await readGitlink(git, repo, input.headSha, path)
@@ -2598,8 +2598,8 @@ async function assertCurrentRecutCertificate(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: PRRecutInput,
-  current: NonNullable<PRRecutInput["current"]>,
+  input: ChangeRecutInput,
+  current: NonNullable<ChangeRecutInput["current"]>,
 ): Promise<void> {
   const certifiedTreeSha = current.treeSha
   const certifiedPatchId = current.patchId
@@ -2721,8 +2721,8 @@ async function recutDirectPR(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: PRRecutInput,
-): Promise<PRRecutResult> {
+  input: ChangeRecutInput,
+): Promise<ChangeRecutResult> {
   const oldBase = input.baseSha
   if (oldBase === undefined) {
     throw createFailure({
@@ -2831,7 +2831,7 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' revision ${input.revision} has no current-composition patch identity`,
     })
   }
-  const outcome = await withScratch<PRRecutResult>(git, repo, input.headSha, undefined, async (path) => {
+  const outcome = await withScratch<ChangeRecutResult>(git, repo, input.headSha, undefined, async (path) => {
     let rebased = await git.run(
       path,
       [
@@ -5590,9 +5590,9 @@ async function absorbedRecutResult(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: PRRecutInput,
+  input: ChangeRecutInput,
   sourceBase: string,
-): Promise<PRRecutResult> {
+): Promise<ChangeRecutResult> {
   const patchId = await git.stablePatchId(repo, sourceBase, input.headSha)
   if (patchId === undefined) {
     throw createFailure({
@@ -5617,7 +5617,7 @@ async function absorbedAuthoredGitlinks(
   sourceHead: string,
   target: string,
   overlaps: readonly string[],
-  currentCompositions: readonly NonNullable<PRSnapshot["composition"]>[] | undefined,
+  currentCompositions: readonly NonNullable<changeSnapshot["composition"]>[] | undefined,
 ): Promise<string[]> {
   const absorbed: string[] = []
   for (const path of overlaps) {
@@ -5674,7 +5674,7 @@ async function certifiesSupersededGitlink(
   authoredBase: string,
   authoredTip: string,
   currentTip: string,
-  source: NonNullable<PRSnapshot["composition"]>["sources"][number],
+  source: NonNullable<changeSnapshot["composition"]>["sources"][number],
 ): Promise<boolean> {
   if (
     (await git.optionalCommit(repo, source.baseSha)) !== source.baseSha ||
@@ -7179,7 +7179,7 @@ async function withStepCandidate<Output extends JsonValue>(
   )
 }
 
-export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
+export function gitCheckStep(options: GitCheckOptions): StepRunner<changeShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   const mode = options.mode ?? "delta"
@@ -7206,7 +7206,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             targetSha: string,
             root: string,
             parentTree: boolean,
-          ): ConfiguredCommandOptions<PRShape> => ({
+          ): ConfiguredCommandOptions<changeShape> => ({
             inject: options.inject,
             command: options.command,
             cwd,
@@ -7603,7 +7603,7 @@ export type ConfiguredMergeOptions = ProcessDependency &
     provisionPinIntent?: PinIntentProvisioner
   }>
 
-function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
+function checkedCandidate(shape: changeShape): GitCheckEvidence | undefined {
   for (const value of Object.values(shape.results).reverse()) {
     const parsed = GitCheckEvidenceSchema.safeParse(value)
     if (parsed.success) return parsed.data
@@ -8178,7 +8178,7 @@ async function rollbackQueueBase(
   }
 }
 
-export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
+export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
@@ -8443,7 +8443,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   }
 }
 
-export function configuredMergeStep<Shape extends PRShape>(
+export function configuredMergeStep<Shape extends changeShape>(
   options: ConfiguredMergeOptions,
 ): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)

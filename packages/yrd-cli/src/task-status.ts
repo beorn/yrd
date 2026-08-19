@@ -1,7 +1,7 @@
-import { prDeliveryState, type PR, type PRDeliveryState } from "@yrd/bay"
+import { changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
-import type { PRCheckRecord, Run, QueueStep } from "@yrd/queue"
+import type { ChangeCheckRecord, Run, QueueStep } from "@yrd/queue"
 
 export type TaskStatus = "todo" | "wip" | "blocked" | "done" | "dropped"
 
@@ -42,11 +42,11 @@ export function taskStatusFields(taskStatus: TaskStatus): TaskStatusFields {
   return { taskStatus, glyph: taskStatusGlyph(taskStatus) }
 }
 
-export function prTaskStatusOf(pr: PR): TaskStatus {
-  return prDeliveryTaskStatusOf(prDeliveryState(pr))
+export function changeTaskStatusOf(pr: PR): TaskStatus {
+  return changeDeliveryTaskStatusOf(changeDeliveryState(pr))
 }
 
-export function prDeliveryTaskStatusOf(delivery: PRDeliveryState | "needs-author"): TaskStatus {
+export function changeDeliveryTaskStatusOf(delivery: ChangeDeliveryState | "needs-author"): TaskStatus {
   switch (delivery) {
     case "pushed":
       return "todo"
@@ -152,7 +152,7 @@ export function stepTaskStatusOf(step: ProjectableStep): TaskStatus {
   }
 }
 
-export function checkTaskStatusOf(check: Pick<PRCheckRecord, "status">): TaskStatus {
+export function checkTaskStatusOf(check: Pick<ChangeCheckRecord, "status">): TaskStatus {
   switch (check.status) {
     case "not-requested":
     case "queued":
@@ -188,7 +188,7 @@ export function issueTaskStatusOf(
   }>,
 ): TaskStatus {
   const children = [
-    ...issue.prs.map((pr) => prTaskStatusOf(pr)),
+    ...issue.prs.map((pr) => changeTaskStatusOf(pr)),
     ...issue.contests.map((contest) => contestTaskStatusOf(contest)),
   ]
   if (children.length === 0) return "todo"
@@ -203,11 +203,11 @@ export type ProjectedPR = PR &
   TaskStatusFields &
   Readonly<{
     /** answers: What delivery result should a reader act on? tense: current. */
-    status: PRDeliveryState
+    status: ChangeDeliveryState
   }>
 
-export function projectPRTaskStatus(pr: PR): ProjectedPR {
-  return { ...pr, status: prDeliveryState(pr), ...taskStatusFields(prTaskStatusOf(pr)) }
+export function projectChangeTaskStatus(pr: PR): ProjectedPR {
+  return { ...pr, status: changeDeliveryState(pr), ...taskStatusFields(changeTaskStatusOf(pr)) }
 }
 
 export type ProjectedJob = Job & TaskStatusFields

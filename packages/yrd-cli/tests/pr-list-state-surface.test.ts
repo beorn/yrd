@@ -19,11 +19,11 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
-import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { createLogger } from "loggily"
 import { createPruneGitFacts } from "../src/pr-withdraw.ts"
-import { PRListView, type PRListRow } from "../src/queue-status-view.tsx"
+import { ChangeListView, type ChangeListRow } from "../src/queue-status-view.tsx"
 
 const WIDTH = 120
 const BASE_SHA = "a".repeat(40)
@@ -34,7 +34,7 @@ const LIVE_HEAD = "d".repeat(40)
 // ---------------------------------------------------------------------------
 // Specimen 1 — the view must render every row it was handed.
 
-function row(id: number, overrides: Partial<PRListRow> = {}): PRListRow {
+function row(id: number, overrides: Partial<ChangeListRow> = {}): ChangeListRow {
   return {
     pr: `PR${id}`,
     state: "integrated",
@@ -54,8 +54,8 @@ function row(id: number, overrides: Partial<PRListRow> = {}): PRListRow {
   }
 }
 
-async function renderRows(rows: readonly PRListRow[]): Promise<string> {
-  return renderString(createElement(PRListView, { rows, columns: WIDTH }), {
+async function renderRows(rows: readonly ChangeListRow[]): Promise<string> {
+  return renderString(createElement(ChangeListView, { rows, columns: WIDTH }), {
     width: WIDTH,
     height: 10_000,
     plain: true,
@@ -144,7 +144,7 @@ async function createCliApp() {
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<PRShape>,
+      _input: StepExecution<changeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",

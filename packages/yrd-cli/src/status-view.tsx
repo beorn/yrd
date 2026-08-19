@@ -2,18 +2,18 @@ import { homedir } from "node:os"
 import { dirname } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
-  prDeliveryState,
-  prHead,
-  prNeedsAuthor,
-  prRevisionNumber,
+  changeDeliveryState,
+  changeHead,
+  changeNeedsAuthor,
+  changeRevisionNumber,
   type Bay,
   type PR,
-  type PRDeliveryState,
-  type PRRegression,
+  type ChangeDeliveryState,
+  type ChangeRegression,
 } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import type { JobError } from "@yrd/job"
-import type { PREligibility } from "@yrd/queue"
+import type { changeEligibility } from "@yrd/queue"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import {
   actionableFailure,
@@ -23,7 +23,7 @@ import {
 } from "./actionable-error.ts"
 import { formatDuration } from "./runner-timeline.ts"
 import { hasStatusPresentation, lifecyclePresentation, statusPresentation } from "./status-presentation.ts"
-import { projectPRTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
+import { projectChangeTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
 
 type EvaluationRow = Readonly<{
   attempt: string
@@ -282,18 +282,18 @@ export function BayStatusView({
   )
 }
 
-export function PRStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly PREligibility[] }) {
+export function ChangeStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly changeEligibility[] }) {
   const rows = prs.map((pr) => {
-    const revision = prRevisionNumber(pr)
+    const revision = changeRevisionNumber(pr)
     const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)
     return {
-      ...projectPRTaskStatus(pr),
+      ...projectChangeTaskStatus(pr),
       status:
-        prNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
+        changeNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
           ? ("needs-author" as const)
-          : prDeliveryState(pr),
+          : changeDeliveryState(pr),
       revision,
-      head: prHead(pr).slice(0, 12),
+      head: changeHead(pr).slice(0, 12),
     }
   })
   return (
@@ -331,7 +331,7 @@ export type IssueDeliveryRow = Readonly<{
   pr: string
   revision: number
   headSha: string
-  status: PRDeliveryState | "needs-author"
+  status: ChangeDeliveryState | "needs-author"
   runs: readonly string[]
   landingSha?: string
   baseSha?: string
@@ -340,7 +340,7 @@ export type IssueDeliveryRow = Readonly<{
   baseTreeSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>
   attributedReceipt?: JobError
-  regressions?: readonly PRRegression[]
+  regressions?: readonly ChangeRegression[]
 }> &
   TaskStatusFields
 
@@ -431,7 +431,7 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
   )
 }
 
-function IssueRegressionView({ regression }: { regression: PRRegression }) {
+function IssueRegressionView({ regression }: { regression: ChangeRegression }) {
   return (
     <Box flexDirection="column" paddingLeft={2}>
       <Text color="$fg-warning">

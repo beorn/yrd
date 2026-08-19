@@ -21,11 +21,11 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import { formatPRRevisionSelector, prRevisionNumber, type BaysState, type PR } from "@yrd/bay"
+import { formatChangeRevisionSelector, changeRevisionNumber, type BaysState, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
-  QueueDetailPrList,
-  QueueDetailRunPrBlocks,
+  QueueDetailChangeList,
+  QueueDetailRunChangeBlocks,
   QueueDetailTitle,
   QueueShowView,
   QueueStatusNotice,
@@ -82,7 +82,7 @@ export type QueueArtifactOutput =
   | (QueueArtifactOutputCommon & Readonly<{ source: "recorded"; path: string }>)
   | (QueueArtifactOutputCommon & Readonly<{ source: "summary" }>)
 
-export type QueuePrDiff =
+export type QueueChangeDiff =
   | Readonly<{
       pr: string
       revision: number
@@ -149,7 +149,7 @@ export type QueueWatchSnapshot = Readonly<{
   readFailure?: QueueReadFailure
   outputs?: readonly QueueArtifactOutput[]
   /** Revision-bound source deltas shown in the PR-scoped detail header. */
-  diffs?: readonly QueuePrDiff[]
+  diffs?: readonly QueueChangeDiff[]
   /** Resolved project commands for the live step headers. */
   commands?: Readonly<Record<string, string>>
 }>
@@ -172,7 +172,7 @@ function selectedQueueWatchFocus(
 ): QueueWatchFocus | undefined {
   if (row === undefined) return undefined
   const pr = prs.find((candidate) => candidate.id === row.pr)
-  const revision = projectedRow?.revision ?? (pr === undefined ? undefined : prRevisionNumber(pr))
+  const revision = projectedRow?.revision ?? (pr === undefined ? undefined : changeRevisionNumber(pr))
   if (revision === undefined) return undefined
   return { pr: row.pr, revision, ...(row.run === undefined ? {} : { run: row.run }) }
 }
@@ -612,7 +612,7 @@ function syntheticArtifactAttempt(attempt: string | undefined): number {
  * State is owned here (not by the caller) so each change's box in the
  * Changes tab folds independently of its siblings.
  */
-function QueueChangeDiff({ diff }: { diff: QueuePrDiff | undefined }) {
+function QueueChangeDiffView({ diff }: { diff: QueueChangeDiff | undefined }) {
   const [expanded, setExpanded] = useState(false)
   const onToggle = () => setExpanded((current) => !current)
   const focusId = `queue-submit-diff-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
@@ -681,7 +681,7 @@ function QueueChangeDiff({ diff }: { diff: QueuePrDiff | undefined }) {
  * row skips its identity line — every other member still needs one, since
  * the title above shows just the one PR the cursor is on.
  */
-function QueueDetailPrSection({
+function QueueDetailChangeSection({
   data,
   row,
   rows,
@@ -696,14 +696,14 @@ function QueueDetailPrSection({
   rows: readonly QueueTimelineProjectedRow[]
   prs: readonly PR[]
   runDetails: readonly QueueShowData[]
-  diffs: readonly QueuePrDiff[]
+  diffs: readonly QueueChangeDiff[]
   showFacts?: boolean
   showDiff?: boolean
 }) {
   return (
     <Box flexDirection="column" minWidth={0} flexShrink={0}>
       {showFacts ? (
-        <QueueDetailRunPrBlocks
+        <QueueDetailRunChangeBlocks
           titleAbove
           {...(data === undefined ? {} : { data })}
           {...(row === undefined ? {} : { row })}
@@ -714,7 +714,7 @@ function QueueDetailPrSection({
           {...(showDiff
             ? {
                 renderDiff: (member: Readonly<{ id: string; revision: number }>) => (
-                  <QueueChangeDiff
+                  <QueueChangeDiffView
                     diff={diffs.find((candidate) => candidate.pr === member.id && candidate.revision === member.revision)}
                   />
                 ),
@@ -749,7 +749,7 @@ export function QueueWorkflowStepTabs({
   prs: readonly PR[]
   runRows?: readonly QueueTimelineProjectedRow[]
   runDetails?: readonly QueueShowData[]
-  diffs?: readonly QueuePrDiff[]
+  diffs?: readonly QueueChangeDiff[]
 }) {
   const names = useMemo(() => (data === undefined ? [] : queueStepNames(data)), [data])
   // The PR/submission overview remains tab 0, ahead of the real step tabs.
@@ -829,8 +829,8 @@ export function QueueWorkflowStepTabs({
       {data === undefined ? (
         <>
           <QueueStatusNotice {...(row === undefined ? {} : { row })} runDetails={runDetails} live={active} />
-          <QueueDetailPrList data={data} rows={runRows} prs={prs} />
-          <QueueDetailPrSection
+          <QueueDetailChangeList data={data} rows={runRows} prs={prs} />
+          <QueueDetailChangeSection
             {...(row === undefined ? {} : { row })}
             rows={runRows}
             prs={prs}
@@ -847,7 +847,7 @@ export function QueueWorkflowStepTabs({
             runDetails={runDetails}
             live={active}
           />
-          <QueueDetailPrList data={data} rows={runRows} prs={prs} />
+          <QueueDetailChangeList data={data} rows={runRows} prs={prs} />
           <Box height={1} flexShrink={0} />
           <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
             <TabList>
@@ -867,7 +867,7 @@ export function QueueWorkflowStepTabs({
             <Box height={1} flexShrink={0} />
             <TabPanel value={PR_TAB_ID}>
               <QueueTabScrollArea>
-                <QueueDetailPrSection
+                <QueueDetailChangeSection
                   data={data}
                   {...(row === undefined ? {} : { row })}
                   rows={runRows}
@@ -964,7 +964,7 @@ type QueueWatchCursorOp =
   | Readonly<{ type: "jump-bottom" }>
 
 function queueWatchCursorLabel(row: QueueWatchCursorRow): string {
-  return formatPRRevisionSelector(row.pr, row.revision)
+  return formatChangeRevisionSelector(row.pr, row.revision)
 }
 
 function queueWatchManualCursorMode(row: QueueWatchCursorRow, index: number): QueueWatchCursorMode {

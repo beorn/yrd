@@ -2,7 +2,7 @@
 // @level l2
 // @consumer @yrd/cli
 
-import { formatPRRevisionSelector } from "@yrd/bay"
+import { formatChangeRevisionSelector } from "@yrd/bay"
 import { queueMemberKind } from "@yrd/queue"
 import type { Event } from "loggily"
 import { createElement } from "react"
@@ -10,7 +10,7 @@ import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
 import { formatResidentLogLine } from "../src/runner-timeline.ts"
-import { formatQueuePrId, QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
+import { formatQueueChangeId, QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
 
 /** A pin-advance record's real id shape, per IntentRecordIdSchema. */
 const GITLINK_ID = "yrdpin#357"
@@ -48,24 +48,24 @@ describe("a renderer never asserts a kind the record does not carry", () => {
   it("does not prefix a pin-advance record with pr#", () => {
     // The reported defect verbatim: `pr#yrdpin#357`. The prefix is false AND it
     // stutters (@i/10-merge-queue/22924-pr-prefix-on-non-pr).
-    const rendered = formatPRRevisionSelector(GITLINK_ID, 1)
+    const rendered = formatChangeRevisionSelector(GITLINK_ID, 1)
     expect(rendered).not.toContain("pr#")
     expect(rendered).toBe(`${GITLINK_ID}.1`)
   })
 
   it("does not prefix a bare intent record with pr#", () => {
-    expect(formatPRRevisionSelector(INTENT_ID, 2)).not.toContain("pr#")
+    expect(formatChangeRevisionSelector(INTENT_ID, 2)).not.toContain("pr#")
   })
 
   it("still renders a real PR with its canonical copy-pasteable identity", () => {
     // The discrimination must not cost the PR path its selector round-trip.
-    expect(formatPRRevisionSelector(PR_ID, 1)).toBe("pr#182.1")
-    expect(formatPRRevisionSelector("182", 3)).toBe("pr#182.3")
+    expect(formatChangeRevisionSelector(PR_ID, 1)).toBe("pr#182.1")
+    expect(formatChangeRevisionSelector("182", 3)).toBe("pr#182.3")
   })
 
   it("covers the queue timeline call site, which shares the one formatter", () => {
-    expect(formatQueuePrId(GITLINK_ID, 1)).not.toContain("pr#")
-    expect(formatQueuePrId(PR_ID, 1)).toBe("pr#182.1")
+    expect(formatQueueChangeId(GITLINK_ID, 1)).not.toContain("pr#")
+    expect(formatQueueChangeId(PR_ID, 1)).toBe("pr#182.1")
   })
 
   it("covers the JSX identity cell, which asserted the kind separately", async () => {

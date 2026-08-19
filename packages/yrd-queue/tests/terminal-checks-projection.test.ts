@@ -8,11 +8,11 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, prAdmission, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, changeAdmission, changeDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withQueue, withStep, type PRShape, type StepExecution, type StepRunner } from "@yrd/queue"
+import { withQueue, withStep, type changeShape, type StepExecution, type StepRunner } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -47,7 +47,7 @@ function workspace(): BayWorkspace {
   }
 }
 
-async function createQueueApp(check?: StepRunner<PRShape, CheckResult>) {
+async function createQueueApp(check?: StepRunner<changeShape, CheckResult>) {
   const checkStep = withStep(
     "check",
     (input: StepExecution, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
@@ -92,7 +92,7 @@ describe("terminal PRs never project a live check status", () => {
 
     const withdrawn = app.bays.pr(pr)
     if (withdrawn === undefined) throw new Error("expected PR")
-    expect(prDeliveryState(withdrawn)).toBe("withdrawn")
+    expect(changeDeliveryState(withdrawn)).toBe("withdrawn")
 
     const eligibility = app.queue.eligibility(pr)
     // The delivery-state surface already tells the truth.
@@ -115,7 +115,7 @@ describe("terminal PRs never project a live check status", () => {
     expect(app.queue.eligibility(pr).checks.status).toBe("passed")
     const current = app.bays.pr(pr)
     if (current === undefined) throw new Error("expected PR")
-    expect(prAdmission(current)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(changeAdmission(current)).toMatchObject({ status: "passed", baseSha: BASE })
 
     await app.bays.closePr({ pr })
 

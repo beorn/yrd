@@ -112,8 +112,8 @@ describe("queue timeline storybook", () => {
         await handle.press("h")
         await handle.waitForLayoutStable()
       })
-      const prFrame = term.screen.getText()
-      expect(prFrame).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
+      const changeFrame = term.screen.getText()
+      expect(changeFrame).toContain(`Diff +324 / -323 ${["li", "nes"].join("")}`)
     } finally {
       handle.unmount()
     }

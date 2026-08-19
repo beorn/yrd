@@ -6,19 +6,19 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { renderString } from "silvery"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { parsePRSelector } from "@yrd/bay"
+import { parseChangeSelector } from "@yrd/bay"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import { FAILURE_SLUGS } from "../src/failure-slug.ts"
 import {
-  formatQueuePrId,
+  formatQueueChangeId,
   QueueRecoveryView,
   QueueTimelineView,
-  PRDetailView,
+  ChangeDetailView,
   queueTimelineAdmissionTimes,
   queueTimelineDefaultCursorId,
   queueTimelineDisplayRows,
   queueTimelineProjection,
-  prDetailData,
+  changeDetailData,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -899,8 +899,8 @@ describe("queue timeline 21106 contract", () => {
     const pending = result.prs.find((pr) => pr.id === "PR1")
     if (running === undefined || pending === undefined) throw new Error("contract fixture is missing expected PRs")
 
-    expect(prDetailData(running, runs).runs.map((run) => run.run)).toEqual(["R42"])
-    const rendered = await renderString(createElement(PRDetailView, { pr: pending, runs, now: 0, position: 1 }), {
+    expect(changeDetailData(running, runs).runs.map((run) => run.run)).toEqual(["R42"])
+    const rendered = await renderString(createElement(ChangeDetailView, { pr: pending, runs, now: 0, position: 1 }), {
       width: 100,
       height: 20,
       plain: true,
@@ -977,8 +977,8 @@ describe("queue timeline 21106 contract", () => {
     // sharing its predecessor's run, which is precisely the blindness 22925
     // removed \u2014 the skipped rows were the ones rendering as dashes.
     for (const row of projection.rows) {
-      const pr = formatQueuePrId(row.pr, row.revision)
-      expect(parsePRSelector(pr), `rendered identity ${pr}`).toEqual({
+      const pr = formatQueueChangeId(row.pr, row.revision)
+      expect(parseChangeSelector(pr), `rendered identity ${pr}`).toEqual({
         pr: row.pr,
         revision: Number(row.revision),
       })

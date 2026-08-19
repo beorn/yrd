@@ -1,4 +1,4 @@
-import { prDeliveryState, prRevisionLineage, type PR, type PRRev } from "@yrd/bay"
+import { changeDeliveryState, changeRevisionLineage, type PR, type ChangeRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -54,7 +54,7 @@ async function freshRemoteBranch(
 
 async function liveBranchHead(
   pr: PR,
-  recorded: PRRev,
+  recorded: ChangeRev,
   options: RecutBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,
   io: YrdCliIO,
@@ -170,7 +170,7 @@ async function commitTree(services: Pick<YrdCliServices, "process">, io: YrdCliI
  * before continuing. Every other drift already refused inside the check. */
 export type RecutBranchFreshness =
   | Readonly<{ status: "fresh" }>
-  | Readonly<{ status: "tracked-drift"; recorded: PRRev; liveHead: string }>
+  | Readonly<{ status: "tracked-drift"; recorded: ChangeRev; liveHead: string }>
 
 /** Manual recut is reproducible: it operates on a recorded immutable source.
  * If the authored branch moved, implicit selection is ambiguous and must stop
@@ -185,13 +185,13 @@ export type RecutBranchFreshness =
  * frozen recorded revision. */
 export async function requireImplicitRecutBranchFreshness(
   pr: PR,
-  selected: PRRev,
+  selected: ChangeRev,
   options: RecutBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,
   io: YrdCliIO,
 ): Promise<RecutBranchFreshness> {
   if (options.transition !== undefined) return { status: "fresh" }
-  const recorded = prRevisionLineage(pr, selected.n)[0]
+  const recorded = changeRevisionLineage(pr, selected.n)[0]
   if (recorded === undefined) {
     throw new Error(`yrd: PR '${pr.id}' revision ${selected.n} has no recorded source lineage`)
   }
@@ -213,7 +213,7 @@ export async function requireImplicitRecutBranchFreshness(
   if (pr.track === true) return { status: "tracked-drift", recorded, liveHead }
 
   const queueFlag = options.queue === true ? " --queue" : ""
-  const recordVerb = prDeliveryState(pr) === "pushed" ? "create" : "submit"
+  const recordVerb = changeDeliveryState(pr) === "pushed" ? "create" : "submit"
   raiseFailure(
     "refusal",
     "recut-branch-moved",

@@ -12,9 +12,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { resolveRelativeSubmoduleOrigin } from "git-super/submodule-origin"
 import {
   createBayJobDefs,
-  currentPRRev,
-  prAdmission,
-  prDeliveryState,
+  currentChangeRev,
+  changeAdmission,
+  changeDeliveryState,
   withBays,
   type BayWorkspace,
   type PR,
@@ -42,7 +42,7 @@ import {
   gitMergeStep,
   gitMergeRecorder,
   inspectGitQueueTarget,
-  PRSnapshotSchema,
+  ChangeSnapshotSchema,
   Queues,
   withQueue,
   withMerge,
@@ -50,7 +50,7 @@ import {
   type AddStepResult,
   type GitCheckEvidence,
   type GitCheckResultEvidence,
-  type PRShape,
+  type changeShape,
   type RefusePathsPolicy,
   type StepExecution,
 } from "@yrd/queue"
@@ -67,7 +67,7 @@ const gitFetchTimeout = {
   verdict: "TIMED_OUT",
 } satisfies ProcessResult
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
-type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
+type Checked = AddStepResult<changeShape, "check", GitCheckResultEvidence>
 
 function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): void {
   const editorCapable = commands.filter((command) => !command.includes("--abort"))
@@ -79,12 +79,12 @@ function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): 
   }
 }
 
-function prFacts(pr: PR | undefined) {
+function changeFacts(pr: PR | undefined) {
   if (pr === undefined) throw new Error("expected PR")
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return {
     ...pr,
-    status: prDeliveryState(pr),
+    status: changeDeliveryState(pr),
     revision: revision.n,
     headSha: revision.head,
   }
@@ -859,7 +859,7 @@ async function submitCertifiedCarrier(
   await app.bays.submit({ ...submission, base, draft: true })
   const pr = Object.values(app.state().bays.prs).find(({ branch }) => branch === submission.branch)
   if (pr === undefined) throw new Error(`missing submitted carrier '${submission.branch}'`)
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   const baseSha = submission.baseSha ?? revision.baseSha ?? (await git(repo, ["merge-base", base, submission.headSha]))
   await using delegate = createProcess()
   const noHooks: Pick<Process, "run"> = {
@@ -993,7 +993,7 @@ describe("Queue command adapters", () => {
       },
     }
     const preparer = gitCandidatePreparer({ inject: { process: refusingProcess }, repo })
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -1048,7 +1048,7 @@ describe("Queue command adapters", () => {
       },
     }
     const preparer = gitCandidatePreparer({ inject: { process: racingProcess }, repo })
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -1088,7 +1088,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const preparer = gitCandidatePreparer({ inject: { process }, repo })
     const snapshot = (branch: string, headSha: string) =>
-      PRSnapshotSchema.parse({ id: "PR1", branch, base: "main", revision: 1, headSha, baseSha })
+      ChangeSnapshotSchema.parse({ id: "PR1", branch, base: "main", revision: 1, headSha, baseSha })
 
     // Both prepares are handed the SAME id — this is precisely the case the old
     // scheme could not survive.
@@ -1130,7 +1130,7 @@ describe("Queue command adapters", () => {
     const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     const preparer = gitCandidatePreparer({ inject: { process }, repo })
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/alpha",
       base: "main",
@@ -2193,7 +2193,7 @@ describe("Queue command adapters", () => {
 
     for (const [index, candidate] of cases.entries()) {
       const id = `C${index + 1}`
-      const parsed = PRSnapshotSchema.safeParse({
+      const parsed = ChangeSnapshotSchema.safeParse({
         id: "PR1",
         branch: "issue/approved",
         base: "main",
@@ -2264,7 +2264,7 @@ describe("Queue command adapters", () => {
       },
     ]) {
       expect(() =>
-        PRSnapshotSchema.parse({
+        ChangeSnapshotSchema.parse({
           id: "PR1",
           branch: "issue/approved",
           base: "main",
@@ -3037,7 +3037,7 @@ describe("Queue command adapters", () => {
 
     const current = app.bays.pr("PR1")
     if (current === undefined) throw new Error("expected PR1")
-    expect(prAdmission(current)).toMatchObject({
+    expect(changeAdmission(current)).toMatchObject({
       status: "refused",
       baseSha: advancedBaseSha,
       receipt: {
@@ -3466,7 +3466,7 @@ describe("Queue command adapters", () => {
     })
     // End-to-end through the REAL compose path: the composition refusal commits
     // native needs-author with its typed receipt, never a terminal rejection.
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "needs-author" })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "needs-author" })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
     expect(eventNames).not.toContain("pr/rejected")
@@ -3495,7 +3495,7 @@ describe("Queue command adapters", () => {
         return { generatedPaths: ["bun.lock"] }
       },
     })
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "yrdpin#1",
       branch: "intent/yrdpin#1",
       base: "main",
@@ -3546,7 +3546,7 @@ describe("Queue command adapters", () => {
     const issue = "@hh/tooling/manifest-gate-blind-to-pins"
     const priorPin = (await git(fixture.repo, ["ls-tree", fixture.baseSha, "dep"])).split(/\s+/u)[2]
     if (priorPin === undefined) throw new Error("fixture has no prior gitlink pin")
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "yrdpin#2",
       branch: "intent/yrdpin#2",
       base: "main",
@@ -3604,7 +3604,7 @@ describe("Queue command adapters", () => {
       candidateOffMain: true,
     })
     await using process = createProcess()
-    const input = (id: string, pr: ReturnType<typeof PRSnapshotSchema.parse>) => ({
+    const input = (id: string, pr: ReturnType<typeof ChangeSnapshotSchema.parse>) => ({
       id,
       queueId: "main",
       baseSha: pr.baseSha!,
@@ -3621,7 +3621,7 @@ describe("Queue command adapters", () => {
 
     // The retired environment bypass must not turn an authored gitlink into
     // an admissible carrier.
-    const authored = PRSnapshotSchema.parse({
+    const authored = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -3650,7 +3650,7 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["merge", "-q", "--no-ff", "issue/merge-right", "-m", "merge root carrier"])
     const mergeHead = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["switch", "-q", "main"])
-    const mergeTip = PRSnapshotSchema.parse({
+    const mergeTip = ChangeSnapshotSchema.parse({
       id: "PR2",
       branch: "issue/merge-left",
       base: "main",
@@ -3781,7 +3781,7 @@ describe("Queue command adapters", () => {
     // conflict, so candidate-conflicting cannot witness the silent revert.
     expect(await git(repo, ["merge-tree", "--write-tree", queueBaseHead, carrierHead])).toMatch(/^[0-9a-f]{40}$/u)
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/stale-carrier",
       base: "main",
@@ -3855,7 +3855,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["log", "--oneline", `${carrierHead}..${queueBaseHead}`])).not.toBe("")
 
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/spent-carrier",
       base: "main",
@@ -3945,7 +3945,7 @@ describe("Queue command adapters", () => {
 
 
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/mint",
       base: "main",
@@ -3985,7 +3985,7 @@ describe("Queue command adapters", () => {
     await git(repo, ["switch", "-q", "main"])
 
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/deleter",
       base: "main",
@@ -4150,7 +4150,7 @@ describe("Queue command adapters", () => {
     ).toBe("")
 
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/beta",
       base: "main",
@@ -4219,7 +4219,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
 
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/beta",
       base: "main",
@@ -4265,7 +4265,7 @@ describe("Queue command adapters", () => {
     await git(repo, ["switch", "-q", "main"])
 
     await using process = createProcess()
-    const pr = PRSnapshotSchema.parse({
+    const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
       branch: "issue/beta",
       base: "main",
@@ -4603,7 +4603,7 @@ describe("Queue command adapters", () => {
     })
   })
   it("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
-    type CheckedCommand = AddStepResult<PRShape, "check", z.infer<typeof CommandEvidenceSchema>>
+    type CheckedCommand = AddStepResult<changeShape, "check", z.infer<typeof CommandEvidenceSchema>>
     const encoder = new TextEncoder()
 
     const controlledQueue = async () => {
@@ -4623,7 +4623,7 @@ describe("Queue command adapters", () => {
       const bayJobs = createBayJobDefs(unusedWorkspace)
       const check = withStep(
         "check",
-        configuredCommandStep<PRShape>({
+        configuredCommandStep<changeShape>({
           inject: { process },
           command: ["progressing-check"],
           cwd,
@@ -4957,7 +4957,7 @@ describe("Queue command adapters", () => {
           createdAt: new Date(0).toISOString(),
         },
         shape: { results: {} },
-      } as StepExecution<PRShape>,
+      } as StepExecution<changeShape>,
       {
         id: "J1",
         attempt: 1,
@@ -5003,11 +5003,11 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
       shape: { results: {} },
-    } as StepExecution<PRShape>
+    } as StepExecution<changeShape>
     const context = { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal }
 
     expect(() =>
-      configuredCommandStep<PRShape>({
+      configuredCommandStep<changeShape>({
         inject: { process },
         command: "printf unsafe" as never,
         cwd,
@@ -5015,13 +5015,13 @@ describe("Queue command adapters", () => {
       }),
     ).toThrow("shellCommand")
 
-    const direct = configuredCommandStep<PRShape>({
+    const direct = configuredCommandStep<changeShape>({
       inject: { process },
       command: ["printf", "%s", "literal;$(not-expanded)"],
       cwd,
       purpose: "check",
     })
-    const explicitShell = configuredCommandStep<PRShape>({
+    const explicitShell = configuredCommandStep<changeShape>({
       inject: { process },
       command: shellCommand("printf shell"),
       cwd,
@@ -5049,7 +5049,7 @@ describe("Queue command adapters", () => {
         return completed.promise
       },
     }
-    const step = configuredCommandStep<PRShape>({
+    const step = configuredCommandStep<changeShape>({
       inject: { process },
       command: ["streaming-check"],
       cwd,
@@ -5062,7 +5062,7 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
       shape: { results: {} },
-    } as StepExecution<PRShape>
+    } as StepExecution<changeShape>
     const context = { id: "J-stream", attempt: 2, runner: "test", signal: new AbortController().signal }
     let settled = false
     const running = Promise.resolve(step(input, context)).finally(() => {
@@ -5170,7 +5170,7 @@ describe("Queue command adapters", () => {
     const stdoutPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "stdout.log")
     const outputPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "output.log")
     await using process = createProcess()
-    const step = configuredCommandStep<PRShape>({
+    const step = configuredCommandStep<changeShape>({
       inject: { process },
       command: shellCommand(
         "printf 'first\\n'; fixture_ticks=0; while [ ! -f \"$YRD_RELEASE\" ] && [ \"$fixture_ticks\" -lt 6000 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 0.01; done; printf 'second\\n'",
@@ -5251,7 +5251,7 @@ describe("Queue command adapters", () => {
     async ({ process: result, error, verdict }) => {
       const cwd = await mkdtemp(join(tmpdir(), "yrd-command-failure-"))
       roots.push(cwd)
-      const step = configuredCommandStep<PRShape>({
+      const step = configuredCommandStep<changeShape>({
         inject: { process: { run: () => Promise.resolve(result) } },
         command: ["false"],
         cwd,
@@ -5320,7 +5320,7 @@ describe("Queue command adapters", () => {
     } as ProcessResult
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-escaped-"))
     roots.push(cwd)
-    const step = configuredCommandStep<PRShape>({
+    const step = configuredCommandStep<changeShape>({
       inject: { process: { run: () => Promise.resolve(result) } },
       command: ["bun", "run", "check"],
       cwd,
@@ -5404,7 +5404,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(app.queue.eligibility("PR1").reason?.message).toContain("55 baseline errors unchanged")
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "needs-author",
       needsAuthor: { receipt: { code: "check-failed" } },
     })
@@ -5458,7 +5458,7 @@ describe("Queue command adapters", () => {
     }
     expect(GitCheckEvidenceSchema.parse(job.output).comparison).toBeUndefined()
     expect(configuredRuns).toBe(1)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
@@ -5635,7 +5635,7 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
       shape: { results: {} },
-    } satisfies StepExecution<PRShape>
+    } satisfies StepExecution<changeShape>
     const checked = await gitCheckStep({
       inject: { process },
       repo,
@@ -6067,7 +6067,7 @@ describe("Queue command adapters", () => {
     expect(evidence.comparison).toBeUndefined()
     expect(job.error).not.toHaveProperty("evidence")
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("keeps an incomplete parent diagnostics run retryable as infrastructure refusal", async () => {
@@ -6114,7 +6114,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(configuredRuns).toBe(2)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it.each([false, true])(
@@ -6152,7 +6152,7 @@ describe("Queue command adapters", () => {
           },
         },
       })
-      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
     },
   )
 
@@ -6180,7 +6180,7 @@ describe("Queue command adapters", () => {
     expect(evidence.diagnostics).toBeUndefined()
     expect(evidence.comparison).toBeUndefined()
     expect(job.error).not.toHaveProperty("evidence")
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("keeps an opaque candidate failure terminal when diagnostics comparison is declared", async () => {
@@ -6212,7 +6212,7 @@ describe("Queue command adapters", () => {
     expect(evidence.diagnostics).toBeUndefined()
     expect(evidence.comparison).toBeUndefined()
     expect(configuredRuns).toBe(1)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("keeps a thrown candidate command distinct as a retryable environment refusal", async () => {
@@ -6246,7 +6246,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(candidateAttempts).toBe(1)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("preserves a legacy R1 attempt ref when an empty journal reuses the display run id", async () => {
@@ -6267,7 +6267,7 @@ describe("Queue command adapters", () => {
     expect(evidence.candidateRef).toBe(expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha))
     expect(await git(repo, ["rev-parse", legacyRef])).toBe(baseSha)
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
   })
 
   it("preserves an occupied derived candidate ref and publishes the candidate under a fresh identity", async () => {
@@ -6303,7 +6303,7 @@ describe("Queue command adapters", () => {
     expect(evidence.candidateRef).not.toBe(occupiedRef)
     expect(await git(repo, ["rev-parse", occupiedRef])).toBe(occupiedSha)
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
   })
 
   it("refuses bounded candidate ref exhaustion without rejecting or moving the submitted payload", async () => {
@@ -6339,7 +6339,7 @@ describe("Queue command adapters", () => {
     })
     expect(occupiedRefs).toHaveLength(33)
     for (const ref of occupiedRefs) expect(await git(repo, ["rev-parse", ref])).toBe(occupiedSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("lands the exact audited candidate and its durable artifacts", async () => {
@@ -6392,7 +6392,7 @@ describe("Queue command adapters", () => {
         },
       },
     })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "already-landed",
       state: "closed",
       merged: true,
@@ -6447,7 +6447,7 @@ describe("Queue command adapters", () => {
     })
     expect(evidence.detail).toContain("[yrd-base-health]")
     expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility).toMatchObject({ reason: { code: "required-check-failed" } })
     expect(eligibility.reason).not.toHaveProperty("receipt")
@@ -6562,7 +6562,7 @@ describe("Queue command adapters", () => {
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     expect(GitCheckEvidenceSchema.parse(job.output).baseSha).toBe(remoteBaseSha)
     expect(await git(repo, ["rev-parse", "main"])).toBe(localBaseSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "integrated",
@@ -6612,7 +6612,7 @@ describe("Queue command adapters", () => {
       conclusion: "success",
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "integrated",
@@ -6649,7 +6649,7 @@ describe("Queue command adapters", () => {
       conclusion: "success",
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "integrated",
@@ -6697,7 +6697,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[0]?.job).not.toHaveProperty("output")
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "submitted",
@@ -6759,7 +6759,7 @@ describe("Queue command adapters", () => {
         },
       },
     ])
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "submitted",
@@ -6838,7 +6838,7 @@ describe("Queue command adapters", () => {
       ]),
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "submitted",
@@ -6896,7 +6896,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
     })
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")
     expect(eventNames).not.toContain("pr/needs-author")
@@ -6905,7 +6905,7 @@ describe("Queue command adapters", () => {
   it("passes exact YRD_* variables while scrubbing ambient YRD_* and GIT_* values", async () => {
     await using process = createProcess()
     expect(() =>
-      configuredCommandStep<PRShape>({
+      configuredCommandStep<changeShape>({
         inject: { process },
         command: ["echo", "{target}"],
         cwd: ".",
@@ -6917,7 +6917,7 @@ describe("Queue command adapters", () => {
     const headSha = "a".repeat(40)
     const baseSha = "b".repeat(40)
     const pr = { id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha, baseSha }
-    const step = configuredCommandStep<PRShape>({
+    const step = configuredCommandStep<changeShape>({
       inject: { process },
       command: shellCommand("env | grep -E '^(YRD_|GIT_)' | sort"),
       cwd: repo,
@@ -6958,14 +6958,14 @@ describe("Queue command adapters", () => {
 
   describe("deterministic child environment (merge-queue R42)", () => {
     const headSha = "a".repeat(40)
-    const execution = (): StepExecution<PRShape> =>
+    const execution = (): StepExecution<changeShape> =>
       ({
         run: "R1",
         step: "check",
         index: 0,
         prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha }],
         shape: { results: {} },
-      }) as StepExecution<PRShape>
+      }) as StepExecution<changeShape>
     const jobContext = (overrides: Readonly<{ id?: string; attempt?: number; runner?: string }> = {}) => ({
       id: "J1",
       attempt: 1,
@@ -7013,7 +7013,7 @@ describe("Queue command adapters", () => {
       context = jobContext(),
     ) => {
       const { requests, process } = capturingProcess()
-      const step = configuredCommandStep<PRShape>({
+      const step = configuredCommandStep<changeShape>({
         inject: { process },
         command: ["check-env"],
         cwd: ".",
@@ -7058,7 +7058,7 @@ describe("Queue command adapters", () => {
     it("snapshots declared overrides at construction so later mutation is never applied", async () => {
       const { requests, process } = capturingProcess()
       const overrides: Record<string, string> = { SAFE_DECLARED: "yes" }
-      const step = configuredCommandStep<PRShape>({
+      const step = configuredCommandStep<changeShape>({
         inject: { process },
         command: ["check-env"],
         cwd: ".",
@@ -7101,7 +7101,7 @@ describe("Queue command adapters", () => {
           environmentPassthrough?: readonly string[]
         }>,
       ) =>
-        configuredCommandStep<PRShape>({
+        configuredCommandStep<changeShape>({
           inject: { process },
           command: ["check-env"],
           cwd: ".",
@@ -7286,7 +7286,7 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     const pr = app.state().bays.prs.PR1
     if (pr === undefined) throw new Error("expected PR1")
-    const changeId = currentPRRev(pr).changeId
+    const changeId = currentChangeRev(pr).changeId
     if (changeId === undefined) throw new Error("expected PR1 Change-Id")
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
@@ -7346,7 +7346,7 @@ describe("Queue command adapters", () => {
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     const pr = app.state().bays.prs.PR1
     if (pr === undefined) throw new Error("expected PR1")
-    const changeId = currentPRRev(pr).changeId
+    const changeId = currentChangeRev(pr).changeId
     if (changeId === undefined) throw new Error("expected PR1 Change-Id")
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
@@ -7782,7 +7782,7 @@ describe("Queue command adapters", () => {
       })
       expect(configuredCheckRan).toBe(false)
       expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
-      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,
       })
@@ -7900,7 +7900,7 @@ describe("Queue command adapters", () => {
       })
       expect(configuredCheckRan).toBe(false)
       expect(injectedFailure).toBe(true)
-      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,
       })
@@ -7989,7 +7989,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "submitted",
       headSha: fixture.featureSha,
     })
@@ -8046,7 +8046,7 @@ describe("Queue command adapters", () => {
       expect(proofFetches[0]?.argv).toContain("--filter=tree:0")
       expect(configuredCheckRan).toBe(false)
       expect(requests.some(({ argv }) => argv.includes("submodule") && argv.includes("update"))).toBe(false)
-      expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,
       })
@@ -8086,7 +8086,7 @@ describe("Queue command adapters", () => {
       error: { code: "check-failed", message: expect.stringContaining("has no URL") },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
@@ -9223,7 +9223,7 @@ describe("Queue command adapters", () => {
         index: 0,
         prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
         shape: { results: {} },
-      } satisfies StepExecution<PRShape>
+      } satisfies StepExecution<changeShape>
       const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
         checkInput,
         { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -9313,7 +9313,7 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
       shape: { results: {} },
-    } satisfies StepExecution<PRShape>
+    } satisfies StepExecution<changeShape>
     const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
       checkInput,
       { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -9431,7 +9431,7 @@ describe("Queue command adapters", () => {
       "",
     )
     expect(landing).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       status: "integrated",
       integration: { commit: landing, baseSha: landing },
     })
@@ -9575,7 +9575,7 @@ describe("Queue command adapters", () => {
       ]),
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
       revision: 1,
       headSha: featureSha,
       status: "submitted",
@@ -9678,7 +9678,7 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
     const cwd = await mkdtemp(join(tmpdir(), "yrd-cmd-timeout-"))
     roots.push(cwd)
     await using process = createProcess({ cwd, killGraceMs: 500 })
-    const runner = configuredCommandStep<PRShape>({
+    const runner = configuredCommandStep<changeShape>({
       inject: { process },
       command: ["sleep", "30"],
       cwd,
@@ -9692,7 +9692,7 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
         step: "check",
         prs: [{ id: "pr-1", base: "main", headSha: "a".repeat(40) }],
         targetSha: "a".repeat(40),
-      } as unknown as StepExecution<PRShape>,
+      } as unknown as StepExecution<changeShape>,
       { attempt: 1 } as never,
     )
     expect(outcome.status).toBe("completed")

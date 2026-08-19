@@ -1,4 +1,4 @@
-import { currentPRRev, prDeliveryState, type PR, type PRDeliveryState } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
 import { createPruneGitFacts } from "./pr-withdraw.ts"
 import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 
@@ -8,9 +8,9 @@ import type { PruneGitFacts, YrdCliIO } from "./types.ts"
  * PROCESS (queued, checking, awaiting an author) and needs no ancestry proof. */
 const NOT_LANDED_CLAIMS = new Set(["withdrawn", "canceled"])
 
-export type PrLanding = Readonly<{
+export type ChangeLanding = Readonly<{
   /** answers: Which rebuildable-index status did repository proof contradict? tense: historical. */
-  recorded: PRDeliveryState
+  recorded: ChangeDeliveryState
   /** Base tip the head was proven to be reachable from. */
   baseSha: string
   headSha: string
@@ -18,15 +18,15 @@ export type PrLanding = Readonly<{
   code: string
 }>
 
-export type PrLandingReconciliation = Readonly<{
-  landings: ReadonlyMap<string, PrLanding>
+export type ChangeLandingReconciliation = Readonly<{
+  landings: ReadonlyMap<string, ChangeLanding>
   /** Bases whose tip or ancestry could not be read. Never swallowed: the caller
    * prints them beside the result so an unverified row is never mistaken for a
    * verified one. */
   warnings: readonly string[]
 }>
 
-const EMPTY: PrLandingReconciliation = { landings: new Map(), warnings: [] }
+const EMPTY: ChangeLandingReconciliation = { landings: new Map(), warnings: [] }
 
 async function landedHeads(git: PruneGitFacts, baseSha: string, heads: readonly string[]): Promise<Set<string>> {
   if (git.landedOnBase !== undefined) return new Set(await git.landedOnBase(baseSha, heads))
@@ -52,8 +52,8 @@ function failureText(error: unknown): string {
  *
  * Git is consulted only when there is such a claim to check, and at most twice
  * per distinct base regardless of how many rows the projection carries. */
-export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Promise<PrLandingReconciliation> {
-  const candidates = prs.filter((pr) => NOT_LANDED_CLAIMS.has(prDeliveryState(pr)))
+export async function reconcileChangeLandings(prs: readonly PR[], io: YrdCliIO): Promise<ChangeLandingReconciliation> {
+  const candidates = prs.filter((pr) => NOT_LANDED_CLAIMS.has(changeDeliveryState(pr)))
   if (candidates.length === 0) return EMPTY
 
   const cwd = io.cwd ?? process.cwd()
@@ -65,7 +65,7 @@ export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Pro
     else grouped.push(pr)
   }
 
-  const landings = new Map<string, PrLanding>()
+  const landings = new Map<string, ChangeLanding>()
   const warnings: string[] = []
   for (const [base, members] of byBase) {
     try {
@@ -77,12 +77,12 @@ export async function reconcilePrLandings(prs: readonly PR[], io: YrdCliIO): Pro
         )
         continue
       }
-      const heads = members.map((pr) => currentPRRev(pr).head)
+      const heads = members.map((pr) => currentChangeRev(pr).head)
       const landed = await landedHeads(git, baseSha, heads)
       for (const pr of members) {
-        const headSha = currentPRRev(pr).head
+        const headSha = currentChangeRev(pr).head
         if (!landed.has(headSha)) continue
-        const recorded = prDeliveryState(pr)
+        const recorded = changeDeliveryState(pr)
         landings.set(pr.id, { recorded, baseSha, headSha, code: `${recorded}-after-landing` })
       }
     } catch (error) {

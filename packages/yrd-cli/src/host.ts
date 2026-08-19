@@ -82,7 +82,7 @@ import {
   type InstalledStep,
   type IntegratedShape,
   type PinIntentProvisioner,
-  type PRShape,
+  type changeShape,
   type QueueAuditEmission,
   type StepDef,
   type StepExecution,
@@ -126,7 +126,7 @@ import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
-import { createPrPublicationService } from "./pr-publication.ts"
+import { createChangePublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { repositoryGitDir } from "./repository-authority.ts"
 import {
@@ -193,7 +193,7 @@ export function createPostureQueueTargetResolver(
   }
 }
 
-type RuntimeStep = StepDef<PRShape, PRShape>
+type RuntimeStep = StepDef<changeShape, changeShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 /** Durable production predecessors: the pre-restore two-check checkpoint, the
@@ -819,7 +819,7 @@ function contestEvaluatorRevision(
     .digest("hex")
 }
 
-function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<Input, Output>): RuntimeStep {
+function eraseStep<Input extends changeShape, Output extends changeShape>(step: StepDef<Input, Output>): RuntimeStep {
   return step as unknown as RuntimeStep
 }
 
@@ -1550,7 +1550,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     }))
   const bayJobs = createBayJobDefs(
     workspace,
-    createPrPublicationService({ repo: options.repo, process: options.process }),
+    createChangePublicationService({ repo: options.repo, process: options.process }),
   )
   let deploymentStorePromise: ReturnType<typeof createGitDeploymentStore> | undefined
   const deploymentStore = () => {

@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { Event } from "loggily"
 import { stripAnsi } from "silvery"
-import { parsePRSelector } from "@yrd/bay"
+import { parseChangeSelector } from "@yrd/bay"
 import { formatResidentLogLine, timelineStatusGlyph } from "../src/runner-timeline.ts"
 
 // A fixed event time so generic notice prefixes remain deterministic.
@@ -158,7 +158,7 @@ describe("resident runner step-row grammar", () => {
         "[main#324] admitted pr#411.2 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
       )
       const renderedPr = visible(runRow).match(/pr#[a-z0-9_-]+\.\d+/iu)?.[0]
-      expect(parsePRSelector(renderedPr ?? "")).toEqual({ pr: "PR411", revision: 2 })
+      expect(parseChangeSelector(renderedPr ?? "")).toEqual({ pr: "PR411", revision: 2 })
       expect(runRow).toContain(`\x1b]8;;${pathToFileURL(runDir).href}\x1b\\[main#324]`)
       expect(runRow).not.toContain("log=")
 

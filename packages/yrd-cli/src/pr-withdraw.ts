@@ -1,13 +1,13 @@
 import { execFileSync } from "node:child_process"
 import { createElement } from "react"
-import { currentPRRev, isLivePR, prDeliveryState, prNeedsAuthor, prNotFoundMessage, type PR } from "@yrd/bay"
+import { currentChangeRev, isLivePR, changeDeliveryState, changeNeedsAuthor, changeNotFoundMessage, type PR } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
-import { PRResultView } from "./queue-status-view.tsx"
-import { projectPRTaskStatus } from "./task-status.ts"
+import { ChangeResultView } from "./queue-status-view.tsx"
+import { projectChangeTaskStatus } from "./task-status.ts"
 import type { PruneGitFacts, YrdCliApp, YrdCliIO } from "./types.ts"
 
 type JsonOption = Readonly<{ json?: boolean }>
@@ -37,9 +37,9 @@ function short(sha: string): string {
 function requiredLivePr(app: YrdCliApp, selector: string): PR {
   const pr = app.bays.pr(selector)
   if (pr === undefined) {
-    raiseFailure("refusal", "pr-missing", prNotFoundMessage(app.state().bays, selector))
+    raiseFailure("refusal", "pr-missing", changeNotFoundMessage(app.state().bays, selector))
   }
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if (!isLivePR(pr)) {
     raiseFailure("refusal", "pr-terminal", `yrd: PR '${pr.id}' is ${delivery}; a terminal PR cannot be withdrawn`)
   }
@@ -63,7 +63,7 @@ async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefine
 type PayloadSpend = Readonly<{ pr: string; revision: number; headSha: string; branch: string; reopen: string }>
 
 function payloadSpend(pr: PR): PayloadSpend {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return {
     pr: pr.id,
     revision: revision.n,
@@ -143,9 +143,9 @@ export async function withdrawPrs(
       command,
       ...(reason === undefined ? {} : { reason }),
       spent: spends,
-      prs: withdrawn.map(projectPRTaskStatus),
+      prs: withdrawn.map(projectChangeTaskStatus),
     },
-    createElement(PRResultView, { prs: withdrawn, runs: [] }),
+    createElement(ChangeResultView, { prs: withdrawn, runs: [] }),
   )
 }
 
@@ -211,7 +211,7 @@ function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: 
 
 function pruneError(pr: PR, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
   const message = pruneFailureMessage(pr.id, "judged", error)
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return {
     pr: pr.id,
     branch: pr.branch,
@@ -236,7 +236,7 @@ function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
  * that side-effect boundary, pruning the exact revision would cancel its own
  * landing and replace the truthful integration with `pr/withdrawn` (22454). */
 function mergeRunOwningRevision(app: YrdCliApp, pr: PR): Run | undefined {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   return Queues.ids(app.state().queues)
     .map((id) => app.queue.get(id))
     .filter((run): run is Run => run !== undefined)
@@ -253,7 +253,7 @@ function mergeRunOwningRevision(app: YrdCliApp, pr: PR): Run | undefined {
 }
 
 function mergeOwnedPruneRow(pr: PR, run: Run): PruneRow {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   const reason = `merge run '${run.id}' owns the in-flight landing for revision ${revision.n} (${revision.head})`
   return {
     pr: pr.id,
@@ -269,7 +269,7 @@ function mergeOwnedPruneRow(pr: PR, run: Run): PruneRow {
 }
 
 function changedPruneRow(row: PruneRow, pr: PR): PruneRow {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   const reason =
     `PR changed during prune from revision ${row.revision} (${row.headSha}) ` +
     `to revision ${revision.n} (${revision.head})`
@@ -294,7 +294,7 @@ async function contentChecks(headSha: string, baseSha: string, git: PruneGitFact
  * check that ran (and every check that was skipped, with why) is named in the
  * returned row so the operator sees exactly what was verified. */
 async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   const identity = {
     pr: pr.id,
     branch: pr.branch,
@@ -356,7 +356,7 @@ export async function preflightRecut(
     usage("--revision must be a positive integer")
   }
   const pr = requiredLivePr(app, selector)
-  const revision = options.revision ?? currentPRRev(pr).n
+  const revision = options.revision ?? currentChangeRev(pr).n
   const source = pr.revs.find((candidate) => candidate.n === revision)
   if (source === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${revision}`)
@@ -424,16 +424,16 @@ export async function preflightRecut(
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
-  const needsAuthor = prNeedsAuthor(pr)
+  const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
     needsAuthor !== undefined &&
     CONSUMED_QUEUE_AUTHORITY_RECEIPTS.has(needsAuthor.receipt.code) &&
-    source.n === currentPRRev(pr).n
+    source.n === currentChangeRev(pr).n
   if (
     needsAuthor !== undefined &&
     !reauthorizing &&
     options.proposedHeadSha === undefined &&
-    source.n === currentPRRev(pr).n
+    source.n === currentChangeRev(pr).n
   ) {
     raiseFailure(
       "refusal",
@@ -561,7 +561,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
         await app.refresh()
         const current = app.bays.pr(row.pr)
         if (current !== undefined && isLivePR(current)) {
-          const revision = currentPRRev(current)
+          const revision = currentChangeRev(current)
           if (revision.n !== row.revision || revision.head !== row.headSha) {
             rows[index] = changedPruneRow(row, current)
             continue
@@ -598,7 +598,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
       dryRun,
       checked: rows.map(({ detail: _detail, ...row }) => row),
       summary: { checked: rows.length, withdrawn: withdrawn.length, wouldWithdraw, kept, errors },
-      withdrawn: withdrawn.map(projectPRTaskStatus),
+      withdrawn: withdrawn.map(projectChangeTaskStatus),
     },
     [...rows.map(pruneLine), summary].join("\n"),
   )

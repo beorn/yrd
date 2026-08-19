@@ -138,7 +138,7 @@ type GateArgs = Parameters<typeof requireQueueableSubmodulePins>
 
 // Only the fields this gate actually reads. Cast at the boundary rather than building a whole PR:
 // widening the fixture would make it look like the gate depends on more than it does.
-function prFixture(headSha: string): GateArgs[0] {
+function changeFixture(headSha: string): GateArgs[0] {
   return {
     id: "PR9001",
     name: "hand-bumped pin",
@@ -162,7 +162,7 @@ async function admissionOutcome(
   const services = { process } as unknown as GateArgs[1]
   const io = { cwd: root } as unknown as GateArgs[2]
   try {
-    await requireQueueableSubmodulePins(prFixture(headSha), services, io)
+    await requireQueueableSubmodulePins(changeFixture(headSha), services, io)
   } catch (error) {
     const fact = failureFact(error)
     if (fact === undefined) throw error

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
-import { createGitPRRecutter, type PRRecutResult } from "@yrd/queue"
+import { createGitPRRecutter, type ChangeRecutResult } from "@yrd/queue"
 
 const roots: string[] = []
 
@@ -84,7 +84,7 @@ async function recut(
   sourceBase: string,
   headSha: string,
   current?: Readonly<{ revision: number; headSha: string; baseSha: string; treeSha: string; patchId: string }>,
-): Promise<PRRecutResult> {
+): Promise<ChangeRecutResult> {
   await using process = createProcess()
   return await createGitPRRecutter({ inject: { process }, repo }).recut({
     id: "PR1",

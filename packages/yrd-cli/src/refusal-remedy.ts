@@ -1,4 +1,4 @@
-import { currentPRRev, prDeliveryState, type PR, type PRDeliveryState } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
 import { compareNatural } from "@yrd/core"
 import { ADMISSION_REFUSAL_LOOP_THRESHOLD, type QueueAdmissionRefusal } from "@yrd/queue"
 import { actionableFailure, recutRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
@@ -24,7 +24,7 @@ export type RefusalRemedyContext = Readonly<{
   /** The PR's branch, substituted for the `<branch>` placeholder the printed
    * remedy carries — the one token a human had to fill in by hand. */
   branch: string
-  delivery?: PRDeliveryState
+  delivery?: ChangeDeliveryState
 }>
 
 /** The `<branch>` placeholder a printed remedy uses when it does not know (or
@@ -241,7 +241,7 @@ export function planRefusalRemedies(
     // The ledger is retained past its PR (compaction drops streaks for PRs the
     // state no longer holds); a streak with no PR names nothing to remedy.
     if (pr === undefined) continue
-    const revision = currentPRRev(pr)
+    const revision = currentChangeRev(pr)
     const key = refusalRemedyKey(pr.id, revision.n, revision.head)
     if (attempted.has(key)) continue
     plans.push(
@@ -255,7 +255,7 @@ export function planRefusalRemedies(
         key,
         remedy: classifyRefusalRemedy(
           { code: refusal.code, message: refusal.reason },
-          { branch: pr.branch, delivery: prDeliveryState(pr) },
+          { branch: pr.branch, delivery: changeDeliveryState(pr) },
         ),
       }),
     )

@@ -7,10 +7,10 @@
  */
 import { describe, expect, it } from "vitest"
 import {
-  formatPRRevisionSelector,
-  parsePRSelector,
+  formatChangeRevisionSelector,
+  parseChangeSelector,
   requireLivePR,
-  resolvePRMatch,
+  resolveChangeMatch,
   type BaysState,
   type PR,
 } from "../src/model.ts"
@@ -45,29 +45,29 @@ describe("displayed PR selector round trip", () => {
     ["1410", { pr: "PR1410" }],
     ["1410.16", { pr: "PR1410", revision: 16 }],
   ] as const)("parses %s without guessing", (selector, expected) => {
-    expect(parsePRSelector(selector)).toEqual(expected)
+    expect(parseChangeSelector(selector)).toEqual(expected)
   })
 
   it("keeps a bare non-numeric token out of the PR grammar (branch/name aliases stay reachable)", () => {
-    expect(parsePRSelector("topic/round-trip")).toBeUndefined()
-    expect(parsePRSelector("fix-thing")).toBeUndefined()
+    expect(parseChangeSelector("topic/round-trip")).toBeUndefined()
+    expect(parseChangeSelector("fix-thing")).toBeUndefined()
   })
 
   it("accepts the bare numeric id every operator types after reading pr#1410.16 (I23 selector uniformity)", () => {
-    expect(resolvePRMatch(state, "1410")?.value).toBe(pr)
-    expect(resolvePRMatch(state, "1410.16")?.revision).toBe(revisions[1])
+    expect(resolveChangeMatch(state, "1410")?.value).toBe(pr)
+    expect(resolveChangeMatch(state, "1410.16")?.revision).toBe(revisions[1])
     expect(requireLivePR(state, "1410")).toBe(pr)
   })
 
   it("falls back to branch/name aliases when a bare numeric names no PR", () => {
     const branchNumeric: PR = { ...pr, id: "PR7", branch: "9999" }
     const numericState: BaysState = { byId: {}, prs: { [branchNumeric.id]: branchNumeric }, receipts: {} }
-    expect(resolvePRMatch(numericState, "9999")?.value).toBe(branchNumeric)
+    expect(resolveChangeMatch(numericState, "9999")?.value).toBe(branchNumeric)
   })
 
   it("feeds the canonical renderer output back to the exact retained revision", () => {
-    const displayed = formatPRRevisionSelector(pr.id, revisions[1])
-    const resolved = resolvePRMatch(state, displayed)
+    const displayed = formatChangeRevisionSelector(pr.id, revisions[1])
+    const resolved = resolveChangeMatch(state, displayed)
 
     expect(displayed).toBe("pr#1410.16")
     expect(resolved?.value).toBe(pr)
@@ -75,8 +75,8 @@ describe("displayed PR selector round trip", () => {
   })
 
   it("keeps a bare selector PR-scoped and rejects an unknown retained revision", () => {
-    expect(resolvePRMatch(state, "pr#1410")?.revision).toBeUndefined()
-    expect(resolvePRMatch(state, "pr#1410.99")).toBeUndefined()
+    expect(resolveChangeMatch(state, "pr#1410")?.revision).toBeUndefined()
+    expect(resolveChangeMatch(state, "pr#1410.99")).toBeUndefined()
   })
 
   it("shows a copy-pasteable accepted form when a PR-shaped selector is malformed", () => {

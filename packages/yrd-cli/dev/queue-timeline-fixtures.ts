@@ -1,4 +1,4 @@
-import { currentPRRev, prDeliveryState, type PR } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type PR } from "@yrd/bay"
 import type { JsonValue } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { Run } from "@yrd/queue"
@@ -22,7 +22,7 @@ const BASE_SHA = "a".repeat(40)
 const INTEGRATED_SHA = "b".repeat(40)
 const ALL_STATUSES: readonly QueueTimelineStatusFilter[] = ["pending", "running", "rejected", "integrated", "other"]
 
-type FixturePrOptions = Readonly<{
+type FixtureChangeOptions = Readonly<{
   revision?: number
   headSha?: string
   submitter?: string
@@ -94,7 +94,7 @@ export function fixturePr(
   status: FixtureDeliveryState,
   submittedAt: string,
   name = `Fixture ${id}`,
-  options: FixturePrOptions = {},
+  options: FixtureChangeOptions = {},
 ): PR {
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
   const revision = options.revision ?? 1
@@ -133,7 +133,7 @@ export function fixturePr(
       },
     ]
   ).map(fixtureRevision)
-  const retainedTerminalAt = currentPRRev({ id, revs }).terminal?.at
+  const retainedTerminalAt = currentChangeRev({ id, revs }).terminal?.at
   return {
     id,
     name,
@@ -170,7 +170,7 @@ function terminalFixturePr(
   terminalAt: string,
   run: string,
   name: string,
-  options: Omit<FixturePrOptions, "headSha" | "revisions" | "terminalRun"> = {},
+  options: Omit<FixtureChangeOptions, "headSha" | "revisions" | "terminalRun"> = {},
 ): PR {
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
   const headSha = digit.repeat(40)
@@ -348,7 +348,7 @@ export function fixtureRun(
     queueId: "main",
     candidateId: `C${id.replace(/\D/gu, "") || "1"}`,
     prs: prs.map((pr) => {
-      const revision = options.memberRevisions?.[pr.id] ?? currentPRRev(pr).n
+      const revision = options.memberRevisions?.[pr.id] ?? currentChangeRev(pr).n
       const clock = pr.revs.find((candidate) => candidate.n === revision)
       if (clock === undefined) throw new Error(`fixture PR '${pr.id}' is missing revision ${revision}`)
       return {
@@ -388,7 +388,7 @@ export function fixtureResult(
     headSha: BASE_SHA,
     prs: [...prs],
     admissionOrder: prs
-      .filter((pr) => prDeliveryState(pr) === "submitted" || prDeliveryState(pr) === "ready")
+      .filter((pr) => changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready")
       .map((pr) => pr.id),
     running: runs.filter((run) => run.status === "queued" || run.status === "in_progress"),
     waiting: runs.filter((run) => run.status === "waiting"),

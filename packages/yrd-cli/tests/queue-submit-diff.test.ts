@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { fixturePr } from "../dev/queue-timeline-fixtures.ts"
-import { queuePrDiff } from "../src/run.ts"
+import { queueChangeDiff } from "../src/run.ts"
 
 const dirs: string[] = []
 
@@ -52,7 +52,7 @@ describe("queue submit diff projection", () => {
       ],
     })
 
-    expect(queuePrDiff(cwd, pr)).toMatchObject({
+    expect(queueChangeDiff(cwd, pr)).toMatchObject({
       pr: "PR8",
       revision: 1,
       additions: 3,
@@ -61,7 +61,7 @@ describe("queue submit diff projection", () => {
       patch: expect.stringContaining("+second"),
     })
     expect(
-      queuePrDiff(cwd, { ...pr, revs: pr.revs.map((revision) => ({ ...revision, head: "f".repeat(40) })) }),
+      queueChangeDiff(cwd, { ...pr, revs: pr.revs.map((revision) => ({ ...revision, head: "f".repeat(40) })) }),
     ).toEqual({
       pr: "PR8",
       revision: 1,
@@ -69,7 +69,7 @@ describe("queue submit diff projection", () => {
     })
     const notARepo = mkdtempSync(join(tmpdir(), "yrd-submit-diff-not-repo-"))
     dirs.push(notARepo)
-    expect(() => queuePrDiff(notARepo, pr)).toThrow()
+    expect(() => queueChangeDiff(notARepo, pr)).toThrow()
 
     writeFileSync(join(cwd, "later.txt"), "later revision\n")
     git(cwd, "add", "later.txt")
@@ -97,7 +97,7 @@ describe("queue submit diff projection", () => {
         },
       ],
     })
-    expect(queuePrDiff(cwd, recut, 1)).toMatchObject({
+    expect(queueChangeDiff(cwd, recut, 1)).toMatchObject({
       pr: "PR8",
       revision: 1,
       additions: 3,

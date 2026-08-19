@@ -20,7 +20,7 @@ import {
   fixtureSnapshot,
   fixtureStep,
 } from "../dev/queue-timeline-fixtures.ts"
-import { QueueDetailRunPrBlocks, QueueShowView, queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
+import { QueueDetailRunChangeBlocks, QueueShowView, queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
 
 const NO_RAW_ISO = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/u
 
@@ -178,7 +178,7 @@ describe("watch detail completeness — primary PR activity projection", () => {
     const row = snapshot.projection.rows.find((candidate) => candidate.pr === pr.id)
     if (row === undefined) throw new Error("missing pending PR fixture row")
     const app = createRenderer({ cols: 140, rows: 30 })(
-      createElement(QueueDetailRunPrBlocks, {
+      createElement(QueueDetailRunChangeBlocks, {
         row,
         rows: snapshot.projection.rows,
         prs: [pr],

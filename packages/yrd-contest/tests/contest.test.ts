@@ -3,7 +3,7 @@
  * @level l3
  * @consumer @yrd/contest orchestration
  */
-import { createBayJobDefs, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, changeDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withIssues } from "@yrd/issue"
@@ -256,7 +256,7 @@ describe("Contests", () => {
       revs: [{ n: 1, head: THOROUGH_SHA }],
     })
     if (submitted === undefined) throw new Error("promoted PR was not retained")
-    expect(prDeliveryState(submitted)).toBe("submitted")
+    expect(changeDeliveryState(submitted)).toBe("submitted")
     expect(app.state().contests.records.C1?.promotion).not.toHaveProperty("status")
     expect(app.state().contests.records.C1?.promotion).not.toHaveProperty("job")
 

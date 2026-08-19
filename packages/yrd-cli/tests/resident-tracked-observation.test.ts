@@ -13,11 +13,11 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentPRRev, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createProcess } from "@yrd/process"
-import { withMerge, withQueue, withStep, type PRShape, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type changeShape, type StepExecution } from "@yrd/queue"
 import { createLogger, type Event as LogEvent } from "loggily"
 import * as runInternals from "../src/run.ts"
 import type { YrdCliApp, YrdCliIO, YrdCliServices } from "../src/types.ts"
@@ -126,7 +126,7 @@ async function trackedApp(mainSha: string, log: ReturnType<typeof createLogger>)
     },
   )
   const merge = withMerge(
-    async (_input: StepExecution<PRShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
+    async (_input: StepExecution<changeShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
       status: "completed",
       conclusion: "success",
       output: { commit: mainSha, baseSha: mainSha },
@@ -231,7 +231,7 @@ describe("resident tracking pass — one unobservable branch never stops the oth
     // the successor is current.
     expect(recut).toHaveBeenCalledWith(expect.objectContaining({ proposedHeadSha: fixture.healthyLive }))
     expect(healthy.revs).toHaveLength(2)
-    expect(currentPRRev(healthy).head).toBe(fixture.recutHead)
+    expect(currentChangeRev(healthy).head).toBe(fixture.recutHead)
 
     // Positive control that the REAL fetch arm ran for the healthy branch: git
     // created its remote-tracking ref, which only the live fetch does.

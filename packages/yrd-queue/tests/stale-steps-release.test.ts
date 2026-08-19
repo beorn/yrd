@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, prDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, changeDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -117,7 +117,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     })
     // Authority released and the PR stays submitted, so it re-admits fresh.
     expect(replayed.state().queues.authority.runs).toBeDefined()
-    expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
   })
 
   it("releases a queued current step whose requested Job revision drifted before execution", async () => {
@@ -147,7 +147,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       conclusion: "failure",
       error: expect.objectContaining({ code: "stale-steps" }),
     })
-    expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
 
     const readmitted = await replayed.queue.run({ prs: ["PR1"] }, runtime)
     expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
@@ -188,7 +188,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     expect(replayed.queue.audit().findings).not.toContainEqual(
       expect.objectContaining({ code: "step-revision-drift", run: "R1" }),
     )
-    expect(prDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+    expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
   })
 
   it("re-admits the still-submitted PR under the installed config after a stale-steps release", async () => {

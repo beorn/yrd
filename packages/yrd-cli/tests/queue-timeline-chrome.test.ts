@@ -231,10 +231,10 @@ describe("queue timeline chrome 21106", () => {
       )
       // Round 6: only the value segment is bold; noun and revision stay plain.
       const doneRow = rowAt(text, mutedRowY)
-      const prX = doneRow.indexOf("pr#4.1")
-      expect(app.cell(prX, mutedRowY).bold, "integrated PR noun is plain").not.toBe(true)
-      expect(app.cell(prX + 3, mutedRowY).bold, "integrated PR value is bold").toBe(true)
-      expect(app.cell(prX + 4, mutedRowY).bold, "integrated PR revision is plain").not.toBe(true)
+      const changeX = doneRow.indexOf("pr#4.1")
+      expect(app.cell(changeX, mutedRowY).bold, "integrated PR noun is plain").not.toBe(true)
+      expect(app.cell(changeX + 3, mutedRowY).bold, "integrated PR value is bold").toBe(true)
+      expect(app.cell(changeX + 4, mutedRowY).bold, "integrated PR revision is plain").not.toBe(true)
       // Item 5: the table header sits flush — the row directly above the TIME
       // header is not a blank spacer (it is the QUEUE metadata row).
       expect(rowAt(text, headerY - 1).trim(), "no blank row above the header").not.toBe("")

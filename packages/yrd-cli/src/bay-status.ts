@@ -83,8 +83,8 @@ export type BayStatusFacts = Readonly<{
   /** Repo-global stash entries attributed to this bay (best-effort). */
   stashAttributed?: number
   stashUnknown?: boolean
-  /** Informational only — open PR does not block local removal. */
-  openPrIds?: readonly string[]
+  /** Informational only — open change does not block local removal. */
+  openChangeIds?: readonly string[]
 }>
 
 /** Extract trailing `:<digits>` PID from a bay name or BY address (22287). */
@@ -373,7 +373,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
   }
 
   // pr — informational only
-  const prs = facts.openPrIds ?? []
+  const prs = facts.openChangeIds ?? []
   lines.push({
     class: "pr",
     verdict: "PASS",

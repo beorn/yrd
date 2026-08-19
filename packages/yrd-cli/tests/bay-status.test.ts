@@ -23,7 +23,7 @@ const base: BayStatusFacts = {
   tipLanded: true,
   aheadOfOrigin: 0,
   stashAttributed: 0,
-  openPrIds: [],
+  openChangeIds: [],
 }
 
 describe("parseOwnerPid", () => {
@@ -208,7 +208,7 @@ describe("classifyBayStatus", () => {
       ...base,
       ownerPid: 1,
       ownerAlive: false,
-      openPrIds: ["PR99"],
+      openChangeIds: ["PR99"],
     })
     expect(report.exit).toBe(0)
     expect(report.lines.find((line) => line.class === "pr")?.evidence).toMatch(/PR99/)

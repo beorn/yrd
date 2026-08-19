@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { hyperlink } from "@silvery/ansi"
-import { formatPRRevisionSelector } from "@yrd/bay"
+import { formatChangeRevisionSelector } from "@yrd/bay"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 import { failureSlug } from "./failure-slug.ts"
@@ -92,7 +92,7 @@ const paint =
   (text) =>
     color ? `${code}${text}${ANSI.reset}` : text
 
-type PRProps = Readonly<{ pr?: string; revision?: number; branch?: string; issue?: string }>
+type ChangeProps = Readonly<{ pr?: string; revision?: number; branch?: string; issue?: string }>
 type OutcomeProps = Readonly<{
   run?: string
   base?: string
@@ -108,7 +108,7 @@ type OutcomeProps = Readonly<{
   error?: Readonly<{ code?: string; message?: string }>
   failure?: Readonly<{ code?: string; message?: string }>
   artifacts?: readonly unknown[]
-  prs?: readonly PRProps[]
+  prs?: readonly ChangeProps[]
 }>
 
 type ResidentLogFormatOptions = Readonly<{
@@ -216,16 +216,16 @@ function stepToken(props: OutcomeProps): string | undefined {
   return props.attempt !== undefined && props.attempt > 1 ? `${numbered}#${props.attempt}` : numbered
 }
 
-function prRef(pr: PRProps): string | undefined {
+function changeRef(pr: ChangeProps): string | undefined {
   if (pr.pr === undefined) return undefined
-  return formatPRRevisionSelector(pr.pr, pr.revision ?? 1)
+  return formatChangeRevisionSelector(pr.pr, pr.revision ?? 1)
 }
 
 function admissionTail(props: OutcomeProps, color: boolean): string {
   const prs = props.prs
   if (prs === undefined || prs.length === 0) return ""
   const facts = prs.flatMap((pr) => {
-    const ref = prRef(pr)
+    const ref = changeRef(pr)
     if (ref === undefined) return []
     const issue = pr.issue === undefined ? "" : ` issue=${pr.issue}`
     return [`${ref}${issue}`]
@@ -233,9 +233,9 @@ function admissionTail(props: OutcomeProps, color: boolean): string {
   return facts.length === 0 ? "" : ` ${paint(color, ANSI.dim)(facts.join(" "))}`
 }
 
-function composedPRTail(props: OutcomeProps, color: boolean): string {
+function composedChangeTail(props: OutcomeProps, color: boolean): string {
   const refs = (props.prs ?? []).flatMap((pr) => {
-    const ref = prRef(pr)
+    const ref = changeRef(pr)
     return ref === undefined ? [] : [ref]
   })
   return refs.length < 2 ? "" : ` ${paint(color, ANSI.dim)(`prs=${refs.join(",")}`)}`
@@ -300,7 +300,7 @@ function renderOutcomeRow(
   if (verb === undefined) return undefined
   const tag = timelineTag(props, color, artifactTarget(props, artifactRoot, verb === "finished" ? "done" : verb))
   const verbCell = paint(color, verb === "finished" ? ANSI.green : ANSI.red)(verb)
-  const prsCell = composedPRTail(props, color)
+  const prsCell = composedChangeTail(props, color)
   const durationCell =
     props.durationMs === undefined
       ? ""
@@ -329,7 +329,7 @@ function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: st
   const verb = paint(color, ANSI.blue)(label)
   return token === undefined
     ? `${tag} ${verb}${admissionTail(props, color)}`
-    : `${tag} ${verb}${composedPRTail(props, color)}`
+    : `${tag} ${verb}${composedChangeTail(props, color)}`
 }
 
 function ansiForStatus(color: StatusPresentationColor): string {
@@ -340,7 +340,7 @@ function ansiForStatus(color: StatusPresentationColor): string {
   return ANSI.dim
 }
 
-function settlementPRTail(props: OutcomeProps): string {
+function settlementChangeTail(props: OutcomeProps): string {
   const refs = (props.prs ?? []).flatMap((pr) => (pr.pr === undefined ? [] : [`${pr.pr}.${pr.revision ?? 1}`]))
   if (refs.length === 0) return ""
   return refs.length === 1 ? ` pr=${refs[0]}` : ` prs=${refs.join(",")}`
@@ -356,7 +356,7 @@ function renderSettlementRow(props: OutcomeProps, color: boolean): string | unde
   const presentation = statusPresentation(statusClass)
   const verb = paint(color, ansiForStatus(presentation.color))("settled")
   const next = disposition?.automation ?? "none"
-  return `${timelineTag(props, color)} ${verb} status=${props.status ?? "failed"} class=${statusClass} next=${next}${settlementPRTail(props)}`
+  return `${timelineTag(props, color)} ${verb} status=${props.status ?? "failed"} class=${statusClass} next=${next}${settlementChangeTail(props)}`
 }
 
 /** Generic INFO/WARN/ERROR notice fields as a dimmed JSON tail, minus the

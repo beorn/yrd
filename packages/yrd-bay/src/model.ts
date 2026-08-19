@@ -21,12 +21,12 @@ export const BayIdSchema = z.string().trim().min(1)
  * id, so a mis-kinded member fails here instead of much later or never.
  *
  * Display forms (`pr#182.1`) and the operator's bare-number selector are NOT
- * ids and are deliberately refused; {@link parsePRSelector} is their grammar.
+ * ids and are deliberately refused; {@link parseChangeSelector} is their grammar.
  */
 export const PRIdSchema = z.string().regex(/^PR\d+$/u, "expected a PR id, e.g. PR182")
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
-export const PRTerminalAssociationSchema = z
+export const ChangeTerminalAssociationSchema = z
   .object({
     pr: PRIdSchema,
     revision: z.number().int().positive(),
@@ -40,7 +40,7 @@ export const PRTerminalAssociationSchema = z
     message: "association run must equal the evidence run",
     path: ["evidence", "run"],
   })
-export type PRTerminalAssociation = Readonly<z.infer<typeof PRTerminalAssociationSchema>>
+export type ChangeTerminalAssociation = Readonly<z.infer<typeof ChangeTerminalAssociationSchema>>
 export const CorrelationSchema = z
   .object({
     namespace: z.string().trim().min(1),
@@ -74,7 +74,7 @@ export function normalizeV2Submitter(value: unknown): unknown {
 }
 
 /** Closed current rejection fact used by the Bay projection and post-append signal observers. */
-const PRRejectedFactObjectSchema = z
+const ChangeRejectedFactObjectSchema = z
   .object({
     pr: PRIdSchema,
     revision: z.number().int().positive(),
@@ -89,19 +89,19 @@ const PRRejectedFactObjectSchema = z
     detail: z.string().optional(),
   })
   .strict()
-export const PRRejectedFactSchema = z.preprocess(normalizeV2Submitter, PRRejectedFactObjectSchema)
-export type PRRejectedFact = Readonly<z.infer<typeof PRRejectedFactSchema>>
+export const ChangeRejectedFactSchema = z.preprocess(normalizeV2Submitter, ChangeRejectedFactObjectSchema)
+export type ChangeRejectedFact = Readonly<z.infer<typeof ChangeRejectedFactSchema>>
 
 /** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the PR in the
  * submitted queue lifecycle and carries the exact typed receipt needed to fix
  * the branch in place. */
-export const PRNeedsAuthorFactSchema = z.preprocess(
+export const ChangeNeedsAuthorFactSchema = z.preprocess(
   normalizeV2Submitter,
-  PRRejectedFactObjectSchema.extend({
+  ChangeRejectedFactObjectSchema.extend({
     receipt: JobErrorSchema,
   }).strict(),
 )
-export type PRNeedsAuthorFact = Readonly<z.infer<typeof PRNeedsAuthorFactSchema>>
+export type ChangeNeedsAuthorFact = Readonly<z.infer<typeof ChangeNeedsAuthorFactSchema>>
 
 export const GitPayloadPathSchema = z
   .string()
@@ -314,7 +314,7 @@ export type BranchLifecycle =
     >
 
 /** W2-facing delivery label derived from canonical PR/PRRev facts. Never stored. */
-export type PRDeliveryState =
+export type ChangeDeliveryState =
   | "pushed"
   | "submitted"
   | "ready"
@@ -325,7 +325,7 @@ export type PRDeliveryState =
   | "withdrawn"
   | "canceled"
 
-const NON_CHECKABLE_PR_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDeliveryState>([
+const NON_CHECKABLE_PR_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
   "integrated",
   "already-landed",
   "withdrawn",
@@ -335,7 +335,7 @@ const NON_CHECKABLE_PR_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDelivery
 /** A PR can accept new check requests in every non-terminal delivery state.
  * Once it reaches integrated/already-landed/withdrawn/canceled, it is no
  * longer checkable. */
-export function isNonCheckablePRState(state: PRDeliveryState): boolean {
+export function isNonCheckableChangeState(state: ChangeDeliveryState): boolean {
   return NON_CHECKABLE_PR_STATES.has(state)
 }
 
@@ -348,13 +348,13 @@ export function isNonCheckablePRState(state: PRDeliveryState): boolean {
  * isConcurrentCheckabilityConflict) apart from a real caller error, without
  * matching on the message text.
  */
-export class PrCheckabilityConflict extends Error {
+export class ChangeCheckabilityConflict extends Error {
   readonly prId: string
-  readonly status: PRDeliveryState
+  readonly status: ChangeDeliveryState
 
-  constructor(prId: string, status: PRDeliveryState) {
+  constructor(prId: string, status: ChangeDeliveryState) {
     super(`yrd: PR '${prId}' is ${status}, not checkable`)
-    this.name = "PrCheckabilityConflict"
+    this.name = "ChangeCheckabilityConflict"
     this.prId = prId
     this.status = status
   }
@@ -368,23 +368,23 @@ export class PrCheckabilityConflict extends Error {
  * continue; the next cycle re-snapshots without the departed PR and composes
  * the remaining runnable ones.
  */
-export function isConcurrentCheckabilityConflict(error: unknown): error is PrCheckabilityConflict {
-  return error instanceof PrCheckabilityConflict && isNonCheckablePRState(error.status)
+export function isConcurrentCheckabilityConflict(error: unknown): error is ChangeCheckabilityConflict {
+  return error instanceof ChangeCheckabilityConflict && isNonCheckableChangeState(error.status)
 }
 
-export type PRRevTerminal = Readonly<{
-  kind: Extract<PRDeliveryState, "rejected" | "integrated" | "already-landed" | "withdrawn" | "canceled">
+export type ChangeRevTerminal = Readonly<{
+  kind: Extract<ChangeDeliveryState, "rejected" | "integrated" | "already-landed" | "withdrawn" | "canceled">
   at: string
   run?: string
 }>
 
-export type PRRevClock = Readonly<{
+export type ChangeRevClock = Readonly<{
   pushedAt: string
   submittedAt?: string
-  terminal?: PRRevTerminal
+  terminal?: ChangeRevTerminal
 }>
 
-export type PRAdmissionStep = Readonly<{
+export type ChangeAdmissionStep = Readonly<{
   name: string
   revision: string
   job: string
@@ -393,7 +393,7 @@ export type PRAdmissionStep = Readonly<{
   receipt?: JobError
 }>
 
-export const PRAdmissionStepSchema = z
+export const ChangeAdmissionStepSchema = z
   .object({
     name: TextSchema,
     revision: TextSchema,
@@ -414,9 +414,9 @@ export const PRAdmissionStepSchema = z
         path: ["receipt"],
       })
     }
-  }) as z.ZodType<PRAdmissionStep>
+  }) as z.ZodType<ChangeAdmissionStep>
 
-const PRAdmissionBaseSchema = z.object({
+const ChangeAdmissionBaseSchema = z.object({
   baseSha: GitShaSchema,
   /** Exact-revision/base check authorities consumed by this verdict.
    * Optional only for replaying admission facts written before this counter.
@@ -446,16 +446,16 @@ const PRAdmissionBaseSchema = z.object({
    * (@yrd/core/rebuilt-carrier-denied-retry). */
   requestCount: z.union([z.number().int().nonnegative(), z.literal("unresolved")]).optional(),
   candidate: TextSchema.optional(),
-  steps: z.array(PRAdmissionStepSchema),
+  steps: z.array(ChangeAdmissionStepSchema),
 })
 
-export type PRAdmissionRecord =
+export type ChangeAdmissionRecord =
   | Readonly<{
       status: "passed"
       baseSha: string
       requestCount?: number | "unresolved"
       candidate?: string
-      steps: readonly PRAdmissionStep[]
+      steps: readonly ChangeAdmissionStep[]
     }>
   | Readonly<{
       status: "refused"
@@ -463,44 +463,44 @@ export type PRAdmissionRecord =
       baseSha: string
       requestCount?: number | "unresolved"
       candidate?: string
-      steps: readonly PRAdmissionStep[]
+      steps: readonly ChangeAdmissionStep[]
       step: string
       receipt: JobError
     }>
 
-export const PRAdmissionRecordSchema = z.discriminatedUnion("status", [
-  PRAdmissionBaseSchema.extend({ status: z.literal("passed") }).strict(),
-  PRAdmissionBaseSchema.extend({
+export const ChangeAdmissionRecordSchema = z.discriminatedUnion("status", [
+  ChangeAdmissionBaseSchema.extend({ status: z.literal("passed") }).strict(),
+  ChangeAdmissionBaseSchema.extend({
     status: z.literal("refused"),
     kind: z.enum(["refusal", "failure", "infrastructure"]),
     step: TextSchema,
     receipt: JobErrorSchema,
   }).strict(),
-]) as z.ZodType<PRAdmissionRecord>
-export type PRAdmission = PRAdmissionRecord & Readonly<{ at: string }>
+]) as z.ZodType<ChangeAdmissionRecord>
+export type ChangeAdmission = ChangeAdmissionRecord & Readonly<{ at: string }>
 
-export type PRAdmissionRecordedFact = Readonly<{
+export type ChangeAdmissionRecordedFact = Readonly<{
   pr: PRId
   revision: number
   headSha: string
-  admission: PRAdmissionRecord
+  admission: ChangeAdmissionRecord
 }>
 
-export const PRAdmissionRecordedFactSchema = z
+export const ChangeAdmissionRecordedFactSchema = z
   .object({
     pr: PRIdSchema,
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
-    admission: PRAdmissionRecordSchema,
+    admission: ChangeAdmissionRecordSchema,
   })
-  .strict() as z.ZodType<PRAdmissionRecordedFact>
+  .strict() as z.ZodType<ChangeAdmissionRecordedFact>
 
-export const PRFreshnessTransitionSchema = z
+export const ChangeFreshnessTransitionSchema = z
   .object({ from: z.literal("admitted"), to: z.literal("refreshed") })
   .strict()
-export type PRFreshnessTransition = Readonly<z.infer<typeof PRFreshnessTransitionSchema>>
+export type ChangeFreshnessTransition = Readonly<z.infer<typeof ChangeFreshnessTransitionSchema>>
 
-export const PRRecutSourceSchema = z
+export const ChangeRecutSourceSchema = z
   .object({
     repo: z.string().trim().min(1),
     fromHeadSha: GitShaSchema,
@@ -510,11 +510,11 @@ export const PRRecutSourceSchema = z
   })
   .strict()
   .readonly()
-export type PRRecutSource = Readonly<z.infer<typeof PRRecutSourceSchema>>
+export type ChangeRecutSource = Readonly<z.infer<typeof ChangeRecutSourceSchema>>
 
-export const PRRecutCertificateSchema = z.literal("frozen-code-carrier-v1")
+export const ChangeRecutCertificateSchema = z.literal("frozen-code-carrier-v1")
 
-export const PRRecutProofSchema = z
+export const ChangeRecutProofSchema = z
   .object({
     fromRevision: z.number().int().positive(),
     patchId: GitShaSchema,
@@ -522,16 +522,16 @@ export const PRRecutProofSchema = z
     reviewCarried: z.boolean(),
     /** Explicit proof contract for a frozen proposed code carrier. Mechanical
      * base-refresh recuts and legacy journal rows use their existing proof. */
-    certificate: PRRecutCertificateSchema.optional(),
+    certificate: ChangeRecutCertificateSchema.optional(),
     /** Durable non-ancestral identity mapping for the root and any rewritten
      * component heads. Missing only while replaying pre-provenance journals. */
-    sources: z.array(PRRecutSourceSchema).min(1).readonly().optional(),
-    transition: PRFreshnessTransitionSchema.optional(),
+    sources: z.array(ChangeRecutSourceSchema).min(1).readonly().optional(),
+    transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
+export type ChangeRecutProof = Readonly<z.infer<typeof ChangeRecutProofSchema>>
 
-export type PRRev = Readonly<{
+export type ChangeRev = Readonly<{
   n: number
   /** Missing only while replaying journals written before stable change identity. */
   changeId?: ChangeId
@@ -542,22 +542,22 @@ export type PRRev = Readonly<{
   submitter?: string
   correlation?: Correlation
   composition?: CompositionV1
-  recut?: PRRecutProof
+  recut?: ChangeRecutProof
   /** Admission is a verdict about this immutable revision, not a landing
    * attempt. A later base revalidation replaces it on the same revision. */
-  admission?: PRAdmission
+  admission?: ChangeAdmission
 }> &
-  PRRevClock
+  ChangeRevClock
 
-export const PRReviewDecisionSchema = z.enum(["approve", "reject"])
-export type PRReviewDecision = z.infer<typeof PRReviewDecisionSchema>
+export const ChangeReviewDecisionSchema = z.enum(["approve", "reject"])
+export type ChangeReviewDecision = z.infer<typeof ChangeReviewDecisionSchema>
 
-export const PRReviewSchema = z
+export const ChangeReviewSchema = z
   .object({
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     by: TextSchema,
-    decision: PRReviewDecisionSchema,
+    decision: ChangeReviewDecisionSchema,
     at: z.iso.datetime({ offset: true }),
     ref: TextSchema.optional(),
     note: TextSchema.optional(),
@@ -568,9 +568,9 @@ export const PRReviewSchema = z
       .optional(),
   })
   .strict()
-export type PRReview = Readonly<z.infer<typeof PRReviewSchema>>
+export type ChangeReview = Readonly<z.infer<typeof ChangeReviewSchema>>
 
-export type PRComment = Readonly<{
+export type ChangeComment = Readonly<{
   revision: number
   headSha: string
   by: string
@@ -579,20 +579,20 @@ export type PRComment = Readonly<{
   ref?: string
 }>
 
-export type PRReviewState = Readonly<{
+export type ChangeReviewState = Readonly<{
   approved: boolean
-  current?: PRReview
-  stale: readonly PRReview[]
+  current?: ChangeReview
+  stale: readonly ChangeReview[]
 }>
 
-export type PRCheckRequest = Readonly<{
+export type ChangeCheckRequest = Readonly<{
   revision: number
   headSha: string
   baseSha?: string
   at: string
 }>
 
-export type PRAlreadyLandedEvidence = Readonly<{
+export type ChangeAlreadyLandedEvidence = Readonly<{
   baseSha: string
   candidateSha: string
   candidateTreeSha: string
@@ -604,11 +604,11 @@ export type PRAlreadyLandedEvidence = Readonly<{
   }>
 }>
 
-export type PRRegressionSeverity = "low" | "medium" | "high" | "critical"
+export type ChangeRegressionSeverity = "low" | "medium" | "high" | "critical"
 
 /** One completed escaped-regression outcome. Implementation and review
  * provenance stay opaque; Yrd owns only their exact delivery join. */
-export type PRRegression = Readonly<{
+export type ChangeRegression = Readonly<{
   pr: PRId
   issueRef: string
   revision: number
@@ -616,7 +616,7 @@ export type PRRegression = Readonly<{
   run: string
   landingSha: string
   detectedAt: string
-  severity: PRRegressionSeverity
+  severity: ChangeRegressionSeverity
   evidence: string
   implementationRunRef: string
   reviewRef: string
@@ -651,16 +651,16 @@ export type PR = Readonly<{
    * refusal stands. */
   track?: boolean
   flow?: FlowPin
-  revs: readonly PRRev[]
-  reviews: readonly PRReview[]
-  comments: readonly PRComment[]
-  checkRequests: readonly PRCheckRequest[]
+  revs: readonly ChangeRev[]
+  reviews: readonly ChangeReview[]
+  comments: readonly ChangeComment[]
+  checkRequests: readonly ChangeCheckRequest[]
   /** Current requested-reviewer set (latest pr/review-requested fact wins;
    * revision-independent, so recuts and new revisions keep the request).
    * Optional like `regressions`: absent means no request was ever recorded,
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
-  regressions?: readonly PRRegression[]
+  regressions?: readonly ChangeRegression[]
   /** answers: Has this PR ever recorded author-owned refusal evidence? tense: historical.
    * Legacy pre-revision-admission projection. New refusal evidence lives on
    * `currentPRRev(pr).admission`; retained so old indexes remain readable. */
@@ -682,7 +682,7 @@ export type PR = Readonly<{
     changeId?: ChangeId
   }>
   alreadyLandedAt?: string
-  alreadyLanded?: PRAlreadyLandedEvidence
+  alreadyLanded?: ChangeAlreadyLandedEvidence
   withdrawnAt?: string
   withdrawReason?: string
   canceledAt?: string
@@ -691,7 +691,7 @@ export type PR = Readonly<{
   detail?: string
 }>
 
-export type ParsedPRSelector = Readonly<{
+export type ParsedChangeSelector = Readonly<{
   pr: PRId
   revision?: number
 }>
@@ -701,8 +701,8 @@ export type ParsedPRSelector = Readonly<{
  * uniformity). Only digits qualify for the bare form; any other bare token
  * stays outside this grammar and continues through the generic selector path,
  * so branch/name aliases remain reachable. A bare numeric that names no PR
- * also falls back to the alias path in {@link resolvePRMatch}. */
-export function parsePRSelector(selector: string): ParsedPRSelector | undefined {
+ * also falls back to the alias path in {@link resolveChangeMatch}. */
+export function parseChangeSelector(selector: string): ParsedChangeSelector | undefined {
   const match =
     /^pr#?([a-z0-9_-]+)(?:\.(\d+))?$/iu.exec(selector.trim()) ?? /^(\d+)(?:\.(\d+))?$/u.exec(selector.trim())
   const id = match?.[1]
@@ -726,24 +726,24 @@ export function parsePRSelector(selector: string): ParsedPRSelector | undefined 
  * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). A record that is not a PR
  * renders under its own id, which is what its kind rename will then change.
  */
-export function formatPRRevisionSelector(pr: PRId, revision: number | Pick<PRRev, "n">): string {
+export function formatChangeRevisionSelector(pr: PRId, revision: number | Pick<ChangeRev, "n">): string {
   const number = typeof revision === "number" ? revision : revision.n
-  if (!isPRRevisionSelector(pr)) return `${pr}.${number}`
-  const canonical = parsePRSelector(pr)?.pr ?? pr
+  if (!isChangeRevisionSelector(pr)) return `${pr}.${number}`
+  const canonical = parseChangeSelector(pr)?.pr ?? pr
   return `pr#${canonical.replace(/^PR/iu, "")}.${number}`
 }
 
 /**
  * Whether an id resolves to a real PR — the one question
- * {@link formatPRRevisionSelector} asks before spending the `pr#` prefix.
+ * {@link formatChangeRevisionSelector} asks before spending the `pr#` prefix.
  *
  * Exported so a JSX renderer asks the SAME question instead of deriving kind
  * from the string a second way. The selector grammar is resolved first (`182`
  * and `pr#182` both name PR182), then the RESOLVED id is judged by the schema —
  * never the raw spelling.
  */
-export function isPRRevisionSelector(pr: string): boolean {
-  return PRIdSchema.safeParse(parsePRSelector(pr)?.pr ?? pr).success
+export function isChangeRevisionSelector(pr: string): boolean {
+  return PRIdSchema.safeParse(parseChangeSelector(pr)?.pr ?? pr).success
 }
 
 /**
@@ -777,63 +777,63 @@ export function isPRRevisionSelector(pr: string): boolean {
  * association and the queue's legacy-terminal invariant are internal `throw`s
  * about a corrupt journal, not an operator whose selector found nothing.
  */
-export function prNotFoundMessage(state: BaysState, selector: string): string {
+export function changeNotFoundMessage(state: BaysState, selector: string): string {
   const searched = `searched ${Object.keys(state.prs).length} pull request(s)`
-  if (parsePRSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
+  if (parseChangeSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
     return `yrd: no PR '${selector}' — ${searched}`
   }
   const copiedId = /^(?:pr#?)?([a-z0-9_-]+)/iu.exec(selector.trim())?.[1]
   const copiedPr = copiedId === undefined ? undefined : state.prs[`PR${copiedId}`]
   const examplePr = copiedPr ?? Object.values(state.prs).toSorted((left, right) => compareNatural(left.id, right.id))[0]
-  const example = examplePr === undefined ? "pr#1.1" : formatPRRevisionSelector(examplePr.id, currentPRRev(examplePr))
+  const example = examplePr === undefined ? "pr#1.1" : formatChangeRevisionSelector(examplePr.id, currentChangeRev(examplePr))
   return `yrd: no PR '${selector}'; accepted form: ${example} — ${searched}`
 }
 
-export function currentPRRev(pr: Pick<PR, "id" | "revs">): PRRev {
+export function currentChangeRev(pr: Pick<PR, "id" | "revs">): ChangeRev {
   const revision = pr.revs.at(-1)
   if (revision === undefined) throw new Error(`yrd: PR '${pr.id}' has no revision`)
   return revision
 }
 
-export const prAdmission = (pr: Pick<PR, "id" | "revs">): PRAdmission | undefined => currentPRRev(pr).admission
+export const changeAdmission = (pr: Pick<PR, "id" | "revs">): ChangeAdmission | undefined => currentChangeRev(pr).admission
 
-export function prNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
+export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
   if (pr.needsAuthor !== undefined) return pr.needsAuthor
-  const admission = prAdmission(pr)
+  const admission = changeAdmission(pr)
   if (admission?.status !== "refused" || admission.kind !== "refusal") return undefined
   const failed = admission.steps.find((step) => step.status === "refused")
   return {
     at: admission.at,
-    run: failed?.job ?? `admission:${pr.id}:${currentPRRev(pr).n}`,
+    run: failed?.job ?? `admission:${pr.id}:${currentChangeRev(pr).n}`,
     step: admission.step,
     receipt: admission.receipt,
     detail: admission.receipt.message,
   }
 }
 
-export const prRevisionNumber = (pr: PR): number => currentPRRev(pr).n
-export const prHead = (pr: PR): string => currentPRRev(pr).head
-export const prBaseSha = (pr: PR): string | undefined => currentPRRev(pr).baseSha
-export const prCorrelation = (pr: PR): Correlation | undefined => currentPRRev(pr).correlation
-export const prComposition = (pr: PR): CompositionV1 | undefined => currentPRRev(pr).composition
-export const prRecut = (pr: PR): PRRecutProof | undefined => currentPRRev(pr).recut
+export const changeRevisionNumber = (pr: PR): number => currentChangeRev(pr).n
+export const changeHead = (pr: PR): string => currentChangeRev(pr).head
+export const changeBaseSha = (pr: PR): string | undefined => currentChangeRev(pr).baseSha
+export const changeCorrelation = (pr: PR): Correlation | undefined => currentChangeRev(pr).correlation
+export const changeComposition = (pr: PR): CompositionV1 | undefined => currentChangeRev(pr).composition
+export const changeRecut = (pr: PR): ChangeRecutProof | undefined => currentChangeRev(pr).recut
 
 /** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
-export function prDeliveryState(pr: PR): PRDeliveryState {
+export function changeDeliveryState(pr: PR): ChangeDeliveryState {
   if (pr.state === "closed") {
     if (pr.merged) return pr.alreadyLanded === undefined ? "integrated" : "already-landed"
     if (pr.canceledAt !== undefined) return "canceled"
     return "withdrawn"
   }
-  const revision = currentPRRev(pr)
-  if (prNeedsAuthor(pr) !== undefined) return "needs-author"
+  const revision = currentChangeRev(pr)
+  if (changeNeedsAuthor(pr) !== undefined) return "needs-author"
   if (revision.terminal?.kind === "rejected") return "rejected"
   if (revision.submittedAt === undefined) return "pushed"
   return revision.admission?.status === "passed" ? "ready" : "submitted"
 }
 
-export function reviewState(pr: PR): PRReviewState {
-  const revision = currentPRRev(pr)
+export function reviewState(pr: PR): ChangeReviewState {
+  const revision = currentChangeRev(pr)
   const current = pr.reviews.findLast((review) => review.revision === revision.n && review.headSha === revision.head)
   return {
     approved: current?.decision === "approve",
@@ -848,9 +848,9 @@ export function reviewState(pr: PR): PRReviewState {
  * Verdicts are revision-bound while requests are not, so a recut without a
  * carried review naturally reopens this projection. */
 export function needsReview(pr: PR, reviewer?: string): boolean {
-  const delivery = prDeliveryState(pr)
+  const delivery = changeDeliveryState(pr)
   if (delivery !== "submitted" && delivery !== "ready") return false
-  const revision = currentPRRev(pr)
+  const revision = currentChangeRev(pr)
   const requested = pr.requestedReviewers ?? []
   if (requested.length === 0) return false
   const hasCurrentVerdict = (by: string) =>
@@ -862,13 +862,13 @@ export function needsReview(pr: PR, reviewer?: string): boolean {
 /** Mechanically certified revision ancestry for one logical PR payload.
  * Ordinary authored revisions start a new lineage; recuts retain the source
  * revision through their persisted `fromRevision` proof. */
-export function prRevisionLineage(pr: PR, revision = currentPRRev(pr).n): readonly PRRev[] {
+export function changeRevisionLineage(pr: PR, revision = currentChangeRev(pr).n): readonly ChangeRev[] {
   const byRevision = new Map(pr.revs.map((candidate) => [candidate.n, candidate]))
   let current = byRevision.get(revision)
   if (current === undefined) {
     throw new Error(`yrd: PR '${pr.id}' has no retained revision ${revision}`)
   }
-  const lineage: PRRev[] = []
+  const lineage: ChangeRev[] = []
   const seen = new Set<number>()
   while (current !== undefined) {
     if (seen.has(current.n)) throw new Error(`yrd: PR '${pr.id}' has a cyclic rebuild history`)
@@ -888,8 +888,8 @@ export function prRevisionLineage(pr: PR, revision = currentPRRev(pr).n): readon
 
 /** First submitted clock for a mechanically identical payload, falling back
  * to its first immutable source-ready (`pushed`) clock before admission. */
-export function prSourceReadyAt(pr: PR, revision = currentPRRev(pr).n): string {
-  const source = prRevisionLineage(pr, revision)[0]
+export function changeSourceReadyAt(pr: PR, revision = currentChangeRev(pr).n): string {
+  const source = changeRevisionLineage(pr, revision)[0]
   if (source === undefined) throw new Error(`yrd: PR '${pr.id}' has no source-ready revision`)
   return source.submittedAt ?? source.pushedAt
 }
@@ -919,8 +919,8 @@ export function checksRequested(pr: PR): boolean {
  * against a base that is no longer main. `findLast` therefore returns the
  * newest request for this tree, which is the one whose base is current.
  */
-export function checkRequest(pr: PR): PRCheckRequest | undefined {
-  const revision = currentPRRev(pr)
+export function checkRequest(pr: PR): ChangeCheckRequest | undefined {
+  const revision = currentChangeRev(pr)
   return pr.checkRequests.findLast((request) => request.headSha === revision.head)
 }
 
@@ -1053,7 +1053,7 @@ function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string |
   // missing association falls back to branch-ref equality. This joins to the
   // submitter RECORDED on the exact-head revision — it never derives a seat
   // from the branch name, and any ambiguity stays unknown below.
-  const associated = prForBay(state, bay.id)
+  const associated = changeForBay(state, bay.id)
   const candidates =
     associated === undefined ? Object.values(state.prs).filter((pr) => pr.branch === bay.branch) : [associated]
   const revisions = candidates.flatMap((pr) => pr.revs.filter((revision) => revision.head === headSha))
@@ -1067,8 +1067,8 @@ function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string |
 export function projectBranchLifecycles(state: BaysState): readonly BranchLifecycle[] {
   return Object.values(state.byId)
     .map((bay): BranchLifecycle => {
-      const pr = prForBay(state, bay.id)
-      const current = pr === undefined ? undefined : currentPRRev(pr)
+      const pr = changeForBay(state, bay.id)
+      const current = pr === undefined ? undefined : currentChangeRev(pr)
       const lifecycleHead = bay.archive?.headSha ?? bay.headSha
       const submitter = submitterForLifecycleHead(state, bay, lifecycleHead)
       const base = {
@@ -1136,7 +1136,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
         bay.headSha !== undefined &&
         bay.handoff?.headSha === bay.headSha &&
         (pr === undefined ||
-          (current?.head === bay.headSha && ["pushed", "withdrawn", "canceled"].includes(prDeliveryState(pr))))
+          (current?.head === bay.headSha && ["pushed", "withdrawn", "canceled"].includes(changeDeliveryState(pr))))
       ) {
         return {
           ...base,
@@ -1158,7 +1158,7 @@ export function isLivePR(pr: PR): boolean {
   return pr.state === "open"
 }
 
-export function prForBay(state: BaysState, bay: BayId): PR | undefined {
+export function changeForBay(state: BaysState, bay: BayId): PR | undefined {
   return Object.values(state.prs).find((pr) => pr.bay === bay)
 }
 
@@ -1185,10 +1185,10 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
  * always addresses that specific PR, terminal or not, ahead of this preference.
  * Mutating verbs enforce the live requirement themselves via requireLivePR —
  * this primitive stays verb-agnostic and read-biased. */
-export type PRSelectorMatch = SelectorMatch<PR> & Readonly<{ revision?: PRRev }>
+export type ChangeSelectorMatch = SelectorMatch<PR> & Readonly<{ revision?: ChangeRev }>
 
-export function resolvePRMatch(state: BaysState, selector: string): PRSelectorMatch | undefined {
-  const parsed = parsePRSelector(selector)
+export function resolveChangeMatch(state: BaysState, selector: string): ChangeSelectorMatch | undefined {
+  const parsed = parseChangeSelector(selector)
   const candidates = Object.values(state.prs)
     .toSorted((left, right) => compareNatural(right.id, left.id))
     .map((pr) => {
@@ -1211,8 +1211,8 @@ export function resolvePRMatch(state: BaysState, selector: string): PRSelectorMa
   return revision === undefined ? undefined : { ...matched, revision }
 }
 
-function projectPRRevision(pr: PR, revision: PRRev): PR {
-  if (revision === currentPRRev(pr)) return pr
+function projectChangeRevision(pr: PR, revision: ChangeRev): PR {
+  if (revision === currentChangeRev(pr)) return pr
   const index = pr.revs.indexOf(revision)
   if (index < 0) return pr
   return {
@@ -1228,9 +1228,9 @@ function projectPRRevision(pr: PR, revision: PRRev): PR {
 }
 
 export function resolvePR(state: BaysState, selector: string): PR | undefined {
-  const matched = resolvePRMatch(state, selector)
+  const matched = resolveChangeMatch(state, selector)
   if (matched === undefined) return undefined
-  return matched.revision === undefined ? matched.value : projectPRRevision(matched.value, matched.revision)
+  return matched.revision === undefined ? matched.value : projectChangeRevision(matched.value, matched.revision)
 }
 
 declare const liveBrand: unique symbol
@@ -1250,13 +1250,13 @@ export type LivePR = PR & { readonly [liveBrand]: true }
  * boundary — resolvePR stays verb-agnostic and read-biased, so this is the one
  * shared guard every mutating verb routes through instead of hand-rolling it. */
 export function requireLivePR(state: BaysState, selector: string): LivePR {
-  const resolution = resolvePRMatch(state, selector)
+  const resolution = resolveChangeMatch(state, selector)
   if (resolution === undefined) {
-    raiseFailure("refusal", "pr-not-found", prNotFoundMessage(state, selector))
+    raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
   }
   const pr = resolution.value
   if (resolution.revision !== undefined) {
-    const current = currentPRRev(pr)
+    const current = currentChangeRev(pr)
     if (resolution.revision.n !== current.n) {
       raiseFailure(
         "refusal",

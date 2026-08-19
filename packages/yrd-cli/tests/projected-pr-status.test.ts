@@ -16,10 +16,10 @@
  * already-landed, and NEVER by withdrawn, integrated or canceled. So the stored
  * fact outlives every closing path and wins over the observation.
  */
-import { prDeliveryState, type PR } from "@yrd/bay"
-import type { PREligibility } from "@yrd/queue"
+import { changeDeliveryState, type PR } from "@yrd/bay"
+import type { changeEligibility } from "@yrd/queue"
 import { describe, expect, it } from "vitest"
-import { projectedPrStatus } from "../src/queue-status-view.tsx"
+import { projectedChangeStatus } from "../src/queue-status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "b".repeat(40)
@@ -59,20 +59,20 @@ const CLOSED_CASES = [
 
 describe("projectedPrStatus", () => {
   it.each(CLOSED_CASES)("a %s PR never reports needs-author, however stale the stored fact", (_label, closed, want) => {
-    expect(projectedPrStatus(closed)).toBe(want)
+    expect(projectedChangeStatus(closed)).toBe(want)
   })
 
   // The eligibility argument is a second door into the same wrong answer: a
   // stale reason code must not resurrect an open-only value on a closed record.
   it("refuses to resurrect needs-author from a stale eligibility reason", () => {
-    const eligibility = { reason: { code: "needs-author" } } as unknown as PREligibility
-    expect(projectedPrStatus(pr({ state: "closed" }), eligibility)).toBe("withdrawn")
+    const eligibility = { reason: { code: "needs-author" } } as unknown as changeEligibility
+    expect(projectedChangeStatus(pr({ state: "closed" }), eligibility)).toBe("withdrawn")
   })
 
   // The regression guard in the other direction. needs-author is a real and
   // useful answer while the PR is open, and this fix must not cost us that.
   it("still reports needs-author while the PR is open", () => {
-    expect(projectedPrStatus(pr({}))).toBe("needs-author")
+    expect(projectedChangeStatus(pr({}))).toBe("needs-author")
   })
 
   // The general invariant, and the one worth keeping if the cases above ever
@@ -80,6 +80,6 @@ describe("projectedPrStatus", () => {
   // other about a closed record. Whatever prDeliveryState says a closed PR is,
   // the projection says the same.
   it.each(CLOSED_CASES)("agrees with prDeliveryState on a %s PR", (_label, closed) => {
-    expect(projectedPrStatus(closed)).toBe(prDeliveryState(closed))
+    expect(projectedChangeStatus(closed)).toBe(changeDeliveryState(closed))
   })
 })

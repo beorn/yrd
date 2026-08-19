@@ -11,7 +11,7 @@ import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { currentPRRev, prBaseSha, prDeliveryState } from "@yrd/bay"
+import { currentChangeRev, changeBaseSha, changeDeliveryState } from "@yrd/bay"
 import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
@@ -1254,7 +1254,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       try {
         const restoredPR = restored.state().bays.prs.PR1!
         expect(restoredPR).toMatchObject({ branch: "issue/feature" })
-        expect(currentPRRev(restoredPR)).toMatchObject({ head: featureSha })
+        expect(currentChangeRev(restoredPR)).toMatchObject({ head: featureSha })
         expect(events).toContainEqual(
           expect.objectContaining({
             kind: "span",
@@ -1653,7 +1653,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const submittedPR = app.state().bays.prs.PR1!
     expect(submittedPR).toMatchObject({ base: "main" })
-    expect(prBaseSha(submittedPR)).toBe(baseSha)
+    expect(changeBaseSha(submittedPR)).toBe(baseSha)
     await expect(
       app.bays.submit({ branch: "origin/issue/feature", headSha: featureSha, base: "main" }),
     ).rejects.toThrow("payload already recorded as PR 'PR1'")
@@ -1882,8 +1882,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       run: { runner: "test", leaseMs: 60_000 },
     })
 
-    expect(currentPRRev(submitted)).toMatchObject({ n: 1, head: featureSha, baseSha: remoteBaseSha })
-    expect(prDeliveryState(submitted)).toBe("submitted")
+    expect(currentChangeRev(submitted)).toMatchObject({ n: 1, head: featureSha, baseSha: remoteBaseSha })
+    expect(changeDeliveryState(submitted)).toBe("submitted")
     expect(await git(repo, "rev-parse", "main")).toBe(localBaseSha)
     expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
@@ -1926,7 +1926,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         prs: [expect.objectContaining({ id: "PR1" })],
       }),
     ])
-    expect(prDeliveryState(queueHost.state().bays.prs.PR1!)).toBe("integrated")
+    expect(changeDeliveryState(queueHost.state().bays.prs.PR1!)).toBe("integrated")
   })
 
   it("uses steps.merge.run as the configured merge step", async () => {
@@ -2016,7 +2016,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       issue: "@yrd/core/atomic-submit",
       branch: "issue/@yrd/core/atomic-submit",
     })
-    expect(prDeliveryState(pr!)).toBe("submitted")
+    expect(changeDeliveryState(pr!)).toBe("submitted")
     expect(reopened.app.bays.checksRequested(pr!.id)).toBe(true)
 
     const transactions = (await journalEnvelope(repo))
@@ -3345,8 +3345,8 @@ checks: [{check: {run: "true"}}]
     const reopened = await createYrdHost({ cwd: repo })
     const reopenedPR = reopened.app.state().bays.prs.PR1!
     expect(reopenedPR).toMatchObject({ branch: "issue/feature", state: "open", merged: false })
-    expect(currentPRRev(reopenedPR)).toMatchObject({ head: headSha })
-    expect(prDeliveryState(reopenedPR)).toBe("submitted")
+    expect(currentChangeRev(reopenedPR)).toMatchObject({ head: headSha })
+    expect(changeDeliveryState(reopenedPR)).toBe("submitted")
     await reopened.close()
   })
 

@@ -6,7 +6,7 @@ import type { PR } from "@yrd/bay"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, test } from "vitest"
-import { PRDetailView } from "../src/queue-status-view.tsx"
+import { ChangeDetailView } from "../src/queue-status-view.tsx"
 import { composeDescription } from "../src/run.ts"
 
 const BASE_SHA = "a".repeat(40)
@@ -32,7 +32,7 @@ function fixturePr(description: string, extra: Partial<PR> = {}): PR {
 }
 
 async function renderDetail(pr: PR, width = 80): Promise<string> {
-  return renderString(createElement(PRDetailView, { pr, runs: [], now: Date.parse("2026-07-20T10:00:00.000Z") }), {
+  return renderString(createElement(ChangeDetailView, { pr, runs: [], now: Date.parse("2026-07-20T10:00:00.000Z") }), {
     width,
     plain: true,
   })

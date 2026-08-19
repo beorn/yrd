@@ -1,5 +1,5 @@
 import { dirname } from "node:path"
-import type { PRDeliveryState } from "@yrd/bay"
+import type { ChangeDeliveryState } from "@yrd/bay"
 import { failureSlug } from "./failure-slug.ts"
 import { retainedWorkspaceFromMessage, type RetainedWorkspace } from "./workspace-retention.ts"
 
@@ -25,7 +25,7 @@ export type ActionableFailure = Readonly<{
  * delivery state refuses is a wrong instruction, not a hint (22396). Callers
  * that hold the PR thread its state; callers that do not get the remedy no
  * state refuses. */
-export type ActionableFailureContext = Readonly<{ delivery?: PRDeliveryState }>
+export type ActionableFailureContext = Readonly<{ delivery?: ChangeDeliveryState }>
 
 const GENERIC_RESOLUTION = "Correct the cause above, then retry the same Yrd command."
 
@@ -93,7 +93,7 @@ function prId(message: string): string | undefined {
 /** `yrd pr recut` refuses a terminal PR outright (`terminal-target`): an
  * integrated/already-landed identity is frozen evidence and a
  * withdrawn/canceled one is reopened by resubmitting its branch, not recut. */
-const RECUT_REFUSING_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDeliveryState>([
+const RECUT_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
   "integrated",
   "already-landed",
   "withdrawn",
@@ -103,7 +103,7 @@ const RECUT_REFUSING_STATES: ReadonlySet<PRDeliveryState> = new Set<PRDeliverySt
 /** Whether `yrd pr recut` is refused outright by this delivery state. The one
  * home for the fact, so a caller that decides whether a printed remedy can be
  * applied mechanically reads the same answer the printer used. */
-export function recutRefusedByDelivery(delivery: PRDeliveryState | undefined): boolean {
+export function recutRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
   return delivery !== undefined && RECUT_REFUSING_STATES.has(delivery)
 }
 
@@ -117,16 +117,16 @@ export function recutRefusedByDelivery(delivery: PRDeliveryState | undefined): b
  * submitted/needs-author PR records a fresh revision, a rejected one resumes,
  * a withdrawn/canceled one reopens, and a landed branch mints a fresh
  * delivery), so it is also the safe answer when the state is unknown. */
-function recordCommand(delivery: PRDeliveryState | undefined): string {
+function recordCommand(delivery: ChangeDeliveryState | undefined): string {
   return delivery === "pushed" ? "yrd pr create <branch>" : "yrd pr submit <branch>"
 }
 
-function recutSteps(pr: string, delivery: PRDeliveryState | undefined): readonly string[] {
+function recutSteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
   if (recutRefusedByDelivery(delivery)) return []
   return [`yrd pr recut ${pr} --preflight --queue --apply`]
 }
 
-function redeliverySteps(pr: string, delivery: PRDeliveryState | undefined): readonly string[] {
+function redeliverySteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
   return [recordCommand(delivery), ...recutSteps(pr, delivery)]
 }
 
