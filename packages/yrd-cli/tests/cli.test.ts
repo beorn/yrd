@@ -7874,7 +7874,7 @@ describe("runYrd", () => {
       )
       try {
         expect(
-          JSON.parse(readFileSync(statusPath, "utf8")).staleDrafts,
+          (JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ staleDrafts: unknown }>).staleDrafts,
           "a real finding exists at +1h, but must stay quiet below the page threshold",
         ).toEqual([])
       } finally {
@@ -7897,7 +7897,7 @@ describe("runYrd", () => {
         },
       )
       try {
-        const written = JSON.parse(readFileSync(statusPath, "utf8"))
+        const written = JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ staleDrafts: unknown }>
         expect(written.staleDrafts).toMatchObject([
           {
             code: "draft-stranded",
@@ -7980,7 +7980,11 @@ describe("runYrd", () => {
       // of whether anything else about the runner is fine or broken.
       const json = outputIO({ cwd: repo, now: () => Date.parse("2026-07-09T16:30:10.000Z") })
       const jsonExit = await runYrd(app, yrd("queue", "list", "--check", "--json"), json.io, services)
-      const body = JSON.parse(json.stdout())
+      const body = JSON.parse(json.stdout()) as Readonly<{
+        state: unknown
+        facts: Readonly<{ runner: Readonly<{ staleDrafts: unknown }> }>
+        warnings: unknown
+      }>
       expect(jsonExit, JSON.stringify(body)).toBe(1)
       expect(body.state).toBe("absent")
       expect(body.facts.runner.staleDrafts).toEqual([finding])
@@ -8011,13 +8015,13 @@ describe("runYrd", () => {
       const quiet = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
       expect(await runYrd(app, yrd("queue", "list", "--json"), quiet.io), quiet.stderr()).toBe(0)
       expect(
-        JSON.parse(quiet.stdout()).warnings,
+        (JSON.parse(quiet.stdout()) as Readonly<{ warnings?: unknown }>).warnings,
         "a real finding at +1h must stay quiet below the 4h default page threshold",
       ).toBeUndefined()
 
       const paging = outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z") })
       expect(await runYrd(app, yrd("queue", "list", "--json"), paging.io), paging.stderr()).toBe(0)
-      const pagingBody = JSON.parse(paging.stdout())
+      const pagingBody = JSON.parse(paging.stdout()) as Readonly<{ warnings: readonly string[] }>
       expect(pagingBody.warnings).toHaveLength(1)
       expect(pagingBody.warnings[0]).toContain("[draft-stranded]")
       expect(pagingBody.warnings[0]).toContain("@dev/7")
