@@ -18,7 +18,7 @@ import {
   type ActionableFailure,
 } from "../src/actionable-error.ts"
 import { diagnostic } from "../src/output.tsx"
-import { changeDetailData, QueueShowView, queueShowData } from "../src/queue-status-view.tsx"
+import { ChangeDetailData, QueueShowView, queueShowData } from "../src/queue-status-view.tsx"
 
 const BASE_ROOT = "a".repeat(40)
 const AUTHORED_ROOT = "b".repeat(40)
@@ -271,7 +271,7 @@ describe("22396 — state-aware remedies", () => {
       steps: [fixtureStep("merge", fixtureJob("J42", "failed", { error: { ...AUTHORED_GITLINK } }))],
     })
 
-    const detail = changeDetailData(pr, [run])
+    const detail = ChangeDetailData(pr, [run])
     const projected = detail.runs[0]
     expect(projected?.failure?.resolution).toEqual(["yrd intent submit --component vendor/yrd --issue <issue-ref>"])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)

@@ -4,7 +4,7 @@ import type { Yrd } from "@yrd/core"
 import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type {
   MergeRecordEstateRepair,
-  GitPRRecutter,
+  GitChangeRemerger,
   HasQueue,
   QueueAuditEmission,
   QueueCommands,
@@ -122,7 +122,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> &
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   queueReadModel?: QueueReadModel
-  recut?: GitPRRecutter
+  recut?: GitChangeRemerger
   mergeRecords?: Readonly<{
     find(selector: string): Promise<RepositoryMergeRecordSearchResult>
     /** Every verified merge record on the configured base, for bulk index reconstruction. */

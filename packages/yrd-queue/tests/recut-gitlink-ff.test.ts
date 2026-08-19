@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
-import { createGitPRRecutter } from "@yrd/queue"
+import { createGitChangeRemerger } from "@yrd/queue"
 
 const roots: string[] = []
 
@@ -200,7 +200,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
     const dirtyBefore = await git(repo, ["status", "--porcelain"])
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -233,7 +233,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
       const dirtyBefore = await git(repo, ["status", "--porcelain"])
       await using process = createProcess()
-      const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -266,7 +266,7 @@ describe("recut fast-forward gitlink resolution", () => {
     const target = await advanceBase(repo, moduleC)
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -344,7 +344,7 @@ describe("recut fast-forward gitlink resolution", () => {
     }
 
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/bytes",
         base: "main",
@@ -384,7 +384,7 @@ describe("recut fast-forward gitlink resolution", () => {
     await chmod(hook, 0o755)
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -408,7 +408,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
     await using process = createProcess()
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -437,7 +437,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
     const dirtyBefore = await git(repo, ["status", "--porcelain"])
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -468,7 +468,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
       const dirtyBefore = await git(repo, ["status", "--porcelain"])
       await using process = createProcess()
-      const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -502,7 +502,7 @@ describe("recut fast-forward gitlink resolution", () => {
     await git(repo, ["cherry-pick", headSha])
     const target = await git(repo, ["rev-parse", "HEAD"])
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -545,7 +545,7 @@ describe("recut fast-forward gitlink resolution", () => {
     await chmod(hook, 0o755)
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -571,7 +571,7 @@ describe("recut fast-forward gitlink resolution", () => {
     const targetSha = await advanceBase(repo, moduleC)
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/source",
       base: "main",
@@ -633,7 +633,7 @@ describe("recut fast-forward gitlink resolution", () => {
     }
 
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/source",
         base: "main",
@@ -663,7 +663,7 @@ describe("recut fast-forward gitlink resolution", () => {
     const targetSha = await advanceBase(repo, moduleC)
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/source",
       base: "main",
@@ -711,7 +711,7 @@ describe("recut fast-forward gitlink resolution", () => {
     const dirtyBefore = await git(repo, ["status", "--porcelain"])
     await using process = createProcess()
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -781,7 +781,7 @@ describe("recut fast-forward gitlink resolution", () => {
     const dirtyBefore = await git(repo, ["status", "--porcelain"])
     await using delegate = createProcess()
     const { process, initialRebases, conflictResolutions } = scratchAutoFfProcess(delegate)
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -843,7 +843,7 @@ describe("recut fast-forward gitlink resolution", () => {
     }
 
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -874,7 +874,7 @@ describe("recut fast-forward gitlink resolution", () => {
     await using delegate = createProcess()
     const { process } = scratchAutoFfProcess(delegate)
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -904,7 +904,7 @@ describe("recut fast-forward gitlink resolution", () => {
     const dirtyBefore = await git(repo, ["status", "--porcelain"])
     await using process = createProcess()
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",
@@ -932,7 +932,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
     await using process = createProcess()
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/feature",
         base: "main",

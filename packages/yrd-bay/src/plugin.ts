@@ -44,8 +44,8 @@ import {
   PRIdSchema,
   ChangeFreshnessTransitionSchema,
   ChangeAdmissionRecordedFactSchema,
-  ChangeRecutCertificateSchema,
-  ChangeRecutSourceSchema,
+  ChangeRemergeCertificateSchema,
+  ChangeRemergeSourceSchema,
   ChangeReviewDecisionSchema,
   ChangeReviewSchema,
   ChangeNeedsAuthorFactSchema,
@@ -73,7 +73,7 @@ import {
   requireLivePR,
   changeHead,
   changeNeedsAuthor,
-  changeRecut,
+  changeRemerge,
   changeRevisionNumber,
   ChangeCheckabilityConflict,
   projectBranchLifecycles,
@@ -95,7 +95,7 @@ import {
   type ChangeAdmissionRecordedFact,
   type ChangeComment,
   type ChangeRegression,
-  type ChangeRecutProof,
+  type ChangeRemergeProof,
   type ChangeReview,
   type ChangeReviewState,
   type ChangeRev,
@@ -276,7 +276,7 @@ export type ChangeEditArgs = z.infer<typeof ChangeEditArgsSchema>
 
 const ChangeReadyArgsSchema = z.object({ pr: TextSchema, expectedCurrent: ChangeExpectedCurrentSchema.optional() }).strict()
 export type ChangeReadyArgs = z.infer<typeof ChangeReadyArgsSchema>
-const ChangeRecutExpectedCurrentSchema = z
+const ChangeRemergeExpectedCurrentSchema = z
   .object({
     revision: RevisionSchema,
     headSha: GitShaSchema,
@@ -285,7 +285,7 @@ const ChangeRecutExpectedCurrentSchema = z
     checksPassed: z.boolean().optional(),
   })
   .strict()
-const ChangeRecutArgsSchema = z
+const ChangeRemergeArgsSchema = z
   .object({
     pr: TextSchema,
     fromRevision: RevisionSchema,
@@ -294,14 +294,14 @@ const ChangeRecutArgsSchema = z
     treeSha: GitShaSchema,
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
-    certificate: ChangeRecutCertificateSchema.optional(),
-    sources: z.array(ChangeRecutSourceSchema).min(1).readonly().optional(),
+    certificate: ChangeRemergeCertificateSchema.optional(),
+    sources: z.array(ChangeRemergeSourceSchema).min(1).readonly().optional(),
     composition: CompositionV1Schema.optional(),
-    expectedCurrent: ChangeRecutExpectedCurrentSchema.optional(),
+    expectedCurrent: ChangeRemergeExpectedCurrentSchema.optional(),
     transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-export type ChangeRecutArgs = z.infer<typeof ChangeRecutArgsSchema>
+export type ChangeRemergeArgs = z.infer<typeof ChangeRemergeArgsSchema>
 const ChangeSettleSupersededArgsSchema = z
   .object({
     pr: TextSchema,
@@ -426,10 +426,10 @@ const LegacyChangePushedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const ChangeRecutLineageSchema = z
+const ChangeRemergeLineageSchema = z
   .object({ revision: RevisionSchema, headSha: GitShaSchema, baseSha: GitShaSchema.optional() })
   .strict()
-const ChangeRecutReplaySchema = z
+const ChangeRemergeReplaySchema = z
   .object({
     pr: PRIdSchema,
     fromRevision: RevisionSchema,
@@ -437,16 +437,16 @@ const ChangeRecutReplaySchema = z
     baseSha: GitShaSchema,
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
-    certificate: ChangeRecutCertificateSchema.optional(),
+    certificate: ChangeRemergeCertificateSchema.optional(),
     submitter: TextSchema.optional(),
-    sources: z.array(ChangeRecutSourceSchema).min(1).readonly().optional(),
-    predecessor: ChangeRecutLineageSchema,
-    successor: ChangeRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
+    sources: z.array(ChangeRemergeSourceSchema).min(1).readonly().optional(),
+    predecessor: ChangeRemergeLineageSchema,
+    successor: ChangeRemergeLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
     composition: CompositionV1Schema.optional(),
     transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-const ChangeRecutFactSchema = ChangeRecutReplaySchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict()
+const ChangeRemergeFactSchema = ChangeRemergeReplaySchema.extend({ changeId: ChangeIdSchema, submitter: TextSchema }).strict()
 const ChangePushedV1Schema = z.preprocess(
   normalizeV2Submitter,
   LegacyChangePushedSchema.extend({ submitter: TextSchema }).strict(),
@@ -730,7 +730,7 @@ export type BayCommands = Readonly<{
   pr: Readonly<{
     close: CommandHandler<ChangeCloseArgs, BayState>
     edit: CommandHandler<ChangeEditArgs, BayState>
-    recut: CommandHandler<ChangeRecutArgs, BayState>
+    recut: CommandHandler<ChangeRemergeArgs, BayState>
     settleSuperseded: CommandHandler<ChangeSettleSupersededArgs, BayState>
     ready: CommandHandler<ChangeReadyArgs, BayState>
     review: CommandHandler<ChangeReviewArgs, BayState>
@@ -764,7 +764,7 @@ export type Bays = Readonly<{
   close(args: CloseBayArgs): Promise<CommandResult>
   closePr(args: ChangeCloseArgs): Promise<CommandResult>
   editPr(args: ChangeEditArgs): Promise<CommandResult>
-  recut(args: ChangeRecutArgs): Promise<CommandResult>
+  recut(args: ChangeRemergeArgs): Promise<CommandResult>
   settleSuperseded(args: ChangeSettleSupersededArgs): Promise<CommandResult>
   ready(args: ChangeReadyArgs): Promise<CommandResult>
   review(args: ChangeReviewArgs): Promise<CommandResult>
@@ -1359,7 +1359,7 @@ export function withBays(options: WithBaysOptions) {
         "bay/orphaned": journalEvent(1, BayOrphanedSchema),
         "bay/handoff-certified": journalEvent(1, BayHandoffCertifiedSchema),
         "pr/pushed": journalEvent(2, ChangePushedSchema),
-        "pr/recut": journalEvent(3, ChangeRecutFactSchema),
+        "pr/recut": journalEvent(3, ChangeRemergeFactSchema),
         "pr/submitted": journalEvent(1, ChangeRevisionSchema),
         "pr/correlation-bound": journalEvent(1, ChangeCorrelationBoundSchema),
         "pr/withdrawn": journalEvent(1, ChangeWithdrawnSchema),
@@ -1381,7 +1381,7 @@ export function withBays(options: WithBaysOptions) {
       },
       replayEvents: {
         "pr/pushed": ChangePushedReplaySchema,
-        "pr/recut": ChangeRecutReplaySchema,
+        "pr/recut": ChangeRemergeReplaySchema,
         "pr/submitted": LegacyChangeRevisionSchema,
         "pr/withdrawn": z.union([ChangeWithdrawnSchema, LegacyChangeWithdrawnSchema]),
         "pr/needs-author": ChangeNeedsAuthorFactSchema,
@@ -1518,8 +1518,8 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
       recut: command({
         title: "Record a mechanically equivalent PR recut",
         visibility: "public",
-        params: ChangeRecutArgsSchema,
-        apply: (state: BayState, args: ChangeRecutArgs) => recutPr(state, args, defaultSubmitter),
+        params: ChangeRemergeArgsSchema,
+        apply: (state: BayState, args: ChangeRemergeArgs) => remergePr(state, args, defaultSubmitter),
       }),
       settleSuperseded: command({
         title: "Settle a queued PR whose payload current main already contains",
@@ -2199,7 +2199,7 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSup
   }
 }
 
-function recutPr(state: DeepReadonly<BayState>, args: ChangeRecutArgs, defaultSubmitter: string) {
+function remergePr(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defaultSubmitter: string) {
   const pr: LivePR = requireLivePR(state.bays, args.pr)
   if (!isLivePR(pr)) {
     raiseFailure(
@@ -2232,21 +2232,21 @@ function recutPr(state: DeepReadonly<BayState>, args: ChangeRecutArgs, defaultSu
       )
     }
   }
-  const recut = changeRecut(pr)
+  const remerge = changeRemerge(pr)
   const payloadUnchanged =
     changeHead(pr) === args.headSha &&
     changeBaseSha(pr) === args.baseSha &&
     sameComposition(changeComposition(pr), args.composition)
   const unchanged =
     payloadUnchanged &&
-    recut?.fromRevision === args.fromRevision &&
-    recut.patchId === args.patchId &&
-    recut.treeSha === args.treeSha &&
-    recut.reviewCarried === args.reviewCarried &&
-    recut.certificate === args.certificate &&
-    JSON.stringify(recut.sources) === JSON.stringify(args.sources) &&
-    recut.transition?.from === args.transition?.from &&
-    recut.transition?.to === args.transition?.to
+    remerge?.fromRevision === args.fromRevision &&
+    remerge.patchId === args.patchId &&
+    remerge.treeSha === args.treeSha &&
+    remerge.reviewCarried === args.reviewCarried &&
+    remerge.certificate === args.certificate &&
+    JSON.stringify(remerge.sources) === JSON.stringify(args.sources) &&
+    remerge.transition?.from === args.transition?.from &&
+    remerge.transition?.to === args.transition?.to
   if (args.expectedCurrent?.track !== undefined && (pr.track ?? false) !== args.expectedCurrent.track) {
     raiseFailure(
       "refusal",
@@ -2898,32 +2898,32 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
     }
     case "pr/recut": {
-      const parsed = ChangeRecutFactSchema.safeParse(data)
-      const recut = parsed.success ? parsed.data : ChangeRecutReplaySchema.parse(data)
-      const pr = current.prs[recut.pr]
-      if (pr === undefined) throw new Error(`yrd: no merge request '${recut.pr}' to rebuild`)
+      const parsed = ChangeRemergeFactSchema.safeParse(data)
+      const remerge = parsed.success ? parsed.data : ChangeRemergeReplaySchema.parse(data)
+      const pr = current.prs[remerge.pr]
+      if (pr === undefined) throw new Error(`yrd: no merge request '${remerge.pr}' to rebuild`)
       const predecessor = pr.revs.find(
-        (revision) => revision.n === recut.predecessor.revision && revision.head === recut.predecessor.headSha,
+        (revision) => revision.n === remerge.predecessor.revision && revision.head === remerge.predecessor.headSha,
       )
       if (
         predecessor === undefined ||
-        recut.fromRevision !== recut.predecessor.revision ||
-        predecessor.baseSha !== recut.predecessor.baseSha ||
-        recut.successor.revision !== changeRevisionNumber(pr) + 1
+        remerge.fromRevision !== remerge.predecessor.revision ||
+        predecessor.baseSha !== remerge.predecessor.baseSha ||
+        remerge.successor.revision !== changeRevisionNumber(pr) + 1
       ) {
         throw new Error(`yrd: rebuild history does not match merge request '${pr.id}'`)
       }
-      const proof: ChangeRecutProof = {
-        fromRevision: recut.fromRevision,
-        patchId: recut.patchId,
-        treeSha: recut.treeSha,
-        reviewCarried: recut.reviewCarried,
-        ...(recut.certificate === undefined ? {} : { certificate: recut.certificate }),
-        ...(recut.sources === undefined ? {} : { sources: recut.sources }),
-        ...(recut.transition === undefined ? {} : { transition: recut.transition }),
+      const proof: ChangeRemergeProof = {
+        fromRevision: remerge.fromRevision,
+        patchId: remerge.patchId,
+        treeSha: remerge.treeSha,
+        reviewCarried: remerge.reviewCarried,
+        ...(remerge.certificate === undefined ? {} : { certificate: remerge.certificate }),
+        ...(remerge.sources === undefined ? {} : { sources: remerge.sources }),
+        ...(remerge.transition === undefined ? {} : { transition: remerge.transition }),
       }
       const correlation = predecessor.correlation
-      const submitter = recut.submitter ?? predecessor.submitter
+      const submitter = remerge.submitter ?? predecessor.submitter
       // An admission is a verdict about a tree merged into a base. A rebuild
       // that lands on the identical head AND the identical certified base has
       // not changed either, so the verdict is still about this revision's
@@ -2937,18 +2937,18 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       // revision 66). Any real change moves the head or the base and correctly
       // leaves the new revision unadmitted.
       const carriedAdmission =
-        recut.successor.headSha === predecessor.head && recut.successor.baseSha === predecessor.baseSha
+        remerge.successor.headSha === predecessor.head && remerge.successor.baseSha === predecessor.baseSha
           ? predecessor.admission
           : undefined
       const revision: ChangeRev = {
-        n: recut.successor.revision,
+        n: remerge.successor.revision,
         ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
-        head: recut.successor.headSha,
+        head: remerge.successor.headSha,
         base: pr.base,
-        baseSha: recut.successor.baseSha,
+        baseSha: remerge.successor.baseSha,
         ...(submitter === undefined ? {} : { submitter }),
         ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
-        ...(recut.composition === undefined ? {} : { composition: recut.composition }),
+        ...(remerge.composition === undefined ? {} : { composition: remerge.composition }),
         ...(carriedAdmission === undefined ? {} : { admission: carriedAdmission }),
         recut: proof,
         pushedAt: applied.ts,
@@ -2957,11 +2957,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         (review) => review.revision === predecessor.n && review.headSha === predecessor.head,
       )
       const approval = effectiveReview?.decision === "approve" ? effectiveReview : undefined
-      if (recut.reviewCarried && approval === undefined) {
+      if (remerge.reviewCarried && approval === undefined) {
         throw new Error(`yrd: PR '${pr.id}' rebuild carries a missing approval`)
       }
       const carriedReview: ChangeReview | undefined =
-        recut.reviewCarried && approval !== undefined
+        remerge.reviewCarried && approval !== undefined
           ? {
               revision: revision.n,
               headSha: revision.head,

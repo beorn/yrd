@@ -5,7 +5,7 @@
 import { changeBaseSha, changeHead, changeRevisionNumber, type PR } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { describe, expect, test } from "vitest"
-import { changeDetailData } from "../src/queue-status-view.tsx"
+import { ChangeDetailData } from "../src/queue-status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 
@@ -67,14 +67,14 @@ describe("prDetailData related runs", () => {
   const runs = [pr1RetryRun, pr2Run, pr1LatestRun]
 
   test("includes only runs the PR is a member of, keeping order", () => {
-    const detail = changeDetailData(pr1, runs)
+    const detail = ChangeDetailData(pr1, runs)
 
     expect(detail.runs.map((run) => run.run)).toEqual(["R1", "R3"])
     expect(detail.run?.run).toBe("R3")
   })
 
   test("a sibling PR sees only its own runs", () => {
-    const detail = changeDetailData(pr2, runs)
+    const detail = ChangeDetailData(pr2, runs)
 
     expect(detail.runs.map((run) => run.run)).toEqual(["R2"])
     expect(detail.run?.run).toBe("R2")

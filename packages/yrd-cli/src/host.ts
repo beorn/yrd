@@ -60,7 +60,7 @@ import {
   configuredWaitingCommandStep,
   createCandidatePool,
   createCandidatePoolGit,
-  createGitPRRecutter,
+  createGitChangeRemerger,
   gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
@@ -82,7 +82,7 @@ import {
   type InstalledStep,
   type IntegratedShape,
   type PinIntentProvisioner,
-  type changeShape,
+  type ChangeShape,
   type QueueAuditEmission,
   type StepDef,
   type StepExecution,
@@ -193,7 +193,7 @@ export function createPostureQueueTargetResolver(
   }
 }
 
-type RuntimeStep = StepDef<changeShape, changeShape>
+type RuntimeStep = StepDef<ChangeShape, ChangeShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 /** Durable production predecessors: the pre-restore two-check checkpoint, the
@@ -819,7 +819,7 @@ function contestEvaluatorRevision(
     .digest("hex")
 }
 
-function eraseStep<Input extends changeShape, Output extends changeShape>(step: StepDef<Input, Output>): RuntimeStep {
+function eraseStep<Input extends ChangeShape, Output extends ChangeShape>(step: StepDef<Input, Output>): RuntimeStep {
   return step as unknown as RuntimeStep
 }
 
@@ -2687,7 +2687,7 @@ async function createYrdRuntimeHost(
         // and steps this process actually installed — never re-derived from config.
         () => ({ batchSize: runtimeApp.queue.state().batchSize, steps: runtimeApp.queue.steps() }),
       ),
-      recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
+      recut: createGitChangeRemerger({ inject: { process }, repo: repository.repo, env }),
       mergeRecords: Object.freeze({
         async find(selector: string) {
           return findRepositoryMergeRecords({

@@ -8,7 +8,7 @@ import type { YrdCliIO, YrdCliServices } from "./types.ts"
 const GIT_TIMEOUT_MS = 30_000
 const MAX_COMMIT_ROWS = 20
 
-type RecutBranchFreshnessOptions = Readonly<{
+type RemergeBranchFreshnessOptions = Readonly<{
   revision?: number
   queue?: boolean
   transition?: unknown
@@ -55,7 +55,7 @@ async function freshRemoteBranch(
 async function liveBranchHead(
   pr: PR,
   recorded: ChangeRev,
-  options: RecutBranchFreshnessOptions,
+  options: RemergeBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,
   io: YrdCliIO,
 ): Promise<string> {
@@ -168,7 +168,7 @@ async function commitTree(services: Pick<YrdCliServices, "process">, io: YrdCliI
 /** Either the recut may proceed on its recorded source, or the PR opted into
  * tracking and its branch moved, so the caller must re-record the live head
  * before continuing. Every other drift already refused inside the check. */
-export type RecutBranchFreshness =
+export type RemergeBranchFreshness =
   | Readonly<{ status: "fresh" }>
   | Readonly<{ status: "tracked-drift"; recorded: ChangeRev; liveHead: string }>
 
@@ -183,13 +183,13 @@ export type RecutBranchFreshness =
  * records the new revision — the same operation an operator performs by hand —
  * and continues. Reproducibility is untouched: each run still executes a
  * frozen recorded revision. */
-export async function requireImplicitRecutBranchFreshness(
+export async function requireImplicitRemergeBranchFreshness(
   pr: PR,
   selected: ChangeRev,
-  options: RecutBranchFreshnessOptions,
+  options: RemergeBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,
   io: YrdCliIO,
-): Promise<RecutBranchFreshness> {
+): Promise<RemergeBranchFreshness> {
   if (options.transition !== undefined) return { status: "fresh" }
   const recorded = changeRevisionLineage(pr, selected.n)[0]
   if (recorded === undefined) {

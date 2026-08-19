@@ -15,7 +15,7 @@ import { createBayJobDefs, currentChangeRev, changeAdmission, changeDeliveryStat
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
-import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import type { ProcessRequest } from "@yrd/process"
 import { withIssues } from "@yrd/issue"
 import { createLogger } from "loggily"
@@ -129,7 +129,7 @@ async function createCliApp(behavior: Readonly<{ failingCheck?: boolean }> = {})
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<changeShape>,
+      _input: StepExecution<ChangeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",
@@ -319,7 +319,7 @@ describe("implicit recut of a moved branch", () => {
     ).toBe(0)
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
 
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: RECUT_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
@@ -330,12 +330,12 @@ describe("implicit recut of a moved branch", () => {
     expect(
       await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), queued.io, {
         ...noRequiredChecks,
-        recut: { recut },
+        recut: { recut: remerge },
       }),
       queued.stderr(),
     ).toBe(0)
     expect(JSON.parse(queued.stdout())).toMatchObject({ pr: "PR1", revision: 3 })
-    expect(recut).toHaveBeenCalledWith(expect.objectContaining({ id: "PR1", revision: 2, headSha: LIVE_HEAD }))
+    expect(remerge).toHaveBeenCalledWith(expect.objectContaining({ id: "PR1", revision: 2, headSha: LIVE_HEAD }))
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
@@ -384,7 +384,7 @@ describe("implicit recut of a moved branch", () => {
         patchMatch: () => ({ patchId: OTHER_PATCH_ID, targetSha: LIVE_HEAD }),
       }),
     }
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: LIVE_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
@@ -393,7 +393,7 @@ describe("implicit recut of a moved branch", () => {
     }))
 
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, io),
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, io),
     ).resolves.toMatchObject([
       {
         status: "applied",
@@ -404,7 +404,7 @@ describe("implicit recut of a moved branch", () => {
         verdict: "RECUT",
       },
     ])
-    expect(recut).toHaveBeenCalledWith(
+    expect(remerge).toHaveBeenCalledWith(
       expect.objectContaining({ revision: 1, headSha: RECORDED_HEAD, proposedHeadSha: LIVE_HEAD }),
     )
     expect(app.bays.pr("PR1")?.revs).toMatchObject([
@@ -468,7 +468,7 @@ describe("resident merge-into-latest", () => {
         },
       },
     }
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: RECUT_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
@@ -479,12 +479,12 @@ describe("resident merge-into-latest", () => {
 
     await expect(
       runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, gate, {
-        recut: { recut },
+        recut: { recut: remerge },
       } as YrdCliServices),
     ).resolves.toBe(0)
 
-    expect(recut).toHaveBeenCalledOnce()
-    expect(recut).toHaveBeenCalledWith(
+    expect(remerge).toHaveBeenCalledOnce()
+    expect(remerge).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "PR1",
         revision: 1,
@@ -516,14 +516,14 @@ describe("resident merge-into-latest", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
 
     const output = outputIO(() => head)
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: RECUT_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))
-    const services = { recut: { recut } } as YrdCliServices
+    const services = { recut: { recut: remerge } } as YrdCliServices
 
     await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toMatchObject([
       {
@@ -536,12 +536,12 @@ describe("resident merge-into-latest", () => {
         verdict: "RECUT",
       },
     ])
-    expect(recut).toHaveBeenCalledOnce()
+    expect(remerge).toHaveBeenCalledOnce()
     expect(app.bays.checksRequested("PR1")).toBe(true)
 
     // A completed cycle is idempotent until the branch moves again.
     await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toEqual([])
-    expect(recut).toHaveBeenCalledOnce()
+    expect(remerge).toHaveBeenCalledOnce()
   })
 
   it("does not observe or re-record an untracked branch", async () => {
@@ -550,12 +550,12 @@ describe("resident merge-into-latest", () => {
     await submitBranch(app, () => head)
     head = LIVE_HEAD
 
-    const recut = vi.fn()
+    const remerge = vi.fn()
     const output = outputIO(() => head)
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, output.io),
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, output.io),
     ).resolves.toEqual([])
-    expect(recut).not.toHaveBeenCalled()
+    expect(remerge).not.toHaveBeenCalled()
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
   })
 
@@ -568,7 +568,7 @@ describe("resident merge-into-latest", () => {
 
     const output = outputIO(() => head)
     let attempt = 0
-    const recut = vi.fn(async () => {
+    const remerge = vi.fn(async () => {
       attempt += 1
       if (attempt === 1) {
         head = NEXT_LIVE_HEAD
@@ -585,7 +585,7 @@ describe("resident merge-into-latest", () => {
         unchanged: false,
       }
     })
-    const services = { recut: { recut } } as YrdCliServices
+    const services = { recut: { recut: remerge } } as YrdCliServices
 
     await expect(runInternals.refreshTrackedQueueRevisions(app, services, output.io)).resolves.toMatchObject([
       {
@@ -605,7 +605,7 @@ describe("resident merge-into-latest", () => {
         currentRevision: 3,
       },
     ])
-    expect(recut).toHaveBeenCalledTimes(2)
+    expect(remerge).toHaveBeenCalledTimes(2)
     expect(app.bays.pr("PR1")?.revs).toMatchObject([
       { n: 1, head: RECORDED_HEAD },
       { n: 2, head: NEXT_LIVE_HEAD },
@@ -640,10 +640,10 @@ describe("resident merge-into-latest", () => {
         },
       }),
     }
-    const recut = vi.fn()
+    const remerge = vi.fn()
 
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, io),
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, io),
     ).resolves.toMatchObject([
       {
         status: "deferred",
@@ -653,7 +653,7 @@ describe("resident merge-into-latest", () => {
         code: "recut-current-changed",
       },
     ])
-    expect(recut).not.toHaveBeenCalled()
+    expect(remerge).not.toHaveBeenCalled()
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: NEXT_LIVE_HEAD })
   })
 
@@ -664,7 +664,7 @@ describe("resident merge-into-latest", () => {
     await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-untrack-r1" })
     head = LIVE_HEAD
 
-    const recut = vi.fn(async () => {
+    const remerge = vi.fn(async () => {
       await app.bays.editPr({ pr: "PR1", track: false })
       return {
         headSha: RECUT_HEAD,
@@ -676,7 +676,7 @@ describe("resident merge-into-latest", () => {
     })
 
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, outputIO(() => head).io),
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, outputIO(() => head).io),
     ).resolves.toMatchObject([
       {
         status: "deferred",
@@ -725,7 +725,7 @@ describe("resident merge-into-latest", () => {
     }
     const broadCancel = vi.fn(app.queue.cancel.bind(app.queue))
     const residentApp = { ...app, queue: { ...app.queue, cancel: broadCancel } }
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: RECUT_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
@@ -736,7 +736,7 @@ describe("resident merge-into-latest", () => {
     await expect(
       runInternals.refreshTrackedQueueRevisions(
         residentApp,
-        { process, recut: { recut } } as YrdCliServices,
+        { process, recut: { recut: remerge } } as YrdCliServices,
         outputIO(() => head).io,
       ),
     ).resolves.toMatchObject([
@@ -765,7 +765,7 @@ describe("resident merge-into-latest", () => {
       submit,
     }
     const residentApp = { ...app, bays }
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: RECUT_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
@@ -776,7 +776,7 @@ describe("resident merge-into-latest", () => {
     await expect(
       runInternals.refreshTrackedQueueRevisions(
         residentApp,
-        { recut: { recut } } as YrdCliServices,
+        { recut: { recut: remerge } } as YrdCliServices,
         outputIO(() => head).io,
       ),
     ).resolves.toMatchObject([
@@ -788,7 +788,7 @@ describe("resident merge-into-latest", () => {
       },
     ])
     expect(submit).not.toHaveBeenCalled()
-    expect(recut).toHaveBeenCalledWith(
+    expect(remerge).toHaveBeenCalledWith(
       expect.objectContaining({ revision: 1, headSha: RECORDED_HEAD, proposedHeadSha: LIVE_HEAD }),
     )
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: RECUT_HEAD })
@@ -816,14 +816,14 @@ describe("resident merge-into-latest", () => {
         },
       }),
     }
-    const recut = vi.fn()
+    const remerge = vi.fn()
 
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, io),
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, io),
     ).resolves.toMatchObject([{ status: "deferred", pr: "PR1", code: "recut-current-changed" }])
     expect(app.bays.pr("PR1")?.track).toBe(false)
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: RECORDED_HEAD })
-    expect(recut).not.toHaveBeenCalled()
+    expect(remerge).not.toHaveBeenCalled()
   })
 
   it("records a decision-required preflight comment once for the exact tracked source", async () => {
@@ -988,7 +988,7 @@ describe("resident merge-into-latest", () => {
     behavior.failingCheck = false
     head = LIVE_HEAD
     const output = outputIO(() => head)
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: RECUT_HEAD,
       baseSha: TARGET_BASE_SHA,
       treeSha: RECUT_TREE,
@@ -996,7 +996,7 @@ describe("resident merge-into-latest", () => {
       unchanged: false,
     }))
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut } } as YrdCliServices, output.io),
+      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, output.io),
     ).resolves.toMatchObject([
       {
         status: "applied",
@@ -1007,7 +1007,7 @@ describe("resident merge-into-latest", () => {
         currentRevision: 2,
       },
     ])
-    expect(recut).toHaveBeenCalledWith(
+    expect(remerge).toHaveBeenCalledWith(
       expect.objectContaining({ revision: 1, headSha: RECORDED_HEAD, proposedHeadSha: LIVE_HEAD }),
     )
     expect(app.bays.checksRequested("PR1")).toBe(true)

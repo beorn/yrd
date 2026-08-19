@@ -50,7 +50,7 @@ import {
   type QueueProjectionLookup,
   type QueueProjectionLookupNode,
   type QueueRecord,
-  type changeShape,
+  type ChangeShape,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
@@ -182,7 +182,7 @@ function observeProjectionLookup<Value>(
 type CheckResult = z.infer<typeof CheckResultSchema>
 type ReviewResult = z.infer<typeof ReviewResultSchema>
 type DeployResult = z.infer<typeof DeployResultSchema>
-type CheckedShape = AddStepResult<changeShape, "check", CheckResult>
+type CheckedShape = AddStepResult<ChangeShape, "check", CheckResult>
 type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 type MergedShape = ReviewedShape & IntegratedShape
 type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
@@ -576,7 +576,7 @@ function workspace(): BayWorkspace {
 function queuePlugin(
   options: Readonly<{
     batch?: false | number
-    check?: StepRunner<changeShape, CheckResult>
+    check?: StepRunner<ChangeShape, CheckResult>
     merge?: (input: StepExecution<ReviewedShape>) => JobResult<IntegrationProof> | Promise<JobResult<IntegrationProof>>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
@@ -703,7 +703,7 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
   return changeFacts(pr)
 }
 
-async function replaySameHeadCandidateRecut() {
+async function replaySameHeadCandidateRemerge() {
   const journal = createMemoryJournal()
   const id = ids()
   const prepared: string[] = []
@@ -772,7 +772,7 @@ describe("Queue", () => {
   })
 
   it("audits a content-equivalent Candidate whose receipt names the prior PR revision", async () => {
-    const fixture = await replaySameHeadCandidateRecut()
+    const fixture = await replaySameHeadCandidateRemerge()
     await using app = fixture.app
 
     const finding = app.queue.audit().findings.find(({ code }) => code === "candidate-revision-mismatch")
@@ -787,7 +787,7 @@ describe("Queue", () => {
   })
 
   it("mints a fresh Candidate after a same-head PR recut survives a runtime restart", async () => {
-    const fixture = await replaySameHeadCandidateRecut()
+    const fixture = await replaySameHeadCandidateRemerge()
     await using app = fixture.app
 
     await expect(app.queue.run({ prs: [fixture.pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
@@ -865,7 +865,7 @@ describe("Queue", () => {
     const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(certified)
     const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(certified)
     const withoutCertificate = (({ certificate: _certificate, ...rest }) => rest)(certified)
-    for (const recut of [
+    for (const remerge of [
       withoutSourceBase,
       withoutSourceHead,
       withoutCertificate,
@@ -875,7 +875,7 @@ describe("Queue", () => {
         sources: [{ repo: "dep", fromHeadSha: pr.headSha, toHeadSha: UPDATED, patchId, rangeDiff: "=" as const }],
       },
     ]) {
-      expect(ChangeSnapshotSchema.safeParse({ ...snapshot, recut }).success).toBe(false)
+      expect(ChangeSnapshotSchema.safeParse({ ...snapshot, remerge }).success).toBe(false)
     }
     expect(
       ChangeSnapshotSchema.safeParse({
@@ -2546,7 +2546,7 @@ describe("Queue", () => {
 
     const check = withStep(
       "check",
-      (_input: StepExecution<changeShape>) => ({
+      (_input: StepExecution<ChangeShape>) => ({
         status: "completed",
         conclusion: "success" as const,
         output: { checked: true },

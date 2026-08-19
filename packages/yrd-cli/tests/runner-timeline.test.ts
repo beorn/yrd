@@ -325,12 +325,12 @@ describe("resident runner step-row grammar", () => {
   })
 
   it("uses the shared short slug vocabulary in resident log rows", () => {
-    const recutFailure = log("yrd:jobs:merge", "error", "merge failed", {
+    const remergeFailure = log("yrd:jobs:merge", "error", "merge failed", {
       ...stepFailed.props,
       error: { code: "recut-certificate-missing", message: "certificate absent" },
     } as Record<string, unknown>)
 
-    expect(grammar(formatResidentLogLine(recutFailure, { color: false }))).toContain("err=recut-cert-missing")
+    expect(grammar(formatResidentLogLine(remergeFailure, { color: false }))).toContain("err=recut-cert-missing")
   })
 
   it("carries the composed PR list on batched step start and finish rows", () => {

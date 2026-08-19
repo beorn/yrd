@@ -18,7 +18,7 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
-import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
   withContests,
@@ -117,7 +117,7 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<changeShape>,
+      _input: StepExecution<ChangeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",
@@ -165,7 +165,7 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
   return { io, stdout: () => stdout, stderr: () => stderr }
 }
 
-function recutOutputIO() {
+function remergeOutputIO() {
   return outputIO({
     pruneGit: () => ({
       resolveCommit: (ref) => (ref === "origin/Topic/One" || ref === "Topic/One" ? HEAD_SHA : undefined),
@@ -364,7 +364,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   it("recuts through the folded selector and echoes the canonical PR", async () => {
     const app = await createCliApp()
     await submitOnePR(app)
-    const output = recutOutputIO()
+    const output = remergeOutputIO()
 
     expect(await runYrd(app, yrd("pr", "recut", "pr1", "--json"), output.io, stubRecutter()), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
@@ -398,7 +398,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(refused.stderr()).toContain("PR 'PR1' required check failed in R1")
 
     // The sanctioned retry: recut the folded selector back into the queue.
-    const requeued = recutOutputIO()
+    const requeued = remergeOutputIO()
     expect(
       await runYrd(app, yrd("pr", "recut", "pr1", "--queue", "--json"), requeued.io, stubRecutter()),
       requeued.stderr(),

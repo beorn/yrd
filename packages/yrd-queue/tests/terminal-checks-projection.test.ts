@@ -12,7 +12,7 @@ import { createBayJobDefs, changeAdmission, changeDeliveryState, withBays, type 
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withQueue, withStep, type changeShape, type StepExecution, type StepRunner } from "@yrd/queue"
+import { withQueue, withStep, type ChangeShape, type StepExecution, type StepRunner } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -47,7 +47,7 @@ function workspace(): BayWorkspace {
   }
 }
 
-async function createQueueApp(check?: StepRunner<changeShape, CheckResult>) {
+async function createQueueApp(check?: StepRunner<ChangeShape, CheckResult>) {
   const checkStep = withStep(
     "check",
     (input: StepExecution, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>

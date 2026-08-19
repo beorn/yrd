@@ -26,8 +26,8 @@ import type {
   CandidateChange,
   IntegratedShape,
   IntegrationProof,
-  changeShape,
-  changeSnapshot,
+  ChangeShape,
+  ChangeSnapshot,
   QueueSubmoduleResolutionEvidence,
   Run,
   SourceRewrite,
@@ -349,7 +349,7 @@ type ProgressResult = Readonly<{
   lastProgressBytes?: number
 }>
 
-export type ConfiguredCommandOptions<Shape extends changeShape> = ProcessDependency &
+export type ConfiguredCommandOptions<Shape extends ChangeShape> = ProcessDependency &
   Readonly<{
     command: readonly string[]
     cwd: string | ((input: StepExecution<Shape>) => string | Promise<string>)
@@ -368,7 +368,7 @@ export type ConfiguredCommandOptions<Shape extends changeShape> = ProcessDepende
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
   }>
 
-export type ConfiguredWaitingCommandOptions<Shape extends changeShape> = ConfiguredCommandOptions<Shape>
+export type ConfiguredWaitingCommandOptions<Shape extends ChangeShape> = ConfiguredCommandOptions<Shape>
 
 const RETIRED_PLACEHOLDERS = new Map([
   ["{name}", "$YRD_ISSUE"],
@@ -379,19 +379,19 @@ const RETIRED_PLACEHOLDERS = new Map([
   ["{base}", "$YRD_BASE"],
 ])
 
-export function configuredCommandStep<Shape extends changeShape>(
+export function configuredCommandStep<Shape extends ChangeShape>(
   options: ConfiguredCommandOptions<Shape>,
 ): StepRunner<Shape, CommandEvidence> {
   return configuredCommand(options, false)
 }
 
-export function configuredWaitingCommandStep<Shape extends changeShape>(
+export function configuredWaitingCommandStep<Shape extends ChangeShape>(
   options: ConfiguredWaitingCommandOptions<Shape>,
 ): StepRunner<Shape, CommandEvidence> {
   return configuredCommand(options, true)
 }
 
-function configuredCommand<Shape extends changeShape>(
+function configuredCommand<Shape extends ChangeShape>(
   options: ConfiguredCommandOptions<Shape>,
   waiting: boolean,
 ): StepRunner<Shape, CommandEvidence> {
@@ -2068,12 +2068,12 @@ export type GitQueueTarget = Readonly<{
   diverged: boolean
 }>
 
-export type ChangeRecutInput = changeSnapshot &
+export type ChangeRemergeInput = ChangeSnapshot &
   Readonly<{
     /** CLI-resolved immutable code-carrier candidate. Queue never resolves a symbolic proposal ref. */
     proposedHeadSha?: string
     /** Same-issue source integrations already present on the authoritative root history, newest first. */
-    currentCompositions?: readonly NonNullable<changeSnapshot["composition"]>[]
+    currentCompositions?: readonly NonNullable<ChangeSnapshot["composition"]>[]
     current?: Readonly<{
       revision: number
       headSha: string
@@ -2081,21 +2081,21 @@ export type ChangeRecutInput = changeSnapshot &
       treeSha?: string
       patchId?: string
       fromRevision?: number
-      composition?: changeSnapshot["composition"]
+      composition?: ChangeSnapshot["composition"]
     }>
   }>
 
-export type ChangeRecutResult = Readonly<{
+export type ChangeRemergeResult = Readonly<{
   headSha: string
   baseSha: string
   treeSha: string
   patchId: string
   unchanged: boolean
-  composition?: changeSnapshot["composition"]
+  composition?: ChangeSnapshot["composition"]
   sourceRewrites?: readonly SourceRewrite[]
 }>
 
-export type GitPRRecutter = Readonly<{ recut(input: ChangeRecutInput): Promise<ChangeRecutResult> }>
+export type GitChangeRemerger = Readonly<{ recut(input: ChangeRemergeInput): Promise<ChangeRemergeResult> }>
 
 /**
  * Base-independent composite patch identity for a composition's source rewrites.
@@ -2116,17 +2116,17 @@ function compositionPatchId(rewrites: readonly Readonly<{ repo: string; patchId:
         .digest("hex")
 }
 
-export function createGitPRRecutter(options: {
+export function createGitChangeRemerger(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
   repo: string
   env?: NodeJS.ProcessEnv
-}): GitPRRecutter {
+}): GitChangeRemerger {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return Object.freeze({ recut: (input: ChangeRecutInput) => recutPR(git, repo, input) })
+  return Object.freeze({ recut: (input: ChangeRemergeInput) => remergePR(git, repo, input) })
 }
 
-async function recutPR(git: Git, repo: string, input: ChangeRecutInput): Promise<ChangeRecutResult> {
+async function remergePR(git: Git, repo: string, input: ChangeRemergeInput): Promise<ChangeRemergeResult> {
   if (input.proposedHeadSha !== undefined) {
     const certificateGit = createGit(git.process, git.env, { noLazyFetch: true })
     const target = await inspectLiveQueueBase(certificateGit, repo, input.base)
@@ -2154,7 +2154,7 @@ async function recutPR(git: Git, repo: string, input: ChangeRecutInput): Promise
     current.patchId !== undefined &&
     !alreadyMergedDirect
   ) {
-    await assertCurrentRecutCertificate(git, repo, target, input, current)
+    await assertCurrentRemergeCertificate(git, repo, target, input, current)
     return {
       headSha: current.headSha,
       baseSha: target.sha,
@@ -2166,22 +2166,22 @@ async function recutPR(git: Git, repo: string, input: ChangeRecutInput): Promise
         : { composition: current.composition ?? input.composition }),
     }
   }
-  let recutInput = input
+  let remergeInput = input
   let localSourceTips: ReadonlySet<string> | undefined
-  if (recutInput.composition === undefined) {
-    const converted = await sourceOnlyCarrierComposition(git, repo, target, recutInput)
-    if (converted === undefined) return recutDirectPR(git, repo, target, recutInput)
-    recutInput = {
-      ...recutInput,
+  if (remergeInput.composition === undefined) {
+    const converted = await sourceOnlyCarrierComposition(git, repo, target, remergeInput)
+    if (converted === undefined) return remergeDirectPR(git, repo, target, remergeInput)
+    remergeInput = {
+      ...remergeInput,
       headSha: converted.sourceBase,
       composition: converted.composition,
     }
     localSourceTips = new Set(converted.composition.sources.map((source) => source.repo))
   }
-  const declared = recutInput.composition
+  const declared = remergeInput.composition
   if (declared === undefined) throw new Error("source-only carrier conversion produced no composition")
-  const outcome = await withScratch<ChangeRecutResult>(git, repo, target.sha, undefined, async (path) => {
-    const composed = await composePR(git, repo, path, recutInput, localSourceTips)
+  const outcome = await withScratch<ChangeRemergeResult>(git, repo, target.sha, undefined, async (path) => {
+    const composed = await composePR(git, repo, path, remergeInput, localSourceTips)
     if (composed.status === "failed") {
       throw createFailure({ kind: "refusal", code: composed.error.code, message: composed.error.message })
     }
@@ -2424,9 +2424,9 @@ async function certifyProposedCodeCarrier(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: ChangeRecutInput,
+  input: ChangeRemergeInput,
   proposedHeadSha: string,
-): Promise<ChangeRecutResult> {
+): Promise<ChangeRemergeResult> {
   const sourceBaseSha = input.baseSha
   if (sourceBaseSha === undefined) {
     throw codeCarrierRefusal(
@@ -2506,7 +2506,7 @@ async function certifyProposedCodeCarrier(
 
 type SourceOnlyCarrierComposition = Readonly<{
   sourceBase: string
-  composition: NonNullable<changeSnapshot["composition"]>
+  composition: NonNullable<ChangeSnapshot["composition"]>
 }>
 
 /**
@@ -2520,7 +2520,7 @@ async function sourceOnlyCarrierComposition(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: ChangeRecutInput,
+  input: ChangeRemergeInput,
 ): Promise<SourceOnlyCarrierComposition | undefined> {
   const oldBase = input.baseSha
   if (
@@ -2531,7 +2531,7 @@ async function sourceOnlyCarrierComposition(
   ) {
     return undefined
   }
-  const sourceBase = await directRecutSourceBase(git, repo, oldBase, input.headSha)
+  const sourceBase = await directRemergeSourceBase(git, repo, oldBase, input.headSha)
   if (sourceBase === undefined) return undefined
   const rootPayload = await changedPaths(git, repo, sourceBase, input.headSha)
   if (rootPayload.length !== 1) return undefined
@@ -2540,7 +2540,7 @@ async function sourceOnlyCarrierComposition(
   if (mergeTipFailure !== undefined && mergeTipFailure.error.code !== "merge-tip-carrier") return undefined
   const mergeTip = mergeTipFailure?.error.code === "merge-tip-carrier"
   let hasDivergentPin = false
-  const sources: NonNullable<changeSnapshot["composition"]>["sources"][number][] = []
+  const sources: NonNullable<ChangeSnapshot["composition"]>["sources"][number][] = []
   for (const path of rootPayload) {
     const basePin = await readGitlink(git, repo, sourceBase, path)
     const authoredPin = await readGitlink(git, repo, input.headSha, path)
@@ -2594,12 +2594,12 @@ async function sourceOnlyCarrierComposition(
   }
 }
 
-async function assertCurrentRecutCertificate(
+async function assertCurrentRemergeCertificate(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: ChangeRecutInput,
-  current: NonNullable<ChangeRecutInput["current"]>,
+  input: ChangeRemergeInput,
+  current: NonNullable<ChangeRemergeInput["current"]>,
 ): Promise<void> {
   const certifiedTreeSha = current.treeSha
   const certifiedPatchId = current.patchId
@@ -2717,12 +2717,12 @@ async function assertCurrentRecutCertificate(
   }
 }
 
-async function recutDirectPR(
+async function remergeDirectPR(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: ChangeRecutInput,
-): Promise<ChangeRecutResult> {
+  input: ChangeRemergeInput,
+): Promise<ChangeRemergeResult> {
   const oldBase = input.baseSha
   if (oldBase === undefined) {
     throw createFailure({
@@ -2758,7 +2758,7 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' recorded base '${oldBase}' is not an ancestor of '${target.sha}'`,
     })
   }
-  const sourceBase = await directRecutSourceBase(git, repo, oldBase, input.headSha)
+  const sourceBase = await directRemergeSourceBase(git, repo, oldBase, input.headSha)
   if (sourceBase === undefined) {
     throw createFailure({
       kind: "refusal",
@@ -2814,7 +2814,7 @@ async function recutDirectPR(
         message: `yrd: PR '${input.id}' revision ${input.revision} changes nothing against its recorded base`,
       })
     }
-    return absorbedRecutResult(git, repo, target, input, sourceBase)
+    return absorbedRemergeResult(git, repo, target, input, sourceBase)
   }
   const overlap = intersection(effectivePayload, authority)
   const overlapSet = new Set(overlap)
@@ -2831,7 +2831,7 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' revision ${input.revision} has no current-composition patch identity`,
     })
   }
-  const outcome = await withScratch<ChangeRecutResult>(git, repo, input.headSha, undefined, async (path) => {
+  const outcome = await withScratch<ChangeRemergeResult>(git, repo, input.headSha, undefined, async (path) => {
     let rebased = await git.run(
       path,
       [
@@ -3008,8 +3008,8 @@ async function recutDirectPR(
     }
     for (const gitlink of ffCarrierGitlinks) {
       const authoredPin = await readGitlink(git, repo, input.headSha, gitlink)
-      const recutPin = await readGitlink(git, path, headSha, gitlink)
-      if (authoredPin === undefined || recutPin === undefined || recutPin !== authoredPin) {
+      const remergePin = await readGitlink(git, path, headSha, gitlink)
+      if (authoredPin === undefined || remergePin === undefined || remergePin !== authoredPin) {
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
@@ -3024,8 +3024,8 @@ async function recutDirectPR(
     const hasAbsorbedExceptions = absorbedPaths.length > 0 || ffCarrierGitlinks.size > 0
     if (usedUnionMerge && hasAbsorbedExceptions) {
       const sourceCount = await git.run(repo, ["rev-list", "--count", `${sourceBase}..${input.headSha}`], true)
-      const recutCount = await git.run(path, ["rev-list", "--count", `${target.sha}..${headSha}`], true)
-      if (sourceCount.code !== 0 || recutCount.code !== 0 || sourceCount.stdout !== "1" || recutCount.stdout !== "1") {
+      const remergeCount = await git.run(path, ["rev-list", "--count", `${target.sha}..${headSha}`], true)
+      if (sourceCount.code !== 0 || remergeCount.code !== 0 || sourceCount.stdout !== "1" || remergeCount.stdout !== "1") {
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
@@ -3051,8 +3051,8 @@ async function recutDirectPR(
         absorbedPaths,
         ffGitlinks,
       )
-      const recutSequence = await certifiedPatchSequence(git, path, target.sha, headSha, absorbedPaths, ffGitlinks)
-      if (sourceSequence === undefined || recutSequence === undefined) {
+      const remergeSequence = await certifiedPatchSequence(git, path, target.sha, headSha, absorbedPaths, ffGitlinks)
+      if (sourceSequence === undefined || remergeSequence === undefined) {
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
@@ -3060,8 +3060,8 @@ async function recutDirectPR(
         })
       }
       if (
-        sourceSequence.length !== recutSequence.length ||
-        sourceSequence.some((patchId, index) => patchId !== recutSequence[index])
+        sourceSequence.length !== remergeSequence.length ||
+        sourceSequence.some((patchId, index) => patchId !== remergeSequence[index])
       ) {
         throw createFailure({
           kind: "refusal",
@@ -3121,7 +3121,7 @@ async function recutDirectPR(
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
 }
 
-async function directRecutSourceBase(
+async function directRemergeSourceBase(
   git: Git,
   repo: string,
   oldBase: string,
@@ -3576,7 +3576,7 @@ async function prepareCandidateMembers(
       const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
       if (mergeTip !== undefined) return mergeTip
       if (pr.recut?.certificate === "frozen-code-carrier-v1") {
-        const certified = await verifyRecutCertificate(git, path, pr)
+        const certified = await verifyRemergeCertificate(git, path, pr)
         if (certified !== undefined) return certified
       }
       // A post-landing actuator retry carries the same immutable PR snapshot
@@ -3605,13 +3605,13 @@ async function prepareCandidateMembers(
     if (pr.composition !== undefined) {
       let baseMoved = false
       if (pr.recut !== undefined) {
-        const movement = await recutBaseMovement(git, path, pr)
+        const movement = await remergeBaseMovement(git, path, pr)
         if (movement.status === "failed") return movement
         baseMoved = movement.moved
       }
       const composed = await composePR(git, repo, path, pr, undefined, provisionPinIntent)
       if (composed.status === "failed") return composed
-      const certificate = await verifyComposedRecutCertificate(
+      const certificate = await verifyComposedRemergeCertificate(
         git,
         path,
         pr,
@@ -3631,7 +3631,7 @@ async function prepareCandidateMembers(
         }>
       | undefined
     if (pr.recut !== undefined && pr.recut.certificate !== "frozen-code-carrier-v1") {
-      const certified = await verifyRecutCertificate(git, path, pr)
+      const certified = await verifyRemergeCertificate(git, path, pr)
       if (certified !== undefined) return certified
     } else {
       const inspected = await authoredGitlinkPaths(git, path, pr.id, pr.headSha)
@@ -3890,7 +3890,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
   }
 }
 
-type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
+type RemergeBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
 
 /**
  * Classify how the authoritative candidate base relates to the reviewed recut base
@@ -3912,7 +3912,7 @@ type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: b
  * its own `recut-base-diverged` code that parks the PR on the first refusal
  * instead of storming the queue head.
  */
-async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"][number]): Promise<RecutBaseMovement> {
+async function remergeBaseMovement(git: Git, repo: string, pr: StepExecution["prs"][number]): Promise<RemergeBaseMovement> {
   const baseSha = pr.recut?.baseSha
   if (baseSha === undefined) {
     return candidateFailure(
@@ -3938,7 +3938,7 @@ async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"
   return { status: "moved", moved: true, baseSha, head }
 }
 
-async function verifyRecutCertificate(
+async function verifyRemergeCertificate(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
@@ -3947,7 +3947,7 @@ async function verifyRecutCertificate(
   const sourceBaseSha = pr.recut.sourceBaseSha
   const sourceHeadSha = pr.recut.sourceHeadSha
   if (pr.recut.certificate === undefined && sourceBaseSha === undefined && sourceHeadSha === undefined) {
-    return verifyLegacyRecutCertificate(git, repo, pr)
+    return verifyLegacyRemergeCertificate(git, repo, pr)
   }
   if (pr.recut.certificate !== "frozen-code-carrier-v1" || sourceBaseSha === undefined || sourceHeadSha === undefined) {
     return candidateFailure(
@@ -3964,7 +3964,7 @@ async function verifyRecutCertificate(
   )
 }
 
-async function verifyLegacyRecutCertificate(
+async function verifyLegacyRemergeCertificate(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
@@ -3977,7 +3977,7 @@ async function verifyLegacyRecutCertificate(
       `PR '${pr.id}' recut tree certificate does not match revision ${pr.revision}`,
     )
   }
-  const movement = await recutBaseMovement(git, repo, pr)
+  const movement = await remergeBaseMovement(git, repo, pr)
   if (movement.status === "failed") return movement
   if (!movement.moved) {
     const patchId = await git.stablePatchId(repo, movement.baseSha, pr.headSha)
@@ -3988,7 +3988,7 @@ async function verifyLegacyRecutCertificate(
           `PR '${pr.id}' recut patch certificate does not match revision ${pr.revision}`,
         )
   }
-  const rederived = await rederiveRecutPatchId(git, repo, pr.headSha)
+  const rederived = await rederiveRemergePatchId(git, repo, pr.headSha)
   if (rederived === undefined) {
     return candidateFailure(
       "recut-certificate",
@@ -4003,7 +4003,7 @@ async function verifyLegacyRecutCertificate(
       )
 }
 
-async function rederiveRecutPatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
+async function rederiveRemergePatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
   const merged = await git.run(repo, ["merge-tree", "--write-tree", "HEAD", headSha], true)
   if (merged.code !== 0) return undefined
   const tree = merged.stdout.split("\n")[0]?.trim()
@@ -4018,9 +4018,9 @@ async function verifyFrozenCodeCarrierCertificate(
   sourceBaseSha: string,
   sourceHeadSha: string,
 ): Promise<CandidateFailure | undefined> {
-  const recut = pr.recut
-  if (recut === undefined) return undefined
-  const candidateBaseSha = recut.baseSha
+  const remerge = pr.recut
+  if (remerge === undefined) return undefined
+  const candidateBaseSha = remerge.baseSha
   if (candidateBaseSha === undefined) {
     return candidateFailure(
       "recut-certificate",
@@ -4078,13 +4078,13 @@ async function verifyFrozenCodeCarrierCertificate(
       `PR '${pr.id}' recut source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
     )
   }
-  if (proof.treeSha !== recut.treeSha) {
+  if (proof.treeSha !== remerge.treeSha) {
     return candidateFailure(
       "recut-certificate",
       `PR '${pr.id}' recut tree certificate does not match candidate revision ${pr.revision}`,
     )
   }
-  return proof.patchId === recut.patchId
+  return proof.patchId === remerge.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
@@ -4092,7 +4092,7 @@ async function verifyFrozenCodeCarrierCertificate(
       )
 }
 
-async function verifyComposedRecutCertificate(
+async function verifyComposedRemergeCertificate(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
@@ -5586,13 +5586,13 @@ async function absorbedAuthoredPaths(
  * the authored patch id — the patch this revision delivers, which the base now
  * carries — so a repeated recut is idempotent.
  */
-async function absorbedRecutResult(
+async function absorbedRemergeResult(
   git: Git,
   repo: string,
   target: GitQueueTarget,
-  input: ChangeRecutInput,
+  input: ChangeRemergeInput,
   sourceBase: string,
-): Promise<ChangeRecutResult> {
+): Promise<ChangeRemergeResult> {
   const patchId = await git.stablePatchId(repo, sourceBase, input.headSha)
   if (patchId === undefined) {
     throw createFailure({
@@ -5617,7 +5617,7 @@ async function absorbedAuthoredGitlinks(
   sourceHead: string,
   target: string,
   overlaps: readonly string[],
-  currentCompositions: readonly NonNullable<changeSnapshot["composition"]>[] | undefined,
+  currentCompositions: readonly NonNullable<ChangeSnapshot["composition"]>[] | undefined,
 ): Promise<string[]> {
   const absorbed: string[] = []
   for (const path of overlaps) {
@@ -5674,7 +5674,7 @@ async function certifiesSupersededGitlink(
   authoredBase: string,
   authoredTip: string,
   currentTip: string,
-  source: NonNullable<changeSnapshot["composition"]>["sources"][number],
+  source: NonNullable<ChangeSnapshot["composition"]>["sources"][number],
 ): Promise<boolean> {
   if (
     (await git.optionalCommit(repo, source.baseSha)) !== source.baseSha ||
@@ -5746,7 +5746,7 @@ async function matchesExpectedUnionMerge(
   baseRef: string,
   currentRef: string,
   authoredRef: string,
-  recutRef: string,
+  remergeRef: string,
   paths: readonly string[],
 ): Promise<boolean> {
   return withScratchRoot(git, repo, "yrd-union-proof-", undefined, async (root) => {
@@ -5755,10 +5755,10 @@ async function matchesExpectedUnionMerge(
         const base = await readUnionBlob(git, repo, baseRef, path)
         const current = await readUnionBlob(git, repo, currentRef, path)
         const authored = await readUnionBlob(git, repo, authoredRef, path)
-        const recut = await readUnionBlob(git, repo, recutRef, path)
-        if (base === undefined || current === undefined || authored === undefined || recut === undefined) return false
+        const remerge = await readUnionBlob(git, repo, remergeRef, path)
+        if (base === undefined || current === undefined || authored === undefined || remerge === undefined) return false
         const mode = mergedUnionMode(base.mode, current.mode, authored.mode)
-        if (mode === undefined || recut.mode !== mode) return false
+        if (mode === undefined || remerge.mode !== mode) return false
         const currentPath = join(root, `${index}-current`)
         const basePath = join(root, `${index}-base`)
         const authoredPath = join(root, `${index}-authored`)
@@ -5770,7 +5770,7 @@ async function matchesExpectedUnionMerge(
           ["merge-file", "--union", "--stdout", currentPath, basePath, authoredPath],
           true,
         )
-        if (merged.code !== 0 || merged.stdout !== recut.content) return false
+        if (merged.code !== 0 || merged.stdout !== remerge.content) return false
       }
       return paths.length > 0
     } finally {
@@ -7179,7 +7179,7 @@ async function withStepCandidate<Output extends JsonValue>(
   )
 }
 
-export function gitCheckStep(options: GitCheckOptions): StepRunner<changeShape, GitCheckResultEvidence> {
+export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   const mode = options.mode ?? "delta"
@@ -7206,7 +7206,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<changeShape, 
             targetSha: string,
             root: string,
             parentTree: boolean,
-          ): ConfiguredCommandOptions<changeShape> => ({
+          ): ConfiguredCommandOptions<ChangeShape> => ({
             inject: options.inject,
             command: options.command,
             cwd,
@@ -7603,7 +7603,7 @@ export type ConfiguredMergeOptions = ProcessDependency &
     provisionPinIntent?: PinIntentProvisioner
   }>
 
-function checkedCandidate(shape: changeShape): GitCheckEvidence | undefined {
+function checkedCandidate(shape: ChangeShape): GitCheckEvidence | undefined {
   for (const value of Object.values(shape.results).reverse()) {
     const parsed = GitCheckEvidenceSchema.safeParse(value)
     if (parsed.success) return parsed.data
@@ -8178,7 +8178,7 @@ async function rollbackQueueBase(
   }
 }
 
-export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
+export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
@@ -8443,7 +8443,7 @@ export function gitMergeStep<Shape extends changeShape>(options: GitMergeOptions
   }
 }
 
-export function configuredMergeStep<Shape extends changeShape>(
+export function configuredMergeStep<Shape extends ChangeShape>(
   options: ConfiguredMergeOptions,
 ): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)

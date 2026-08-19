@@ -17,7 +17,7 @@ import { createBayJobDefs, currentChangeRev, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createProcess } from "@yrd/process"
-import { withMerge, withQueue, withStep, type changeShape, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
 import { createLogger, type Event as LogEvent } from "loggily"
 import * as runInternals from "../src/run.ts"
 import type { YrdCliApp, YrdCliIO, YrdCliServices } from "../src/types.ts"
@@ -83,10 +83,10 @@ async function repository() {
   await Bun.write(join(repo, "healthy-live.txt"), "healthy-live.txt\n")
   await git(repo, ["add", "--", "healthy-recorded.txt", "healthy-live.txt"])
   await git(repo, ["commit", "-q", "-m", "recut healthy onto main"])
-  const recutHead = await git(repo, ["rev-parse", "HEAD"])
-  const recutTree = await git(repo, ["rev-parse", "HEAD^{tree}"])
+  const remergeHead = await git(repo, ["rev-parse", "HEAD"])
+  const remergeTree = await git(repo, ["rev-parse", "HEAD^{tree}"])
   await git(repo, ["checkout", "-q", "main"])
-  return { repo, origin, mainSha, deletedHead, healthyRecorded, healthyLive, recutHead, recutTree }
+  return { repo, origin, mainSha, deletedHead, healthyRecorded, healthyLive, remergeHead, remergeTree }
 }
 
 function ids(): () => string {
@@ -126,7 +126,7 @@ async function trackedApp(mainSha: string, log: ReturnType<typeof createLogger>)
     },
   )
   const merge = withMerge(
-    async (_input: StepExecution<changeShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
+    async (_input: StepExecution<ChangeShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
       status: "completed",
       conclusion: "success",
       output: { commit: mainSha, baseSha: mainSha },
@@ -186,14 +186,14 @@ describe("resident tracking pass — one unobservable branch never stops the oth
 
     const io = liveIO(fixture.repo)
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
-    const recut = vi.fn(async () => ({
-      headSha: fixture.recutHead,
+    const remerge = vi.fn(async () => ({
+      headSha: fixture.remergeHead,
       baseSha: fixture.mainSha,
-      treeSha: fixture.recutTree,
+      treeSha: fixture.remergeTree,
       patchId: "1".repeat(40),
       unchanged: false,
     }))
-    const services = { process, recut: { recut } } as unknown as YrdCliServices
+    const services = { process, recut: { recut: remerge } } as unknown as YrdCliServices
 
     // The pass must RESOLVE. Before containment it rejected with
     // kind:"configuration" recut-branch-refresh-failed and killed the resident.
@@ -229,9 +229,9 @@ describe("resident tracking pass — one unobservable branch never stops the oth
     // it flows into the recutter as proposedHeadSha and the recut PRODUCT is the
     // successor revision. Assert the observation reached the recutter, and that
     // the successor is current.
-    expect(recut).toHaveBeenCalledWith(expect.objectContaining({ proposedHeadSha: fixture.healthyLive }))
+    expect(remerge).toHaveBeenCalledWith(expect.objectContaining({ proposedHeadSha: fixture.healthyLive }))
     expect(healthy.revs).toHaveLength(2)
-    expect(currentChangeRev(healthy).head).toBe(fixture.recutHead)
+    expect(currentChangeRev(healthy).head).toBe(fixture.remergeHead)
 
     // Positive control that the REAL fetch arm ran for the healthy branch: git
     // created its remote-tracking ref, which only the live fetch does.

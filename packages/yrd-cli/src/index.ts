@@ -12,7 +12,7 @@ export * from "./settlement.ts"
 export * from "./submodule-tracking.ts"
 export { runYrd } from "./run.ts"
 export type { QueueReadModel } from "./queue-read-model.ts"
-export type { RecutPreflightResult, RecutPreflightVerdict } from "./pr-withdraw.ts"
+export type { RemergePreflightResult, RemergePreflightVerdict } from "./pr-withdraw.ts"
 export type {
   PruneGitFacts,
   QueueAuditEmission,

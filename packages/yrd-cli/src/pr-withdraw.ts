@@ -173,13 +173,13 @@ type PruneRow = Readonly<{
   detail: string
 }>
 
-export type RecutPreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
+export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
 
-export type RecutPreflightResult = Readonly<{
+export type RemergePreflightResult = Readonly<{
   command: "pr.recut.preflight"
   pr: string
   revision: number
-  verdict: RecutPreflightVerdict
+  verdict: RemergePreflightVerdict
   evidence: Readonly<{
     headSha: string
     proposedHeadSha?: string
@@ -329,7 +329,7 @@ async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun:
   }
 }
 
-export type RecutPreflightOptions = JsonOption &
+export type RemergePreflightOptions = JsonOption &
   Readonly<{
     revision?: number
     queue?: boolean
@@ -346,12 +346,12 @@ export type RecutPreflightOptions = JsonOption &
  * mechanical caller (the resident's self-applied-remedy pass, 22474) runs the
  * same `next` a human would have read off the terminal — one decision function,
  * never a second copy of the verdict rules. */
-export async function preflightRecut(
+export async function preflightRemerge(
   app: YrdCliApp,
   selector: string,
-  options: RecutPreflightOptions,
+  options: RemergePreflightOptions,
   io: YrdCliIO,
-): Promise<RecutPreflightResult> {
+): Promise<RemergePreflightResult> {
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
   }
@@ -444,7 +444,7 @@ export async function preflightRecut(
   }
   const certifiedCurrentBase =
     options.proposedHeadSha === undefined && distance.targetOnly === 0 && source.recut !== undefined
-  const verdict: RecutPreflightVerdict = subsumed
+  const verdict: RemergePreflightVerdict = subsumed
     ? "SUBSUMED-WITHDRAW"
     : reauthorizing
       ? requiresForce
@@ -459,7 +459,7 @@ export async function preflightRecut(
     options.revision === undefined || options.proposedHeadSha !== undefined ? "" : ` --revision ${source.n}`
   const queueFlag = options.queue === true ? " --queue" : ""
   const candidateFlag = options.proposedHeadSha === undefined ? "" : ` --ref ${options.proposedHeadSha}`
-  const recutCommand = `yrd pr recut ${pr.id}${revisionFlag}${candidateFlag}${queueFlag}`
+  const remergeCommand = `yrd pr recut ${pr.id}${revisionFlag}${candidateFlag}${queueFlag}`
   const next =
     verdict === "SUBSUMED-WITHDRAW"
       ? // The subsumed proof (head reachable from the base, or merging it reproduces
@@ -468,13 +468,13 @@ export async function preflightRecut(
         // command runs as written rather than refusing whoever pastes it.
         `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
       : verdict === "RECUT-FORCE"
-        ? `${recutCommand} --force`
+        ? `${remergeCommand} --force`
         : verdict === "RECUT"
-          ? recutCommand
+          ? remergeCommand
           : options.queue === true
             ? `yrd pr ready ${pr.id}`
             : `yrd pr view ${pr.id}`
-  const evidence: RecutPreflightResult["evidence"] = {
+  const evidence: RemergePreflightResult["evidence"] = {
     headSha: source.head,
     ...(options.proposedHeadSha === undefined ? {} : { proposedHeadSha: options.proposedHeadSha }),
     ...(options.expectedCurrent === undefined ? {} : { expectedCurrent: options.expectedCurrent }),
@@ -490,7 +490,7 @@ export async function preflightRecut(
     passingCheck: requiresForce,
     requestedQueue: options.queue === true,
   }
-  const result: RecutPreflightResult = {
+  const result: RemergePreflightResult = {
     command: "pr.recut.preflight",
     pr: pr.id,
     revision: source.n,

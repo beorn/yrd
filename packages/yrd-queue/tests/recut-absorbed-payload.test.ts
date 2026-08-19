@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
-import { createGitPRRecutter, type ChangeRecutResult } from "@yrd/queue"
+import { createGitChangeRemerger, type ChangeRemergeResult } from "@yrd/queue"
 
 const roots: string[] = []
 
@@ -79,14 +79,14 @@ async function landOnMain(repo: string, subjects: readonly string[]): Promise<st
   return git(repo, ["rev-parse", "HEAD"])
 }
 
-async function recut(
+async function remerge(
   repo: string,
   sourceBase: string,
   headSha: string,
   current?: Readonly<{ revision: number; headSha: string; baseSha: string; treeSha: string; patchId: string }>,
-): Promise<ChangeRecutResult> {
+): Promise<ChangeRemergeResult> {
   await using process = createProcess()
-  return await createGitPRRecutter({ inject: { process }, repo }).recut({
+  return await createGitChangeRemerger({ inject: { process }, repo }).recut({
     id: "PR1",
     branch: "issue/feature",
     base: "main",
@@ -102,7 +102,7 @@ describe("recut against a base that absorbed part of the payload (22373)", () =>
     const { repo, sourceBase, headSha } = await featureRepo()
     const target = await landOnMain(repo, ["feat: agents", "feat: claude"])
 
-    const result = await recut(repo, sourceBase, headSha)
+    const result = await remerge(repo, sourceBase, headSha)
 
     expect(result.unchanged).toBe(false)
     expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
@@ -121,7 +121,7 @@ describe("recut against a base that absorbed part of the payload (22373)", () =>
     const { repo, sourceBase, headSha } = await featureRepo()
     const target = await landOnMain(repo, ["feat: agents", "feat: claude", "feat: hab"])
 
-    const result = await recut(repo, sourceBase, headSha)
+    const result = await remerge(repo, sourceBase, headSha)
 
     // Nothing is left to deliver: the recut head IS the base, so the merge
     // step's tree-equality proof closes the PR as already-landed instead of
@@ -135,11 +135,11 @@ describe("recut against a base that absorbed part of the payload (22373)", () =>
   it("re-derives an already-landed revision instead of refusing its absent patch certificate", async () => {
     const { repo, sourceBase, headSha } = await featureRepo()
     const target = await landOnMain(repo, ["feat: agents", "feat: claude", "feat: hab"])
-    const first = await recut(repo, sourceBase, headSha)
+    const first = await remerge(repo, sourceBase, headSha)
 
     // `target..head` is empty for an already-landed head, so the fast path has
     // no patch identity to certify against and must re-derive from the source.
-    const again = await recut(repo, sourceBase, headSha, {
+    const again = await remerge(repo, sourceBase, headSha, {
       revision: 1,
       headSha: first.headSha,
       baseSha: first.baseSha,
@@ -166,7 +166,7 @@ describe("recut against a base that absorbed part of the payload (22373)", () =>
     )
     const target = await commit(repo, "unrelated.md", "unrelated\n", "base: unrelated")
 
-    const result = await recut(repo, sourceBase, headSha)
+    const result = await remerge(repo, sourceBase, headSha)
 
     expect(await changedPaths(repo, target, result.headSha)).toEqual(["AGENTS.md", "CLAUDE.md", "hab.yml"])
   })

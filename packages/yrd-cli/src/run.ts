@@ -77,7 +77,7 @@ import {
   type QueuesState,
   type InTotoStatement,
   type MergeRecordBody,
-  type changeEligibility,
+  type ChangeEligibility,
   type UnverifiableMergeRecord,
   type RefGit,
   type QueueAuditFinding,
@@ -122,7 +122,7 @@ import {
   queueLogRows,
   latestRunForCurrentRevision,
   changeListRows,
-  changeDetailData,
+  ChangeDetailData,
   projectedChangeStatus,
   queuePauseWarnings,
   queueRunRevisionClocks,
@@ -148,11 +148,11 @@ import {
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
 import {
-  preflightRecut,
+  preflightRemerge,
   prunePrs,
   withdrawPrs,
-  type RecutPreflightResult,
-  type RecutPreflightVerdict,
+  type RemergePreflightResult,
+  type RemergePreflightVerdict,
 } from "./pr-withdraw.ts"
 import {
   foldRefusalStall,
@@ -166,7 +166,7 @@ import {
   type ResidentRefusalStall,
 } from "./refusal-remedy.ts"
 import { reconcileChangeMerges, type ChangeMerge } from "./pr-landing.ts"
-import { requireImplicitRecutBranchFreshness, type RecutBranchFreshness } from "./recut-branch-freshness.ts"
+import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { lifecycleStatus } from "./status-presentation.ts"
 import {
@@ -1919,7 +1919,7 @@ type TrackerBridgeV2 = Readonly<{
 function trackerDeliveryV2(
   pr: DeepReadonly<PR>,
   state: DeepReadonly<YrdCliState>,
-  eligibility: changeEligibility,
+  eligibility: ChangeEligibility,
 ): TrackerDeliveryV2 | undefined {
   if (pr.issue === undefined) return undefined
   const revision = currentChangeRev(pr)
@@ -1991,7 +1991,7 @@ function trackerDeliveryV2(
         bounce,
       }
     case "integrated": {
-      const merge = changeMergeOutcome(pr)
+      const merge = ChangeMergeOutcome(pr)
       if (merge.outcome !== "landed") refusal(`integrated PR '${pr.id}' has no canonical landing outcome`)
       return {
         ...identity,
@@ -2002,7 +2002,7 @@ function trackerDeliveryV2(
       }
     }
     case "already-landed": {
-      const merge = changeMergeOutcome(pr)
+      const merge = ChangeMergeOutcome(pr)
       if (merge.outcome !== "already-landed") {
         refusal(`PR '${pr.id}' is recorded as already merged but has no canonical equivalence proof`)
       }
@@ -2506,7 +2506,7 @@ function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
   }
 }
 
-function projectEligibilityTaskStatus(eligibility: changeEligibility) {
+function projectEligibilityTaskStatus(eligibility: ChangeEligibility) {
   return {
     ...eligibility,
     checks: { ...eligibility.checks, ...taskStatusFields(checkTaskStatusOf(eligibility.checks)) },
@@ -2525,7 +2525,7 @@ type ChangeListStatusProjection = Omit<ReturnType<typeof projectChangeTaskStatus
 
 function projectChangeTaskStatusWithEligibility(
   pr: PR,
-  eligibility: changeEligibility,
+  eligibility: ChangeEligibility,
   merge?: ChangeMerge,
 ): ChangeListStatusProjection {
   const projected = projectChangeTaskStatus(pr)
@@ -4128,7 +4128,7 @@ async function readyPr(
   return changeDeliveryState(pr) === "needs-author" ? 1 : 0
 }
 
-async function recutPr(
+async function remergePr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
@@ -4168,7 +4168,7 @@ async function recutPr(
   const selected = pr.revs.find((revision) => revision.n === selectedRevision)
   let proposedHeadSha = explicitProposedHeadSha
   if (explicitProposedHeadSha === undefined && isLivePR(pr) && selected !== undefined) {
-    const freshness = await requireImplicitRecutBranchFreshness(pr, selected, options, services, io)
+    const freshness = await requireImplicitRemergeBranchFreshness(pr, selected, options, services, io)
     if (freshness.status === "tracked-drift") proposedHeadSha = freshness.liveHead
   }
   const currentRevisionAtStart = currentChangeRev(pr)
@@ -4185,7 +4185,7 @@ async function recutPr(
     ...(pr.track === true ? { track: true } : {}),
   }
   if (options.preflight === true) {
-    const preflight = await preflightRecut(
+    const preflight = await preflightRemerge(
       app,
       selector,
       {
@@ -4222,7 +4222,7 @@ async function recutPr(
     )
     return delivery === "needs-author" ? 1 : 0
   }
-  const outcome = await executeRecutPr(
+  const outcome = await executeRemergePr(
     app,
     services,
     selector,
@@ -4247,7 +4247,7 @@ async function recutPr(
   return changeDeliveryState(outcome.current) === "needs-author" ? 1 : 0
 }
 
-type ExecuteRecutChangeOptions = Readonly<{
+type ExecuteRemergeChangeOptions = Readonly<{
   revision?: number
   proposedHeadSha?: string
   queue?: boolean
@@ -4282,11 +4282,11 @@ async function cancelSupersededRevisionRuns(
   }
 }
 
-async function executeRecutPr(
+async function executeRemergePr(
   app: YrdCliApp,
   services: Pick<YrdCliServices, "process" | "recut">,
   selector: string,
-  options: ExecuteRecutChangeOptions,
+  options: ExecuteRemergeChangeOptions,
   io: YrdCliIO,
 ) {
   const service = services.recut ?? configuration("pr.recut capability is not installed")
@@ -4360,7 +4360,7 @@ async function executeRecutPr(
   }
   const sourceReview = pr.reviews.findLast((review) => review.revision === source.n && review.headSha === source.head)
   const approval = sourceReview?.decision === "approve" ? sourceReview : undefined
-  const recutExpectedCurrent = {
+  const remergeExpectedCurrent = {
     ...expectedCurrent,
     ...(certificate === undefined || approvedCurrentReview === undefined
       ? {}
@@ -4381,7 +4381,7 @@ async function executeRecutPr(
         }),
   }
   const currentCompositions = source.composition === undefined ? sameIssueIntegratedCompositions(app, pr) : undefined
-  const recutInput: Parameters<typeof service.recut>[0] = {
+  const remergeInput: Parameters<typeof service.recut>[0] = {
     id: pr.id,
     ...(pr.bay === undefined ? {} : { bay: pr.bay }),
     ...(pr.name === undefined ? {} : { name: pr.name }),
@@ -4408,7 +4408,7 @@ async function executeRecutPr(
           },
         }),
   }
-  const result = await service.recut(recutInput)
+  const result = await service.recut(remergeInput)
   if (options.transition !== undefined && result.headSha === result.baseSha) {
     await app.bays.settleSuperseded({
       pr: pr.id,
@@ -4475,7 +4475,7 @@ async function executeRecutPr(
     ...(certificate === undefined ? {} : { certificate }),
     sources,
     ...(result.composition === undefined ? {} : { composition: result.composition }),
-    expectedCurrent: recutExpectedCurrent,
+    expectedCurrent: remergeExpectedCurrent,
     ...(options.transition === undefined ? {} : { transition: options.transition }),
   })
   const unchanged = recorded.events.length === 0
@@ -5071,7 +5071,7 @@ function requiredPr(app: YrdCliApp, selector: string): PR {
   return app.bays.pr(selector) ?? requireLivePR(stateOf(app).bays, selector)
 }
 
-type changeMergeOutcome =
+type ChangeMergeOutcome =
   | Readonly<{
       outcome: "landed"
       status: "integrated"
@@ -5092,7 +5092,7 @@ type changeMergeOutcome =
     }>
   | Readonly<{ outcome: "not-landed"; status: Exclude<ChangeDeliveryState, "integrated" | "already-landed"> }>
 
-function changeMergeOutcome(pr: DeepReadonly<PR>): changeMergeOutcome {
+function ChangeMergeOutcome(pr: DeepReadonly<PR>): ChangeMergeOutcome {
   const delivery = changeDeliveryState(pr)
   if (delivery === "already-landed") {
     const hasRunProof = pr.terminalRun !== undefined
@@ -5404,7 +5404,7 @@ async function viewPr(
   const position = positions?.get(pr.id)
   const runs = changeQueueRuns(app, pr)
   const attempts = await queueAttempts(services)
-  const detail = changeDetailData(pr, runs, attempts)
+  const detail = ChangeDetailData(pr, runs, attempts)
   const eligibility = app.queue.eligibility(pr.id)
   const publication = projectPublication(publicationJob(app, pr))
   await printResultWithWarnings(
@@ -5414,7 +5414,7 @@ async function viewPr(
       command,
       pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
       eligibility: projectEligibilityTaskStatus(eligibility),
-      landing: changeMergeOutcome(pr),
+      landing: ChangeMergeOutcome(pr),
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,
@@ -5865,7 +5865,7 @@ async function preparePublicationQueueCycle(
     if (pr === undefined || changeDeliveryState(pr) !== "pushed") continue
     const revision = currentChangeRev(pr)
     if (revision.n !== input.revision || revision.head !== input.headSha) continue
-    await executeRecutPr(
+    await executeRemergePr(
       app,
       services,
       pr.id,
@@ -6009,7 +6009,7 @@ async function queueAuditFindings(
 function admissionBlockedPrs(
   app: YrdCliApp,
   selectedChangeIds?: ReadonlySet<string>,
-): Array<Readonly<{ pr: PR; eligibility: changeEligibility }>> {
+): Array<Readonly<{ pr: PR; eligibility: ChangeEligibility }>> {
   return Object.values(stateOf(app).bays.prs)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
@@ -8757,7 +8757,7 @@ export type ResidentTrackedRevisionTransition =
       sourceRevision: number
       sourceHead: string
       currentRevision: number
-      verdict: RecutPreflightVerdict
+      verdict: RemergePreflightVerdict
       recorded: boolean
     }>
   | Readonly<{
@@ -8875,10 +8875,10 @@ export async function refreshTrackedQueueRevisions(
       observation?.set(observationKey, { ...backoff, skipped: backoff.skipped + 1 })
       continue
     }
-    let classified: RecutPreflightResult | undefined
-    let freshness: RecutBranchFreshness
+    let classified: RemergePreflightResult | undefined
+    let freshness: RemergeBranchFreshness
     try {
-      freshness = await requireImplicitRecutBranchFreshness(candidate, before, { queue: true }, services, io)
+      freshness = await requireImplicitRemergeBranchFreshness(candidate, before, { queue: true }, services, io)
       observation?.delete(observationKey)
     } catch (error) {
       // Containment is scoped to the OBSERVATION phase by position: only this
@@ -8910,7 +8910,7 @@ export async function refreshTrackedQueueRevisions(
       if (freshness.status === "fresh" && !interrupted) continue
 
       const source = freshness.status === "tracked-drift" ? before : currentChangeRev(requiredPr(app, candidate.id))
-      classified = await preflightRecut(
+      classified = await preflightRemerge(
         app,
         candidate.id,
         {
@@ -9177,7 +9177,7 @@ export async function refreshAdmittedQueueRevisions(
     }
 
     try {
-      const recut = await executeRecutPr(
+      const remerge = await executeRemergePr(
         app,
         services,
         candidate.id,
@@ -9189,46 +9189,46 @@ export async function refreshAdmittedQueueRevisions(
         },
         io,
       )
-      const refreshedRevision = currentChangeRev(recut.current)
-      if (recut.settlement === "payload-already-contained") {
+      const refreshedRevision = currentChangeRev(remerge.current)
+      if (remerge.settlement === "payload-already-contained") {
         outcomes.push({
           status: "settled",
-          pr: recut.current.id,
+          pr: remerge.current.id,
           revision: refreshedRevision.n,
           fromBase: candidateRevision.baseSha,
-          toBase: recut.result.baseSha,
-          proof: recut.settlement,
-          patchId: recut.result.patchId,
+          toBase: remerge.result.baseSha,
+          proof: remerge.settlement,
+          patchId: remerge.result.patchId,
         })
         app.log.info?.("Settled a queued PR whose payload current main already contains.", {
           action: "queue-freshness-superseded",
-          pr: recut.current.id,
+          pr: remerge.current.id,
           revision: refreshedRevision.n,
           fromBase: candidateRevision.baseSha,
-          toBase: recut.result.baseSha,
-          proof: recut.settlement,
-          patchId: recut.result.patchId,
+          toBase: remerge.result.baseSha,
+          proof: remerge.settlement,
+          patchId: remerge.result.patchId,
         })
         finishBatch()
         continue
       }
       outcomes.push({
         status: "refreshed",
-        pr: recut.current.id,
+        pr: remerge.current.id,
         revision: refreshedRevision.n,
         fromBase: candidateRevision.baseSha,
-        toBase: recut.result.baseSha,
+        toBase: remerge.result.baseSha,
         headSha: refreshedRevision.head,
-        patchId: recut.result.patchId,
+        patchId: remerge.result.patchId,
       })
       preparedBatches.add(plan.batch)
       app.log.info?.("Updated a queued PR to the latest base.", {
         action: "queue-freshness-refreshed",
-        pr: recut.current.id,
+        pr: remerge.current.id,
         revision: refreshedRevision.n,
         fromBase: candidateRevision.baseSha,
-        toBase: recut.result.baseSha,
-        patchId: recut.result.patchId,
+        toBase: remerge.result.baseSha,
+        patchId: remerge.result.patchId,
       })
     } catch (error) {
       const failure = failureFact(error)
@@ -9313,7 +9313,7 @@ export type RefusalRemedyOutcome =
       count: number
       /** Every command the runner ran, verbatim, in order. */
       commands: readonly string[]
-      verdict: RecutPreflightVerdict
+      verdict: RemergePreflightVerdict
     }>
   | Readonly<{
       status: "escalated"
@@ -9363,11 +9363,11 @@ async function applyRedeliveryStep(
 async function applyPreflightVerdict(
   app: YrdCliApp,
   services: YrdCliServices,
-  preflight: RecutPreflightResult,
+  preflight: RemergePreflightResult,
   io: YrdCliIO,
   requirements: Readonly<{ track?: true }> = {},
 ): Promise<void> {
-  const recutExpectedCurrent = {
+  const remergeExpectedCurrent = {
     revision: preflight.evidence.expectedCurrent?.revision ?? preflight.revision,
     headSha: preflight.evidence.expectedCurrent?.headSha ?? preflight.evidence.headSha,
     ...(preflight.evidence.expectedCurrent?.track === undefined
@@ -9375,7 +9375,7 @@ async function applyPreflightVerdict(
       : { track: preflight.evidence.expectedCurrent.track }),
     ...requirements,
   }
-  const expectedCurrent = { pr: preflight.pr, ...recutExpectedCurrent }
+  const expectedCurrent = { pr: preflight.pr, ...remergeExpectedCurrent }
   if (preflight.verdict === "SUBSUMED-WITHDRAW") {
     // Withdrawal ENDS a delivery, and `yrd admin pr prune` already owns unattended
     // subsumption on its own schedule. The runner's job is to unwedge the line,
@@ -9399,7 +9399,7 @@ async function applyPreflightVerdict(
   // `admit: false` for the same reason the freshness pass uses it: the compose
   // that follows in THIS cycle owns admission. The remedy's job is to leave a
   // queueable revision behind, not to start a second admission path.
-  await executeRecutPr(
+  await executeRemergePr(
     app,
     services,
     preflight.pr,
@@ -9408,7 +9408,7 @@ async function applyPreflightVerdict(
       ...(preflight.evidence.proposedHeadSha === undefined
         ? {}
         : { proposedHeadSha: preflight.evidence.proposedHeadSha }),
-      expectedCurrent: recutExpectedCurrent,
+      expectedCurrent: remergeExpectedCurrent,
       queue: true,
       admit: false,
       ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}),
@@ -9424,8 +9424,8 @@ async function applyRefusalRemedy(
   steps: readonly RemedyStep[],
   commands: string[],
   io: YrdCliIO,
-): Promise<RecutPreflightVerdict> {
-  let verdict: RecutPreflightVerdict | undefined
+): Promise<RemergePreflightVerdict> {
+  let verdict: RemergePreflightVerdict | undefined
   for (const step of steps) {
     commands.push(formatRemedyCommand(step))
     if (step.verb !== "recut") {
@@ -9433,12 +9433,12 @@ async function applyRefusalRemedy(
       continue
     }
     if (step.preflight !== true) {
-      await executeRecutPr(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
+      await executeRemergePr(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
       continue
     }
     // The printed `--apply` command executes this exact verdict in-process, so
     // a human and the resident both consume the same preflight decision.
-    const preflight = await preflightRecut(app, step.pr, { queue: step.queue }, io)
+    const preflight = await preflightRemerge(app, step.pr, { queue: step.queue }, io)
     commands.push(preflight.next)
     await applyPreflightVerdict(app, services, preflight, io)
     verdict = preflight.verdict
@@ -11245,7 +11245,7 @@ function buildProgram(
     .action(async (selector, options) => editPr(installed(), selector, options, io))
   // Off the help surface (I23: "recut disappears — resubmitting is submit
   // again"); the verb keeps working for the flows that learned it.
-  const recut = pr
+  const remerge = pr
     .command("recut <selector>", { hidden: true })
     .description("recut a merge request revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
@@ -11256,9 +11256,9 @@ function buildProgram(
     .option("--force", "recut even when the current revision already passed its checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
-      setExit(await recutPr(installed(), installedServices(), selector, options, io)),
+      setExit(await remergePr(installed(), installedServices(), selector, options, io)),
     )
-  addAuthoredCarrierWorkflow(recut, name)
+  addAuthoredCarrierWorkflow(remerge, name)
   // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
   pr.command("publish <selector>", { hidden: true })
     .description("request credential-bearing publication of one immutable PR revision")

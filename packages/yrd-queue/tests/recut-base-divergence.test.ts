@@ -80,7 +80,7 @@ function preparation(
   head: string,
   certified: Readonly<{ baseSha: string; treeSha: string; patchId: string }>,
 ): CandidatePreparationInput {
-  const recut = { ...certified, fromRevision: 33, reviewCarried: true }
+  const remerge = { ...certified, fromRevision: 33, reviewCarried: true }
   return {
     id: "C1",
     queueId: "refs/heads/main",
@@ -95,7 +95,7 @@ function preparation(
         revision: 34,
         headSha: head,
         baseSha: base,
-        recut,
+        recut: remerge,
       },
     ],
   }

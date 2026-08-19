@@ -32,7 +32,7 @@ import {
   IntegrationProofSchema,
   configuredCommandStep,
   configuredMergeStep,
-  createGitPRRecutter,
+  createGitChangeRemerger,
   findRepositoryChangeMerge,
   findRepositoryMergeRecords,
   CANDIDATE_REF_NAMESPACE,
@@ -50,7 +50,7 @@ import {
   type AddStepResult,
   type GitCheckEvidence,
   type GitCheckResultEvidence,
-  type changeShape,
+  type ChangeShape,
   type RefusePathsPolicy,
   type StepExecution,
 } from "@yrd/queue"
@@ -67,7 +67,7 @@ const gitFetchTimeout = {
   verdict: "TIMED_OUT",
 } satisfies ProcessResult
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
-type Checked = AddStepResult<changeShape, "check", GitCheckResultEvidence>
+type Checked = AddStepResult<ChangeShape, "check", GitCheckResultEvidence>
 
 function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): void {
   const editorCapable = commands.filter((command) => !command.includes("--abort"))
@@ -487,7 +487,7 @@ const payloadLines = (five: string, three = "3"): string =>
  * middle of `payload.txt`. Returned `baseSha` is the base the reviewed head was cut
  * from; callers advance `main` afterwards to exercise the recut base-chase gate.
  */
-async function directRecutBaseChaseRepository(): Promise<{ repo: string; baseSha: string; featureSha: string }> {
+async function directRemergeBaseChaseRepository(): Promise<{ repo: string; baseSha: string; featureSha: string }> {
   const { repo } = await repository()
   await writeFile(join(repo, "payload.txt"), payloadLines("5"))
   await git(repo, ["add", "payload.txt"])
@@ -624,14 +624,14 @@ async function codeCarrierProposalRepository(): Promise<CodeCarrierProposalFixtu
   }
 }
 
-function recutProposedCodeCarrier(
-  recutter: ReturnType<typeof createGitPRRecutter>,
-  input: Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0],
+function remergeProposedCodeCarrier(
+  remerger: ReturnType<typeof createGitChangeRemerger>,
+  input: Parameters<ReturnType<typeof createGitChangeRemerger>["recut"]>[0],
   proposedHeadSha: string,
 ) {
   // The production input has not grown this P1a seam yet. Keep the RED at
   // runtime so the failure proves replay rather than stopping at transpilation.
-  return recutter.recut({ ...input, proposedHeadSha } as Parameters<ReturnType<typeof createGitPRRecutter>["recut"]>[0])
+  return remerger.recut({ ...input, proposedHeadSha } as Parameters<ReturnType<typeof createGitChangeRemerger>["recut"]>[0])
 }
 
 function observeGitMutations(process: Pick<Process, "run">): {
@@ -873,7 +873,7 @@ async function submitCertifiedCarrier(
           })
     },
   }
-  const recut = await createGitPRRecutter({ inject: { process: noHooks }, repo }).recut({
+  const remerge = await createGitChangeRemerger({ inject: { process: noHooks }, repo }).recut({
     id: pr.id,
     branch: submission.branch,
     base,
@@ -884,10 +884,10 @@ async function submitCertifiedCarrier(
   await app.bays.recut({
     pr: pr.id,
     fromRevision: revision.n,
-    headSha: recut.headSha,
-    baseSha: recut.baseSha,
-    treeSha: recut.treeSha,
-    patchId: recut.patchId,
+    headSha: remerge.headSha,
+    baseSha: remerge.baseSha,
+    treeSha: remerge.treeSha,
+    patchId: remerge.patchId,
     reviewCarried: false,
   })
   await app.bays.ready({ pr: pr.id })
@@ -1165,9 +1165,9 @@ describe("Queue command adapters", () => {
     await git(repo, ["commit", "-qm", "advance authority"])
     const currentBaseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
-    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const remerger = createGitChangeRemerger({ inject: { process }, repo })
 
-    const result = await recutter.recut({
+    const result = await remerger.recut({
       id: "PR1",
       branch: "issue/candidate",
       base: "main",
@@ -1191,7 +1191,7 @@ describe("Queue command adapters", () => {
     await git(repo, ["add", "candidate.txt"])
     await git(repo, ["commit", "-qm", "overlap candidate"])
     await expect(
-      recutter.recut({
+      remerger.recut({
         id: "PR2",
         branch: "issue/candidate",
         base: "main",
@@ -1216,8 +1216,8 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const observed = observeGitMutations(process)
 
-    const result = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+    const result = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/approved",
@@ -1251,8 +1251,8 @@ describe("Queue command adapters", () => {
     expect(noLazyFetch).not.toContain("1")
     noLazyFetch.length = 0
 
-    await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process: recordingProcess }, repo: fixture.repo }),
+    await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process: recordingProcess }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/approved",
@@ -1280,8 +1280,8 @@ describe("Queue command adapters", () => {
     const observed = observeGitMutations(process)
 
     await expect(
-      recutProposedCodeCarrier(
-        createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+      remergeProposedCodeCarrier(
+        createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
         {
           id: "PR1",
           branch: "issue/approved",
@@ -1321,8 +1321,8 @@ describe("Queue command adapters", () => {
     const observed = observeGitMutations(process)
 
     await expect(
-      recutProposedCodeCarrier(
-        createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+      remergeProposedCodeCarrier(
+        createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
         {
           id: "PR1",
           branch: "issue/approved",
@@ -1371,8 +1371,8 @@ describe("Queue command adapters", () => {
     ]) {
       const observed = observeGitMutations(process)
       try {
-        const result = await recutProposedCodeCarrier(
-          createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+        const result = await remergeProposedCodeCarrier(
+          createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
           input,
           candidate.sha,
         )
@@ -1471,8 +1471,8 @@ describe("Queue command adapters", () => {
       baseSha: fixture.approvedBaseSha,
     } as const
     const refusedGit = observeGitMutations(process)
-    const refused = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process: refusedGit.process }, repo: fixture.repo }),
+    const refused = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process: refusedGit.process }, repo: fixture.repo }),
       input,
       fixture.corrupt.sha,
     ).then(
@@ -1484,14 +1484,14 @@ describe("Queue command adapters", () => {
       }),
     )
     const siblingGit = observeGitMutations(process)
-    const sibling = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process: siblingGit.process }, repo: fixture.repo }),
+    const sibling = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process: siblingGit.process }, repo: fixture.repo }),
       { ...input, id: "PR2" },
       fixture.sibling.sha,
     )
     const repairedGit = observeGitMutations(process)
-    const repaired = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process: repairedGit.process }, repo: fixture.repo }),
+    const repaired = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process: repairedGit.process }, repo: fixture.repo }),
       input,
       fixture.repaired.sha,
     )
@@ -1523,8 +1523,8 @@ describe("Queue command adapters", () => {
     for (const candidate of [fixture.gitlinkAdd, fixture.gitlinkModify, fixture.gitlinkDelete]) {
       const observed = observeGitMutations(process)
       try {
-        const result = await recutProposedCodeCarrier(
-          createGitPRRecutter({ inject: { process: observed.process }, repo: fixture.repo }),
+        const result = await remergeProposedCodeCarrier(
+          createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
           {
             id: "PR1",
             branch: "issue/approved",
@@ -1640,8 +1640,8 @@ describe("Queue command adapters", () => {
     expect(candidateSha).not.toBe(sourceHeadSha)
 
     await using process = createProcess()
-    const result = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const result = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/source",
@@ -1684,8 +1684,8 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["switch", "-q", "main"])
 
     await using process = createProcess()
-    const result = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const result = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/source",
@@ -1725,8 +1725,8 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await expect(
-      recutProposedCodeCarrier(
-        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      remergeProposedCodeCarrier(
+        createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
         {
           id: "PR1",
           branch: "issue/source",
@@ -1767,8 +1767,8 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await expect(
-      recutProposedCodeCarrier(
-        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      remergeProposedCodeCarrier(
+        createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
         {
           id: "PR1",
           branch: "issue/source",
@@ -1809,8 +1809,8 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await expect(
-      recutProposedCodeCarrier(
-        createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+      remergeProposedCodeCarrier(
+        createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
         {
           id: "PR1",
           branch: "issue/source",
@@ -1848,8 +1848,8 @@ describe("Queue command adapters", () => {
     expect(candidateSha).not.toBe(sourceHeadSha)
 
     await using process = createProcess()
-    const result = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const result = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/source",
@@ -1895,8 +1895,8 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["commit", "-qm", "recut a: verbatim floor"])
     const verbatimSha = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["switch", "-q", "main"])
-    const verbatimResult = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const verbatimResult = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       input,
       verbatimSha,
     )
@@ -1915,8 +1915,8 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["commit", "-qm", "recut b: code only, dep ff-resolved to the advance"])
     const ffSha = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["switch", "-q", "main"])
-    const ffResult = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const ffResult = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       input,
       ffSha,
     )
@@ -1935,7 +1935,7 @@ describe("Queue command adapters", () => {
   })
 
   it("admits an exact frozen code carrier after independently rederiving its durable endpoints", async () => {
-    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    const { repo, baseSha, featureSha } = await directRemergeBaseChaseRepository()
     await writeFile(join(repo, "authority.txt"), "current authority\n")
     await git(repo, ["add", "authority.txt"])
     await git(repo, ["commit", "-qm", "advance authority"])
@@ -1946,8 +1946,8 @@ describe("Queue command adapters", () => {
     const proposedSha = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-q", "main"])
     await using process = createProcess()
-    const recut = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo }),
+    const remerge = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo }),
       {
         id: "PR1",
         branch: "issue/feature",
@@ -1974,10 +1974,10 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: true,
       certificate: "frozen-code-carrier-v1",
       sources: [
@@ -1985,7 +1985,7 @@ describe("Queue command adapters", () => {
           repo: ".",
           fromHeadSha: featureSha,
           toHeadSha: proposedSha,
-          patchId: recut.patchId,
+          patchId: remerge.patchId,
           rangeDiff: "=",
         },
       ],
@@ -2007,8 +2007,8 @@ describe("Queue command adapters", () => {
   it("reverifies a frozen certificate before skipping an already-landed actuator retry", async () => {
     const fixture = await codeCarrierProposalRepository()
     await using process = createProcess()
-    const recut = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const remerge = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/approved",
@@ -2029,15 +2029,15 @@ describe("Queue command adapters", () => {
       recut: {
         certificate: "frozen-code-carrier-v1",
         fromRevision: 1,
-        patchId: recut.patchId,
-        treeSha: recut.treeSha,
+        patchId: remerge.patchId,
+        treeSha: remerge.treeSha,
         reviewCarried: false,
         sources: [
           {
             repo: ".",
             fromHeadSha: fixture.corrupt.sha,
             toHeadSha: fixture.exact.sha,
-            patchId: recut.patchId,
+            patchId: remerge.patchId,
             rangeDiff: "=" as const,
           },
         ],
@@ -2122,8 +2122,8 @@ describe("Queue command adapters", () => {
   it("refuses altered or missing frozen code-carrier endpoints without landing them", async () => {
     const fixture = await codeCarrierProposalRepository()
     await using process = createProcess()
-    const recut = await recutProposedCodeCarrier(
-      createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+    const remerge = await remergeProposedCodeCarrier(
+      createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
         branch: "issue/approved",
@@ -2138,22 +2138,22 @@ describe("Queue command adapters", () => {
       repo: ".",
       fromHeadSha: fixture.approvedSha,
       toHeadSha: fixture.exact.sha,
-      patchId: recut.patchId,
+      patchId: remerge.patchId,
       rangeDiff: "=" as const,
     }
-    const exactRecut = {
+    const exactRemerge = {
       certificate: "frozen-code-carrier-v1" as const,
       fromRevision: 1,
-      patchId: recut.patchId,
-      treeSha: recut.treeSha,
+      patchId: remerge.patchId,
+      treeSha: remerge.treeSha,
       reviewCarried: false,
       sources: [rootSource],
       baseSha: fixture.currentBaseSha,
       sourceBaseSha: fixture.approvedBaseSha,
       sourceHeadSha: fixture.approvedSha,
     }
-    const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(exactRecut)
-    const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(exactRecut)
+    const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(exactRemerge)
+    const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(exactRemerge)
     // One commit before approvedBaseSha is the fixture's pre-gitlink root, so
     // this widened range also picks up the "baseline gitlink" commit — which
     // adds .gitmodules (an ordinary file the gitlink obligations never touch)
@@ -2167,13 +2167,13 @@ describe("Queue command adapters", () => {
       {
         name: "altered source base",
         headSha: fixture.exact.sha,
-        recut: { ...exactRecut, sourceBaseSha: alteredSourceBaseSha },
+        recut: { ...exactRemerge, sourceBaseSha: alteredSourceBaseSha },
       },
       {
         name: "altered source head",
         headSha: fixture.exact.sha,
         recut: {
-          ...exactRecut,
+          ...exactRemerge,
           sourceHeadSha: fixture.corrupt.sha,
           sources: [{ ...rootSource, fromHeadSha: fixture.corrupt.sha }],
         },
@@ -2181,12 +2181,12 @@ describe("Queue command adapters", () => {
       {
         name: "altered candidate base",
         headSha: fixture.exact.sha,
-        recut: { ...exactRecut, baseSha: fixture.approvedBaseSha },
+        recut: { ...exactRemerge, baseSha: fixture.approvedBaseSha },
       },
       {
         name: "altered candidate head",
         headSha: fixture.corrupt.sha,
-        recut: { ...exactRecut, sources: [{ ...rootSource, toHeadSha: fixture.corrupt.sha }] },
+        recut: { ...exactRemerge, sources: [{ ...rootSource, toHeadSha: fixture.corrupt.sha }] },
       },
     ] as const
     const mainBefore = await git(fixture.repo, ["rev-parse", "main"])
@@ -2295,7 +2295,7 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR-MULTI",
         branch: "issue/multi",
         base: "main",
@@ -2325,7 +2325,7 @@ describe("Queue command adapters", () => {
     const currentBaseSha = await git(repo, ["rev-parse", "main"])
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR-OVERSIZED",
       branch: "issue/oversized",
       base: "main",
@@ -2352,7 +2352,7 @@ describe("Queue command adapters", () => {
     await git(repo, ["add", "upstream.txt"])
     await git(repo, ["commit", "-qm", "advance authority"])
     await using process = createProcess()
-    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const remerger = createGitChangeRemerger({ inject: { process }, repo })
     const input = {
       id: "PR1",
       branch: "issue/candidate",
@@ -2361,9 +2361,9 @@ describe("Queue command adapters", () => {
       headSha: candidate,
       baseSha: oldBaseSha,
     } as const
-    const first = await recutter.recut(input)
+    const first = await remerger.recut(input)
 
-    const request = recutter.recut({
+    const request = remerger.recut({
       ...input,
       current: {
         revision: 2,
@@ -2425,7 +2425,7 @@ describe("Queue command adapters", () => {
         return process.run(request)
       },
     }
-    const result = await createGitPRRecutter({ inject: { process: capturingProcess }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process: capturingProcess }, repo }).recut({
       id: "PR1",
       branch: "issue/payload",
       base: "main",
@@ -2458,7 +2458,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["rev-parse", `${rawSha}^{tree}`])).not.toBe(rawTree)
 
     await using process = createProcess()
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/raw",
       base: "main",
@@ -2489,7 +2489,7 @@ describe("Queue command adapters", () => {
     const currentBaseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
 
-    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/candidate",
       base: "main",
@@ -2613,7 +2613,7 @@ describe("Queue command adapters", () => {
         return result
       },
     }
-    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const remerger = createGitChangeRemerger({ inject: { process }, repo })
     const input = {
       id: "PR1",
       branch: "issue/root",
@@ -2622,7 +2622,7 @@ describe("Queue command adapters", () => {
       headSha: authoredHead,
       baseSha: currentBase,
     }
-    await expect(recutter.recut(input)).rejects.toThrow(
+    await expect(remerger.recut(input)).rejects.toThrow(
       /target root '.+' pins submodule 'dep' to '.+'; replayed authored root '.+' pins it to '.+'; ancestry walk failed because neither submodule commit is an ancestor of the other/u,
     )
 
@@ -2652,7 +2652,7 @@ describe("Queue command adapters", () => {
         ],
       },
     ] as const
-    const result = await recutter.recut({ ...input, currentCompositions })
+    const result = await remerger.recut({ ...input, currentCompositions })
 
     expect(result).toMatchObject({
       baseSha: currentBase,
@@ -2662,9 +2662,9 @@ describe("Queue command adapters", () => {
     })
     expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(currentBase)
     expect(await git(repo, ["diff", "--name-only", currentBase, result.headSha])).toBe("doctrine.md")
-    const recutDoctrine = await git(repo, ["show", `${result.headSha}:doctrine.md`])
-    expect(recutDoctrine).toContain("generated `current_command` verbatim")
-    expect(recutDoctrine).toContain("For authored roots, draft then recut the same PR")
+    const remergeDoctrine = await git(repo, ["show", `${result.headSha}:doctrine.md`])
+    expect(remergeDoctrine).toContain("generated `current_command` verbatim")
+    expect(remergeDoctrine).toContain("For authored roots, draft then recut the same PR")
     expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(currentPin)
 
     await git(repo, ["switch", "-qc", "issue/root-multi", sourceBase])
@@ -2687,7 +2687,7 @@ describe("Queue command adapters", () => {
     await git(repo, ["switch", "-q", "main"])
     await git(repo, ["submodule", "update", "--init", "--recursive"])
     await expect(
-      recutter.recut({
+      remerger.recut({
         ...input,
         branch: "issue/root-multi",
         headSha: multiCommitHead,
@@ -2701,7 +2701,7 @@ describe("Queue command adapters", () => {
       },
     })
 
-    const validBytes = new TextEncoder().encode(recutDoctrine)
+    const validBytes = new TextEncoder().encode(remergeDoctrine)
     const marker = [0xef, 0xbf, 0xbd, 0x28]
     const markerIndex = validBytes.findIndex((byte, index) =>
       marker.every((part, offset) => validBytes[index + offset] === part),
@@ -2725,7 +2725,7 @@ describe("Queue command adapters", () => {
         "tamper union output",
       ])
     }
-    await expect(recutter.recut({ ...input, currentCompositions })).rejects.toMatchObject({
+    await expect(remerger.recut({ ...input, currentCompositions })).rejects.toMatchObject({
       failure: {
         kind: "refusal",
         code: "payload-certificate",
@@ -2759,7 +2759,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
 
     await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR1",
         branch: "issue/right",
         base: "main",
@@ -2790,7 +2790,7 @@ describe("Queue command adapters", () => {
     await git(repo, ["push", "-q", "origin", "main"])
     await writeFile(join(repo, ".git", "hooks", "pre-push"), "#!/bin/sh\nexit 0\n")
     await using process = createProcess()
-    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -2798,20 +2798,20 @@ describe("Queue command adapters", () => {
       headSha: featureSha,
       baseSha,
     })
-    expect(await git(repo, ["rev-list", "--count", `${recut.baseSha}..${recut.headSha}`])).toBe("2")
-    expect(await git(repo, ["rev-parse", `${recut.headSha}~2`])).toBe(recut.baseSha)
+    expect(await git(repo, ["rev-list", "--count", `${remerge.baseSha}..${remerge.headSha}`])).toBe("2")
+    expect(await git(repo, ["rev-parse", `${remerge.headSha}~2`])).toBe(remerge.baseSha)
     expect(
-      (await git(repo, ["log", "--reverse", "--format=%s", `${recut.baseSha}..${recut.headSha}`])).split("\n"),
+      (await git(repo, ["log", "--reverse", "--format=%s", `${remerge.baseSha}..${remerge.headSha}`])).split("\n"),
     ).toEqual(["feature dependency", "feature"])
     await using app = await checkedQueue(process, repo, ["true"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: false,
     })
     await app.bays.ready({ pr: "PR1" })
@@ -2821,14 +2821,14 @@ describe("Queue command adapters", () => {
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion).toBe("success")
     await git(repo, ["fetch", "-q", "origin", "main"])
-    expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).toBe(await git(repo, ["ls-tree", recut.headSha, "dep"]))
+    expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).toBe(await git(repo, ["ls-tree", remerge.headSha, "dep"]))
   })
 
   it("recuts one composition revision onto the authoritative root and returns its exact certificate", async () => {
     const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     const oldRootBaseSha = await git(repo, ["rev-parse", `${rootBaseSha}^`])
     await using process = createProcess()
-    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const remerger = createGitChangeRemerger({ inject: { process }, repo })
 
     const input = {
       id: "PR1",
@@ -2850,7 +2850,7 @@ describe("Queue command adapters", () => {
         ],
       },
     } as const
-    const result = await recutter.recut(input)
+    const result = await remerger.recut(input)
 
     expect(result).toMatchObject({
       headSha: rootBaseSha,
@@ -2893,13 +2893,13 @@ describe("Queue command adapters", () => {
       composition: result.composition,
       unchanged: true,
     } as const
-    await expect(recutter.recut({ ...input, current })).resolves.toMatchObject(unchanged)
+    await expect(remerger.recut({ ...input, current })).resolves.toMatchObject(unchanged)
     const candidateBranch = result.composition?.sources[0]?.branch
     if (candidateBranch === undefined) throw new Error("missing immutable source candidate")
     await git(module, ["update-ref", "-d", candidateBranch])
-    await expect(recutter.recut({ ...input, current })).resolves.toMatchObject(unchanged)
+    await expect(remerger.recut({ ...input, current })).resolves.toMatchObject(unchanged)
     await expect(
-      recutter.recut({
+      remerger.recut({
         ...input,
         current: { ...current, treeSha: "0".repeat(40) },
       }),
@@ -2911,7 +2911,7 @@ describe("Queue command adapters", () => {
       },
     })
     await expect(
-      recutter.recut({
+      remerger.recut({
         ...input,
         current: { ...current, patchId: "f".repeat(40) },
       }),
@@ -2923,7 +2923,7 @@ describe("Queue command adapters", () => {
       },
     })
     await expect(
-      recutter.recut({
+      remerger.recut({
         ...input,
         current: { ...current, headSha: oldRootBaseSha },
       }),
@@ -2956,7 +2956,7 @@ describe("Queue command adapters", () => {
         },
       ],
     } as const
-    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/source",
       base: "main",
@@ -2977,12 +2977,12 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: tree === "exact" ? recut.treeSha : "f".repeat(40),
-      patchId: patch === "exact" ? recut.patchId : "e".repeat(40),
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: tree === "exact" ? remerge.treeSha : "f".repeat(40),
+      patchId: patch === "exact" ? remerge.patchId : "e".repeat(40),
       reviewCarried: false,
-      composition: recut.composition,
+      composition: remerge.composition,
     })
     await app.bays.ready({ pr: "PR1" })
 
@@ -3001,9 +3001,9 @@ describe("Queue command adapters", () => {
   })
 
   it("refuses a direct recut whose base advanced even when Git could re-anchor it cleanly", async () => {
-    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    const { repo, baseSha, featureSha } = await directRemergeBaseChaseRepository()
     await using process = createProcess()
-    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -3016,10 +3016,10 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: false,
     })
     await app.bays.ready({ pr: "PR1" })
@@ -3050,9 +3050,9 @@ describe("Queue command adapters", () => {
   })
 
   it("rejects a direct recut whose advanced base conflicts with the reviewed change", async () => {
-    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    const { repo, baseSha, featureSha } = await directRemergeBaseChaseRepository()
     await using process = createProcess()
-    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -3070,10 +3070,10 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: false,
     })
     await app.bays.ready({ pr: "PR1" })
@@ -3092,9 +3092,9 @@ describe("Queue command adapters", () => {
   })
 
   it("rejects a direct recut whose advanced base cleanly drifts the reviewed patch identity", async () => {
-    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    const { repo, baseSha, featureSha } = await directRemergeBaseChaseRepository()
     await using process = createProcess()
-    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/feature",
       base: "main",
@@ -3114,10 +3114,10 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: false,
     })
     await app.bays.ready({ pr: "PR1" })
@@ -3150,7 +3150,7 @@ describe("Queue command adapters", () => {
         },
       ],
     } as const
-    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/source",
       base: "main",
@@ -3159,7 +3159,7 @@ describe("Queue command adapters", () => {
       baseSha: oldRootBaseSha,
       composition,
     })
-    expect(recut.baseSha).toBe(rootBaseSha)
+    expect(remerge.baseSha).toBe(rootBaseSha)
     // Advance the authoritative root base with a disjoint root change (dep pin untouched).
     await writeFile(join(repo, "unrelated-root.txt"), "advanced\n")
     await git(repo, ["add", "unrelated-root.txt"])
@@ -3178,12 +3178,12 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: false,
-      composition: recut.composition,
+      composition: remerge.composition,
     })
     await app.bays.ready({ pr: "PR1" })
 
@@ -3671,7 +3671,7 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["push", "-q", "--no-verify", "origin", "main"])
     const movedBase = await git(fixture.repo, ["rev-parse", "main"])
     await rm(join(fixture.repo, ".git", "hooks", "pre-push"))
-    const recut = await createGitPRRecutter({ inject: { process }, repo: fixture.repo }).recut({
+    const remerge = await createGitChangeRemerger({ inject: { process }, repo: fixture.repo }).recut({
       ...authored,
       id: "PR3",
     })
@@ -3686,10 +3686,10 @@ describe("Queue command adapters", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recut.headSha,
-      baseSha: recut.baseSha,
-      treeSha: recut.treeSha,
-      patchId: recut.patchId,
+      headSha: remerge.headSha,
+      baseSha: remerge.baseSha,
+      treeSha: remerge.treeSha,
+      patchId: remerge.patchId,
       reviewCarried: false,
     })
     await app.bays.ready({ pr: "PR1" })
@@ -3734,9 +3734,9 @@ describe("Queue command adapters", () => {
         },
       },
     })
-    expect(recut).toMatchObject({ baseSha: movedBase, unchanged: false })
-    expect(await git(fixture.repo, ["rev-parse", `${recut.headSha}^`])).toBe(movedBase)
-    expect(await git(fixture.repo, ["ls-tree", recut.headSha, "dep"])).toContain(fixture.moduleSha)
+    expect(remerge).toMatchObject({ baseSha: movedBase, unchanged: false })
+    expect(await git(fixture.repo, ["rev-parse", `${remerge.headSha}^`])).toBe(movedBase)
+    expect(await git(fixture.repo, ["ls-tree", remerge.headSha, "dep"])).toContain(fixture.moduleSha)
     expect(utc).toMatchObject({ mergeability: "mergeable", sha: expect.stringMatching(/^[0-9a-f]{40}$/u) })
     expect(pacific).toMatchObject({ mergeability: "mergeable", sha: utc.sha })
     expect(pacificBytes).toBe(utcBytes)
@@ -4603,7 +4603,7 @@ describe("Queue command adapters", () => {
     })
   })
   it("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
-    type CheckedCommand = AddStepResult<changeShape, "check", z.infer<typeof CommandEvidenceSchema>>
+    type CheckedCommand = AddStepResult<ChangeShape, "check", z.infer<typeof CommandEvidenceSchema>>
     const encoder = new TextEncoder()
 
     const controlledQueue = async () => {
@@ -4623,7 +4623,7 @@ describe("Queue command adapters", () => {
       const bayJobs = createBayJobDefs(unusedWorkspace)
       const check = withStep(
         "check",
-        configuredCommandStep<changeShape>({
+        configuredCommandStep<ChangeShape>({
           inject: { process },
           command: ["progressing-check"],
           cwd,
@@ -4957,7 +4957,7 @@ describe("Queue command adapters", () => {
           createdAt: new Date(0).toISOString(),
         },
         shape: { results: {} },
-      } as StepExecution<changeShape>,
+      } as StepExecution<ChangeShape>,
       {
         id: "J1",
         attempt: 1,
@@ -5003,11 +5003,11 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
       shape: { results: {} },
-    } as StepExecution<changeShape>
+    } as StepExecution<ChangeShape>
     const context = { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal }
 
     expect(() =>
-      configuredCommandStep<changeShape>({
+      configuredCommandStep<ChangeShape>({
         inject: { process },
         command: "printf unsafe" as never,
         cwd,
@@ -5015,13 +5015,13 @@ describe("Queue command adapters", () => {
       }),
     ).toThrow("shellCommand")
 
-    const direct = configuredCommandStep<changeShape>({
+    const direct = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: ["printf", "%s", "literal;$(not-expanded)"],
       cwd,
       purpose: "check",
     })
-    const explicitShell = configuredCommandStep<changeShape>({
+    const explicitShell = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: shellCommand("printf shell"),
       cwd,
@@ -5049,7 +5049,7 @@ describe("Queue command adapters", () => {
         return completed.promise
       },
     }
-    const step = configuredCommandStep<changeShape>({
+    const step = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: ["streaming-check"],
       cwd,
@@ -5062,7 +5062,7 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
       shape: { results: {} },
-    } as StepExecution<changeShape>
+    } as StepExecution<ChangeShape>
     const context = { id: "J-stream", attempt: 2, runner: "test", signal: new AbortController().signal }
     let settled = false
     const running = Promise.resolve(step(input, context)).finally(() => {
@@ -5170,7 +5170,7 @@ describe("Queue command adapters", () => {
     const stdoutPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "stdout.log")
     const outputPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "output.log")
     await using process = createProcess()
-    const step = configuredCommandStep<changeShape>({
+    const step = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: shellCommand(
         "printf 'first\\n'; fixture_ticks=0; while [ ! -f \"$YRD_RELEASE\" ] && [ \"$fixture_ticks\" -lt 6000 ]; do fixture_ticks=$((fixture_ticks + 1)); sleep 0.01; done; printf 'second\\n'",
@@ -5251,7 +5251,7 @@ describe("Queue command adapters", () => {
     async ({ process: result, error, verdict }) => {
       const cwd = await mkdtemp(join(tmpdir(), "yrd-command-failure-"))
       roots.push(cwd)
-      const step = configuredCommandStep<changeShape>({
+      const step = configuredCommandStep<ChangeShape>({
         inject: { process: { run: () => Promise.resolve(result) } },
         command: ["false"],
         cwd,
@@ -5320,7 +5320,7 @@ describe("Queue command adapters", () => {
     } as ProcessResult
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-escaped-"))
     roots.push(cwd)
-    const step = configuredCommandStep<changeShape>({
+    const step = configuredCommandStep<ChangeShape>({
       inject: { process: { run: () => Promise.resolve(result) } },
       command: ["bun", "run", "check"],
       cwd,
@@ -5635,7 +5635,7 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
       shape: { results: {} },
-    } satisfies StepExecution<changeShape>
+    } satisfies StepExecution<ChangeShape>
     const checked = await gitCheckStep({
       inject: { process },
       repo,
@@ -6905,7 +6905,7 @@ describe("Queue command adapters", () => {
   it("passes exact YRD_* variables while scrubbing ambient YRD_* and GIT_* values", async () => {
     await using process = createProcess()
     expect(() =>
-      configuredCommandStep<changeShape>({
+      configuredCommandStep<ChangeShape>({
         inject: { process },
         command: ["echo", "{target}"],
         cwd: ".",
@@ -6917,7 +6917,7 @@ describe("Queue command adapters", () => {
     const headSha = "a".repeat(40)
     const baseSha = "b".repeat(40)
     const pr = { id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha, baseSha }
-    const step = configuredCommandStep<changeShape>({
+    const step = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: shellCommand("env | grep -E '^(YRD_|GIT_)' | sort"),
       cwd: repo,
@@ -6958,14 +6958,14 @@ describe("Queue command adapters", () => {
 
   describe("deterministic child environment (merge-queue R42)", () => {
     const headSha = "a".repeat(40)
-    const execution = (): StepExecution<changeShape> =>
+    const execution = (): StepExecution<ChangeShape> =>
       ({
         run: "R1",
         step: "check",
         index: 0,
         prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha }],
         shape: { results: {} },
-      }) as StepExecution<changeShape>
+      }) as StepExecution<ChangeShape>
     const jobContext = (overrides: Readonly<{ id?: string; attempt?: number; runner?: string }> = {}) => ({
       id: "J1",
       attempt: 1,
@@ -7013,7 +7013,7 @@ describe("Queue command adapters", () => {
       context = jobContext(),
     ) => {
       const { requests, process } = capturingProcess()
-      const step = configuredCommandStep<changeShape>({
+      const step = configuredCommandStep<ChangeShape>({
         inject: { process },
         command: ["check-env"],
         cwd: ".",
@@ -7058,7 +7058,7 @@ describe("Queue command adapters", () => {
     it("snapshots declared overrides at construction so later mutation is never applied", async () => {
       const { requests, process } = capturingProcess()
       const overrides: Record<string, string> = { SAFE_DECLARED: "yes" }
-      const step = configuredCommandStep<changeShape>({
+      const step = configuredCommandStep<ChangeShape>({
         inject: { process },
         command: ["check-env"],
         cwd: ".",
@@ -7101,7 +7101,7 @@ describe("Queue command adapters", () => {
           environmentPassthrough?: readonly string[]
         }>,
       ) =>
-        configuredCommandStep<changeShape>({
+        configuredCommandStep<ChangeShape>({
           inject: { process },
           command: ["check-env"],
           cwd: ".",
@@ -9223,7 +9223,7 @@ describe("Queue command adapters", () => {
         index: 0,
         prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
         shape: { results: {} },
-      } satisfies StepExecution<changeShape>
+      } satisfies StepExecution<ChangeShape>
       const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
         checkInput,
         { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -9313,7 +9313,7 @@ describe("Queue command adapters", () => {
       index: 0,
       prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
       shape: { results: {} },
-    } satisfies StepExecution<changeShape>
+    } satisfies StepExecution<ChangeShape>
     const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
       checkInput,
       { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -9678,7 +9678,7 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
     const cwd = await mkdtemp(join(tmpdir(), "yrd-cmd-timeout-"))
     roots.push(cwd)
     await using process = createProcess({ cwd, killGraceMs: 500 })
-    const runner = configuredCommandStep<changeShape>({
+    const runner = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: ["sleep", "30"],
       cwd,
@@ -9692,7 +9692,7 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
         step: "check",
         prs: [{ id: "pr-1", base: "main", headSha: "a".repeat(40) }],
         targetSha: "a".repeat(40),
-      } as unknown as StepExecution<changeShape>,
+      } as unknown as StepExecution<ChangeShape>,
       { attempt: 1 } as never,
     )
     expect(outcome.status).toBe("completed")

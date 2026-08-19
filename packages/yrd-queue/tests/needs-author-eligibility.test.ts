@@ -27,7 +27,7 @@ import {
   withQueue,
   withStep,
   type AddStepResult,
-  type changeShape,
+  type ChangeShape,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
@@ -85,7 +85,7 @@ function workspace(): BayWorkspace {
   }
 }
 
-async function createQueueApp(check?: StepRunner<changeShape, CheckResult>) {
+async function createQueueApp(check?: StepRunner<ChangeShape, CheckResult>) {
   const checkStep = withStep(
     "check",
     (input: StepExecution, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
@@ -105,7 +105,7 @@ async function createQueueApp(check?: StepRunner<changeShape, CheckResult>) {
   })
 }
 
-type CheckedShape = AddStepResult<changeShape, "check", CheckResult>
+type CheckedShape = AddStepResult<ChangeShape, "check", CheckResult>
 
 /** A check(passes) → merge(integrating) queue, so a composition refusal can be
  * placed SOLELY on the integrating step while a passed check record is also
@@ -233,7 +233,7 @@ describe("native needs-author lifecycle", () => {
     expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
     expect(await Array.fromAsync(app.events())).toEqual(beforeReplay)
 
-    const recutReplay = await app.bays.recut({
+    const remergeReplay = await app.bays.recut({
       pr,
       fromRevision: 1,
       headSha: HEAD,
@@ -242,7 +242,7 @@ describe("native needs-author lifecycle", () => {
       patchId: "4".repeat(40),
       reviewCarried: false,
     })
-    expect(recutReplay.events).toEqual([])
+    expect(remergeReplay.events).toEqual([])
     expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
 
     // A fix push advances this already-submitted PR in place and re-requests

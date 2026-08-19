@@ -30,7 +30,7 @@ import type {
   Candidate,
   IntegrationProof,
   ChangeCheckRecord,
-  changeEligibility,
+  ChangeEligibility,
   QueueAuditFinding,
   QueueMemberKind,
   Run,
@@ -196,7 +196,7 @@ export type QueueStatusResult = QueueSummary &
     prs: PR[]
     admissionOrder: readonly string[]
     candidates?: readonly Candidate[]
-    eligibilities?: readonly changeEligibility[]
+    eligibilities?: readonly ChangeEligibility[]
   }>
 
 type QueuePauseAllowListMember = Readonly<{
@@ -1088,7 +1088,7 @@ export type ChangeRunRevisionClock =
 
 export type ChangeRunsData = Readonly<{
   pr: PR
-  eligibility?: changeEligibility
+  eligibility?: ChangeEligibility
   runs: readonly QueueShowData[]
 }>
 
@@ -1155,7 +1155,7 @@ function latestCandidateForCurrentRevision(result: QueueStatusResult, pr: PR): C
     .at(-1)
 }
 
-function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): changeEligibility | undefined {
+function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): ChangeEligibility | undefined {
   const revision = changeRevisionNumber(pr)
   return result.eligibilities?.find((eligibility) => eligibility.pr === pr.id && eligibility.revision === revision)
 }
@@ -1871,7 +1871,7 @@ export type QueueDisplayState = Readonly<{
 
 export function queueDisplayState(
   pr: PR,
-  options: Readonly<{ eligibility?: changeEligibility; runs?: readonly Run[] }> = {},
+  options: Readonly<{ eligibility?: ChangeEligibility; runs?: readonly Run[] }> = {},
 ): QueueDisplayState {
   const kind = queueMemberKind(pr.id)
   const native = changeDeliveryState(pr)
@@ -1919,7 +1919,7 @@ function preRunBand(pr: PR, native: ChangeDeliveryState, runs: readonly Run[]): 
 
 /** Thin consumer of {@link queueDisplayState} — kept as the named surface every
  * status caller already reads, but no longer a second derivation of it. */
-export function projectedChangeStatus(pr: PR, eligibility?: changeEligibility): ChangeDeliveryState | "needs-author" {
+export function projectedChangeStatus(pr: PR, eligibility?: ChangeEligibility): ChangeDeliveryState | "needs-author" {
   return queueDisplayState(pr, eligibility === undefined ? {} : { eligibility }).delivery
 }
 
@@ -2291,13 +2291,13 @@ function timelineRevisionLineage(pr: PR, revision = changeRevisionNumber(pr)): Q
 }
 
 function timelineLineageLabel(lineages: readonly QueueTimelineRevisionLineage[]): string | undefined {
-  const recuts = lineages.filter(({ revisions }) => revisions.length > 1)
-  if (recuts.length === 0) return undefined
-  return recuts
+  const remerges = lineages.filter(({ revisions }) => revisions.length > 1)
+  if (remerges.length === 0) return undefined
+  return remerges
     .map(({ pr, revisions }) => {
       const path = revisions.map((revision) => `rev${revision}`).join("→")
       const currentRevision = revisions.at(-1) ?? 1
-      return recuts.length === 1 ? path : `${formatQueueChangeId(pr, currentRevision)} ${path}`
+      return remerges.length === 1 ? path : `${formatQueueChangeId(pr, currentRevision)} ${path}`
     })
     .join(" · ")
 }
@@ -3082,7 +3082,7 @@ function projectPR(
   now: number,
   runOverride?: Run,
   candidateOverride?: Candidate,
-  eligibility?: changeEligibility,
+  eligibility?: ChangeEligibility,
 ): HumanChangeProjection {
   const run = runOverride ?? latestRunForCurrentRevision(pr, result)
   const candidate = candidateOverride
@@ -3323,7 +3323,7 @@ export function QueueRecoveryView({
 }: {
   runs: readonly Run[]
   findings: readonly QueueAuditFinding[]
-  blocked: readonly Readonly<{ pr: PR; eligibility: changeEligibility }>[]
+  blocked: readonly Readonly<{ pr: PR; eligibility: ChangeEligibility }>[]
 }) {
   if (findings.length === 0 && blocked.length === 0) return <QueueRunsView runs={runs} />
   return (
@@ -3398,16 +3398,16 @@ const checkLabels = {
   checking: "run",
   passed: "pass",
   failed: "fail",
-} as const satisfies Record<changeEligibility["checks"]["status"], ChangeListRow["checks"]>
+} as const satisfies Record<ChangeEligibility["checks"]["status"], ChangeListRow["checks"]>
 
-function reviewLabel(eligibility: changeEligibility): ChangeListRow["review"] {
+function reviewLabel(eligibility: ChangeEligibility): ChangeListRow["review"] {
   if (!eligibility.review.required) return "n/a"
   if (eligibility.review.decision === "reject") return "reject"
   return eligibility.review.approved && !eligibility.review.stale ? "ok" : "need"
 }
 
 export function changeListRows(
-  entries: readonly Readonly<{ pr: PR; eligibility: changeEligibility }>[],
+  entries: readonly Readonly<{ pr: PR; eligibility: ChangeEligibility }>[],
   runs: readonly Run[],
   now: number,
   merges: ReadonlyMap<string, Readonly<{ code: string }>> = new Map(),
@@ -3634,7 +3634,7 @@ export function ChangeResultView({
   prs: readonly PR[]
   runs: readonly Run[]
   checks?: readonly ChangeCheckViewRecord[]
-  eligibilities?: readonly changeEligibility[]
+  eligibilities?: readonly ChangeEligibility[]
   now?: number
 }) {
   return (
@@ -3661,13 +3661,13 @@ function latestChangeRun(pr: PR, runs: readonly Run[]): Run | undefined {
     .at(-1)
 }
 
-export type changeDetailData = Readonly<{
+export type ChangeDetailData = Readonly<{
   pr: PR
   runs: readonly QueueShowData[]
   run?: QueueShowData
 }>
 
-export function changeDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): changeDetailData {
+export function ChangeDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): ChangeDetailData {
   const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
   const delivery = changeDeliveryState(pr)
   const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts, undefined, delivery))
@@ -3760,7 +3760,7 @@ export function ChangeDetailView({
   position,
 }: {
   pr: PR
-  eligibility?: changeEligibility
+  eligibility?: ChangeEligibility
   runs: readonly Run[]
   attempts?: readonly QueueAttempt[]
   now: number
@@ -3783,7 +3783,7 @@ export function ChangeDetailView({
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const merge = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
-  const detail = changeDetailData(pr, runs, attempts)
+  const detail = ChangeDetailData(pr, runs, attempts)
   const lineage = timelineRevisionLineage(pr)
   const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
   const recomposedSources = changeRevisionLineage(pr).flatMap((candidate) => candidate.recut?.sources ?? [])

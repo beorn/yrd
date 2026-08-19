@@ -16,7 +16,7 @@ const TARGET = "b".repeat(40)
 type Call = Readonly<{ op: string; detail?: string }>
 type LogCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
-function mechanicalRecutReason(pr: string): string {
+function mechanicalRemergeReason(pr: string): string {
   return `yrd: PR '${pr}' needs a certified refresh; run 'yrd pr recut ${pr} --preflight --queue --apply'`
 }
 
@@ -76,7 +76,7 @@ function harness(
             pr: "PR1791",
             code: options.code ?? "composition-invalid",
             kind: "refusal",
-            reason: options.reason ?? mechanicalRecutReason("PR1791"),
+            reason: options.reason ?? mechanicalRemergeReason("PR1791"),
             count: options.count ?? 3,
             firstAt: "2026-07-27T15:00:00.000Z",
             lastAt: "2026-07-27T15:51:00.000Z",

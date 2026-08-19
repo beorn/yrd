@@ -75,7 +75,7 @@ describe("queue submit diff projection", () => {
     git(cwd, "add", "later.txt")
     git(cwd, "commit", "-qm", "revision two")
     const latestHeadSha = git(cwd, "rev-parse", "HEAD")
-    const recut = fixturePr("PR8", "submitted", "2026-07-19T01:05:00.000Z", "Diff", {
+    const remerge = fixturePr("PR8", "submitted", "2026-07-19T01:05:00.000Z", "Diff", {
       revision: 2,
       headSha: latestHeadSha,
       revisions: [
@@ -97,7 +97,7 @@ describe("queue submit diff projection", () => {
         },
       ],
     })
-    expect(queueChangeDiff(cwd, recut, 1)).toMatchObject({
+    expect(queueChangeDiff(cwd, remerge, 1)).toMatchObject({
       pr: "PR8",
       revision: 1,
       additions: 3,

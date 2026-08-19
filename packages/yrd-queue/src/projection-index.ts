@@ -1,7 +1,7 @@
 import { compareNatural } from "@yrd/core"
 import type {
   InstalledStep,
-  changeSnapshot,
+  ChangeSnapshot,
   QueueAuthorityState,
   QueueProjectionIndex,
   QueueProjectionLookup,
@@ -28,7 +28,7 @@ export function emptyQueueProjectionIndex(): QueueProjectionIndex {
   }
 }
 
-export function queueLookupKey(snapshot: Readonly<changeSnapshot>, steps: readonly Readonly<InstalledStep>[]): string {
+export function queueLookupKey(snapshot: Readonly<ChangeSnapshot>, steps: readonly Readonly<InstalledStep>[]): string {
   return JSON.stringify([
     [snapshot.id, snapshot.revision, snapshot.headSha, snapshot.base, snapshot.baseSha ?? null],
     steps.map((step) => [step.name, step.revision, step.kind, step.classification ?? null]),
@@ -124,7 +124,7 @@ export function childRunId(index: Readonly<QueueProjectionIndex>, parent: RunId,
 
 export function latestExactRunId(
   index: Readonly<QueueProjectionIndex>,
-  snapshot: Readonly<changeSnapshot>,
+  snapshot: Readonly<ChangeSnapshot>,
   steps: readonly Readonly<InstalledStep>[],
 ): RunId | undefined {
   return projectionLookupGet(index.plans, queueLookupKey(snapshot, steps))?.latestExact
@@ -132,7 +132,7 @@ export function latestExactRunId(
 
 export function latestPrefixRunId(
   index: Readonly<QueueProjectionIndex>,
-  snapshot: Readonly<changeSnapshot>,
+  snapshot: Readonly<ChangeSnapshot>,
   steps: readonly Readonly<InstalledStep>[],
 ): RunId | undefined {
   return projectionLookupGet(index.plans, queueLookupKey(snapshot, steps))?.latestPrefix
@@ -140,14 +140,14 @@ export function latestPrefixRunId(
 
 export function latestRootRunId(
   index: Readonly<QueueProjectionIndex>,
-  snapshot: Readonly<changeSnapshot>,
+  snapshot: Readonly<ChangeSnapshot>,
 ): RunId | undefined {
   return projectionLookupGet(index.rootsByMember, queueMemberKey(snapshot))
 }
 
 export function releasedAdmissionFailures(
   index: Readonly<QueueProjectionIndex>,
-  snapshot: Readonly<changeSnapshot>,
+  snapshot: Readonly<ChangeSnapshot>,
   steps: readonly Readonly<InstalledStep>[],
 ): number {
   return projectionLookupGet(index.plans, queueLookupKey(snapshot, steps))?.releasedAdmissionFailures ?? 0
@@ -165,11 +165,11 @@ function childKey(parent: RunId, part: 0 | 1): string {
   return `${parent}\0${part}`
 }
 
-function queueMemberKey(snapshot: Readonly<changeSnapshot>): string {
+function queueMemberKey(snapshot: Readonly<ChangeSnapshot>): string {
   return JSON.stringify([snapshot.id, snapshot.revision, snapshot.headSha])
 }
 
-function lookupSnapshots(snapshot: Readonly<changeSnapshot>): readonly Readonly<changeSnapshot>[] {
+function lookupSnapshots(snapshot: Readonly<ChangeSnapshot>): readonly Readonly<ChangeSnapshot>[] {
   return snapshot.baseSha === undefined ? [snapshot] : [snapshot, { ...snapshot, baseSha: undefined }]
 }
 

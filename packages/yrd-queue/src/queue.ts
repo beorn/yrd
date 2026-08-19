@@ -117,10 +117,10 @@ import {
   type QueueUnassociatedTerminal,
   type StepName,
   type StepSelection,
-  type changeEligibility,
+  type ChangeEligibility,
   type ChangeCheckRecord,
-  type changeShape,
-  type changeSnapshot,
+  type ChangeShape,
+  type ChangeSnapshot,
 } from "./model.ts"
 import {
   activeQueueRootIds,
@@ -475,7 +475,7 @@ const QueueAuthorityTokenFactSchema = z.object({
   revision: z.number().int().positive(),
   headSha: GitShaSchema,
 })
-const QueueRecutAuthorityFactSchema = z.object({
+const QueueRemergeAuthorityFactSchema = z.object({
   pr: PRIdSchema,
   successor: z.object({ revision: z.number().int().positive(), headSha: GitShaSchema }),
 })
@@ -508,22 +508,22 @@ const AssociateTerminalsArgsSchema = z
   })
 type AssociateTerminalsArgs = Readonly<z.infer<typeof AssociateTerminalsArgsSchema>>
 
-export type StepExecution<Shape extends changeShape = changeShape> = Readonly<{
+export type StepExecution<Shape extends ChangeShape = ChangeShape> = Readonly<{
   run: RunId
   step: string
   index: number
-  prs: readonly changeSnapshot[]
+  prs: readonly ChangeSnapshot[]
   targetSha?: string
   candidate?: Readonly<Omit<Candidate, "createdAt">>
   shape: Shape
 }>
 
-export type StepRunner<Shape extends changeShape, Output extends JsonValue> = JobHandler<StepExecution<Shape>, Output>
+export type StepRunner<Shape extends ChangeShape, Output extends JsonValue> = JobHandler<StepExecution<Shape>, Output>
 
 declare const inputShape: unique symbol
 declare const outputShape: unique symbol
 
-export type StepDef<Input extends changeShape, Output extends changeShape> = Readonly<{
+export type StepDef<Input extends ChangeShape, Output extends ChangeShape> = Readonly<{
   name: string
   title: string
   revision: string
@@ -535,10 +535,10 @@ export type StepDef<Input extends changeShape, Output extends changeShape> = Rea
   readonly [outputShape]?: Output
 }>
 
-type AnyStepDef = StepDef<changeShape, changeShape>
+type AnyStepDef = StepDef<ChangeShape, ChangeShape>
 type InputOf<Step> = Step extends StepDef<infer Input, infer _Output> ? Input : never
 type OutputOf<Step> = Step extends StepDef<infer _Input, infer Output> ? Output : never
-type ValidateStepChain<Steps extends readonly AnyStepDef[], Shape extends changeShape = changeShape> = Steps extends readonly [
+type ValidateStepChain<Steps extends readonly AnyStepDef[], Shape extends ChangeShape = ChangeShape> = Steps extends readonly [
   infer First extends AnyStepDef,
   ...infer Rest extends readonly AnyStepDef[],
 ]
@@ -546,7 +546,7 @@ type ValidateStepChain<Steps extends readonly AnyStepDef[], Shape extends change
     ? ValidateStepChain<Rest, OutputOf<First>>
     : Readonly<{ "yrd: incompatible queue step input": never }>
   : object
-type FinalShape<Steps extends readonly AnyStepDef[], Shape extends changeShape = changeShape> = Steps extends readonly [
+type FinalShape<Steps extends readonly AnyStepDef[], Shape extends ChangeShape = ChangeShape> = Steps extends readonly [
   infer First extends AnyStepDef,
   ...infer Rest extends readonly AnyStepDef[],
 ]
@@ -561,7 +561,7 @@ export type StepOptions<Output extends JsonValue> = Readonly<{
   output?: z.ZodType<Output>
 }>
 
-export function withStep<const Name extends string, Shape extends changeShape, Output extends JsonValue>(
+export function withStep<const Name extends string, Shape extends ChangeShape, Output extends JsonValue>(
   name: Name,
   runner: StepRunner<Shape, Output>,
   options: StepOptions<Output>,
@@ -588,7 +588,7 @@ export function withStep<const Name extends string, Shape extends changeShape, O
   }) as StepDef<Shape, AddStepResult<Shape, Name, Output>>
 }
 
-export function withMerge<Shape extends changeShape>(
+export function withMerge<Shape extends ChangeShape>(
   runner: StepRunner<Shape, IntegrationProof>,
   options: Readonly<{ revision: string; title?: string; implementationSource?: string }>,
 ): StepDef<Shape, Shape & IntegratedShape> {
@@ -681,7 +681,7 @@ export type CandidatePreparationInput = Readonly<{
   queueId: string
   baseSha: string
   revs: Candidate["revs"]
-  prs: readonly changeSnapshot[]
+  prs: readonly ChangeSnapshot[]
 }>
 
 export type PreparedCandidate = Omit<Candidate, "createdAt" | "mergeability"> &
@@ -778,7 +778,7 @@ export type TerminalAssociationPlan = Readonly<{
   summary: Readonly<{ unprojectable: number; ready: number; refused: number; appended: number }>
 }>
 
-export type Queue<Shape extends changeShape = changeShape> = Readonly<{
+export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
@@ -800,8 +800,8 @@ export type Queue<Shape extends changeShape = changeShape> = Readonly<{
   cancelRun(args: CancelRunArgs): Promise<Run>
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
   audit(options?: QueueAuditOptions): QueueAuditEmission
-  eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): changeEligibility
-  eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly changeEligibility[]
+  eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): ChangeEligibility
+  eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly ChangeEligibility[]
   /** PR batches whose revisions may be refreshed before the next selectorless drain.
    * Queue owns this projection because it must preserve the same candidate
    * partitioning, batch size, and FIFO order as compose. */
@@ -872,9 +872,9 @@ export type CancelAdmissionJobsArgs = Readonly<{
   reason: string
 }>
 
-export type HasQueue<Shape extends changeShape = changeShape> = Readonly<{ queue: Queue<Shape> }>
+export type HasQueue<Shape extends ChangeShape = ChangeShape> = Readonly<{ queue: Queue<Shape> }>
 
-export type QueuePlugin<Shape extends changeShape> = (<
+export type QueuePlugin<Shape extends ChangeShape> = (<
   State extends object,
   Commands extends CommandTree,
   Features extends HasJobs & HasBays,
@@ -1193,7 +1193,7 @@ function sameTerminalAssociation(
   )
 }
 
-function createQueue<Shape extends changeShape>(
+function createQueue<Shape extends ChangeShape>(
   state: ReadSignal<DeepReadonly<QueuesState>>,
   runtime: () => DeepReadonly<RuntimeState>,
   jobs: HasJobs["jobs"],
@@ -1593,7 +1593,7 @@ function createQueue<Shape extends changeShape>(
   }
 
   const candidateFactsForSnapshots = async (
-    snapshots: readonly DeepReadonly<changeSnapshot>[],
+    snapshots: readonly DeepReadonly<ChangeSnapshot>[],
     baseSha: string,
   ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> => {
     const pinned = pinCandidateBaseSha(snapshots, baseSha)
@@ -1800,7 +1800,7 @@ function createQueue<Shape extends changeShape>(
             ...(runOptions.now === undefined ? {} : { now: runOptions.now }),
           }))
     const evidence: ChangeAdmissionStep[] = []
-    let shape: changeShape = changeShape([snapshot])
+    let shape: ChangeShape = ChangeShape([snapshot])
     for (const [index, step] of selected.entries()) {
       const requested = await actions.admissionStep({
         pr: snapshot,
@@ -2358,10 +2358,10 @@ function createQueue<Shape extends changeShape>(
           const authoritySteps = selectSteps(steps, args.steps ?? snapshot.queues.defaultSteps)
           const authorityGaps = selectorless
             ? requested.flatMap((pr) => {
-                const changeSnapshot = Queues.snapshot(pr)
+                const requestedSnapshot = Queues.snapshot(pr)
                 return queueAuthorityGaps(
                   snapshot.queues.authority,
-                  [changeSnapshot],
+                  [requestedSnapshot],
                   authoritySteps,
                   integratedChangeShape([pr]) !== undefined,
                 )
@@ -2967,12 +2967,12 @@ function createQueue<Shape extends changeShape>(
         const snapshot = projected ?? runtime()
         const pr = resolvePR(snapshot.bays, selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
-        return changeEligibility(snapshot, pr, steps)
+        return ChangeEligibility(snapshot, pr, steps)
       })
     },
     eligibilities(projected) {
       const snapshot = projected ?? runtime()
-      return Object.values(snapshot.bays.prs).map((pr) => changeEligibility(snapshot, pr, steps))
+      return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps))
     },
     freshnessCandidateBatches() {
       const snapshot = runtime()
@@ -3078,7 +3078,7 @@ function createQueue<Shape extends changeShape>(
   }) as Queue<Shape>
 }
 
-function deliveryIdentity(pr: DeepReadonly<changeSnapshot>): YrdDeliveryIdentity {
+function deliveryIdentity(pr: DeepReadonly<ChangeSnapshot>): YrdDeliveryIdentity {
   return {
     pr: pr.id,
     revision: pr.revision,
@@ -3294,7 +3294,7 @@ function createQueueCommands(
               index: args.index,
               prs: [args.pr],
               candidate: args.candidate,
-              shape: args.shape as changeShape,
+              shape: args.shape as ChangeShape,
             },
             { key },
           ),
@@ -3458,7 +3458,7 @@ function createQueueCommands(
         args.candidate,
         remaining,
         selection,
-        reuse?.shape ?? integrated ?? changeShape(candidateSnapshots),
+        reuse?.shape ?? integrated ?? ChangeShape(candidateSnapshots),
         integrated?.integration,
         {},
         reuse === undefined
@@ -3553,7 +3553,7 @@ function createQueueCommands(
         args.candidate,
         selected,
         parent.stepSelection,
-        changeShape(prs),
+        ChangeShape(prs),
         undefined,
         {
           parent: parent.id,
@@ -3952,7 +3952,7 @@ function queueAuthorityReleaseReason(
 
 function authorityRequirement(
   authority: DeepReadonly<QueueAuthorityState>,
-  pr: DeepReadonly<changeSnapshot>,
+  pr: DeepReadonly<ChangeSnapshot>,
   steps: readonly DeepReadonly<InstalledStep>[],
   alreadyIntegrated = false,
 ): QueueAuthorityKind | undefined {
@@ -3966,7 +3966,7 @@ function authorityRequirement(
 
 function sameAuthorityToken(
   token: DeepReadonly<QueueAuthorityToken> | undefined,
-  pr: DeepReadonly<changeSnapshot>,
+  pr: DeepReadonly<ChangeSnapshot>,
 ): boolean {
   if (token === undefined) return false
   return token.pr === pr.id && token.revision === pr.revision && token.headSha === pr.headSha
@@ -3974,14 +3974,14 @@ function sameAuthorityToken(
 
 function availableAuthorityToken(
   token: DeepReadonly<QueueAuthorityToken> | undefined,
-  pr: DeepReadonly<changeSnapshot>,
+  pr: DeepReadonly<ChangeSnapshot>,
 ): boolean {
   return sameAuthorityToken(token, pr) && token?.consumedBy === undefined
 }
 
 function queueAuthorityGaps(
   authority: DeepReadonly<QueueAuthorityState>,
-  prs: readonly DeepReadonly<changeSnapshot>[],
+  prs: readonly DeepReadonly<ChangeSnapshot>[],
   steps: readonly DeepReadonly<InstalledStep>[],
   alreadyIntegrated = false,
 ): QueueAuthorityGap[] {
@@ -4010,7 +4010,7 @@ function queueAuthorityGaps(
 
 function requireQueueAuthority(
   authority: DeepReadonly<QueueAuthorityState>,
-  prs: readonly DeepReadonly<changeSnapshot>[],
+  prs: readonly DeepReadonly<ChangeSnapshot>[],
   steps: readonly DeepReadonly<InstalledStep>[],
   alreadyIntegrated = false,
 ): void {
@@ -4339,7 +4339,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const token =
       applied.name === "pr/pushed"
         ? QueueAuthorityTokenFactSchema.parse(applied.data)
-        : ((fact) => ({ pr: fact.pr, ...fact.successor }))(QueueRecutAuthorityFactSchema.parse(applied.data))
+        : ((fact) => ({ pr: fact.pr, ...fact.successor }))(QueueRemergeAuthorityFactSchema.parse(applied.data))
     const invalidated = invalidateChangeAuthority(state.queues.authority, token.pr, "pushed")
     return {
       queues: {
@@ -4838,12 +4838,12 @@ function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: bool
 function startRun(
   queues: DeepReadonly<QueuesState>,
   id: RunId,
-  prs: readonly changeSnapshot[],
+  prs: readonly ChangeSnapshot[],
   baseSha: string,
   prepared: DeepReadonly<Omit<Candidate, "createdAt">> | undefined,
   selected: readonly RuntimeStep[],
   selection: StepSelection | undefined,
-  shape: changeShape,
+  shape: ChangeShape,
   integration?: IntegrationProof,
   lineage: Readonly<{ parent?: RunId; isolationPart?: 0 | 1 }> = {},
   reuse?: Readonly<{ run?: RunId; results: Readonly<Record<string, JsonValue>> }>,
@@ -4926,11 +4926,11 @@ function startRun(
   }
 }
 
-function pinCandidateBaseSha(prs: readonly DeepReadonly<changeSnapshot>[], baseSha: string): readonly changeSnapshot[] {
+function pinCandidateBaseSha(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): readonly ChangeSnapshot[] {
   return prs.map((pr) => ChangeSnapshotSchema.parse({ ...pr, baseSha }))
 }
 
-function requiredCandidateBaseSha(prs: readonly DeepReadonly<changeSnapshot>[]): string {
+function requiredCandidateBaseSha(prs: readonly DeepReadonly<ChangeSnapshot>[]): string {
   const baseSha = prs[0]?.baseSha
   if (baseSha === undefined) {
     throw new Error("yrd: a Candidate requires the exact merge-queue base SHA")
@@ -4941,7 +4941,7 @@ function requiredCandidateBaseSha(prs: readonly DeepReadonly<changeSnapshot>[]):
   return baseSha
 }
 
-function candidateArtifactKey(prs: readonly DeepReadonly<changeSnapshot>[], baseSha: string): string {
+function candidateArtifactKey(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): string {
   return JSON.stringify([
     prs[0] === undefined ? "" : queueIdentity(prs[0]),
     baseSha,
@@ -4949,7 +4949,7 @@ function candidateArtifactKey(prs: readonly DeepReadonly<changeSnapshot>[], base
   ])
 }
 
-function candidateReceiptKey(prs: readonly DeepReadonly<changeSnapshot>[], baseSha: string): string {
+function candidateReceiptKey(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): string {
   return JSON.stringify([
     prs[0] === undefined ? "" : queueIdentity(prs[0]),
     baseSha,
@@ -4957,12 +4957,12 @@ function candidateReceiptKey(prs: readonly DeepReadonly<changeSnapshot>[], baseS
   ])
 }
 
-function sameFlow(left: DeepReadonly<changeSnapshot["flow"]>, right: DeepReadonly<changeSnapshot["flow"]>): boolean {
+function sameFlow(left: DeepReadonly<ChangeSnapshot["flow"]>, right: DeepReadonly<ChangeSnapshot["flow"]>): boolean {
   if (left === undefined || right === undefined) return left === right
   return left.name === right.name && left.rev === right.rev && left.fingerprint === right.fingerprint
 }
 
-function candidateFlow(prs: readonly DeepReadonly<changeSnapshot>[]): DeepReadonly<changeSnapshot["flow"]> {
+function candidateFlow(prs: readonly DeepReadonly<ChangeSnapshot>[]): DeepReadonly<ChangeSnapshot["flow"]> {
   const flow = prs[0]?.flow
   if (prs.some((pr) => !sameFlow(pr.flow, flow))) {
     throw new Error("yrd: one Candidate cannot span Flow revisions")
@@ -4970,14 +4970,14 @@ function candidateFlow(prs: readonly DeepReadonly<changeSnapshot>[]): DeepReadon
   return flow
 }
 
-function queueIdentity(pr: Pick<DeepReadonly<changeSnapshot>, "base" | "flow">): string {
+function queueIdentity(pr: Pick<DeepReadonly<ChangeSnapshot>, "base" | "flow">): string {
   const base = baseIdentity(pr.base)
   return pr.flow === undefined ? base : `${pr.flow.name}/${base}`
 }
 
 function candidateFor(
   queues: DeepReadonly<QueuesState>,
-  prs: readonly DeepReadonly<changeSnapshot>[],
+  prs: readonly DeepReadonly<ChangeSnapshot>[],
   baseSha: string,
 ): DeepReadonly<Candidate> | undefined {
   const first = prs[0]
@@ -5078,7 +5078,7 @@ function requestStep(
   run: Pick<QueueStart, "id" | "prs">,
   candidate: DeepReadonly<Candidate> | DeepReadonly<Omit<Candidate, "createdAt">>,
   index: number,
-  shape: changeShape,
+  shape: ChangeShape,
 ) {
   const { createdAt: _createdAt, ...candidateFacts } = candidate as DeepReadonly<Candidate>
   return step.job.request(
@@ -5290,7 +5290,7 @@ function assertCurrentFlow(flow: DeepReadonly<FlowPin> | undefined, config: YrdC
 
 function samePayloadPRs(
   state: DeepReadonly<BaysState>,
-  snapshots: readonly DeepReadonly<changeSnapshot>[],
+  snapshots: readonly DeepReadonly<ChangeSnapshot>[],
 ): readonly DeepReadonly<PR>[] {
   const payloads = new Set(snapshots.map(payloadIdentity))
   return Object.values(state.prs).filter(
@@ -5299,7 +5299,7 @@ function samePayloadPRs(
   )
 }
 
-function payloadIdentity(pr: DeepReadonly<PR> | DeepReadonly<changeSnapshot>): string {
+function payloadIdentity(pr: DeepReadonly<PR> | DeepReadonly<ChangeSnapshot>): string {
   if ("revs" in pr) {
     return `${baseIdentity(pr.base)}\0${changeHead(pr)}\0${JSON.stringify(changeComposition(pr))}`
   }
@@ -5555,7 +5555,7 @@ function jobKey(run: RunId, index: number): string {
   return `queue:${run}:${index}`
 }
 
-function admissionExecutionId(pr: DeepReadonly<changeSnapshot>, baseSha: string): string {
+function admissionExecutionId(pr: DeepReadonly<ChangeSnapshot>, baseSha: string): string {
   return `${admissionRevisionKeyPrefix(pr.id, pr.revision)}${baseSha}`
 }
 
@@ -5563,7 +5563,7 @@ function admissionRevisionKeyPrefix(pr: string, revision: number): string {
   return `admission:${pr}:${revision}:`
 }
 
-function admissionJobKey(pr: DeepReadonly<changeSnapshot>, baseSha: string, index: number, stepRevision?: string): string {
+function admissionJobKey(pr: DeepReadonly<ChangeSnapshot>, baseSha: string, index: number, stepRevision?: string): string {
   const prefix = `${admissionExecutionId(pr, baseSha)}:${index}`
   return stepRevision === undefined ? prefix : `${prefix}:${stepRevision}`
 }
@@ -5572,9 +5572,9 @@ function shapeThrough(
   record: DeepReadonly<QueueRecord>,
   jobs: DeepReadonly<JobsState>,
   limit = record.steps.length,
-): changeShape {
+): ChangeShape {
   const hasMerge = record.steps.some((step) => step.kind === "merge")
-  let shape: changeShape | IntegratedShape = {
+  let shape: ChangeShape | IntegratedShape = {
     results: { ...record.initialResults },
     ...(record.initialIntegration === undefined || hasMerge ? {} : { integration: record.initialIntegration }),
   }
@@ -5889,7 +5889,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
   for (const record of Queues.values(state.queues)) {
     const candidate = state.queues.candidates[record.candidateId]
     if (candidate === undefined || candidate.mergeability === "unknown") continue
-    const current: changeSnapshot[] = []
+    const current: ChangeSnapshot[] = []
     let live = true
     for (const snapshot of record.prs) {
       const pr = state.bays.prs[snapshot.id]
@@ -6557,7 +6557,7 @@ function unstartedAdmission(
 
 function admissionRun(
   state: DeepReadonly<RuntimeState>,
-  snapshot: DeepReadonly<changeSnapshot>,
+  snapshot: DeepReadonly<ChangeSnapshot>,
   selected: readonly RuntimeStep[],
 ): Run | undefined {
   const id = latestExactRunId(state.queues.index, snapshot, selected)
@@ -6567,7 +6567,7 @@ function admissionRun(
 
 function checkFactRun(
   state: DeepReadonly<RuntimeState>,
-  snapshot: DeepReadonly<changeSnapshot>,
+  snapshot: DeepReadonly<ChangeSnapshot>,
   selected: readonly RuntimeStep[],
 ): Run | undefined {
   const id = latestPrefixRunId(state.queues.index, snapshot, selected)
@@ -6575,7 +6575,7 @@ function checkFactRun(
   return record === undefined ? undefined : materializeRun(record, state.jobs)
 }
 
-function checkRunStatus(run: Run, selectedCount: number): changeEligibility["checks"]["status"] {
+function checkRunStatus(run: Run, selectedCount: number): ChangeEligibility["checks"]["status"] {
   const selected = run.steps.slice(0, selectedCount)
   if (selected.every((step) => step.job !== undefined && jobSucceeded(step.job))) return "passed"
   if (selected.some((step) => step.job !== undefined && jobFailed(step.job))) {
@@ -6588,7 +6588,7 @@ const AUTOMATIC_ADMISSION_RETRIES = 1
 function automaticAdmissionAttemptsExhausted(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
-  snapshot: DeepReadonly<changeSnapshot>,
+  snapshot: DeepReadonly<ChangeSnapshot>,
   selected: readonly RuntimeStep[],
 ): boolean {
   const exactRequests = pr.checkRequests.filter(
@@ -6853,7 +6853,7 @@ function checkEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
-): changeEligibility["checks"] {
+): ChangeEligibility["checks"] {
   const request = checkRequest(pr)
   const timing = request === undefined ? {} : { queuedAt: request.at }
   const selected = admissionSteps(state.queues, steps)
@@ -7166,9 +7166,9 @@ function projectChangeChecks(
 
 function reusableRevisionAdmission(
   state: DeepReadonly<RuntimeState>,
-  snapshots: readonly DeepReadonly<changeSnapshot>[],
+  snapshots: readonly DeepReadonly<ChangeSnapshot>[],
   selected: readonly RuntimeStep[],
-): Readonly<{ count: number; shape: changeShape }> | undefined {
+): Readonly<{ count: number; shape: ChangeShape }> | undefined {
   const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
   if (snapshot?.baseSha === undefined) return undefined
   const pr = state.bays.prs[snapshot.id]
@@ -7203,9 +7203,9 @@ function reusableRevisionAdmission(
 
 function reusablePrefix(
   state: DeepReadonly<RuntimeState>,
-  snapshots: readonly DeepReadonly<changeSnapshot>[],
+  snapshots: readonly DeepReadonly<ChangeSnapshot>[],
   selected: readonly RuntimeStep[],
-): Readonly<{ run: RunId; count: number; shape: changeShape }> | undefined {
+): Readonly<{ run: RunId; count: number; shape: ChangeShape }> | undefined {
   const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
   if (snapshot?.baseSha === undefined) return undefined
   const boundary = selected.findIndex((step) => step.kind === "merge")
@@ -7217,7 +7217,7 @@ function reusablePrefix(
   return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
 }
 
-type RunnableChangeDecision = Readonly<{ pr: PR; eligibility: changeEligibility }>
+type RunnableChangeDecision = Readonly<{ pr: PR; eligibility: ChangeEligibility }>
 
 function runnableChangeSelection(
   state: DeepReadonly<RuntimeState>,
@@ -7237,7 +7237,7 @@ function runnableChangeSelection(
   )
   const decisions = requested.map((pr) => ({
     pr,
-    eligibility: changeEligibility(state, pr, steps, {
+    eligibility: ChangeEligibility(state, pr, steps, {
       resumeIntegrated: true,
       ignoreChecks: options.explicitStepAuthority,
       ignoredClaims,
@@ -7440,7 +7440,7 @@ function needsAuthorMessage(pr: DeepReadonly<PR>, receipt: JobError): string {
   return `PR '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`
 }
 
-function changeEligibility(
+function ChangeEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
@@ -7449,7 +7449,7 @@ function changeEligibility(
     ignoreChecks?: boolean
     ignoredClaims?: ReadonlySet<string>
   }> = {},
-): changeEligibility {
+): ChangeEligibility {
   const reviewed = reviewState(pr)
   const required = state.queues.requires.includes("review")
   const review = {
@@ -7464,7 +7464,7 @@ function changeEligibility(
   const exhaustedAutomaticAdmissions =
     checks.status === "failed" &&
     automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(state.queues, steps))
-  const result = (reason?: changeEligibility["reason"]): changeEligibility => ({
+  const result = (reason?: ChangeEligibility["reason"]): ChangeEligibility => ({
     pr: pr.id,
     revision: changeRevisionNumber(pr),
     runnable: reason === undefined,
@@ -7630,7 +7630,7 @@ function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
   return candidates
 }
 
-function changeShape(prs: readonly changeSnapshot[]): changeShape {
+function ChangeShape(prs: readonly ChangeSnapshot[]): ChangeShape {
   if (prs.length === 0) throw new Error("yrd: a queue run requires at least one PR")
   return { results: {} }
 }
@@ -7659,7 +7659,7 @@ function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined 
   const { changeId: _changeId, ...queueProof } = proof
   const integration = IntegrationProofSchema.parse(queueProof)
   return {
-    ...changeShape(prs.map(Queues.snapshot)),
+    ...ChangeShape(prs.map(Queues.snapshot)),
     integration:
       alreadyMerged === undefined
         ? integration
@@ -7676,7 +7676,7 @@ function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined 
 
 function pinnedChangeError(
   state: DeepReadonly<RuntimeState>,
-  snapshots: readonly changeSnapshot[],
+  snapshots: readonly ChangeSnapshot[],
   runId?: RunId,
 ): JobError | undefined {
   for (const snapshot of snapshots) {
@@ -7761,7 +7761,7 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
   })
 }
 
-function isIntegrated(shape: changeShape): shape is IntegratedShape {
+function isIntegrated(shape: ChangeShape): shape is IntegratedShape {
   return "integration" in shape
 }
 

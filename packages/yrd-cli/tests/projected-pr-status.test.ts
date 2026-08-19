@@ -17,7 +17,7 @@
  * fact outlives every closing path and wins over the observation.
  */
 import { changeDeliveryState, type PR } from "@yrd/bay"
-import type { changeEligibility } from "@yrd/queue"
+import type { ChangeEligibility } from "@yrd/queue"
 import { describe, expect, it } from "vitest"
 import { projectedChangeStatus } from "../src/queue-status-view.tsx"
 
@@ -65,7 +65,7 @@ describe("projectedPrStatus", () => {
   // The eligibility argument is a second door into the same wrong answer: a
   // stale reason code must not resurrect an open-only value on a closed record.
   it("refuses to resurrect needs-author from a stale eligibility reason", () => {
-    const eligibility = { reason: { code: "needs-author" } } as unknown as changeEligibility
+    const eligibility = { reason: { code: "needs-author" } } as unknown as ChangeEligibility
     expect(projectedChangeStatus(pr({ state: "closed" }), eligibility)).toBe("withdrawn")
   })
 

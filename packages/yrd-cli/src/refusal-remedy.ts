@@ -1,7 +1,7 @@
 import { currentChangeRev, changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
 import { compareNatural } from "@yrd/core"
 import { ADMISSION_REFUSAL_LOOP_THRESHOLD, type QueueAdmissionRefusal } from "@yrd/queue"
-import { actionableFailure, recutRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
+import { actionableFailure, remergeRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
 
 /**
  * One mechanically executable step of a printed refusal remedy.
@@ -31,7 +31,7 @@ export type RefusalRemedyContext = Readonly<{
  * does not need to name) the branch. */
 const BRANCH_PLACEHOLDER = "<branch>"
 
-function parseRecut(argv: readonly string[]): RemedyStep | undefined {
+function parseRemerge(argv: readonly string[]): RemedyStep | undefined {
   const [pr, ...flags] = argv
   if (pr === undefined || pr.startsWith("-")) return undefined
   const parsed = { verb: "recut" as const, pr, preflight: false, apply: false, queue: false, force: false }
@@ -60,7 +60,7 @@ function parseRedelivery(verb: "submit" | "create", argv: readonly string[], bra
 export function parseRemedyCommand(command: string, context: RefusalRemedyContext): RemedyStep | undefined {
   const [binary, group, verb, ...argv] = command.trim().split(/\s+/u)
   if (binary !== "yrd" || group !== "pr") return undefined
-  if (verb === "recut") return parseRecut(argv)
+  if (verb === "recut") return parseRemerge(argv)
   if (verb === "submit" || verb === "create") return parseRedelivery(verb, argv, context.branch)
   return undefined
 }
@@ -116,7 +116,7 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
     }
     steps.push(step)
   }
-  if (steps.some((step) => step.verb === "recut") && recutRefusedByDelivery(context.delivery)) {
+  if (steps.some((step) => step.verb === "recut") && remergeRefusedByDelivery(context.delivery)) {
     return Object.freeze({
       kind: "judgment",
       reason: `a merge request in delivery state '${context.delivery ?? "unknown"}' cannot be recut`,

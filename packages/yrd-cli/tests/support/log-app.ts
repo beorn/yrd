@@ -15,7 +15,7 @@ import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO } from "@yrd/cli"
-import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
   withContests,
@@ -103,7 +103,7 @@ export async function createCliApp(journal: Journal<unknown>, id: () => string =
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<changeShape>,
+      _input: StepExecution<ChangeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",

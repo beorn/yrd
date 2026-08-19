@@ -18,7 +18,7 @@ import {
   queueTimelineDefaultCursorId,
   queueTimelineDisplayRows,
   queueTimelineProjection,
-  changeDetailData,
+  ChangeDetailData,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -899,7 +899,7 @@ describe("queue timeline 21106 contract", () => {
     const pending = result.prs.find((pr) => pr.id === "PR1")
     if (running === undefined || pending === undefined) throw new Error("contract fixture is missing expected PRs")
 
-    expect(changeDetailData(running, runs).runs.map((run) => run.run)).toEqual(["R42"])
+    expect(ChangeDetailData(running, runs).runs.map((run) => run.run)).toEqual(["R42"])
     const rendered = await renderString(createElement(ChangeDetailView, { pr: pending, runs, now: 0, position: 1 }), {
       width: 100,
       height: 20,

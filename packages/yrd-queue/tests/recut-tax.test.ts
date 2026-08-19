@@ -43,7 +43,7 @@ import {
   withStep,
   type AddStepResult,
   type IntegrationProof,
-  type changeShape,
+  type ChangeShape,
   type StepExecution,
 } from "@yrd/queue"
 
@@ -54,7 +54,7 @@ const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 const ReviewResultSchema = z.object({ approved: z.boolean() }).strict()
 type CheckResult = z.infer<typeof CheckResultSchema>
 type ReviewResult = z.infer<typeof ReviewResultSchema>
-type CheckedShape = AddStepResult<changeShape, "check", CheckResult>
+type CheckedShape = AddStepResult<ChangeShape, "check", CheckResult>
 type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 
 function ids(initial = 0): () => string {

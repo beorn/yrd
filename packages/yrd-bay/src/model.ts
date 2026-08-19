@@ -500,7 +500,7 @@ export const ChangeFreshnessTransitionSchema = z
   .strict()
 export type ChangeFreshnessTransition = Readonly<z.infer<typeof ChangeFreshnessTransitionSchema>>
 
-export const ChangeRecutSourceSchema = z
+export const ChangeRemergeSourceSchema = z
   .object({
     repo: z.string().trim().min(1),
     fromHeadSha: GitShaSchema,
@@ -510,11 +510,11 @@ export const ChangeRecutSourceSchema = z
   })
   .strict()
   .readonly()
-export type ChangeRecutSource = Readonly<z.infer<typeof ChangeRecutSourceSchema>>
+export type ChangeRemergeSource = Readonly<z.infer<typeof ChangeRemergeSourceSchema>>
 
-export const ChangeRecutCertificateSchema = z.literal("frozen-code-carrier-v1")
+export const ChangeRemergeCertificateSchema = z.literal("frozen-code-carrier-v1")
 
-export const ChangeRecutProofSchema = z
+export const ChangeRemergeProofSchema = z
   .object({
     fromRevision: z.number().int().positive(),
     patchId: GitShaSchema,
@@ -522,14 +522,14 @@ export const ChangeRecutProofSchema = z
     reviewCarried: z.boolean(),
     /** Explicit proof contract for a frozen proposed code carrier. Mechanical
      * base-refresh recuts and legacy journal rows use their existing proof. */
-    certificate: ChangeRecutCertificateSchema.optional(),
+    certificate: ChangeRemergeCertificateSchema.optional(),
     /** Durable non-ancestral identity mapping for the root and any rewritten
      * component heads. Missing only while replaying pre-provenance journals. */
-    sources: z.array(ChangeRecutSourceSchema).min(1).readonly().optional(),
+    sources: z.array(ChangeRemergeSourceSchema).min(1).readonly().optional(),
     transition: ChangeFreshnessTransitionSchema.optional(),
   })
   .strict()
-export type ChangeRecutProof = Readonly<z.infer<typeof ChangeRecutProofSchema>>
+export type ChangeRemergeProof = Readonly<z.infer<typeof ChangeRemergeProofSchema>>
 
 export type ChangeRev = Readonly<{
   n: number
@@ -542,7 +542,7 @@ export type ChangeRev = Readonly<{
   submitter?: string
   correlation?: Correlation
   composition?: CompositionV1
-  recut?: ChangeRecutProof
+  recut?: ChangeRemergeProof
   /** Admission is a verdict about this immutable revision, not a landing
    * attempt. A later base revalidation replaces it on the same revision. */
   admission?: ChangeAdmission
@@ -816,7 +816,7 @@ export const changeHead = (pr: PR): string => currentChangeRev(pr).head
 export const changeBaseSha = (pr: PR): string | undefined => currentChangeRev(pr).baseSha
 export const changeCorrelation = (pr: PR): Correlation | undefined => currentChangeRev(pr).correlation
 export const changeComposition = (pr: PR): CompositionV1 | undefined => currentChangeRev(pr).composition
-export const changeRecut = (pr: PR): ChangeRecutProof | undefined => currentChangeRev(pr).recut
+export const changeRemerge = (pr: PR): ChangeRemergeProof | undefined => currentChangeRev(pr).recut
 
 /** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
 export function changeDeliveryState(pr: PR): ChangeDeliveryState {

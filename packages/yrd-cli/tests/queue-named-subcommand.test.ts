@@ -17,7 +17,7 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withJobs, type JobResult } from "@yrd/job"
 import { normalizeYrdRepositoryAliasInvocation, runYrd as runYrdRaw, type YrdCliIO } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
-import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
   withContests,
@@ -115,7 +115,7 @@ async function createCliApp() {
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<changeShape>,
+      _input: StepExecution<ChangeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",

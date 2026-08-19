@@ -6,8 +6,8 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
-  ChangeRecutCertificateSchema,
-  ChangeRecutProofSchema,
+  ChangeRemergeCertificateSchema,
+  ChangeRemergeProofSchema,
   type ChangeDeliveryState,
   type ChangeTerminalAssociation,
   baseIdentity,
@@ -17,7 +17,7 @@ import {
   changeComposition,
   changeCorrelation,
   changeHead,
-  changeRecut,
+  changeRemerge,
   changeRevisionNumber,
   type PR,
   type PRId,
@@ -52,9 +52,9 @@ const FlowPinSchema = z
   })
   .strict()
 
-const ChangeSnapshotRecutProofSchema = ChangeRecutProofSchema.extend({
+const ChangeSnapshotRemergeProofSchema = ChangeRemergeProofSchema.extend({
   /** Current exact carrier certificate. Absence is accepted only for replaying legacy queue records. */
-  certificate: ChangeRecutCertificateSchema.optional(),
+  certificate: ChangeRemergeCertificateSchema.optional(),
   /** Immutable base certified by this recut revision. Optional only for replaying legacy queue records. */
   baseSha: GitShaSchema.optional(),
   /** Immutable approved-source endpoints. Both are absent only for legacy queue records. */
@@ -154,7 +154,7 @@ export const ChangeSnapshotSchema = z
     baseSha: GitShaSchema.optional(),
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
-    recut: ChangeSnapshotRecutProofSchema.optional(),
+    recut: ChangeSnapshotRemergeProofSchema.optional(),
     flow: FlowPinSchema.optional(),
     /** Present only for a carrier-free pin intent materialized by Queue. */
     intent: QueueIntentSnapshotSchema.optional(),
@@ -167,40 +167,40 @@ export const ChangeSnapshotSchema = z
     if (snapshot.intent !== undefined && snapshot.id !== snapshot.intent.id) {
       context.addIssue({ code: "custom", path: ["intent", "id"], message: "intent member id must match snapshot id" })
     }
-    const recutIssue = (path: string[], message: string) =>
+    const remergeIssue = (path: string[], message: string) =>
       context.addIssue({ code: "custom", path: ["recut", ...path], message })
     const rootSources = snapshot.recut?.sources?.filter(({ repo }) => repo === ".") ?? []
     const rootSource = rootSources[0]
     const frozen = snapshot.recut?.certificate === "frozen-code-carrier-v1"
     if (frozen && snapshot.recut?.baseSha === undefined) {
-      recutIssue(["baseSha"], "a frozen code-carrier certificate requires an immutable candidate base")
+      remergeIssue(["baseSha"], "a frozen code-carrier certificate requires an immutable candidate base")
     }
     if (frozen && (snapshot.recut?.sourceBaseSha === undefined || snapshot.recut.sourceHeadSha === undefined)) {
-      recutIssue([], "a frozen code-carrier certificate requires a complete immutable source range")
+      remergeIssue([], "a frozen code-carrier certificate requires a complete immutable source range")
     }
     if (!frozen && (snapshot.recut?.sourceBaseSha !== undefined || snapshot.recut?.sourceHeadSha !== undefined)) {
-      recutIssue([], "immutable source endpoints require a frozen code-carrier certificate")
+      remergeIssue([], "immutable source endpoints require a frozen code-carrier certificate")
     }
     if (rootSources.length > 1) {
-      recutIssue(["sources"], "a recut snapshot may carry at most one root source mapping")
+      remergeIssue(["sources"], "a recut snapshot may carry at most one root source mapping")
     }
     if (frozen && rootSources.length !== 1) {
-      recutIssue(["sources"], "a frozen code-carrier certificate requires exactly one root source mapping")
+      remergeIssue(["sources"], "a frozen code-carrier certificate requires exactly one root source mapping")
     }
     if (
       rootSource !== undefined &&
       snapshot.recut?.sourceHeadSha !== undefined &&
       rootSource.fromHeadSha !== snapshot.recut.sourceHeadSha
     ) {
-      recutIssue(["sources"], "root source mapping must start at the certified source head")
+      remergeIssue(["sources"], "root source mapping must start at the certified source head")
     }
     if (rootSource !== undefined && rootSource.toHeadSha !== snapshot.headSha) {
-      recutIssue(["sources"], "root source mapping must end at the current candidate head")
+      remergeIssue(["sources"], "root source mapping must end at the current candidate head")
     }
   })
 /** answers: Which immutable PR revision did this Queue record select? tense: historical.
  * A snapshot deliberately carries identity and content, never mutable delivery status. */
-export type changeSnapshot = Readonly<z.infer<typeof ChangeSnapshotSchema>>
+export type ChangeSnapshot = Readonly<z.infer<typeof ChangeSnapshotSchema>>
 
 export type SourceRewrite = Readonly<{
   repo: string
@@ -433,13 +433,13 @@ export const IntegrationProofSchema = z
   })
   .strict() as z.ZodType<IntegrationProof>
 
-export type changeShape = Readonly<{
+export type ChangeShape = Readonly<{
   results: Readonly<Record<string, JsonValue>>
 }>
 
-export type IntegratedShape = changeShape & Readonly<{ integration: IntegrationProof }>
+export type IntegratedShape = ChangeShape & Readonly<{ integration: IntegrationProof }>
 
-export type AddStepResult<Shape extends changeShape, Name extends string, Output extends JsonValue> = Omit<
+export type AddStepResult<Shape extends ChangeShape, Name extends string, Output extends JsonValue> = Omit<
   Shape,
   "results"
 > & {
@@ -559,7 +559,7 @@ export type QueueRecord = Readonly<{
   candidateId: CandidateId
   /** Immutable execution receipt. Candidate owns the ordered revision identity;
    * projection rejects any receipt that diverges from it. */
-  prs: readonly changeSnapshot[]
+  prs: readonly ChangeSnapshot[]
   /** Queue-target receipt; Candidate owns the exact base SHA. */
   base: string
   /** Effective Queue batch size when this Run started. Absent only on legacy journal records. */
@@ -608,7 +608,7 @@ export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "s
     /** Durable Job identities in literal Flow order. */
     jobs: readonly string[]
     steps: readonly QueueStep[]
-    shape: changeShape | IntegratedShape
+    shape: ChangeShape | IntegratedShape
     /** answers: When did this Run enter a terminal status? tense: historical. */
     finishedAt?: string
     /** answers: Why did this Run finish without success? tense: historical. */
@@ -709,7 +709,7 @@ export type ChangeEligibilityReason = Readonly<{
   receipt?: JobError
 }>
 
-export type changeEligibility = Readonly<{
+export type ChangeEligibility = Readonly<{
   pr: string
   revision: number
   /** answers: Can this exact PR revision enter a Queue run now? tense: current. */
@@ -735,7 +735,7 @@ export type changeEligibility = Readonly<{
 export type ChangeCheckRecord = Readonly<{
   pr: string
   revision: number
-  status: changeEligibility["checks"]["status"]
+  status: ChangeEligibility["checks"]["status"]
   run?: RunId
   job?: string
   step?: StepName
@@ -1171,12 +1171,12 @@ export const Queues = Object.freeze({
     return `C${Math.max(0, ...values) + 1}`
   },
 
-  snapshot(pr: PR): changeSnapshot {
+  snapshot(pr: PR): ChangeSnapshot {
     const revision = currentChangeRev(pr)
     const baseSha = checkRequest(pr)?.baseSha ?? changeBaseSha(pr)
-    const recut = changeRecut(pr)
-    const frozen = recut?.certificate === "frozen-code-carrier-v1"
-    const sourceRevision = recut === undefined ? undefined : pr.revs.find(({ n }) => n === recut.fromRevision)
+    const remerge = changeRemerge(pr)
+    const frozen = remerge?.certificate === "frozen-code-carrier-v1"
+    const sourceRevision = remerge === undefined ? undefined : pr.revs.find(({ n }) => n === remerge.fromRevision)
     const sourceEndpoints =
       !frozen || sourceRevision?.baseSha === undefined
         ? {}
@@ -1194,11 +1194,11 @@ export const Queues = Object.freeze({
       ...(baseSha === undefined ? {} : { baseSha }),
       ...(changeCorrelation(pr) === undefined ? {} : { correlation: changeCorrelation(pr) }),
       ...(changeComposition(pr) === undefined ? {} : { composition: changeComposition(pr) }),
-      ...(recut === undefined
+      ...(remerge === undefined
         ? {}
         : {
             recut: {
-              ...recut,
+              ...remerge,
               ...(changeBaseSha(pr) === undefined ? {} : { baseSha: changeBaseSha(pr) }),
               ...sourceEndpoints,
             },

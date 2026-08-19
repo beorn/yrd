@@ -29,15 +29,15 @@ import {
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
-import { runYrd as runYrdRaw, type PruneGitFacts, type RecutPreflightResult, type YrdCliIO } from "@yrd/cli"
+import { runYrd as runYrdRaw, type PruneGitFacts, type RemergePreflightResult, type YrdCliIO } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import {
-  createGitPRRecutter,
+  createGitChangeRemerger,
   withMerge,
   withQueue,
   withStep,
   type CandidatePreparer,
-  type changeShape,
+  type ChangeShape,
   type SourceRewrite,
   type StepExecution,
 } from "@yrd/queue"
@@ -155,7 +155,7 @@ async function createCliApp(
     journal?: Journal<unknown>
     resolveBase?: (ref: string) => Readonly<{ base: string; baseSha: string }>
     merge?: (
-      input: StepExecution<changeShape>,
+      input: StepExecution<ChangeShape>,
     ) => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>
     prepareCandidate?: CandidatePreparer
   } = {},
@@ -173,7 +173,7 @@ async function createCliApp(
   const merge = withMerge(
     options.merge ??
       (async (
-        _input: StepExecution<changeShape>,
+        _input: StepExecution<ChangeShape>,
       ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
         status: "completed",
         conclusion: "success",
@@ -257,7 +257,7 @@ function gitResult(cwd: string, ...args: string[]): Readonly<{ code: number; std
   }
 }
 
-function sourceOnlyDivergentRecutRepository(): {
+function sourceOnlyDivergentRemergeRepository(): {
   root: string
   repo: string
   module: string
@@ -391,7 +391,7 @@ function pruneGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
   }
 }
 
-type RecutPreflightGitFacts = PruneGitFacts &
+type RemergePreflightGitFacts = PruneGitFacts &
   Readonly<{
     pinDistance(
       sourceBaseSha: string,
@@ -406,7 +406,7 @@ type RecutPreflightGitFacts = PruneGitFacts &
     ): Readonly<{ patchId?: string; targetSha?: string }> | Promise<Readonly<{ patchId?: string; targetSha?: string }>>
   }>
 
-function recutPreflightGit(overrides: Partial<RecutPreflightGitFacts> = {}): RecutPreflightGitFacts {
+function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}): RemergePreflightGitFacts {
   return {
     ...pruneGit({
       resolveCommit: (ref) =>
@@ -444,7 +444,7 @@ describe("pr withdraw", () => {
       ),
       output.stderr(),
     ).toBe(0)
-    const result = JSON.parse(output.stdout()) as RecutPreflightResult
+    const result = JSON.parse(output.stdout()) as RemergePreflightResult
     expect(result).toMatchObject({
       command: "pr.withdraw",
       reason: "superseded by rework",
@@ -753,7 +753,7 @@ describe("pr recut --preflight", () => {
     const before = (await Array.fromAsync(app.events())).length
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_MERGE_SHA }),
         }),
     })
@@ -774,10 +774,10 @@ describe("pr recut --preflight", () => {
   it("applies RECUT and records a re-derivable receipt", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/apply", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           mergeTree: () => OTHER_TREE,
           patchMatch: () => ({ patchId: PR476_PATCH_ID }),
         }),
@@ -787,7 +787,7 @@ describe("pr recut --preflight", () => {
       await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), output.io, {
         recut: {
           recut: (input) => {
-            recutInputs.push(input)
+            remergeInputs.push(input)
             return Promise.resolve({
               headSha: HEAD2_SHA,
               baseSha: TARGET_BASE_SHA,
@@ -807,7 +807,7 @@ describe("pr recut --preflight", () => {
       executed: "yrd pr recut PR1 --queue",
       result: { revision: 2, headSha: HEAD2_SHA, delivery: "submitted" },
     })
-    expect(recutInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
+    expect(remergeInputs).toEqual([expect.objectContaining({ id: "PR1", revision: 1, headSha: HEAD_SHA })])
     expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD2_SHA })
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
@@ -825,7 +825,7 @@ describe("pr recut --preflight", () => {
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({ prs: ["PR1"] }, runtime)
 
-    const recutService = {
+    const remergeService = {
       recut: {
         recut: () =>
           Promise.resolve({
@@ -838,7 +838,7 @@ describe("pr recut --preflight", () => {
       },
     }
     const gitFacts = () =>
-      recutPreflightGit({
+      remergePreflightGit({
         resolveCommit: (ref) =>
           ref === "origin/main"
             ? BASE_SHA
@@ -852,15 +852,15 @@ describe("pr recut --preflight", () => {
         treeOf: (sha) => (sha === BASE_SHA ? BASE_TREE : OTHER_TREE),
         patchMatch: () => ({ patchId: PR476_PATCH_ID }),
       })
-    const initialRecut = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
+    const initialRemerge = outputIO({ pruneGit: gitFacts, resolveRevision: async () => HEAD_SHA })
     expect(
       await runYrd(
         app,
         yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
-        initialRecut.io,
-        recutService,
+        initialRemerge.io,
+        remergeService,
       ),
-      initialRecut.stderr(),
+      initialRemerge.stderr(),
     ).toBe(0)
     expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: HEAD_SHA })
 
@@ -876,7 +876,7 @@ describe("pr recut --preflight", () => {
         app,
         yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
         remedy.io,
-        recutService,
+        remergeService,
       ),
       remedy.stderr(),
     ).toBe(0)
@@ -894,7 +894,7 @@ describe("pr recut --preflight", () => {
         app,
         yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"),
         replay.io,
-        recutService,
+        remergeService,
       ),
       replay.stderr(),
     ).toBe(0)
@@ -923,7 +923,7 @@ describe("pr recut --preflight", () => {
     })
 
     const gitFacts = () =>
-      recutPreflightGit({
+      remergePreflightGit({
         resolveCommit: (ref) =>
           ref === "origin/main"
             ? BASE_SHA
@@ -969,7 +969,7 @@ describe("pr recut --preflight", () => {
     const beforeRevisions = structuredClone(app.state().bays.prs.PR1?.revs)
     const beforeReviews = structuredClone(app.state().bays.prs.PR1?.reviews)
     const resolvedRefs: string[] = []
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const proposedRef = "refs/heads/proposal/ambiguous"
     const output = outputIO({
       resolveRevision: async (ref) => {
@@ -985,7 +985,7 @@ describe("pr recut --preflight", () => {
       {
         recut: {
           recut: (input) => {
-            recutInputs.push(input)
+            remergeInputs.push(input)
             return Promise.resolve({
               headSha: HEAD2_SHA,
               baseSha: TARGET_BASE_SHA,
@@ -1001,7 +1001,7 @@ describe("pr recut --preflight", () => {
     expect.soft(exit, output.stderr()).toBe(2)
     expect.soft(output.stderr()).toContain("--ref cannot combine with --revision")
     expect.soft(resolvedRefs).toEqual([])
-    expect.soft(recutInputs).toEqual([])
+    expect.soft(remergeInputs).toEqual([])
     expect.soft(await Array.fromAsync(app.events())).toEqual(beforeEvents)
     expect.soft(app.state().bays.prs.PR1?.revs).toEqual(beforeRevisions)
     expect.soft(app.state().bays.prs.PR1?.reviews).toEqual(beforeReviews)
@@ -1060,7 +1060,7 @@ describe("pr recut --preflight", () => {
         const before = app.state().bays.prs.PR1!
         const beforeRevisions = structuredClone(before.revs)
         const beforeReviews = structuredClone(before.reviews)
-        const recutInputs: unknown[] = []
+        const remergeInputs: unknown[] = []
         const output = outputIO({ resolveRevision: async () => fixture.proposedSha })
 
         const exit = await runYrd(
@@ -1070,7 +1070,7 @@ describe("pr recut --preflight", () => {
           {
             recut: {
               recut: (input) => {
-                recutInputs.push(input)
+                remergeInputs.push(input)
                 return Promise.resolve({
                   headSha: fixture.proposedSha,
                   baseSha: fixture.currentBaseSha,
@@ -1086,7 +1086,7 @@ describe("pr recut --preflight", () => {
         expect.soft(exit, output.stderr()).toBe(1)
         expect.soft(output.stderr()).toContain(expectedCode)
         expect.soft(output.stderr()).toContain(expectedMessage)
-        expect.soft(recutInputs).toEqual([])
+        expect.soft(remergeInputs).toEqual([])
         expect.soft(await Array.fromAsync(app.events())).toEqual(beforeEvents)
         expect.soft(app.state().bays.prs.PR1?.revs).toEqual(beforeRevisions)
         expect.soft(app.state().bays.prs.PR1?.reviews).toEqual(beforeReviews)
@@ -1113,16 +1113,16 @@ describe("pr recut --preflight", () => {
       })
       await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-r1" })
       git(fixture.repo, "branch", "-f", "main", fixture.currentBaseSha)
-      const recutInputs: unknown[] = []
+      const remergeInputs: unknown[] = []
       let proposalResolutions = 0
       await using process = createProcess({ cwd: fixture.repo })
-      const realRecutter = createGitPRRecutter({ inject: { process }, repo: fixture.repo })
+      const realRemerger = createGitChangeRemerger({ inject: { process }, repo: fixture.repo })
       const services = {
         process,
         recut: {
-          recut: (input: Parameters<typeof realRecutter.recut>[0]) => {
-            recutInputs.push(input)
-            return realRecutter.recut(input)
+          recut: (input: Parameters<typeof realRemerger.recut>[0]) => {
+            remergeInputs.push(input)
+            return realRemerger.recut(input)
           },
         },
       }
@@ -1159,7 +1159,7 @@ describe("pr recut --preflight", () => {
       expect(pr.revs).toEqual(afterFirstRevisions)
       expect(pr.reviews).toEqual(afterFirstReviews)
       expect(proposalResolutions).toBe(2)
-      expect(recutInputs).toEqual([
+      expect(remergeInputs).toEqual([
         expect.objectContaining({ revision: 1, headSha: fixture.approvedSha, proposedHeadSha: fixture.proposedSha }),
         expect.objectContaining({ revision: 1, headSha: fixture.approvedSha, proposedHeadSha: fixture.proposedSha }),
       ])
@@ -1201,10 +1201,10 @@ describe("pr recut --preflight", () => {
     await app.bays.submit({ branch, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.editPr({ pr: "PR1", track: true })
     await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-tracked-r1" })
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           resolveCommit: (ref) =>
             ref === `origin/${branch}` || ref === branch
               ? HEAD2_SHA
@@ -1221,7 +1221,7 @@ describe("pr recut --preflight", () => {
       await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, {
         recut: {
           recut: (input) => {
-            recutInputs.push(input)
+            remergeInputs.push(input)
             return Promise.resolve({
               headSha: HEAD2_SHA,
               baseSha: TARGET_BASE_SHA,
@@ -1236,7 +1236,7 @@ describe("pr recut --preflight", () => {
     ).toBe(0)
 
     const pr = app.state().bays.prs.PR1!
-    expect(recutInputs).toEqual([
+    expect(remergeInputs).toEqual([
       expect.objectContaining({
         revision: 1,
         headSha: HEAD_SHA,
@@ -1274,10 +1274,10 @@ describe("pr recut --preflight", () => {
     await app.bays.submit({ branch, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.editPr({ pr: "PR1", track: true })
     await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-resident-r1" })
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           resolveCommit: (ref) =>
             ref === `origin/${branch}` || ref === branch
               ? HEAD2_SHA
@@ -1296,7 +1296,7 @@ describe("pr recut --preflight", () => {
         {
           recut: {
             recut: (input) => {
-              recutInputs.push(input)
+              remergeInputs.push(input)
               return Promise.resolve({
                 headSha: HEAD2_SHA,
                 baseSha: TARGET_BASE_SHA,
@@ -1320,7 +1320,7 @@ describe("pr recut --preflight", () => {
       },
     ])
 
-    expect(recutInputs).toEqual([
+    expect(remergeInputs).toEqual([
       expect.objectContaining({
         revision: 1,
         headSha: HEAD_SHA,
@@ -1346,7 +1346,7 @@ describe("pr recut --preflight", () => {
     const proposedRef = "refs/heads/human-preflight-proposal"
     const proposalResolutionInputs: string[] = []
     const downstreamProposedHeadInputs: string[] = []
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const output = outputIO({
       resolveRevision: async (ref) => {
         if (ref !== proposedRef) return undefined
@@ -1354,7 +1354,7 @@ describe("pr recut --preflight", () => {
         return proposalResolutionInputs.length === 1 ? HEAD2_SHA : HEAD3_SHA
       },
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           resolveCommit: (ref) => {
             if (ref === proposedRef) throw new Error(`preflight leaked symbolic candidate '${ref}'`)
             if (ref === HEAD2_SHA) downstreamProposedHeadInputs.push(ref)
@@ -1392,7 +1392,7 @@ describe("pr recut --preflight", () => {
         {
           recut: {
             recut: (input) => {
-              recutInputs.push(input)
+              remergeInputs.push(input)
               return Promise.resolve({
                 headSha: HEAD2_SHA,
                 baseSha: TARGET_BASE_SHA,
@@ -1410,8 +1410,8 @@ describe("pr recut --preflight", () => {
     const pr = app.state().bays.prs.PR1!
     expect(proposalResolutionInputs).toEqual([proposedRef])
     expect(downstreamProposedHeadInputs).toEqual([HEAD2_SHA, HEAD2_SHA, HEAD2_SHA, HEAD2_SHA])
-    expect(recutInputs).toEqual([expect.objectContaining({ proposedHeadSha: HEAD2_SHA })])
-    expect(recutInputs.map((input) => (input as { proposedHeadSha?: string }).proposedHeadSha)).toEqual([HEAD2_SHA])
+    expect(remergeInputs).toEqual([expect.objectContaining({ proposedHeadSha: HEAD2_SHA })])
+    expect(remergeInputs.map((input) => (input as { proposedHeadSha?: string }).proposedHeadSha)).toEqual([HEAD2_SHA])
     expect(pr.revs.map((revision) => [revision.n, revision.head])).toEqual([
       [1, HEAD_SHA],
       [2, HEAD2_SHA],
@@ -1430,7 +1430,7 @@ describe("pr recut --preflight", () => {
     await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-retry-r1" })
     const proposedRef = "refs/heads/human-preflight-retry"
     const proposalResolutionInputs: string[] = []
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const output = () =>
       outputIO({
         resolveRevision: async (ref) => {
@@ -1439,7 +1439,7 @@ describe("pr recut --preflight", () => {
           return HEAD2_SHA
         },
         pruneGit: () =>
-          recutPreflightGit({
+          remergePreflightGit({
             resolveCommit: (ref) =>
               ref === "origin/main"
                 ? TARGET_BASE_SHA
@@ -1456,7 +1456,7 @@ describe("pr recut --preflight", () => {
     const services = {
       recut: {
         recut: (input: unknown) => {
-          recutInputs.push(input)
+          remergeInputs.push(input)
           return Promise.resolve({
             headSha: HEAD2_SHA,
             baseSha: TARGET_BASE_SHA,
@@ -1506,7 +1506,7 @@ describe("pr recut --preflight", () => {
     expect(await runYrd(app, yrd(...nextArgs), roundtrip.io, services), roundtrip.stderr()).toBe(0)
 
     expect(proposalResolutionInputs).toEqual([proposedRef, proposedRef, HEAD2_SHA])
-    expect(recutInputs).toEqual([
+    expect(remergeInputs).toEqual([
       expect.objectContaining({ revision: 1, headSha: HEAD_SHA, proposedHeadSha: HEAD2_SHA }),
       expect.objectContaining({ revision: 1, headSha: HEAD_SHA, proposedHeadSha: HEAD2_SHA }),
       expect.objectContaining({ revision: 1, headSha: HEAD_SHA, proposedHeadSha: HEAD2_SHA }),
@@ -1524,7 +1524,7 @@ describe("pr recut --preflight", () => {
   })
 
   it("applies a source-only divergent recut and persists its generated composition", async () => {
-    const fixture = sourceOnlyDivergentRecutRepository()
+    const fixture = sourceOnlyDivergentRemergeRepository()
     try {
       git(fixture.repo, "switch", "-q", "issue/source")
       git(fixture.repo, "branch", "-f", "main", fixture.sourceBase)
@@ -1544,7 +1544,7 @@ describe("pr recut --preflight", () => {
       expect(
         await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--apply", "--json"), output.io, {
           process,
-          recut: createGitPRRecutter({ inject: { process }, repo: fixture.repo }),
+          recut: createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
         }),
         output.stderr(),
       ).toBe(0)
@@ -1591,7 +1591,7 @@ describe("pr recut --preflight", () => {
     expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           mergeTree: () => OTHER_TREE,
           patchMatch: () => ({ patchId: PR476_PATCH_ID }),
         }),
@@ -1622,11 +1622,11 @@ describe("pr recut --preflight", () => {
   it("is idempotent: a second --apply records FRESH-NOOP without recutting", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/apply-twice", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    let recutCalls = 0
+    let remergeCalls = 0
     const services = {
       recut: {
         recut: () => {
-          recutCalls += 1
+          remergeCalls += 1
           return Promise.resolve({
             headSha: HEAD2_SHA,
             baseSha: TARGET_BASE_SHA,
@@ -1639,7 +1639,7 @@ describe("pr recut --preflight", () => {
     }
     const first = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           mergeTree: () => OTHER_TREE,
           patchMatch: () => ({ patchId: PR476_PATCH_ID }),
         }),
@@ -1651,7 +1651,7 @@ describe("pr recut --preflight", () => {
 
     const repeated = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
           mergeTree: () => OTHER_TREE,
           patchMatch: () => ({ patchId: PR476_PATCH_ID }),
@@ -1671,7 +1671,7 @@ describe("pr recut --preflight", () => {
       executed: "yrd pr ready PR1",
       result: { revision: 2, headSha: HEAD2_SHA, delivery: "submitted" },
     })
-    expect(recutCalls).toBe(1)
+    expect(remergeCalls).toBe(1)
   })
 
   it.each([
@@ -1702,7 +1702,7 @@ describe("pr recut --preflight", () => {
       baseSha: BASE_SHA,
     })
     const before = (await Array.fromAsync(app.events())).length
-    const facts = recutPreflightGit({
+    const facts = remergePreflightGit({
       resolveCommit: (ref) =>
         ref === "origin/main"
           ? TARGET_BASE_SHA
@@ -1748,7 +1748,7 @@ describe("pr recut --preflight", () => {
     const before = (await Array.fromAsync(app.events())).length
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           patchMatch: () => ({ patchId: PR380_PATCH_ID, targetSha: PR380_MERGE_SHA }),
         }),
     })
@@ -1803,7 +1803,7 @@ describe("pr recut --preflight", () => {
       const before = (await Array.fromAsync(app.events())).length
       const output = outputIO({
         pruneGit: () =>
-          recutPreflightGit({
+          remergePreflightGit({
             mergeTree: () => mergeTree,
             pinDistance: () => ({ sourceOnly: 0, targetOnly }),
             patchMatch: () => ({
@@ -1832,7 +1832,7 @@ describe("pr recut --preflight", () => {
     await app.bays.submit({ branch: "collision/whitespace", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           mergeTree: () => OTHER_TREE,
           patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
         }),
@@ -1865,7 +1865,7 @@ describe("pr recut --preflight", () => {
     })
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           resolveCommit: (ref) =>
             ref === "origin/main" || ref === BASE_SHA
               ? BASE_SHA
@@ -1907,7 +1907,7 @@ describe("pr recut --preflight", () => {
     const before = (await Array.fromAsync(app.events())).length
     const output = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           mergeTree: () => OTHER_TREE,
           patchMatch: () => ({ patchId: "c".repeat(40) }),
         }),
@@ -1931,7 +1931,7 @@ describe("pr recut --preflight", () => {
     await app.bays.intake({ branch: "topic/revisions", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
     const selected = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           mergeTree: () => OTHER_TREE,
           patchMatch: (_base, head) => ({ patchId: head === HEAD_SHA ? "1".repeat(40) : "2".repeat(40) }),
         }),
@@ -1949,7 +1949,7 @@ describe("pr recut --preflight", () => {
 
     const diverged = outputIO({
       pruneGit: () =>
-        recutPreflightGit({
+        remergePreflightGit({
           resolveCommit: (ref) =>
             ref === "origin/main"
               ? TARGET_BASE_SHA
@@ -1984,7 +1984,7 @@ describe("pr recut --preflight", () => {
         ],
       },
     })
-    const composed = outputIO({ pruneGit: () => recutPreflightGit() })
+    const composed = outputIO({ pruneGit: () => remergePreflightGit() })
     expect(await runYrd(composedApp, yrd("pr", "recut", "PR1", "--preflight", "--json"), composed.io)).toBe(1)
     expect(composed.stderr()).toContain("has composed source payloads")
   })
@@ -1992,7 +1992,7 @@ describe("pr recut --preflight", () => {
   it("prints explicit pin-distance and patch-match evidence in human output", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/human", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    const output = outputIO({ pruneGit: () => recutPreflightGit(), columns: 160 })
+    const output = outputIO({ pruneGit: () => remergePreflightGit(), columns: 160 })
 
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight"), output.io), output.stderr()).toBe(0)
     expect(output.stdout()).toContain("SUBSUMED-WITHDRAW PR1 r1")

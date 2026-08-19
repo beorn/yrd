@@ -103,7 +103,7 @@ const RECUT_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDe
 /** Whether `yrd pr recut` is refused outright by this delivery state. The one
  * home for the fact, so a caller that decides whether a printed remedy can be
  * applied mechanically reads the same answer the printer used. */
-export function recutRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
+export function remergeRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
   return delivery !== undefined && RECUT_REFUSING_STATES.has(delivery)
 }
 
@@ -121,13 +121,13 @@ function recordCommand(delivery: ChangeDeliveryState | undefined): string {
   return delivery === "pushed" ? "yrd pr create <branch>" : "yrd pr submit <branch>"
 }
 
-function recutSteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
-  if (recutRefusedByDelivery(delivery)) return []
+function remergeSteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
+  if (remergeRefusedByDelivery(delivery)) return []
   return [`yrd pr recut ${pr} --preflight --queue --apply`]
 }
 
 function redeliverySteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
-  return [recordCommand(delivery), ...recutSteps(pr, delivery)]
+  return [recordCommand(delivery), ...remergeSteps(pr, delivery)]
 }
 
 function authoredGitlinkComponents(message: string): readonly string[] {
@@ -162,7 +162,7 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
   })
 }
 
-function recutGitlinkFailure(
+function remergeGitlinkFailure(
   failure: FailureLike,
   cause: string,
   context: ActionableFailureContext,
@@ -216,7 +216,7 @@ function recutGitlinkFailure(
  * every delivery state accepts instead. No merge judgment is involved, so the
  * remedy stays machine-readable rather than an escalation.
  */
-function divergedRecutBaseFailure(
+function divergedRemergeBaseFailure(
   failure: FailureLike,
   cause: string,
   context: ActionableFailureContext,
@@ -239,11 +239,11 @@ export function actionableFailure(failure: FailureLike, context: ActionableFailu
   }
   if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause)
   if (failure.code === "recut-gitlink-conflict") {
-    const projected = recutGitlinkFailure(failure, cause, context)
+    const projected = remergeGitlinkFailure(failure, cause, context)
     if (projected !== undefined) return projected
   }
   if (failure.code === "recut-base-diverged") {
-    const projected = divergedRecutBaseFailure(failure, cause, context)
+    const projected = divergedRemergeBaseFailure(failure, cause, context)
     if (projected !== undefined) return projected
   }
   const commands = [...new Set([...(failure.resolution ?? []), ...embeddedYrdCommands(failure.message)])]

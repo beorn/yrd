@@ -58,7 +58,7 @@ import {
   Queues,
   type Run,
   type QueueSummary,
-  type changeEligibility,
+  type ChangeEligibility,
   type CandidateRefSweepResult,
   candidateRefFor,
   withQueue,
@@ -67,7 +67,7 @@ import {
   type AddStepResult,
   type CandidatePreparer,
   type SourceRewrite,
-  type changeShape,
+  type ChangeShape,
   type StepExecution,
 } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
@@ -144,7 +144,7 @@ const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 const retiredRoleNoun = ["act", "or"].join("")
 
-function recutGitlinkConflictReason(pr: string, targetRoot: string): string {
+function remergeGitlinkConflictReason(pr: string, targetRoot: string): string {
   return (
     `yrd: PR '${pr}' could not recut: target root '${targetRoot}' pins submodule 'km' to '${"c".repeat(40)}'; ` +
     `replayed authored root '${"e".repeat(40)}' pins it to '${"d".repeat(40)}'; ancestry walk failed because ` +
@@ -212,7 +212,7 @@ function currentChangeSnapshot(pr: PR) {
   }
 }
 
-type CheckedShape = AddStepResult<changeShape, "check", JsonValue>
+type CheckedShape = AddStepResult<ChangeShape, "check", JsonValue>
 type ProbeKind = "bay" | "runner" | "evaluator"
 type OverlapProbe = {
   pause(kind: ProbeKind): Promise<void>
@@ -367,7 +367,7 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
 
 async function createApp(
   options: {
-    waitingCheck?: boolean | ((input: StepExecution<changeShape>) => boolean)
+    waitingCheck?: boolean | ((input: StepExecution<ChangeShape>) => boolean)
     dirtyBay?: boolean
     bayPath?: string
     failingBay?: string
@@ -428,7 +428,7 @@ async function createApp(
   })
   const check = withStep(
     "check",
-    (input: StepExecution<changeShape>): JobResult<JsonValue> => {
+    (input: StepExecution<ChangeShape>): JobResult<JsonValue> => {
       options.checkRuns?.push("check")
       options.checkedRevisions?.push(...input.prs.map((pr) => `${pr.id}@${pr.revision}`))
       const waiting =
@@ -575,7 +575,7 @@ function fixtureAdmissionOrder(prs: readonly PR[]): string[] {
     .map((pr) => pr.id)
 }
 
-function recutIO(app: TestApp, selector = "PR1", overrides: Partial<YrdCliIO> = {}) {
+function remergeIO(app: TestApp, selector = "PR1", overrides: Partial<YrdCliIO> = {}) {
   const pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`missing ${selector}`)
   const recorded = changeRevisionLineage(pr)[0]
@@ -1902,11 +1902,11 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
 
-    const recut = recutIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services), recut.stderr()).toBe(
+    const remerge = remergeIO(app)
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services), remerge.stderr()).toBe(
       0,
     )
-    expect(JSON.parse(recut.stdout())).toMatchObject({
+    expect(JSON.parse(remerge.stdout())).toMatchObject({
       pr: "PR1",
       revision: 2,
       baseSha: nextBase,
@@ -1953,8 +1953,8 @@ describe("runYrd", () => {
       created.stderr(),
     ).toBe(0)
 
-    const recut = recutIO(app, "PR1", { residentLeaseHeld: () => Promise.resolve(true) })
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    const remerge = remergeIO(app, "PR1", { residentLeaseHeld: () => Promise.resolve(true) })
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
     expect(checkedRevisions).toEqual([])
     expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
     expect(Queues.ids(app.state().queues)).toEqual([])
@@ -2064,9 +2064,9 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    const recut = recutIO(app, "PR3")
+    const remerge = remergeIO(app, "PR3")
 
-    expect(await runYrd(app, yrd("pr", "recut", "PR3", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "recut", "PR3", "--queue", "--json"), remerge.io, services)).toBe(0)
     expect(requests).toEqual([
       expect.objectContaining({
         id: "PR3",
@@ -2131,9 +2131,9 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
 
-    const recut = recutIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
-    expect(JSON.parse(recut.stdout())).toMatchObject({
+    const remerge = remergeIO(app)
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
+    expect(JSON.parse(remerge.stdout())).toMatchObject({
       pr: "PR1",
       revision: 2,
       baseSha: BASE_SHA,
@@ -2184,9 +2184,9 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    const recut = recutIO(app)
+    const remerge = remergeIO(app)
 
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
     expect(app.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -2220,7 +2220,7 @@ describe("runYrd", () => {
       },
     } as unknown as YrdCliServices
 
-    const output = recutIO(app)
+    const output = remergeIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
 
     expect(app.jobs.get(predecessorJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
@@ -2302,7 +2302,7 @@ describe("runYrd", () => {
       },
     } as unknown as YrdCliServices
 
-    const output = recutIO(app, "PR2")
+    const output = remergeIO(app, "PR2")
     expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), output.io, services)).toBe(0)
 
     expect(Queues.ids(app.state().queues)).toEqual([])
@@ -2350,7 +2350,7 @@ describe("runYrd", () => {
     expect(predecessorJob).toMatchObject({ status: "queued" })
     expect(checkRuns).toEqual([])
     expect(mergeRuns).toEqual([])
-    const output = recutIO(app)
+    const output = remergeIO(app)
 
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
 
@@ -2377,9 +2377,9 @@ describe("runYrd", () => {
       lineage: [1, 2],
       unchanged: false,
     })
-    const recutPr = app.bays.pr("PR1")!
-    expect(changeDeliveryState(recutPr)).toBe("submitted")
-    expect(currentChangeRev(recutPr)).toMatchObject({
+    const remergePr = app.bays.pr("PR1")!
+    expect(changeDeliveryState(remergePr)).toBe("submitted")
+    expect(currentChangeRev(remergePr)).toMatchObject({
       n: 2,
       head: nextHead,
       correlation,
@@ -2399,11 +2399,11 @@ describe("runYrd", () => {
         ],
       },
     })
-    expect(recutPr.revs).toMatchObject([
+    expect(remergePr.revs).toMatchObject([
       { n: 1, correlation, submittedAt: sourceReadyAt },
       { n: 2, correlation, submittedAt: expect.any(String) },
     ])
-    expect(recutPr.revs[1]?.submittedAt).not.toBe(sourceReadyAt)
+    expect(remergePr.revs[1]?.submittedAt).not.toBe(sourceReadyAt)
     expect(app.bays.reviewState("PR1")).toMatchObject({
       approved: true,
       current: { carriedFrom: { revision: 1, headSha: HEAD_SHA } },
@@ -2427,7 +2427,7 @@ describe("runYrd", () => {
     expect(detail.stdout()).toContain("HISTORY rev1→rev2")
     expect(detail.stdout()).toContain(`RECOMPOSED . ${HEAD_SHA.slice(0, 12)}→${nextHead.slice(0, 12)}`)
 
-    const repeated = recutIO(app)
+    const repeated = remergeIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
     expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
     expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
@@ -2492,7 +2492,7 @@ describe("runYrd", () => {
 
     const RECUTS = 6
     for (let i = 0; i < RECUTS; i += 1) {
-      const io = recutIO(app)
+      const io = remergeIO(app)
       expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), io.io, services)).toBe(0)
     }
 
@@ -2741,15 +2741,15 @@ describe("runYrd", () => {
     const laterBase = "e".repeat(40)
     const treeSha = "c".repeat(40)
     const patchId = "d".repeat(40)
-    const recutInputs: unknown[] = []
+    const remergeInputs: unknown[] = []
     const app = await createApp({ waitingCheck: true })
     const services = {
       recut: {
         recut(input: unknown) {
-          recutInputs.push(input)
+          remergeInputs.push(input)
           return Promise.resolve({
-            headSha: recutInputs.length === 1 ? nextHead : laterHead,
-            baseSha: recutInputs.length === 1 ? nextBase : laterBase,
+            headSha: remergeInputs.length === 1 ? nextHead : laterHead,
+            baseSha: remergeInputs.length === 1 ? nextBase : laterBase,
             treeSha,
             patchId,
             unchanged: false,
@@ -2784,7 +2784,7 @@ describe("runYrd", () => {
     expect(secondAdmissionJob).toMatchObject({ status: "waiting" })
     expect(secondAdmissionJob?.id).not.toBe(firstAdmissionJob?.id)
 
-    expect(recutInputs).toEqual([
+    expect(remergeInputs).toEqual([
       expect.objectContaining({
         id: "PR1",
         revision: 2,
@@ -2811,7 +2811,7 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     const appended = (await Array.fromAsync(app.events())).slice(beforeCycle)
-    const recutIndex = appended.findIndex(
+    const remergeIndex = appended.findIndex(
       ({ name, data }) =>
         name === "pr/recut" && (data as { successor?: { revision?: number } }).successor?.revision === 3,
     )
@@ -2819,13 +2819,13 @@ describe("runYrd", () => {
       ({ name, data }) =>
         name === "job/requested" && (data as { key?: string }).key?.startsWith("admission:PR1:3:") === true,
     )
-    expect(recutIndex).toBeGreaterThanOrEqual(0)
-    expect(appended[recutIndex]?.data).toMatchObject({ transition: { from: "admitted", to: "refreshed" } })
-    expect(successorJobIndex).toBeGreaterThan(recutIndex)
+    expect(remergeIndex).toBeGreaterThanOrEqual(0)
+    expect(appended[remergeIndex]?.data).toMatchObject({ transition: { from: "admitted", to: "refreshed" } })
+    expect(successorJobIndex).toBeGreaterThan(remergeIndex)
 
     const afterFirstCycle = await Array.fromAsync(app.events()).then((events) => events.length)
     await cycle(app, services, io)
-    expect(recutInputs).toHaveLength(1)
+    expect(remergeInputs).toHaveLength(1)
     expect(app.bays.pr("PR1")?.revs).toHaveLength(3)
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterFirstCycle)
 
@@ -2833,7 +2833,7 @@ describe("runYrd", () => {
     expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
     const thirdAdmissionJob = revisionAdmissionJob(app, "PR1")
     expect(thirdAdmissionJob).toMatchObject({ status: "waiting" })
-    expect(recutInputs).toHaveLength(2)
+    expect(remergeInputs).toHaveLength(2)
     const secondRefresh = app.bays.pr("PR1")!
     expect(changeDeliveryState(secondRefresh)).toBe("submitted")
     expect(currentChangeRev(secondRefresh)).toMatchObject({
@@ -2855,14 +2855,14 @@ describe("runYrd", () => {
     let targetBase = "f".repeat(40)
     const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
     const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
-    const recutInputs: Array<{ id: string }> = []
+    const remergeInputs: Array<{ id: string }> = []
     const app = await createApp({ batch: 2 })
     const services = {
       recut: {
         recut(input: unknown) {
-          const recut = input as { id: string }
-          recutInputs.push(recut)
-          const index = Number(recut.id.slice(2)) - 1
+          const remerge = input as { id: string }
+          remergeInputs.push(remerge)
+          const index = Number(remerge.id.slice(2)) - 1
           return Promise.resolve({
             headSha: refreshedHeads[index]!,
             baseSha: targetBase,
@@ -2898,20 +2898,20 @@ describe("runYrd", () => {
     }
 
     await refresh(app, services, io)
-    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
+    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
     expect(["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n)).toEqual([3, 3, 2, 2, 2])
 
     await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
     await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
     targetBase = "e".repeat(40)
     await refresh(app, services, io)
-    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4"])
+    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4"])
 
     await app.bays.closePr({ pr: "PR3", reason: "candidate landed" })
     await app.bays.closePr({ pr: "PR4", reason: "candidate landed" })
     targetBase = "d".repeat(40)
     await refresh(app, services, io)
-    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4", "PR5"])
+    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4", "PR5"])
     expect(currentChangeRev(app.bays.pr("PR5")!).n).toBe(3)
   })
 
@@ -2922,14 +2922,14 @@ describe("runYrd", () => {
     const nextBase = "b".repeat(40)
     const baseTree = "c".repeat(40)
     const patchId = "d".repeat(40)
-    const recutInputs: Array<{ id: string }> = []
+    const remergeInputs: Array<{ id: string }> = []
     const app = await createApp({ waitingCheck: (input) => input.prs.some((pr) => pr.id === "PR1") })
     const services = {
       recut: {
         recut(input: unknown) {
-          const recut = input as { id: string }
-          recutInputs.push(recut)
-          if (recut.id === "PR2") {
+          const remerge = input as { id: string }
+          remergeInputs.push(remerge)
+          if (remerge.id === "PR2") {
             return Promise.resolve({
               headSha: refreshedNextHead,
               baseSha: nextBase,
@@ -2978,7 +2978,7 @@ describe("runYrd", () => {
       expect.objectContaining({ status: "refreshed", pr: "PR2", headSha: refreshedNextHead }),
     ])
 
-    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
+    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("already-landed")
     expect(app.jobs.get(admissionJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: absorbedHead })
@@ -3004,7 +3004,7 @@ describe("runYrd", () => {
 
     const afterSettlement = await Array.fromAsync(app.events()).then((events) => events.length)
     await expect(refresh(app, services, io)).resolves.toEqual([])
-    expect(recutInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
+    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterSettlement)
 
     // The same-cycle refresh proves that terminal settlement releases the
@@ -3078,7 +3078,7 @@ describe("runYrd", () => {
     let now = 0
     const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
     const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
-    const recutIds: string[] = []
+    const remergeIds: string[] = []
     const checkedRevisions: string[] = []
     const app = await createApp({ batch: 2, waitingCheck: true, checkedRevisions })
 
@@ -3103,9 +3103,9 @@ describe("runYrd", () => {
       await app.bays.requestChecks({ pr, baseSha: BASE_SHA })
     }
 
-    const recut = vi.fn((input: unknown) => {
+    const remerge = vi.fn((input: unknown) => {
       const candidate = input as { id: string }
-      recutIds.push(candidate.id)
+      remergeIds.push(candidate.id)
       const index = Number(candidate.id.slice(2)) - 1
       return Promise.resolve({
         headSha: refreshedHeads[index]!,
@@ -3115,7 +3115,7 @@ describe("runYrd", () => {
         unchanged: false,
       })
     })
-    const services = { recut: { recut } } as unknown as YrdCliServices
+    const services = { recut: { recut: remerge } } as unknown as YrdCliServices
     const controller = new AbortController()
     const beforeResident = await Array.fromAsync(app.events()).then((events) => events.length)
     const snapshots: Array<{
@@ -3134,7 +3134,7 @@ describe("runYrd", () => {
         sleep: async () => {
           const residentEvents = (await Array.fromAsync(app.events())).slice(beforeResident)
           snapshots.push({
-            recuts: [...recutIds],
+            recuts: [...remergeIds],
             revisions: ["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n),
             admissions: ["PR1", "PR2", "PR3", "PR4", "PR5"].flatMap((pr) =>
               app.bays
@@ -3199,7 +3199,7 @@ describe("runYrd", () => {
         checks: ["PR1@3", "PR3@3", "PR5@3"],
       },
     ])
-    expect(recut).toHaveBeenCalledTimes(5)
+    expect(remerge).toHaveBeenCalledTimes(5)
   })
 
   it("does not count a refused freshness pass as resident cycle progress", async () => {
@@ -3223,16 +3223,16 @@ describe("runYrd", () => {
     await app.bays.ready({ pr: "PR1" })
     await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
 
-    const recut = vi.fn(() =>
+    const remerge = vi.fn(() =>
       Promise.reject(
         createFailure({
           kind: "refusal",
           code: "recut-gitlink-conflict",
-          message: recutGitlinkConflictReason("PR1", nextBase),
+          message: remergeGitlinkConflictReason("PR1", nextBase),
         }),
       ),
     )
-    const services = { recut: { recut } } as unknown as YrdCliServices
+    const services = { recut: { recut: remerge } } as unknown as YrdCliServices
     const queueRun = vi.fn(async () => [])
     const viewer = {
       ...app,
@@ -3261,7 +3261,7 @@ describe("runYrd", () => {
       runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, async () => undefined, services),
     ).resolves.toBe(3)
 
-    expect(recut, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
+    expect(remerge, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
     expect(app.state().queues.admissionRefusals.PR1?.settlement).toMatchObject({
       disposition: "needs-person",
       reason: expect.stringContaining("neither submodule commit is an ancestor"),
@@ -3309,7 +3309,7 @@ describe("runYrd", () => {
         timedOut: false,
       }
     })
-    const recut = vi.fn(async () => ({
+    const remerge = vi.fn(async () => ({
       headSha: nextHead,
       baseSha: nextBase,
       treeSha: "e".repeat(40),
@@ -3318,7 +3318,7 @@ describe("runYrd", () => {
     }))
     const services = {
       process: { run: processRun },
-      recut: { recut },
+      recut: { recut: remerge },
     } as unknown as YrdCliServices
     const queueRun = vi.fn(async () => [])
     const viewer = { ...app, queue: { ...app.queue, run: queueRun } } as TestApp
@@ -3341,7 +3341,7 @@ describe("runYrd", () => {
       runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate, services),
     ).resolves.toBe(3)
 
-    expect(recut).toHaveBeenCalled()
+    expect(remerge).toHaveBeenCalled()
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: nextHead })
     // A recut PR is queue-carried, so the gate asks reachability (the mute stub advertises
     // zero refs → unreachable), never the author-demand main-ancestry question.
@@ -3557,7 +3557,7 @@ describe("runYrd", () => {
 
   it("does not overwrite an authored revision that arrives while resident freshness is computing", async () => {
     const branch = "issue/auto-recut-cas"
-    const recutHead = "2".repeat(40)
+    const remergeHead = "2".repeat(40)
     const authoredHead = "3".repeat(40)
     const staleAutoHead = "4".repeat(40)
     const nextBase = "b".repeat(40)
@@ -3570,7 +3570,7 @@ describe("runYrd", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recutHead,
+      headSha: remergeHead,
       baseSha: BASE_SHA,
       treeSha,
       patchId,
@@ -3605,7 +3605,7 @@ describe("runYrd", () => {
     expect(currentChangeRev(authored)).toMatchObject({ n: 3, head: authoredHead })
     expect(authored.revs).toMatchObject([
       { n: 1, head: HEAD_SHA },
-      { n: 2, head: recutHead },
+      { n: 2, head: remergeHead },
       { n: 3, head: authoredHead },
     ])
   })
@@ -3644,13 +3644,13 @@ describe("runYrd", () => {
     await app.bays.ready({ pr: "PR2" })
     await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
 
-    const recut = vi.fn((input: { id: string }) => {
+    const remerge = vi.fn((input: { id: string }) => {
       if (input.id === "PR1") {
         return Promise.reject(
           createFailure({
             kind: "refusal",
             code: "recut-gitlink-conflict",
-            message: recutGitlinkConflictReason("PR1", nextBase),
+            message: remergeGitlinkConflictReason("PR1", nextBase),
           }),
         )
       }
@@ -3662,7 +3662,7 @@ describe("runYrd", () => {
         unchanged: false,
       })
     })
-    const services = { recut: { recut } } as unknown as YrdCliServices
+    const services = { recut: { recut: remerge } } as unknown as YrdCliServices
     const resolveQueueTarget = vi.fn(async () => ({ base: "main", sha: nextBase }))
     const io = outputIO({ resolveQueueTarget }).io
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
@@ -3694,7 +3694,7 @@ describe("runYrd", () => {
       revision: 2,
       headSha: "2".repeat(40),
       code: "recut-gitlink-conflict",
-      reason: recutGitlinkConflictReason("PR1", nextBase),
+      reason: remergeGitlinkConflictReason("PR1", nextBase),
       count: 1,
     })
     await expect(runInternals.applyRefusalRemedies(app, services, io, new Set())).resolves.toEqual([])
@@ -3707,7 +3707,7 @@ describe("runYrd", () => {
     expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
 
     await expect(refresh(app, services, io)).resolves.toEqual([])
-    expect(recut).toHaveBeenCalledTimes(2)
+    expect(remerge).toHaveBeenCalledTimes(2)
     expect(
       logs.filter(
         (event) => event.kind === "log" && event.level === "warn" && event.props?.action === "queue-freshness-refused",
@@ -3727,7 +3727,7 @@ describe("runYrd", () => {
   it("recomputes the certificate after an authored revision supersedes a recut head", async () => {
     const app = await createApp()
     const branch = "issue/recut-then-author"
-    const recutHead = "2".repeat(40)
+    const remergeHead = "2".repeat(40)
     const authoredHead = "3".repeat(40)
     const successorHead = "4".repeat(40)
     const oldTreeSha = "c".repeat(40)
@@ -3739,7 +3739,7 @@ describe("runYrd", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
-      headSha: recutHead,
+      headSha: remergeHead,
       baseSha: BASE_SHA,
       treeSha: oldTreeSha,
       patchId: oldPatchId,
@@ -3762,7 +3762,7 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    const output = recutIO(app)
+    const output = remergeIO(app)
 
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), output.io, services)).toBe(0)
 
@@ -3771,7 +3771,7 @@ describe("runYrd", () => {
     expect(app.bays.pr("PR1")).toMatchObject({
       revs: [
         { n: 1, head: HEAD_SHA },
-        { n: 2, head: recutHead, recut: { fromRevision: 1, treeSha: oldTreeSha, patchId: oldPatchId } },
+        { n: 2, head: remergeHead, recut: { fromRevision: 1, treeSha: oldTreeSha, patchId: oldPatchId } },
         { n: 3, head: authoredHead },
         { n: 4, head: successorHead, recut: { fromRevision: 3, treeSha: nextTreeSha, patchId: nextPatchId } },
       ],
@@ -3787,11 +3787,11 @@ describe("runYrd", () => {
     await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
     expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
 
-    let recutCalls = 0
+    let remergeCalls = 0
     const services = {
       recut: {
         recut() {
-          recutCalls += 1
+          remergeCalls += 1
           return Promise.resolve({
             headSha: "2".repeat(40),
             baseSha: "b".repeat(40),
@@ -3804,22 +3804,22 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
 
     // Without --force the recut is refused so nobody mechanically discards the green check.
-    const refused = recutIO(app)
+    const refused = remergeIO(app)
     expect(await runYrd(app, yrd("pr", "recut", "PR1"), refused.io, services)).toBe(1)
     expect(refused.stderr()).toContain("passed its checks")
     expect(refused.stderr()).toContain("--force")
-    expect(recutCalls).toBe(0)
+    expect(remergeCalls).toBe(0)
     // The passing check survives and the current revision is untouched.
     expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: HEAD_SHA })
 
     // With --force the recut proceeds exactly as before the guard.
-    const forced = recutIO(app)
+    const forced = remergeIO(app)
     expect(
       await runYrd(app, yrd("pr", "recut", "PR1", "--force", "--json"), forced.io, services),
       forced.stderr(),
     ).toBe(0)
-    expect(recutCalls).toBe(1)
+    expect(remergeCalls).toBe(1)
     expect(JSON.parse(forced.stdout())).toMatchObject({ pr: "PR1", revision: 2, unchanged: false })
   })
 
@@ -3855,7 +3855,7 @@ describe("runYrd", () => {
       ...(status === "integrated" ? { integratedAt: clock.terminal?.at } : {}),
     })
     const review = { required: false, approved: false, stale: false } as const
-    const entries: ReadonlyArray<Readonly<{ pr: PR; eligibility: changeEligibility }>> = [
+    const entries: ReadonlyArray<Readonly<{ pr: PR; eligibility: ChangeEligibility }>> = [
       {
         pr: pr(
           "PR1",
@@ -12805,7 +12805,7 @@ describe("typed issue landing bridge", () => {
       eligibility(selector: string, snapshot?: unknown) {
         if (snapshot === undefined) throw new Error("live eligibility read during journal snapshot projection")
         snapshotEligibilityReads += 1
-        const read = app.queue.eligibility as (selected: string, state?: unknown) => changeEligibility
+        const read = app.queue.eligibility as (selected: string, state?: unknown) => ChangeEligibility
         return read(selector, snapshot)
       },
     }

@@ -1784,9 +1784,9 @@ describe("withBays", () => {
       patchId,
       reviewCarried: true,
     } as const
-    const recut = await app.bays.recut(args)
+    const remerge = await app.bays.recut(args)
 
-    expect(recut.events).toContainEqual(
+    expect(remerge.events).toContainEqual(
       expect.objectContaining({
         name: "pr/recut",
         data: {
@@ -2003,7 +2003,7 @@ describe("withBays", () => {
     await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-r1" })
     const sourceApproval = app.bays.reviewState("PR1").current
     if (sourceApproval === undefined) throw new Error("expected source approval")
-    const recut = {
+    const remerge = {
       pr: "PR1",
       fromRevision: 1,
       headSha: HEAD_2,
@@ -2015,7 +2015,7 @@ describe("withBays", () => {
       sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId, rangeDiff: "=" }],
     } as const
     await app.bays.recut({
-      ...recut,
+      ...remerge,
       expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: sourceApproval, checksPassed: false },
     })
     expect(currentChangeRev(app.bays.pr("PR1")!).recut).toMatchObject({ certificate: "frozen-code-carrier-v1" })
@@ -2026,7 +2026,7 @@ describe("withBays", () => {
 
     await expect(
       app.bays.recut({
-        ...recut,
+        ...remerge,
         expectedCurrent: { revision: 2, headSha: HEAD_2, effectiveReview: carriedApproval, checksPassed: false },
       }),
     ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-review-changed" } })

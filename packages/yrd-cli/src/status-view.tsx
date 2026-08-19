@@ -13,7 +13,7 @@ import {
 } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import type { JobError } from "@yrd/job"
-import type { changeEligibility } from "@yrd/queue"
+import type { ChangeEligibility } from "@yrd/queue"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import {
   actionableFailure,
@@ -282,7 +282,7 @@ export function BayStatusView({
   )
 }
 
-export function ChangeStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly changeEligibility[] }) {
+export function ChangeStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly ChangeEligibility[] }) {
   const rows = prs.map((pr) => {
     const revision = changeRevisionNumber(pr)
     const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)

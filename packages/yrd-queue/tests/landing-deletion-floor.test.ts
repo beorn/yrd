@@ -19,7 +19,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess, type Process } from "@yrd/process"
-import { gitCheckStep, gitMergeStep, type changeShape, type StepExecution } from "@yrd/queue"
+import { gitCheckStep, gitMergeStep, type ChangeShape, type StepExecution } from "@yrd/queue"
 
 const roots: string[] = []
 
@@ -103,7 +103,7 @@ const checkInputFor = (featureSha: string) =>
     index: 0,
     prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
     shape: { results: {} },
-  }) satisfies StepExecution<changeShape>
+  }) satisfies StepExecution<ChangeShape>
 
 const jobContext = () => ({ id: "J-merge", attempt: 1, runner: "test", signal: new AbortController().signal })
 

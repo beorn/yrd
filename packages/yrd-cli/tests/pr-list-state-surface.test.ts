@@ -19,7 +19,7 @@ import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Js
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
-import { withMerge, withQueue, withStep, type changeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { createLogger } from "loggily"
 import { createPruneGitFacts } from "../src/pr-withdraw.ts"
@@ -144,7 +144,7 @@ async function createCliApp() {
   )
   const merge = withMerge(
     async (
-      _input: StepExecution<changeShape>,
+      _input: StepExecution<ChangeShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
       status: "completed",
       conclusion: "success",
