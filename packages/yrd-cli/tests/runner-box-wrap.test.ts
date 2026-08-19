@@ -23,6 +23,7 @@ import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
 import { uncarriedLine, uncarriedObservation, type UncarriedObservation } from "../src/queue-status-view.tsx"
+import { boundedHangingLines } from "../src/queue-view-primitives.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 /** Width at which the uncarried rail below overflows a full-width queue pane. */
@@ -152,6 +153,65 @@ describe("RUNNER box clips rather than overflowing (@yrd/cli/runner-box-overflow
         box.inner.some((row) => row.includes("…")),
         "at least the header row must elide rather than overflow",
       ).toBe(true)
+    } finally {
+      app.unmount()
+    }
+  })
+})
+
+describe("RUNNER box bounded hanging command (item 29 — the item-13 deviation settled)", () => {
+  // The 2026-08-13 guard's REASON survives with a new MECHANISM: wrapped
+  // command text hangs off the `$` marker BOUNDED — at most 3 rows, the last
+  // eliding with `…` — so a long command can never push the run list off a
+  // narrow pane, while every other rail left-aligns with the command column.
+  const LONG_COMMAND = [
+    "bun /very/long/install/path/vendor/yrd/bin/yrd.ts queue run code --resident",
+    "--lease-ms 300000 --artifact-root /repo/.git/yrd/artifacts --log-level debug",
+    "--journal /repo/.git/yrd/journal.db --state-dir /repo/.git/yrd/state",
+    "--config /repo/.yrd.yml --runner-name resident-code --heartbeat-ms 5000",
+  ].join(" ")
+
+  it("wraps the command into hanging rows capped at three, eliding the tail", () => {
+    const rows = boundedHangingLines(LONG_COMMAND, 72, 3)
+    expect(rows.length).toBe(3)
+    for (const row of rows) expect(row.length).toBeLessThanOrEqual(72)
+    expect(rows.at(-1)).toMatch(/…$/u)
+    // Short text stays a single unelided row.
+    expect(boundedHangingLines("resident runner [84042]", 40, 3)).toEqual(["resident runner [84042]"])
+  })
+
+  it("keeps the run list on screen under a narrow pane with the wrapped command hanging off the $ gutter", async () => {
+    const pr = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes")
+    const run = fixtureRun("R1", [pr], "passed", "2026-07-13T11:20:00.000Z", {
+      finishedAt: "2026-07-13T11:25:00.000Z",
+    })
+    const snapshot = fixtureSnapshot(fixtureResult([pr], [run]), {
+      runner: {
+        pid: 84042,
+        startedAt: "2026-07-13T11:00:00.000Z",
+        lastTickAt: "2026-07-13T11:59:58.000Z",
+        queueProgress: { state: "healthy", observedAt: "2026-07-13T11:59:58.000Z" },
+        command: LONG_COMMAND,
+      },
+    })
+    const app = createRenderer({ cols: NARROW_COLS, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      const box = boxRows(app.text, "RUNNER")
+      // The command hangs: its first row leads with the `$` marker, the
+      // continuation rows start at the same text column (the 2-cell gutter).
+      const commandRows = box.inner.filter((row) => row.includes("yrd") || row.includes("$"))
+      const first = box.inner.findIndex((row) => row.trimStart().startsWith("$"))
+      expect(first, "the $ marker leads the command").toBeGreaterThanOrEqual(0)
+      const gutterX = (box.inner[first] ?? "").indexOf("$")
+      const continuation = box.inner[first + 1] ?? ""
+      expect(continuation.slice(0, gutterX + 1).trim(), "continuation hangs past the marker gutter").toBe("")
+      // Bounded: at most three command rows, the last elided.
+      expect(commandRows.length).toBeLessThanOrEqual(4)
+      expect(box.joined).toContain("…")
+      // The reason the guard exists: the run list survives beneath the box.
+      expect(app.text, "the run list survives the wrapped command").toContain("pr#1.1")
+      expect(app.text).toContain("TIME")
     } finally {
       app.unmount()
     }

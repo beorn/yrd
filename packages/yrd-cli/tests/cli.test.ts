@@ -7025,20 +7025,21 @@ describe("runYrd", () => {
     }
     const first = rows.find((row) => row.includes("pr#1.1"))
     const second = rows.find((row) => row.includes("pr#2.1"))
-    expect(first).toContain("main#1")
+    expect(first).toContain("#1 ✓")
     expect(first).toContain("@cto")
-    // An adjacent member of the SAME run renders its own Run-level cells, not
-    // continuation placeholders: Round 8 blanked TIME/STATUS/RUN here, which
-    // made a co-landed PR print exactly like one that was never attempted
-    // (@i/10-merge-queue/22925-watch-shows-every-pr, operator 2026-08-17).
+    // An adjacent member of the SAME run keeps its own TIME/STATUS cells —
+    // Round 8 blanked them, making a co-landed PR print exactly like one that
+    // was never attempted (@i/10-merge-queue/22925, operator 2026-08-17).
+    // Item 38 refines the RUN cell only: the shared id renders on the FIRST
+    // member row and the partner carries the muted `·` membership dot.
     expect(second?.trimStart()).not.toMatch(/^-\s+-\s+-\s+pr#2\.1\b/u)
-    expect(second).toContain("main#1")
+    expect(second).toMatch(/merged\s+·\s+pr#2\.1/u)
     expect(second).toContain("@agent/3")
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
     // Item 2/3: the status pills row moved BELOW the list (was directly above
     // the header) and dropped its "FILTER" label — plain-word pills now.
-    const pillsRowIndex = rows.findIndex((row) => /all.*open.*running.*done.*failed/u.test(row))
+    const pillsRowIndex = rows.findIndex((row) => /open.*running.*done.*failed/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
     const statsIndex = rows.findIndex((row) => row.includes("╭─ STATS "))
     expect(statsIndex).toBeGreaterThan(pillsRowIndex)
@@ -8245,7 +8246,7 @@ describe("runYrd", () => {
     expect(rendered).toContain("TIME")
     expect(rendered).toContain("STATUS")
     expect(rendered).toContain("AGE")
-    expect(rendered).toContain("main#4")
+    expect(rendered).toContain("#4 ◉")
     expect(rendered).toContain("pr#5.1")
     expect(rendered).toContain("typecheck-failed")
     expect(rendered).not.toContain("R4·PR5")
@@ -8269,15 +8270,13 @@ describe("runYrd", () => {
         ),
       )
       const rows = fixed.split("\n")
-      const filter = rows.find((row) => /all.*open.*running.*done.*failed/u.test(row))
+      const filter = rows.find((row) => /open.*running.*done.*failed/u.test(row))
       // The pills share the row with the left-aligned coverage text ("retained
       // since …" / "... N more"), so assert the pill cluster is present rather
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
-      // no [p] brackets — the since= dimension survives, pills are plain words.
-      // `all` is its own centered pill, left of the status cluster (operator
-      // ruling 2026-08-18, item 9) — no longer adjacent to `failed`.
+      // no [p] brackets — the since= dimension survives, pills are plain
+      // words. `all` moved to the top line's pill group (item 32).
       expect.soft(filter).toContain("since=6:00:00 open running done failed")
-      expect.soft(filter?.indexOf("all")).toBeGreaterThanOrEqual(0)
       // The STATS frame reads the same retained terminal facts at every tier.
       // The landed per-24h throughput fact stays in projection.metrics for JSON.
       expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
@@ -8435,10 +8434,12 @@ describe("runYrd", () => {
       await frameHandle.waitForLayoutStable()
       const frame = stripOsc8Targets(frameHandle.text)
       expect(frame).toContain("pr#1.1")
-      expect(frame).toContain("QUEUE main")
+      expect(frame).toContain("YRD QUEUES")
       expect(frame.split("\n").find((row) => row.includes("pr#1.1") && row.includes(" ready "))).toContain("ready")
       expect(frame).toContain("Queued at position 1")
-      expect(frame).toMatch(/POSITION\s+1/u)
+      // Item 31: the live POSITION fact left the metadata — the status box
+      // (headline + explanation) is its single home.
+      expect(frame).not.toMatch(/POSITION\s+1/u)
       expect(frame).toContain("AGE")
       expect(frame).toContain("QUEUING")
       // The remedy tail truncates in this split-pane width; the fact does not.
@@ -8493,25 +8494,24 @@ describe("runYrd", () => {
 
     try {
       // Default cursor is the first row (PR1); the detail follows it with no
-      // Enter, heading the pane with its PR-scoped title and its HEAD fact (the
-      // uppercase key padded to the fact column width). Row 0 is the watch
-      // pane's own top line (item 12, always present); the title row that
-      // used to be row 0 sits one row lower.
-      expect(handle.text.split("\n")[1]).toContain("pr#1.1")
-      expect(handle.text).toContain(`HEAD      ${HEAD_SHA}`)
+      // Enter. The pane has no identity title (item 23) — the member box's
+      // `pr#N.1 ⎇` header and the code group's short-sha HEAD row (item 31)
+      // prove which change the detail shows.
+      expect(handle.text).toContain("pr#1.1 ⎇")
+      expect(handle.text).toContain(`${HEAD_SHA.slice(0, 8)} (r`)
       expect(handle.text).not.toMatch(/\bPRS\b/giu)
 
       await handle.press("j")
       await handle.waitForLayoutStable()
       // The cursor moved to PR2 and the detail followed — still no Enter.
-      expect(handle.text.split("\n")[1]).toContain("pr#2.1")
-      expect(handle.text).toContain(`HEAD      ${"2".repeat(40)}`)
-      expect(handle.text).not.toContain(`HEAD      ${HEAD_SHA}`)
+      expect(handle.text).toContain("pr#2.1 ⎇")
+      expect(handle.text).toContain(`${"2".repeat(8)} (r`)
+      expect(handle.text).not.toContain(`${HEAD_SHA.slice(0, 8)} (r`)
 
       await handle.press("Enter")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain(`HEAD      ${"2".repeat(40)}`)
-      expect(handle.text).not.toContain(`HEAD      ${HEAD_SHA}`)
+      expect(handle.text).toContain(`${"2".repeat(8)} (r`)
+      expect(handle.text).not.toContain(`${HEAD_SHA.slice(0, 8)} (r`)
     } finally {
       handle.unmount()
     }
@@ -8648,35 +8648,38 @@ describe("runYrd", () => {
     })
 
     try {
+      // Item 31: the code group's HEAD row reads `<short-sha> (rN)`.
+      const headRow = `${HEAD_SHA.slice(0, 8)} (r`
       expect(wide.text).toContain("│")
-      // Right-docked: the DETAIL pane's identity title (item M — the selected
-      // `PR.rev`) shares a row with the QUEUE tab, one row below the watch
-      // pane's own top line (item 12, always present).
-      expect(wide.text.split("\n")[1]).toMatch(/pr#\d+\.\d+/u)
-      expect(wide.text).toContain(`HEAD      ${HEAD_SHA}`)
+      // Right-docked: the detail pane opens on its status box (item 23); the
+      // member box beneath carries the selected change's identity header
+      // (item 25 — a pre-run selection has no run, so no change list).
+      expect(wide.text).toMatch(/pr#\d+\.\d+ ⎇/u)
+      expect(wide.text).toContain(headRow)
       await wide.press("Escape")
       await wide.waitForLayoutStable()
-      expect(wide.text).not.toContain(`HEAD      ${HEAD_SHA}`)
+      expect(wide.text).not.toContain(headRow)
       await wide.press("Enter")
       await wide.waitForLayoutStable()
-      expect(wide.text).toContain(`HEAD      ${HEAD_SHA}`)
+      expect(wide.text).toContain(headRow)
 
       expect(below.text).toContain("─")
-      // Below-docked: the detail identity title is not on the QUEUE tab's
-      // row (row 1 — row 0 is the watch pane's own top line, item 12).
+      // Below-docked: no identity rides row 1 (the runner border row).
       expect(below.text.split("\n")[1]).not.toMatch(/PR\d+\.\d+/u)
-      expect(below.text).toContain(`HEAD      ${HEAD_SHA}`)
+      expect(below.text).toContain(headRow)
 
-      expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain(`HEAD      ${HEAD_SHA}`)
+      // Compact full tier: the list owns the frame (TIME header), detail
+      // replaces it wholesale on Enter and returns on Escape.
+      expect(compact.text).toContain("TIME")
+      expect(compact.text).not.toContain(headRow)
       await compact.press("Enter")
       await compact.waitForLayoutStable()
-      expect(compact.text).toContain(`HEAD      ${HEAD_SHA}`)
-      expect(compact.text).not.toContain("QUEUE main")
+      expect(compact.text).toContain(headRow)
+      expect(compact.text).not.toContain("TIME ")
       await compact.press("Escape")
       await compact.waitForLayoutStable()
-      expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain(`HEAD      ${HEAD_SHA}`)
+      expect(compact.text).toContain("TIME")
+      expect(compact.text).not.toContain(headRow)
     } finally {
       wide.unmount()
       below.unmount()
