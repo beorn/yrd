@@ -95,15 +95,16 @@ function refuseUnacknowledgedSpend(verb: string, spends: readonly PayloadSpend[]
 
 export type WithdrawPrsOptions = JsonOption & Readonly<{ reason?: string; burnPayload?: boolean }>
 
-/** `yrd pr withdraw <selector...> --burn-payload [--reason <text>]` — withdraw
- * live PRs, recording the operator's reason on each pr/withdrawn event. Every
- * selector is validated, and the whole spend disclosed and acknowledged, before
- * the first event is emitted, so a mixed batch refuses whole.
+/** `yrd change withdraw <selector...> --burn-payload [--reason <text>]` —
+ * withdraw live PRs, recording the operator's reason on each pr/withdrawn
+ * event. Every selector is validated, and the whole spend disclosed and
+ * acknowledged, before the first event is emitted, so a mixed batch refuses
+ * whole.
  *
- * `mr close` and the hidden `withdraw` alias are ONE act (I23: two words, one
- * act): the withdrawn record with its reason is written FIRST, then queue work
- * terminalizes — a close that fails partway still leaves the reason behind.
- * Only the printed envelope name follows the invoked spelling. */
+ * `change close` and the hidden `withdraw` alias are ONE act: the withdrawn
+ * record with its reason is written FIRST, then queue work terminalizes — a
+ * close that fails partway still leaves the reason behind. Only the printed
+ * envelope name follows the invoked spelling. */
 export async function withdrawPrs(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -111,7 +112,7 @@ export async function withdrawPrs(
   io: YrdCliIO,
   command: "pr.close" | "pr.withdraw" = "pr.withdraw",
 ): Promise<void> {
-  const verb = command === "pr.close" ? "mr close" : "pr withdraw"
+  const verb = command === "pr.close" ? "change close" : "change withdraw"
   if (selectors.length === 0) usage(`${verb} requires at least one PR selector`)
   const reason = options.reason?.trim()
   if (options.reason !== undefined && (reason === undefined || reason === "")) {

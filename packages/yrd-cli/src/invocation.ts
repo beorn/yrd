@@ -192,6 +192,7 @@ const READ_ONLY_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
   // runtime must be able to run it — the rail is least useful exactly where
   // mutation is not allowed.
   queue: new Set(["_list", "list", "audit", "uncarried"]),
+  change: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   pr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   mr: new Set(["list", "view", "runs", "diff", "status", "checks"]),
   issue: new Set(["_list", "list", "view"]),

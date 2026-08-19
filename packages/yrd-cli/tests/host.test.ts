@@ -2394,7 +2394,6 @@ checks: [{check: {run: "true"}}]
             [],
         ),
     ).toEqual([
-      "mr|pr",
       "bay",
       "issue",
       "contest",
@@ -2413,6 +2412,7 @@ checks: [{check: {run: "true"}}]
       "in",
       "sh",
       "run",
+      "change|mr",
       "guard",
     ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)

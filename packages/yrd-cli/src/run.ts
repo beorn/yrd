@@ -11128,13 +11128,16 @@ function buildProgram(
 
   addRootBayCommands(program, installed, installedServices, io, setExit)
 
-  // `mr` is the printed name; `pr` is the permanent ruled alias (I23: "the
-  // `yrd mr` family becomes primary; `yrd pr *` continues working forever").
+  // `change` is the printed name (operator ruling 2026-08-18, superseding
+  // I23's `mr`-primary call); `mr` and `pr` are permanent taught aliases --
+  // ids keep printing as PRnnn (a pure label) and both spellings keep
+  // working forever.
   const pr = program
-    .command("mr")
+    .command("change")
+    .alias("mr")
     .alias("pr")
     .description(
-      "manage merge requests, also called pull requests or PRs (a branch selector targets the live delivery; address a terminal merge request by its id)",
+      "manage changes, also called merge requests or pull requests (a branch selector targets the live delivery; address a terminal change by its id, printed as PRnnn; mr/pr accepted)",
     )
   pr.helpCommand(false)
   const list = pr
@@ -11629,7 +11632,8 @@ async function executeYrd(
   )
   const canonicalArgs = invocation.args
   const args =
-    canonicalArgs.length === 1 && (canonicalArgs[0] === "pr" || canonicalArgs[0] === "mr")
+    canonicalArgs.length === 1 &&
+    (canonicalArgs[0] === "change" || canonicalArgs[0] === "pr" || canonicalArgs[0] === "mr")
       ? [canonicalArgs[0], "--help"]
       : canonicalArgs
   try {
