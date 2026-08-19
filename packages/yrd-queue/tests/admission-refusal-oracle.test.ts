@@ -73,6 +73,7 @@ function checkOnlyPlugin(
   /** Derived from the shipped default so a new policy field cannot silently
    * diverge here — this literal previously carried its own copy of every knob. */
   progress: QueueProgressPolicy = { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
+  needsPersonOwner?: string,
 ) {
   const check = withStep(
     "check",
@@ -89,6 +90,7 @@ function checkOnlyPlugin(
     defaultSteps: ["check"],
     prepareCandidate,
     progress,
+    ...(needsPersonOwner === undefined ? {} : { needsPersonOwner }),
   })
 }
 
@@ -99,9 +101,10 @@ async function createApp(
   id: () => string = ids(),
   log?: ReturnType<typeof createLogger>,
   progress?: QueueProgressPolicy,
+  needsPersonOwner?: string,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = checkOnlyPlugin(prepareCandidate, progress)
+  const queue = checkOnlyPlugin(prepareCandidate, progress, needsPersonOwner)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
@@ -243,7 +246,81 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       },
     })
     expect(app.queue.eligibility(pr.id).reason).toMatchObject({ code: "admission-refused" })
-    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
+    // Parked at admission, never wedged — but NOT silent: settling a refusal
+    // stops the RETRY, it must not also stop the REPORT
+    // (@i/10-merge-queue/22918-needs-person-unowned). The finding names the
+    // owner explicitly, even unconfigured — never an omitted field.
+    expect(app.queue.audit().findings).toContainEqual({
+      code: "admission-refusal-needs-person",
+      message:
+        `merge request '${pr.id}' needs a person: its entry-check failure 'recut-gitlink-conflict' has no ` +
+        "mechanical remedy — two fixed gitlink commits are non-ancestral. " +
+        "Owner: unowned — no needsPerson.owner is configured in .yrd.yml.",
+      pr: pr.id,
+      specimen: `pr:${pr.id}:needs-person`,
+      refusal: "recut-gitlink-conflict",
+      since: "2026-01-01T00:00:00.000Z",
+      owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
+    })
+  })
+
+  it("names a configured needsPersonOwner on a needs-person finding instead of the unowned default", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      "@ci",
+    )
+    const pr = await submitAndRequestChecks(app, "issue/configured-owner")
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "recut-gitlink-conflict",
+      kind: "refusal",
+      reason: "two fixed gitlink commits are non-ancestral",
+    })
+
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({
+        code: "admission-refusal-needs-person",
+        pr: pr.id,
+        owner: "@ci",
+        message: expect.stringContaining("Owner: @ci."),
+      }),
+    )
+  })
+
+  it("falls back to the unowned default when needsPersonOwner is configured as blank", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      "   ",
+    )
+    const pr = await submitAndRequestChecks(app, "issue/blank-configured-owner")
+
+    await app.queue.recordAdmissionRefusal({
+      pr: pr.id,
+      code: "recut-gitlink-conflict",
+      kind: "refusal",
+      reason: "two fixed gitlink commits are non-ancestral",
+    })
+
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({
+        code: "admission-refusal-needs-person",
+        pr: pr.id,
+        owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
+      }),
+    )
   })
 
   it("parks a deterministically stale recut base on its FIRST refusal and drains the PR behind it", async () => {
@@ -275,9 +352,19 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(refusal?.settlement?.reason).toContain(DIVERGED)
     expect(refusal?.settlement?.reason).toContain(BASE)
     expect(app.queue.eligibility(head.id).reason).toMatchObject({ code: "admission-refused" })
-    // Parked, not wedged: `queue audit` has nothing left to report and no human
-    // had to pause the queue to stop the storm.
-    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: head.id }))
+    // Parked at admission, not wedged: it no longer blocks the PR behind it —
+    // but it is still visible and owned, never silently dropped
+    // (@i/10-merge-queue/22918-needs-person-unowned).
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({
+        code: "admission-refusal-needs-person",
+        message: expect.stringContaining(DIVERGED),
+        pr: head.id,
+        specimen: `pr:${head.id}:needs-person`,
+        refusal: "recut-base-diverged",
+        owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
+      }),
+    )
     expect(app.queue.eligibility(behind.id).checks.status).toBe("passed")
   })
 
@@ -336,7 +423,12 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       reason: "two fixed gitlink commits are non-ancestral",
     })
 
-    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: behind.id }))
+    // Parked behind the head — it does not promote itself back into the
+    // retry loop — but it is still visible and owned, never silently dropped
+    // (@i/10-merge-queue/22918-needs-person-unowned).
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-needs-person", pr: behind.id }),
+    )
     expect(app.queue.eligibility(head.id).checks.position).toBe(1)
   })
 

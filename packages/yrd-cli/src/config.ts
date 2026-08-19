@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve } from "node:path"
 import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
 import {
+  DEFAULT_NEEDS_PERSON_OWNER,
   DEFAULT_QUEUE_BATCH_SIZE,
   DEFAULT_QUEUE_PROGRESS_POLICY,
   DIAGNOSTICS_COMPARISON_READY,
@@ -192,6 +193,18 @@ const DraftsSchema = z
   .strict()
   .default({})
 
+const NeedsPersonSchema = z
+  .object({
+    /** Static role routing for an admission refusal that settled with no
+     * mechanical remedy (@i/10-merge-queue/22918-needs-person-unowned) — a
+     * repository-declared fact, never guessed at read time. Unset keeps
+     * {@link DEFAULT_NEEDS_PERSON_OWNER}, which reads as explicitly unowned
+     * rather than silently omitting the finding's `owner` field. */
+    owner: TextSchema.optional(),
+  })
+  .strict()
+  .default({})
+
 /**
  * Whether anything in this repository is ever going to drain its queue.
  *
@@ -224,6 +237,7 @@ const ProjectFields = {
   contest: ContestSchema,
   progress: ProgressSchema,
   drafts: DraftsSchema,
+  needsPerson: NeedsPersonSchema,
 } as const
 
 const ProjectSchema = z.object(ProjectFields).strict()
@@ -241,6 +255,7 @@ export type YrdProjectConfig = Readonly<{
   contest: Readonly<z.infer<typeof ContestSchema>>
   progress: Readonly<z.infer<typeof ProgressSchema>>
   drafts: Readonly<z.infer<typeof DraftsSchema>>
+  needsPerson: Readonly<z.infer<typeof NeedsPersonSchema>>
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -268,6 +283,12 @@ export type ResolvedYrdProjectConfig = Readonly<{
    * this type directly without it. Absent means "use the built-in default" —
    * see {@link DEFAULT_DRAFT_PAGE_AFTER_HOURS} — never "drafts never page". */
   drafts?: Readonly<{ pageAfterHours: number }>
+  /** Optional, like `drafts`, for the same reason: `loadYrdConfig` always
+   * populates it (`owner` always resolved, never blank), but hand-built
+   * fixtures construct this type directly without it. Absent means "use the
+   * built-in unowned default" — see {@link DEFAULT_NEEDS_PERSON_OWNER} —
+   * never "no needs-person finding is ever owned". */
+  needsPerson?: Readonly<{ owner: string }>
   /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
   flows?: readonly FlowDef[]
 }>
@@ -290,7 +311,8 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, checks, guards, merge, landing, requires, contest, progress, drafts } = parsed.data
+    const { base, batch, checks, guards, merge, landing, requires, contest, progress, drafts, needsPerson } =
+      parsed.data
     if (merge !== undefined && landing !== undefined && merge !== landing) {
       throw createFailure({
         kind: "configuration",
@@ -309,6 +331,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       contest,
       progress,
       drafts,
+      needsPerson,
     }
   }
   const issue = mostSpecificConfigIssue(parsed.error.issues[0])
@@ -485,6 +508,9 @@ export async function loadYrdConfig(options: {
       },
       drafts: {
         pageAfterHours: parsed.drafts.pageAfterHours ?? DEFAULT_DRAFT_PAGE_AFTER_HOURS,
+      },
+      needsPerson: {
+        owner: parsed.needsPerson.owner ?? DEFAULT_NEEDS_PERSON_OWNER,
       },
       flows: flows.flows,
     },
