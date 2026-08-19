@@ -11,6 +11,13 @@
  * surface owns only SELECTION and TRANSPORT: expand the selectors, print what
  * they resolved to, push, and hand the receiver's own refusal back unaltered.
  * A rule restated here would drift from the one that enforces it.
+ *
+ * EVERY TEST HERE DRIVES INJECTED GIT FACTS, SO GREEN HERE IS NOT GREEN. All
+ * eleven passed while `yrd draft` in a real repository refused with "no
+ * current Git branch to act on", because the bare path read a seam only tests
+ * set. Running the verb against a real repository is a required smoke test
+ * for this whole verb family, not an optional extra — the injected suite
+ * cannot see that class of bug at all.
  */
 import { beforeAll, describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays } from "@yrd/bay"
