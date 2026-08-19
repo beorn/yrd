@@ -2476,6 +2476,13 @@ checks: [{check: {run: "true"}}]
       "prime",
       "submit",
       "cancel",
+      // The branch-state quartet: `yrd branch <state>` is the complete set,
+      // and the three states whose names are free are also bare verbs.
+      // `submit` above is the merge-request verb, a different act.
+      "branch",
+      "draft",
+      "archive",
+      "ignore",
       "deployment",
       "in",
       "sh",

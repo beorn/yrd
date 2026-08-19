@@ -428,7 +428,46 @@ yrd queue                   render the queue timeline by default; list/ls is can
 yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   thin alias for yrd queue list --watch
 yrd prime                   delivery briefing plus current context
+yrd branch                  move branches into a delivery state:
+                            draft, submit, archive, ignore
+yrd draft                   shorthand for yrd branch draft
+yrd archive                 shorthand for yrd branch archive
+yrd ignore                  shorthand for yrd branch ignore
 ```
+
+### Branch States
+
+A branch IS a change. Four state-targeting verbs move one INTO a state, and
+there are no un-verbs: `draft` is how a submitted branch is unsubmitted and how
+an ignored one is unshelved.
+
+```text
+yrd branch draft   [selector...] [--dry-run]
+yrd branch submit  [selector...] [--dry-run]
+yrd branch archive [selector...] [--dry-run] [-m <text> | -F <path>]
+yrd branch ignore  [selector...] [--dry-run]
+```
+
+Selectors are branch names, quoted globs, or both; zero selectors means the
+current branch, and a bare invocation on one of Yrd's own `yrd/` branches is
+refused rather than guessed at. Every run prints the branches it resolved and
+the exact `git push` it will make, so a glob's expansion is never a surprise; a
+glob that matches no branch is a refusal, never a silent success.
+
+The push IS the API. `draft`, `submit` and `ignore` write the decision ref the
+receiver reads — `refs/yrd/draft/<branch>`, `refs/yrd/submit/<branch>` (valued
+at the branch tip, the commit its author approves to land), and
+`refs/yrd/ignore/<branch>`. Draft is the default state, so a branch that has
+never been moved needs no ref at all. `archive` pushes a branch DELETION: the
+shelf under `refs/yrd/archive/` refuses every direct write, and the receiver
+files the branch there itself, keyed by its full old sha.
+
+Every RULE belongs to the receiver — which writes are legal, how a new branch
+is auto-classified, and why an ignore is refused while a live submit stands.
+These verbs select, print and push; a refusal comes back in the receiver's own
+words, unaltered.
+
+`yrd submit` is a different act: it submits a merge request into the queue.
 
 ### Workspace Operations
 
