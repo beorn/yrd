@@ -22,7 +22,7 @@ import {
   type ListViewHandle,
 } from "silvery"
 import { formatChangeRevisionSelector, changeRevisionNumber, type BaysState, type PR } from "@yrd/bay"
-import type { QueueAuditFinding } from "@yrd/queue"
+import { DEFAULT_NEEDS_PERSON_OWNER, type QueueAuditFinding } from "@yrd/queue"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailChangeList,
@@ -160,6 +160,14 @@ export type QueueWatchSnapshot = Readonly<{
    * never distinguishes not-yet-measured from measured-and-clean here, unlike
    * the resident status file, because a live watch snapshot always measures. */
   staleDrafts?: readonly QueueAuditFinding[]
+  /** `admission-refusal-needs-person` findings — merge requests whose
+   * admission refusal settled `needs-person` and stopped being retried, so no
+   * other row in this pane marks them
+   * (@i/10-merge-queue/22918-needs-person-unowned). A visible row, never only
+   * a `queue audit` record nobody ran; no age threshold, unlike
+   * `staleDrafts`, since a settlement already earned its urgency.
+   * Absent/empty both mean "nothing needs a person". */
+  needsPerson?: readonly QueueAuditFinding[]
 }>
 
 /** The one immutable row identity whose expensive detail data watch may load. */
@@ -1286,18 +1294,40 @@ function staleDraftFooterNotice(findings: readonly QueueAuditFinding[]): string 
   return `${pr} stranded (owner=${owner}${more}) — yrd queue audit for detail, yrd pr submit or withdraw to clear`
 }
 
+/** One footer-width line for however many needs-person merge requests the
+ * snapshot carries — same shape as {@link staleDraftFooterNotice}, but the
+ * owner is the finding's `owner` ROLE (`.yrd.yml` `needsPerson.owner`, or the
+ * explicit unowned default — never a submitter guessed from push identity),
+ * and a settlement already earned its urgency (no page-after grace, unlike a
+ * merely-aging draft), so it outranks that notice in
+ * {@link QueueWatchFooter}'s priority order
+ * (@i/10-merge-queue/22918-needs-person-unowned). */
+function needsPersonFooterNotice(findings: readonly QueueAuditFinding[]): string | undefined {
+  const [first, ...rest] = findings
+  if (first === undefined) return undefined
+  // The finding always carries `owner` (@yrd/queue emits it unconditionally);
+  // the fallback only covers a foreign-version record with the field missing,
+  // and says exactly what the emitter would have said.
+  const owner = first.owner ?? DEFAULT_NEEDS_PERSON_OWNER
+  const pr = first.pr === undefined ? "a merge request" : `PR ${first.pr}`
+  const more = rest.length === 0 ? "" : `, +${rest.length} more`
+  return `${pr} needs a person (owner=${owner}${more}) — yrd queue audit for detail`
+}
+
 function QueueWatchFooter({
   cancelArmed,
   selectedRun,
   readFailure,
   cursorNotice,
   staleDrafts,
+  needsPerson,
 }: Readonly<{
   cancelArmed: boolean
   selectedRun?: string
   readFailure?: QueueReadFailure
   cursorNotice?: string
   staleDrafts?: readonly QueueAuditFinding[]
+  needsPerson?: readonly QueueAuditFinding[]
 }>) {
   if (cancelArmed && selectedRun !== undefined) {
     return (
@@ -1309,12 +1339,14 @@ function QueueWatchFooter({
     )
   }
   // Priority, highest first: an active read failure is a broken surface right
-  // now; a cursor notice means the row the operator was on just disappeared,
-  // both more urgent than a background fact that has been true for hours by
-  // the time it can appear here at all (drafts.pageAfterHours, default 4h).
+  // now; a cursor notice means the row the operator was on just disappeared;
+  // a needs-person settlement already earned its urgency (no grace period —
+  // the queue gave up on it); lowest is a background fact that has been true
+  // for hours by the time it can appear here at all (drafts.pageAfterHours,
+  // default 4h).
   const notice =
     readFailure === undefined
-      ? (cursorNotice ?? staleDraftFooterNotice(staleDrafts ?? []))
+      ? (cursorNotice ?? needsPersonFooterNotice(needsPerson ?? []) ?? staleDraftFooterNotice(staleDrafts ?? []))
       : queueReadFailureMessage(readFailure, true)
   if (notice === undefined) return null
   return (
@@ -1797,15 +1829,17 @@ export function QueueWatchFrame({
       </Box>
       {/* The keybinding footer was removed (user directive 2026-07-15). Bottom
           chrome is reserved for explicit state changes: run cancellation, a
-          loud cursor recovery when the selected row disappears, and — lowest
-          priority, since it is a background fact rather than something this
-          render just did — a page-worthy stale draft. */}
+          loud cursor recovery when the selected row disappears, an unrouted
+          needs-person merge request (@i/10-merge-queue/22918-needs-person-unowned),
+          and — lowest priority, since it is a background fact rather than
+          something this render just did — a page-worthy stale draft. */}
       <QueueWatchFooter
         cancelArmed={cancelArmed}
         {...(selectedRow?.run === undefined ? {} : { selectedRun: selectedRow.run })}
         {...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure })}
         {...(resolvedCursorState.notice === undefined ? {} : { cursorNotice: resolvedCursorState.notice })}
         {...(snapshot.staleDrafts === undefined ? {} : { staleDrafts: snapshot.staleDrafts })}
+        {...(snapshot.needsPerson === undefined ? {} : { needsPerson: snapshot.needsPerson })}
       />
       {helpOpen ? <QueueWatchHelp onClose={() => setHelpOpen(false)} /> : null}
     </Box>
