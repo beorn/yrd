@@ -4874,6 +4874,22 @@ type ChangeSelectionOptions = {
   json?: boolean
 }
 
+/** `pr create` past-draft refusal. When the PR was reached through a Bay
+ * binding — a bare `pr create` resolving the cwd Bay, or a Bay selector — the
+ * caller never named the PR, so the refusal must say which binding produced it
+ * and that a branch selector is the way past it (B94, 2026-08-19: two bare
+ * `pr create` refusals named only the finished PR). */
+function createOnlyRefusal(
+  bay: Readonly<{ id: string }> | undefined,
+  pr: Readonly<{ id: string }>,
+  delivery: string,
+): never {
+  if (bay !== undefined) {
+    refusal(`bay '${bay.id}' is bound to PR '${pr.id}' (${delivery}); pass a branch — yrd pr create <branch>`)
+  }
+  refusal(`PR '${pr.id}' is already ${delivery}; create is only for a draft PR`)
+}
+
 type ChangeSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"
 type ChangeSelectionResult = Readonly<{ prs: readonly PR[]; warnings: readonly string[] }>
 
@@ -4908,7 +4924,7 @@ async function applyChangeSelection(
     if (createOnly) {
       const delivery = previous === undefined ? undefined : changeDeliveryState(previous)
       if (previous !== undefined && delivery !== "pushed" && delivery !== "rejected") {
-        refusal(`PR '${previous.id}' is already ${delivery}; create is only for a draft PR`)
+        createOnlyRefusal(selectedBay, previous, changeDeliveryState(previous))
       }
     }
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
@@ -4941,7 +4957,7 @@ async function applyChangeSelection(
     }
     const delivery = changeDeliveryState(pr)
     if (createOnly && delivery !== "pushed") {
-      refusal(`PR '${pr.id}' is already ${delivery}; create is only for a draft PR`)
+      createOnlyRefusal(selectedBay, pr, delivery)
     }
     if (reviewers.length > 0 && delivery !== "integrated" && delivery !== "already-landed") {
       await app.bays.requestReview({
