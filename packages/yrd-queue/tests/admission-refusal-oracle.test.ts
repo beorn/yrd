@@ -170,6 +170,45 @@ async function requestChecksTimes(app: SubmissionApp, pr: string, times: number)
   for (let index = 0; index < times; index++) await app.bays.requestChecks({ pr, baseSha: BASE })
 }
 
+type JournalFact = Readonly<{ name: string; data?: unknown }>
+type JournalFrame = Readonly<{ events?: readonly JournalFact[] }>
+
+async function journalFrames(journal: Journal<unknown>): Promise<unknown[]> {
+  const collected: unknown[] = []
+  for await (const page of journal.read()) collected.push(...page.values)
+  return collected
+}
+
+/** Reproduce `pr/pushed`/`pr/submitted` facts as journals wrote them before
+ * revision identity existed: no `submitter` (and, on `pr/pushed`, no
+ * `changeId` — the legacy replay schema is strict, so a fact carrying
+ * `changeId` but no `submitter` matches no shape any journal holds, same
+ * surgery as orphaned-run-recovery.test.ts's `withoutPushedIdentity`).
+ * `bays.submit({branch, ...})` mints BOTH facts for one revision and each
+ * independently carries `submitter` — stripping only `pr/pushed` leaves
+ * `pr/submitted`'s copy standing in for it. */
+async function withoutPushedIdentity(journal: Journal<unknown>): Promise<Journal<unknown>> {
+  const kept = (await journalFrames(journal)).map((value) => {
+    const frame = value as JournalFrame
+    if (frame.events === undefined) return value
+    return {
+      ...frame,
+      events: frame.events.map((event) => {
+        if (event.name === "pr/pushed") {
+          const { submitter: _submitter, changeId: _changeId, ...data } = event.data as Record<string, unknown>
+          return { ...event, data }
+        }
+        if (event.name === "pr/submitted") {
+          const { submitter: _submitter, ...data } = event.data as Record<string, unknown>
+          return { ...event, data }
+        }
+        return event
+      }),
+    }
+  })
+  return createMemoryJournal(kept)
+}
+
 /** A Candidate preparer that refuses for one PR forever — the shape of every
  * real head-of-line admission wedge (authored gitlink, stale recut certificate,
  * unresolvable base): typed `refusal`, so the selectorless drain survives it and
@@ -322,6 +361,44 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
       }),
     )
+  })
+
+  it("keeps the needs-person finding honest when the revision records no submitter", async () => {
+    // `owner` is repository CONFIG, never journal identity — so a revision
+    // with no recorded submitter anywhere in its history must still produce
+    // the finding, still carrying the explicit unowned default: no invented
+    // name resurrected from push identity, no crash on the missing fields
+    // (@i/10-merge-queue/22918-needs-person-unowned), same principle as the
+    // draft-stranded precedent (orphaned-run-recovery.test.ts).
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    const seeded = createMemoryJournal()
+    {
+      await using seed = await createApp(refuseForever(() => ""), clock.read, seeded)
+      const pr = await submitAndRequestChecks(seed, "issue/unattributed-permanent-refusal")
+      await seed.queue.recordAdmissionRefusal({
+        pr: pr.id,
+        code: "recut-gitlink-conflict",
+        kind: "refusal",
+        reason: "two fixed gitlink commits are non-ancestral",
+      })
+    }
+    await using app = await createApp(
+      refuseForever(() => ""),
+      clock.read,
+      await withoutPushedIdentity(seeded),
+      ids(100),
+    )
+    const revision = Object.values(app.state().bays.prs)[0]?.revs.at(-1)
+    expect(revision?.submitter, "the surgery must leave a genuinely unattributed revision").toBeUndefined()
+
+    const finding = app.queue.audit().findings.find((candidate) => candidate.code === "admission-refusal-needs-person")
+    expect(finding, "an unattributed settlement still needs a person and must still flag").toBeDefined()
+    expect(finding?.owner, "the empty owner slot is shown explicitly, never invented from identity").toBe(
+      "unowned — no needsPerson.owner is configured in .yrd.yml",
+    )
+    expect(finding?.submitter, "no recorded identity means no field, never a plausible-looking owner").toBeUndefined()
+    expect(finding?.message).toContain("Owner: unowned — no needsPerson.owner is configured in .yrd.yml.")
+    expect(finding?.message).not.toContain("undefined")
   })
 
   it("parks a deterministically stale recut base on its FIRST refusal and drains the PR behind it", async () => {
