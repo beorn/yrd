@@ -102,13 +102,50 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
       // branch half — digit, then `⎇ branch` (items 32d/36).
       expect(topRow).toContain("1 ⎇ main")
       expect(topRow).toContain("2 ⎇ release/next")
-      // `all` rides the same pill group (it clears both filter kinds).
-      expect(topRow).toContain("all")
-      // The bottom row keeps only the status pills (item 32) — the legend no
-      // longer renders beside them.
+      // The title carries one leading column (operator, 2026-08-19).
+      expect(topRow.indexOf("YRD QUEUES")).toBe(1)
+      // `all` is NOT up here (operator, 2026-08-19): the top line is queue
+      // TABS, and `all` clears both filter kinds, so it belongs with the
+      // status pills at the bottom, where it sat before.
+      expect(topRow).not.toContain("all")
+      // The bottom row carries the status pills AND `all`; the queue legend
+      // still does not render beside them (item 32).
       const statusRow = app.text.split("\n").find((row) => /open.*running.*done.*failed/u.test(row))
       expect(statusRow, "status pills row renders").toBeDefined()
+      expect(statusRow).toContain("all")
       expect(statusRow).not.toContain("⎇")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("lights the selected queue tab with a filled background, unlike an unselected one", async () => {
+    // Asserted on rendered CELLS, not on Box props: the whole point of the
+    // change is a colour the operator can see, and a props-level test would
+    // pass while the surface rendered flat. Selected and unselected must both
+    // carry a background AND differ from each other — either half alone would
+    // let "everything is one shade" through.
+    const app = createRenderer({ cols: 140, rows: 40 })(createElement(QueueWatchFrame, { snapshot: twoQueues() }))
+    try {
+      await app.waitForLayoutStable()
+      const topRow = app.text.split("\n")[0] ?? ""
+      const firstX = topRow.indexOf("1 ⎇ main")
+      const secondX = topRow.indexOf("2 ⎇ release/next")
+      expect(firstX, "queue 1 tab renders").toBeGreaterThan(0)
+      expect(secondX, "queue 2 tab renders").toBeGreaterThan(0)
+
+      // Both queues start selected, so both tabs are lit the same.
+      const bothOn = app.cell(firstX, 0).bg
+      expect(bothOn, "a selected tab carries a background").not.toBeNull()
+      expect(app.cell(secondX, 0).bg, "both selected tabs share one surface").toEqual(bothOn)
+
+      await app.press("2")
+      await app.waitForLayoutStable()
+      const selected = app.cell(firstX, 0).bg
+      const unselected = app.cell(secondX, 0).bg
+      expect(selected, "the still-selected tab stays lit").not.toBeNull()
+      expect(unselected, "an unselected tab still sits on its own surface").not.toBeNull()
+      expect(unselected, "selected and unselected tabs must not look alike").not.toEqual(selected)
     } finally {
       app.unmount()
     }
