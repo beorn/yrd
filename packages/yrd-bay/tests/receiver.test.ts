@@ -5,10 +5,10 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process, type ProcessRequest } from "@yrd/process"
 import {
   createGitPushReceiver,
@@ -58,8 +58,8 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return result.stdout
 }
 
-async function commit(repo: string, name: string): Promise<string> {
-  await writeFile(join(repo, name), `${name}\n`)
+async function commit(repo: string, name: string, content = `${name}\n`): Promise<string> {
+  await writeFile(join(repo, name), content)
   await git(repo, "add", name)
   await git(repo, "commit", "-qm", `add ${name}`)
   return await git(repo, "rev-parse", "HEAD")
@@ -85,7 +85,13 @@ async function createRepo(root: string, name: string): Promise<{ path: string; h
   await git(path, "init", "-q", "-b", "main")
   await git(path, "config", "user.name", "Yrd Receiver Test")
   await git(path, "config", "user.email", "receiver@example.invalid")
-  return { path, head: await commit(path, "README.md") }
+  // Content keyed on the repo's own (mkdtemp-unique) path, never the fixed
+  // "README.md\n" default: two independently created repos must never share
+  // a root commit by coincidence. The receiver's move-identity proof
+  // (sameRepositoryAcrossMove) treats a shared root commit as proof of a
+  // shared genesis, so a fixture standing in for a genuinely different
+  // repository must not accidentally fake one via identical boilerplate.
+  return { path, head: await commit(path, "README.md", `${path}\n`) }
 }
 
 async function fixture(label: string): Promise<Fixture> {
@@ -312,8 +318,66 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const other = await createRepo(f.root, "other repo")
     await expect(
       createGitPushReceiver({ mainRepo: other.path, stateDir: f.stateDir, process: f.process }),
-    ).rejects.toThrow(/already belongs to main repository/)
+    ).rejects.toThrow(/already belongs to another repository/)
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)
+  })
+
+  it("self-heals stale receiver roots when the whole repository moved, proven by shared commit history", async () => {
+    const f = await fixture("move")
+    await git(f.receiver.receiverPath, "update-ref", "refs/heads/preserved-across-move", f.baseSha)
+
+    // Simulate the move itself: the main repo AND its state dir (which holds
+    // prs.git) relocate together to a new absolute prefix, exactly like a
+    // directory rename/move — prs.git/config on disk still has the OLD
+    // absolute paths baked into it, since a plain move never rewrites file
+    // contents, only the path used to reach them.
+    const movedRoot = await mkdtemp(join(tmpdir(), "yrd-move-dest-"))
+    roots.push(movedRoot)
+    await cp(f.root, movedRoot, { recursive: true })
+    const movedMainRepo = join(movedRoot, "main repo")
+    const movedStateDir = join(movedRoot, "state with 'quotes $()")
+
+    const loud = vi.spyOn(console, "error").mockImplementation(() => {})
+    let lines: string[]
+    try {
+      const healed = await createGitPushReceiver({
+        mainRepo: movedMainRepo,
+        stateDir: movedStateDir,
+        process: f.process,
+        hookEntry: f.hookEntry,
+      })
+
+      // Proven-same-repo self-heal: no throw, and the receiver now reports
+      // the NEW roots rather than the stale ones still on disk before this
+      // call.
+      expect(healed.mainRepo).toBe(await realpath(movedMainRepo))
+      expect(healed.stateDir).toBe(await realpath(movedStateDir))
+      expect(healed.receiverPath).toBe(join(await realpath(movedStateDir), "prs.git"))
+      expect(healed.mainRepo).not.toBe(f.receiver.mainRepo)
+
+      // The rewrite is durable, not just in-memory: reloading from disk (the
+      // path every subsequent hook invocation actually takes) reports the
+      // same healed roots, and existing objects/refs survived the heal
+      // untouched.
+      const reloaded = await loadGitPushReceiver(healed.receiverPath, f.process)
+      expect(reloaded.mainRepo).toBe(healed.mainRepo)
+      expect(reloaded.stateDir).toBe(healed.stateDir)
+      expect(reloaded.inboxDir).toBe(healed.inboxDir)
+      expect(await git(healed.receiverPath, "rev-parse", "refs/heads/preserved-across-move")).toBe(f.baseSha)
+      expect(await git(healed.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)
+
+      // `mockRestore()` below clears recorded call history (it implies
+      // mockReset/mockClear), so the loud lines must be read out while the
+      // spy is still live — capture them before the `finally` tears it down.
+      lines = loud.mock.calls.map((call) => call.join(" "))
+    } finally {
+      loud.mockRestore()
+    }
+
+    // Loud, not silent: one explicit old -> new line per drifted key.
+    for (const key of ["yrd.mainRepo", "yrd.stateDir", "yrd.inboxDir"]) {
+      expect(lines.some((line) => line.includes("self-healing") && line.includes(`'${key}'`))).toBe(true)
+    }
   })
 
   it("accepts an authorized pinned push and leaves a pending result for Bay intake", async () => {

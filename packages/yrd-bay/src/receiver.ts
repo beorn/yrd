@@ -708,6 +708,58 @@ async function requiredConfig(process: Pick<Process, "run">, path: string, key: 
   return value
 }
 
+type StaleRoot = readonly [key: string, stored: string, fresh: string]
+
+/**
+ * Mechanical proof that `mainRepo` is the SAME repository this receiver was
+ * already bound to, merely relocated to a new absolute path — never a guess,
+ * never a coincidence of matching strings. A moved repository keeps its full
+ * commit history byte-identical; this receiver's own object store already
+ * holds objects fetched from that history (`refs/yrd/bases/*`, refreshed on
+ * every successful bind, plus anything ever pushed through it since). Git
+ * object ids are content hashes, so if ANY of `mainRepo`'s current root
+ * (parentless) commits already exists as an object here, the two share a
+ * genesis an unrelated repository cannot fake. No shared root ⇒ identity is
+ * unproven ⇒ the caller must refuse, never self-heal on a hunch.
+ */
+async function sameRepositoryAcrossMove(
+  process: Pick<Process, "run">,
+  receiverPath: string,
+  mainRepo: string,
+): Promise<boolean> {
+  const roots = await mainGit(process, mainRepo, ["rev-list", "--max-parents=0", "--all"], { allowFailure: true })
+  if (roots.code !== 0) return false
+  const shas = roots.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  for (const sha of shas) {
+    const has = await exec(
+      process,
+      ["git", `--git-dir=${receiverPath}`, "cat-file", "-e", `${sha}^{commit}`],
+      receiverPath,
+      { allowFailure: true },
+    )
+    if (has.code === 0) return true
+  }
+  return false
+}
+
+/** The loud refusal for a stale-and-unproven binding: both values for every drifted key, plus the exact command that heals it once a human has independently confirmed the two repositories really are the same. */
+function staleRootRefusal(receiverPath: string, mainRepo: string, stale: readonly StaleRoot[]): string {
+  const heal = stale
+    .map(([key, , fresh]) => `git --git-dir="${receiverPath}" config --local ${key} "${fresh}"`)
+    .join(" && ")
+  return [
+    `existing prs.git at '${receiverPath}' already belongs to another repository — no shared commit history with ` +
+      `'${mainRepo}' proves otherwise:`,
+    ...stale.map(([key, stored, fresh]) => `  ${key}: stored '${stored}', actual '${fresh}'`),
+    "if this really is the same repository under a new path (verify manually first), heal it with:",
+    `  ${heal}`,
+    "otherwise this prs.git belongs to a genuinely different repository — move it aside and let Yrd reinitialize.",
+  ].join("\n")
+}
+
 async function validateBinding(receiver: GitPushReceiver): Promise<void> {
   const version = await config(receiver.process, receiver.receiverPath, "yrd.receiverVersion")
   const state = await config(receiver.process, receiver.receiverPath, "yrd.stateDir")
@@ -718,12 +770,27 @@ async function validateBinding(receiver: GitPushReceiver): Promise<void> {
     version === String(RECEIVER_VERSION) && state && main && inbox,
     "existing prs.git has incomplete or unsupported Yrd receiver configuration",
   )
+  const candidates: StaleRoot[] = [
+    ["yrd.mainRepo", main, receiver.mainRepo],
+    ["yrd.stateDir", state, receiver.stateDir],
+    ["yrd.inboxDir", inbox, receiver.inboxDir],
+  ]
+  const stale = candidates.filter(([, stored, fresh]) => resolve(stored) !== fresh)
+  if (stale.length === 0) return
   check(
-    resolve(main) === receiver.mainRepo,
-    `existing prs.git already belongs to main repository '${main}', not '${receiver.mainRepo}'`,
+    await sameRepositoryAcrossMove(receiver.process, receiver.receiverPath, receiver.mainRepo),
+    staleRootRefusal(receiver.receiverPath, receiver.mainRepo, stale),
   )
-  check(resolve(state) === receiver.stateDir, "existing prs.git is bound to another state directory")
-  check(resolve(inbox) === receiver.inboxDir, "existing prs.git is bound to another receiver inbox")
+  // Proven, not assumed: log the exact rewrite loudly before the caller's own
+  // unconditional `receiverConfig()` write (a few lines below this return, in
+  // `createGitPushReceiver`) applies it. No silent acceptance of a dangling
+  // path — the operator sees old -> new even when nothing else fails.
+  for (const [key, stored, fresh] of stale) {
+    console.error(
+      `yrd: receiver: self-healing stale '${key}' at '${receiver.receiverPath}': '${stored}' -> '${fresh}' ` +
+        `(proven same repository via shared commit history with '${receiver.mainRepo}')`,
+    )
+  }
 }
 
 async function text(path: string): Promise<string | undefined> {
