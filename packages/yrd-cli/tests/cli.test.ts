@@ -561,6 +561,9 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     leaseMs: 60_000,
     implementationSource: `git:${"1".repeat(40)}`,
     now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+    // Linear by default: the linear-root gate reads parent counts on the
+    // active-Bay and ready entrances; merge-tip scenarios override this.
+    parents: async () => ["0".repeat(40)],
     ...overrides,
   }
   return { io, stdout: () => stdout, stderr: () => stderr }
@@ -666,6 +669,7 @@ async function submitBayFixture(app: TestApp, bay: string): Promise<void> {
     changeDeliveryState(
       await app.bays.submitSelection(bay, {
         resolveRevision: async () => undefined,
+        resolveParents: async () => ["0".repeat(40)],
         run: { runner: "cli-test", leaseMs: 60_000 },
       }),
     ),
@@ -4823,6 +4827,50 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "create"), create.io)).toBe(1)
     expect(create.stderr()).toContain("bay 'B1' is bound to PR 'PR1' (integrated)")
     expect(create.stderr()).toContain("pass a branch — yrd pr create <branch>")
+  })
+
+  it("refuses an active-bay submit whose checked-out head is a merge commit", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "merge-tip-bay" })
+
+    // The bay's committed head is a merge commit. Until now this entrance was
+    // the one submit path that never met the linear-root check at all: the
+    // branch resolver (where submit enforces it) is deliberately skipped for
+    // an ACTIVE bay, so the merge tip sailed into the ledger and was refused
+    // only later, on the landing path (PR1364 shape, 2026-08-19).
+    const submit = outputIO({
+      cwd: "/repo/.bays/B1",
+      parents: async () => ["e".repeat(40), "f".repeat(40)],
+    })
+    expect(await runYrd(app, yrd("pr", "submit"), submit.io)).toBe(1)
+    expect(submit.stderr()).toContain("merge commit with 2 parents")
+    expect(submit.stderr()).toContain("linear rebuild required")
+    // The refusal precedes the ledger write: nothing queued is left behind.
+    expect(app.bays.prs()).toEqual([])
+  })
+
+  it("refuses pr ready for a merge-tip head before running the required checks", async () => {
+    const localChecks: string[] = []
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/merge-tip-ready", headSha: MERGED_SHA, base: "main", draft: true })
+
+    const ready = outputIO({ parents: async () => ["e".repeat(40), "f".repeat(40)] })
+    expect(
+      await runYrd(app, yrd("pr", "ready", "PR1"), ready.io, {
+        checks: {
+          names: ["typecheck"],
+          run: async (name) => {
+            localChecks.push(name)
+            return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
+          },
+          install: async () => "/repo/.git/yrd/hooks/pre-submit",
+        },
+      }),
+    ).toBe(1)
+    expect(ready.stderr()).toContain("merge commit with 2 parents")
+    expect(ready.stderr()).toContain("linear rebuild required")
+    // The cheap lineage read fires BEFORE the expensive check gate pays out.
+    expect(localChecks).toEqual([])
   })
 
   it("tells a bayless author which step is missing instead of that a lookup failed", async () => {

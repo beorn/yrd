@@ -45,6 +45,7 @@ import {
   failureFact,
   pipe,
   raiseFailure,
+  requireLinearRootTip,
   SUPPORTED_VERSIONS,
   stageReport,
   withCheckpointMigrations,
@@ -109,7 +110,6 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
-import { requireLinearRootTip } from "./linear-tip.ts"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"
@@ -1310,6 +1310,33 @@ async function requireSubmitLinearTip(
       : `local '${branch}' is '${head}'`
   requireLinearRootTip(identity, branch, parents)
   return head
+}
+
+/** Parent SHAs of one commit — the linear-root gate's evidence at entrances
+ * that hold a sha rather than a branch (`pr ready`, active-Bay submit). */
+async function readCommitParents(
+  process: Pick<Process, "run">,
+  repo: string,
+  sha: string,
+): Promise<readonly string[]> {
+  const args = ["rev-list", "--parents", "-n", "1", sha]
+  const lineage = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(lineage, args)
+  const [commit, ...parents] = lineage.stdout.trim().toLowerCase().split(/\s+/u)
+  if (lineage.exitCode !== 0 || commit !== sha.toLowerCase()) {
+    raiseFailure(
+      "configuration",
+      "commit-lineage-inspection-failed",
+      `yrd: could not inspect commit lineage at '${sha}': ` +
+        `${lineage.stderr.trim() || lineage.stdout.trim() || `exit ${String(lineage.exitCode)}`}`,
+    )
+  }
+  return parents
 }
 
 /** Submission asks whether this is unpublished local work or "what commit does
@@ -3127,6 +3154,8 @@ async function runYrdProcessHost(
               io.resolveRevision === undefined
                 ? resolveSubmitCommit(activeHost.process, cwd, ref)
                 : io.resolveRevision(ref, cwd),
+            parents: (sha, cwd) =>
+              io.parents === undefined ? readCommitParents(activeHost.process, cwd, sha) : io.parents(sha, cwd),
             resolveCommitMeta: (ref, cwd) =>
               io.resolveCommitMeta === undefined
                 ? resolveCommitMeta(activeHost.process, cwd, ref)

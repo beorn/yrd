@@ -237,6 +237,10 @@ export type YrdCliIO = {
   concurrency?: number
   now?: () => number
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
+  /** Parent SHAs of one commit in the invocation repository — the linear-root
+   * gate's evidence at entrances that hold a sha rather than a branch
+   * (`pr ready`, active-Bay submit). */
+  parents?(sha: string, cwd: string): Promise<readonly string[]>
   resolveQueueTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
   /** Head commit subject + body used to default a submitted PR's title/description. */
   resolveCommitMeta?(ref: string, cwd: string): Promise<Readonly<{ subject: string; body?: string }> | undefined>
