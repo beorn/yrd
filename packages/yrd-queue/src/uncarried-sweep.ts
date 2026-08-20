@@ -38,6 +38,10 @@ export type SweepOptions = UncarriedOptions &
     authoredOnly?: boolean
   }>
 
+/** A ref the sweep could not judge, with the reason it could not. `tipSha` is
+ * carried so an operator can act on the row without re-deriving it. */
+export type UnenumerableRef = Readonly<{ ref: string; tipSha: string; reason: string }>
+
 /**
  * What a sweep saw, not just what it found.
  *
@@ -58,13 +62,27 @@ export type SweepResult = Readonly<{
    * `-rN` series stands in the population. Counted separately from `carried`
    * and `outsideAgeBound` so every ref lands in exactly one bucket and the
    * denominators still add up: scanned = carried + superseded +
-   * missingUpdateClocks + outsideAgeBound + examined.
+   * missingUpdateClocks + outsideAgeBound + examined + skipped.length.
    */
   superseded: number
   /** Disqualified by the age bound, before any per-ref git work. */
   outsideAgeBound: number
-  /** Facts gathered — the refs that actually cost git object reads. */
+  /** Facts gathered — the refs that actually cost git object reads. Excludes
+   * `skipped`: a ref whose facts could not be gathered was not examined. */
   examined: number
+  /**
+   * Survivors that share NO merge base with the base, so the three-dot diff
+   * that describes every other ref cannot be computed for them at all.
+   *
+   * Named, never dropped. One such ref (a state-repo branch pushed onto the
+   * code remote: 1,455 commits of lease records, zero shared ancestry) used to
+   * abort the whole sweep with a git 128, which at least failed honestly. A
+   * silent skip would be strictly worse — it turns the crash into an
+   * under-count, and an under-count here reads exactly like a clean fleet.
+   * These are the GAP, not the coverage, so they are out of `examined` and out
+   * of `measurable` for the same reason `missingUpdateClocks` is.
+   */
+  skipped: readonly UnenumerableRef[]
   /** Legacy refs whose local update reflog is no longer retained. They cannot
    * mint TTL findings, and the coverage gap is always surfaced to operators. */
   missingUpdateClocks: number
@@ -303,7 +321,24 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
 
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, base)
   const findings: UncarriedFinding[] = []
+  const skipped: UnenumerableRef[] = []
   for (const survivor of survivors) {
+    // Probed BEFORE the facts, because `gatherPushedRefFact`'s three-dot diff
+    // is a hard `git` 128 across unrelated histories — not an empty result —
+    // and it used to take the entire sweep down with it. `merge-base` answers
+    // the same question first and cheaply, and a ref that has none is
+    // unenumerable rather than fatal.
+    // Resolved with `run`, never `optional`: an unreadable ref is a genuine
+    // fault and must stay loud. Ordering is what makes the next answer
+    // trustworthy — once the tip is known good, an absent merge base means
+    // unrelated histories rather than "something around here is broken", so
+    // the row can be reported as a fact instead of a shrug.
+    const tipSha = await git.run(repo, ["rev-parse", `${survivor.ref}^{commit}`])
+    const mergeBase = await git.optional(repo, ["merge-base", base, survivor.ref])
+    if (mergeBase === undefined) {
+      skipped.push({ ref: survivor.ref, tipSha, reason: `no merge base with '${base}' — unrelated histories` })
+      continue
+    }
     const fact = await gatherPushedRefFact(git, survivor.ref, {
       repo,
       base,
@@ -316,14 +351,19 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     if (finding !== undefined) findings.push(finding)
   }
 
+  // Survivors whose facts could not be gathered are not "examined", and must
+  // not inflate `measurable` either — that would flatter the coverage with the
+  // very refs the sweep failed to judge.
+  const examined = survivors.length - skipped.length
   return {
     findings: findings.toSorted((left, right) => right.ageMs - left.ageMs),
     scanned: refs.length,
     carried,
     superseded: collapsed.superseded,
     outsideAgeBound,
-    examined: survivors.length,
+    examined,
     missingUpdateClocks,
-    measurable: outsideAgeBound + survivors.length,
+    skipped,
+    measurable: outsideAgeBound + examined,
   }
 }
