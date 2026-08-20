@@ -4,6 +4,7 @@ import {
   journalEvent,
   observeYrdLifecycle,
   raiseFailure,
+  requireLinearRootTip,
   resolveSelector,
   type CommandHandler,
   type CommandResult,
@@ -239,6 +240,10 @@ export type SubmitSelectionOptions = Readonly<{
   correlation?: Correlation
   composition?: CompositionV1
   resolveRevision(ref: string): Promise<string | undefined>
+  /** Parent SHAs of one commit in the submission repository. The active-Bay
+   * path proves the checked-out head is linear BEFORE the ledger write — the
+   * one submit entrance the branch resolver's check never covers. */
+  resolveParents?(sha: string): Promise<readonly string[]> | readonly string[]
   run: RunJobOptions
   /** Caller-owned advisory-warning sink for a submission that SUCCEEDS with a
    * caveat (same `readonly string[]` shape the queue list/status envelope uses).
@@ -1136,6 +1141,23 @@ export function createBays(
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
       }
+      // The linear-root rule at the one submit entrance the branch resolver's
+      // check never covers: an active Bay's head comes from the workspace
+      // refresh, so a merge-tip commit sailed into the ledger and was refused
+      // only on the landing path (PR1364, 2026-08-19). Absence of parent
+      // evidence is loud — skipping silently would re-open the hole.
+      if (options.resolveParents === undefined) {
+        raiseFailure(
+          "configuration",
+          "bay-head-lineage-unavailable",
+          `yrd: bay '${bay.id}' submission provides no commit-parent evidence; the linear-root gate cannot run`,
+        )
+      }
+      requireLinearRootTip(
+        `bay '${bay.id}' committed head is '${bay.headSha}'`,
+        bay.branch,
+        await options.resolveParents(bay.headSha),
+      )
       pr = changeForBay(snapshot, bay.id) ?? resolvePR(snapshot, bay.branch)
       const composition = requestedComposition ?? (pr === undefined ? undefined : changeComposition(pr))
       if (pr === undefined || changeHead(pr) !== bay.headSha || !sameComposition(composition, changeComposition(pr))) {

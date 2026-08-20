@@ -52,6 +52,7 @@ import {
   createFailure,
   failureFact,
   raiseFailure,
+  requireLinearRootTip,
   SUPPORTED_VERSIONS,
   type DeepReadonly,
   type JournalSnapshot,
@@ -4239,6 +4240,14 @@ async function readyPr(
   const selected = requiredPr(app, selector)
   const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
   if (refusalExit !== undefined) return refusalExit
+  // The linear-root rule, before the expensive gate: a merge-tip head cannot
+  // land, so refuse on the cheap lineage read instead of after paying for the
+  // required checks.
+  requireLinearRootTip(
+    `PR '${selected.id}' head '${changeHead(selected)}'`,
+    selected.branch,
+    await requiredParents(changeHead(selected), io),
+  )
   await runPreSubmitGuards(services, io)
   await runRequiredChecks(services, io)
   await app.bays.ready({ pr: selector })
@@ -4806,6 +4815,22 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
   return io.resolveRevision?.(ref, cwd)
 }
 
+/** Parent SHAs for the linear-root gate. Unlike `optionalRevision`, absence is
+ * loud: a host that cannot produce parent evidence would otherwise skip the
+ * gate silently and re-open the merge-tip hole. */
+async function requiredParents(sha: string, io: YrdCliIO): Promise<readonly string[]> {
+  const cwd = io.cwd ?? process.cwd()
+  const parents = io.parents
+  if (parents === undefined) {
+    raiseFailure(
+      "configuration",
+      "commit-lineage-unavailable",
+      `yrd: this host provides no commit-parent evidence for '${sha}'; the linear-root gate cannot run`,
+    )
+  }
+  return parents(sha, cwd)
+}
+
 async function optionalCommitMeta(
   ref: string,
   io: YrdCliIO,
@@ -4984,6 +5009,7 @@ async function applyChangeSelection(
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
+      resolveParents: (sha) => requiredParents(sha, io),
       run: runtimeOptions(io),
       warnings,
     })
@@ -9573,6 +9599,7 @@ async function applyRedeliveryStep(
   const submitted = await app.bays.submitSelection(step.branch, {
     ...(step.verb === "create" ? { draft: true } : {}),
     resolveRevision: (ref) => optionalRevision(ref, io),
+    resolveParents: (sha) => requiredParents(sha, io),
     run: runtimeOptions(io),
     warnings,
   })
