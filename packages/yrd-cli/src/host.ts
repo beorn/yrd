@@ -16,6 +16,7 @@ import {
   baseIdentity,
   defaultBayBranch,
   loadGitPushReceiver,
+  normalizeV1CorrelationToProps,
   runReceiverHookFromEnvironment,
   withBays,
   withDeployments,
@@ -228,6 +229,16 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // retained edges from the production journal's stored identity, never a
   // test app.
   "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7",
+  // The PRODUCTION composition's correlation-era identity — what /hh's live
+  // journal stored immediately before the props cut (correlation→props,
+  // pr/props-set registration) moved every composition's identity. Measured
+  // from the production journal itself (journal_snapshot.checkpoint_identity,
+  // copy taken 2026-08-19 16:25), cross-checked against the identity embedded
+  // in checkpoint_json and its stored sha256 — never from a harness value
+  // (the PR1305 lesson above). The checkpoint behind it still spells revision
+  // labels `correlation: {namespace, id}`; the migrate callback below folds
+  // those to `props` on the way in.
+  "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -253,6 +264,34 @@ export function fillMissingStateFromInitial<T>(initial: unknown, stored: T): T {
 
 function isPlainStateObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** Fold every legacy `correlation: {namespace, id}` pair in a stored checkpoint
+ * into `props`, recursively.
+ *
+ * The props cut normalizes journal FRAMES at their read boundary
+ * (`normalizeV1CorrelationToProps` rides inside every schema that carries
+ * props), but a retained checkpoint's STATE never re-parses through those
+ * schemas — it restores structurally. Without this fold a correlation-era
+ * checkpoint carries its pairs into a process that only reads `props`: the
+ * labels turn invisible to settlement and detail views, and every future
+ * checkpoint re-persists them unread forever — the exact leak the intents
+ * drop below exists to prevent. Production's pre-props checkpoint holds them
+ * in three families (bays.prs.*.revs[], jobs.byId.*.input.prs[],
+ * queues.records…prs[]); the walk covers all three and any copy of the same
+ * record shape without naming paths. Idempotent, shape-precise (only a
+ * `{namespace: string, id: string}` pair folds; anything else is left for the
+ * strict schema to refuse loudly), and a no-op on post-props state. */
+function foldLegacyCorrelationDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(foldLegacyCorrelationDeep)
+  if (!isPlainStateObject(value)) return value
+  const folded = normalizeV1CorrelationToProps(value)
+  if (!isPlainStateObject(folded)) return folded
+  const result: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(folded)) {
+    result[key] = foldLegacyCorrelationDeep(entry)
+  }
+  return result
 }
 const CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS = 60_000
 
@@ -1692,12 +1731,17 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES.map((from) => ({
       from,
       migrate: (state) => {
+        // Correlation-era checkpoints spell revision labels
+        // `correlation: {namespace, id}`; fold them to `props` FIRST, at this
+        // read boundary, so everything downstream — fill, compact, the process
+        // that runs on the migrated state — sees only the current vocabulary.
+        const folded = foldLegacyCorrelationDeep(state) as typeof state
         // Every retained edge lands on the CURRENT identity, so a stored
         // checkpoint predates every state field added since its writer ran.
         // Fill those from initial values BEFORE compacting — compaction and
         // validation both assume the current contract (2026-08-18: intents-v2
         // added `unreadable`, absent from every intents-v1 checkpoint).
-        const compacted = definition.compact(fillMissingStateFromInitial(definition.initialState, state))
+        const compacted = definition.compact(fillMissingStateFromInitial(definition.initialState, folded))
         // The intent rail's deletion (2026-08-18) dropped `intents` from the
         // state contract entirely — no feature owns that key anymore, so
         // `compact`'s composition (each surviving feature merges only ITS OWN

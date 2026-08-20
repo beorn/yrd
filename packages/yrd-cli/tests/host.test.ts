@@ -522,13 +522,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // change updates this constant consciously and adds a retained migration
     // edge measured from the PRODUCTION journal's stored identity (the
     // R2752/R2732 refusal prints it), never from a harness value.
-    expect(first.manifest.targetIdentity).toBe("b45cdd9c3cb1e83752bb472a0b1ecb50505abc6670786a4ee8e2f95fef30acd4")
+    // Conscious update 2026-08-19: the props cut registers pr/props-set and
+    // retires the correlation pair from every schema that carries props — an
+    // intentional persisted-contract change, so the identity moves and the
+    // correlation-era predecessor gains a retained edge below.
+    expect(first.manifest.targetIdentity).toBe("690704d679947c4814c3cbd024dc08f91f03959dc4a340f4d3f2ad24ea23f8c7")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
     })
     expect(first.manifest.edges).toContainEqual({
       from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
+      to: first.manifest.targetIdentity,
+    })
+    // The PRODUCTION composition's correlation-era identity (measured from the
+    // live journal's stored checkpoint, 2026-08-19 — see the retained list's
+    // own comment). Its edge is what lets a deployment cross the props cut.
+    expect(first.manifest.edges).toContainEqual({
+      from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
       to: first.manifest.targetIdentity,
     })
     expect(changed.manifest.targetIdentity).not.toBe(first.manifest.targetIdentity)
@@ -1423,6 +1434,112 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .passthrough()
       .parse(JSON.parse(rewritten.checkpoint_json))
     expect(rewrittenValue.value.state).not.toHaveProperty("intents")
+  })
+
+  it("folds a correlation-era checkpoint's revision labels into props while migrating a retained checkpoint", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string; cursor: number }, []>(
+        "SELECT checkpoint_json, cursor FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    const checkpointValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(checkpoint.checkpoint_json))
+    // A checkpoint written before the props cut spells a revision's label as
+    // the retired single `correlation: {namespace, id}` pair — the production
+    // journal's stored checkpoint holds 100+ of them across pr revisions, job
+    // inputs and queue records. Journal FRAMES fold at their schema read
+    // boundary, but checkpoint STATE restores structurally, so the migrate
+    // path itself must fold or the labels enter a process that only reads
+    // `props` and go invisible to settlement and detail views forever.
+    const bays = z
+      .object({ prs: z.record(z.string(), z.unknown()) })
+      .passthrough()
+      .parse(checkpointValue.value.state["bays"])
+    const pr = z.object({ revs: z.array(z.record(z.string(), z.unknown())) }).passthrough().parse(bays.prs["PR1"])
+    const legacyRevs = pr.revs.map(({ props: _props, ...rev }) => ({
+      ...rev,
+      correlation: { namespace: "tribe-request", id: "2f333586-27b7-434e-8764-6ae53ec0c468" },
+    }))
+    // The PRODUCTION composition's correlation-era identity — the same value
+    // the retained list carries, so this test also pins that the edge a live
+    // deployment needs to cross the props cut actually exists.
+    const retainedIdentity = "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5"
+    const retainedCheckpoint = JSON.stringify({
+      ...checkpointValue,
+      value: {
+        ...checkpointValue.value,
+        state: {
+          ...checkpointValue.value.state,
+          bays: { ...bays, prs: { ...bays.prs, PR1: { ...pr, revs: legacyRevs } } },
+        },
+      },
+      identity: retainedIdentity,
+    })
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+
+    // Boot migrates the retained checkpoint and the fold lands each legacy
+    // pair as a one-entry props map — visible to everything that reads props.
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    const migrated = z
+      .object({ revs: z.array(z.record(z.string(), z.unknown())) })
+      .passthrough()
+      .parse(restored.state().bays.prs.PR1)
+    for (const rev of migrated.revs) {
+      expect(rev).not.toHaveProperty("correlation")
+      expect(rev["props"]).toEqual({ "tribe-request": "2f333586-27b7-434e-8764-6ae53ec0c468" })
+    }
+    await restored.close()
+
+    // The fold is durable: the checkpoint THIS boot writes back carries the
+    // props spelling, and no correlation pair rides forward to a future one.
+    using redatabase = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
+    const rewritten = redatabase
+      .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton = 1")
+      .get()
+    if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
+    expect(rewritten.checkpoint_json.includes('"correlation"')).toBe(false)
+    expect(rewritten.checkpoint_json).toContain('"tribe-request"')
   })
 
   it("boots past historical pin-intent and tombstone events, quarantining them by name, while the shape their ids mint still parses", async () => {
@@ -2614,6 +2731,11 @@ checks: [{check: {run: "true"}}]
       },
       {
         from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        // The production composition's correlation-era identity (props cut).
+        from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
         to: attestation.manifest.targetIdentity,
       },
       {
