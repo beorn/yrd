@@ -26,6 +26,7 @@ import { createLogger, type ConditionalLogger, type Event as LogEvent } from "lo
 import * as z from "zod"
 import {
   CommandEvidenceSchema,
+  CommandTerminalSchema,
   DIAGNOSTICS_COMPARISON_READY,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
@@ -5025,7 +5026,7 @@ describe("Queue command adapters", () => {
     // 22896: the command DID run and exit 1 — a reader must not have to guess
     // that from stream contents, and must not confuse it with a check that
     // never got as far as spawning a process at all.
-    const terminal = JSON.parse(await readFile(join(dir, "terminal.json"), "utf8"))
+    const terminal = CommandTerminalSchema.parse(JSON.parse(await readFile(join(dir, "terminal.json"), "utf8")))
     expect(terminal).toMatchObject({ status: "failure", exitCode: 1, signal: null, timedOut: false })
     expect(new Date(terminal.startedAt).getTime()).not.toBeNaN()
     expect(new Date(terminal.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(terminal.startedAt).getTime())
@@ -5286,7 +5287,7 @@ describe("Queue command adapters", () => {
     // 22896: a GREEN check is exactly the case artifacts alone could never
     // distinguish from one still running or crashed silently — the terminal
     // record is what makes that distinction possible without the journal.
-    const terminal = JSON.parse(await readFile(join(dir, "terminal.json"), "utf8"))
+    const terminal = CommandTerminalSchema.parse(JSON.parse(await readFile(join(dir, "terminal.json"), "utf8")))
     expect(terminal).toMatchObject({ status: "success", exitCode: 0, signal: null, timedOut: false, durationMs: 10 })
     expect(new Date(terminal.startedAt).getTime()).not.toBeNaN()
     expect(new Date(terminal.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(terminal.startedAt).getTime())

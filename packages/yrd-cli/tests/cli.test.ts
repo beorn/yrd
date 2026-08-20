@@ -5587,18 +5587,18 @@ describe("runYrd", () => {
     const open = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--state", "open", "--json"), open.io), open.stderr()).toBe(0)
     expect(JSON.parse(open.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1", state: "open" }] })
-    expect(JSON.parse(open.stdout()).prs).toHaveLength(1)
+    expect((JSON.parse(open.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
 
     const closed = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--state", "closed", "--json"), closed.io), closed.stderr()).toBe(0)
     expect(JSON.parse(closed.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR2", state: "closed" }] })
-    expect(JSON.parse(closed.stdout()).prs).toHaveLength(1)
+    expect((JSON.parse(closed.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
 
     // The delivery vocabulary keeps filtering the status field, unchanged.
     const pushed = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), pushed.io), pushed.stderr()).toBe(0)
     expect(JSON.parse(pushed.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1" }] })
-    expect(JSON.parse(pushed.stdout()).prs).toHaveLength(1)
+    expect((JSON.parse(pushed.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
 
     const withdrawn = outputIO()
     expect(
@@ -5606,7 +5606,7 @@ describe("runYrd", () => {
       withdrawn.stderr(),
     ).toBe(0)
     expect(JSON.parse(withdrawn.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR2" }] })
-    expect(JSON.parse(withdrawn.stdout()).prs).toHaveLength(1)
+    expect((JSON.parse(withdrawn.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
 
     // A valid value that matches nothing is still a success with an empty
     // list — the duality the refusal exists to protect, not to replace.

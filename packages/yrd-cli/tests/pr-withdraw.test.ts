@@ -790,7 +790,7 @@ describe("pr recut --preflight", () => {
     // linear-root rule — the gate passed work the landing path cannot land.
     // The gate must raise the SAME refusal at the first evaluation.
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io)).toBe(1)
-    const failure = JSON.parse(output.stderr())
+    const failure = JSON.parse(output.stderr()) as { failure: { code: string; cause: string } }
     expect(failure).toMatchObject({ failure: { code: "merge-tip-carrier" } })
     expect(failure.failure.cause).toContain("is a merge commit with 2 parents")
     expect(failure.failure.cause).toContain("Yrd requires a linear root carrier")
