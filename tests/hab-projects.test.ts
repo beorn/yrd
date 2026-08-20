@@ -1,14 +1,14 @@
 /**
  * @failure Hab queue-runner declarations drift into implicit paths or commands whose argv no longer identifies the repository they operate on.
  * @level l2
- * @consumer Hallohuman Hab composition loading vendor/yrd/hab.module.ts
+ * @consumer Hallohuman Hab composition loading vendor/yrd/hab.projects.ts
  */
 import { describe, expect, it } from "vitest"
 import hab, {
   YRD_REPOSITORY_ALIASES,
   defineYrdQueueRunnerDeclarations,
   yrdQueueRunnerDeclarations,
-} from "../hab.module.ts"
+} from "../hab.projects.ts"
 import { YRD_REPOSITORY_ALIASES_ENV, takeYrdComposition } from "../packages/yrd-cli/src/repository-composition.ts"
 
 describe("Yrd Hab runner declarations", () => {
