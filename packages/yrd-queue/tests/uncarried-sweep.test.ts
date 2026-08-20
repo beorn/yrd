@@ -33,6 +33,11 @@ function fakeGit(responses: Record<string, string>): RefGit & { calls: string[][
     for (const [prefix, value] of Object.entries(responses)) {
       if (args.join(" ").startsWith(prefix)) return value
     }
+    // The sweep now probes merge-base before gathering facts. Every fixture
+    // ref in this file shares history with the base — the unrelated-history
+    // case is exercised against a REAL repository below, because a double that
+    // can be told to have no merge base proves nothing about git's own 128.
+    if (args[0] === "merge-base") return "0".repeat(40)
     if (args[0] === "reflog" && args[1] === "show") {
       const refs = responses["for-each-ref"] ?? ""
       return refs
@@ -458,3 +463,82 @@ describe("sweepUncarriedRefs", () => {
     expect(result.superseded).toBe(1)
   })
 })
+
+describe("a ref with no shared ancestry is one unenumerable ROW, not a dead sweep", () => {
+  /** Git's canonical empty tree, so an orphan commit can be minted without
+   * touching the working tree or the index. */
+  const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+  it("returns every other row AND names the ref it could not enumerate", async () => {
+    // Specimen: a state-repo branch pushed onto the CODE remote — 1,455 commits
+    // of hab lease records sharing no ancestry with main. `git diff a...b`
+    // across unrelated histories is a hard 128, not an empty diff, so this ONE
+    // row used to abort the whole command fleet-wide and left 12 CRITICAL pages
+    // unverifiable. A fixture of well-formed refs cannot fail for this.
+    const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-unrelated-"))
+    try {
+      const clock = `${String(Math.floor((NOW - 40 * HOUR) / 1000))} +0000`
+      const dates = { GIT_AUTHOR_DATE: clock, GIT_COMMITTER_DATE: clock }
+      expect((await gitCommand(repo, ["init", "-b", "main"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "user.name", "Yrd Test"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "user.email", "yrd@example.test"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "core.logAllRefUpdates", "true"])).success).toBe(true)
+      await writeFile(join(repo, "base.txt"), "base\n", "utf8")
+      expect((await gitCommand(repo, ["add", "base.txt"])).success).toBe(true)
+      expect((await gitCommand(repo, ["commit", "-m", "base"], dates)).success).toBe(true)
+      const base = (await gitCommand(repo, ["rev-parse", "HEAD"])).stdout
+      await writeFile(join(repo, "change.txt"), "change\n", "utf8")
+      expect((await gitCommand(repo, ["add", "change.txt"])).success).toBe(true)
+      expect((await gitCommand(repo, ["commit", "-m", "change"], dates)).success).toBe(true)
+      const tip = (await gitCommand(repo, ["rev-parse", "HEAD"])).stdout
+      expect((await gitCommand(repo, ["update-ref", "refs/heads/main", base, tip])).success).toBe(true)
+
+      // The unrelated history: a commit with NO parent, so it shares not one
+      // object of ancestry with main. This is what makes merge-base empty.
+      const orphan = await gitCommand(repo, ["commit-tree", EMPTY_TREE, "-m", "lease records"], dates)
+      expect(orphan.success).toBe(true)
+      const orphanSha = orphan.stdout
+      expect((await gitCommand(repo, ["merge-base", "main", orphanSha])).success).toBe(false)
+
+      const observed = `${String(Math.floor((NOW - HOUR) / 1000))} +0000`
+      for (const [ref, sha] of [
+        ["refs/remotes/origin/task/ordinary", tip],
+        ["refs/remotes/origin/rescue/state-hab-launch", orphanSha],
+      ] as const) {
+        expect(
+          (await gitCommand(repo, ["update-ref", "--create-reflog", ref, sha], { GIT_COMMITTER_DATE: observed }))
+            .success,
+        ).toBe(true)
+      }
+
+      const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
+
+      // The whole point: the good row survives the bad one.
+      expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/ordinary"])
+      expect(result.skipped).toMatchObject([
+        { ref: "origin/rescue/state-hab-launch", tipSha: orphanSha },
+      ])
+      expect(result.skipped[0]?.reason).toContain("no merge base")
+      // Named, not merely counted — a silent skip is an under-count, which is
+      // strictly worse than the crash it replaced.
+      expect(result.skipped[0]?.ref).toContain("state-hab-launch")
+
+      // The skipped ref is the GAP, never the coverage.
+      expect(result.examined).toBe(1)
+      expect(result.measurable).toBe(result.outsideAgeBound + 1)
+
+      // Derived a second way: every ref lands in exactly one bucket.
+      expect(result.scanned).toBe(
+        result.carried +
+          result.superseded +
+          result.missingUpdateClocks +
+          result.outsideAgeBound +
+          result.examined +
+          result.skipped.length,
+      )
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+})
+

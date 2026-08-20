@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from "vitest"
 import {
+  uncarriedCoverageFloor,
   uncarriedFloorCount,
   uncarriedLine,
   uncarriedObservation,
@@ -202,5 +203,46 @@ describe("uncarriedFloorCount", () => {
     // An older resident that cannot report its clock gap has not proven it had
     // none; assuming completeness is how a partial sweep reads as a total.
     expect(uncarriedFloorCount(7, undefined)).toBe("≥7")
+  })
+})
+
+describe("unenumerable refs are a coverage gap, not a rounding error", () => {
+  it("refuses to call coverage complete while a ref went unenumerable", () => {
+    // The whole point of the skipped bucket. A sweep that hit a ref with no
+    // merge base measured LESS of the fleet than one that did not, and saying
+    // "every candidate had a retained update clock" here would be true about
+    // clocks and false about coverage — the exact under-count that made
+    // skipping worse than the original crash.
+    expect(uncarriedCoverageFloor(51, 0, 1)).not.toContain("every candidate")
+    expect(uncarriedCoverageFloor(51, 0, 1)).toContain("1 ref with no merge base")
+    expect(uncarriedCoverageFloor(51, 0, 1)).toContain("a floor")
+  })
+
+  it("still reports full coverage when nothing was skipped", () => {
+    expect(uncarriedCoverageFloor(51, 0, 0)).toBe("every candidate had a retained update clock")
+  })
+
+  it("names both gaps separately rather than folding one into the other", () => {
+    // A ref with no merge base is not a ref with no clock. Folding them would
+    // attribute the gap to a cause that was never measured.
+    const line = uncarriedCoverageFloor(592, 2211, 1)
+    expect(line).toContain("2211 refs without retained update clocks")
+    expect(line).toContain("1 ref with no merge base")
+  })
+
+  it("counts unenumerable refs in the candidate population, never as coverage", () => {
+    // 1 measurable of 2 candidates is 50%. Dropping the skipped ref from the
+    // denominator would report 100% and flatter the sweep with the very ref it
+    // could not judge.
+    expect(uncarriedCoverageFloor(1, 0, 1)).toContain("50% of 2 candidates measurable")
+  })
+
+  it("bounds the count as a floor when a ref was skipped, even with perfect clocks", () => {
+    expect(uncarriedFloorCount(21, 0, 1)).toBe("\u226521")
+    expect(uncarriedFloorCount(21, 0, 0)).toBe("21")
+  })
+
+  it("pluralises the gap so a single skipped ref does not read as a tally bug", () => {
+    expect(uncarriedCoverageFloor(51, 0, 2)).toContain("2 refs with no merge base")
   })
 })

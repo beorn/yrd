@@ -502,14 +502,25 @@ export function uncarriedRailColor(observation: UncarriedObservation | undefined
 export function uncarriedCoverageFloor(
   measurable: number | undefined,
   missingUpdateClocks: number | undefined,
+  unenumerable = 0,
 ): string {
   // An absent clock count is unknown coverage, never full coverage — the
   // distinction an older resident's status cannot make for itself.
   if (missingUpdateClocks === undefined) return "push-clock coverage unknown, so a floor"
-  const gap = `${String(missingUpdateClocks)} refs without retained update clocks`
-  if (missingUpdateClocks === 0) return "every candidate had a retained update clock"
+  // Two independent gaps, phrased separately. A ref with no merge base was not
+  // missing a clock, and folding it into that count would attribute the gap to
+  // a cause nobody measured.
+  const gaps: string[] = []
+  if (missingUpdateClocks > 0) gaps.push(`${String(missingUpdateClocks)} refs without retained update clocks`)
+  if (unenumerable > 0) {
+    gaps.push(`${String(unenumerable)} ref${unenumerable === 1 ? "" : "s"} with no merge base`)
+  }
+  // Full coverage is a claim about BOTH gaps. Returning it while refs went
+  // unenumerable is the under-count this whole helper exists to refuse.
+  if (gaps.length === 0) return "every candidate had a retained update clock"
+  const gap = gaps.join(" and ")
   if (measurable === undefined) return `a floor — ${gap}, against an unknown candidate population`
-  const candidates = measurable + missingUpdateClocks
+  const candidates = measurable + missingUpdateClocks + unenumerable
   const percent = Math.round((measurable / candidates) * 100)
   // A rail that rounds a real 0.4% down to a flat "0% measurable" says the
   // sweep saw nothing, which is a different fact from seeing almost nothing.
@@ -529,8 +540,14 @@ export function uncarriedCoverageFloor(
  * Unknown coverage counts as partial: an older resident that cannot report its
  * clock gap has not proven it had none.
  */
-export function uncarriedFloorCount(count: number, missingUpdateClocks: number | undefined): string {
-  const partial = missingUpdateClocks === undefined || missingUpdateClocks > 0
+export function uncarriedFloorCount(
+  count: number,
+  missingUpdateClocks: number | undefined,
+  unenumerable = 0,
+): string {
+  // A ref the sweep could not enumerate is unmeasured exactly like a ref with
+  // no retained clock: either one makes the count a floor rather than a total.
+  const partial = missingUpdateClocks === undefined || missingUpdateClocks > 0 || unenumerable > 0
   return `${partial ? "≥" : ""}${String(count)}`
 }
 

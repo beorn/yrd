@@ -7825,16 +7825,25 @@ async function queueUncarried(
     `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
     `${String(result.superseded)} superseded revisions collapsed · ` +
     `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined · ` +
-    `${String(result.missingUpdateClocks)} refs without retained update clocks`
+    `${String(result.missingUpdateClocks)} refs without retained update clocks · ` +
+    // Prints even at zero, like every other bucket here: the identity
+    // scanned = carried + superseded + clocks + aged + examined + unenumerable
+    // is only checkable by a reader if every term is on the line.
+    `${String(result.skipped.length)} unenumerable`
   // The same sentence the rail shows, from the same function: a reader must not
   // have to work out from the raw ledger that the count is a floor.
-  const floor = uncarriedCoverageFloor(result.measurable, result.missingUpdateClocks)
+  const floor = uncarriedCoverageFloor(result.measurable, result.missingUpdateClocks, result.skipped.length)
   // The findings count is bounded by the SAME helper the rail uses. It used to
   // print bare, so the command contradicted the rail's own reasoning about the
   // very number it was reporting — and a bare "0 uncarried refs" from a 15%
   // reading is the exact "clean fleet" claim the floor exists to refuse.
-  const bounded = uncarriedFloorCount(result.findings.length, result.missingUpdateClocks)
+  const bounded = uncarriedFloorCount(result.findings.length, result.missingUpdateClocks, result.skipped.length)
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
+  // Named on BOTH paths, including the "nothing found" one — that is the path
+  // where an unreported skip does its damage, because there is no finding on
+  // screen to make a reader wonder what else was there.
+  const skippedLines = result.skipped.map((row) => `SKIPPED  ${row.ref}  ${row.tipSha}  ${row.reason}`)
+  const skippedBlock = skippedLines.length === 0 ? [] : [...skippedLines, ""]
   await printResult(
     io,
     jsonEnabled(options),
@@ -7845,8 +7854,8 @@ async function queueUncarried(
     // (@i/10-merge-queue/22925-watch-shows-every-pr).
     { command: "queue.uncarried", ...result, floor, bounded },
     result.findings.length === 0
-      ? `${bounded} uncarried refs (${floor}) — ${denominator}`
-      : [...lines, "", `${bounded} findings (${floor})`, denominator].join("\n"),
+      ? [...skippedBlock, `${bounded} uncarried refs (${floor}) — ${denominator}`].join("\n")
+      : [...lines, "", ...skippedBlock, `${bounded} findings (${floor})`, denominator].join("\n"),
   )
   return result.findings.length === 0 ? 0 : 1
 }
