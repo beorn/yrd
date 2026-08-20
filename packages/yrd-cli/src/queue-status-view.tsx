@@ -540,11 +540,7 @@ export function uncarriedCoverageFloor(
  * Unknown coverage counts as partial: an older resident that cannot report its
  * clock gap has not proven it had none.
  */
-export function uncarriedFloorCount(
-  count: number,
-  missingUpdateClocks: number | undefined,
-  unenumerable = 0,
-): string {
+export function uncarriedFloorCount(count: number, missingUpdateClocks: number | undefined, unenumerable = 0): string {
   // A ref the sweep could not enumerate is unmeasured exactly like a ref with
   // no retained clock: either one makes the count a floor rather than a total.
   const partial = missingUpdateClocks === undefined || missingUpdateClocks > 0 || unenumerable > 0

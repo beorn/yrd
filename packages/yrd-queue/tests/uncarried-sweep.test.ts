@@ -515,9 +515,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
 
       // The whole point: the good row survives the bad one.
       expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/ordinary"])
-      expect(result.skipped).toMatchObject([
-        { ref: "origin/rescue/state-hab-launch", tipSha: orphanSha },
-      ])
+      expect(result.skipped).toMatchObject([{ ref: "origin/rescue/state-hab-launch", tipSha: orphanSha }])
       expect(result.skipped[0]?.reason).toContain("no merge base")
       // Named, not merely counted — a silent skip is an under-count, which is
       // strictly worse than the crash it replaced.
@@ -541,4 +539,3 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
     }
   })
 })
-
