@@ -1,13 +1,18 @@
 /**
- * @failure Nothing computed how far a resident runner's booted source has
- *          fallen behind the checkout it is running from, so the RUNNER
- *          box's `source git:<sha>` line could not flag staleness inline.
+ * @failure The RUNNER box's "N behind pin" figure counted the OBSERVER'S OWN
+ *          Yrd checkout (`runnerSha..HEAD` in `yrdSourceCheckout()`), so the
+ *          number tracked whoever was looking, not the queue's recorded pin:
+ *          an observer two commits ahead rendered a pin-exact resident as
+ *          "28 behind pin", and moving the recorded pin did not move the
+ *          display.
  * @level   l2
  * @consumer @yrd/cli queue watch
  *
- * Box 2 of @yrd/core/stale-runner-never-recycles. `runnerSourceBehind` is the
- * observation-time computation (never on the render path); the render-level
- * proof that the box shows/hides the flag lives in
+ * @i/10-merge-queue/23041-staleness-measures-the-observer. `runnerPinBehind`
+ * derives the figure from the RECORDED PIN — the queue repository's
+ * `origin/main` gitlink for its Yrd submodule — never from any checkout's
+ * HEAD. When the pin cannot be resolved it answers a LOUD unknown, never a
+ * number computed from a different base. The render-level proof lives in
  * runner-box-source-staleness.test.ts.
  */
 import { execFileSync } from "node:child_process"
@@ -16,7 +21,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { runnerSourceBehind } from "../src/run.ts"
+import { runnerPinBehind } from "../src/run.ts"
 
 const roots: string[] = []
 
@@ -24,12 +29,13 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-function initRepo(): string {
-  const repo = mkdtempSync(join(tmpdir(), "yrd-source-behind-repo-"))
+function initRepo(prefix: string): string {
+  const repo = mkdtempSync(join(tmpdir(), prefix))
   roots.push(repo)
   execFileSync("git", ["init", "-q", "-b", "main", repo])
   execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"])
   execFileSync("git", ["-C", repo, "config", "user.name", "Test"])
+  execFileSync("git", ["-C", repo, "config", "protocol.file.allow", "always"])
   return repo
 }
 
@@ -39,6 +45,163 @@ function commit(repo: string, message: string): string {
   execFileSync("git", ["-C", repo, "commit", "-q", "-m", message])
   return execFileSync("git", ["-C", repo, "rev-parse", "HEAD"]).toString().trim()
 }
+
+/** A source repository that IDENTIFIES as the Yrd distribution — the same
+ * package.json name check `yrdSourceRoot` applies to the running code is what
+ * `runnerPinBehind` uses to find the queue repo's Yrd submodule, so the
+ * fixture must satisfy it rather than merely look like a repo. */
+function initYrdShapedSource(): string {
+  const repo = initRepo("yrd-pin-source-")
+  writeFileSync(join(repo, "package.json"), `${JSON.stringify({ name: "git-yrd", version: "0.0.0-test" })}\n`)
+  execFileSync("git", ["-C", repo, "add", "-A"])
+  execFileSync("git", ["-C", repo, "commit", "-q", "-m", "identity"])
+  return repo
+}
+
+type QueueFixture = Readonly<{ queueRoot: string; sourceRepo: string; submoduleRoot: string }>
+
+/** A queue repository whose `origin/main` records `sourceRepo` as a submodule
+ * pin at `vendor/yrd`, with the submodule working tree materialized the way
+ * the resident's own deployment is. `origin/main` is a genuine remote ref
+ * (`refs/remotes/origin/main`), advanced by `recordPin`, so the helper reads
+ * exactly the surface production reads. */
+function initQueueRepo(sourceRepo: string, pinSha: string): QueueFixture {
+  const queueRoot = initRepo("yrd-pin-queue-")
+  commit(queueRoot, "queue history")
+  execFileSync("git", ["-C", queueRoot, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sourceRepo, "vendor/yrd"])
+  const submoduleRoot = join(queueRoot, "vendor/yrd")
+  execFileSync("git", ["-C", submoduleRoot, "checkout", "-q", pinSha])
+  execFileSync("git", ["-C", queueRoot, "add", "vendor/yrd"])
+  execFileSync("git", ["-C", queueRoot, "commit", "-q", "-m", "pin yrd"])
+  execFileSync("git", ["-C", queueRoot, "update-ref", "refs/remotes/origin/main", "HEAD"])
+  return { queueRoot, sourceRepo, submoduleRoot }
+}
+
+/** Advance the RECORDED pin — the fact the display must follow — without
+ * touching any checkout's HEAD beyond the gitlink commit itself. */
+function recordPin(fixture: QueueFixture, pinSha: string): void {
+  execFileSync("git", ["-C", fixture.submoduleRoot, "fetch", "-q", "origin"])
+  execFileSync("git", ["-C", fixture.submoduleRoot, "checkout", "-q", pinSha])
+  execFileSync("git", ["-C", fixture.queueRoot, "add", "vendor/yrd"])
+  execFileSync("git", ["-C", fixture.queueRoot, "commit", "-q", "-m", "advance pin"])
+  execFileSync("git", ["-C", fixture.queueRoot, "update-ref", "refs/remotes/origin/main", "HEAD"])
+}
+
+describe("runnerPinBehind (@i/10-merge-queue/23041-staleness-measures-the-observer)", () => {
+  it("answers at-pin for a resident booted exactly at the recorded pin", () => {
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const fixture = initQueueRepo(source, pin)
+    expect(runnerPinBehind(fixture.queueRoot, `git:${pin}`, Date.now())).toEqual({ state: "at" })
+  })
+
+  it("keeps answering at-pin while OTHER checkouts advance — the observer's own history weighs nothing", () => {
+    // The live specimen's first two table rows: the runner never moved, the
+    // observer's checkout gained commits, and the display counted the observer.
+    // Here the upstream source (any checkout that is not the recorded pin)
+    // advances twice; the recorded pin and the resident stay put, so the
+    // answer must not move.
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const fixture = initQueueRepo(source, pin)
+    commit(source, "observer-only advance 1")
+    commit(source, "observer-only advance 2")
+    expect(runnerPinBehind(fixture.queueRoot, `git:${pin}`, Date.now())).toEqual({ state: "at" })
+  })
+
+  it("counts behind against the recorded pin, and the count FOLLOWS a pin advance", () => {
+    // The decisive third table row, inverted to the fix: moving the recorded
+    // pin is the only thing that may move the number.
+    const source = initYrdShapedSource()
+    const booted = commit(source, "booted")
+    const fixture = initQueueRepo(source, booted)
+    const next = commit(source, "pin advance 1")
+    recordPin(fixture, next)
+    expect(runnerPinBehind(fixture.queueRoot, `git:${booted}`, Date.now())).toEqual({ state: "behind", commits: 1 })
+    const further = commit(source, "pin advance 2")
+    recordPin(fixture, further)
+    // Fresh timestamp past the TTL so the second read is a recompute.
+    expect(runnerPinBehind(fixture.queueRoot, `git:${booted}`, Date.now() + 60_000)).toEqual({
+      state: "behind",
+      commits: 2,
+    })
+  })
+
+  it("answers a LOUD unknown naming AHEAD when the resident descends from the recorded pin", () => {
+    // The counter-caution in the bead: a runtime NEWER than the recorded pin
+    // is the direction that crashed settlement drain, and it must neither
+    // read as behind nor as silently current.
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const ahead = commit(source, "newer than pin")
+    const fixture = initQueueRepo(source, pin)
+    execFileSync("git", ["-C", fixture.submoduleRoot, "fetch", "-q", "origin"])
+    const answer = runnerPinBehind(fixture.queueRoot, `git:${ahead}`, Date.now())
+    expect(answer.state).toBe("unknown")
+    expect(answer.state === "unknown" && answer.reason).toMatch(/ahead/i)
+  })
+
+  it("answers a LOUD unknown when the queue repository has no origin/main to read a pin from", () => {
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const fixture = initQueueRepo(source, pin)
+    execFileSync("git", ["-C", fixture.queueRoot, "update-ref", "-d", "refs/remotes/origin/main"])
+    const answer = runnerPinBehind(fixture.queueRoot, `git:${pin}`, Date.now())
+    expect(answer.state).toBe("unknown")
+    expect(answer.state === "unknown" && answer.reason).toMatch(/origin\/main/)
+  })
+
+  it("answers a LOUD unknown when the booted sha cannot be related to the pin", () => {
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const fixture = initQueueRepo(source, pin)
+    const stranger = "f".repeat(40)
+    const answer = runnerPinBehind(fixture.queueRoot, `git:${stranger}`, Date.now())
+    expect(answer.state).toBe("unknown")
+  })
+
+  it("answers unpinned, not unknown, when origin/main records no Yrd submodule", () => {
+    // A queue repository without a Yrd pin is a normal deployment, not a
+    // failure — silence is the honest render, and it must be distinguishable
+    // from a pin we FAILED to read.
+    const queueRoot = initRepo("yrd-pin-plain-queue-")
+    commit(queueRoot, "no submodules here")
+    execFileSync("git", ["-C", queueRoot, "update-ref", "refs/remotes/origin/main", "HEAD"])
+    const sha = "a".repeat(40)
+    expect(runnerPinBehind(queueRoot, `git:${sha}`, Date.now())).toEqual({ state: "unpinned" })
+  })
+
+  it("answers unpinned for a non-git implementation source and does not throw", () => {
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const fixture = initQueueRepo(source, pin)
+    expect(runnerPinBehind(fixture.queueRoot, "dirty:abc123", Date.now())).toEqual({ state: "unpinned" })
+    expect(runnerPinBehind(fixture.queueRoot, undefined, Date.now())).toEqual({ state: "unpinned" })
+  })
+
+  it("does not fork git again within the TTL window for the same booted sha", () => {
+    const source = initYrdShapedSource()
+    const pin = commit(source, "pinned")
+    const fixture = initQueueRepo(source, pin)
+    const counter = installGitCounter()
+    try {
+      const now = Date.now() + 120_000
+      expect(runnerPinBehind(fixture.queueRoot, `git:${pin}`, now)).toEqual({ state: "at" })
+      const afterFirst = invocationCount(counter.logPath)
+      expect(afterFirst).toBeGreaterThan(0)
+      // Same queue repo, same booted sha, well inside the TTL: a cache hit,
+      // not a fork — `observeQueueList` runs on every cursor move, and this
+      // read now walks .gitmodules too, so the per-keystroke cost matters
+      // even more than it did for the single rev-list it replaces.
+      for (let i = 0; i < 10; i += 1) {
+        expect(runnerPinBehind(fixture.queueRoot, `git:${pin}`, now + i)).toEqual({ state: "at" })
+      }
+      expect(invocationCount(counter.logPath)).toBe(afterFirst)
+    } finally {
+      counter.restore()
+    }
+  })
+})
 
 /** Counts real `git` invocations, same technique as queue-git-dir-memo.test.ts:
  * the regression being guarded (a fork on every observation tick) is only
@@ -70,104 +233,3 @@ function invocationCount(logPath: string): number {
     .split("\n")
     .filter((line) => line.trim() !== "").length
 }
-
-describe("runnerSourceBehind (@yrd/core/stale-runner-never-recycles box 2)", () => {
-  it("is undefined when the resident's booted sha is exactly the checkout's HEAD", () => {
-    const repo = initRepo()
-    const sha = commit(repo, "first")
-    expect(runnerSourceBehind(repo, `git:${sha}`, Date.now())).toBeUndefined()
-  })
-
-  it("counts the commits the checkout has advanced past the resident's booted sha", () => {
-    const repo = initRepo()
-    const bootedSha = commit(repo, "first")
-    commit(repo, "second")
-    commit(repo, "third")
-    commit(repo, "fourth")
-    expect(runnerSourceBehind(repo, `git:${bootedSha}`, Date.now())).toBe(3)
-  })
-
-  it("is undefined for a non-git implementation source and does not throw", () => {
-    const repo = initRepo()
-    commit(repo, "first")
-    expect(runnerSourceBehind(repo, "dirty:abc123", Date.now())).toBeUndefined()
-    expect(runnerSourceBehind(repo, undefined, Date.now())).toBeUndefined()
-  })
-
-  it("is undefined, not a thrown error, when cwd is not a Git repository", () => {
-    const notARepo = mkdtempSync(join(tmpdir(), "yrd-source-behind-not-a-repo-"))
-    roots.push(notARepo)
-    const fakeSha = "1".repeat(40)
-    expect(() => runnerSourceBehind(notARepo, `git:${fakeSha}`, Date.now())).not.toThrow()
-    expect(runnerSourceBehind(notARepo, `git:${fakeSha}`, Date.now())).toBeUndefined()
-  })
-
-  it("does not fork git again within the TTL window for the same booted sha", () => {
-    const repo = initRepo()
-    const bootedSha = commit(repo, "first")
-    commit(repo, "second")
-    const counter = installGitCounter()
-    try {
-      const now = Date.now()
-      expect(runnerSourceBehind(repo, `git:${bootedSha}`, now)).toBe(1)
-      const afterFirst = invocationCount(counter.logPath)
-      expect(afterFirst).toBeGreaterThan(0)
-      // Same cwd, same booted sha, well inside the TTL: a cache hit, not a fork.
-      // This is the per-focus-change refresh path (`observeQueueList` runs on
-      // every cursor move, not just the poll tick) that `queueGitDir`'s own
-      // doc comment names as the regression class to avoid repeating.
-      for (let i = 0; i < 10; i += 1) {
-        expect(runnerSourceBehind(repo, `git:${bootedSha}`, now + i)).toBe(1)
-      }
-      expect(invocationCount(counter.logPath)).toBe(afterFirst)
-    } finally {
-      counter.restore()
-    }
-  })
-
-  it("is undefined when the booted sha is not an ANCESTOR of HEAD, even though both resolve", () => {
-    // The live specimen, reduced. `implementationSource` names a commit of the
-    // YRD repository; the queue repository `/hh` it is serving happens to hold
-    // Yrd's objects too, so `rev-list --count` answered across two unrelated
-    // histories instead of failing: a resident sitting exactly on its checkout's
-    // HEAD measured 37576 behind, and the box rendered that as a warning. A
-    // count is only a distance when one commit descends from the other.
-    const repo = initRepo()
-    const unrelated = commit(repo, "history A")
-    execFileSync("git", ["-C", repo, "checkout", "-q", "--orphan", "history-b"])
-    commit(repo, "history B first")
-    commit(repo, "history B second")
-    commit(repo, "history B third")
-
-    // Both shas are resolvable in this one repository — the precondition that
-    // made the bug silent rather than loud.
-    expect(() => execFileSync("git", ["-C", repo, "cat-file", "-t", unrelated])).not.toThrow()
-    expect(runnerSourceBehind(repo, `git:${unrelated}`, Date.now())).toBeUndefined()
-  })
-
-  it("is undefined when the checkout REWOUND past the resident — behind is not the same as different", () => {
-    // The 2026-08-14 staged-rewind incident: the checkout sat 18 commits behind
-    // its own pin. The resident is then AHEAD of its source, which no restart
-    // improves, so it must not read as a recycle-worthy gap.
-    const repo = initRepo()
-    const base = commit(repo, "first")
-    const ahead = commit(repo, "second")
-    execFileSync("git", ["-C", repo, "checkout", "-q", "--detach", base])
-    expect(runnerSourceBehind(repo, `git:${ahead}`, Date.now())).toBeUndefined()
-  })
-
-  it("recomputes once the TTL has elapsed, picking up a newly landed pin", () => {
-    const repo = initRepo()
-    const bootedSha = commit(repo, "first")
-    const now = Date.now()
-    expect(runnerSourceBehind(repo, `git:${bootedSha}`, now)).toBeUndefined()
-    commit(repo, "second")
-    commit(repo, "third")
-    // Still inside the TTL: the cached "current" answer stands even though a
-    // new commit landed — this is the deliberate cost of the cache, bounded
-    // by the TTL below.
-    expect(runnerSourceBehind(repo, `git:${bootedSha}`, now + 1_000)).toBeUndefined()
-    // Past the TTL: recomputes and sees the advance.
-    expect(runnerSourceBehind(repo, `git:${bootedSha}`, now + 16_000)).toBe(2)
-  })
-})

@@ -43,7 +43,7 @@ function runnerConfig() {
     startedAt: "2026-07-13T11:00:00.000Z",
     lastTickAt: freshAgo,
     queueProgress: { state: "healthy" as const, observedAt: freshAgo },
-    sourceBehind: 3,
+    sourcePin: { state: "behind" as const, commits: 3 },
     implementationSource: "abc1234",
     uncarried: uncarriedObservation({ count: 5, scanned: 100, missingUpdateClocks: 0, observedAt: freshAgo }),
   }

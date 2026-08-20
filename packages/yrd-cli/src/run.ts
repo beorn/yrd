@@ -146,6 +146,7 @@ import {
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
+  type RunnerSourcePin,
   type UncarriedObservation,
   uncarriedCoverageFloor,
   uncarriedFloorCount,
@@ -1006,42 +1007,163 @@ function readSourceAdvance(sourceRoot: string, runnerSha: string): SourceAdvance
   }
 }
 
-/** Cached answer for {@link runnerSourceBehind}, keyed by source root and the
+/** One comparison of a resident's booted source against the queue repository's
+ * RECORDED pin (@i/10-merge-queue/23041-staleness-measures-the-observer).
+ * `unpinned` is the one state the watcher renders as silence: the queue
+ * repository records no Yrd submodule, or the source is not a plain git sha,
+ * so there is no pin to be behind. Every failure to READ a pin that should be
+ * readable is `unknown` with its reason — never silence, never a number
+ * computed from a different base. */
+export type RunnerPinComparison = RunnerSourcePin | Readonly<{ state: "unpinned" }>
+
+/**
+ * The queue repository's recorded Yrd pin: the gitlink its `origin/main` tree
+ * carries for the submodule that IS the Yrd distribution.
+ *
+ * This is the ONE pin-resolution site. The submodule is found by identity, not
+ * by a hardcoded path — the same package-name check `yrdSourceRoot` applies to
+ * the running code, applied to each recorded submodule's working tree — because
+ * a host repository may pin Yrd anywhere, and Yrd source must not assume its
+ * own location inside a host. `origin/main` (not HEAD) is deliberate: the
+ * recorded pin is a claim about what the queue's landing branch prescribes,
+ * and a local checkout mid-rebase must not move it.
+ */
+function queueRecordedYrdPin(
+  queueCwd: string,
+): Readonly<{ pinSha: string; submoduleRoot: string }> | Extract<RunnerPinComparison, { state: "unknown" | "unpinned" }> {
+  let toplevel: string
+  try {
+    toplevel = gitSync(queueCwd, ["rev-parse", "--show-toplevel"]).trim()
+  } catch {
+    return { state: "unknown", reason: "queue repository root unresolvable" }
+  }
+  try {
+    gitSync(toplevel, ["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
+  } catch {
+    return { state: "unknown", reason: "origin/main unresolvable in the queue repository" }
+  }
+  let moduleConfig: string
+  try {
+    moduleConfig = gitSync(toplevel, [
+      "config",
+      "--blob",
+      "origin/main:.gitmodules",
+      "--get-regexp",
+      String.raw`^submodule\..*\.path$`,
+    ])
+  } catch {
+    // No .gitmodules blob at origin/main (or none declaring a path): a
+    // repository with no submodules at all, which is a normal deployment.
+    return { state: "unpinned" }
+  }
+  for (const line of moduleConfig.split("\n")) {
+    const separator = line.indexOf(" ")
+    if (separator < 0) continue
+    const path = line.slice(separator + 1).trim()
+    if (path === "") continue
+    const directory = resolve(toplevel, path)
+    if (yrdSourceRoot(directory) !== directory) continue
+    let pinSha: string
+    try {
+      pinSha = gitSync(toplevel, ["rev-parse", `origin/main:${path}`]).trim().toLowerCase()
+    } catch {
+      return { state: "unknown", reason: `origin/main declares the Yrd submodule at ${path} but records no gitlink there` }
+    }
+    if (!/^[0-9a-f]{40,64}$/u.test(pinSha)) {
+      return { state: "unknown", reason: `recorded pin at ${path} is not a commit id` }
+    }
+    return { pinSha, submoduleRoot: directory }
+  }
+  return { state: "unpinned" }
+}
+
+/** Exit-zero probe for relating two commits. Exit 1 (not an ancestor) and a
+ * missing object both land in the same `false` here; the caller distinguishes
+ * them by probing BOTH directions — two clean falses with resolvable objects
+ * means diverged, anything unresolvable means unrelatable, and each answers a
+ * loud unknown rather than a number. */
+function gitIsAncestor(root: string, ancestor: string, descendant: string): boolean {
+  try {
+    gitSync(root, ["merge-base", "--is-ancestor", ancestor, descendant])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Uncached single read behind {@link runnerPinBehind}. The count runs in the
+ * queue's own submodule working tree — the repository that owns both the pin
+ * and (in any deployment where a resident booted from it) the booted sha —
+ * never in the observer's checkout, whose history is what the pre-fix figure
+ * wrongly tracked. */
+function readPinComparison(queueCwd: string, runnerSha: string): RunnerPinComparison {
+  const pin = queueRecordedYrdPin(queueCwd)
+  if ("state" in pin) return pin
+  if (runnerSha === pin.pinSha) return { state: "at" }
+  if (gitIsAncestor(pin.submoduleRoot, runnerSha, pin.pinSha)) {
+    try {
+      const counted = Number(gitSync(pin.submoduleRoot, ["rev-list", "--count", `${runnerSha}..${pin.pinSha}`]).trim())
+      if (Number.isSafeInteger(counted) && counted > 0) return { state: "behind", commits: counted }
+    } catch {
+      // Fall through to the unknown below: ancestry held but the count did
+      // not, which is a read failure, not a distance.
+    }
+    return { state: "unknown", reason: `cannot count ${runnerSha.slice(0, 10)}..${pin.pinSha.slice(0, 10)}` }
+  }
+  if (gitIsAncestor(pin.submoduleRoot, pin.pinSha, runnerSha)) {
+    // The dangerous direction (@i/10-merge-queue/23041 counter-caution): a
+    // runtime NEWER than the recorded pin is what crashed settlement drain,
+    // and a restart of the runner cannot fix it — the pin is what lags.
+    return {
+      state: "unknown",
+      reason: `booted source is ahead of recorded pin ${pin.pinSha.slice(0, 10)} — the pin lags, not the runner`,
+    }
+  }
+  return {
+    state: "unknown",
+    reason: `cannot relate booted ${runnerSha.slice(0, 10)} to recorded pin ${pin.pinSha.slice(0, 10)}`,
+  }
+}
+
+/** Cached answer for {@link runnerPinBehind}, keyed by queue repository and the
  * resident sha it was computed against. */
-type RunnerSourceBehindEntry = Readonly<{ runnerSha: string; behind: number | undefined; computedAt: number }>
-const runnerSourceBehindCache = new Map<string, RunnerSourceBehindEntry>()
+type RunnerPinBehindEntry = Readonly<{ runnerSha: string; answer: RunnerPinComparison; computedAt: number }>
+const runnerPinBehindCache = new Map<string, RunnerPinBehindEntry>()
 
 /** Matches the watch poll cadence (`watchQueue`'s `interval`). `observeQueueList`
  * also runs once per focus/cursor change (see `queueGitDir`'s doc comment on why
- * an uncached git fork there is a bug, not a feature) — this TTL keeps a fresh
- * `rev-parse`+`rev-list` fork off that per-keystroke path while still catching a
+ * an uncached git fork there is a bug, not a feature) — this TTL keeps the
+ * pin-resolution forks off that per-keystroke path while still catching a
  * pin advance within one poll tick. The resident's own self-check deliberately
  * does NOT come through here: it needs consecutive observations to be genuinely
  * consecutive reads, which a cache at the poll cadence would quietly collapse. */
-const RUNNER_SOURCE_BEHIND_TTL_MS = 15_000
+const RUNNER_PIN_BEHIND_TTL_MS = 15_000
 
-/** How many commits the resident runner's booted source (`implementationSource`,
- * captured once at its startup) has fallen behind the SOURCE checkout it booted
- * from — never the queue repository, which is a different repo whose HEAD shares
- * no history with it. The source can advance under a live resident (a submodule
- * pin bump, a `git pull`), and box 1 of @yrd/core/stale-runner-never-recycles
- * now recycles on it; this is the same read rendered for a watcher.
- * `undefined` means "not behind" or "not measurable" and must render nothing,
- * never a confident zero. */
-export function runnerSourceBehind(
-  sourceRoot: string,
+/** How the resident runner's booted source (`implementationSource`, captured
+ * once at its startup) relates to the queue repository's RECORDED Yrd pin.
+ *
+ * This is the watcher's figure, and its base is the pin — never any checkout's
+ * HEAD. The pre-fix read counted `runnerSha..HEAD` in the OBSERVER'S OWN Yrd
+ * checkout, so the number tracked whoever was looking: an observer two commits
+ * ahead rendered a pin-exact resident as "28 behind pin", and moving the
+ * recorded pin did not move the display. The resident's own recycle self-check
+ * (`readSourceAdvance` against the checkout it booted from) is a DIFFERENT
+ * question — "has my source moved under me" — and deliberately keeps its own
+ * base. */
+export function runnerPinBehind(
+  queueCwd: string,
   implementationSource: string | undefined,
   now: number,
-): number | undefined {
+): RunnerPinComparison {
   const runnerSha = residentBootedSha(implementationSource)
-  if (runnerSha === undefined) return undefined
-  const cached = runnerSourceBehindCache.get(sourceRoot)
-  if (cached?.runnerSha === runnerSha && now - cached.computedAt < RUNNER_SOURCE_BEHIND_TTL_MS) {
-    return cached.behind
+  if (runnerSha === undefined) return { state: "unpinned" }
+  const cached = runnerPinBehindCache.get(queueCwd)
+  if (cached?.runnerSha === runnerSha && now - cached.computedAt < RUNNER_PIN_BEHIND_TTL_MS) {
+    return cached.answer
   }
-  const behind = readSourceAdvance(sourceRoot, runnerSha)?.behind
-  runnerSourceBehindCache.set(sourceRoot, { runnerSha, behind, computedAt: now })
-  return behind
+  const answer = readPinComparison(queueCwd, runnerSha)
+  runnerPinBehindCache.set(queueCwd, { runnerSha, answer, computedAt: now })
+  return answer
 }
 
 /** The commit a resident booted from, or undefined when its source identity is
@@ -6731,7 +6853,7 @@ function queueRunnerProjectionToken(
     queueRunnerStateToken(runner),
     runner?.queueProgress ?? null,
     runner?.driver ?? null,
-    runner?.sourceBehind ?? null,
+    runner?.sourcePin ?? null,
     absence ?? null,
   ])
 }
@@ -6780,17 +6902,16 @@ async function observeQueueList(
   const now = io.now?.() ?? Date.now()
   const observation = observeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
   const observedRunner = observation.runner
-  // Measured in the Yrd SOURCE checkout, not `cwd`: `implementationSource` is a
-  // commit of the Yrd repository, and the queue repository it is serving is a
-  // different repo. Handing `cwd` to this read is what made a current resident
-  // render "(37576 behind pin)".
-  const sourceCheckout = yrdSourceCheckout()
-  const sourceBehind =
-    observedRunner === null || sourceCheckout === undefined
-      ? undefined
-      : runnerSourceBehind(sourceCheckout, observedRunner.implementationSource, now)
+  // Measured against the queue repository's RECORDED pin, never any checkout's
+  // HEAD. The two prior bases were both wrong the same way — `cwd` counted
+  // across unrelated histories ("37576 behind pin" for a current resident),
+  // and the observer's own Yrd checkout counted the observer ("28 behind pin"
+  // for a pin-exact resident, tracking commits only the watcher had).
+  const sourcePin = observedRunner === null ? undefined : runnerPinBehind(cwd, observedRunner.implementationSource, now)
   const runner =
-    observedRunner === null || sourceBehind === undefined ? observedRunner : { ...observedRunner, sourceBehind }
+    observedRunner === null || sourcePin === undefined || sourcePin.state === "unpinned"
+      ? observedRunner
+      : { ...observedRunner, sourcePin }
   return {
     state,
     stateSource,
@@ -9951,9 +10072,11 @@ async function writeResidentSourceRecycle(
  * and a bare programmatic follow have no supervisor and must finish their work
  * on whatever code they started with.
  *
- * The read is deliberately uncached — {@link runnerSourceBehind}'s TTL matches
- * the poll interval, so routing through it would let one git read satisfy both
- * of the two observations that are supposed to be independent.
+ * The read is deliberately uncached and deliberately based on the checkout the
+ * resident booted from — NOT the recorded pin `runnerPinBehind` serves the
+ * watcher (a cache at the poll cadence would let one git read satisfy two
+ * observations that are supposed to be independent, and "has my source moved
+ * under me" is a different question from "am I where the pin says").
  */
 export async function residentSourceHealth(
   app: YrdCliApp,

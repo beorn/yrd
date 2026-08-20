@@ -583,6 +583,14 @@ function humanAge(ageMs: number): string {
   return rest === 0 ? `${String(hours)}h` : `${String(hours)}h${String(rest)}m`
 }
 
+/** The pin-relative states a runner's source line can render. `unpinned` never
+ * reaches this type — an unpinned queue attaches no `sourcePin` at all — so
+ * every present value is a positive claim about the RECORDED pin. */
+export type RunnerSourcePin =
+  | Readonly<{ state: "at" }>
+  | Readonly<{ state: "behind"; commits: number }>
+  | Readonly<{ state: "unknown"; reason: string }>
+
 export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
@@ -623,16 +631,18 @@ export type QueueTimelineRunner = Readonly<{
    * crash exit. Absent while the runner is live. */
   clean?: boolean
   /**
-   * Commits the checkout has advanced past `implementationSource` since the
-   * resident booted, computed at observation time (never per render — see
-   * `runnerSourceBehind` in run.ts). Nothing recycles a stale resident yet
-   * (@yrd/core/stale-runner-never-recycles), so this is how a watcher sees the
-   * drift without cross-referencing the pin by hand.
+   * How the resident's booted `implementationSource` relates to the queue
+   * repository's RECORDED Yrd pin, computed at observation time (never per
+   * render — see `runnerPinBehind` in run.ts). The base is the pin and only
+   * the pin (@i/10-merge-queue/23041-staleness-measures-the-observer): a
+   * figure derived from any checkout's HEAD tracks whoever is looking.
    *
-   * Absent means "not behind" (or not measurable), and must never render as a
-   * confident zero.
+   * Absent means UNPINNED (the queue records no Yrd submodule, or the source
+   * is not a plain git sha) and renders as silence. A pin that exists but
+   * could not be read or related arrives as `state: "unknown"` with its
+   * reason, and must render loudly — never as silence, never as a number.
    */
-  sourceBehind?: number
+  sourcePin?: RunnerSourcePin
   /**
    * `draft-stranded` findings (@yrd/queue `auditQueues`) old enough to page —
    * projected by the resident from the canonical audit exactly like
@@ -5629,13 +5639,19 @@ function runnerMergeTimer(lastMerge: number | null, now: number, uptimeMs: numbe
   return hasRunner ? `no merge for ${runnerClock(uptimeMs)}` : "no merge recorded"
 }
 
-/** The RUNNER box's source rail, staleness flagged inline (@yrd/core/stale-runner-never-recycles
- * box 2) so a watcher sees a booted-source/checkout gap without cross-referencing the pin
- * by hand. `sourceBehind` is absent for a current or unmeasurable source and must never
- * render as a confident "0 behind". */
+/** The RUNNER box's source rail, pin-staleness flagged inline (@yrd/core/stale-runner-never-recycles
+ * box 2) so a watcher sees a booted-source/pin gap without cross-referencing the pin by
+ * hand. Every annotation names the RECORDED pin as its base
+ * (@i/10-merge-queue/23041-staleness-measures-the-observer); an unpinned queue renders
+ * the bare source, and a pin that could not be read renders its reason loudly — never a
+ * confident "0 behind", never a number from a different base. */
 function runnerSourceLine(runner: QueueTimelineRunner): string {
   const source = `source ${runner.implementationSource ?? "unknown"}`
-  return runner.sourceBehind === undefined ? source : `${source} (${String(runner.sourceBehind)} behind pin)`
+  const pin = runner.sourcePin
+  if (pin === undefined) return source
+  if (pin.state === "at") return `${source} (at pin)`
+  if (pin.state === "behind") return `${source} (${String(pin.commits)} behind pin)`
+  return `${source} (pin unknown: ${pin.reason})`
 }
 
 function RunnerProgressStatus({
@@ -5877,7 +5893,11 @@ function TimelineRunnerBox({
       </MarkerRow>
       {runner === null ? null : (
         <MarkerRow>
-          <Text color={runner.sourceBehind === undefined ? "$fg-muted" : "$fg-warning"} wrap="truncate" minWidth={0}>
+          <Text
+            color={runner.sourcePin === undefined || runner.sourcePin.state === "at" ? "$fg-muted" : "$fg-warning"}
+            wrap="truncate"
+            minWidth={0}
+          >
             {runnerSourceLine(runner)}
           </Text>
         </MarkerRow>
