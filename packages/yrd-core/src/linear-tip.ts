@@ -1,13 +1,14 @@
-import { raiseFailure } from "@yrd/core"
+import { raiseFailure } from "./failure.ts"
 
 /**
  * The linear-root rule, stated once: a root carrier's tip must have at most
- * one parent. The submit path and the recut preflight gate both raise the
- * SAME refusal through here, so the rule cannot drift between the gate and
- * the landing path — a merge-tip carrier once ran the whole preflight gate
- * clean and was refused only at submit, after the gate investment
- * (2026-08-19). `identity` names what the caller inspected; `branch` names
- * the ref the author rebuilds.
+ * one parent. Every entrance raises the SAME refusal through here — the
+ * submit branch resolver, the active-Bay submit path, `pr ready`, and the
+ * recut preflight gate — so the rule cannot drift between an entrance and
+ * the landing path. A merge-tip carrier once ran a whole gate clean and was
+ * refused only at submit, after the gate investment, and the active-Bay
+ * entrance met no check at all (PR1364, 2026-08-19). `identity` names what
+ * the caller inspected; `branch` names the ref the author rebuilds.
  */
 export function requireLinearRootTip(identity: string, branch: string, parents: readonly string[]): void {
   if (parents.length <= 1) return

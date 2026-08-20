@@ -515,6 +515,7 @@ describe("withBays", () => {
 
     const revised = await app.bays.submitSelection("B1", {
       resolveRevision: async () => undefined,
+      resolveParents: async () => ["0".repeat(40)],
       run: runtime,
     })
 
@@ -2621,7 +2622,7 @@ describe("withBays", () => {
       return ref === "release/fix" ? HEAD_1 : undefined
     }
 
-    const bayPR = await app.bays.submitSelection("B1", { resolveRevision, run: runtime })
+    const bayPR = await app.bays.submitSelection("B1", { resolveRevision, resolveParents: async () => ["0".repeat(40)], run: runtime })
     expect(changeFacts(bayPR)).toMatchObject({
       bay: "B1",
       delivery: "submitted",
@@ -2891,7 +2892,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     workspace.dirty = true
 
     const warnings: string[] = []
-    const pr = await app.bays.submitSelection("B1", { resolveRevision: async () => undefined, run: runtime, warnings })
+    const pr = await app.bays.submitSelection("B1", { resolveRevision: async () => undefined, resolveParents: async () => ["0".repeat(40)], run: runtime, warnings })
     // Submitted the committed head (HEAD_2 from refresh), never refused.
     expect(changeFacts(pr)).toMatchObject({ bay: "B1", delivery: "submitted", current: { head: HEAD_2 } })
     // Loud by construction: the caveat rides the result envelope (warnings array)…
