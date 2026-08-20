@@ -1056,6 +1056,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
     expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
     expect(message).toContain("the recut certificate requires human judgment")
+    expect(message).toContain("decision owner: unowned — no needsPerson.owner is configured in .yrd.yml")
     expect(message).not.toContain("yrd pr recut")
   })
 
@@ -1081,6 +1082,38 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const message = app.queue.eligibility(pr.id).reason?.message
     expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
     expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
+    expect(message).not.toContain("yrd pr recut")
+  })
+
+  it("names the configured decision owner in the settled eligibility message", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = ""
+    await using app = await createApp(
+      refuseForever(() => blocked),
+      clock.read,
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      undefined,
+      "@queue-captain",
+    )
+    const pr = await submitAndRequestChecks(app, "issue/settled-owner")
+    blocked = pr.id
+    await app.queue.run({}, runtime)
+    const revision = app.bays.pr(pr.id)!.revs.at(-1)!
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: revision.n,
+      headSha: revision.head,
+      disposition: "needs-person",
+      reason: "the recut certificate requires human judgment",
+    })
+
+    // The audit finding names the owner (admission-refusal-needs-person); the
+    // reader-facing eligibility message must not decline to say WHO at the
+    // exact moment the reader asks — same resolution, same value.
+    const message = app.queue.eligibility(pr.id).reason?.message
+    expect(message).toContain("decision owner: @queue-captain")
     expect(message).not.toContain("yrd pr recut")
   })
 })
