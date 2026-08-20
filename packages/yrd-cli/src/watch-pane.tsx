@@ -160,7 +160,7 @@ export type QueueWatchSnapshot = Readonly<{
    * never distinguishes not-yet-measured from measured-and-clean here, unlike
    * the resident status file, because a live watch snapshot always measures. */
   staleDrafts?: readonly QueueAuditFinding[]
-  /** `admission-refusal-needs-person` findings — merge requests whose
+  /** `admission-refusal-needs-person` findings — changes whose
    * admission refusal settled `needs-person` and stopped being retried, so no
    * other row in this pane marks them
    * (@i/10-merge-queue/22918-needs-person-unowned). A visible row, never only
@@ -1294,7 +1294,7 @@ function staleDraftFooterNotice(findings: readonly QueueAuditFinding[]): string 
   return `${pr} stranded (owner=${owner}${more}) — yrd queue audit for detail, yrd pr submit or withdraw to clear`
 }
 
-/** One footer-width line for however many needs-person merge requests the
+/** One footer-width line for however many needs-person changes the
  * snapshot carries — same shape as {@link staleDraftFooterNotice}, but the
  * owner is the finding's `owner` ROLE (`.yrd.yml` `needsPerson.owner`, or the
  * explicit unowned default — never a submitter guessed from push identity),
@@ -1309,7 +1309,7 @@ function needsPersonFooterNotice(findings: readonly QueueAuditFinding[]): string
   // the fallback only covers a foreign-version record with the field missing,
   // and says exactly what the emitter would have said.
   const owner = first.owner ?? DEFAULT_NEEDS_PERSON_OWNER
-  const pr = first.pr === undefined ? "a merge request" : `PR ${first.pr}`
+  const pr = first.pr === undefined ? "a change" : `PR ${first.pr}`
   const more = rest.length === 0 ? "" : `, +${rest.length} more`
   return `${pr} needs a person (owner=${owner}${more}) — yrd queue audit for detail`
 }
@@ -1810,7 +1810,7 @@ export function QueueWatchFrame({
       {/* The keybinding footer was removed (user directive 2026-07-15). Bottom
           chrome is reserved for explicit state changes: run cancellation, a
           loud cursor recovery when the selected row disappears, an unrouted
-          needs-person merge request (@i/10-merge-queue/22918-needs-person-unowned),
+          needs-person change (@i/10-merge-queue/22918-needs-person-unowned),
           and — lowest priority, since it is a background fact rather than
           something this render just did — a page-worthy stale draft. */}
       <QueueWatchFooter

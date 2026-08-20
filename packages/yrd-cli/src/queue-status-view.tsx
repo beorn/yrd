@@ -637,7 +637,7 @@ export type QueueTimelineRunner = Readonly<{
   staleDrafts?: readonly QueueAuditFinding[]
   /**
    * `admission-refusal-needs-person` findings (@yrd/queue `auditQueues`) —
-   * merge requests whose admission refusal settled `needs-person` and stopped
+   * changes whose admission refusal settled `needs-person` and stopped
    * being retried, so the one finding that used to mark them
    * (`admission-refusal-loop`) went silent the instant they most needed a
    * human (@i/10-merge-queue/22918-needs-person-unowned). Projected by the

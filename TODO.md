@@ -21,7 +21,7 @@ public repository.
 
 - [ ] Shaset commits: the queue authors gitlink+lock commits as the request's
       shaset moves up (README § Content commits and shaset commits); a pure pin
-      advance becomes a one-shaset-commit merge request and the `yrd intent`
+      advance becomes a one-shaset-commit change and the `yrd intent`
       rail is deleted (verbs, `PinIntent` kind, remedies, and the two persisted
       `yrd.intent.*` schemas gain a tolerant reader first).
 

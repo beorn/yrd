@@ -96,12 +96,12 @@ describe("actionable failure projection", () => {
       code: "authored-gitlink",
       message:
         "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
-        "own main, then submit an ordinary merge request whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
+        "own main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
     })
 
     expect(failure.cause).toBe(
       "PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s own " +
-        "main, then submit an ordinary merge request whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
+        "main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
     )
     expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })

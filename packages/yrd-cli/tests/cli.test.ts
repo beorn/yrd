@@ -6119,7 +6119,7 @@ describe("runYrd", () => {
           code: "authored-gitlink",
           message:
             "yrd: PR 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
-            "ordinary merge request whose diff is the gitlink bump",
+            "ordinary change whose diff is the gitlink bump",
         })
       },
     })
@@ -6242,7 +6242,7 @@ describe("runYrd", () => {
           code: "authored-gitlink",
           message:
             "yrd: PR 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
-            "ordinary merge request whose diff is the gitlink bump",
+            "ordinary change whose diff is the gitlink bump",
         })
       },
     })
@@ -8189,7 +8189,7 @@ describe("runYrd", () => {
    * ROLE — never the revision's recorded submitter, and never omitted: an
    * unconfigured repository shows the explicit unowned default.
    */
-  it("writes an unrouted needs-person merge request into the resident heartbeat", async () => {
+  it("writes an unrouted needs-person change into the resident heartbeat", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-needs-person-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -8257,7 +8257,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("surfaces a resident-observed needs-person merge request as a non-fatal warning in `queue list --check`", async () => {
+  it("surfaces a resident-observed needs-person change as a non-fatal warning in `queue list --check`", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-needs-person-"))
     execFileSync("git", ["init", "-q", "-b", "main", repo])
     execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
@@ -8274,7 +8274,7 @@ describe("runYrd", () => {
     const finding = {
       code: "admission-refusal-needs-person",
       message:
-        "merge request 'PR1' needs a person: its entry-check failure 'recut-gitlink-conflict' has no " +
+        "change 'PR1' needs a person: its entry-check failure 'recut-gitlink-conflict' has no " +
         "mechanical remedy — two fixed gitlink commits are non-ancestral. Owner: @ci.",
       pr: "PR1",
       specimen: "pr:PR1:needs-person",
@@ -8321,7 +8321,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("surfaces a needs-person merge request in `queue list` — the same loader `yrd watch` renders", async () => {
+  it("surfaces a needs-person change in `queue list` — the same loader `yrd watch` renders", async () => {
     const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
     try {
       await app.bays.intake({

@@ -292,7 +292,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit().findings).toContainEqual({
       code: "admission-refusal-needs-person",
       message:
-        `merge request '${pr.id}' needs a person: its entry-check failure 'recut-gitlink-conflict' has no ` +
+        `change '${pr.id}' needs a person: its entry-check failure 'recut-gitlink-conflict' has no ` +
         "mechanical remedy — two fixed gitlink commits are non-ancestral. " +
         "Owner: unowned — no needsPerson.owner is configured in .yrd.yml.",
       pr: pr.id,
