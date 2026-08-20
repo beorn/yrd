@@ -919,7 +919,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(steps, byName, options.flows, options.prepareCandidate !== undefined)
+  const commands = createQueueCommands(steps, byName, needsPersonOwner, options.flows, options.prepareCandidate !== undefined)
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -2537,7 +2537,7 @@ function createQueue<Shape extends ChangeShape>(
           // so unrelated ready PRs can integrate while targeted one-PR drains
           // return their admission result instead of a checks-running refusal.
           const unavailable = new Set([...consumed, ...pendingIds, ...authorityGaps.map((gap) => gap.pr)])
-          const runnable = runnableChangeSelection(snapshot, args, steps, unavailable, {
+          const runnable = runnableChangeSelection(snapshot, args, steps, needsPersonOwner, unavailable, {
             explicitStepAuthority,
             ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
           })
@@ -2547,7 +2547,7 @@ function createQueue<Shape extends ChangeShape>(
             // admission phase's temporary exclusions hide the reason it emitted
             // no candidate. This uses the SAME eligibility helper as selection;
             // it broadens evidence only, never what may run.
-            const diagnostic = runnableChangeSelection(snapshot, args, steps, consumed, {
+            const diagnostic = runnableChangeSelection(snapshot, args, steps, needsPersonOwner, consumed, {
               explicitStepAuthority,
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
@@ -2990,16 +2990,16 @@ function createQueue<Shape extends ChangeShape>(
         const snapshot = projected ?? runtime()
         const pr = resolvePR(snapshot.bays, selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
-        return ChangeEligibility(snapshot, pr, steps)
+        return ChangeEligibility(snapshot, pr, steps, needsPersonOwner)
       })
     },
     eligibilities(projected) {
       const snapshot = projected ?? runtime()
-      return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps))
+      return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
     freshnessCandidateBatches() {
       const snapshot = runtime()
-      const candidates = runnablePRs(snapshot, {}, steps, new Set(), { explicitStepAuthority: true }).filter((pr) =>
+      const candidates = runnablePRs(snapshot, {}, steps, needsPersonOwner, new Set(), { explicitStepAuthority: true }).filter((pr) =>
         checksRequested(pr),
       )
       return partitionCandidates(candidates, snapshot.queues.batchSize).map((candidate) => candidate.map((pr) => pr.id))
@@ -3269,6 +3269,7 @@ function queueFailedEvent(
 function createQueueCommands(
   steps: readonly RuntimeStep[],
   byName: ReadonlyMap<string, RuntimeStep>,
+  needsPersonOwner: string,
   flows?: YrdConfig,
   requiresPreparedCandidate = false,
 ): QueueCommands {
@@ -3390,7 +3391,7 @@ function createQueueCommands(
         args.steps === undefined ? "configured" : "explicit",
       )
       const explicitStepAuthority = selection.authority === "explicit"
-      const selectionResult = runnableChangeSelection(state, args, steps, new Set(), { explicitStepAuthority })
+      const selectionResult = runnableChangeSelection(state, args, steps, needsPersonOwner, new Set(), { explicitStepAuthority })
       const prs = selectionResult.prs
       if (prs.length === 0) {
         const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
@@ -7269,6 +7270,7 @@ function runnableChangeSelection(
   state: DeepReadonly<RuntimeState>,
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
+  needsPersonOwner: string,
   excluded: ReadonlySet<string> = new Set(),
   options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
 ): Readonly<{ prs: PR[]; decisions: RunnableChangeDecision[] }> {
@@ -7283,7 +7285,7 @@ function runnableChangeSelection(
   )
   const decisions = requested.map((pr) => ({
     pr,
-    eligibility: ChangeEligibility(state, pr, steps, {
+    eligibility: ChangeEligibility(state, pr, steps, needsPersonOwner, {
       resumeIntegrated: true,
       ignoreChecks: options.explicitStepAuthority,
       ignoredClaims,
@@ -7304,10 +7306,11 @@ function runnablePRs(
   state: DeepReadonly<RuntimeState>,
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
+  needsPersonOwner: string,
   excluded: ReadonlySet<string> = new Set(),
   options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
 ): PR[] {
-  return runnableChangeSelection(state, args, steps, excluded, options).prs
+  return runnableChangeSelection(state, args, steps, needsPersonOwner, excluded, options).prs
 }
 
 /**
@@ -7490,15 +7493,19 @@ function needsAuthorMessage(pr: DeepReadonly<PR>, result: JobError): string {
  * refusal is the remedy classifier's judgment made durable: no mechanical
  * remedy exists, so printing the recut drill after it points the reader back
  * into the loop the settlement closed (2026-08-19). Print the judgment fact
- * instead; the drill is only for refusals nothing has settled. */
+ * instead — including WHO decides, through the same `needsPersonOwner`
+ * resolution the audit's needs-person finding carries, so the reader-facing
+ * message and the finding never disagree about the owner. The drill is only
+ * for refusals nothing has settled. */
 function admissionRefusalNext(
   pr: string,
   settlement: Readonly<{ disposition: string; reason: string; settledAt: string }> | undefined,
+  needsPersonOwner: string,
 ): string {
   return settlement === undefined
     ? `Next: yrd pr recut ${pr} --preflight --queue --apply`
     : `Settled ${settlement.disposition} at ${settlement.settledAt}: ${settlement.reason}; ` +
-        "a person decides the next step — no mechanical remedy applies"
+        `decision owner: ${needsPersonOwner} — no mechanical remedy applies`
 }
 
 /** The current revision's durable settlement, when the refusal ledger holds one
@@ -7518,6 +7525,7 @@ function ChangeEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
+  needsPersonOwner: string,
   options: Readonly<{
     resumeIntegrated?: boolean
     ignoreChecks?: boolean
@@ -7560,7 +7568,7 @@ function ChangeEligibility(
           code: "admission-refused",
           message:
             `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admission.receipt.code}': ` +
-            `${admission.receipt.message}.\n${admissionRefusalNext(pr.id, settledAdmissionRefusal(state, pr))}`,
+            `${admission.receipt.message}.\n${admissionRefusalNext(pr.id, settledAdmissionRefusal(state, pr), needsPersonOwner)}`,
         })
       }
       const result = changeNeedsAuthor(pr)?.receipt
@@ -7628,7 +7636,7 @@ function ChangeEligibility(
         message:
           `merge request '${pr.id}' required checks cannot run after the entry-check failure '${admissionRefusal.code}': ` +
           `${admissionRefusal.reason}.\n` +
-          admissionRefusalNext(pr.id, admissionRefusal.settlement),
+          admissionRefusalNext(pr.id, admissionRefusal.settlement, needsPersonOwner),
       })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
