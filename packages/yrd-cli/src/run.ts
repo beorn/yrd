@@ -452,7 +452,16 @@ function parseQueueAuditFinding(value: unknown, context: string): QueueAuditFind
       `yrd: resident runner ${context} identity is invalid`,
     )
   }
-  for (const field of ["run", "pr", "specimen", "step", "refusal", "submitter", "reviewCertification", "owner"] as const) {
+  for (const field of [
+    "run",
+    "pr",
+    "specimen",
+    "step",
+    "refusal",
+    "submitter",
+    "reviewCertification",
+    "owner",
+  ] as const) {
     if (record[field] !== undefined && typeof record[field] !== "string") {
       raiseFailure(
         "infrastructure",
@@ -10106,9 +10115,7 @@ export async function followQueueRuns(
   // react to a config edit mid-run. A restarted resident picks up a changed
   // `drafts.pageAfterHours` the same way it picks up any other config change.
   const draftThresholdMs = resident
-    ? draftPageThresholdMs(
-        (await loadYrdConfig({ repo: io.cwd ?? process.cwd(), defaultBase: base })).config,
-      )
+    ? draftPageThresholdMs((await loadYrdConfig({ repo: io.cwd ?? process.cwd(), defaultBase: base })).config)
     : 0
   const heartbeat = resident
     ? await startResidentRunnerHeartbeat(io, {
