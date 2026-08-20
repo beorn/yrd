@@ -1030,7 +1030,9 @@ export type RunnerPinComparison = RunnerSourcePin | Readonly<{ state: "unpinned"
  */
 function queueRecordedYrdPin(
   queueCwd: string,
-): Readonly<{ pinSha: string; submoduleRoot: string }> | Extract<RunnerPinComparison, { state: "unknown" | "unpinned" }> {
+):
+  | Readonly<{ pinSha: string; submoduleRoot: string }>
+  | Extract<RunnerPinComparison, { state: "unknown" | "unpinned" }> {
   let toplevel: string
   try {
     toplevel = gitSync(queueCwd, ["rev-parse", "--show-toplevel"]).trim()
@@ -1065,9 +1067,14 @@ function queueRecordedYrdPin(
     if (yrdSourceRoot(directory) !== directory) continue
     let pinSha: string
     try {
-      pinSha = gitSync(toplevel, ["rev-parse", `origin/main:${path}`]).trim().toLowerCase()
+      pinSha = gitSync(toplevel, ["rev-parse", `origin/main:${path}`])
+        .trim()
+        .toLowerCase()
     } catch {
-      return { state: "unknown", reason: `origin/main declares the Yrd submodule at ${path} but records no gitlink there` }
+      return {
+        state: "unknown",
+        reason: `origin/main declares the Yrd submodule at ${path} but records no gitlink there`,
+      }
     }
     if (!/^[0-9a-f]{40,64}$/u.test(pinSha)) {
       return { state: "unknown", reason: `recorded pin at ${path} is not a commit id` }

@@ -68,7 +68,17 @@ type QueueFixture = Readonly<{ queueRoot: string; sourceRepo: string; submoduleR
 function initQueueRepo(sourceRepo: string, pinSha: string): QueueFixture {
   const queueRoot = initRepo("yrd-pin-queue-")
   commit(queueRoot, "queue history")
-  execFileSync("git", ["-C", queueRoot, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sourceRepo, "vendor/yrd"])
+  execFileSync("git", [
+    "-C",
+    queueRoot,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "-q",
+    sourceRepo,
+    "vendor/yrd",
+  ])
   const submoduleRoot = join(queueRoot, "vendor/yrd")
   execFileSync("git", ["-C", submoduleRoot, "checkout", "-q", pinSha])
   execFileSync("git", ["-C", queueRoot, "add", "vendor/yrd"])
