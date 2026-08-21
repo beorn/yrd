@@ -547,6 +547,46 @@ export function uncarriedFloorCount(count: number, missingUpdateClocks: number |
   return `${partial ? "≥" : ""}${String(count)}`
 }
 
+/** Every bucket a sweep sorted its refs into, in the order the ledger prints. */
+export type UncarriedBuckets = Readonly<{
+  scanned: number
+  carried: number
+  exempt: number
+  superseded: number
+  outsideAgeBound: number
+  examined: number
+  missingUpdateClocks: number
+  unenumerable: number
+}>
+
+/**
+ * The ledger line that makes a zero believable.
+ *
+ * ONE function rather than a template at each call site, for the same reason
+ * `uncarriedFloorCount` is: the identity
+ *
+ *   scanned = carried + exempt + superseded + clocks + aged + examined + unenumerable
+ *
+ * is only checkable by a reader if every term is on the line, and a term that
+ * lives in a string literal is one careless edit from silently disappearing.
+ * A dropped term does not look like a bug — it looks like a smaller fleet.
+ */
+export function uncarriedDenominator(buckets: UncarriedBuckets): string {
+  return [
+    `scanned ${String(buckets.scanned)}`,
+    `${String(buckets.carried)} carried`,
+    // Policy exclusions sit with every other bucket, at zero as much as at
+    // seven: an exemption reported somewhere else is one a reader has to
+    // already suspect before they can find it.
+    `${String(buckets.exempt)} exempt by policy`,
+    `${String(buckets.superseded)} superseded revisions collapsed`,
+    `${String(buckets.outsideAgeBound)} outside the age bound`,
+    `${String(buckets.examined)} examined`,
+    `${String(buckets.missingUpdateClocks)} refs without retained update clocks`,
+    `${String(buckets.unenumerable)} unenumerable`,
+  ].join(" · ")
+}
+
 /**
  * How a rail must say what it measured, or that it did not measure.
  *

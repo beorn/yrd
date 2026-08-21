@@ -7,10 +7,12 @@
 import { describe, expect, it } from "vitest"
 import {
   uncarriedCoverageFloor,
+  uncarriedDenominator,
   uncarriedFloorCount,
   uncarriedLine,
   uncarriedObservation,
   uncarriedRailColor,
+  type UncarriedBuckets,
   type UncarriedObservation,
 } from "../src/queue-status-view.tsx"
 
@@ -244,5 +246,43 @@ describe("unenumerable refs are a coverage gap, not a rounding error", () => {
 
   it("pluralises the gap so a single skipped ref does not read as a tally bug", () => {
     expect(uncarriedCoverageFloor(51, 0, 2)).toContain("2 refs with no merge base")
+  })
+})
+
+describe("uncarriedDenominator — a policy exclusion a reader cannot see is a silent one", () => {
+  const BUCKETS = {
+    scanned: 6352,
+    carried: 12,
+    exempt: 7,
+    superseded: 40,
+    outsideAgeBound: 6280,
+    examined: 9,
+    missingUpdateClocks: 3,
+    unenumerable: 1,
+  } as const satisfies UncarriedBuckets
+
+  it("names the policy exclusions rather than folding them into another bucket", () => {
+    // The rail's own ruling: exempt, never silent. Refs dropped by policy that
+    // appeared nowhere would be indistinguishable from a rail that quietly
+    // stopped covering a namespace.
+    expect(uncarriedDenominator(BUCKETS)).toContain("7 exempt by policy")
+  })
+
+  it("prints the exemption bucket at zero too", () => {
+    // A term that appears only when non-zero cannot be used to check the
+    // identity, which is the only reason the line carries every term at all.
+    expect(uncarriedDenominator({ ...BUCKETS, exempt: 0 })).toContain("0 exempt by policy")
+  })
+
+  it("carries every term, so the identity is checkable from the line alone", () => {
+    const line = uncarriedDenominator(BUCKETS)
+    // Derived a second way: pull the numbers back OUT of the rendered line and
+    // require them to reconstruct `scanned`. A dropped term does not read as a
+    // bug — it reads as a smaller fleet — so nothing but the sum catches it.
+    const printed = [...line.matchAll(/(\d+)(?= carried| exempt| superseded| outside| examined| refs without| unenumerable)/gu)].map(
+      (match) => Number(match[1]),
+    )
+    expect(printed).toHaveLength(7)
+    expect(printed.reduce((sum, term) => sum + term, 0)).toBe(BUCKETS.scanned)
   })
 })

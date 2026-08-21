@@ -36,11 +36,73 @@ export type SweepOptions = UncarriedOptions &
      * namespace leaves it off so the caller sees exactly what they selected.
      */
     authoredOnly?: boolean
+    /**
+     * Branch names whose author has declared the work harvested or parked, as a
+     * change records a branch — without the remote prefix.
+     *
+     * Author-declared, so it is data the caller supplies rather than a judgement
+     * this module makes. Defaults to empty: a sweep told nothing retires nothing.
+     */
+    retiredRefs?: ReadonlySet<string>
   }>
 
 /** A ref the sweep could not judge, with the reason it could not. `tipSha` is
  * carried so an operator can act on the row without re-deriving it. */
 export type UnenumerableRef = Readonly<{ ref: string; tipSha: string; reason: string }>
+
+/**
+ * Why a ref is excluded by POLICY rather than by fact.
+ *
+ * Both are deliberate exclusions, and neither is a gap: `skipped` means the
+ * sweep tried and could not judge, while these mean it was told not to.
+ *
+ * `archive` — a preservation branch whose entire value is that it sits there
+ *   untouched. `rescue/*` refs were written by the 2026-08-20 move teardown and
+ *   tmp-reap precisely so nothing was lost.
+ * `retired` — ordinary work whose author has declared it harvested or parked.
+ *   Retiring STOPS TRACKING a ref as uncarried; it never deletes it, and the
+ *   fleet-wide halt on ref deletion is untouched by this mechanism.
+ *
+ * Deliberately NOT called `rescue` or `superseded`, though both words fit the
+ * English: `UncarriedVerdict.rescue` already means "trunk can safely take this"
+ * — the exact OPPOSITE of the archive class — and `SweepResult.superseded`
+ * already means "a higher -rN revision of this series stands". Reusing either
+ * would put two opposite meanings behind one word in one output.
+ */
+export type ExemptionDisposition = "archive" | "retired"
+
+/** One ref excluded by policy, carried as a ROW rather than folded into a
+ * count: a bare number says the class exists, but only the ages say whether it
+ * is growing — which is the one question that would make anyone act on it. */
+export type ExemptedRef = Readonly<{
+  ref: string
+  disposition: ExemptionDisposition
+  /** Local observation age, or undefined when no reflog for the ref is still
+   * retained. Undefined is reported as unknown, never as zero. */
+  ageMs: number | undefined
+}>
+
+/**
+ * Ref namespaces whose members are archives, not landing candidates.
+ *
+ * A PREFIX, never a list of the refs themselves: a hand-list goes stale the
+ * next time a teardown writes preservation branches, and going stale here means
+ * the rail silently resumes paging on the very class it was told to exempt.
+ *
+ * `tools/branch-triage.ts` holds the same one-line predicate as
+ * `isRescueBranch`. It is not imported because this module lives in the
+ * `vendor/yrd` submodule and cannot reach the root repo; the twin is named here
+ * so the duplication is visible rather than discovered.
+ */
+export const ARCHIVE_REF_PREFIXES: readonly string[] = ["rescue/"]
+
+/** Which policy exclusion applies to a branch, if any. Archive outranks
+ * retired so a ref that is both still lands in exactly one bucket. */
+function exemptionOf(branch: string, retiredRefs: ReadonlySet<string>): ExemptionDisposition | undefined {
+  if (ARCHIVE_REF_PREFIXES.some((prefix) => branch.startsWith(prefix))) return "archive"
+  if (retiredRefs.has(branch)) return "retired"
+  return undefined
+}
 
 /**
  * What a sweep saw, not just what it found.
@@ -61,8 +123,9 @@ export type SweepResult = Readonly<{
    * Uncarried refs dropped because a strictly higher revision of the same
    * `-rN` series stands in the population. Counted separately from `carried`
    * and `outsideAgeBound` so every ref lands in exactly one bucket and the
-   * denominators still add up: scanned = carried + superseded +
-   * missingUpdateClocks + outsideAgeBound + examined + skipped.length.
+   * denominators still add up: scanned = carried + exempted.length +
+   * superseded + missingUpdateClocks + outsideAgeBound + examined +
+   * skipped.length.
    */
   superseded: number
   /** Disqualified by the age bound, before any per-ref git work. */
@@ -83,12 +146,25 @@ export type SweepResult = Readonly<{
    * of `measurable` for the same reason `missingUpdateClocks` is.
    */
   skipped: readonly UnenumerableRef[]
+  /**
+   * Refs excluded by POLICY — archives, and work its author retired from
+   * tracking. Rows, not a bare count, and present on every path.
+   *
+   * Neither is a GAP: `skipped` means the sweep tried and could not judge,
+   * these mean it was told not to. But an exemption nobody can see is
+   * indistinguishable from a rail that quietly stopped covering a namespace,
+   * which is the failure this module exists to refuse. The count belongs to the
+   * totals identity for the same reason — an exclusion outside the denominator
+   * is how a disclosed number silently becomes an undisclosed one.
+   */
+  exempted: readonly ExemptedRef[]
   /** Legacy refs whose local update reflog is no longer retained. They cannot
    * mint TTL findings, and the coverage gap is always surfaced to operators. */
   missingUpdateClocks: number
   /**
    * The population this sweep could actually judge: aged out, or examined.
-   * Refs excluded as carried or superseded were never the rail's to measure, so
+   * Refs excluded as carried, exempted or superseded were never the rail's to
+   * measure, so
    * counting them would flatter the coverage; refs with no retained update
    * clock could not be judged at all, so they are the gap, not the coverage.
    *
@@ -270,6 +346,7 @@ function isAuthoredRef(candidate: EnumeratedRef, namespace: string, base: string
  */
 export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Promise<SweepResult> {
   const { repo, base, carriedBranches, namespace } = options
+  const retiredRefs = options.retiredRefs ?? new Set<string>()
   const enumerated = await enumeratedRefs(git, repo, namespace)
   if (enumerated.length === 0) {
     // Loud on purpose. Every other zero in this result is a fact about the
@@ -287,9 +364,20 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   let outsideAgeBound = 0
   let missingUpdateClocks = 0
   const uncarried: EnumeratedRef[] = []
+  // Policy exclusions ride WITH the cheap disqualifiers, not after them: both
+  // are name tests, so neither may cost a git object read. Carried is tested
+  // first — a ref something already decided about is decided, whatever it is
+  // named — which also keeps a carried archive ref in exactly one bucket.
+  const exemptCandidates: Array<Readonly<{ candidate: EnumeratedRef; disposition: ExemptionDisposition }>> = []
   for (const candidate of refs) {
-    if (carriedBranches.has(branchOf(candidate.ref, namespace))) {
+    const branch = branchOf(candidate.ref, namespace)
+    if (carriedBranches.has(branch)) {
       carried += 1
+      continue
+    }
+    const disposition = exemptionOf(branch, retiredRefs)
+    if (disposition !== undefined) {
+      exemptCandidates.push({ candidate, disposition })
       continue
     }
     uncarried.push(candidate)
@@ -297,10 +385,25 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
 
   const collapsed = collapseSupersededRevisions(refs, uncarried, namespace)
 
-  const refUpdates =
-    collapsed.survivors.length === 0
-      ? new Map<string, number>()
-      : await latestRefUpdates(git, repo, new Set(collapsed.survivors.map(({ candidate }) => candidate.fullRef)))
+  // One aggregate reflog scan already covers the survivors, so folding the
+  // exempted refs into the SAME selector buys their ages at no extra process.
+  const clockRefs = new Set([
+    ...collapsed.survivors.map(({ candidate }) => candidate.fullRef),
+    ...exemptCandidates.map(({ candidate }) => candidate.fullRef),
+  ])
+  const refUpdates = clockRefs.size === 0 ? new Map<string, number>() : await latestRefUpdates(git, repo, clockRefs)
+
+  // Aged, never merely counted. The age bound is deliberately NOT applied: an
+  // archive ref is exempt whatever its age, and dropping the old ones would
+  // hide exactly the growth this disclosure exists to make visible.
+  const exempted: ExemptedRef[] = exemptCandidates.map(({ candidate, disposition }) => {
+    const updatedAtMs = refUpdates.get(candidate.fullRef)
+    return {
+      ref: candidate.ref,
+      disposition,
+      ageMs: updatedAtMs === undefined ? undefined : options.nowMs - updatedAtMs,
+    }
+  })
   const survivors: Array<Readonly<{ ref: string; observedAtMs: number; absorbedRevisions: number }>> = []
   for (const { candidate, absorbedRevisions } of collapsed.survivors) {
     const updatedAtMs = refUpdates.get(candidate.fullRef)
@@ -364,6 +467,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     examined,
     missingUpdateClocks,
     skipped,
+    exempted,
     measurable: outsideAgeBound + examined,
   }
 }

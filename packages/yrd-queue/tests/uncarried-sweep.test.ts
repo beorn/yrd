@@ -475,6 +475,13 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
     // across unrelated histories is a hard 128, not an empty diff, so this ONE
     // row used to abort the whole command fleet-wide and left 12 CRITICAL pages
     // unverifiable. A fixture of well-formed refs cannot fail for this.
+    //
+    // The real specimen was `rescue/state-hab-launch`, and the archive
+    // exemption now intercepts that name before the merge-base probe ever runs
+    // — proven by the sibling test below. This fixture therefore carries the
+    // same orphan under an ORDINARY name, because what it guards is unrelated
+    // histories, not a namespace, and a fixture that the exemption swallows
+    // would leave the git-128 path with no test at all.
     const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-unrelated-"))
     try {
       const clock = `${String(Math.floor((NOW - 40 * HOUR) / 1000))} +0000`
@@ -503,7 +510,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
       const observed = `${String(Math.floor((NOW - HOUR) / 1000))} +0000`
       for (const [ref, sha] of [
         ["refs/remotes/origin/task/ordinary", tip],
-        ["refs/remotes/origin/rescue/state-hab-launch", orphanSha],
+        ["refs/remotes/origin/task/state-hab-launch", orphanSha],
       ] as const) {
         expect(
           (await gitCommand(repo, ["update-ref", "--create-reflog", ref, sha], { GIT_COMMITTER_DATE: observed }))
@@ -515,7 +522,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
 
       // The whole point: the good row survives the bad one.
       expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/ordinary"])
-      expect(result.skipped).toMatchObject([{ ref: "origin/rescue/state-hab-launch", tipSha: orphanSha }])
+      expect(result.skipped).toMatchObject([{ ref: "origin/task/state-hab-launch", tipSha: orphanSha }])
       expect(result.skipped[0]?.reason).toContain("no merge base")
       // Named, not merely counted — a silent skip is an under-count, which is
       // strictly worse than the crash it replaced.
@@ -528,6 +535,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
       // Derived a second way: every ref lands in exactly one bucket.
       expect(result.scanned).toBe(
         result.carried +
+          result.exempted.length +
           result.superseded +
           result.missingUpdateClocks +
           result.outsideAgeBound +
@@ -537,5 +545,171 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
+  })
+
+  it("exempts an ARCHIVE ref with unrelated histories instead of paying the git 128", async () => {
+    // The production specimen, under its real name. Before the exemption this
+    // ref reached the merge-base probe and was reported as an unenumerable GAP
+    // every sweep, forever — a permanent hole in the coverage denominator for a
+    // branch that was doing exactly what it was written to do.
+    const repo = await mkdtemp(join(tmpdir(), "yrd-uncarried-archive-orphan-"))
+    try {
+      const clock = `${String(Math.floor((NOW - 40 * HOUR) / 1000))} +0000`
+      const dates = { GIT_AUTHOR_DATE: clock, GIT_COMMITTER_DATE: clock }
+      expect((await gitCommand(repo, ["init", "-b", "main"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "user.name", "Yrd Test"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "user.email", "yrd@example.test"])).success).toBe(true)
+      expect((await gitCommand(repo, ["config", "core.logAllRefUpdates", "true"])).success).toBe(true)
+      await writeFile(join(repo, "base.txt"), "base\n", "utf8")
+      expect((await gitCommand(repo, ["add", "base.txt"])).success).toBe(true)
+      expect((await gitCommand(repo, ["commit", "-m", "base"], dates)).success).toBe(true)
+
+      const orphan = await gitCommand(repo, ["commit-tree", EMPTY_TREE, "-m", "lease records"], dates)
+      expect(orphan.success).toBe(true)
+      expect((await gitCommand(repo, ["merge-base", "main", orphan.stdout])).success).toBe(false)
+
+      const observed = `${String(Math.floor((NOW - HOUR) / 1000))} +0000`
+      expect(
+        (
+          await gitCommand(
+            repo,
+            ["update-ref", "--create-reflog", "refs/remotes/origin/rescue/state-hab-launch", orphan.stdout],
+            { GIT_COMMITTER_DATE: observed },
+          )
+        ).success,
+      ).toBe(true)
+
+      const result = await sweepUncarriedRefs(realGit, { ...OPTIONS, repo })
+
+      // Exempted by policy, not skipped as a fault: the sweep never tried, so
+      // this is not a hole in what it could measure.
+      expect(result.exempted).toMatchObject([
+        { ref: "origin/rescue/state-hab-launch", disposition: "archive", ageMs: HOUR },
+      ])
+      expect(result.skipped).toEqual([])
+      expect(result.findings).toEqual([])
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+})
+
+
+describe("policy exemptions", () => {
+  // The rail's failure mode is not a missed ref; it is a reader who stopped
+  // opening it. @ci's pager reached 36 unread rows
+  // (@i/10-merge-queue/23091-pager-rail-unread) while these refs paged
+  // nightly about work that was never going anywhere.
+  it("exempts the archive namespace instead of paging on it forever", async () => {
+    const git = fakeGit({
+      "for-each-ref": [refLine("origin/rescue/kernel-docs", 3 * HOUR), refLine("origin/task/stranded", 3 * HOUR)].join(
+        "\n",
+      ),
+      "ls-tree": "160000 commit abc\tvendor/yrd",
+      "rev-parse origin/task/stranded^{commit}": "deadbeefcafe",
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    // The archive ref never becomes a finding, and the ordinary one still does:
+    // an exemption that also swallowed real work would be the worse bug.
+    expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/stranded"])
+    expect(result.exempted).toMatchObject([{ ref: "origin/rescue/kernel-docs", disposition: "archive" }])
+  })
+
+  it("keeps every exempted ref AGED, not merely counted", async () => {
+    const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 5 * HOUR) })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    // A bare count says the class exists; it cannot say the class is growing,
+    // which is the only question that would make anyone act on it.
+    expect(result.exempted).toHaveLength(1)
+    expect(result.exempted[0]?.ageMs).toBe(5 * HOUR)
+  })
+
+  it("pays no per-ref git cost for an exempted ref", async () => {
+    const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
+
+    await sweepUncarriedRefs(git, OPTIONS)
+
+    // One enumeration plus one aggregate reflog scan — the exemption is a
+    // name test, so it belongs with the cheap disqualifiers and must not
+    // reintroduce the per-ref cost the module's ordering exists to avoid.
+    expect(git.calls).toHaveLength(2)
+    expect(git.calls[0]?.[0]).toBe("for-each-ref")
+    expect(git.calls[1]?.slice(0, 2)).toEqual(["reflog", "show"])
+  })
+
+  it("retires a ref whose author declared it harvested", async () => {
+    const git = fakeGit({ "for-each-ref": refLine("origin/task/bead-bodies-ci-r1", 3 * HOUR) })
+
+    const result = await sweepUncarriedRefs(git, {
+      ...OPTIONS,
+      // Recorded as a change records a branch: without the remote prefix.
+      retiredRefs: new Set(["task/bead-bodies-ci-r1"]),
+    })
+
+    // Retire means STOP TRACKING IT AS UNCARRIED, never delete the ref — the
+    // fleet-wide halt on ref deletion is untouched by this mechanism.
+    expect(result.findings).toEqual([])
+    expect(result.exempted).toMatchObject([{ ref: "origin/task/bead-bodies-ci-r1", disposition: "retired" }])
+  })
+
+  it("counts a carried archive ref as carried, so no ref lands in two buckets", async () => {
+    const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
+
+    const result = await sweepUncarriedRefs(git, {
+      ...OPTIONS,
+      carriedBranches: new Set(["rescue/kernel-docs"]),
+    })
+
+    // A ref something already decided about is decided, whatever it is named.
+    expect(result.carried).toBe(1)
+    expect(result.exempted).toEqual([])
+  })
+
+  it("keeps the totals identity closed over the new bucket", async () => {
+    const git = fakeGit({
+      "for-each-ref": [
+        refLine("origin/rescue/kernel-docs", 3 * HOUR),
+        refLine("origin/task/carried", 3 * HOUR),
+        refLine("origin/task/ancient", 40 * HOUR),
+        refLine("origin/task/stranded", 3 * HOUR),
+      ].join("\n"),
+      "ls-tree": "160000 commit abc\tvendor/yrd",
+      "rev-parse origin/task/stranded^{commit}": "deadbeefcafe",
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, { ...OPTIONS, carriedBranches: new Set(["task/carried"]) })
+
+    // Derived a second way. An exclusion outside the identity is how a
+    // disclosed count silently becomes an undisclosed one.
+    expect(result.scanned).toBe(
+      result.carried +
+        result.exempted.length +
+        result.superseded +
+        result.missingUpdateClocks +
+        result.outsideAgeBound +
+        result.examined +
+        result.skipped.length,
+    )
+    expect(result.exempted).toHaveLength(1)
+    expect(result.examined).toBe(1)
+  })
+
+  it("never counts an exempted ref as coverage", async () => {
+    const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    // Exempted refs were never this rail's to measure. Counting them would
+    // flatter the coverage with refs it deliberately declined to judge —
+    // the same reason `carried` and `superseded` stay out of `measurable`.
+    expect(result.measurable).toBe(0)
   })
 })

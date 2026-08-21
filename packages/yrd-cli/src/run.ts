@@ -149,6 +149,7 @@ import {
   type RunnerSourcePin,
   type UncarriedObservation,
   uncarriedCoverageFloor,
+  uncarriedDenominator,
   uncarriedFloorCount,
   uncarriedObservation,
   type QueueStatusResult,
@@ -7926,6 +7927,9 @@ function createUncarriedSweeper(
       namespace: "refs/remotes/origin",
       authoredOnly: true,
       carriedBranches: new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch)),
+      // Declared empty, never omitted — see `queueUncarried` below for why
+      // there is no store to read it from yet.
+      retiredRefs: new Set<string>(),
       nowMs: startedMs,
       ttlMs: UNCARRIED_TTL_MS,
       ageBoundMs: UNCARRIED_AGE_BOUND_MS,
@@ -7981,6 +7985,11 @@ async function queueUncarried(
     namespace: options.namespace ?? "refs/remotes/origin",
     authoredOnly: options.namespace === undefined,
     carriedBranches,
+    // No store yet, so nothing is retired and the sweep is told that
+    // explicitly rather than by omission. Where an author's retirement
+    // declaration lives is still open — `.yrd.yml` is flow-shaped and this is
+    // watcher-policy-shaped (@i/10-merge-queue/23090-watcher-pages-archives).
+    retiredRefs: new Set<string>(),
     nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
     ttlMs: UNCARRIED_TTL_MS,
     ageBoundMs: UNCARRIED_AGE_BOUND_MS,
@@ -7989,15 +7998,18 @@ async function queueUncarried(
   // The counts print on BOTH paths, not just the empty one. "no uncarried refs"
   // alone cannot be told apart from a sweep that looked at nothing, and this
   // rail's whole job is to be believable when it reads zero.
-  const denominator =
-    `scanned ${String(result.scanned)} · ${String(result.carried)} carried · ` +
-    `${String(result.superseded)} superseded revisions collapsed · ` +
-    `${String(result.outsideAgeBound)} outside the age bound · ${String(result.examined)} examined · ` +
-    `${String(result.missingUpdateClocks)} refs without retained update clocks · ` +
-    // Prints even at zero, like every other bucket here: the identity
-    // scanned = carried + superseded + clocks + aged + examined + unenumerable
-    // is only checkable by a reader if every term is on the line.
-    `${String(result.skipped.length)} unenumerable`
+  // Built by the shared helper, never inline: the identity this line exists to
+  // let a reader check is only enforceable if one function owns every term.
+  const denominator = uncarriedDenominator({
+    scanned: result.scanned,
+    carried: result.carried,
+    exempt: result.exempted.length,
+    superseded: result.superseded,
+    outsideAgeBound: result.outsideAgeBound,
+    examined: result.examined,
+    missingUpdateClocks: result.missingUpdateClocks,
+    unenumerable: result.skipped.length,
+  })
   // The same sentence the rail shows, from the same function: a reader must not
   // have to work out from the raw ledger that the count is a floor.
   const floor = uncarriedCoverageFloor(result.measurable, result.missingUpdateClocks, result.skipped.length)
