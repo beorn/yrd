@@ -248,6 +248,29 @@ const QueueRunNoRunnablePRsSchema = z
   .strict()
 type QueueRunNoRunnablePRs = Readonly<z.infer<typeof QueueRunNoRunnablePRsSchema>>
 
+/**
+ * The OTHER zero: nothing was submitted, so nothing was considered. Until
+ * 2026-08-21 this case returned `{ events: [] }` with no value and logged
+ * nothing, so "I found nothing submitted" and "I never looked" were the same
+ * bytes — the silent-zero instrument shape that let six surfaces report
+ * healthy through the 2026-08-16 freeze (@pm/incidents/22881, ruling 22895:
+ * absence of a required fact is a refusal with a reason, never a filter).
+ * `considered` above is `.min(1)` on purpose; this is the shape for zero, and
+ * it names the population it looked at (every record, by delivery state) and
+ * what the caller excluded, so an empty FIFO and a FIFO whose members are all
+ * claimed elsewhere read differently.
+ */
+const QueueRunNoSubmittedPRsSchema = z
+  .object({
+    kind: z.literal("no-submitted-prs"),
+    population: z.record(z.string().trim().min(1), z.number().int().nonnegative()),
+    excluded: z.number().int().nonnegative(),
+    selectedSteps: z.array(StepNameSchema).min(1),
+    reason: z.literal("no submitted or ready PR is visible to the queue"),
+  })
+  .strict()
+type QueueRunNoSubmittedPRs = Readonly<z.infer<typeof QueueRunNoSubmittedPRsSchema>>
+
 function queueRunReuseCovered(
   members: readonly string[],
   selected: readonly RuntimeStep[],
@@ -287,6 +310,25 @@ function queueRunNoRunnablePRs(
     considered,
     selectedSteps: selected.map((step) => step.name),
     reason: "every considered PR was ineligible for the selected plan",
+  })
+}
+
+function queueRunNoSubmittedPRs(
+  bays: DeepReadonly<BaysState>,
+  selected: readonly RuntimeStep[],
+  excluded: ReadonlySet<string>,
+): QueueRunNoSubmittedPRs {
+  const population: Record<string, number> = {}
+  for (const pr of Object.values(bays.prs)) {
+    const delivery = changeDeliveryState(pr)
+    population[delivery] = (population[delivery] ?? 0) + 1
+  }
+  return QueueRunNoSubmittedPRsSchema.parse({
+    kind: "no-submitted-prs",
+    population,
+    excluded: excluded.size,
+    selectedSteps: selected.map((step) => step.name),
+    reason: "no submitted or ready PR is visible to the queue",
   })
 }
 
@@ -907,8 +949,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   const steps = installSteps(options.steps)
   const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
   const trimmedOwner = options.needsPersonOwner?.trim()
-  const needsPersonOwner =
-    trimmedOwner === undefined || trimmedOwner === "" ? DEFAULT_NEEDS_PERSON_OWNER : trimmedOwner
+  const needsPersonOwner = trimmedOwner === undefined || trimmedOwner === "" ? DEFAULT_NEEDS_PERSON_OWNER : trimmedOwner
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   const batchSize = effectiveBatchSize(options.batch)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
@@ -919,7 +960,13 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(steps, byName, needsPersonOwner, options.flows, options.prepareCandidate !== undefined)
+  const commands = createQueueCommands(
+    steps,
+    byName,
+    needsPersonOwner,
+    options.flows,
+    options.prepareCandidate !== undefined,
+  )
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -1249,6 +1296,18 @@ function createQueue<Shape extends ChangeShape>(
       log.warn?.("queue run emitted zero events because every considered PR was ineligible", {
         action: "queue-run-no-runnable-prs",
         ...rejected.data,
+      })
+      return true
+    }
+    const empty = QueueRunNoSubmittedPRsSchema.safeParse(value)
+    if (empty.success) {
+      // info, not warn: an empty FIFO is the resident runner's normal state
+      // most of the day, and a warning that fires every tick is the noise
+      // that gets a channel muted. The line still exists, with its population,
+      // so an honest empty is distinguishable from a run that never looked.
+      log.info?.("queue run emitted zero events because nothing is submitted", {
+        action: "queue-run-no-submitted-prs",
+        ...empty.data,
       })
       return true
     }
@@ -2552,7 +2611,13 @@ function createQueue<Shape extends ChangeShape>(
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
             const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
-            if (rejected.length > 0) reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps))
+            if (rejected.length > 0) {
+              reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps))
+            } else if (diagnostic.decisions.length === 0) {
+              // Nothing to consider at all (as opposed to runnable members held
+              // back by an active base, which the admission loop reports itself).
+              reportZeroEventRun(queueRunNoSubmittedPRs(snapshot.bays, authoritySteps, consumed))
+            }
           }
           for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
             if (runOptions.continueAdmissions?.() === false) break
@@ -2999,9 +3064,9 @@ function createQueue<Shape extends ChangeShape>(
     },
     freshnessCandidateBatches() {
       const snapshot = runtime()
-      const candidates = runnablePRs(snapshot, {}, steps, needsPersonOwner, new Set(), { explicitStepAuthority: true }).filter((pr) =>
-        checksRequested(pr),
-      )
+      const candidates = runnablePRs(snapshot, {}, steps, needsPersonOwner, new Set(), {
+        explicitStepAuthority: true,
+      }).filter((pr) => checksRequested(pr))
       return partitionCandidates(candidates, snapshot.queues.batchSize).map((candidate) => candidate.map((pr) => pr.id))
     },
     checks(selectors) {
@@ -3393,13 +3458,18 @@ function createQueueCommands(
         args.steps === undefined ? "configured" : "explicit",
       )
       const explicitStepAuthority = selection.authority === "explicit"
-      const selectionResult = runnableChangeSelection(state, args, steps, needsPersonOwner, new Set(), { explicitStepAuthority })
+      const selectionResult = runnableChangeSelection(state, args, steps, needsPersonOwner, new Set(), {
+        explicitStepAuthority,
+      })
       const prs = selectionResult.prs
       if (prs.length === 0) {
         const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
         return {
           events: [],
-          ...(rejected.length === 0 ? {} : { value: queueRunNoRunnablePRs(rejected, selected) }),
+          value:
+            rejected.length === 0
+              ? queueRunNoSubmittedPRs(state.bays, selected, new Set())
+              : queueRunNoRunnablePRs(rejected, selected),
         }
       }
       for (const pr of prs) assertCurrentFlow(pr.flow, flows)
