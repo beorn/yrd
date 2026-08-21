@@ -1598,7 +1598,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       value: { ...checkpointValue.value, state: { ...checkpointValue.value.state, bays: baysBefore } },
       identity: retainedIdentity,
     })
-    expect(JSON.parse(retainedCheckpoint).value.state.bays).not.toHaveProperty("submits")
+    const stripped = z
+      .object({ value: z.object({ state: z.object({ bays: z.record(z.string(), z.unknown()) }).passthrough() }) })
+      .passthrough()
+      .parse(JSON.parse(retainedCheckpoint))
+    expect(stripped.value.state.bays).not.toHaveProperty("submits")
     database
       .query(
         "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
