@@ -63,6 +63,7 @@ async function pinnedSuperproject(): Promise<{
   specChangeSha: string
   metadataChangeSha: string
   unrelatedChangeSha: string
+  deletionSha: string
 }> {
   const root = await mkdtemp(join(tmpdir(), "yrd-manifest-drift-"))
   roots.push(root)
