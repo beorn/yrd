@@ -64,9 +64,9 @@ export default {
     yrdQueueRunnerDeclarations.map(({ serviceName, repository }) => [
       serviceName,
       {
-        command: `tools/installed/yrd queue run ${repository.name}`,
+        command: `bun tools/yrd-runtime.mjs yrd queue run ${repository.name}`,
         env: { TRIBE_NAME: "@yrd", YRD_REPOSITORY_ALIASES },
-        health: { command: `tools/installed/yrd queue ${repository.name} --check --json` },
+        health: { command: `bun tools/yrd-runtime.mjs yrd queue ${repository.name} --check --json` },
       },
     ]),
   ),
