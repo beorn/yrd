@@ -9328,9 +9328,20 @@ describe("runYrd", () => {
     expect(source).not.toContain("PaneDivider")
     expect(source).not.toContain("queueSplitRatioAfterDrag")
 
-    expect(queueDetailTier(200, 50)).toBe("right")
+    expect(queueDetailTier(200, 50)).toBe("below")
     expect(queueDetailTier(100, 40)).toBe("below")
     expect(queueDetailTier(80, 24)).toBe("full")
+
+    // THE BOUNDARY, PINNED BY VALUE. Side-by-side needs the list at its full
+    // natural width, so SplitPane's rowFits gate is
+    //   LIST_NATURAL_WIDTH + DIVIDER_SIZE + DETAIL_NATURAL_WIDTH = 140 + 1 + 72
+    // Both sides are asserted because only the pair fixes the number: the
+    // previous version of this test asserted 200 -> "right" and nothing else,
+    // which held for every threshold at or below 200 and so pinned no boundary
+    // at all. That is why the gate sat at 153 for months without anyone
+    // noticing it was far below the width the list actually needs.
+    expect(queueDetailTier(212, 50)).toBe("below")
+    expect(queueDetailTier(213, 50)).toBe("right")
 
     const app = await createApp()
     await openAndSubmit(app)

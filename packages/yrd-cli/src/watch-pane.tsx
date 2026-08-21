@@ -50,7 +50,7 @@ import { statusPresentation } from "./status-presentation.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 
-const LIST_NATURAL_WIDTH = 80
+const LIST_NATURAL_WIDTH = 140
 const DETAIL_NATURAL_WIDTH = 72
 // This compact primary height reserves the queue title, runner, filter, table
 // header, and useful data rows. The taller calendar STATS panel has its
