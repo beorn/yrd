@@ -4958,6 +4958,71 @@ describe("runYrd", () => {
     })
   })
 
+  it("--check resolves the bay read-only: no certification write, same refusal when bayless", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "handoff-check" })
+
+    // With a live bay: the preflight reports the resolution facts…
+    const check = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "B1",
+          "--branch",
+          "issue/handoff-check",
+          "--head",
+          HEAD_SHA,
+          "--evidence",
+          "@km/handoff/handoff-check.md",
+          "--check",
+          "--json",
+        ),
+        check.io,
+      ),
+      check.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(check.stdout())).toMatchObject({
+      command: "bay.handoff",
+      check: { bay: "B1", branch: "issue/handoff-check", branchMatches: true },
+    })
+
+    // …and writes nothing: the lifecycle is still "open", not "handoff-ready".
+    const after = outputIO()
+    expect(await runYrd(app, yrd("bay", "--json"), after.io), after.stderr()).toBe(0)
+    expect(JSON.parse(after.stdout())).toMatchObject({
+      command: "bay.list",
+      lifecycles: [{ bay: "B1", status: "open" }],
+    })
+
+    // Bayless: --check raises the SAME handoff-bay-missing refusal the real
+    // certification would, which is what lets a caller refuse BEFORE writing
+    // a durable packet instead of write-then-unwind (23055 flavours 1 and 4).
+    const bayless = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "task/no-such-bay",
+          "--branch",
+          "task/no-such-bay",
+          "--head",
+          HEAD_SHA,
+          "--evidence",
+          "@km/handoff/no-such-bay.md",
+          "--check",
+          "--json",
+        ),
+        bayless.io,
+      ),
+    ).toBe(1)
+    expect(bayless.stderr()).toContain("yrd bay open --pr task/no-such-bay")
+  })
+
   it("returns the durable certification when an exact handoff retry is already submitted", async () => {
     const app = await createApp()
     const evidence = "@km/handoff/submitted-retry.md"
@@ -5625,9 +5690,7 @@ describe("runYrd", () => {
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
 
     const matching = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), matching.io), matching.stderr()).toBe(
-      0,
-    )
+    expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), matching.io), matching.stderr()).toBe(0)
     expect(JSON.parse(matching.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1" }] })
 
     const nonMatching = outputIO()

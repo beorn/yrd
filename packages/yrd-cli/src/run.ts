@@ -3585,7 +3585,7 @@ export function handoffBayMissingRemedy(selector: string, branch: string): strin
 async function certifyBayHandoff(
   app: YrdCliApp,
   selector: string,
-  options: Readonly<{ branch: string; head: string; evidence: string; json?: boolean }>,
+  options: Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
   let bay = app.bays.get(selector)
@@ -3607,6 +3607,29 @@ async function certifyBayHandoff(
     // that Yrd had failed internally. host.test.ts pins that exact shape as
     // "message-shaped-but-untyped", which is what this was.
     raiseFailure("refusal", "handoff-bay-missing", handoffBayMissingRemedy(selector, options.branch))
+  }
+  // --check: the read-only preflight of THIS command — the same bay resolution
+  // and the same handoff-bay-missing refusal, with no refresh and no
+  // certification write. It exists so a caller about to publish a durable
+  // packet can refuse BEFORE writing instead of write-then-unwind, and so a
+  // dry run can predict this refusal instead of reporting ready over it
+  // (@i/16-work/23055-handoff-lies flavours 1 and 4).
+  if (options.check === true) {
+    await printResult(
+      io,
+      jsonEnabled(options),
+      {
+        command: "bay.handoff",
+        check: {
+          bay: bay.id,
+          branch: bay.branch,
+          headSha: bay.headSha,
+          branchMatches: bay.branch === options.branch,
+        },
+      },
+      createElement(BayStatusView, { bays: [bay] }),
+    )
+    return
   }
   // The Bay projection records the last observed workspace head, while the
   // packet is cut after the agent's final commit. Refresh only when needed so
@@ -11286,12 +11309,13 @@ function buildProgram(
     .requiredOption("--branch <branch>", "exact branch recorded in the handoff packet")
     .requiredOption("--head <sha>", "exact head recorded in the handoff packet")
     .requiredOption("--evidence <ref>", "opaque materialized handoff reference")
+    .option("--check", "resolve and validate the bay without certifying (read-only preflight)")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       certifyBayHandoff(
         installed(),
         selector,
-        options as Readonly<{ branch: string; head: string; evidence: string; json?: boolean }>,
+        options as Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
         io,
       ),
     )
