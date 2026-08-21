@@ -5243,6 +5243,49 @@ async function printChangeSelectionResult(
   )
 }
 
+/**
+ * The refusal when a submit would gate the WORKING TREE while recording a REF
+ * that does not contain it.
+ *
+ * `submitRequiredCheckContexts` passes no `ref` when you submit the branch you
+ * are standing on, and `runRequiredChecks` reads the working tree in that case.
+ * That is fine while the tree and the pushed ref agree, and silently wrong when
+ * they do not: measured on PR1546, a local `git commit --amend` that was never
+ * pushed produced "manifest-co-change: clean" and a +2 identity delta about
+ * three inventory rows the RECORDED sha did not contain.
+ *
+ * Pure, so the decision is testable without a repository, and so the message
+ * cannot drift from the condition that raises it.
+ */
+export function submitTreeDivergenceRefusal(
+  branch: string,
+  headSha: string | undefined,
+  refSha: string | undefined,
+): string | undefined {
+  // A read that failed is not a mismatch. A branch with no pushed ref fails
+  // later in submit naming itself, and inventing a refusal from a git hiccup
+  // would be unactionable — the one thing worse than this bug.
+  if (headSha === undefined || refSha === undefined) return undefined
+  if (headSha === refSha) return undefined
+  return (
+    `local HEAD ${headSha} is not the ref this submit would record: '${branch}' resolves to ${refSha}. ` +
+    "The required checks run against your WORKING TREE when you submit the branch you are standing on, " +
+    "so a green verdict here would describe content the queue cannot carry. Push the branch first, " +
+    "then submit — or submit from a tree that is not on it, which gates the pushed ref instead."
+  )
+}
+
+/** A commit sha, or undefined when the revision cannot be resolved at all. */
+function resolvedSha(cwd: string, revision: string): string | undefined {
+  try {
+    const sha = gitSync(cwd, ["rev-parse", "--verify", "--end-of-options", `${revision}^{commit}`]).trim()
+    return sha === "" ? undefined : sha
+  } catch (error) {
+    if (isGitTimeoutError(error)) throw error
+    return undefined
+  }
+}
+
 function submitRequiredCheckContexts(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -5257,7 +5300,18 @@ function submitRequiredCheckContexts(
     const bay = app.bays.get(selector)
     if (bay?.path !== undefined) return { cwd: bay.path }
     const branch = app.bays.pr(selector)?.branch ?? bay?.branch ?? selector
-    return branch === currentBranch ? { cwd } : { cwd, ref: branch }
+    if (branch !== currentBranch) return { cwd, ref: branch }
+    // Standing on the branch: the checks below will read this WORKING TREE, so
+    // refuse before they can earn a verdict about content the record will not
+    // name. Compared against the remote-tracking ref because that is what the
+    // queue will fetch, not what the local branch pointer says.
+    const divergence = submitTreeDivergenceRefusal(
+      branch,
+      resolvedSha(cwd, "HEAD"),
+      resolvedSha(cwd, `refs/remotes/origin/${branch}`),
+    )
+    if (divergence !== undefined) refusal(divergence)
+    return { cwd }
   })
 }
 
