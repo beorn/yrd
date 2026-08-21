@@ -4901,8 +4901,12 @@ describe("runYrd", () => {
       ),
     ).toBe(1)
     const stderr = refusal.stderr()
-    // The remedy, runnable as printed, carrying the author's own branch.
-    expect(stderr).toContain("yrd bay open --bay <name> --branch task/22716-runner-supervision")
+    // The remedy, runnable as printed, carrying the author's own branch. The
+    // previous pin here certified `bay open --bay <name> --branch …` — a flag
+    // `bay open` never had, so the "runnable as printed" claim was false in
+    // the field (23055 flavour 2). handoff-remedy-flags.test.ts now validates
+    // the remedy's flags against live `bay open --help`.
+    expect(stderr).toContain("yrd bay open --pr task/22716-runner-supervision")
     // And WHY a Bay, so the step reads as a requirement rather than a ritual:
     // the workspace is the evidence being certified, which is also why this
     // command must not open one for you.

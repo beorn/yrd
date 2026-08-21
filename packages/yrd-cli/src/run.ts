@@ -3566,6 +3566,22 @@ async function refreshBay(app: YrdCliApp, bay: Bay, io: YrdCliIO): Promise<Bay> 
   return refreshed
 }
 
+// Exported so the remedy's prescribed flags can be tested against the LIVE
+// `bay open --help` — a printed remedy naming a flag the command lacks is a
+// refusal with extra steps (@i/16-work/23055-handoff-lies flavour 2: this
+// message shipped `--branch`, which `bay open` never had; the supported form
+// operators found by hand was `--pr`).
+export function handoffBayMissingRemedy(selector: string, branch: string): string {
+  return (
+    `yrd: no active bay tracks '${selector}', and 'bay handoff' certifies a bay's materialized workspace — ` +
+    `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
+    `Open one from the packet's PR first:\n` +
+    `  yrd bay open --pr ${branch}\n` +
+    `then re-run this command. --pr takes the PR selector or its branch name; if no PR exists for ` +
+    `'${branch}' yet, run 'yrd pr create' from the pushed branch, then 'bay open --pr'.`
+  )
+}
+
 async function certifyBayHandoff(
   app: YrdCliApp,
   selector: string,
@@ -3590,15 +3606,7 @@ async function certifyBayHandoff(
     // and exits 3 — the CLI was telling an author who merely skipped a step
     // that Yrd had failed internally. host.test.ts pins that exact shape as
     // "message-shaped-but-untyped", which is what this was.
-    raiseFailure(
-      "refusal",
-      "handoff-bay-missing",
-      `yrd: no active bay tracks '${selector}', and 'bay handoff' certifies a bay's materialized workspace — ` +
-        `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
-        `Open it first:\n` +
-        `  yrd bay open --bay <name> --branch ${options.branch}\n` +
-        `then re-run this command. A branch or a bay name both select it.`,
-    )
+    raiseFailure("refusal", "handoff-bay-missing", handoffBayMissingRemedy(selector, options.branch))
   }
   // The Bay projection records the last observed workspace head, while the
   // packet is cut after the agent's final commit. Refresh only when needed so
