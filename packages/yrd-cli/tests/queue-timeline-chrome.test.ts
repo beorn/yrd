@@ -789,17 +789,16 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader).not.toBeNull()
       expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(1)
-      // Bottom-aligned statistics: the STATS frame is pushed to the
-      // bottom of the pane by a flex spacer. The keybindings footer was removed
-      // (item h), so the box's bottom border hugs the pane's last content row.
+      // Bottom-aligned statistics: STATS sits after the list, in the QUEUE
+      // pane. A below-split (200 cols < 213) places DETAIL under that pane,
+      // so the last ╰ in the frame is the detail box, not STATS.
       const rows = text.split("\n")
-      const lastY = rows.findLastIndex((row) => row.trim() !== "")
       const statsY = rowIndexOf(text, "╭─ STATS ")
-      const lastBoxBottomY = rows.findLastIndex((row) => row.includes("╰"))
-      expect(lastY).toBeGreaterThan(0)
+      const statsBottomY = rows.findIndex((row, index) => index > statsY && row.includes("╰"))
+      const detailY = rowIndexOf(text, "RUN main#42")
       expect(statsY, "STATS box renders below the list header").toBeGreaterThan(timeHeader!.y)
-      expect(lastBoxBottomY).toBeGreaterThan(0)
-      expect(lastY - lastBoxBottomY, "the grid's last box border hugs the pane bottom band").toBeLessThanOrEqual(1)
+      expect(statsBottomY, "STATS box closes").toBeGreaterThan(statsY)
+      expect(detailY, "detail sits below STATS in the below-split").toBeGreaterThan(statsBottomY)
     } finally {
       app.unmount()
     }
@@ -842,9 +841,12 @@ describe("queue timeline chrome 21106", () => {
         }
       }
       expect(durBox, "cursor row run-duration cell").not.toBeNull()
-      const durX = durBox!.x + durBox!.width - 1
-      expect(app.cell(durX, cursorY).bg, "selection bg at the right edge").toEqual(cursorBg)
-      expect(app.cell(durX - 1, cursorY).bg, "selection bg across cell gaps").toEqual(cursorBg)
+      // Sample inside the duration cell, not its last column: a filled
+      // ListView scrollbar sits on the row's right edge and is not the
+      // selection band.
+      const durX = durBox!.x + Math.min(2, Math.max(0, durBox!.width - 1))
+      expect(app.cell(durX, cursorY).bg, "selection bg in the duration cell").toEqual(cursorBg)
+      expect(app.cell(durBox!.x, cursorY).bg, "selection bg at the duration cell origin").toEqual(cursorBg)
       // Unselected rejected row keeps its own colorization: status fg differs
       // from muted TIME fg.
       const rejectedY = timelineRowIndexOf(text, " failed ")

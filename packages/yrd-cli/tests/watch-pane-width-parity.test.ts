@@ -12,9 +12,13 @@ describe("watch pane width parity", () => {
     const primary = queueTimelineColumns(columns, "right", true, 0.52)
     const secondary = columns - primary - 1
 
-    expect(primary).toBe(83)
-    expect(secondary).toBe(76)
+    // 160 is below LIST_NATURAL_WIDTH + divider + DETAIL_NATURAL_WIDTH (213),
+    // so the clamp shrinks both mins in proportion rather than the raw 0.52.
+    const listNaturalWidth = 140
+    const detailNaturalWidth = 72
+    expect(primary).toBe(Math.round((listNaturalWidth / (listNaturalWidth + detailNaturalWidth)) * (columns - 1)))
     expect(primary + 1 + secondary).toBe(columns)
+    expect(secondary).toBeGreaterThan(0)
   })
 
   test("restores the full timeline width when the detail pane closes", () => {

@@ -45,8 +45,6 @@ import {
   type QueueTimelineProjectedRow,
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
-import { timelineStatusGlyph } from "./runner-timeline.ts"
-import { statusPresentation } from "./status-presentation.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
 import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-failure.ts"
 
@@ -58,7 +56,12 @@ const DETAIL_NATURAL_WIDTH = 72
 const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
-const DEFAULT_SPLIT_RATIO = 0.52
+// 0.52 left a 40-row / 45-row below-split with a 19–22-row list pane, under
+// QUEUE_STATS_MIN_PANE_ROWS, so STATS never painted. 0.65 is the smallest
+// share that still gives the list 24 rows at the 40-row production geometry
+// (chrome 2, divider 1 → round(0.65 × 37) = 24) without changing the tier
+// ladder (@yrd/cli/23130).
+const DEFAULT_SPLIT_RATIO = 0.65
 const QUEUE_PANE_PADDING_X = 1
 // Fixed-height chrome OUTSIDE the QUEUE/DETAIL split: the top line (item 12,
 // always present) plus the footer's reserved row (present or not, so a
@@ -734,7 +737,9 @@ function QueueDetailChangeSection({
             ? {
                 renderDiff: (member: Readonly<{ id: string; revision: number }>) => (
                   <QueueChangeDiffView
-                    diff={diffs.find((candidate) => candidate.pr === member.id && candidate.revision === member.revision)}
+                    diff={diffs.find(
+                      (candidate) => candidate.pr === member.id && candidate.revision === member.revision,
+                    )}
                   />
                 ),
               }
@@ -1386,9 +1391,7 @@ function QueueWatchTopLine({
       ? { ...queue, path: snapshot.repositoryRoot }
       : queue,
   )
-  return (
-    <QueueTopLine queues={queues} visibleQueues={visibleQueues} onToggleQueue={onToggleQueue} />
-  )
+  return <QueueTopLine queues={queues} visibleQueues={visibleQueues} onToggleQueue={onToggleQueue} />
 }
 
 export function QueueWatchFrame({
@@ -1653,7 +1656,12 @@ export function QueueWatchFrame({
     snapshot.projection === undefined
       ? timelineOuterColumns
       : Math.max(0, timelineOuterColumns - 2 * QUEUE_PANE_PADDING_X)
-  const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - QUEUE_WATCH_CHROME_ROWS), tier, detailOpen, splitRatio)
+  const timelineRows = queueTimelineHeight(
+    Math.max(0, viewportRows - QUEUE_WATCH_CHROME_ROWS),
+    tier,
+    detailOpen,
+    splitRatio,
+  )
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView

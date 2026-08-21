@@ -6303,7 +6303,8 @@ function QueueUpdatedClock({ now }: { now: string }) {
 
 // Preserve fixed queue chrome plus at least two data rows. Below this pane
 // height, omit the secondary STATS panel instead of collapsing ListView to a
-// zero-height viewport.
+// zero-height viewport. The below-split's default ratio (watch-pane.tsx) is
+// what actually delivers this budget at 40- and 45-row production geometries.
 const QUEUE_STATS_MIN_PANE_ROWS = 24
 
 function ProjectedQueueTimeline({

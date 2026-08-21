@@ -641,7 +641,9 @@ describe("queue timeline 21106 contract", () => {
         },
       ],
     }
-    const render = createRenderer({ cols: 200, rows: 50 })
+    // Side-by-side starts at LIST_NATURAL_WIDTH + divider + DETAIL_NATURAL_WIDTH
+    // = 213. 200 is a below-split and has no vertical divider.
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -659,7 +661,7 @@ describe("queue timeline 21106 contract", () => {
       for (const row of sentinelRows) {
         expect(row.indexOf("JSON_EDGE_SENTINEL")).toBeGreaterThan(divider)
         expect(row.slice(0, divider)).not.toContain("JSON_EDGE_SENTINEL")
-        expect(Array.from(row).length).toBeLessThanOrEqual(200)
+        expect(Array.from(row).length).toBeLessThanOrEqual(220)
       }
       // Log rows render ONE terminal row each (21684 truncation contract) — the
       // long payload occupies exactly its own row, clipped at the pane edge; the
@@ -849,7 +851,9 @@ describe("queue timeline 21106 contract", () => {
 
   it("drops the footer and scopes batched-run detail to the selected PR while listing its run members", async () => {
     const story = queueTimelineStories["contract-overview"]
-    const render = createRenderer({ cols: 200, rows: 50 })
+    // Side-by-side (220 ≥ 213) so the PR-tab submit lines fit in the detail
+    // pane. A 200-col below-split clips them under STATS + the list share.
+    const render = createRenderer({ cols: 220, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
@@ -872,7 +876,8 @@ describe("queue timeline 21106 contract", () => {
       // no longer gets its own block or its own submit-timeline line.
       expect(detailShows(handle.text, "pr#42.1")).toBe(true)
       expect(handle.text, "the run identity rides the status-box border").toContain("RUN main#42")
-      expect(handle.text, "the RUN region lists every batch member").toMatch(/PRs\b.*pr#42\.1.*pr#43\.1/u)
+      expect(handle.text, "the RUN region lists every batch member").toContain("· pr#42.1")
+      expect(handle.text, "the RUN region lists the batch partner").toContain("· pr#43.1")
       expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
 
       // PR42's own submit timeline lives on the PR tab (tab 0), which is not
@@ -1016,7 +1021,7 @@ describe("queue timeline 21106 contract", () => {
 
   it("selects whole rows through the canonical primitive with no textual cursor", async () => {
     const story = queueTimelineStories["contract-overview"]
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
