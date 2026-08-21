@@ -225,3 +225,83 @@ describe("eligibility congruence — one fixture, both surfaces", () => {
     expect(started).toEqual([approved])
   })
 })
+
+describe("eligibility congruence — the second source (refs/yrd/submit, projected by the receiver)", () => {
+  const SHA = "7".repeat(40)
+
+  it("a branch approved ONLY in git is visible on every surface with its reason, and runnable on none", async () => {
+    // No legacy record at all — the fixture @cto made acceptance: a dual-source
+    // reader tested only on rows that have both sources has not been tested.
+    await using app = await createQueueApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
+
+    // Status surface: the unrecorded list and the branch-keyed derivation agree.
+    const unrecorded = app.queue.unrecordedSubmits()
+    expect(unrecorded).toEqual([
+      {
+        branch: "issue/ref-only",
+        sha: SHA,
+        base: "main",
+        at: "2026-01-01T00:00:00.000Z",
+        reason: { code: "unrecorded-submit", message: expect.stringContaining("no PR record carries it") },
+      },
+    ])
+    const derived = app.queue.deriveChange("issue/ref-only")
+    expect(derived).toEqual({
+      branch: "issue/ref-only",
+      submit: { sha: SHA, base: "main", at: "2026-01-01T00:00:00.000Z" },
+      unrecorded: unrecorded[0],
+    })
+    expect(derived.record).toBeUndefined()
+    expect(derived.eligibility).toBeUndefined()
+    // The record-keyed list does not invent a PR for it.
+    expect(app.queue.eligibilities()).toEqual([])
+
+    // Run path: the considered rows carry the same branch-keyed verdict — not
+    // "nothing is submitted", because something IS.
+    const direct = await app.dispatch(app.commands.queue.run, {})
+    expect(direct.events).toEqual([])
+    expect(direct.value).toEqual({
+      kind: "no-runnable-prs",
+      considered: [
+        {
+          branch: "issue/ref-only",
+          sha: SHA,
+          code: "unrecorded-submit",
+          reason: unrecorded[0]?.reason.message,
+        },
+      ],
+      selectedSteps: ["check"],
+      reason: "every considered PR was ineligible for the selected plan",
+    })
+  })
+
+  it("the record wins when both sources exist for one branch, and the unrecorded row disappears", async () => {
+    await using app = await createQueueApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/both", sha: SHA, base: "main" })
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/both"])
+
+    const pr = await submit(app, "issue/both")
+    expect(app.queue.unrecordedSubmits()).toEqual([])
+    const derived = app.queue.deriveChange("issue/both")
+    expect(derived.record?.id).toBe(pr)
+    expect(derived.eligibility).toEqual(app.queue.eligibility(pr))
+    expect(derived.submit).toMatchObject({ sha: SHA, base: "main" })
+    expect(derived.unrecorded).toBeUndefined()
+  })
+
+  it("an unsubmit fact removes the branch from every surface; an unsubmit for a branch that never submitted is a no-op", async () => {
+    await using app = await createQueueApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: SHA, base: "main" })
+    await app.bays.recordBranchUnsubmit({ branch: "issue/gone", reason: "deleted" })
+    expect(app.queue.unrecordedSubmits()).toEqual([])
+    expect(app.queue.deriveChange("issue/gone")).toEqual({ branch: "issue/gone" })
+
+    const before = app.state()
+    await app.bays.recordBranchUnsubmit({ branch: "issue/never", reason: "archived" })
+    expect(app.state().bays.submits).toEqual(before.bays.submits)
+    // Back to the honest empty: nothing submitted anywhere.
+    const direct = await app.dispatch(app.commands.queue.run, {})
+    expect(direct.value).toMatchObject({ kind: "no-submitted-prs", population: {} })
+  })
+})

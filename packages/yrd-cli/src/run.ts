@@ -1314,17 +1314,25 @@ export function staleDraftFindings(
   now: string,
   thresholdMs: number,
 ): readonly QueueAuditFinding[] {
+  // `unrecorded-submit` rides the same projection (branch-is-change 2a): a
+  // branch approved in git that no record carries is the mirror image of a
+  // draft nobody submitted — both are work waiting on a human that every
+  // other surface would otherwise hide — and the same age threshold applies.
   return app.queue
     .audit({ now })
-    .findings.filter((finding) => finding.code === "draft-stranded" && (finding.blockedMs ?? 0) >= thresholdMs)
+    .findings.filter(
+      (finding) =>
+        (finding.code === "draft-stranded" || finding.code === "unrecorded-submit") &&
+        (finding.blockedMs ?? 0) >= thresholdMs,
+    )
 }
 
-/** One scannable warning line per stale draft, in the same `[code] message`
- * shape {@link queuePauseWarnings} already established — the finding's own
- * `message` already names the branch, submitter and review certification
- * (@yrd/queue `auditQueues`), so this never re-derives that text. */
+/** One scannable warning line per stale draft or unrecorded submit, in the
+ * same `[code] message` shape {@link queuePauseWarnings} already established —
+ * the finding's own `message` already names the branch, submitter and review
+ * certification (@yrd/queue `auditQueues`), so this never re-derives that text. */
 export function staleDraftWarnings(findings: readonly QueueAuditFinding[]): string[] {
-  return findings.map((finding) => `[draft-stranded] ${finding.message}`)
+  return findings.map((finding) => `[${finding.code}] ${finding.message}`)
 }
 
 /**

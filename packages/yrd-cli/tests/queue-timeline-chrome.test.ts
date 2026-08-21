@@ -376,7 +376,7 @@ describe("queue timeline chrome 21106", () => {
       },
     }
     const app = createRenderer({ cols: 120, rows: 40 })(
-      createElement(QueueTimelineView, { projection, state: { byId: {}, prs: {}, receipts: {} }, columns: 120 }),
+      createElement(QueueTimelineView, { projection, state: { byId: {}, prs: {}, receipts: {}, submits: {} }, columns: 120 }),
     )
     try {
       await app.waitForLayoutStable()
@@ -445,6 +445,7 @@ describe("queue timeline chrome 21106", () => {
         ].map((pr) => [pr.id, pr]),
       ),
       receipts: {},
+      submits: {},
     }
     const projection: QueueTimelineProjection = {
       ...story,
@@ -529,6 +530,7 @@ describe("queue timeline chrome 21106", () => {
       byId: {},
       prs: Object.fromEntries((snapshot.results[0]?.prs ?? []).map((pr) => [pr.id, pr])),
       receipts: {},
+      submits: {},
     }
     const app = createRenderer({ cols: 120, rows: 40 })(
       createElement(QueueTimelineView, { projection, state, nav: false, columns: 120 }),

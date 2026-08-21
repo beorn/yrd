@@ -32,7 +32,7 @@ const pr: PR = {
   checkRequests: [],
 }
 
-const state: BaysState = { byId: {}, prs: { [pr.id]: pr }, receipts: {} }
+const state: BaysState = { byId: {}, prs: { [pr.id]: pr }, receipts: {}, submits: {} }
 
 describe("displayed PR selector round trip", () => {
   it.each([
@@ -61,7 +61,7 @@ describe("displayed PR selector round trip", () => {
 
   it("falls back to branch/name aliases when a bare numeric names no PR", () => {
     const branchNumeric: PR = { ...pr, id: "PR7", branch: "9999" }
-    const numericState: BaysState = { byId: {}, prs: { [branchNumeric.id]: branchNumeric }, receipts: {} }
+    const numericState: BaysState = { byId: {}, prs: { [branchNumeric.id]: branchNumeric }, receipts: {}, submits: {} }
     expect(resolveChangeMatch(numericState, "9999")?.value).toBe(branchNumeric)
   })
 

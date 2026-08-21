@@ -239,6 +239,16 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // labels `correlation: {namespace, id}`; the migrate callback below folds
   // those to `props` on the way in.
   "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
+  // The PRODUCTION composition's identity immediately before branch-is-change
+  // phase 2a registered `branch/submitted` + `branch/unsubmitted` and gave
+  // `bays` its `submits` slice (projectionVersion bays-v14-branch-submits).
+  // Measured from the production journal itself — `journal_snapshot.
+  // checkpoint_identity` at cursor 69408, copy taken 2026-08-21 02:39 PDT,
+  // the embedded `identity` in checkpoint_json agreeing — never from a
+  // harness (the PR1305 lesson above). Its checkpoint has no `bays.submits`;
+  // `fillMissingStateFromInitial` in the migrate callback below supplies the
+  // empty record, and replay resumes after the stored cursor.
+  "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -2900,6 +2910,15 @@ async function runReceiverHook(
       // loadYrdConfig reads. See validatePushedYrdConfig's doc for the PR1337
       // incident this closes.
       validateConfig: validatePushedYrdConfig,
+      // branch-is-change phase 2a: an accepted refs/yrd/submit/<branch> write
+      // becomes a journal fact the queue projects; before this the ref stood
+      // in git and no reader could see it (@yrd/core/22991).
+      branchSubmitted: async (fact) => {
+        await runtimeApp.bays.recordBranchSubmit(fact)
+      },
+      branchUnsubmitted: async (fact) => {
+        await runtimeApp.bays.recordBranchUnsubmit(fact)
+      },
     })
   } finally {
     await closeRuntime(app, runtimeProcess, scope)

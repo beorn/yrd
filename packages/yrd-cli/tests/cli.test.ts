@@ -8108,6 +8108,54 @@ describe("runYrd", () => {
     }
   })
 
+  it("surfaces a branch submitted only in git (no record) in audit, list warnings, and the considered rows", async () => {
+    // branch-is-change 2a: the receiver projected a direct refs/yrd/submit push
+    // as branch/submitted; nothing can run it (no PRnnn), so every surface a
+    // waiting author looks at must say so — and say why.
+    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
+    try {
+      await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: "4".repeat(40), base: "main" })
+
+      // audit: the finding, with the same age grace a stranded draft gets.
+      expect(app.queue.audit({ now: "2026-07-09T12:05:00.000Z" }).findings).toEqual([])
+      const audit = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
+      expect(await runYrd(app, yrd("queue", "audit"), audit.io), audit.stderr()).toBe(1)
+      expect(audit.stdout()).toContain("err=unrecorded-submit")
+      expect(audit.stdout()).toContain("issue/ref-only")
+      expect(audit.stdout()).toContain("resolve: yrd pr submit issue/ref-only --issue <ref>")
+      const json = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
+      expect(await runYrd(app, yrd("queue", "audit", "--json"), json.io)).toBe(1)
+      const findings = (JSON.parse(json.stdout()) as { findings: ReadonlyArray<Record<string, unknown>> }).findings
+      expect(findings).toContainEqual(
+        expect.objectContaining({
+          code: "unrecorded-submit",
+          specimen: "branch:issue/ref-only",
+          since: "2026-07-09T12:00:00.000Z",
+          blockedMs: 3_600_000,
+        }),
+      )
+
+      // list/watch/health: the same finding rides the stale-draft warning
+      // projection those surfaces share — one projection, never a second read.
+      const paged = runInternals.staleDraftFindings(app, "2026-07-09T13:00:00.000Z", 30 * 60 * 1000)
+      expect(paged.map((finding) => finding.code)).toEqual(["unrecorded-submit"])
+      expect(runInternals.staleDraftWarnings(paged)).toEqual([
+        expect.stringContaining("[unrecorded-submit] branch 'issue/ref-only' is submitted in git"),
+      ])
+      // Below the page threshold it is a correct audit finding but not page-worthy yet.
+      expect(runInternals.staleDraftFindings(app, "2026-07-09T12:20:00.000Z", 30 * 60 * 1000)).toEqual([])
+
+      // considered rows: an implicit run says the one thing submitted is unrecorded, not that nothing is.
+      const direct = await app.dispatch(app.commands.queue.run, {})
+      expect(direct.value).toMatchObject({
+        kind: "no-runnable-prs",
+        considered: [expect.objectContaining({ branch: "issue/ref-only", code: "unrecorded-submit" })],
+      })
+    } finally {
+      await app.close()
+    }
+  })
+
   it("offers only reversible submission for a stranded draft, never payload destruction", async () => {
     const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
     try {
@@ -11228,7 +11276,7 @@ describe("runYrd", () => {
       headSha: "f".repeat(40),
     })
     const statusRows = queueStatusRows(
-      { byId: {}, prs: { PR1: statusPr }, receipts: {} },
+      { byId: {}, prs: { PR1: statusPr }, receipts: {}, submits: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr], admissionOrder: ["PR1"] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),

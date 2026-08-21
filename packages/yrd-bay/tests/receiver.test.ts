@@ -219,7 +219,13 @@ async function installHookHost(
       '  if (matches(auto.draft)) return "draft"',
       "  return undefined",
       "}",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch })",
+      // The branch-fact sink: every projected submit/unsubmit lands as one JSON
+      // line in YRD_TEST_BRANCH_FACTS, so a test can assert WHAT the receiver
+      // told the journal, not just what git holds.
+      'import { appendFile } from "node:fs/promises"',
+      "const factsFile = process.env.YRD_TEST_BRANCH_FACTS",
+      "const record = (kind) => factsFile === undefined ? undefined : async (fact) => { await appendFile(factsFile, `${JSON.stringify({ kind, ...fact })}\\n`) }",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch, branchSubmitted: record('submitted'), branchUnsubmitted: record('unsubmitted') })",
       "",
     ].join("\n"),
   )
@@ -228,6 +234,7 @@ async function installHookHost(
     ...process.env,
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     YRD_TEST_TARGETS: targetFile,
+    YRD_TEST_BRANCH_FACTS: join(root, "branch-facts.jsonl"),
     ...(intakePolicy === undefined ? {} : { YRD_TEST_INTAKE_POLICY: intakePolicy }),
     ...(rejectConfigContaining === undefined ? {} : { YRD_TEST_REJECT_CONFIG_CONTAINING: rejectConfigContaining }),
     ...(autoConfig === undefined ? {} : { YRD_TEST_AUTO_CONFIG: JSON.stringify(autoConfig) }),
@@ -244,6 +251,20 @@ function receiverId(ref: string, oldSha: string, newSha: string): string {
 
 async function inboxFiles(receiver: GitPushReceiver): Promise<string[]> {
   return (await readdir(receiver.inboxDir)).filter((name) => name.endsWith(".json")).toSorted()
+}
+
+/** Every branch-submit/unsubmit fact the hook host projected, in order. */
+async function branchFacts(f: Fixture): Promise<unknown[]> {
+  const path = join(f.root, "branch-facts.jsonl")
+  try {
+    return (await readFile(path, "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as unknown)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
 }
 
 // Every case launches several real Git processes; budget for cold starts on loaded CI hosts.
@@ -935,6 +956,36 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.stderr).toContain("is not authorized for Yrd intake")
   })
 
+  it("projects an accepted direct submit-ref push as a branch-submitted fact carrying the resolved base", async () => {
+    // Phase 2a: before this, a direct refs/yrd/submit push was authorized and
+    // then dropped at post-receive — the ref stood in git and no reader could
+    // see it. The fact is what the queue projects.
+    const f = await fixture("submitref-fact")
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-fact")
+    const headSha = await commit(f.mainRepo, "submit-fact.txt")
+    const env = await installHookHost(f.root, { "issue/submit-fact": target(f.baseSha) })
+    expect((await push(f, "issue/submit-fact:refs/heads/issue/submit-fact", env)).code).toBe(0)
+    expect(await branchFacts(f)).toEqual([])
+
+    const result = await push(f, `${headSha}:refs/yrd/submit/issue/submit-fact`, env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await branchFacts(f)).toEqual([
+      { kind: "submitted", branch: "issue/submit-fact", sha: headSha, base: "main" },
+    ])
+  })
+
+  it("a refused submit-ref push projects nothing — the fact follows acceptance, never the attempt", async () => {
+    const f = await fixture("submitref-refused-fact")
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-refused")
+    await commit(f.mainRepo, "submit-refused.txt")
+    const env = await installHookHost(f.root, { "issue/submit-refused": target(f.baseSha) })
+    expect((await push(f, "issue/submit-refused:refs/heads/issue/submit-refused", env)).code).toBe(0)
+    // The base sha is already an ancestor of the base: refused as "nothing left to submit".
+    const result = await push(f, `${f.baseSha}:refs/yrd/submit/issue/submit-refused`, env)
+    expect(result.code).not.toBe(0)
+    expect(await branchFacts(f)).toEqual([])
+  })
+
   it("accepts deleting a submit ref — unsubmit", async () => {
     const f = await fixture("submitref-unsubmit")
     await git(f.mainRepo, "switch", "-qc", "issue/unsubmit")
@@ -946,6 +997,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const result = await push(f, ":refs/yrd/submit/issue/unsubmit", env)
     expect(result.code, result.stderr).toBe(0)
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/unsubmit")).toBe("")
+    // Both halves projected: the approval, then its withdrawal by the author.
+    expect(await branchFacts(f)).toEqual([
+      { kind: "submitted", branch: "issue/unsubmit", sha: headSha, base: "main" },
+      { kind: "unsubmitted", branch: "issue/unsubmit", reason: "deleted" },
+    ])
   })
 
   it("translates a refs/heads/ branch deletion into an atomic archival: archive created, branch gone, submit swept", async () => {
@@ -970,6 +1026,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       headSha,
     )
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/issue/archive-me")).toBe("")
+    // The sweep tells the projection the approval is gone, with the closed reason.
+    expect(await branchFacts(f)).toEqual([
+      { kind: "submitted", branch: "issue/archive-me", sha: headSha, base: "main" },
+      { kind: "unsubmitted", branch: "issue/archive-me", reason: "archived" },
+    ])
   })
 
   it("re-archiving a branch resurrected at the identical sha is accepted — a legal newest-wins move, not a collision", async () => {
@@ -1059,16 +1120,20 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       "for:main/dual-write": target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
     })
     expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
-    expect(
-      (
-        await f.receiver.drain({
-          resolveTarget: async (_branch, _update, intent) =>
-            intent === undefined ? null : target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
-          intake: async () => {},
-        })
-      ).failed,
-    ).toEqual([])
+    // The drain-time dual-write projects the same fact a direct submit does —
+    // one projection for both spellings of "submitted".
+    const projected: unknown[] = []
+    const drainOptions = {
+      resolveTarget: async (_branch: string, _update: unknown, intent: { base: string; name: string } | undefined) =>
+        intent === undefined ? null : target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
+      intake: async () => {},
+      branchSubmitted: async (fact: unknown) => {
+        projected.push(fact)
+      },
+    }
+    expect((await f.receiver.drain(drainOptions)).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(firstHead)
+    expect(projected).toEqual([{ branch: "issue/dual-write", sha: firstHead, base: "main" }])
 
     // Model the first result's carrier materialization (see "refuses a
     // rewritten submit patchset" above for why a SECOND refs/for push needs
@@ -1077,16 +1142,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await git(f.mainRepo, "update-ref", "refs/heads/issue/dual-write", firstHead)
     const secondHead = await commit(f.mainRepo, "second.txt")
     expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
-    expect(
-      (
-        await f.receiver.drain({
-          resolveTarget: async (_branch, _update, intent) =>
-            intent === undefined ? null : target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
-          intake: async () => {},
-        })
-      ).failed,
-    ).toEqual([])
+    expect((await f.receiver.drain(drainOptions)).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(secondHead)
+    // Newest wins in the projection exactly as in the ref: a second submitted fact, no unsubmit between.
+    expect(projected).toEqual([
+      { branch: "issue/dual-write", sha: firstHead, base: "main" },
+      { branch: "issue/dual-write", sha: secondHead, base: "main" },
+    ])
   })
 
   // ── branch-is-change phase 1b: scope (draft/ignore) + auto classification ──

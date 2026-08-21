@@ -1293,9 +1293,15 @@ function QueueWatchHelp({ onClose }: { onClose: () => void }) {
 function staleDraftFooterNotice(findings: readonly QueueAuditFinding[]): string | undefined {
   const [first, ...rest] = findings
   if (first === undefined) return undefined
+  const more = rest.length === 0 ? "" : `, +${rest.length} more`
+  if (first.code === "unrecorded-submit") {
+    // A branch approved in git that no record carries (branch-is-change 2a):
+    // it has no PR and no recorded submitter; the specimen names the branch.
+    const branch = first.specimen?.replace(/^branch:/u, "") ?? "a branch"
+    return `${branch} submitted in git but unrecorded${more} — yrd queue audit for detail, yrd pr submit to carry it`
+  }
   const owner = first.submitter === undefined ? "no recorded owner" : first.submitter
   const pr = first.pr === undefined ? "a draft" : `PR ${first.pr}`
-  const more = rest.length === 0 ? "" : `, +${rest.length} more`
   return `${pr} stranded (owner=${owner}${more}) — yrd queue audit for detail, yrd pr submit or withdraw to clear`
 }
 
