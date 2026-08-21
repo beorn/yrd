@@ -9392,7 +9392,10 @@ describe("runYrd", () => {
       expect(below.text).toContain("─")
       // Below-docked: no identity rides row 1 (the runner border row).
       expect(below.text.split("\n")[1]).not.toMatch(/PR\d+\.\d+/u)
-      expect(below.text).toContain(headRow)
+      // 40-row production geometry must keep the calendar box; the member
+      // identity header witnesses an open detail even when HEAD clips.
+      expect(below.text).toContain("╭─ STATS ")
+      expect(below.text).toMatch(/pr#\d+\.\d+ ⎇/u)
 
       // Compact full tier: the list owns the frame (TIME header), detail
       // replaces it wholesale on Enter and returns on Escape.

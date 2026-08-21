@@ -31,6 +31,20 @@ function pendingRowCount(text: string): number {
   return new Set(text.match(/pr#\d\d\.\d/gu) ?? []).size
 }
 
+function frameLines(text: string): string[] {
+  return text.split("\n")
+}
+
+function statsTitleY(rows: readonly string[]): number {
+  return rows.findIndex((row) => row.includes("╭─ STATS "))
+}
+
+/** Timeline data rows carry a clock then a change id. The detail pane's
+ * `pr#00.1 ⎇ branch` header is not a timeline row. */
+function lastTimelineChangeY(rows: readonly string[]): number {
+  return rows.reduce((last, row, index) => (/\d{2}:\d{2}:\d{2}.*pr#\d/u.test(row) ? index : last), -1)
+}
+
 describe("queue timeline fill height (item 5)", () => {
   it("the projection still carries its coarse cap", () => {
     expect(manyPendingSnapshot().projection.display).toMatchObject({ shown: 3, hidden: 7 })
@@ -47,13 +61,38 @@ describe("queue timeline fill height (item 5)", () => {
       // No `... N more` residue: every retained row is reachable in the pane.
       expect(app.text, "fill suppresses the pre-slice residue").not.toMatch(/\.\.\. \d+ more/u)
 
-      // The STATS box anchors below the filled rows — the row block
-      // claims the slack, so the box sits after the last PR row.
-      const rows = app.text.split("\n")
-      const statsY = rows.findIndex((row) => row.includes("╭─ STATS "))
-      const lastRowY = rows.reduce((last, row, index) => (/pr#\d\d\.\d/u.test(row) ? index : last), -1)
-      expect(statsY, "STATS box renders").toBeGreaterThan(0)
+      // The STATS box anchors below the filled timeline rows — the row
+      // block claims the slack, so the box sits after the last list row.
+      const rows = frameLines(app.text)
+      const statsY = statsTitleY(rows)
+      const lastRowY = lastTimelineChangeY(rows)
+      expect(statsY, "STATS box renders").toBeGreaterThanOrEqual(0)
       expect(statsY, "STATS box sits below the filled rows").toBeGreaterThan(lastRowY)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it.each([
+    { cols: 162, rows: 45, label: "filing 162×45" },
+    { cols: 120, rows: 40, label: "filing 40×120" },
+  ] as const)("STATS title is in the captured $label watch frame", async ({ cols, rows: height }) => {
+    // @yrd/core/21096-cli-ux/23130: production watch geometries omitted the
+    // calendar box even though the 24-row / 48-col gates looked satisfied —
+    // the below-split hands the list ~19–22 rows, under QUEUE_STATS_MIN_PANE_ROWS.
+    // Acceptance is a captured frame, not a component-tree mount.
+    const snapshot = manyPendingSnapshot()
+    const render = createRenderer({ cols, rows: height })
+    const app = render(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      const rows = frameLines(app.text)
+      const statsY = statsTitleY(rows)
+      expect(statsY, `STATS box renders in the ${cols}×${height} frame`).toBeGreaterThanOrEqual(0)
+      const lastRowY = lastTimelineChangeY(rows)
+      if (lastRowY >= 0) {
+        expect(statsY, "STATS box sits below the timeline list").toBeGreaterThan(lastRowY)
+      }
     } finally {
       app.unmount()
     }
