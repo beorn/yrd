@@ -12,10 +12,11 @@
  * and the provisioner now runs for every gitlink-bearing wrapper call.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import type { ProcessRequest, ProcessResult } from "@yrd/process"
 import { synthesizeGitlinkWrapper } from "../src/command.ts"
 
 const roots: string[] = []
@@ -46,7 +47,38 @@ async function sh(repo: string, args: readonly string[]): Promise<{ code: number
 
 /** The two members the wrapper actually uses, over a real repository. */
 function gitAdapter() {
+  const env = Object.fromEntries(
+    Object.entries(globalThis.process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  )
   return {
+    env,
+    process: {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        if (request.stdin !== undefined) throw new Error("gitlink wrapper fixture does not accept process stdin")
+        const started = performance.now()
+        const child = Bun.spawn([...request.argv], {
+          cwd: request.cwd,
+          env: { ...globalThis.process.env, ...request.env },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ])
+        return {
+          exitCode,
+          stdout,
+          stderr,
+          durationMs: performance.now() - started,
+          signal: null,
+          timedOut: false,
+          verdict: "EXITED",
+        }
+      },
+    },
     async run(repo: string, args: readonly string[], _allowFailure?: boolean) {
       const result = await sh(repo, args)
       // The full GitResult shape: vitest does not typecheck, and the (a) fixture
@@ -74,9 +106,14 @@ function gitAdapter() {
   }
 }
 
-const PIN_BASE = "0".repeat(39) + "1"
-const PIN_A = "1".repeat(40)
-const PIN_B = "2".repeat(40)
+type GitlinkPin = Readonly<{ base: string; next: string }>
+type GitlinkFixture = Readonly<{ repo: string; parent: string; pins: ReadonlyMap<string, GitlinkPin> }>
+
+function pin(fixture: GitlinkFixture, path: string): GitlinkPin {
+  const value = fixture.pins.get(path)
+  if (value === undefined) throw new Error(`missing fixture pin for ${path}`)
+  return value
+}
 
 /**
  * The base commit already RECORDS every gitlink the wrapper will move. Discovered by
@@ -85,41 +122,73 @@ const PIN_B = "2".repeat(40)
  * exit 128 — so the wrapper's contract is UPDATE-only. That matches production, where
  * added and deleted gitlinks are refused before composition ever runs.
  */
-async function repository(paths: readonly string[] = ["dep"]): Promise<{ repo: string; parent: string }> {
-  const repo = await mkdtemp(join(tmpdir(), "yrd-gitlink-wrapper-"))
-  roots.push(repo)
+async function repository(paths: readonly string[] = ["dep"]): Promise<GitlinkFixture> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-gitlink-wrapper-"))
+  roots.push(root)
+  const repo = join(root, "product")
+  await mkdir(repo)
   await sh(repo, ["init", "-q", "-b", "main"])
   await writeFile(join(repo, "README.md"), "base\n")
   await sh(repo, ["add", "README.md"])
+  const sources = new Map<string, string>()
+  const bases = new Map<string, string>()
   for (const path of paths) {
-    await sh(repo, ["update-index", "--add", "--cacheinfo", `160000,${PIN_BASE},${path}`])
+    const source = join(root, `source-${path.replaceAll("/", "-")}`)
+    await mkdir(source)
+    await sh(source, ["init", "-q", "-b", "main"])
+    await writeFile(join(source, "value.txt"), "base\n")
+    await sh(source, ["add", "value.txt"])
+    await sh(source, ["commit", "-qm", "base"])
+    sources.set(path, source)
+    bases.set(path, (await sh(source, ["rev-parse", "HEAD"])).stdout)
+    await sh(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, path])
   }
   await sh(repo, ["commit", "-qm", "base"])
   const parent = (await sh(repo, ["rev-parse", "HEAD"])).stdout
-  return { repo, parent }
+  const pins = new Map<string, GitlinkPin>()
+  for (const path of paths) {
+    const source = sources.get(path)
+    const base = bases.get(path)
+    if (source === undefined || base === undefined) throw new Error(`incomplete fixture source for ${path}`)
+    await writeFile(join(source, "value.txt"), `next ${path}\n`)
+    await sh(source, ["add", "value.txt"])
+    await sh(source, ["commit", "-qm", "next"])
+    const next = (await sh(source, ["rev-parse", "HEAD"])).stdout
+    await sh(join(repo, path), ["fetch", "-q", "origin", next])
+    pins.set(path, { base, next })
+  }
+  return { repo, parent, pins }
 }
 
 describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of the (b) build's start", () => {
   it("writes a commit whose diff is exactly the gitlink updates, nothing else", async () => {
-    const { repo, parent } = await repository()
-    const result = await synthesizeGitlinkWrapper(gitAdapter(), repo, parent, [{ path: "dep", sha: PIN_A }], "wrapper")
+    const fixture = await repository()
+    const { repo, parent } = fixture
+    const result = await synthesizeGitlinkWrapper(
+      gitAdapter(),
+      repo,
+      parent,
+      [{ path: "dep", sha: pin(fixture, "dep").next }],
+      "wrapper",
+    )
 
     expect(result.status).toBe("passed")
     if (result.status !== "passed") throw new Error("unreachable")
     const changed = await sh(repo, ["diff", "--name-only", parent, result.output.commit])
     expect(changed.stdout.split("\n")).toEqual(["dep"])
     const entry = await sh(repo, ["ls-tree", result.output.commit, "--", "dep"])
-    expect(entry.stdout).toContain(`160000 commit ${PIN_A}`)
+    expect(entry.stdout).toContain(`160000 commit ${pin(fixture, "dep").next}`)
   })
 
   it("with a provisioner, one gitlink plus exactly bun.lock is the whole diff", async () => {
-    const { repo, parent } = await repository()
+    const fixture = await repository()
+    const { repo, parent } = fixture
     const provisioned: string[] = []
     const result = await synthesizeGitlinkWrapper(
       gitAdapter(),
       repo,
       parent,
-      [{ path: "dep", sha: PIN_A }],
+      [{ path: "dep", sha: pin(fixture, "dep").next }],
       "wrapper",
       async ({ provisionalCandidateSha }) => {
         provisioned.push(provisionalCandidateSha)
@@ -146,15 +215,16 @@ describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of
    * plus the regenerated bun.lock.
    */
   it("fills in bun.lock across more than one gitlink update in one shaset commit", async () => {
-    const { repo, parent } = await repository(["dep-a", "dep-b"])
+    const fixture = await repository(["dep-a", "dep-b"])
+    const { repo, parent } = fixture
     const provisioned: string[] = []
     const result = await synthesizeGitlinkWrapper(
       gitAdapter(),
       repo,
       parent,
       [
-        { path: "dep-a", sha: PIN_A },
-        { path: "dep-b", sha: PIN_B },
+        { path: "dep-a", sha: pin(fixture, "dep-a").next },
+        { path: "dep-b", sha: pin(fixture, "dep-b").next },
       ],
       "wrapper",
       async ({ provisionalCandidateSha }) => {
@@ -172,20 +242,21 @@ describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of
     const changed = await sh(repo, ["diff", "--name-only", parent, result.output.commit])
     expect(changed.stdout.split("\n").toSorted()).toEqual(["bun.lock", "dep-a", "dep-b"])
     const entryA = await sh(repo, ["ls-tree", result.output.commit, "--", "dep-a"])
-    expect(entryA.stdout).toContain(`160000 commit ${PIN_A}`)
+    expect(entryA.stdout).toContain(`160000 commit ${pin(fixture, "dep-a").next}`)
     const entryB = await sh(repo, ["ls-tree", result.output.commit, "--", "dep-b"])
-    expect(entryB.stdout).toContain(`160000 commit ${PIN_B}`)
+    expect(entryB.stdout).toContain(`160000 commit ${pin(fixture, "dep-b").next}`)
   })
 
   it("stages a drift-free multi-gitlink update as a gitlinks-only shaset commit", async () => {
-    const { repo, parent } = await repository(["dep-a", "dep-b"])
+    const fixture = await repository(["dep-a", "dep-b"])
+    const { repo, parent } = fixture
     const result = await synthesizeGitlinkWrapper(
       gitAdapter(),
       repo,
       parent,
       [
-        { path: "dep-a", sha: PIN_A },
-        { path: "dep-b", sha: PIN_B },
+        { path: "dep-a", sha: pin(fixture, "dep-a").next },
+        { path: "dep-b", sha: pin(fixture, "dep-b").next },
       ],
       "wrapper",
       // No manifest moved dependency specs across the staged range, so the
@@ -201,12 +272,13 @@ describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of
   })
 
   it("refuses a provisioner that generates anything but bun.lock", async () => {
-    const { repo, parent } = await repository()
+    const fixture = await repository()
+    const { repo, parent } = fixture
     const result = await synthesizeGitlinkWrapper(
       gitAdapter(),
       repo,
       parent,
-      [{ path: "dep", sha: PIN_A }],
+      [{ path: "dep", sha: pin(fixture, "dep").next }],
       "wrapper",
       async () => {
         await writeFile(join(repo, "package.json"), "{}\n")

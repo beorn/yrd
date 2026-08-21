@@ -13,6 +13,7 @@ import {
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
 import { readCommitSubmodules } from "git-super/commit-graph"
+import { writeGitlink } from "git-super/gitlink"
 import { ensureCommitObject } from "git-super/objects"
 import { pushRefUpdates } from "git-super/push"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
@@ -1024,7 +1025,7 @@ async function hasCommandOutput(dir: string): Promise<boolean> {
 }
 
 async function hasTerminalRecord(dir: string): Promise<boolean> {
-  return await readFile(join(dir, "terminal.json"))
+  return  readFile(join(dir, "terminal.json"))
     .then(() => true)
     .catch(() => false)
 }
@@ -1385,6 +1386,23 @@ function createGit(
     process,
     env,
   })
+}
+
+async function writeQueueGitlink(git: Pick<Git, "process" | "env">, repo: string, path: string, commit: string) {
+  return writeGitlink({
+    repo,
+    path,
+    commit,
+    git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+  })
+}
+
+function queueGitlinkWriteSucceeded(result: Awaited<ReturnType<typeof writeGitlink>>): boolean {
+  return result.state === "updated" || result.state === "unchanged"
+}
+
+function queueGitlinkWriteFailure(result: Awaited<ReturnType<typeof writeGitlink>>): string {
+  return gitSuperFailureDetail(result)?.message ?? `git-super gitlink write ended as ${result.state}`
 }
 
 function mergeRecordJob(job: Job, step: string): MergeRecordBody["evidence"]["jobs"][number] | undefined {
@@ -2753,12 +2771,12 @@ async function assertCurrentRemergeCertificate(
         if (patchId === undefined) {
           throw currentCompositionFailure(`source '${source.repo}' patch certificate does not replay`)
         }
-        const staged = await git.run(
-          path,
-          ["update-index", "--cacheinfo", `160000,${source.tipSha},${source.repo}`],
-          true,
-        )
-        if (staged.code !== 0) throw currentCompositionFailure(`source '${source.repo}' wrapper could not be staged`)
+        const staged = await writeQueueGitlink(git, path, source.repo, source.tipSha)
+        if (!queueGitlinkWriteSucceeded(staged)) {
+          throw currentCompositionFailure(
+            `source '${source.repo}' wrapper could not be staged: ${queueGitlinkWriteFailure(staged)}`,
+          )
+        }
         results.push({ repo: source.repo, patchId })
       }
       const tree = await git.run(path, ["write-tree"], true)
@@ -2942,10 +2960,14 @@ async function remergeDirectPR(
         if (absorbedSet.has(conflict)) {
           const currentPin = await readGitlink(git, repo, target.sha, conflict)
           if (currentPin === undefined) break
-          const staged = await git.run(path, ["update-index", "--cacheinfo", `160000,${currentPin},${conflict}`], true)
-          if (staged.code !== 0) {
-            rebased = staged
-            break
+          const staged = await writeQueueGitlink(git, path, conflict, currentPin)
+          if (!queueGitlinkWriteSucceeded(staged)) {
+            await git.run(path, ["rebase", "--abort"], true)
+            throw createFailure({
+              kind: "refusal",
+              code: "recut-gitlink-write-failed",
+              message: `yrd: PR '${input.id}' could not stage absorbed gitlink '${conflict}': ${queueGitlinkWriteFailure(staged)}`,
+            })
           }
           continue
         }
@@ -2967,14 +2989,14 @@ async function remergeDirectPR(
               `'${resolution.authoredPin}'; ancestry walk failed because ${resolution.message}`,
           })
         }
-        const staged = await git.run(
-          path,
-          ["update-index", "--cacheinfo", `160000,${resolution.sha},${conflict}`],
-          true,
-        )
-        if (staged.code !== 0) {
-          rebased = staged
-          break
+        const staged = await writeQueueGitlink(git, path, conflict, resolution.sha)
+        if (!queueGitlinkWriteSucceeded(staged)) {
+          await git.run(path, ["rebase", "--abort"], true)
+          throw createFailure({
+            kind: "refusal",
+            code: "recut-gitlink-write-failed",
+            message: `yrd: PR '${input.id}' could not stage resolved gitlink '${conflict}': ${queueGitlinkWriteFailure(staged)}`,
+          })
         }
         if (resolution.side === "carrier") ffCarrierGitlinks.add(conflict)
         else ffCarrierGitlinks.delete(conflict)
@@ -4768,7 +4790,7 @@ type SynthesizedGitlinkWrapper = Readonly<{ commit: string; treeSha: string; gen
  * See tests/gitlink-wrapper.test.ts and @i/10-merge-queue/b-derivation-sites.
  */
 export async function synthesizeGitlinkWrapper(
-  git: Pick<Git, "run" | "commitTree">,
+  git: Pick<Git, "run" | "commitTree" | "process" | "env">,
   path: string,
   parent: string,
   updates: readonly GitlinkUpdate[],
@@ -4777,11 +4799,11 @@ export async function synthesizeGitlinkWrapper(
 ): Promise<Readonly<{ status: "passed"; output: SynthesizedGitlinkWrapper }> | CandidateFailure> {
   const expectedPaths = updates.map((update) => update.path)
   for (const update of updates) {
-    const staged = await git.run(path, ["update-index", "--cacheinfo", `160000,${update.sha},${update.path}`], true)
-    if (staged.code !== 0) {
+    const staged = await writeQueueGitlink(git, path, update.path, update.sha)
+    if (!queueGitlinkWriteSucceeded(staged)) {
       return candidateFailure(
         "wrapper-mismatch",
-        `generated wrapper could not stage gitlink '${update.path}': ${staged.stderr || staged.stdout}`,
+        `generated wrapper could not stage gitlink '${update.path}': ${queueGitlinkWriteFailure(staged)}`,
         update.path,
         [update.path],
       )
@@ -6774,12 +6796,12 @@ async function resolveCandidateSubmoduleConflict(
   }
 
   for (const resolution of executed.resolutions) {
-    const staged = await git.probe(path, ["update-index", "--cacheinfo", `160000,${resolution.sha},${resolution.path}`])
-    if (staged.code !== 0) {
+    const staged = await writeQueueGitlink(git, path, resolution.path, resolution.sha)
+    if (!queueGitlinkWriteSucceeded(staged)) {
       throw createSubmoduleCompositionRefusal(
         repo,
         resolution.path,
-        `could not stage composed pin for '${resolution.path}': ${fetchDetail(staged)}`,
+        `could not stage composed pin for '${resolution.path}': ${queueGitlinkWriteFailure(staged)}`,
       )
     }
   }
