@@ -732,6 +732,40 @@ export type ChangeEligibility = Readonly<{
   }>
 }>
 
+/**
+ * A branch approved in git (`refs/yrd/submit/<branch>`, projected by the
+ * receiver as `branch/submitted`) that no PR record carries. The queue cannot
+ * run it — candidates, runs and checks are keyed by `PRnnn` — but it must SAY
+ * so wherever a waiting author looks: status, watch, audit and the considered
+ * rows of an empty run (@cto efd1fa9a, constraint 3). When a record exists for
+ * the same branch, the record wins and this row does not appear.
+ */
+export type UnrecordedSubmit = Readonly<{
+  branch: string
+  sha: string
+  base: string
+  /** When the receiver projected the approval. */
+  at: string
+  reason: Readonly<{
+    code: "unrecorded-submit"
+    message: string
+  }>
+}>
+
+/**
+ * One branch, both sources, one answer. `record` (and its `eligibility`) is
+ * present when a PR record exists for the branch; `submit` is the projected
+ * live submit ref when one stands; `unrecorded` is the row rendered for a
+ * submit with no record. Never both `eligibility` and `unrecorded`.
+ */
+export type DerivedChange = Readonly<{
+  branch: string
+  record?: PR
+  eligibility?: ChangeEligibility
+  submit?: Readonly<{ sha: string; base: string; at: string }>
+  unrecorded?: UnrecordedSubmit
+}>
+
 export type ChangeCheckRecord = Readonly<{
   pr: string
   revision: number

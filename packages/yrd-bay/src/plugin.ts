@@ -107,6 +107,10 @@ import {
   type RefreshBayInput,
   type RefreshedBay,
   type RemoteBranchSnapshot,
+  BranchSubmitSchema,
+  BranchUnsubmitSchema,
+  type BranchSubmit,
+  type BranchUnsubmit,
 } from "./model.ts"
 
 const TextSchema = z.string().trim().min(1)
@@ -765,6 +769,10 @@ export type BayCommands = Readonly<{
     regression: CommandHandler<ChangeRegressionArgs, BayState>
     publish: CommandHandler<ChangePublicationInput, BayState>
   }>
+  branch: Readonly<{
+    recordSubmit: CommandHandler<BranchSubmit, BayState>
+    recordUnsubmit: CommandHandler<BranchUnsubmit, BayState>
+  }>
 }>
 
 export type Bays = Readonly<{
@@ -798,6 +806,10 @@ export type Bays = Readonly<{
   requestReview(args: ChangeRequestReviewArgs): Promise<CommandResult>
   recordRegression(args: ChangeRegressionArgs): Promise<CommandResult>
   requestPublication(args: ChangePublicationInput): Promise<CommandResult>
+  /** The receiver ACCEPTED a `refs/yrd/submit/<branch>` write — project the approval fact. */
+  recordBranchSubmit(args: BranchSubmit): Promise<CommandResult>
+  /** The receiver removed a submit ref (delete, archival sweep) or a record superseded it. */
+  recordBranchUnsubmit(args: BranchUnsubmit): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
@@ -824,6 +836,8 @@ type BayActions = Pick<
   | "requestReview"
   | "recordRegression"
   | "requestPublication"
+  | "recordBranchSubmit"
+  | "recordBranchUnsubmit"
 >
 
 export type BayBaseTarget = Readonly<{
@@ -1370,6 +1384,8 @@ export function createBays(
     requestReview: actions.requestReview,
     recordRegression: actions.recordRegression,
     requestPublication: actions.requestPublication,
+    recordBranchSubmit: actions.recordBranchSubmit,
+    recordBranchUnsubmit: actions.recordBranchUnsubmit,
   })
 }
 
@@ -1424,6 +1440,15 @@ export function withBays(options: WithBaysOptions) {
         "pr/checks-requested": journalEvent(1, ChangeCheckRequestFactSchema),
         "pr/admission-recorded": journalEvent(2, ChangeAdmissionRecordedFactSchema),
         "pr/review-requested": journalEvent(1, ChangeReviewRequestFactSchema),
+        // branch-is-change phase 2a (@yrd/core/22991; @cto efd1fa9a): the
+        // receiver projects an ACCEPTED refs/yrd/submit/<branch> write, and its
+        // removal, as journal facts — the queue reads the projection and never
+        // enumerates git refs. 2b's bridge is the receiver INTAKING a direct
+        // submit-ref push exactly as it intakes refs/for (record created, ref
+        // already there); never a second bridge teaching `pr submit` to write
+        // the ref. These two events are what make that a small write.
+        "branch/submitted": journalEvent(1, BranchSubmitSchema),
+        "branch/unsubmitted": journalEvent(1, BranchUnsubmitSchema),
       },
       replayEvents: {
         "pr/pushed": ChangePushedReplaySchema,
@@ -1446,7 +1471,7 @@ export function withBays(options: WithBaysOptions) {
         ),
         "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v13-recut-certificate",
+      projectionVersion: "bays-v14-branch-submits",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1476,6 +1501,8 @@ export function withBays(options: WithBaysOptions) {
               requestReview: (args) => yrd.dispatch(commands.pr.requestReview, args),
               recordRegression: (args) => yrd.dispatch(commands.pr.regression, args),
               requestPublication: (args) => yrd.dispatch(commands.pr.publish, args),
+              recordBranchSubmit: (args) => yrd.dispatch(commands.branch.recordSubmit, args),
+              recordBranchUnsubmit: (args) => yrd.dispatch(commands.branch.recordUnsubmit, args),
             },
             {
               defaultBase,
@@ -1625,6 +1652,28 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         params: ChangePublicationInputSchema,
         apply: (state: BayState, args: ChangePublicationInput) =>
           requestChangePublication(state, args, jobs["pr.publish"]),
+      }),
+    },
+    branch: {
+      // The receiver is the only legitimate caller of these two: it has already
+      // accepted (or swept) the git ref when it dispatches them, so neither
+      // command validates liveness again — a second judge of the same fact
+      // would be the second derivation 22895 exists to delete. A branch that
+      // never had a standing submit can still be "unsubmitted" (the archival
+      // sweep names every scope ref it clears); that is a no-op projection,
+      // not a refusal, because the receiver's sweep is already atomic.
+      recordSubmit: command({
+        title: "Project an accepted refs/yrd/submit/<branch> write",
+        params: BranchSubmitSchema,
+        apply: (_state: BayState, args: BranchSubmit) => ({ events: [event("branch/submitted", args)] }),
+      }),
+      recordUnsubmit: command({
+        title: "Project a removed refs/yrd/submit/<branch> ref",
+        params: BranchUnsubmitSchema,
+        apply: (state: BayState, args: BranchUnsubmit) =>
+          state.bays.submits[args.branch] === undefined
+            ? { events: [] }
+            : { events: [event("branch/unsubmitted", args)] },
       }),
     },
   }
@@ -2875,6 +2924,24 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         openedAt: applied.ts,
         refreshedAt: applied.ts,
       })
+    }
+    case "branch/submitted": {
+      // Newest wins, unconditionally — the receiver's submit ref has no CAS
+      // either (writeSubmitRefForCarrier), so the projection mirrors the ref.
+      const submitted = BranchSubmitSchema.parse(data)
+      return bayState({
+        ...current,
+        submits: {
+          ...current.submits,
+          [submitted.branch]: { sha: submitted.sha, base: baseIdentity(submitted.base), at: applied.ts },
+        },
+      })
+    }
+    case "branch/unsubmitted": {
+      const unsubmitted = BranchUnsubmitSchema.parse(data)
+      if (current.submits[unsubmitted.branch] === undefined) return bayState(current)
+      const { [unsubmitted.branch]: _removed, ...submits } = current.submits
+      return bayState({ ...current, submits })
     }
     case "bay/closing": {
       const bay = current.byId[data.bay as string]

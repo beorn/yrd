@@ -206,6 +206,21 @@ export type ReceiverHookOptions = {
    * refs remain purely instance decisions, never auto-materialized).
    */
   classifyBranch?: ReceiverAutoClassifier
+  /**
+   * Project an ACCEPTED `refs/yrd/submit/<branch>` write as a journal fact
+   * (branch-is-change phase 2a; @cto efd1fa9a). Called only after git has
+   * applied the ref — at post-receive for a direct push, after the drain-time
+   * dual-write for a refs/for push, and after birth classification — never
+   * before authorize() accepts. Omit and the receiver keeps its pre-2a
+   * behaviour: the ref stands in git and nothing downstream can see it.
+   */
+  branchSubmitted?: (fact: Readonly<{ branch: string; sha: string; base: string }>) => Promise<void>
+  /**
+   * The inverse fact: a submit ref was deleted by its author (`deleted`) or
+   * swept by archival (`archived`). `superseded` belongs to 2b, when an
+   * intaken record takes over the approval; the receiver never emits it.
+   */
+  branchUnsubmitted?: (fact: Readonly<{ branch: string; reason: "deleted" | "archived" }>) => Promise<void>
 }
 export type ReceiverDrainResult = {
   delivered: string[]
@@ -447,7 +462,7 @@ async function finalizeReceiverUpdates(
         // has already applied the branch deletion the push requested (see
         // `applyArchival`'s doc for why the hook itself never performs that
         // delete), so the transaction below is racing nothing.
-        await applyArchival(receiver, update, authorized.branch, options.env)
+        await applyArchival(receiver, update, authorized.branch, options)
       } else if (authorized.kind === "draft-ref" || authorized.kind === "ignore-ref") {
         // Same reasoning as archival: git already applied THIS ref's own
         // write or delete natively. A deletion (undrafting/unignoring) needs
@@ -468,8 +483,17 @@ async function finalizeReceiverUpdates(
           await applyCreationClassification(receiver, update, authorized.branch, authorized.target.base, options)
         }
       }
-      // "submit-ref": git's own ref update already applied the write (or the
-      // delete); there is nothing further to do at post-receive.
+      else if (authorized.kind === "submit-ref") {
+        // git's own ref update already applied the write (or the delete); the
+        // only post-receive duty is to project the accepted fact so the queue
+        // can see it — before 2a this branch did nothing and a direct submit
+        // was invisible to every reader (@yrd/core/22991 phase 2a).
+        if (ZERO_SHA.test(update.newSha)) {
+          await options.branchUnsubmitted?.({ branch: authorized.branch, reason: "deleted" })
+        } else if (authorized.base !== undefined) {
+          await options.branchSubmitted?.({ branch: authorized.branch, sha: update.newSha, base: authorized.base })
+        }
+      }
     }
     if (result !== undefined) {
       await moveResult(receiver, result, "prepared", "pending")
@@ -511,7 +535,7 @@ async function drainReceiverInbox(
         // retries the whole result on the next drain, and this write should
         // not have happened for a result nothing downstream has accepted yet.
         if (result.change !== undefined) {
-          await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
+          await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
         } else if (!ZERO_SHA.test(result.oldSha)) {
           // An ordinary push to an EXISTING branch (never creation — that is
           // `applyCreationClassification`'s job, run atomically with the
@@ -524,7 +548,7 @@ async function drainReceiverInbox(
           // construction: nothing re-checks them on a later push.
           const verdict = await evaluateClassification(receiver, options, result.intake.base, result.branch)
           if (verdict === "submit") {
-            await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, options.env)
+            await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
           }
         }
         await rm(path)
@@ -1090,7 +1114,7 @@ async function validateSubmitRefValue(
   update: ReceiverRefUpdate,
   branch: string,
   options: ReceiverHookOptions,
-): Promise<void> {
+): Promise<string> {
   const branchTip = await refValue(receiver, `${BRANCH_PREFIX}${branch}`, options.env)
   check(
     branchTip !== null,
@@ -1125,6 +1149,7 @@ async function validateSubmitRefValue(
     landed.code !== 0,
     `submit ref '${update.ref}' names ${update.newSha.slice(0, 12)}, which is already an ancestor of base branch '${target.base}'; nothing left to submit`,
   )
+  return target.base
 }
 
 /**
@@ -1247,8 +1272,9 @@ async function applyArchival(
   receiver: GitPushReceiver,
   update: ReceiverRefUpdate,
   branch: string,
-  env?: Environment,
+  options: ReceiverHookOptions,
 ): Promise<void> {
+  const env = options.env
   const archiveRef = archiveRefFor(branch, update.oldSha)
   // Read every sweepable ref's current value BEFORE building the transaction,
   // same reasoning as the original submit-only sweep: only a ref that
@@ -1271,6 +1297,11 @@ async function applyArchival(
     "",
   ].join("\n")
   await receiverGit(receiver, ["update-ref", "--stdin"], { env, stdin: commands })
+  // The sweep just cleared the submit ref along with the branch; say so to the
+  // projection — the shelf keeps the bytes, the approval is gone (phase 2a).
+  if (current.some(([ref, value]) => ref.startsWith(SUBMIT_REF_PREFIX) && value !== null)) {
+    await options.branchUnsubmitted?.({ branch, reason: "archived" })
+  }
 }
 
 /**
@@ -1286,9 +1317,13 @@ async function writeSubmitRefForCarrier(
   receiver: GitPushReceiver,
   branch: string,
   headSha: string,
-  env?: Environment,
+  base: string,
+  options: ReceiverHookOptions,
 ): Promise<void> {
-  await receiverGit(receiver, ["update-ref", `${SUBMIT_REF_PREFIX}${branch}`, headSha], { env })
+  await receiverGit(receiver, ["update-ref", `${SUBMIT_REF_PREFIX}${branch}`, headSha], { env: options.env })
+  // The ref is the fact; the projection follows it (phase 2a). Emitted AFTER
+  // the write so the journal never claims an approval git does not hold.
+  await options.branchSubmitted?.({ branch, sha: headSha, base })
 }
 
 /**
@@ -1403,13 +1438,13 @@ async function applyCreationClassification(
     await receiverGit(receiver, ["update-ref", `${IGNORE_REF_PREFIX}${branch}`, update.newSha], { env: options.env })
   } else if (verdict === "submit") {
     if (await isAncestorOfBase(receiver, update.newSha, base, options.env)) return
-    await writeSubmitRefForCarrier(receiver, branch, update.newSha, options.env)
+    await writeSubmitRefForCarrier(receiver, branch, update.newSha, base, options)
   }
 }
 
 type AuthorizedUpdate =
   | Readonly<{ kind: "intake"; branch: string; target: ReceiverTarget; intent?: ReceiverSubmitIntent }>
-  | Readonly<{ kind: "submit-ref"; branch: string }>
+  | Readonly<{ kind: "submit-ref"; branch: string; base?: string }>
   | Readonly<{ kind: "archive"; branch: string }>
   | Readonly<{ kind: "draft-ref" | "ignore-ref"; branch: string }>
 
@@ -1471,8 +1506,9 @@ async function authorize(
     check(branch.length > 0, `submit ref '${update.ref}' names no branch`)
     await validBranch(receiver, branch, "submit branch")
     await checkNotStale(receiver, update, stage, options.env)
-    if (!deleting) await validateSubmitRefValue(receiver, update, branch, options)
-    return { kind: "submit-ref", branch }
+    if (deleting) return { kind: "submit-ref", branch }
+    const base = await validateSubmitRefValue(receiver, update, branch, options)
+    return { kind: "submit-ref", branch, base }
   }
 
   const isSubmit = update.ref.startsWith(SUBMIT_PREFIX)

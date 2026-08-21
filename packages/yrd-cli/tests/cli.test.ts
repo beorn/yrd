@@ -11228,7 +11228,7 @@ describe("runYrd", () => {
       headSha: "f".repeat(40),
     })
     const statusRows = queueStatusRows(
-      { byId: {}, prs: { PR1: statusPr }, receipts: {} },
+      { byId: {}, prs: { PR1: statusPr }, receipts: {}, submits: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr], admissionOrder: ["PR1"] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),

@@ -121,6 +121,8 @@ import {
   type ChangeCheckRecord,
   type ChangeShape,
   type ChangeSnapshot,
+  type DerivedChange,
+  type UnrecordedSubmit,
 } from "./model.ts"
 import {
   activeQueueRootIds,
@@ -227,21 +229,28 @@ const QueueRunReuseCoveredSchema = z
   .strict()
 type QueueRunReuseCovered = Readonly<z.infer<typeof QueueRunReuseCoveredSchema>>
 
+/** A considered carrier with a record: the PR and the revision the verdict is about. */
+const ConsideredRecordRowSchema = z
+  .object({
+    pr: z.string().trim().min(1),
+    revision: z.number().int().positive(),
+    code: z.string().trim().min(1),
+    reason: z.string().trim().min(1),
+  })
+  .strict()
+/** A considered carrier WITHOUT a record: a branch approved in git that nothing can run yet (2a). */
+const ConsideredUnrecordedRowSchema = z
+  .object({
+    branch: z.string().trim().min(1),
+    sha: GitShaSchema,
+    code: z.literal("unrecorded-submit"),
+    reason: z.string().trim().min(1),
+  })
+  .strict()
 const QueueRunNoRunnablePRsSchema = z
   .object({
     kind: z.literal("no-runnable-prs"),
-    considered: z
-      .array(
-        z
-          .object({
-            pr: z.string().trim().min(1),
-            revision: z.number().int().positive(),
-            code: z.string().trim().min(1),
-            reason: z.string().trim().min(1),
-          })
-          .strict(),
-      )
-      .min(1),
+    considered: z.array(z.union([ConsideredRecordRowSchema, ConsideredUnrecordedRowSchema])).min(1),
     selectedSteps: z.array(StepNameSchema).min(1),
     reason: z.literal("every considered PR was ineligible for the selected plan"),
   })
@@ -293,6 +302,7 @@ function queueRunReuseCovered(
 function queueRunNoRunnablePRs(
   decisions: readonly RunnableChangeDecision[],
   selected: readonly RuntimeStep[],
+  unrecorded: readonly UnrecordedSubmit[] = [],
 ): QueueRunNoRunnablePRs {
   const considered = decisions.map(({ pr, eligibility }) => {
     if (eligibility.runnable || eligibility.reason === undefined) {
@@ -307,10 +317,49 @@ function queueRunNoRunnablePRs(
   })
   return QueueRunNoRunnablePRsSchema.parse({
     kind: "no-runnable-prs",
-    considered,
+    considered: [
+      ...considered,
+      ...unrecorded.map((submit) => ({
+        branch: submit.branch,
+        sha: submit.sha,
+        code: submit.reason.code,
+        reason: submit.reason.message,
+      })),
+    ],
     selectedSteps: selected.map((step) => step.name),
     reason: "every considered PR was ineligible for the selected plan",
   })
+}
+
+/**
+ * The approvals the queue can see but not run: every projected submit ref
+ * whose branch has no PR record. A record for the branch — in ANY state —
+ * wins, because the record is what candidates, runs and checks are keyed by,
+ * and a withdrawn or integrated record already tells the reader more than the
+ * bare ref can.
+ */
+function unrecordedSubmits(bays: DeepReadonly<BaysState>): UnrecordedSubmit[] {
+  const recorded = new Set(Object.values(bays.prs).map((pr) => pr.branch))
+  return Object.entries(bays.submits)
+    .filter(([branch]) => !recorded.has(branch))
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([branch, submit]) => unrecordedSubmit(branch, submit))
+}
+
+function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submits"][string]>): UnrecordedSubmit {
+  return {
+    branch,
+    sha: submit.sha,
+    base: submit.base,
+    at: submit.at,
+    reason: {
+      code: "unrecorded-submit",
+      message:
+        `branch '${branch}' is submitted in git (${submit.sha.slice(0, 12)} for '${submit.base}', ` +
+        `since ${submit.at}) but no PR record carries it, so the queue cannot run it; ` +
+        `until the receiver intakes direct submits (phase 2b), submit it with 'yrd pr submit ${branch}'`,
+    },
+  }
 }
 
 function queueRunNoSubmittedPRs(
@@ -862,6 +911,14 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   audit(options?: QueueAuditOptions): QueueAuditEmission
   eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): ChangeEligibility
   eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly ChangeEligibility[]
+  /**
+   * Branches approved in git (`refs/yrd/submit/*`, projected by the receiver)
+   * that no PR record carries — visible, never runnable, each with its reason.
+   * The record wins when one exists for the branch (branch-is-change 2a).
+   */
+  unrecordedSubmits(snapshot?: DeepReadonly<QueueRuntimeState>): readonly UnrecordedSubmit[]
+  /** One branch, both sources (record + submit ref), one answer. */
+  deriveChange(branch: string, snapshot?: DeepReadonly<QueueRuntimeState>): DerivedChange
   /** PR batches whose revisions may be refreshed before the next selectorless drain.
    * Queue owns this projection because it must preserve the same candidate
    * partitioning, batch size, and FIFO order as compose. */
@@ -2611,8 +2668,9 @@ function createQueue<Shape extends ChangeShape>(
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
             const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
-            if (rejected.length > 0) {
-              reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps))
+            const unrecorded = unrecordedSubmits(snapshot.bays)
+            if (rejected.length > 0 || (diagnostic.decisions.length === 0 && unrecorded.length > 0)) {
+              reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps, unrecorded))
             } else if (diagnostic.decisions.length === 0) {
               // Nothing to consider at all (as opposed to runnable members held
               // back by an active base, which the admission loop reports itself).
@@ -3062,6 +3120,20 @@ function createQueue<Shape extends ChangeShape>(
       const snapshot = projected ?? runtime()
       return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
+    unrecordedSubmits(projected) {
+      return unrecordedSubmits((projected ?? runtime()).bays)
+    },
+    deriveChange(branch, projected) {
+      const snapshot = projected ?? runtime()
+      const record = Object.values(snapshot.bays.prs).find((pr) => pr.branch === branch)
+      const submit = snapshot.bays.submits[branch]
+      return {
+        branch,
+        ...(record === undefined ? {} : { record, eligibility: ChangeEligibility(snapshot, record, steps, needsPersonOwner) }),
+        ...(submit === undefined ? {} : { submit }),
+        ...(record !== undefined || submit === undefined ? {} : { unrecorded: unrecordedSubmit(branch, submit) }),
+      }
+    },
     freshnessCandidateBatches() {
       const snapshot = runtime()
       const candidates = runnablePRs(snapshot, {}, steps, needsPersonOwner, new Set(), {
@@ -3464,12 +3536,13 @@ function createQueueCommands(
       const prs = selectionResult.prs
       if (prs.length === 0) {
         const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
+        const unrecorded = unrecordedSubmits(state.bays)
         return {
           events: [],
           value:
-            rejected.length === 0
+            rejected.length === 0 && unrecorded.length === 0
               ? queueRunNoSubmittedPRs(state.bays, selected, new Set())
-              : queueRunNoRunnablePRs(rejected, selected),
+              : queueRunNoRunnablePRs(rejected, selected, unrecorded),
         }
       }
       for (const pr of prs) assertCurrentFlow(pr.flow, flows)

@@ -526,7 +526,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // retires the correlation pair from every schema that carries props — an
     // intentional persisted-contract change, so the identity moves and the
     // correlation-era predecessor gains a retained edge below.
-    expect(first.manifest.targetIdentity).toBe("690704d679947c4814c3cbd024dc08f91f03959dc4a340f4d3f2ad24ea23f8c7")
+    expect(first.manifest.targetIdentity).toBe("5d25a0aa9aeef5425421ce6d640804d360e5cfdb3b333ae4337d3e56513e5f5d")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
@@ -540,6 +540,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // own comment). Its edge is what lets a deployment cross the props cut.
     expect(first.manifest.edges).toContainEqual({
       from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
+      to: first.manifest.targetIdentity,
+    })
+    // The PRODUCTION composition's identity immediately before branch-is-change
+    // phase 2a (measured from the live journal 2026-08-21 — see the retained
+    // list's own comment). Its edge is what lets a deployment cross into the
+    // `branch/*` events and `bays.submits`.
+    expect(first.manifest.edges).toContainEqual({
+      from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
       to: first.manifest.targetIdentity,
     })
     expect(changed.manifest.targetIdentity).not.toBe(first.manifest.targetIdentity)
@@ -1540,6 +1548,77 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
     expect(rewritten.checkpoint_json.includes('"correlation"')).toBe(false)
     expect(rewritten.checkpoint_json).toContain('"tribe-request"')
+  })
+
+  it("restores the pre-branch-submits production checkpoint and gives bays its empty submits slice", async () => {
+    // The PRODUCTION identity immediately before branch-is-change phase 2a
+    // (retained list: 61773b43…, measured from the live journal 2026-08-21).
+    // Its checkpoint predates `bays.submits` entirely. A deployment that boots
+    // the 2a code must cross that edge and end up with the slice present and
+    // empty — not refuse (the PR1305 outage shape), not leak `undefined` into
+    // every reader of `submits`.
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton = 1")
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    const checkpointValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(checkpoint.checkpoint_json))
+    const bays = z.object({ submits: z.unknown() }).passthrough().parse(checkpointValue.value.state["bays"])
+    // Strip the slice the way a checkpoint written before 2a genuinely lacks it.
+    const { submits: _current, ...baysBefore } = bays
+    const retainedIdentity = "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37"
+    const retainedCheckpoint = JSON.stringify({
+      ...checkpointValue,
+      value: { ...checkpointValue.value, state: { ...checkpointValue.value.state, bays: baysBefore } },
+      identity: retainedIdentity,
+    })
+    expect(JSON.parse(retainedCheckpoint).value.state.bays).not.toHaveProperty("submits")
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expect(restored.state().bays.submits).toEqual({})
+    // And the new fact lands on the migrated state like on any other.
+    await restored.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: featureSha, base: "main" })
+    expect(restored.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: featureSha, base: "main" })
   })
 
   it("boots past historical pin-intent and tombstone events, quarantining them by name, while the shape their ids mint still parses", async () => {
@@ -2740,6 +2819,11 @@ checks: [{check: {run: "true"}}]
       },
       {
         from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        // The production composition's identity before branch-is-change 2a.
+        from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
         to: attestation.manifest.targetIdentity,
       },
       {

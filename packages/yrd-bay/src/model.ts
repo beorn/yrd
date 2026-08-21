@@ -955,6 +955,43 @@ export function checkRequest(pr: PR): ChangeCheckRequest | undefined {
   return pr.checkRequests.findLast((request) => request.headSha === revision.head)
 }
 
+/**
+ * The branch-is-change model's approval fact as the queue sees it: a
+ * `refs/yrd/submit/<branch>` write the receiver ACCEPTED (never one it merely
+ * saw), keyed by the same branch key and spelled in the same sha/base
+ * vocabulary as the `pr/*` events, so `submits[branch]` and a record for the
+ * same branch converge by key — `deriveChange(branch)` reads both and the
+ * record wins when present (@yrd/core/22991 phase 2a; @cto verdict efd1fa9a).
+ * Liveness is the receiver's to judge at write time; this projection never
+ * re-reads git.
+ */
+export const BranchSubmitSchema = z
+  .object({
+    branch: GitRefSchema,
+    sha: GitShaSchema,
+    base: GitRefSchema,
+  })
+  .strict()
+export type BranchSubmit = z.infer<typeof BranchSubmitSchema>
+
+/** CLOSED: a new reason is a schema change, never a string (@cto efd1fa9a, constraint 1). */
+export const BranchUnsubmitReasonSchema = z.enum(["deleted", "archived", "superseded"])
+export type BranchUnsubmitReason = z.infer<typeof BranchUnsubmitReasonSchema>
+export const BranchUnsubmitSchema = z
+  .object({
+    branch: GitRefSchema,
+    reason: BranchUnsubmitReasonSchema,
+  })
+  .strict()
+export type BranchUnsubmit = z.infer<typeof BranchUnsubmitSchema>
+
+/** A projected, still-standing submit ref: what was approved, for which base, and when the fact landed. */
+export type ProjectedBranchSubmit = Readonly<{
+  sha: string
+  base: string
+  at: string
+}>
+
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
   prs: Readonly<Record<PRId, PR>>
@@ -971,6 +1008,8 @@ export type BaysState = Readonly<{
       }>
     >
   >
+  /** Live `refs/yrd/submit/<branch>` facts by branch — see {@link BranchSubmitSchema}. */
+  submits: Readonly<Record<string, ProjectedBranchSubmit>>
 }>
 
 /** `headSha` absent used to mean two different facts — "origin has no such
@@ -1074,7 +1113,7 @@ export function defaultBayBranch(name: string): string {
 }
 
 export function emptyBaysState(): BaysState {
-  return { byId: {}, prs: {}, receipts: {} }
+  return { byId: {}, prs: {}, receipts: {}, submits: {} }
 }
 
 function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {
