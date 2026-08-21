@@ -185,6 +185,13 @@ export async function submoduleManifestDrift(
   ])
   const drifts: SubmoduleManifestDrift[] = []
   for (const change of gitlinkChanges(raw, options)) {
+    // A DELETION has no candidate side to compare: the component is leaving, so its
+    // manifests cannot drift against anything. Discriminate on the NULL PIN and never
+    // on materialization failure — the docblock above requires an unreadable pin to
+    // stay a loud refusal, and skipping on a missing workdir would hide a genuinely
+    // broken checkout. The null pin comes from the diff itself, needs no filesystem
+    // access, and cannot be produced by a broken checkout.
+    if (/^0+$/u.test(change.candidatePin)) continue
     const submoduleWorkdir = join(options.workspace, change.submodule)
     if (!existsSync(join(submoduleWorkdir, ".git"))) {
       options.fail(

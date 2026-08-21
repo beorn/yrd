@@ -127,7 +127,14 @@ async function pinnedSuperproject(): Promise<{
   await git(repo, "commit", "-qm", "advance dep to metadata change")
   const metadataChangeSha = await git(repo, "rev-parse", "HEAD")
 
-  return { repo, baseSha, specChangeSha, metadataChangeSha, unrelatedChangeSha }
+  await git(repo, "reset", "-q", "--soft", baseSha)
+  await git(repo, "rm", "-q", "--cached", "dep")
+  await writeFile(join(repo, ".gitmodules"), "")
+  await git(repo, "add", ".gitmodules")
+  await git(repo, "commit", "-qm", "delete dep from the component model")
+  const deletionSha = await git(repo, "rev-parse", "HEAD")
+
+  return { repo, baseSha, specChangeSha, metadataChangeSha, unrelatedChangeSha, deletionSha }
 }
 
 function refuse(message: string): never {
@@ -150,6 +157,44 @@ describe("submoduleManifestDrift", () => {
     expect(drifts).toHaveLength(1)
     expect(drifts[0]).toMatchObject({ submodule: "dep", manifests: ["dep/package.json"] })
     expect(drifts[0]?.basePin).not.toBe(drifts[0]?.candidatePin)
+  })
+
+  // @failure A submodule DELETION set the candidate gitlink to the null pin, and the
+  //          materialization guard read that as an unreadable pin and refused. The
+  //          deletion path was therefore unimplementable: authorized, no-data-loss
+  //          proven, and still unable to pass its own checks. Measured on hh-web 2026-08-21.
+  it("passes a component DELETION, whose candidate side has no manifests to compare", async () => {
+    const { repo, baseSha, deletionSha } = await pinnedSuperproject()
+    await using process = createProcess({ cwd: repo })
+
+    // The component is leaving, so its manifests cannot drift against anything.
+    expect(
+      await submoduleManifestDrift(process, {
+        repo,
+        workspace: repo,
+        baseSha,
+        candidateSha: deletionSha,
+        fail: refuse,
+      }),
+    ).toEqual([])
+  })
+
+  it("STILL refuses loudly when a non-deleted submodule is not materialized", async () => {
+    const { repo, baseSha, specChangeSha } = await pinnedSuperproject()
+    await using process = createProcess({ cwd: repo })
+    // Discriminating on the null pin must not become "skip whenever the workdir is
+    // missing" — that would hide a broken checkout, which the docblock forbids.
+    await rm(join(repo, "dep", ".git"), { recursive: true, force: true })
+
+    await expect(
+      submoduleManifestDrift(process, {
+        repo,
+        workspace: repo,
+        baseSha,
+        candidateSha: specChangeSha,
+        fail: refuse,
+      }),
+    ).rejects.toThrow(/is not materialized/u)
   })
 
   it("withholds authorization when the pin moved but no manifest did", async () => {
