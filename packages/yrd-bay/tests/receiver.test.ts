@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process, type ProcessRequest } from "@yrd/process"
 import {
   createGitPushReceiver,
+  defaultReceiverHookEntry,
   loadGitPushReceiver,
   receiverHookSource,
   submitRefSplits,
@@ -314,6 +315,8 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // Mirror the real layout: the receiver state dir lives inside the host's own git directory.
     const gitDir = await realpath(join(main.path, ".git"))
     const stateDir = join(gitDir, "yrd")
+    await mkdir(join(main.path, "bin"))
+    await writeFile(join(main.path, "bin", "yrd"), "#!/bin/sh\necho isolation-yrd\n")
     const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process: runner })
 
     // `git init --bare` must target the isolated prs.git, strictly inside .git and never the host git dir.
@@ -327,18 +330,68 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await git(main.path, "rev-parse", "--show-toplevel")).toBe(await realpath(main.path))
   })
 
+  it("refuses loudly when declared mainRepo has no bin/yrd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-hook-missing-"))
+    roots.push(root)
+    const main = await createRepo(root, "main repo")
+    const runner = createProcess()
+    processes.push(runner)
+    const gitDir = await realpath(join(main.path, ".git"))
+    await expect(
+      createGitPushReceiver({ mainRepo: main.path, stateDir: join(gitDir, "yrd"), process: runner }),
+    ).rejects.toThrow(/declared mainRepo .* has no bin\/yrd/)
+  })
+
+  it("anchors managed hooks on declared mainRepo, not the running checkout", async () => {
+    // @yrd/core/receive-hooks-follow-declared-main: createGitPushReceiver
+    // rewrites fleet hooks whenever the running module's import.meta walk
+    // disagrees with the last writer. A slot must not retarget the fleet
+    // receiver onto its own bin/yrd. The declared mainRepo is anchor (b)
+    // (cto verdict d1af9005): a library is always handed the declared root.
+    const root = await mkdtemp(join(tmpdir(), "yrd-hook-anchor-"))
+    roots.push(root)
+    const main = await createRepo(root, "main repo")
+    const declared = join(main.path, "vendor", "yrd", "bin", "yrd")
+    await mkdir(join(main.path, "vendor", "yrd", "bin"), { recursive: true })
+    await writeFile(declared, "#!/bin/sh\necho declared-main-yrd\n")
+    const runner = createProcess()
+    processes.push(runner)
+    const gitDir = await realpath(join(main.path, ".git"))
+    const stateDir = join(gitDir, "yrd")
+    const running = defaultReceiverHookEntry()
+    expect(running, "this checkout's bin is not the declared mainRepo bin").not.toBe(declared)
+
+    const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process: runner })
+    for (const mode of ["pre-receive", "post-receive"] as const) {
+      const body = await readFile(join(receiver.receiverPath, "hooks", mode), "utf8")
+      expect(body, `${mode} re-execs declared mainRepo yrd`).toBe(receiverHookSource(mode, declared))
+      expect(body, `${mode} must not follow the running checkout`).not.toContain(running)
+      expect(body, `${mode} must not mention a worktree slot`).not.toContain(".worktrees")
+    }
+  })
+
   it("refuses unmanaged hooks and retargeting", async () => {
     const f = await fixture("binding")
     const hook = join(f.receiver.receiverPath, "hooks", "pre-receive")
     await writeFile(hook, "#!/bin/sh\necho operator-hook\n")
     await expect(
-      createGitPushReceiver({ mainRepo: f.mainRepo, stateDir: f.stateDir, process: f.process }),
+      createGitPushReceiver({
+        mainRepo: f.mainRepo,
+        stateDir: f.stateDir,
+        process: f.process,
+        hookEntry: f.hookEntry,
+      }),
     ).rejects.toThrow(/unmanaged pre-receive hook/)
     expect(await readFile(hook, "utf8")).toContain("operator-hook")
 
     const other = await createRepo(f.root, "other repo")
     await expect(
-      createGitPushReceiver({ mainRepo: other.path, stateDir: f.stateDir, process: f.process }),
+      createGitPushReceiver({
+        mainRepo: other.path,
+        stateDir: f.stateDir,
+        process: f.process,
+        hookEntry: f.hookEntry,
+      }),
     ).rejects.toThrow(/already belongs to another repository/)
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)
   })

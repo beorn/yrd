@@ -234,21 +234,17 @@ type ReceiverOptions = Readonly<{
   process: Pick<Process, "run">
   receiverPath?: string
   inboxDir?: string
-  /** Yrd entry the managed hook re-invokes; defaults to the worktree-anchored `bin/yrd`. */
+  /** Yrd entry the managed hook re-invokes; defaults to declared `mainRepo`'s `bin/yrd`. */
   hookEntry?: string
 }>
 
 /**
  * Absolute path to the `bin/yrd` entry of the Yrd checkout that owns THIS module.
  *
- * The managed receive hook re-invokes Yrd in a fresh process that cold-replays
- * the journal and statically imports `@yrd/bay`. Resolving that entry through
- * the ambient `PATH` (the previous `["yrd", …]` spawn) let a push validated from
- * one linked worktree load `@yrd/bay` from a *different* (mutable) checkout — the
- * hermeticity leak in @yrd/core/21170. Anchoring to `import.meta` binds the hook
- * to the worktree whose code wrote it, mirroring the source-root walk in
- * `@yrd/cli`'s version identity. A missing entry is raised loudly; it never
- * silently falls back to a parent Git repository.
+ * Used by tests to name the *running* checkout. Production hooks must not use
+ * this: a fleet receiver is last-writer-wins across every linked worktree if
+ * it re-execs whichever module wrote it (21170's import.meta walk, inverted).
+ * The fleet entry is {@link declaredReceiverHookEntry}.
  */
 export function defaultReceiverHookEntry(): string {
   let directory = import.meta.dirname
@@ -260,6 +256,23 @@ export function defaultReceiverHookEntry(): string {
     }
     directory = parent
   }
+}
+
+/**
+ * `bin/yrd` under the declared main repository — cto d1af9005 anchor (b).
+ * A yrd clone keeps `bin/yrd` at its root; an hh superproject keeps it at
+ * `vendor/yrd/bin/yrd`. Missing both is loud; there is no PATH or import.meta
+ * fallback, so a slot cannot silently retarget the fleet receiver.
+ */
+export function declaredReceiverHookEntry(mainRepo: string): string {
+  const repo = resolve(mainRepo)
+  const direct = join(repo, "bin", "yrd")
+  const nested = join(repo, "vendor", "yrd", "bin", "yrd")
+  if (existsSync(direct)) return direct
+  if (existsSync(nested)) return nested
+  throw new Error(
+    `yrd: receiver: declared mainRepo '${repo}' has no bin/yrd (looked at '${direct}' and '${nested}')`,
+  )
 }
 
 export function receiverHookSource(mode: HookMode, entry: string): string {
@@ -279,7 +292,7 @@ export function receiverHookSource(mode: HookMode, entry: string): string {
 }
 
 export async function createGitPushReceiver(options: ReceiverOptions): Promise<GitPushReceiver> {
-  const hookEntry = options.hookEntry ?? defaultReceiverHookEntry()
+  const hookEntry = options.hookEntry ?? declaredReceiverHookEntry(options.mainRepo)
   const requestedState = resolve(options.stateDir)
   await mkdir(requestedState, { recursive: true, mode: 0o700 })
   const mainRepo = await realpath(resolve(options.mainRepo))
