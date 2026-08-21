@@ -1363,11 +1363,7 @@ async function requireSubmitLinearTip(
 
 /** Parent SHAs of one commit — the linear-root gate's evidence at entrances
  * that hold a sha rather than a branch (`pr ready`, active-Bay submit). */
-async function readCommitParents(
-  process: Pick<Process, "run">,
-  repo: string,
-  sha: string,
-): Promise<readonly string[]> {
+async function readCommitParents(process: Pick<Process, "run">, repo: string, sha: string): Promise<readonly string[]> {
   const args = ["rev-list", "--parents", "-n", "1", sha]
   const lineage = await process.run({
     argv: ["git", "-C", repo, ...args],
@@ -2528,6 +2524,9 @@ export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | 
      * (`code`, `pm`) — the queue LABEL run names lead with (item 36). Absent
      * for standalone invocations, which have no config handles yet. */
     repositoryLabel?: string
+    /** Host-evaluated uncarried exemptions. Copied onto IO so both the
+     * `queue uncarried` command and the resident sweeper share one adapter. */
+    uncarriedFilter?: YrdCliIO["filterUncarriedFindings"]
   }>
 
 type YrdRuntimeHostOptions = YrdHostOptions &
@@ -2986,6 +2985,7 @@ async function runYrdProcessHost(
   terminateAfterCleanup: boolean,
   options: YrdProcessHostOptions,
 ): Promise<YrdCliExitCode> {
+  if (options.uncarriedFilter) io.filterUncarriedFindings = options.uncarriedFilter
   const env = process.env
   const invocation = resolveInvocation(argv)
   if (invocation.args[0] === "receiver-hook") {

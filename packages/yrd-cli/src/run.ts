@@ -73,6 +73,7 @@ import {
   Queues,
   pruneCandidateRefs,
   sweepCandidateRefs,
+  applyHostFindingFilter,
   sweepUncarriedRefs,
   type CandidateRefSweepResult,
   type QueuesState,
@@ -7989,15 +7990,16 @@ function createUncarriedSweeper(
       namespace: "refs/remotes/origin",
       authoredOnly: true,
       carriedBranches: new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch)),
-      // Declared empty, never omitted — see `queueUncarried` below for why
-      // there is no store to read it from yet.
+      // Declared empty, never omitted — the disposition store is host-evaluated
+      // after this sweep (applyHostFindingFilter). retiredRefs cannot carry it.
       retiredRefs: new Set<string>(),
       nowMs: startedMs,
       ttlMs: UNCARRIED_TTL_MS,
       ageBoundMs: UNCARRIED_AGE_BOUND_MS,
     })
+    const filtered = applyHostFindingFilter(result.findings, io.filterUncarriedFindings)
     latest = uncarriedObservation({
-      count: result.findings.length,
+      count: filtered.findings.length,
       scanned: result.scanned,
       missingUpdateClocks: result.missingUpdateClocks,
       // The sweep reports its own measurable population now — this used to be
@@ -8047,15 +8049,16 @@ async function queueUncarried(
     namespace: options.namespace ?? "refs/remotes/origin",
     authoredOnly: options.namespace === undefined,
     carriedBranches,
-    // No store yet, so nothing is retired and the sweep is told that
-    // explicitly rather than by omission. Where an author's retirement
-    // declaration lives is still open — `.yrd.yml` is flow-shaped and this is
-    // watcher-policy-shaped (@i/10-merge-queue/23090-watcher-pages-archives).
+    // retiredRefs stays empty: the disposition store is host-evaluated after
+    // this sweep. Feeding it through retiredRefs would print "retired" for a
+    // ref held to a date by a named verdict (@i/10-merge-queue/23150).
     retiredRefs: new Set<string>(),
     nowMs: new Date(io.now?.() ?? Date.now()).getTime(),
     ttlMs: UNCARRIED_TTL_MS,
     ageBoundMs: UNCARRIED_AGE_BOUND_MS,
   })
+  const filtered = applyHostFindingFilter(result.findings, io.filterUncarriedFindings)
+  const findings = filtered.findings
 
   // The counts print on BOTH paths, not just the empty one. "no uncarried refs"
   // alone cannot be told apart from a sweep that looked at nothing, and this
@@ -8079,8 +8082,9 @@ async function queueUncarried(
   // print bare, so the command contradicted the rail's own reasoning about the
   // very number it was reporting — and a bare "0 uncarried refs" from a 15%
   // reading is the exact "clean fleet" claim the floor exists to refuse.
-  const bounded = uncarriedFloorCount(result.findings.length, result.missingUpdateClocks, result.skipped.length)
-  const lines = result.findings.map((finding) => `${finding.ref}  ${finding.message}`)
+  const bounded = uncarriedFloorCount(findings.length, result.missingUpdateClocks, result.skipped.length)
+  const exemptionBlock = filtered.exemptionLines.length === 0 ? [] : [...filtered.exemptionLines, ""]
+  const lines = findings.map((finding) => `${finding.ref}  ${finding.message}`)
   // Named on BOTH paths, including the "nothing found" one — that is the path
   // where an unreported skip does its damage, because there is no finding on
   // screen to make a reader wonder what else was there.
@@ -8094,12 +8098,12 @@ async function queueUncarried(
     // a bare `findings` array and had to rediscover from the raw ledger that the
     // count is a floor — the same misreading the human branch already refuses
     // (@i/10-merge-queue/22925-watch-shows-every-pr).
-    { command: "queue.uncarried", ...result, floor, bounded },
-    result.findings.length === 0
-      ? [...skippedBlock, `${bounded} uncarried refs (${floor}) — ${denominator}`].join("\n")
-      : [...lines, "", ...skippedBlock, `${bounded} findings (${floor})`, denominator].join("\n"),
+    { command: "queue.uncarried", ...result, findings, exemptionLines: filtered.exemptionLines, floor, bounded },
+    findings.length === 0
+      ? [...exemptionBlock, ...skippedBlock, `${bounded} uncarried refs (${floor}) — ${denominator}`].join("\n")
+      : [...exemptionBlock, ...lines, "", ...skippedBlock, `${bounded} findings (${floor})`, denominator].join("\n"),
   )
-  return result.findings.length === 0 ? 0 : 1
+  return findings.length === 0 ? 0 : 1
 }
 
 /**
