@@ -1025,7 +1025,7 @@ async function hasCommandOutput(dir: string): Promise<boolean> {
 }
 
 async function hasTerminalRecord(dir: string): Promise<boolean> {
-  return  readFile(join(dir, "terminal.json"))
+  return readFile(join(dir, "terminal.json"))
     .then(() => true)
     .catch(() => false)
 }
