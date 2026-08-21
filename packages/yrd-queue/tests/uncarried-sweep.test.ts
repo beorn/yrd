@@ -8,7 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { sweepUncarriedRefs, type SweepOptions } from "../src/uncarried-sweep.ts"
+import { applyHostFindingFilter, sweepUncarriedRefs, type SweepOptions } from "../src/uncarried-sweep.ts"
 import type { RefGit } from "../src/uncarried-facts.ts"
 
 const HOUR = 60 * 60 * 1000
@@ -594,7 +594,6 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
   })
 })
 
-
 describe("policy exemptions", () => {
   // The rail's failure mode is not a missed ref; it is a reader who stopped
   // opening it. @ci's pager reached 36 unread rows
@@ -711,5 +710,21 @@ describe("policy exemptions", () => {
     // flatter the coverage with refs it deliberately declined to judge —
     // the same reason `carried` and `superseded` stay out of `measurable`.
     expect(result.measurable).toBe(0)
+  })
+
+  it("host finding filter drops in-force refs after the sweep, never through retiredRefs", () => {
+    const findings = [
+      { ref: "origin/feat/one-repo-root-resolver-v2", message: "rescue" },
+      { ref: "origin/task/live-work", message: "rescue" },
+    ]
+    const out = applyHostFindingFilter(findings, (rows) => ({
+      findings: rows.filter((row) => row.ref !== "origin/feat/one-repo-root-resolver-v2"),
+      exemptionLines: [
+        "EXEMPTED  origin/feat/one-repo-root-resolver-v2  held-by-ruling  store @yrd/uncarried-dispositions.md  ruling:: 6acb3bf6",
+      ],
+    }))
+    expect(out.findings.map((row) => row.ref)).toEqual(["origin/task/live-work"])
+    expect(out.exemptionLines[0]).toMatch(/ruling:: 6acb3bf6/)
+    expect(applyHostFindingFilter(findings).findings).toEqual(findings)
   })
 })

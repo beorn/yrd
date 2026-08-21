@@ -96,6 +96,27 @@ export type ExemptedRef = Readonly<{
  */
 export const ARCHIVE_REF_PREFIXES: readonly string[] = ["rescue/"]
 
+/**
+ * Host-evaluated exemptions applied AFTER the sweep. Not `retiredRefs`.
+ *
+ * `retiredRefs` is a two-valued membership test that prints "retired". A
+ * disposition store with held-by-ruling / until-date must not go through that
+ * socket (@i/10-merge-queue/23150). The host evaluates predicates and hands
+ * already-decided rows; the sweep stays a pure evaluator.
+ */
+export type HostFindingFilter = <T extends { ref: string }>(
+  findings: readonly T[],
+) => { findings: readonly T[]; exemptionLines?: readonly string[] }
+
+export function applyHostFindingFilter<T extends { ref: string }>(
+  findings: readonly T[],
+  filter?: HostFindingFilter,
+): { findings: readonly T[]; exemptionLines: readonly string[] } {
+  if (!filter) return { findings, exemptionLines: [] }
+  const out = filter(findings)
+  return { findings: out.findings, exemptionLines: out.exemptionLines ?? [] }
+}
+
 /** Which policy exclusion applies to a branch, if any. Archive outranks
  * retired so a ref that is both still lands in exactly one bucket. */
 function exemptionOf(branch: string, retiredRefs: ReadonlySet<string>): ExemptionDisposition | undefined {
