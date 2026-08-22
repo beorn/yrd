@@ -40,4 +40,36 @@ describe("requireLinearRootTip", () => {
       expect(message).toMatch(/fast-forward/iu)
     }
   })
+
+  it("says the FF is a no-op when the unique list is empty", () => {
+    try {
+      requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"], {
+        unique: [],
+        notYours: 0,
+        unreviewed: 0,
+      })
+      throw new Error("expected refusal")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      expect(message).toMatch(/FF is a no-op/u)
+      expect(message).toMatch(/unique list is empty/u)
+      expect(message).not.toMatch(/dragged set/u)
+    }
+  })
+
+  it("names the dragged set with N not-yours and M unreviewed", () => {
+    try {
+      requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"], {
+        unique: [{ sha: "3652bfe", subject: "fix(process): retry a STALLED read-only git call" }],
+        notYours: 1,
+        unreviewed: 1,
+      })
+      throw new Error("expected refusal")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      expect(message).toMatch(/dragged set/u)
+      expect(message).toMatch(/3652bfe/)
+      expect(message).toMatch(/of the commits this FF would carry, 1 are not yours and 1 are unreviewed/u)
+    }
+  })
 })
