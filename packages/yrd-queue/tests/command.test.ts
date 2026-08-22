@@ -5104,6 +5104,79 @@ describe("Queue command adapters", () => {
     expect(commandCwds).toEqual([candidatePath])
   })
 
+  it("defaults command artifacts under $GIT_DIR/yrd/artifacts, not cwd/.yrd-artifacts", async () => {
+    const { repo } = await repository()
+    const gitDir = await git(repo, ["rev-parse", "--absolute-git-dir"])
+    const process: Pick<Process, "run"> = {
+      run() {
+        return Promise.resolve({
+          exitCode: 0,
+          signal: null,
+          stdout: "ok\n",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        })
+      },
+    }
+    const step = configuredCommandStep<ChangeShape>({
+      inject: { process },
+      command: ["true"],
+      cwd: repo,
+      purpose: "check",
+    })
+    const outcome = await step(
+      {
+        run: "R-outside",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        shape: { results: {} },
+      },
+      { id: "J-outside", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(existsSync(join(repo, ".yrd-artifacts"))).toBe(false)
+    expect(existsSync(join(gitDir, "yrd", "artifacts", "R-outside", "0-check", "attempt-1"))).toBe(true)
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
+  it("refuses a missing artifactRoot when cwd is not a git work tree", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-no-git-"))
+    roots.push(cwd)
+    const step = configuredCommandStep<ChangeShape>({
+      inject: {
+        process: {
+          run() {
+            return Promise.resolve({
+              exitCode: 0,
+              signal: null,
+              stdout: "",
+              stderr: "",
+              durationMs: 1,
+              timedOut: false,
+            })
+          },
+        },
+      },
+      command: ["true"],
+      cwd,
+      purpose: "check",
+    })
+    await expect(
+      step(
+        {
+          run: "R1",
+          step: "check",
+          index: 0,
+          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          shape: { results: {} },
+        },
+        { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).rejects.toThrow(/not a git work tree|artifactRoot/)
+  })
+
   it("executes argv directly and requires an explicit gate for shell text", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-argv-"))
     roots.push(cwd)
@@ -5139,17 +5212,20 @@ describe("Queue command adapters", () => {
       }),
     ).toThrow("shellCommand")
 
+    const artifactRoot = join(cwd, "artifacts")
     const direct = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: ["printf", "%s", "literal;$(not-expanded)"],
       cwd,
       purpose: "check",
+      artifactRoot,
     })
     const explicitShell = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: shellCommand("printf shell"),
       cwd,
       purpose: "check",
+      artifactRoot,
     })
 
     await direct(input, context)
@@ -5387,6 +5463,7 @@ describe("Queue command adapters", () => {
         command: ["false"],
         cwd,
         purpose: "check",
+        artifactRoot: join(cwd, "artifacts"),
         ...(verdict === undefined ? {} : { noProgressTimeoutMs: 120_000 }),
       })
       const outcome = await step(
@@ -5456,6 +5533,7 @@ describe("Queue command adapters", () => {
       command: ["bun", "run", "check"],
       cwd,
       purpose: "check",
+      artifactRoot: join(cwd, "artifacts"),
       // Deliberately NO noProgressTimeoutMs — proves the escaped branch is
       // independent of the output-progress lease.
     })
@@ -7144,11 +7222,14 @@ describe("Queue command adapters", () => {
       context = jobContext(),
     ) => {
       const { requests, process } = capturingProcess()
+      const artifactRoot = await mkdtemp(join(tmpdir(), "yrd-env-artifacts-"))
+      roots.push(artifactRoot)
       const step = configuredCommandStep<ChangeShape>({
         inject: { process },
         command: ["check-env"],
         cwd: ".",
         purpose: "check",
+        artifactRoot,
         ...options,
       })
       const result = await step(execution(), context)
@@ -7189,11 +7270,14 @@ describe("Queue command adapters", () => {
     it("snapshots declared overrides at construction so later mutation is never applied", async () => {
       const { requests, process } = capturingProcess()
       const overrides: Record<string, string> = { SAFE_DECLARED: "yes" }
+      const artifactRoot = await mkdtemp(join(tmpdir(), "yrd-env-artifacts-"))
+      roots.push(artifactRoot)
       const step = configuredCommandStep<ChangeShape>({
         inject: { process },
         command: ["check-env"],
         cwd: ".",
         purpose: "check",
+        artifactRoot,
         env: ambient,
         environmentOverrides: overrides,
       })
