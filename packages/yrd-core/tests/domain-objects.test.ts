@@ -15,6 +15,7 @@ import {
   createYrd,
   createYrdDef,
   event,
+  failureFact,
   journalEvent,
   withCheckpointMigrations,
   type CommandTree,
@@ -584,6 +585,46 @@ describe("Yrd domain objects", () => {
         { from: "not-a-checkpoint-identity", migrate: identity },
       ]),
     ).toThrow(/not a SHA-256 identity/iu)
+  })
+
+  it("names eviction when a missing migration path cannot rebuild from retained history", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const predecessor = withCounter("counter-v1")(createYrdDef())
+    const writer = await createYrd(predecessor, {
+      inject: { journal: cache.journal, id: ids("named-eviction-command", "named-eviction-event") },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 1 } })
+    await writer.close()
+    const stored = cache.stored()
+    if (stored === undefined) throw new Error("expected predecessor checkpoint")
+    const evictedThrough = 27609
+    const retained = {
+      ...cache.journal,
+      history: journalHistory(evictedThrough),
+      read(after = 0, before?: number) {
+        if (after === 0) throw new RangeError(`history below cursor ${evictedThrough + 1} was evicted`)
+        return backing.read(after, before)
+      },
+    } satisfies Journal<unknown>
+    const definition = withCheckpointMigrations(withCounter("counter-v2")(createYrdDef()), [
+      { from: "1".repeat(64), migrate: (state: CounterState) => state },
+    ])
+
+    let caught: unknown
+    try {
+      await createYrd(definition, { inject: { journal: retained } })
+    } catch (error) {
+      caught = error
+    }
+
+    const fact = failureFact(caught)
+    expect(fact?.code).toBe("checkpoint-migration-missing")
+    expect(fact?.message).toContain(stored.identity)
+    expect(fact?.message).toMatch(/rebuild from history is unavailable/i)
+    expect(fact?.message).toContain(`cursor ${evictedThrough}`)
+    expect(fact?.message).not.toMatch(/invent a migration|run a migration to proceed/i)
+    expect(fact?.message).toMatch(/inspect the checkpoint store|declare an edge/i)
   })
 
   it("restores versioned result frames from a projection checkpoint", async () => {
