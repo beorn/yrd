@@ -153,9 +153,12 @@ describe("terminalSettlementTargets", () => {
 })
 
 describe("settlement cursors", () => {
-  it("reads an absent cursor as the start of the journal", async () => {
+  it("refuses a missing cursor for a registered worker instead of inventing 0", async () => {
     const dir = temporaryDir("yrd-settlement-cursor-")
-    await expect(readSettlementCursor(join(dir, "missing.json"), "@seat/1")).resolves.toBe(0)
+    const path = join(dir, "missing.json")
+    await expect(readSettlementCursor(path, "@seat/1")).rejects.toThrow(/missing\.json/)
+    await expect(readSettlementCursor(path, "@seat/1")).rejects.toThrow(/@seat\/1/)
+    await expect(readSettlementCursor(path, "@seat/1")).rejects.toThrow(/evictedThrough/)
   })
 
   it("round-trips a cursor for its owner", async () => {
@@ -172,11 +175,12 @@ describe("settlement cursors", () => {
     await expect(readSettlementCursor(path, "@seat/2")).rejects.toThrow("settlement cursor is invalid")
   })
 
-  it("names the repair command in the refusal so the rail is never permanently stuck", async () => {
+  it("names a recovery that does not convert a readable cursor into ENOENT", async () => {
     const dir = temporaryDir("yrd-settlement-cursor-repair-")
     const path = join(dir, "broken.json")
     writeFileSync(path, "{ not json")
-    await expect(readSettlementCursor(path, undefined)).rejects.toThrow(`recovery: mv -n -- '${path}'`)
+    await expect(readSettlementCursor(path, undefined)).rejects.toThrow(/recovery:/)
+    await expect(readSettlementCursor(path, undefined)).rejects.not.toThrow(/mv -n --/)
   })
 
   it("keeps owned and ownerless cursors in different files", () => {
