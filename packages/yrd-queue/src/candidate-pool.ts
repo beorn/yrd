@@ -22,6 +22,12 @@ import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktre
  * outcome is `hit` (reused a warm worktree), `miss` (created a fresh one), or
  * `residue-evicted` (a reused worktree could not be made clean and was
  * discarded). Span disposal records the measured duration.
+ *
+ * `materialize` is the one span whose cost is not its own: nearly all of it is
+ * git-super updating submodules. It nests `yrd:submodules:*` underneath —
+ * per-level `walk` laps, and one `update` per submodule naming local versus
+ * network — so the 39s in run R40 is attributable to a submodule rather than
+ * merely to this phase. Enable with -vv, as with every other span here.
  */
 
 /** The narrow Git surface the pool drives. Structural to keep the pool decoupled
@@ -241,11 +247,20 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
 
   async function materialize(worktree: string, ref: string): Promise<void> {
     using _span = log?.span?.("materialize", { repo, ref })
+    // The logger goes through whole, under its own namespace. It used to be
+    // flattened here — `log: (message) => log?.debug?.(message)` — which turned
+    // every structured fact git-super had (which submodule, borrowed off disk
+    // or fetched over the network, how long each phase took) into a debug
+    // string. This span then reported one duration for all of it, so the run
+    // that opened sixteen SSH connections on 2026-08-21 and the run that
+    // borrowed sixteen times off local disk produced the same record.
+    // `child` keeps them distinguishable as `yrd:submodules:*` rather than
+    // colliding with this `yrd:materialize` span.
     const updated = await materializeSubmodules(git, {
       worktree,
       referenceWorktree: repo,
       force: true,
-      log: (message) => log?.debug?.(message),
+      ...(log === undefined ? {} : { log: log.child("submodules") }),
     })
     if (updated.code !== 0) {
       throw new Error(updated.stderr || updated.stdout || `could not materialize submodules for '${ref}'`)
