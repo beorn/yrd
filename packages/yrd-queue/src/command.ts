@@ -7,8 +7,10 @@ import {
   CheckpointMigrationManifestSchema,
   checkpointMigrationManifestHash,
   cherryFfInstruction,
+  parseCherryVerbose,
   createFailure,
   failureFact,
+  type CherryDragged,
   type JsonValue,
   type YrdFailure,
 } from "@yrd/core"
@@ -4372,11 +4374,28 @@ async function intentSubmissionWorkflow(
       }
       return (
         `get commit '${target}' onto '${submodule}''s own main, then submit an ordinary change whose ` +
-        `diff is the gitlink bump (issue ${issue}); ${cherryFfInstruction()}`
+        `diff is the gitlink bump (issue ${issue}); ${cherryFfInstruction(await readCherryDragged(git, repo, submodule, previous))}`
       )
     }),
   )
   return steps.join("; ")
+}
+
+/** Best-effort `git cherry -v <estate-pin> <component-main>` in the submodule
+ * checkout. Unavailable objects, an unmaterialized checkout, or a missing main
+ * return undefined so the caller prints the command instead of inventing a list. */
+async function readCherryDragged(
+  git: Git,
+  repo: string,
+  submodule: string,
+  estatePin: string,
+): Promise<CherryDragged | undefined> {
+  const checkout = join(repo, submodule)
+  const main = await git.run(checkout, ["rev-parse", "--verify", SUBMODULE_MAIN_REF], true)
+  if (main.code !== 0 || main.stdout === "") return undefined
+  const cherry = await git.run(checkout, ["cherry", "-v", estatePin, main.stdout], true)
+  if (cherry.code !== 0) return undefined
+  return { unique: parseCherryVerbose(cherry.stdout) }
 }
 
 function submoduleIntentWorkflow(): string {

@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { failureFact } from "../src/failure.ts"
-import { cherryFfInstruction, requireLinearRootTip } from "../src/linear-tip.ts"
+import { cherryFfInstruction, parseCherryVerbose, requireLinearRootTip } from "../src/linear-tip.ts"
 
 describe("requireLinearRootTip", () => {
   it("is silent for a linear tip", () => {
@@ -93,5 +93,34 @@ describe("cherryFfInstruction", () => {
     })
     expect(text).toMatch(/dragged set \(1 unique\): 3652bfe /u)
     expect(text).toMatch(/1 are not yours and 1 are unreviewed/u)
+  })
+
+  it("names the dragged set without inventing N/M when those counts are not in hand", () => {
+    const text = cherryFfInstruction({
+      unique: [{ sha: "3652bfe", subject: "fix(process): retry a STALLED read-only git call" }],
+    })
+    expect(text).toMatch(/dragged set \(1 unique\): 3652bfe /u)
+    expect(text).not.toMatch(/not yours/u)
+    expect(text).not.toMatch(/unreviewed/u)
+  })
+})
+
+describe("parseCherryVerbose", () => {
+  it("returns an empty unique list when cherry is empty or only equivalents", () => {
+    expect(parseCherryVerbose("")).toEqual([])
+    expect(parseCherryVerbose("- 21d0a4b already in the estate\n")).toEqual([])
+  })
+
+  it("keeps only unique (+) rows as the dragged set", () => {
+    expect(
+      parseCherryVerbose(
+        "+ 3652bfe fix(process): retry a STALLED read-only git call\n" +
+          "- 21d0a4b already applied\n" +
+          "+ abcdef0 feat(queue): another unique\n",
+      ),
+    ).toEqual([
+      { sha: "3652bfe", subject: "fix(process): retry a STALLED read-only git call" },
+      { sha: "abcdef0", subject: "feat(queue): another unique" },
+    ])
   })
 })
