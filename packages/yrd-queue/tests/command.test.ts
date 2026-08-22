@@ -5141,6 +5141,32 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it("a real command run leaves the git work tree porcelain-empty", async () => {
+    const { repo } = await repository()
+    const gitDir = await git(repo, ["rev-parse", "--absolute-git-dir"])
+    await using process = createProcess()
+    const step = configuredCommandStep<ChangeShape>({
+      inject: { process },
+      command: ["true"],
+      cwd: repo,
+      purpose: "check",
+    })
+    const outcome = await step(
+      {
+        run: "R-live",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        shape: { results: {} },
+      },
+      { id: "J-live", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(existsSync(join(repo, ".yrd-artifacts"))).toBe(false)
+    expect(existsSync(join(gitDir, "yrd", "artifacts", "R-live", "0-check", "attempt-1"))).toBe(true)
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
   it("refuses a missing artifactRoot when cwd is not a git work tree", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-no-git-"))
     roots.push(cwd)
