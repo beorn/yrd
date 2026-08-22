@@ -5197,6 +5197,10 @@ describe("Queue command adapters", () => {
     )
     expect(existsSync(join(cwd, ".yrd-artifacts")), "must not write into the working tree").toBe(false)
     expect(existsSync(join(gitDir, "yrd", "artifacts", "R1", "0-check", "attempt-1", "terminal.json"))).toBe(true)
+    expect(
+      execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }).trim(),
+      "a completed command run must leave the working tree clean",
+    ).toBe("")
   })
 
   it("streams exact stdout and stderr artifacts before a configured command settles", async () => {
