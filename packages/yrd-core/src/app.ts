@@ -873,12 +873,20 @@ export async function createYrd<State extends object, Commands extends CommandTr
             try {
               checkpoint = migrateProjectionCheckpoint(definition, predecessor, checkpointIdentity)
             } catch (error) {
-              if (
-                failureFact(error)?.code === "checkpoint-migration-missing" &&
-                history?.diagnostics().evictedThrough === 0
-              ) {
-                reportSavedStateRebuild("Saved state has no migration path; rebuilding it from complete history.")
-                return undefined
+              if (failureFact(error)?.code === "checkpoint-migration-missing") {
+                const evictedThrough = history?.diagnostics().evictedThrough ?? 0
+                if (evictedThrough === 0) {
+                  reportSavedStateRebuild("Saved state has no migration path; rebuilding it from complete history.")
+                  return undefined
+                }
+                raiseFailure(
+                  "configuration",
+                  "checkpoint-migration-missing",
+                  `yrd: no checkpoint migration path exists from '${predecessor.identity}' to '${checkpointIdentity}'; ` +
+                    `rebuild from history is unavailable because history through cursor ${evictedThrough} was evicted. ` +
+                    "If this identity pair is unexpected, inspect the checkpoint store; " +
+                    "if it is an intended definition change, declare an edge from the stored identity",
+                )
               }
               throw error
             }
