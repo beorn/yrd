@@ -106,7 +106,14 @@ import {
   type MutableJournal,
   type ResolvedRetention,
 } from "@yrd/persistence"
-import { adaptProcessGit, createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
+import {
+  adaptProcessGit,
+  createProcess,
+  shellCommand,
+  withGitTimeoutRetry,
+  type Process,
+  type ProcessResult,
+} from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
@@ -2555,7 +2562,9 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
       globalThis.process.stderr.write(text),
     )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
-  const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
+  const process = withGitTimeoutRetry(
+    withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } })),
+  )
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
@@ -2641,7 +2650,9 @@ async function createYrdRuntimeHost(
       globalThis.process.stderr.write(text),
     )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
-  const process = withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } }))
+  const process = withGitTimeoutRetry(
+    withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } })),
+  )
   let app: YrdCliApp | undefined
   let residentLease: ResidentRunnerLease | undefined
   let candidatePool: CandidatePool | undefined
@@ -2868,8 +2879,8 @@ async function runReceiverHook(
   const scope = createScope("yrd-receiver-hook")
   const rootLog = createYrdLogger(resolveYrdObservability({}, env), (text) => globalThis.process.stderr.write(text))
   const log = rootLog.child({ host: "receiver-hook", mode })
-  const runtimeProcess = withGitIndexLockRetry(
-    createProcess({ cwd: globalThis.process.cwd(), env, inject: { scope, log } }),
+  const runtimeProcess = withGitTimeoutRetry(
+    withGitIndexLockRetry(createProcess({ cwd: globalThis.process.cwd(), env, inject: { scope, log } })),
   )
   let app: YrdCliApp | undefined
   try {
