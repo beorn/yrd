@@ -11,7 +11,13 @@ import {
   type YrdFailure,
 } from "@yrd/core"
 import { JobErrorSchema, parseJobLaunch, type Job, type JobContext, type JobError, type JobResult } from "@yrd/job"
-import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
+import {
+  adaptProcessGit,
+  gitSuperFailureDetail,
+  withGitTimeoutRetry,
+  type Process,
+  type ProcessResult,
+} from "@yrd/process"
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { writeGitlink } from "git-super/gitlink"
 import { ensureCommitObject } from "git-super/objects"
@@ -1162,10 +1168,11 @@ const GIT_CLEANUP_TIMEOUT_MS = 120_000
 const GIT_UNSTARTABLE_CODE = 126
 
 function createGit(
-  process: Pick<Process, "run">,
+  incoming: Pick<Process, "run">,
   environment: NodeJS.ProcessEnv = globalThis.process.env,
   options: Readonly<{ noLazyFetch?: boolean }> = {},
 ) {
+  const process = withGitTimeoutRetry(incoming)
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
