@@ -18,6 +18,8 @@ import {
   isQueueRunInvocation,
   prepareYrdSettlementLaunch,
   readSettlementCursor,
+  registerSettlementCursor,
+  registerSettlementWorker,
   settlementCursorPath,
   settlementNoticeDir,
   settlementStateSegments,
@@ -110,6 +112,11 @@ function drainOptions(stateDir: string, hook: YrdSettlementHook, journal: Journa
   }
 }
 
+/** Registration is the act that establishes a worker's position; drain never infers one from absence. */
+async function registerCursor(stateDir: string, owner: string | undefined, cursor = 0): Promise<void> {
+  await registerSettlementCursor(settlementCursorPath(stateDir, owner), owner, cursor)
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -152,10 +159,40 @@ describe("terminalSettlementTargets", () => {
   })
 })
 
+describe("registerSettlementCursor", () => {
+  it("writes an explicit initial cursor so a new worker does not infer position from absence", async () => {
+    const dir = temporaryDir("yrd-settlement-register-")
+    const path = settlementCursorPath(dir, "@seat/1")
+    await registerSettlementCursor(path, "@seat/1", 27609)
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(27609)
+  })
+
+  it("refuses to overwrite a live cursor, so a second create cannot skip ahead of the true position", async () => {
+    const dir = temporaryDir("yrd-settlement-register-once-")
+    const path = settlementCursorPath(dir, "@seat/1")
+    await registerSettlementCursor(path, "@seat/1", 7)
+    await expect(registerSettlementCursor(path, "@seat/1", 99)).rejects.toThrow(/already registered/)
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(7)
+  })
+
+  it("worker create writes the floor cursor once and does not rewind a live one", async () => {
+    const stateDir = temporaryDir("yrd-settlement-worker-create-")
+    const path = settlementCursorPath(stateDir, "@seat/1")
+    await registerSettlementWorker({ stateDir, owner: "@seat/1", evictedThrough: 27609 })
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(27609)
+    await writeSettlementCursor(path, "@seat/1", 30000)
+    await registerSettlementWorker({ stateDir, owner: "@seat/1", evictedThrough: 27609 })
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(30000)
+  })
+})
+
 describe("settlement cursors", () => {
-  it("reads an absent cursor as the start of the journal", async () => {
+  it("refuses a missing cursor for a registered worker instead of inventing 0", async () => {
     const dir = temporaryDir("yrd-settlement-cursor-")
-    await expect(readSettlementCursor(join(dir, "missing.json"), "@seat/1")).resolves.toBe(0)
+    const path = join(dir, "missing.json")
+    await expect(readSettlementCursor(path, "@seat/1")).rejects.toThrow(/missing\.json/)
+    await expect(readSettlementCursor(path, "@seat/1")).rejects.toThrow(/@seat\/1/)
+    await expect(readSettlementCursor(path, "@seat/1")).rejects.toThrow(/evictedThrough/)
   })
 
   it("round-trips a cursor for its owner", async () => {
@@ -172,11 +209,12 @@ describe("settlement cursors", () => {
     await expect(readSettlementCursor(path, "@seat/2")).rejects.toThrow("settlement cursor is invalid")
   })
 
-  it("names the repair command in the refusal so the rail is never permanently stuck", async () => {
+  it("names a recovery that does not convert a readable cursor into ENOENT", async () => {
     const dir = temporaryDir("yrd-settlement-cursor-repair-")
     const path = join(dir, "broken.json")
     writeFileSync(path, "{ not json")
-    await expect(readSettlementCursor(path, undefined)).rejects.toThrow(`recovery: mv -n -- '${path}'`)
+    await expect(readSettlementCursor(path, undefined)).rejects.toThrow(/recovery:/)
+    await expect(readSettlementCursor(path, undefined)).rejects.not.toThrow(/mv -n --/)
   })
 
   it("keeps owned and ownerless cursors in different files", () => {
@@ -187,9 +225,21 @@ describe("settlement cursors", () => {
 })
 
 describe("drainSettlements", () => {
+  it("refuses a drain whose registered cursor file is gone instead of resuming at 0", async () => {
+    const stateDir = temporaryDir("yrd-settlement-drain-lost-")
+    const hook = recordingHook()
+    const journal = createMemoryJournal([frame([terminal("pr/rejected", "host-request", "one")])])
+    const failure = await drainSettlements(drainOptions(stateDir, hook, journal))
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/settlement cursor is missing/)
+    expect((failure as Error).message).toMatch(/evictedThrough/)
+    expect(hook.settled).toEqual([])
+  })
+
   it("hands every terminal fact to the hook and advances the cursor past them", async () => {
     const stateDir = temporaryDir("yrd-settlement-drain-")
     const hook = recordingHook()
+    await registerCursor(stateDir, hook.owner)
     const journal = createMemoryJournal([
       frame([terminal("pr/rejected", "host-request", "one")]),
       frame([terminal("pr/integrated", "host-request", "two")]),
@@ -203,6 +253,7 @@ describe("drainSettlements", () => {
   it("leaves the cursor unmoved when the hook refuses, so the next drain retries the range", async () => {
     const stateDir = temporaryDir("yrd-settlement-drain-refused-")
     const hook = recordingHook({ settle: () => Promise.reject(new Error("host said no")) })
+    await registerCursor(stateDir, hook.owner)
     const journal = createMemoryJournal([frame([terminal("pr/rejected", "host-request", "one")])])
     const failure = await drainSettlements(drainOptions(stateDir, hook, journal))
     expect(failure).toBeInstanceOf(Error)
@@ -213,6 +264,7 @@ describe("drainSettlements", () => {
   it("writes the failure down so a detached worker's error is not lost with its stderr", async () => {
     const stateDir = temporaryDir("yrd-settlement-drain-record-")
     const hook = recordingHook({ settle: () => Promise.reject(new Error("host said no")) })
+    await registerCursor(stateDir, hook.owner)
     await drainSettlements(
       drainOptions(stateDir, hook, createMemoryJournal([frame([terminal("pr/rejected", "host-request", "one")])])),
     )
@@ -227,6 +279,7 @@ describe("drainSettlements", () => {
     const errorPath = join(stateDir, "errors-v1", `${Buffer.from("@seat/1", "utf8").toString("base64url")}.json`)
     mkdirSync(join(stateDir, "errors-v1"), { recursive: true })
     writeFileSync(errorPath, `${JSON.stringify({ version: 1, owner: "@seat/1", error: "stale" })}\n`)
+    await registerCursor(stateDir, "@seat/1")
     await drainSettlements(drainOptions(stateDir, recordingHook(), createMemoryJournal([])))
     expect(() => readFileSync(errorPath, "utf8")).toThrow()
   })
@@ -242,6 +295,7 @@ describe("drainSettlements", () => {
       },
     }
     const journal = createMemoryJournal([frame([terminal("pr/rejected", "host-request", "one")])])
+    await registerCursor(stateDir, undefined)
     await drainSettlements(drainOptions(stateDir, hook, journal))
     expect(settled).toEqual([])
     await expect(readSettlementCursor(settlementCursorPath(stateDir, undefined), undefined)).resolves.toBe(1)
@@ -267,6 +321,7 @@ describe("drainSettlements", () => {
         closed += 1
       },
     })
+    await registerCursor(stateDir, hook.owner)
     await drainSettlements(drainOptions(stateDir, hook, createMemoryJournal([])))
     await drainSettlements(drainOptions(stateDir, hook, createMemoryJournal([])))
     expect(closed).toBe(0)
