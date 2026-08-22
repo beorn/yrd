@@ -906,8 +906,8 @@ export function createBays(
     if (baseSha !== undefined && resolved.baseSha !== undefined && baseSha !== resolved.baseSha) {
       raiseFailure(
         "refusal",
-        "queue-base-moved",
-        `yrd: queue '${resolved.base}' resolved to ${resolved.baseSha.slice(0, 12)}, not pinned ${baseSha.slice(0, 12)}`,
+        "base-authority-conflict",
+        `yrd: caller pin ${baseSha.slice(0, 12)} contradicts live queue '${resolved.base}' at ${resolved.baseSha.slice(0, 12)}`,
       )
     }
     return { ...resolved, ...(baseSha === undefined ? {} : { baseSha }) }
@@ -951,10 +951,9 @@ export function createBays(
       async () => {
         const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
         const recorded = selectedPR()
-        const resolved = await target(
-          args.base ?? bay?.base ?? recorded?.base,
-          args.baseSha ?? bay?.baseSha ?? (recorded === undefined ? undefined : changeBaseSha(recorded)),
-        )
+        // Historical bay/PR pins are not an authority against the live queue.
+        // Only an explicit caller baseSha may contradict resolveBase (AC2).
+        const resolved = await target(args.base ?? bay?.base ?? recorded?.base, args.baseSha)
         return actions.intake({ ...args, ...resolved })
       },
     )
@@ -1197,7 +1196,7 @@ export function createBays(
         await intake({
           bay: bay.id,
           headSha: bay.headSha,
-          ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+          ...(options.base === undefined ? {} : { base: options.base }),
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(composition === undefined ? {} : { composition }),
         })
