@@ -82,6 +82,7 @@ describe("runWithGitTimeoutRetry", () => {
     const completed = await runWithGitTimeoutRetry(process, gitRequest, {
       delaysMs: [0, 0],
       sleep: async () => undefined,
+      announce: () => undefined,
     })
     expect(completed.timedOut).toBe(true)
     expect(process.requests).toHaveLength(3)
@@ -95,5 +96,66 @@ describe("withGitTimeoutRetry", () => {
     const completed = await wrapped.run(gitRequest)
     expect(completed.exitCode).toBe(0)
     expect(inner.requests).toHaveLength(2)
+  })
+
+  it("opens a consecutive-timeout breaker and fails through without spawning", async () => {
+    const inner = runner([timedOut(), timedOut(), timedOut(), ok()])
+    const announcements: string[] = []
+    const wrapped = withGitTimeoutRetry(inner, {
+      delaysMs: [0, 0, 0, 0],
+      sleep: async () => undefined,
+      consecutiveTimeoutLimit: 3,
+      announce: (message) => void announcements.push(message),
+    })
+    const first = await wrapped.run(gitRequest)
+    expect(first.timedOut).toBe(true)
+    expect(inner.requests).toHaveLength(3)
+    expect(announcements).toHaveLength(1)
+    expect(announcements[0]).toContain("circuit breaker open")
+    expect(announcements[0]).toContain("3 consecutive timeouts")
+
+    const second = await wrapped.run(gitRequest)
+    expect(second.timedOut).toBe(true)
+    expect(second.stderr).toContain("circuit breaker open")
+    expect(inner.requests).toHaveLength(3)
+  })
+
+  it("resets consecutive timeouts on a non-timeout git answer", async () => {
+    const inner = runner([timedOut(), timedOut(), failed(), timedOut(), ok()])
+    const wrapped = withGitTimeoutRetry(inner, {
+      delaysMs: [0],
+      sleep: async () => undefined,
+      consecutiveTimeoutLimit: 3,
+      announce: () => undefined,
+    })
+    expect((await wrapped.run(gitRequest)).timedOut).toBe(true)
+    expect((await wrapped.run({ ...gitRequest, argv: ["git", "status"] })).exitCode).toBe(1)
+    const recovered = await wrapped.run(gitRequest)
+    expect(recovered.timedOut).toBe(false)
+    expect(recovered.exitCode).toBe(0)
+    expect(inner.requests).toHaveLength(5)
+  })
+
+  it("closes the breaker after its window and attempts again", async () => {
+    let nowMs = 1_000
+    const inner = runner([timedOut(), timedOut(), timedOut(), ok()])
+    const wrapped = withGitTimeoutRetry(inner, {
+      delaysMs: [0, 0],
+      sleep: async () => undefined,
+      consecutiveTimeoutLimit: 3,
+      breakerWindowMs: 60_000,
+      now: () => nowMs,
+      announce: () => undefined,
+    })
+    expect((await wrapped.run(gitRequest)).timedOut).toBe(true)
+    expect(inner.requests).toHaveLength(3)
+    const inWindow = await wrapped.run(gitRequest)
+    expect(inWindow.timedOut).toBe(true)
+    expect(inWindow.stderr).toContain("circuit breaker open")
+    expect(inner.requests).toHaveLength(3)
+    nowMs += 60_000
+    const recovered = await wrapped.run(gitRequest)
+    expect(recovered.exitCode).toBe(0)
+    expect(inner.requests).toHaveLength(4)
   })
 })
