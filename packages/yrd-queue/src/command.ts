@@ -3917,11 +3917,18 @@ export type ComponentModelChangeAuthorizationRequest = Readonly<{
   pr: string
   revision: number
   headSha: string
+  /** Present on Candidate preparation. Optional only for legacy/direct host
+   * gates that do not yet mint a Candidate authorization receipt. */
+  patchId?: string
+  source?: NonNullable<ComponentModelChangeAuthorization["source"]>
 }>
 
-export type ComponentModelChangeAuthorizer = (
-  request: ComponentModelChangeAuthorizationRequest,
-) => Promise<Readonly<{ authorizer: string }>>
+export type ComponentModelChangeAuthorizer = (request: ComponentModelChangeAuthorizationRequest) => Promise<
+  Readonly<{
+    authorizer: string
+    source?: NonNullable<ComponentModelChangeAuthorization["source"]>
+  }>
+>
 
 /** Construct and publish the ONE immutable Candidate before Runner admission.
  * `git merge-tree` classifies ordinary conflicts without a checkout; the
@@ -4947,7 +4954,7 @@ const COMPONENT_MODEL_CHANGE_VALUE =
 export function parseComponentModelChangeAuthorizationValue(
   pr: string,
   value: string | undefined,
-): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha"> | undefined {
+): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
   if (value === undefined) return undefined
   const match = COMPONENT_MODEL_CHANGE_VALUE.exec(value.trim())
   if (match?.groups === undefined) {
@@ -4966,7 +4973,7 @@ export function parseComponentModelChangeAuthorizationValue(
 
 export function parseComponentModelChangeAuthorization(
   pr: StepExecution["prs"][number],
-): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha"> | undefined {
+): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
   return parseComponentModelChangeAuthorizationValue(pr.id, pr.props?.[COMPONENT_MODEL_CHANGE_PROP])
 }
 
@@ -5038,13 +5045,39 @@ async function fillAuthoredGitlinksFromMain(
           [gitlink],
         )
       }
-      let authorization: Readonly<{ authorizer: string }>
+      if (pr.baseSha === undefined) {
+        return candidateFailure(
+          "component-model-identity-unavailable",
+          `PR '${pr.id}' requests '${operation} ${gitlink}' but its immutable base SHA is unavailable; ` +
+            "the host cannot compute a patch-bound authorization receipt",
+          ".",
+          [gitlink],
+        )
+      }
+      const patchId = await git.stablePatchId(repo, pr.baseSha, pr.headSha)
+      if (patchId === undefined) {
+        return candidateFailure(
+          "component-model-identity-unavailable",
+          `PR '${pr.id}' requests '${operation} ${gitlink}' but its base-to-head diff has no stable patch identity`,
+          ".",
+          [gitlink],
+        )
+      }
+      const source = pr.recut?.sources?.find(
+        (entry) => entry.repo === "." && entry.toHeadSha === pr.headSha && entry.patchId === patchId,
+      )
+      let authorization: Readonly<{
+        authorizer: string
+        source?: NonNullable<ComponentModelChangeAuthorization["source"]>
+      }>
       try {
         authorization = await authorizeComponentModelChange({
           ...declared,
           pr: pr.id,
           revision: pr.revision,
           headSha: pr.headSha,
+          patchId,
+          ...(source === undefined ? {} : { source }),
         })
       } catch (cause) {
         return candidateFailure(
@@ -5062,6 +5095,8 @@ async function fillAuthoredGitlinksFromMain(
           pr: pr.id,
           revision: pr.revision,
           headSha: pr.headSha,
+          patchId,
+          ...(authorization.source === undefined ? {} : { source: authorization.source }),
         }),
       )
       continue

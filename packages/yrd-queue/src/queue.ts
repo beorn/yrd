@@ -3407,18 +3407,40 @@ function queueFailedEvent(
   })
 }
 
+function sameComponentModelSource(
+  left: NonNullable<Candidate["componentModelChanges"]>[number]["source"],
+  right: NonNullable<Candidate["componentModelChanges"]>[number]["source"],
+): boolean {
+  if (left === undefined || right === undefined) return left === right
+  return (
+    left.repo === right.repo &&
+    left.fromHeadSha === right.fromHeadSha &&
+    left.toHeadSha === right.toHeadSha &&
+    left.patchId === right.patchId &&
+    left.rangeDiff === right.rangeDiff
+  )
+}
+
 function sameComponentModelAuthorization(
   left: NonNullable<Candidate["componentModelChanges"]>[number],
   right: NonNullable<Candidate["componentModelChanges"]>[number],
 ): boolean {
-  return (
+  const sameDecision =
     left.operation === right.operation &&
     left.path === right.path &&
     left.ruling === right.ruling &&
     left.authorizer === right.authorizer &&
-    left.pr === right.pr &&
-    left.revision === right.revision &&
-    left.headSha === right.headSha
+    left.pr === right.pr
+  if (!sameDecision) return false
+  if (left.revision === right.revision && left.headSha === right.headSha) {
+    return left.patchId === right.patchId && sameComponentModelSource(left.source, right.source)
+  }
+  if (left.patchId === undefined || right.patchId === undefined || left.patchId !== right.patchId) return false
+  return (
+    right.source?.fromHeadSha === left.headSha &&
+    right.source.toHeadSha === right.headSha &&
+    right.source.patchId === right.patchId &&
+    right.source.rangeDiff === "="
   )
 }
 
@@ -3432,13 +3454,14 @@ export function assertComponentModelAuthorizationsAvailable(
   const prior = Object.values(queues.candidates).flatMap((entry) => entry.componentModelChanges ?? [])
   const claimed = [...prior]
   for (const authorization of candidate.componentModelChanges ?? []) {
-    const existing = claimed.find(({ ruling }) => ruling === authorization.ruling)
-    if (existing !== undefined && !sameComponentModelAuthorization(existing, authorization)) {
+    const existing = claimed.filter(({ ruling }) => ruling === authorization.ruling)
+    if (existing.length > 0 && !existing.some((entry) => sameComponentModelAuthorization(entry, authorization))) {
+      const first = existing[0] as (typeof existing)[number]
       raiseFailure(
         "refusal",
         "component-model-ruling-spent",
         `yrd: component-model ruling '${authorization.ruling}' is already spent by ` +
-          `${existing.pr} revision ${existing.revision} (${existing.operation} ${existing.path}); ` +
+          `${first.pr} revision ${first.revision} (${first.operation} ${first.path}); ` +
           `ask @cto for a new ruling for ${authorization.operation} ${authorization.path}`,
       )
     }

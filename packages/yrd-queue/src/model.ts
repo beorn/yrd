@@ -8,6 +8,7 @@ import {
   PRIdSchema,
   ChangeRemergeCertificateSchema,
   ChangeRemergeProofSchema,
+  ChangeRemergeSourceSchema,
   type ChangeDeliveryState,
   type ChangeTerminalAssociation,
   baseIdentity,
@@ -243,8 +244,25 @@ export const ComponentModelChangeAuthorizationSchema = z
     pr: QueueMemberIdSchema,
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
+    /** Stable identity of the authorized code change. Optional only while
+     * replaying Candidates written before patch-bound authorization receipts. */
+    patchId: GitShaSchema.optional(),
+    /** Mechanical proof that a later revision is the same code change at a
+     * different commit. Present only when authorization crossed a recut. */
+    source: ChangeRemergeSourceSchema.optional(),
   })
   .strict()
+  .superRefine(({ headSha, patchId, source }, context) => {
+    if (source === undefined) return
+    if (patchId === undefined) {
+      context.addIssue({ code: "custom", message: "recut source requires patchId", path: ["patchId"] })
+    } else if (source.patchId !== patchId) {
+      context.addIssue({ code: "custom", message: "recut source patchId must match receipt patchId", path: ["source"] })
+    }
+    if (source.toHeadSha !== headSha) {
+      context.addIssue({ code: "custom", message: "recut source must end at receipt headSha", path: ["source"] })
+    }
+  })
 export type ComponentModelChangeAuthorization = Readonly<z.infer<typeof ComponentModelChangeAuthorizationSchema>>
 
 /** Immutable attempted integration. Its content identity is derived from the

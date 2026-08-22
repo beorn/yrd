@@ -879,6 +879,14 @@ there is no intake bypass. Added and deleted gitlinks are not
 advance intents and remain refused. Queue owns the generated root carrier and
 writes it deterministically from the exact base and accepted intents.
 
+An explicitly ruled component-model addition or removal is the narrow
+exception. Its Candidate receipt binds the ruling to the PR, operation, exact
+path, current head, and stable patch ID. A later revision may reuse that
+one-shot ruling only when Yrd's recut certificate maps a previously authorized
+head to the new head with the same patch ID and `rangeDiff: "="`; retries of
+the identical receipt remain idempotent, while a different PR, path, operation,
+or unproven head is refused as a spent ruling.
+
 > **Legacy rail.** This whole passage speaks the killed vocabulary — see
 > [Vocabulary](#vocabulary). An authored gitlink is a **min commit**, checked
 > against the submodule's main before queueing, and this `yrd intent` rail is

@@ -149,6 +149,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
       pr: "PR1",
       revision: 1,
       headSha: "a".repeat(40),
+      patchId: "d".repeat(40),
     }
     const queues = Queues.empty({ batchSize: 1 })
     const spent = {
@@ -169,6 +170,19 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     expect(() =>
       assertComponentModelAuthorizationsAvailable(spent, { componentModelChanges: [authorization] }),
     ).not.toThrow()
+    const recut = {
+      ...authorization,
+      revision: 2,
+      headSha: "c".repeat(40),
+      source: {
+        repo: ".",
+        fromHeadSha: authorization.headSha,
+        toHeadSha: "c".repeat(40),
+        patchId: authorization.patchId,
+        rangeDiff: "=" as const,
+      },
+    }
+    expect(() => assertComponentModelAuthorizationsAvailable(spent, { componentModelChanges: [recut] })).not.toThrow()
     const error = (() => {
       try {
         assertComponentModelAuthorizationsAvailable(spent, {
@@ -198,9 +212,28 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
       },
     })(preparation(rootBase, headSha, { "component-model-change": `remove dep; ruling ${ruling}` }))
 
-    expect(requests).toEqual([{ operation: "remove", path: "dep", ruling, pr: "PR1", revision: 1, headSha }])
+    expect(requests).toEqual([
+      {
+        operation: "remove",
+        path: "dep",
+        ruling,
+        pr: "PR1",
+        revision: 1,
+        headSha,
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      },
+    ])
     expect(prepared.componentModelChanges).toEqual([
-      { operation: "remove", path: "dep", ruling, authorizer: "@cto", pr: "PR1", revision: 1, headSha },
+      {
+        operation: "remove",
+        path: "dep",
+        ruling,
+        authorizer: "@cto",
+        pr: "PR1",
+        revision: 1,
+        headSha,
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      },
     ])
     expect(prepared.sha).toBeDefined()
     expect(await gitlinkAt(repo, prepared.sha as string)).toBe("")
