@@ -36,6 +36,8 @@ export type BayStatusReport = Readonly<{
   name: string
   branch: string
   path?: string
+  /** Live queue SHA `pr create` will consume — not the historical provision pin. */
+  effectiveBase?: Readonly<{ base: string; baseSha?: string }>
   /** wrapper attribution for composed stacks (22290). */
   wrapper: "git"
   lines: readonly BayStatusLine[]
@@ -85,6 +87,8 @@ export type BayStatusFacts = Readonly<{
   stashUnknown?: boolean
   /** Informational only — open change does not block local removal. */
   openChangeIds?: readonly string[]
+  /** Live queue SHA `pr create` will consume. */
+  effectiveBase?: Readonly<{ base: string; baseSha?: string }>
 }>
 
 /** Extract trailing `:<digits>` PID from a bay name or BY address (22287). */
@@ -412,6 +416,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     name: facts.name,
     branch: facts.branch,
     ...(facts.path === undefined ? {} : { path: facts.path }),
+    ...(facts.effectiveBase === undefined ? {} : { effectiveBase: facts.effectiveBase }),
     wrapper: "git",
     lines,
     exit,
@@ -420,7 +425,11 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
 }
 
 export function formatBayStatusHuman(report: BayStatusReport): string {
-  const header = `bay ${report.bay} ${report.name}  branch ${report.branch}  wrapper=${report.wrapper}  exit=${report.exit}  safe=${report.safe === null ? "unknown" : report.safe}`
+  const base =
+    report.effectiveBase === undefined
+      ? ""
+      : `  base ${report.effectiveBase.base}${report.effectiveBase.baseSha === undefined ? "" : `@${report.effectiveBase.baseSha.slice(0, 12)}`}`
+  const header = `bay ${report.bay} ${report.name}  branch ${report.branch}${base}  wrapper=${report.wrapper}  exit=${report.exit}  safe=${report.safe === null ? "unknown" : report.safe}`
   const body = report.lines
     .map((line) => `  ${line.class.padEnd(9)} ${line.verdict.padEnd(7)} ${line.evidence}`)
     .join("\n")

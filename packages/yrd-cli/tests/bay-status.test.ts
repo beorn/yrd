@@ -228,4 +228,16 @@ describe("classifyBayStatus", () => {
     expect(text).toMatch(/commits\s+PASS/)
     expect(text).toMatch(/wrapper=git/)
   })
+
+  it("human format names the effective base SHA pr create will consume", () => {
+    const text = formatBayStatusHuman(
+      classifyBayStatus({
+        ...base,
+        ownerPid: 7,
+        ownerAlive: false,
+        effectiveBase: { base: "main", baseSha: "c".repeat(40) },
+      }),
+    )
+    expect(text).toMatch(/base main@cccccccccccc/)
+  })
 })

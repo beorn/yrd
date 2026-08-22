@@ -793,6 +793,8 @@ export type Bays = Readonly<{
   intake(args: IntakeChangeArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
+  /** Live queue SHA `pr create` will consume for this bay — not the historical pin. */
+  effectiveBase(selector: string, requestedBase?: string): Promise<BayBaseTarget>
   close(args: CloseBayArgs): Promise<CommandResult>
   closePr(args: ChangeCloseArgs): Promise<CommandResult>
   editPr(args: ChangeEditArgs): Promise<CommandResult>
@@ -1363,6 +1365,15 @@ export function createBays(
     needsReview: (selector, reviewer) => needsReview(required(resolvePR(state(), selector), "PR", selector), reviewer),
     checksRequested: (selector) => checksRequested(required(resolvePR(state(), selector), "PR", selector)),
     submitSelection,
+    effectiveBase: async (selector, requestedBase) => {
+      const snapshot = state()
+      const bay = resolveBay(snapshot, selector)
+      const baseName = requestedBase ?? bay?.base
+      if (baseName === undefined) {
+        raiseFailure("refusal", "bay-not-found", `yrd: no bay '${selector}'`)
+      }
+      return target(baseName, undefined)
+    },
     open,
     refresh: actions.refresh,
     checkpoint: actions.checkpoint,

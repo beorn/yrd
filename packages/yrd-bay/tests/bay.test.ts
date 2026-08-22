@@ -3084,4 +3084,22 @@ describe("bay-base authority vs live queue", () => {
     })
     await app.close()
   })
+
+  it("exposes one effective-base SHA that matches pr create after the stored pin ages", async () => {
+    const liveSha = { current: BASE }
+    const { app } = await createPinnedApp(liveSha)
+    await finishJob(app, await app.bays.open({ name: "effective", base: "main", baseSha: BASE, by: "test" }))
+    liveSha.current = LIVE
+    const shown = await app.bays.effectiveBase("B1")
+    const created = await app.bays.submitSelection("B1", {
+      resolveRevision: async () => HEAD_1,
+      resolveParents: async () => ["0".repeat(40)],
+      run: runtime,
+      draft: true,
+    })
+    expect(shown).toEqual({ base: "main", baseSha: LIVE })
+    expect(created.revs[0]?.baseSha).toBe(shown.baseSha)
+    expect(shown.baseSha).not.toBe(app.bays.get("B1")?.baseSha)
+    await app.close()
+  })
 })
