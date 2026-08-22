@@ -793,6 +793,8 @@ export type Bays = Readonly<{
   intake(args: IntakeChangeArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
+  /** Live queue SHA `pr create` will consume for this bay — not the historical pin. */
+  effectiveBase(selector: string, requestedBase?: string): Promise<BayBaseTarget>
   close(args: CloseBayArgs): Promise<CommandResult>
   closePr(args: ChangeCloseArgs): Promise<CommandResult>
   editPr(args: ChangeEditArgs): Promise<CommandResult>
@@ -906,8 +908,8 @@ export function createBays(
     if (baseSha !== undefined && resolved.baseSha !== undefined && baseSha !== resolved.baseSha) {
       raiseFailure(
         "refusal",
-        "queue-base-moved",
-        `yrd: queue '${resolved.base}' resolved to ${resolved.baseSha.slice(0, 12)}, not pinned ${baseSha.slice(0, 12)}`,
+        "base-authority-conflict",
+        `yrd: caller pin ${baseSha.slice(0, 12)} contradicts live queue '${resolved.base}' at ${resolved.baseSha.slice(0, 12)}`,
       )
     }
     return { ...resolved, ...(baseSha === undefined ? {} : { baseSha }) }
@@ -951,10 +953,9 @@ export function createBays(
       async () => {
         const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
         const recorded = selectedPR()
-        const resolved = await target(
-          args.base ?? bay?.base ?? recorded?.base,
-          args.baseSha ?? bay?.baseSha ?? (recorded === undefined ? undefined : changeBaseSha(recorded)),
-        )
+        // Historical bay/PR pins are not an authority against the live queue.
+        // Only an explicit caller baseSha may contradict resolveBase (AC2).
+        const resolved = await target(args.base ?? bay?.base ?? recorded?.base, args.baseSha)
         return actions.intake({ ...args, ...resolved })
       },
     )
@@ -1197,7 +1198,7 @@ export function createBays(
         await intake({
           bay: bay.id,
           headSha: bay.headSha,
-          ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+          ...(options.base === undefined ? {} : { base: options.base }),
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(composition === undefined ? {} : { composition }),
         })
@@ -1364,6 +1365,15 @@ export function createBays(
     needsReview: (selector, reviewer) => needsReview(required(resolvePR(state(), selector), "PR", selector), reviewer),
     checksRequested: (selector) => checksRequested(required(resolvePR(state(), selector), "PR", selector)),
     submitSelection,
+    effectiveBase: async (selector, requestedBase) => {
+      const snapshot = state()
+      const bay = resolveBay(snapshot, selector)
+      const baseName = requestedBase ?? bay?.base
+      if (baseName === undefined) {
+        raiseFailure("refusal", "bay-not-found", `yrd: no bay '${selector}'`)
+      }
+      return target(baseName, undefined)
+    },
     open,
     refresh: actions.refresh,
     checkpoint: actions.checkpoint,
