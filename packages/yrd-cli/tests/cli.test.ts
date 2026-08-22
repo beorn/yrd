@@ -4761,6 +4761,38 @@ describe("runYrd", () => {
         histogram: { pruned: 1, keptByReason: {}, pagedByReason: {} },
       })
       expect(exit, output.stderr()).toBe(0)
+
+      const apply = outputIO({ cwd: repo, now })
+      const failingServices = {
+        process: {
+          reapPath: async () => {
+            throw new Error("simulated reap failure")
+          },
+        },
+      } as unknown as YrdCliServices
+
+      expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), apply.io, failingServices)).toBe(3)
+      expect(apply.stdout()).toBe("")
+      expect(apply.stderr()).toContain("simulated reap failure")
+      expect(app.state().bays.byId.B1?.status).toBe("active")
+
+      const successfulApply = outputIO({ cwd: repo, now })
+      const successfulServices = {
+        process: {
+          reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+        },
+      } as unknown as YrdCliServices
+
+      expect(
+        await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), successfulApply.io, successfulServices),
+        successfulApply.stderr(),
+      ).toBe(0)
+      expect(successfulApply.stdout().trim().split("\n")).toHaveLength(1)
+      expect(JSON.parse(successfulApply.stdout())).toMatchObject({
+        closed: ["B1"],
+        outcomes: { pruned: ["B1"], kept: [], paged: [] },
+      })
+      expect(app.state().bays.byId.B1?.status).toBe("closed")
     } finally {
       safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
     }

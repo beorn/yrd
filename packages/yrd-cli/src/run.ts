@@ -3730,9 +3730,9 @@ async function closeBays(
   app: YrdCliApp,
   services: YrdCliServices,
   selectors: readonly string[],
-  options: { withdraw?: boolean; json?: boolean; force?: boolean },
+  options: { withdraw?: boolean; json?: boolean; force?: boolean; quiet?: boolean; requireAll?: boolean },
   io: YrdCliIO,
-): Promise<void> {
+): Promise<readonly Bay[]> {
   const cwd = io.cwd ?? process.cwd()
   // --force requires an explicit bay name/id (no empty selector = all open).
   if (options.force === true && selectors.length === 0) {
@@ -3803,12 +3803,12 @@ async function closeBays(
       closed.length === 0
         ? "nothing closed"
         : `closed ${closed.map((bay) => bay.name).join(", ")}; kept ${refused.map((report) => report.name).join(", ")}`
-    await printHuman(io, `bay close stopped: ${outcome}\n\n${body}`)
-    if (closed.length === 0) {
+    if (options.quiet !== true) await printHuman(io, `bay close stopped: ${outcome}\n\n${body}`)
+    if (closed.length === 0 || options.requireAll === true) {
       raiseFailure(
         "refusal",
         "request-refused",
-        `could not close ${String(refused.length)} bay(s); run bay status, or bay close --force <name>`,
+        `${outcome}; could not close ${String(refused.length)} bay(s); run bay status, or bay close --force <name>`,
       )
     }
   }
@@ -3816,11 +3816,17 @@ async function closeBays(
     usage("bay close requires at least one bay selector")
   }
   const [only] = closed
-  if (!jsonEnabled(options) && only !== undefined && closed.length === 1 && refused.length === 0) {
+  if (
+    options.quiet !== true &&
+    !jsonEnabled(options) &&
+    only !== undefined &&
+    closed.length === 1 &&
+    refused.length === 0
+  ) {
     io.stdout(`closed ${only.name}\n`)
-    return
+    return closed
   }
-  if (closed.length > 0) {
+  if (options.quiet !== true && closed.length > 0) {
     await printResult(
       io,
       jsonEnabled(options),
@@ -3828,6 +3834,7 @@ async function closeBays(
       createElement(BayStatusView, { bays: closed }),
     )
   }
+  return closed
 }
 
 /**
@@ -4116,6 +4123,11 @@ async function bayPruneCommand(
   const preservedSet = new Set(preserved)
   const outcomes = bayPruneOutcomes(reports, preservedSet)
 
+  const closed =
+    !dryRun && outcomes.rows.pruned.length > 0
+      ? await closeBays(app, services, outcomes.rows.pruned, { quiet: true, requireAll: true }, io)
+      : []
+
   if (jsonEnabled(options)) {
     await printResult(
       io,
@@ -4127,7 +4139,7 @@ async function bayPruneCommand(
         preserved,
         outcomes: outcomes.rows,
         histogram: outcomes.histogram,
-        closed: dryRun ? [] : outcomes.rows.pruned,
+        closed: closed.map((bay) => bay.id),
       },
       null,
     )
@@ -4157,9 +4169,6 @@ async function bayPruneCommand(
     await printHuman(io, lines.join("\n"))
   }
 
-  if (!dryRun && outcomes.rows.pruned.length > 0) {
-    await closeBays(app, services, outcomes.rows.pruned, { json: options.json }, io)
-  }
   if (reports.length === 0) return 0
   return outcomes.rows.paged.length > 0 || outcomes.rows.pruned.length === 0 ? 1 : 0
 }
@@ -11486,7 +11495,9 @@ function buildProgram(
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => closeBays(installed(), installedServices(), selectors, options, io))
+    .action(async (selectors, options) => {
+      await closeBays(installed(), installedServices(), selectors, options, io)
+    })
   bay
     .command("status [selector...]")
     .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
