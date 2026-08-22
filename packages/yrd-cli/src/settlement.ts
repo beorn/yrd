@@ -151,14 +151,38 @@ function shellQuote(value: string): string {
   return `${quote}${value.replaceAll(quote, `${quote}\\${quote}${quote}`)}${quote}`
 }
 
+function isEnoent(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+}
+
+export type SettlementCursorRead = Readonly<{
+  /**
+   * Retention floor from the journal. Required in the missing-cursor refusal so
+   * the operator can choose an explicit restart without the loader inventing one.
+   * Omit only when the journal has no history diagnostics; the refusal then
+   * names that unreadability instead of substituting 0.
+   */
+  evictedThrough?: number
+}>
+
 /** Every refusal about a cursor carries the command that repairs it: a cursor
  * this reader cannot use is unreadable to every future command too, so a
  * refusal without the remedy is a permanently stuck rail. */
-function cursorRecovery(path: string): string {
-  return `recovery: mv -n -- ${shellQuote(path)} ${shellQuote(`${path}.invalid`)} && yrd log --json`
+function cursorRecovery(path: string, evictedThrough: number | undefined): string {
+  const floor =
+    evictedThrough === undefined ? "unreadable (journal has no history diagnostics)" : String(evictedThrough)
+  return (
+    `recovery: re-initialize ${shellQuote(path)} with an explicit cursor ` +
+    `(floor evictedThrough=${floor}); do not move the cursor file aside — ` +
+    `absence is not a position`
+  )
 }
 
-export async function readSettlementCursor(path: string, owner: string | undefined): Promise<number> {
+export async function readSettlementCursor(
+  path: string,
+  owner: string | undefined,
+  options: SettlementCursorRead = {},
+): Promise<number> {
   try {
     const value: unknown = JSON.parse(await readFile(path, "utf8"))
     const record = value as Record<string, unknown> | null
@@ -177,10 +201,22 @@ export async function readSettlementCursor(path: string, owner: string | undefin
     }
     return record["cursor"] as number
   } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return 0
-    throw new Error(`yrd: settlement cursor is invalid (${path}): ${detail(error)}; ${cursorRecovery(path)}`, {
-      cause: error,
-    })
+    if (isEnoent(error)) {
+      const floor =
+        options.evictedThrough === undefined
+          ? "unreadable (journal has no history diagnostics)"
+          : String(options.evictedThrough)
+      throw new Error(
+        `yrd: settlement cursor is missing (${path}) for owner ${JSON.stringify(owner ?? null)}; ` +
+          `evictedThrough ${floor} — the range below the floor cannot be settled by anyone; ` +
+          `${cursorRecovery(path, options.evictedThrough)}`,
+        { cause: error },
+      )
+    }
+    throw new Error(
+      `yrd: settlement cursor is invalid (${path}): ${detail(error)}; ${cursorRecovery(path, options.evictedThrough)}`,
+      { cause: error },
+    )
   }
 }
 
@@ -261,8 +297,11 @@ export type SettlementDrainOptions = Readonly<{
 export async function settleCommittedTerminals(options: SettlementDrainOptions): Promise<void> {
   const { hook, repository } = options
   const cursorPath = settlementCursorPath(options.stateDir, hook.owner)
-  const cursor = await readSettlementCursor(cursorPath, hook.owner)
   const journal = options.journal ?? createReadOnlyJournal({ dir: repository.stateDir })
+  const evictedThrough = journal.history?.diagnostics().evictedThrough
+  const cursor = await readSettlementCursor(cursorPath, hook.owner, {
+    ...(evictedThrough === undefined ? {} : { evictedThrough }),
+  })
   try {
     for await (const batch of journal.read(cursor)) {
       const { targets, integrated } = terminalSettlementTargets(batch.values, hook.key)
@@ -280,7 +319,7 @@ export async function settleCommittedTerminals(options: SettlementDrainOptions):
   } catch (error) {
     const message = detail(error)
     if (error instanceof RangeError && message.startsWith("yrd: journal range ")) {
-      throw new RangeError(`${message}; ${cursorRecovery(cursorPath)}`, { cause: error })
+      throw new RangeError(`${message}; ${cursorRecovery(cursorPath, evictedThrough)}`, { cause: error })
     }
     throw error
   }
