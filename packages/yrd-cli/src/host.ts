@@ -264,6 +264,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // current identity. Measured from the refusal emitted by /hh's live journal
   // on 2026-08-21; this is the deployment identity, not a harness value.
   "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691",
+  // The PRODUCTION composition immediately before component-model
+  // authorization receipts gained stable patch IDs and optional recut source
+  // proofs. The prior receipt fields remain optional for replay, so the shared
+  // migration preserves every stored Candidate verbatim. Measured from the
+  // live /hh journal refusal while probing component commit 1ce1967d on
+  // 2026-08-22; this is the deployment identity, not a harness value.
+  "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
