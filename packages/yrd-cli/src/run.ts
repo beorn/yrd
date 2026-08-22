@@ -3890,6 +3890,7 @@ function gatherBayStatusFacts(
   let worktreeMissing: boolean | undefined
   let tipMerged: boolean | undefined
   let tipDurableAt: string | undefined
+  let tipProofSource: BayStatusFacts["tipProofSource"]
   let tipMergedUnknown: boolean | undefined
   let aheadOfOrigin: number | undefined
   let uniquePatches: number | undefined
@@ -3923,6 +3924,7 @@ function gatherBayStatusFacts(
           worktreeMissing === true
             ? requiredPersistedBayHead(persistedHead)
             : gitSync(path, ["rev-parse", "HEAD"]).trim()
+        tipProofSource = worktreeMissing === true ? "persisted Bay head" : "live worktree HEAD"
         // Prefer superproject origin/main when bay is a linked worktree of the repo.
         const originMain = gitSync(repoRoot, ["rev-parse", "origin/main"]).trim()
         try {
@@ -4023,6 +4025,7 @@ function gatherBayStatusFacts(
     ...(worktreeMissing === undefined ? {} : { worktreeMissing }),
     ...(tipMerged === undefined ? {} : { tipMerged }),
     ...(tipDurableAt === undefined ? {} : { tipDurableAt }),
+    ...(tipProofSource === undefined ? {} : { tipProofSource }),
     ...(tipMergedUnknown === undefined ? {} : { tipMergedUnknown }),
     ...(aheadOfOrigin === undefined ? {} : { aheadOfOrigin }),
     ...(uniquePatches === undefined ? {} : { uniquePatches }),

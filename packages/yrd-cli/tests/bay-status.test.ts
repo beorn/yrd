@@ -104,6 +104,19 @@ describe("classifyBayStatus", () => {
     expect(commits?.evidence).toMatch(/3 unique commit/)
   })
 
+  it("names the live worktree HEAD when it supplied the commit proof", () => {
+    const report = classifyBayStatus({
+      ...base,
+      branchMissingFromOrigin: true,
+      remoteTrackingFresh: true,
+      tipProofSource: "live worktree HEAD",
+      uniquePatches: 0,
+    })
+    expect(report.lines.find((line) => line.class === "commits")?.evidence).toBe(
+      "branch is absent from origin after a fresh pruned fetch and the tip has no unique commits (proof used live worktree HEAD)",
+    )
+  })
+
   it("exit 2 when a failed refresh leaves even landed-looking origin evidence stale", () => {
     const report = classifyBayStatus({
       ...base,

@@ -73,6 +73,8 @@ export type BayStatusFacts = Readonly<{
   tipMerged?: boolean
   /** Ref or equivalence proof that makes the tip durable. */
   tipDurableAt?: string
+  /** Which immutable input supplied the commit proof rendered below. */
+  tipProofSource?: "live worktree HEAD" | "persisted Bay head"
   tipMergedUnknown?: boolean
   /** Commits not on origin/main (ahead count) when computable. */
   aheadOfOrigin?: number
@@ -289,6 +291,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
 
   // commits — clean tree alone is NOT enough (22290 sample: 22/25 clean-but-ahead)
   const unique = facts.uniquePatches ?? facts.aheadOfOrigin
+  const proofSource = facts.tipProofSource === undefined ? "" : ` (proof used ${facts.tipProofSource})`
   if (facts.remoteTrackingFresh === false) {
     lines.push({
       class: "commits",
@@ -309,13 +312,13 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       lines.push({
         class: "commits",
         verdict: "BLOCK",
-        evidence: `no advertised origin ref after a fresh pruned fetch — ${String(unique)} unique commit(s) at risk`,
+        evidence: `no advertised origin ref after a fresh pruned fetch — ${String(unique)} unique commit(s) at risk${proofSource}`,
       })
     } else {
       lines.push({
         class: "commits",
         verdict: "PASS",
-        evidence: "branch is absent from origin after a fresh pruned fetch and the tip has no unique commits",
+        evidence: `branch is absent from origin after a fresh pruned fetch and the tip has no unique commits${proofSource}`,
       })
     }
   } else if (facts.tipDurableAt !== undefined && facts.tipMerged !== true) {
@@ -324,8 +327,8 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       verdict: "PASS",
       evidence:
         unique === undefined
-          ? `tip is pushed to ${facts.tipDurableAt} — not merged, but durable`
-          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — not merged, but durable`,
+          ? `tip is pushed to ${facts.tipDurableAt} — not merged, but durable${proofSource}`
+          : `tip has ${unique} unique commit(s) pushed to ${facts.tipDurableAt} — not merged, but durable${proofSource}`,
     })
   } else if (facts.tipMergedUnknown === true || (facts.tipMerged === undefined && facts.aheadOfOrigin === undefined)) {
     lines.push({
@@ -339,10 +342,10 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       verdict: "PASS",
       evidence:
         facts.tipDurableAt !== undefined
-          ? `tip is durable at ${facts.tipDurableAt}`
+          ? `tip is durable at ${facts.tipDurableAt}${proofSource}`
           : facts.aheadOfOrigin === 0
-            ? "tip is not ahead of origin/main"
-            : "tip is merged (ancestor or patch-id equivalent of origin/main)",
+            ? `tip is not ahead of origin/main${proofSource}`
+            : `tip is merged (ancestor or patch-id equivalent of origin/main)${proofSource}`,
     })
   } else {
     lines.push({
@@ -350,7 +353,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
       verdict: "BLOCK",
       evidence:
         unique !== undefined
-          ? `tip has ${unique} unique commit(s) on no advertised origin ref — at risk`
+          ? `tip has ${unique} unique commit(s) on no advertised origin ref — at risk${proofSource}`
           : "tip is not merged and is on no advertised origin ref — at risk",
     })
   }

@@ -4710,7 +4710,21 @@ describe("runYrd", () => {
       const headSha = git(repo, "rev-parse", "HEAD")
       const app = await createApp({ bayPath: missingBay, provisionedHead: headSha })
       await openTestBay(app, { name: "missing-worktree", branch: "task/missing-worktree" })
-      const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-12T12:01:00.000Z") })
+      const now = () => Date.parse("2026-07-12T12:01:00.000Z")
+      const statusOutput = outputIO({ cwd: repo, now })
+
+      expect(await runYrd(app, yrd("bay", "status", "B1", "--json"), statusOutput.io)).toBe(0)
+      const status = JSON.parse(statusOutput.stdout()) as Readonly<{
+        reports: ReadonlyArray<Readonly<{ lines: ReadonlyArray<Readonly<{ evidence: string }>> }>>
+      }>
+      expect(status.reports[0]?.lines).toContainEqual({
+        class: "commits",
+        verdict: "PASS",
+        evidence:
+          "branch is absent from origin after a fresh pruned fetch and the tip has no unique commits (proof used persisted Bay head)",
+      })
+
+      const output = outputIO({ cwd: repo, now })
 
       const exit = await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io)
       expect(JSON.parse(output.stdout())).toMatchObject({
