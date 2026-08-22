@@ -139,6 +139,8 @@ export type YrdCliServices = Readonly<{
   checks?: YrdCliChecks
   guards?: YrdCliGuards
   process?: Pick<Process, "run" | "reapPath">
+  /** Resolve the live workspace path when a durable Bay record predates a repository move. */
+  resolveBayWorkspacePath?(bay: string, recordedPath?: string): string | undefined
   /** Live base-authority flow config for deterministic doctor diagnostics. */
   config?: YrdConfig
   /** Configured base branch. */

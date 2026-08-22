@@ -3536,7 +3536,7 @@ async function runBaySession(
   try {
     bay = await checkpointRunBay(app, bay, identity.claim, io)
     if (await preserveInterruptedRunBay(app, bay, "post-child checkpoint", io)) return 1
-    const closed = await closeBayWithProcessReap(app, services.process, bay, {}, io, `bay '${bay.id}' close`)
+    const closed = await closeBayWithProcessReap(app, services, bay, {}, io, `bay '${bay.id}' close`)
     if (closed?.status !== "closed") refusal(`bay '${bay.id}' did not close synchronously`)
     io.stdout(`closed ${identity.bay}\n`)
     return 0
@@ -3687,13 +3687,14 @@ async function certifyBayHandoff(
 async function certifyBayProcessesStopped(
   processService: Pick<Process, "reapPath"> | undefined,
   bay: Bay,
+  path: string | undefined,
 ): Promise<void> {
   // Provision can fail before a workspace exists. There is then no path-owned
   // process tree to reap; explicit force-close must still be able to drive the
   // durable Bay record to a terminal state.
-  if (bay.path === undefined) return
+  if (path === undefined) return
   if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
-  const reaped = await processService.reapPath(bay.path)
+  const reaped = await processService.reapPath(path)
   const failure = pathReapFailure(reaped)
   if (failure !== undefined) {
     throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}`)
@@ -3702,7 +3703,7 @@ async function certifyBayProcessesStopped(
 
 async function closeBayWithProcessReap(
   app: YrdCliApp,
-  processService: Pick<Process, "reapPath"> | undefined,
+  services: YrdCliServices,
   bay: Bay,
   options: Readonly<{ withdraw?: boolean }>,
   io: YrdCliIO,
@@ -3711,12 +3712,14 @@ async function closeBayWithProcessReap(
   // First empty the active Bay. Then atomically mark it closing so `bay in`
   // refuses new guests, and re-census before the deprovision job removes the
   // ownership root. This closes the attach-between-census-and-delete race.
-  await certifyBayProcessesStopped(processService, bay)
+  const path =
+    services.resolveBayWorkspacePath === undefined ? bay.path : services.resolveBayWorkspacePath(bay.id, bay.path)
+  await certifyBayProcessesStopped(services.process, bay, path)
   const closing = await app.bays.close({
     bay: bay.id,
     ...(options.withdraw === true ? { withdraw: true } : {}),
   })
-  await certifyBayProcessesStopped(processService, bay)
+  await certifyBayProcessesStopped(services.process, bay, path)
   assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), jobContext)
   const closed = app.bays.get(bay.id)
   if (closed === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
@@ -3761,7 +3764,7 @@ async function closeBays(
           : []
       const current = await closeBayWithProcessReap(
         app,
-        services.process,
+        services,
         bay,
         { withdraw: options.withdraw },
         io,

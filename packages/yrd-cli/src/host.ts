@@ -13,6 +13,7 @@ import {
   createGitPushReceiver,
   createGitWorkspace,
   gitWorkspaceRevision,
+  resolveBayWorkspacePath,
   baseIdentity,
   defaultBayBranch,
   loadGitPushReceiver,
@@ -2879,6 +2880,8 @@ async function createYrdRuntimeHost(
       }),
       queueReadModel: Object.freeze({ snapshot: queueReadModel.snapshot }),
       process,
+      resolveBayWorkspacePath: (bay: string, recordedPath?: string) =>
+        resolveBayWorkspacePath({ baysRoot: repository.baysRoot, bay, recordedPath }),
       environment: env,
       ...(options.authorizeComponentModelChange === undefined
         ? {}

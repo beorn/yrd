@@ -4,7 +4,7 @@
  * @consumer @yrd/bay Git workspace adapter
  */
 import { existsSync } from "node:fs"
-import { chmod, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -12,7 +12,12 @@ import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult 
 import { withJobs } from "@yrd/job"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger } from "loggily"
-import { createGitWorkspace, gitWorkspaceRevision, type GitWorkspaceOptions } from "../src/git.ts"
+import {
+  createGitWorkspace,
+  gitWorkspaceRevision,
+  resolveBayWorkspacePath,
+  type GitWorkspaceOptions,
+} from "../src/git.ts"
 import type { RemoteBranchSnapshot } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -154,6 +159,57 @@ describe("createGitWorkspace", () => {
     } else {
       expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(headSha)
     }
+  })
+
+  it("deprovisions the current Bay root when the recorded path predates a repository move", async () => {
+    const { root, repo } = await repository()
+    await using process = createProcess()
+    const baysRoot = join(root, "current-bays")
+    const adapter = await workspace(process, { repo, baysRoot })
+    const provisioned = await adapter.provision(
+      { bay: "B1", name: "moved-root", branch: "issue/moved-root", base: "main" },
+      { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    if (provisioned.status !== "completed" || provisioned.conclusion !== "success") {
+      throw new Error("workspace provision failed")
+    }
+    const stalePath = join(root, "legacy-bays", "B1")
+
+    await expect(
+      adapter.deprovision(
+        {
+          bay: "B1",
+          path: stalePath,
+          branch: "issue/moved-root",
+          headSha: provisioned.output.headSha,
+        },
+        { id: "deprovision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).resolves.toMatchObject({ status: "completed", conclusion: "success" })
+    expect(existsSync(provisioned.output.path)).toBe(false)
+    expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(provisioned.output.headSha)
+  })
+
+  it("refuses ambiguous current and recorded Bay workspaces", async () => {
+    const { root } = await repository()
+    const baysRoot = join(root, "current-bays")
+    const currentPath = join(baysRoot, "B1")
+    const recordedPath = join(root, "legacy-bays", "B1")
+    await Promise.all([mkdir(currentPath, { recursive: true }), mkdir(recordedPath, { recursive: true })])
+
+    expect(() => resolveBayWorkspacePath({ baysRoot, bay: "B1", recordedPath })).toThrow(
+      `Bay 'B1' has workspaces at both current path '${currentPath}' and recorded path '${recordedPath}'`,
+    )
+  })
+
+  it("falls back to the sole recorded Bay workspace after a configured root change", async () => {
+    const { root } = await repository()
+    const recordedPath = join(root, "legacy-bays", "B1")
+    await mkdir(recordedPath, { recursive: true })
+
+    expect(resolveBayWorkspacePath({ baysRoot: join(root, "current-bays"), bay: "B1", recordedPath })).toBe(
+      recordedPath,
+    )
   })
 
   it("keeps the repository clean with the default in-repository bays root", async () => {

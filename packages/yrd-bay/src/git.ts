@@ -42,7 +42,7 @@ export function gitWorkspaceRevision(options: GitWorkspaceRevisionOptions): stri
   return createHash("sha256")
     .update(
       JSON.stringify({
-        implementation: "yrd-git-workspace-v6",
+        implementation: "yrd-git-workspace-v7",
         repo,
         baysRoot,
         intakeRemote: options.intakeRemote,
@@ -139,6 +139,28 @@ function safeBayPath(root: string, bay: string): string {
   const prefix = `${resolve(root)}/`
   if (!path.startsWith(prefix)) throw new Error(`bay id '${bay}' escapes the configured bays root`)
   return path
+}
+
+/** Resolve a Bay workspace across repository-root moves without guessing when two copies exist. */
+export function resolveBayWorkspacePath(
+  input: Readonly<{
+    baysRoot: string
+    bay: string
+    recordedPath?: string
+  }>,
+): string | undefined {
+  const currentPath = safeBayPath(input.baysRoot, input.bay)
+  const recordedPath = input.recordedPath === undefined ? undefined : resolve(input.recordedPath)
+  const currentExists = existsSync(currentPath)
+  const recordedExists = recordedPath !== undefined && recordedPath !== currentPath && existsSync(recordedPath)
+  if (currentExists && recordedExists) {
+    throw new Error(
+      `Bay '${input.bay}' has workspaces at both current path '${currentPath}' and recorded path '${recordedPath}'`,
+    )
+  }
+  if (currentExists) return currentPath
+  if (recordedExists) return recordedPath
+  return undefined
 }
 
 async function configureIntake(git: Git, path: string, remote: string): Promise<void> {
@@ -498,7 +520,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
 
     async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
       try {
-        if (input.path === undefined || !existsSync(input.path)) {
+        const path = resolveBayWorkspacePath({ baysRoot, bay: input.bay, recordedPath: input.path })
+        if (path === undefined) {
           // Provision can fail before either a worktree path or head is
           // recorded. Closing that lifecycle is an idempotent no-op: there is
           // no authored head to preserve and therefore no archive proof to invent.
@@ -514,21 +537,21 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             },
           }
         }
-        const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+        const status = await git.run(path, ["status", "--porcelain", "--ignore-submodules=none"])
         if (status.stdout.trim() !== "") {
           return {
             status: "completed",
             conclusion: "failure",
             error: {
               code: "dirty-worktree",
-              message: `workspace '${input.path}' has uncommitted work:\n${status.stdout.trim()}`,
+              message: `workspace '${path}' has uncommitted work:\n${status.stdout.trim()}`,
             },
           }
         }
-        const headSha = await git.commit(input.path, "HEAD")
+        const headSha = await git.commit(path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
-        await worktrees.remove(input.path)
-        await options.postDeprovision?.({ bay: input.bay, path: input.path })
+        await worktrees.remove(path)
+        await options.postDeprovision?.({ bay: input.bay, path })
         return { status: "completed", conclusion: "success", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)

@@ -4634,6 +4634,34 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
+  it("reaps the current Bay root when the recorded path predates a repository move", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "moved-root", branch: "topic/moved-root" })
+    const currentPath = "/repo/current/.bays/B1"
+    const reaped: string[] = []
+    const services = {
+      resolveBayWorkspacePath: () => currentPath,
+      process: {
+        run: async () => ({
+          stdout: `${"0".repeat(39)}1\n`,
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+          durationMs: 0,
+          timedOut: false,
+        }),
+        reapPath: async (path: string) => {
+          reaped.push(path)
+          return { targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }
+        },
+      },
+    } as unknown as YrdCliServices
+    const close = outputIO()
+
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io, services), close.stderr()).toBe(0)
+    expect(reaped).toEqual([currentPath, currentPath])
+  })
+
   it("admin bay prune refuses a Bay protected by a live external consumer", async () => {
     const app = await createApp()
     await openTestBay(app, { name: "protected", branch: "topic/protected" })
