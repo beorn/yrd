@@ -6,6 +6,7 @@ import { authoredDeltaBase } from "@yrd/bay"
 import {
   CheckpointMigrationManifestSchema,
   checkpointMigrationManifestHash,
+  cherryFfInstruction,
   createFailure,
   failureFact,
   type JsonValue,
@@ -4371,7 +4372,7 @@ async function intentSubmissionWorkflow(
       }
       return (
         `get commit '${target}' onto '${submodule}''s own main, then submit an ordinary change whose ` +
-        `diff is the gitlink bump (issue ${issue})`
+        `diff is the gitlink bump (issue ${issue}); ${cherryFfInstruction()}`
       )
     }),
   )

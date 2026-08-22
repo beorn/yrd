@@ -1581,7 +1581,7 @@ describe("Queue command adapters", () => {
           code: "authored-gitlink",
           message: expect.stringMatching(
             new RegExp(
-              `${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary change`,
+              `${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary change.*git cherry <estate-pin> <component-main>`,
               "su",
             ),
           ),

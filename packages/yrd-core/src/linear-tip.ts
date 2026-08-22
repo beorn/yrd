@@ -33,6 +33,27 @@ export function requireLinearRootTip(
   raiseFailure("refusal", "merge-tip-carrier", linearRebuildMessage(identity, branch, parents.length, dragged))
 }
 
+/** The cherry denominator, stated once: merge-tip-carrier and the authored-gitlink
+ * projection both instruct a component-main FF, and both must name what that FF
+ * would drag in. Omitted `dragged` prints the command; empty unique list is a
+ * no-op; non-empty is the dragged set with N not-yours and M unreviewed. */
+export function cherryFfInstruction(dragged?: CherryDragged): string {
+  if (dragged === undefined) {
+    return (
+      `before fast-forwarding, print what the FF would drag in with ` +
+      `'git cherry <estate-pin> <component-main>' (empty unique list = no-op; non-empty is the dragged set)`
+    )
+  }
+  if (dragged.unique.length === 0) {
+    return "FF is a no-op (git cherry unique list is empty)"
+  }
+  const lines = dragged.unique.map((row) => `${row.sha} ${row.subject}`).join("; ")
+  return (
+    `dragged set (${dragged.unique.length} unique): ${lines}. ` +
+    `of the commits this FF would carry, ${dragged.notYours} are not yours and ${dragged.unreviewed} are unreviewed`
+  )
+}
+
 function linearRebuildMessage(
   identity: string,
   branch: string,
@@ -46,22 +67,5 @@ function linearRebuildMessage(
     `then merge inside the affected component repository, ` +
     `fast-forward that component's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
     `then run 'yrd pr submit ${branch}'`
-  if (dragged === undefined) {
-    return (
-      prefix +
-      `before fast-forwarding, print what the FF would drag in with ` +
-      `'git cherry <estate-pin> <component-main>' (empty unique list = no-op; non-empty is the dragged set); ` +
-      suffix
-    )
-  }
-  if (dragged.unique.length === 0) {
-    return prefix + `FF is a no-op (git cherry unique list is empty); ` + suffix
-  }
-  const lines = dragged.unique.map((row) => `${row.sha} ${row.subject}`).join("; ")
-  return (
-    prefix +
-    `dragged set (${dragged.unique.length} unique): ${lines}. ` +
-    `of the commits this FF would carry, ${dragged.notYours} are not yours and ${dragged.unreviewed} are unreviewed; ` +
-    suffix
-  )
+  return prefix + `${cherryFfInstruction(dragged)}; ` + suffix
 }

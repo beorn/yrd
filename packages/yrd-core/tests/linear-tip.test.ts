@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { failureFact } from "../src/failure.ts"
-import { requireLinearRootTip } from "../src/linear-tip.ts"
+import { cherryFfInstruction, requireLinearRootTip } from "../src/linear-tip.ts"
 
 describe("requireLinearRootTip", () => {
   it("is silent for a linear tip", () => {
@@ -71,5 +71,27 @@ describe("requireLinearRootTip", () => {
       expect(message).toMatch(/3652bfe/)
       expect(message).toMatch(/of the commits this FF would carry, 1 are not yours and 1 are unreviewed/u)
     }
+  })
+})
+
+describe("cherryFfInstruction", () => {
+  it("prints the git cherry command when the unique list is not in hand", () => {
+    expect(cherryFfInstruction()).toMatch(/git cherry <estate-pin> <component-main>/u)
+    expect(cherryFfInstruction()).toMatch(/empty unique list = no-op/u)
+  })
+
+  it("says the FF is a no-op when the unique list is empty", () => {
+    expect(cherryFfInstruction({ unique: [], notYours: 0, unreviewed: 0 })).toMatch(/FF is a no-op/u)
+    expect(cherryFfInstruction({ unique: [], notYours: 0, unreviewed: 0 })).not.toMatch(/dragged set/u)
+  })
+
+  it("names the dragged set with N not-yours and M unreviewed", () => {
+    const text = cherryFfInstruction({
+      unique: [{ sha: "3652bfe", subject: "fix(process): retry a STALLED read-only git call" }],
+      notYours: 1,
+      unreviewed: 1,
+    })
+    expect(text).toMatch(/dragged set \(1 unique\): 3652bfe /u)
+    expect(text).toMatch(/1 are not yours and 1 are unreviewed/u)
   })
 })

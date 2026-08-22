@@ -106,6 +106,21 @@ describe("actionable failure projection", () => {
     expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })
 
+  it("preserves the cherry denominator the producer already named, never re-deriving it", () => {
+    const failure = actionableFailure({
+      code: "authored-gitlink",
+      message:
+        "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
+        "own main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1); " +
+        "before fast-forwarding, print what the FF would drag in with 'git cherry <estate-pin> <component-main>' " +
+        "(empty unique list = no-op; non-empty is the dragged set)",
+    })
+
+    expect(failure.cause).toMatch(/git cherry <estate-pin> <component-main>/u)
+    expect(failure.cause).toMatch(/empty unique list = no-op/u)
+    expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
+  })
+
   it("does not project an unexecutable mechanical remedy for a component addition or deletion", () => {
     for (const change of ["new component 'vendor/new'", "component 'vendor/old' is deleted"]) {
       const projected = actionableFailure({
