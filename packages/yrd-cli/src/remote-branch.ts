@@ -1,7 +1,11 @@
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { GIT_PLUMBING_TIMEOUT_MS } from "./git-timeouts.ts"
 
-const GIT_TIMEOUT_MS = 30_000
+/** Two backoffs → three attempts. A 30s cap that is 1.8s in a clear window and
+ * 45s+ under origin load fails closed on workers; retrying the probe is the
+ * worker-side fix, independent of queue-side drain retry. Timeouts only. */
+const PROBE_TIMEOUT_RETRY_DELAYS_MS = Object.freeze([200, 200])
 
 type GitFailure = Readonly<{ ok: false; detail: string; timedOut: boolean }>
 
@@ -13,16 +17,23 @@ export type FreshRemoteBranch =
   | Readonly<{ ok: false; phase: "fetch" | "resolve"; detail: string; target: string }>
 
 async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]): Promise<ProcessResult> {
-  return process.run({
+  const request = {
     argv: ["git", "-C", cwd, ...args],
     cwd,
     env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
+    timeoutMs: GIT_PLUMBING_TIMEOUT_MS,
+  }
+  let result = await process.run(request)
+  for (const delayMs of PROBE_TIMEOUT_RETRY_DELAYS_MS) {
+    if (!result.timedOut) return result
+    await Bun.sleep(delayMs)
+    result = await process.run(request)
+  }
+  return result
 }
 
 function gitFailure(result: ProcessResult): string {
-  if (result.timedOut) return `timed out after ${GIT_TIMEOUT_MS}ms`
+  if (result.timedOut) return `timed out after ${GIT_PLUMBING_TIMEOUT_MS}ms`
   return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
 }
 
