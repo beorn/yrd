@@ -18,6 +18,8 @@ import {
   isQueueRunInvocation,
   prepareYrdSettlementLaunch,
   readSettlementCursor,
+  registerSettlementCursor,
+  registerSettlementWorker,
   settlementCursorPath,
   settlementNoticeDir,
   settlementStateSegments,
@@ -112,7 +114,7 @@ function drainOptions(stateDir: string, hook: YrdSettlementHook, journal: Journa
 
 /** Registration is the act that establishes a worker's position; drain never infers one from absence. */
 async function registerCursor(stateDir: string, owner: string | undefined, cursor = 0): Promise<void> {
-  await writeSettlementCursor(settlementCursorPath(stateDir, owner), owner, cursor)
+  await registerSettlementCursor(settlementCursorPath(stateDir, owner), owner, cursor)
 }
 
 afterEach(() => {
@@ -154,6 +156,33 @@ describe("terminalSettlementTargets", () => {
   it("deduplicates a props repeated on the same event", () => {
     const repeated = frame([terminal("pr/rejected", "host-request", "one")])
     expect(terminalSettlementTargets([repeated, repeated], "host-request").targets).toHaveLength(1)
+  })
+})
+
+describe("registerSettlementCursor", () => {
+  it("writes an explicit initial cursor so a new worker does not infer position from absence", async () => {
+    const dir = temporaryDir("yrd-settlement-register-")
+    const path = settlementCursorPath(dir, "@seat/1")
+    await registerSettlementCursor(path, "@seat/1", 27609)
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(27609)
+  })
+
+  it("refuses to overwrite a live cursor, so a second create cannot skip ahead of the true position", async () => {
+    const dir = temporaryDir("yrd-settlement-register-once-")
+    const path = settlementCursorPath(dir, "@seat/1")
+    await registerSettlementCursor(path, "@seat/1", 7)
+    await expect(registerSettlementCursor(path, "@seat/1", 99)).rejects.toThrow(/already registered/)
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(7)
+  })
+
+  it("worker create writes the floor cursor once and does not rewind a live one", async () => {
+    const stateDir = temporaryDir("yrd-settlement-worker-create-")
+    const path = settlementCursorPath(stateDir, "@seat/1")
+    await registerSettlementWorker({ stateDir, owner: "@seat/1", evictedThrough: 27609 })
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(27609)
+    await writeSettlementCursor(path, "@seat/1", 30000)
+    await registerSettlementWorker({ stateDir, owner: "@seat/1", evictedThrough: 27609 })
+    await expect(readSettlementCursor(path, "@seat/1")).resolves.toBe(30000)
   })
 })
 

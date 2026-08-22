@@ -155,6 +155,10 @@ function isEnoent(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
 }
 
+function isEexist(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST"
+}
+
 export type SettlementCursorRead = Readonly<{
   /**
    * Retention floor from the journal. Required in the missing-cursor refusal so
@@ -239,6 +243,50 @@ export async function writeSettlementCursor(path: string, owner: string | undefi
 }
 
 /**
+ * Create a worker's cursor. Creating the worker is the act that establishes
+ * its position; the loader never infers one from a missing file.
+ *
+ * The destination is created exclusively (`wx`) so a second create cannot
+ * skip ahead of a live position. Advances after registration go through
+ * {@link writeSettlementCursor}.
+ */
+export async function registerSettlementCursor(path: string, owner: string | undefined, cursor: number): Promise<void> {
+  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error(`yrd: invalid settlement cursor ${cursor}`)
+  await mkdir(dirname(path), { recursive: true })
+  const body = `${JSON.stringify({ version: 2, owner: owner ?? null, cursor })}\n`
+  try {
+    await writeFile(path, body, { flag: "wx" })
+  } catch (error) {
+    if (isEexist(error)) {
+      throw new Error(
+        `yrd: settlement cursor already registered (${path}) for owner ${JSON.stringify(owner ?? null)}; ` +
+          `absence is the only registration window — do not overwrite a live position`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * Worker create: write the floor cursor if this owner has never registered,
+ * leave a live cursor untouched. `evictedThrough` is the journal's own floor,
+ * not a default the loader invented from absence.
+ */
+export async function registerSettlementWorker(options: {
+  stateDir: string
+  owner: string | undefined
+  evictedThrough: number
+}): Promise<void> {
+  const path = settlementCursorPath(options.stateDir, options.owner)
+  try {
+    await registerSettlementCursor(path, options.owner, options.evictedThrough)
+  } catch (error) {
+    if (!detail(error).includes("already registered")) throw error
+  }
+}
+
+/**
  * The terminal facts in one batch that a prop key asked to be told about.
  *
  * `integrated` is reported separately from the settlements because an
@@ -299,9 +347,7 @@ export async function settleCommittedTerminals(options: SettlementDrainOptions):
   const cursorPath = settlementCursorPath(options.stateDir, hook.owner)
   const journal = options.journal ?? createReadOnlyJournal({ dir: repository.stateDir })
   const evictedThrough = journal.history?.diagnostics().evictedThrough
-  const cursor = await readSettlementCursor(cursorPath, hook.owner, {
-    ...(evictedThrough === undefined ? {} : { evictedThrough }),
-  })
+  const cursor = await readSettlementCursor(cursorPath, hook.owner, (evictedThrough === undefined ? {} : { evictedThrough }))
   try {
     for await (const batch of journal.read(cursor)) {
       const { targets, integrated } = terminalSettlementTargets(batch.values, hook.key)
@@ -465,13 +511,20 @@ export async function runYrdSettlementWorker(
     hook = await loadSettlementHook(specifier, { env, repository, ...named })
     if (hook === undefined) return
     const settler = hook
+    const stateDir = settlementStateDir(repository, segments)
+    const journal = createReadOnlyJournal({ dir: repository.stateDir })
+    const evictedThrough = journal.history?.diagnostics().evictedThrough
+    if (evictedThrough !== undefined) {
+      await registerSettlementWorker({ stateDir, owner: settler.owner, evictedThrough })
+    }
     const drain = (retries: number) =>
       drainSettlements({
         repository,
         hook: settler,
-        stateDir: settlementStateDir(repository, segments),
+        stateDir,
         ...named,
         retries,
+        journal,
       })
     if (!resident) {
       await report(await drain(BUSY_RETRIES), settler.owner)
