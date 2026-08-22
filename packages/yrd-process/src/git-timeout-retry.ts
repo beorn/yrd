@@ -27,7 +27,7 @@ async function runWithGitTimeoutRetry(
   const sleep = options.sleep ?? ((delayMs: number) => Bun.sleep(delayMs))
   let result = await process.run(request)
   for (const delayMs of delaysMs) {
-    if (result.timedOut !== true || result.stalled === true) return result
+    if (result.timedOut !== true) return result
     await sleep(delayMs)
     result = await process.run(request)
   }
