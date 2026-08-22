@@ -1635,6 +1635,72 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(restored.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: featureSha, base: "main" })
   })
 
+  it("migrates the live production checkpoint identity f41d7eff when history is evicted", async () => {
+    // /hh journal_snapshot.checkpoint_identity at cursor 76950, read 2026-08-22.
+    // history_evicted_through=27609 so rebuild from zero is unavailable.
+    // Missing this retain-edge is the live checkpoint-migration-missing pair.
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string; cursor: number }, []>(
+        "SELECT checkpoint_json, cursor FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    expect(checkpoint.cursor).toBeGreaterThan(1)
+    const checkpointValue = z.record(z.string(), z.unknown()).parse(JSON.parse(checkpoint.checkpoint_json))
+    const retainedIdentity = "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd"
+    const retainedCheckpoint = JSON.stringify({ ...checkpointValue, identity: retainedIdentity })
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    // Live floor is 27609 below snapshot 76950. Keep eviction strictly below this
+    // fixture's snapshot so SQLite's completeness assert still holds, and drop
+    // the retained rows the floor claims to have evicted.
+    database.query("DELETE FROM journal_history WHERE cursor <= ?").run(1)
+    database
+      .query(
+        "INSERT INTO journal_metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      )
+      .run("history_evicted_through", "1")
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+  })
+
   it("boots past historical pin-intent and tombstone events, quarantining them by name, while the shape their ids mint still parses", async () => {
     // Positional replay proof (queue-member-id-no-discrimination discipline): raw, positional
     // frames in the intent rail's OLD shapes, copied verbatim as DATA from the deleted
