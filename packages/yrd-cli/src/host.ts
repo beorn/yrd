@@ -257,6 +257,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // `fillMissingStateFromInitial` in the migrate callback below supplies the
   // empty record, and replay resumes after the stored cursor.
   "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
+  // The PRODUCTION composition immediately before Candidate facts began
+  // retaining one-shot component-model authorization evidence. The new field
+  // is optional on historical Candidates, so the shared migration callback
+  // can preserve the projection verbatim while moving the checkpoint onto the
+  // current identity. Measured from the refusal emitted by /hh's live journal
+  // on 2026-08-21; this is the deployment identity, not a harness value.
+  "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
