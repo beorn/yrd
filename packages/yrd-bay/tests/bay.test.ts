@@ -3025,25 +3025,16 @@ describe("bay-base authority vs live queue", () => {
 
   async function createPinnedApp(liveSha: { current: string }) {
     const harness = createWorkspaceHarness()
-    const provision = harness.adapter.provision
-    harness.adapter.provision = (input) => {
-      const result = provision(input)
-      if (result.status !== "completed" || result.conclusion !== "success" || result.output === undefined) return result
-      return {
-        ...result,
-        output: { ...result.output, baseSha: input.baseSha ?? result.output.baseSha },
-      }
-    }
     const resolveBase: ResolveBayBase = async (base) => ({ base, baseSha: liveSha.current })
     const app = await createApp(harness.adapter, undefined, undefined, undefined, resolveBase)
     return { app, liveSha }
   }
 
   it("accepts a managed bay whose recorded base still names the live queue after the stored pin ages", async () => {
-    const liveSha = { current: STALE }
+    const liveSha = { current: BASE }
     const { app } = await createPinnedApp(liveSha)
-    await finishJob(app, await app.bays.open({ name: "b160", base: "main", baseSha: STALE, by: "test" }))
-    expect(app.bays.get("B1")).toMatchObject({ base: "main", baseSha: STALE })
+    await finishJob(app, await app.bays.open({ name: "b160", base: "main", baseSha: BASE, by: "test" }))
+    expect(app.bays.get("B1")).toMatchObject({ base: "main", baseSha: BASE })
 
     liveSha.current = LIVE
     const created = await app.bays.submitSelection("B1", {
@@ -3061,9 +3052,9 @@ describe("bay-base authority vs live queue", () => {
   })
 
   it("honours explicit --base instead of silently replacing it with the bay pin", async () => {
-    const liveSha = { current: STALE }
+    const liveSha = { current: BASE }
     const { app } = await createPinnedApp(liveSha)
-    await finishJob(app, await app.bays.open({ name: "b159", base: "main", baseSha: STALE, by: "test" }))
+    await finishJob(app, await app.bays.open({ name: "b159", base: "main", baseSha: BASE, by: "test" }))
     liveSha.current = LIVE
 
     const created = await app.bays.submitSelection("B1", {
@@ -3079,9 +3070,10 @@ describe("bay-base authority vs live queue", () => {
   })
 
   it("refuses an explicit pin that contradicts the live queue, naming both authorities", async () => {
-    const liveSha = { current: LIVE }
+    const liveSha = { current: BASE }
     const { app } = await createPinnedApp(liveSha)
-    await finishJob(app, await app.bays.open({ name: "conflict", base: "main", baseSha: LIVE, by: "test" }))
+    await finishJob(app, await app.bays.open({ name: "conflict", base: "main", baseSha: BASE, by: "test" }))
+    liveSha.current = LIVE
     await expect(
       app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: STALE }),
     ).rejects.toMatchObject({
