@@ -271,6 +271,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // live /hh journal refusal while probing component commit 1ce1967d on
   // 2026-08-22; this is the deployment identity, not a harness value.
   "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657",
+  // The PRODUCTION composition currently stored in /hh's live journal
+  // (`journal_snapshot.checkpoint_identity` at cursor 76950, read-only
+  // 2026-08-22T10:50Z). history_evicted_through=27609 so rebuild from
+  // complete history is unavailable; the declared retain list had no edge
+  // from this identity (refusal f41d7eff→0150a374). Measured from the
+  // production journal itself, never a harness (PR1305 / R2732).
+  "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.

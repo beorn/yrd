@@ -526,7 +526,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // retires the correlation pair from every schema that carries props — an
     // intentional persisted-contract change, so the identity moves and the
     // correlation-era predecessor gains a retained edge below.
-    expect(first.manifest.targetIdentity).toBe("5d25a0aa9aeef5425421ce6d640804d360e5cfdb3b333ae4337d3e56513e5f5d")
+    expect(first.manifest.targetIdentity).toBe("2267a28ea7be952a07e1d3fa351a7d8e2112a810af227229364617749518f32f")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
@@ -548,6 +548,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // `branch/*` events and `bays.submits`.
     expect(first.manifest.edges).toContainEqual({
       from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
+      to: first.manifest.targetIdentity,
+    })
+    // Production journal stored identity 2026-08-22 (cursor 76950,
+    // evictedThrough 27609). Missing this edge is the live
+    // checkpoint-migration-missing pair f41d7eff→0150a374.
+    expect(first.manifest.edges).toContainEqual({
+      from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
       to: first.manifest.targetIdentity,
     })
     expect(changed.manifest.targetIdentity).not.toBe(first.manifest.targetIdentity)
@@ -1490,7 +1497,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .object({ prs: z.record(z.string(), z.unknown()) })
       .passthrough()
       .parse(checkpointValue.value.state["bays"])
-    const pr = z.object({ revs: z.array(z.record(z.string(), z.unknown())) }).passthrough().parse(bays.prs["PR1"])
+    const pr = z
+      .object({ revs: z.array(z.record(z.string(), z.unknown())) })
+      .passthrough()
+      .parse(bays.prs["PR1"])
     const legacyRevs = pr.revs.map(({ props: _props, ...rev }) => ({
       ...rev,
       correlation: { namespace: "tribe-request", id: "2f333586-27b7-434e-8764-6ae53ec0c468" },
@@ -2813,6 +2823,14 @@ checks: [{check: {run: "true"}}]
         to: attestation.manifest.targetIdentity,
       },
       {
+        from: "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        from: "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
         from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
         to: attestation.manifest.targetIdentity,
       },
@@ -2832,6 +2850,11 @@ checks: [{check: {run: "true"}}]
       },
       {
         from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        // Production journal stored identity 2026-08-22 (evictedThrough 27609).
+        from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
         to: attestation.manifest.targetIdentity,
       },
       {
