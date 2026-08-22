@@ -4561,6 +4561,32 @@ describe("runYrd", () => {
     expect(app.bays.get("B2")).toMatchObject({ branch: "task/reusable", status: "opening" })
   })
 
+  it("classifies a closed-degenerate bay as all-PASS through the status CLI, not just in the store", async () => {
+    // REGRESSION @yrd/22609-bayprune. The sibling test above proves the PERSISTED state is
+    // right and stops there. The consumer read it back off `status === "failed"`, a literal
+    // the bay domain never assigns, so `closedDegenerate` was never derived and the all-PASS
+    // path in classifyBayStatus was unreachable from every CLI surface. The store was correct
+    // and the answer was still wrong, which is the half a store-only assertion cannot see.
+    const app = await createApp({ failingBay: "B1" })
+    const failedOpen = await app.bays.open({ name: "pathless", branch: "task/degenerate", by: "test" })
+    await app.jobs.runMany(app.jobs.requested(failedOpen), { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed", closure: { kind: "closed-degenerate" } })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("bay", "status", "B1", "--json"), output.io), output.stderr()).toBe(0)
+    const report = JSON.parse(output.stdout()) as Readonly<{
+      reports: ReadonlyArray<
+        Readonly<{ bay: string; exit: number; safe: boolean; lines: ReadonlyArray<{ verdict: string }> }>
+      >
+    }>
+    expect(report.reports).toHaveLength(1)
+    expect(report.reports[0]).toMatchObject({ bay: "B1", exit: 0, safe: true })
+    // Every class PASSes on the absence of a workspace — the absence IS the certificate.
+    const verdicts = report.reports[0]?.lines.map((line) => line.verdict) ?? []
+    expect(verdicts.length).toBeGreaterThan(0)
+    expect(verdicts).toEqual(verdicts.map(() => "PASS"))
+  })
+
   it("uses by, submitter, and reviewer throughout CLI help", async () => {
     const app = await createApp()
     for (const args of [

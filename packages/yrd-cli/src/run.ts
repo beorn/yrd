@@ -3991,7 +3991,12 @@ function gatherBayStatusFacts(
     bayId: bay.id,
     name: bay.name,
     branch: bay.branch,
-    ...(bay.status === "failed" && path === undefined ? { closedDegenerate: true } : {}),
+    // Read the PERSISTED closure, not a status literal. The bay domain never assigns
+    // status "failed" — provision failure writes status "closed" with closure.kind
+    // "closed-degenerate" (yrd-bay/src/plugin.ts, projectBayJob). Keying this on
+    // "failed" meant the fact was never emitted and classifyBayStatus's all-PASS
+    // closed-degenerate path was unreachable from the CLI. @yrd/22609-bayprune.
+    ...(bay.closure?.kind === "closed-degenerate" && path === undefined ? { closedDegenerate: true } : {}),
     ...(path === undefined ? {} : { path }),
     protectedBy: protectionEvidenceForBay(protections, { id: bay.id, ...(path === undefined ? {} : { path }) }),
     protectionGaps: protectionGapEvidenceForBay(protections, {
