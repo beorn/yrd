@@ -33,7 +33,7 @@ import {
   type ProvisionedBay,
   type RefreshedBay,
 } from "../src/model.ts"
-import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import { createBayJobDefs, withBays, type BayWorkspace, type ResolveBayBase } from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -51,6 +51,7 @@ async function createApp(
   log?: ConditionalLogger,
   defaultSubmitter?: string,
   selectSubmissionFlow?: (submission: Submission) => FlowPin,
+  resolveBase?: ResolveBayBase,
 ) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(
@@ -61,6 +62,7 @@ async function createApp(
       defaultBase: "main",
       ...(defaultSubmitter === undefined ? {} : { defaultSubmitter }),
       ...(selectSubmissionFlow === undefined ? {} : { selectFlow: selectSubmissionFlow }),
+      ...(resolveBase === undefined ? {} : { resolveBase }),
     }),
   )
   return createYrd(definition, {
@@ -3010,5 +3012,84 @@ describe("admission request-count fact", () => {
     expect(() => ChangeAdmissionRecordedFactSchema.parse(record(-1))).toThrow()
     expect(() => ChangeAdmissionRecordedFactSchema.parse(record(1.5))).toThrow()
     expect(() => ChangeAdmissionRecordedFactSchema.parse(record("unknown"))).toThrow()
+  })
+})
+
+/**
+ * @failure A managed bay's historical pin silently overrules both its own recorded
+ * base and an explicit `--base`. @yrd/core/bay-base-authority (B159/B160).
+ */
+describe("bay-base authority vs live queue", () => {
+  const STALE = "5".repeat(40)
+  const LIVE = "c".repeat(40)
+
+  async function createPinnedApp(liveSha: { current: string }) {
+    const harness = createWorkspaceHarness()
+    const provision = harness.adapter.provision
+    harness.adapter.provision = (input) => {
+      const result = provision(input)
+      if (result.status !== "completed" || result.conclusion !== "success" || result.output === undefined) return result
+      return {
+        ...result,
+        output: { ...result.output, baseSha: input.baseSha ?? result.output.baseSha },
+      }
+    }
+    const resolveBase: ResolveBayBase = async (base) => ({ base, baseSha: liveSha.current })
+    const app = await createApp(harness.adapter, undefined, undefined, undefined, resolveBase)
+    return { app, liveSha }
+  }
+
+  it("accepts a managed bay whose recorded base still names the live queue after the stored pin ages", async () => {
+    const liveSha = { current: STALE }
+    const { app } = await createPinnedApp(liveSha)
+    await finishJob(app, await app.bays.open({ name: "b160", base: "main", baseSha: STALE, by: "test" }))
+    expect(app.bays.get("B1")).toMatchObject({ base: "main", baseSha: STALE })
+
+    liveSha.current = LIVE
+    const created = await app.bays.submitSelection("B1", {
+      resolveRevision: async () => HEAD_1,
+      resolveParents: async () => ["0".repeat(40)],
+      run: runtime,
+      draft: true,
+    })
+    expect(changeFacts(created)).toMatchObject({
+      delivery: "pushed",
+      base: "main",
+    })
+    expect(created.revs[0]?.baseSha).toBe(LIVE)
+    await app.close()
+  })
+
+  it("honours explicit --base instead of silently replacing it with the bay pin", async () => {
+    const liveSha = { current: STALE }
+    const { app } = await createPinnedApp(liveSha)
+    await finishJob(app, await app.bays.open({ name: "b159", base: "main", baseSha: STALE, by: "test" }))
+    liveSha.current = LIVE
+
+    const created = await app.bays.submitSelection("B1", {
+      resolveRevision: async () => HEAD_1,
+      resolveParents: async () => ["0".repeat(40)],
+      run: runtime,
+      base: "main",
+      draft: true,
+    })
+    expect(created.revs[0]?.baseSha).toBe(LIVE)
+    expect(created.revs[0]?.baseSha).not.toBe(STALE)
+    await app.close()
+  })
+
+  it("refuses an explicit pin that contradicts the live queue, naming both authorities", async () => {
+    const liveSha = { current: LIVE }
+    const { app } = await createPinnedApp(liveSha)
+    await finishJob(app, await app.bays.open({ name: "conflict", base: "main", baseSha: LIVE, by: "test" }))
+    await expect(
+      app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: STALE }),
+    ).rejects.toMatchObject({
+      failure: {
+        code: "base-authority-conflict",
+        message: expect.stringMatching(/555555555555.*cccccccccccc/),
+      },
+    })
+    await app.close()
   })
 })
