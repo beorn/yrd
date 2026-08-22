@@ -7729,7 +7729,7 @@ describe("Queue command adapters", () => {
       ({ argv }) => argv.includes("ls-remote") && argv.includes("refs/notes/yrd/merge-records"),
     )
     const mutations = gitRequests.filter(({ argv }) => !argv.includes("ls-remote"))
-    expect(mergeRecordProbes.some(({ timeoutMs }) => timeoutMs === 15_000)).toBe(true)
+    expect(mergeRecordProbes.some(({ timeoutMs }) => timeoutMs === 20_000)).toBe(true)
     expect(
       mutations.filter(({ timeoutMs }) => timeoutMs !== 120_000).map(({ argv, timeoutMs }) => ({ argv, timeoutMs })),
     ).toEqual([])
@@ -7753,6 +7753,35 @@ describe("Queue command adapters", () => {
     const materializeIndex = requests.findIndex(({ argv }) => argv.includes("submodule") && argv.includes("update"))
     expect(checkIndex).toBeGreaterThan(-1)
     expect(materializeIndex).toBeGreaterThan(checkIndex)
+  }, 15_000)
+
+  it("retries a timed-out merge-record ls-remote and still lands", async () => {
+    const { repo, featureSha } = await groupedSubmoduleRepository()
+    await using process = createProcess()
+    let mergeRecordCalls = 0
+    let mergeRecordTimeouts = 0
+    const traced: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv.includes("ls-remote") && request.argv.includes("refs/notes/yrd/merge-records")) {
+          mergeRecordCalls += 1
+          if (mergeRecordTimeouts === 0) {
+            mergeRecordTimeouts += 1
+            return Promise.resolve({
+              ...gitFetchTimeout,
+              durationMs: request.timeoutMs ?? 20_000,
+            })
+          }
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(traced, repo, ["true"])
+    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    expect(run.status, run.error?.message).toBe("completed")
+    expect(run.conclusion, run.error?.message).toBe("success")
+    expect(mergeRecordTimeouts).toBe(1)
+    expect(mergeRecordCalls).toBeGreaterThan(1)
   }, 15_000)
 
   it.each([

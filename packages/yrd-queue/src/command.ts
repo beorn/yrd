@@ -1155,7 +1155,12 @@ const GIT_TIMEOUT_MS = 120_000
  * ceiling. 120s exists to protect rebases/merges (2026-07-23: 30s killed
  * mid-mutation). A hung ls-remote held the git-super push lock for that
  * whole window and blocked every later git call (@adhoc/1 2026-08-22). */
-const GIT_PROBE_TIMEOUT_MS = 15_000
+const GIT_PROBE_TIMEOUT_MS = 20_000
+/** Timed-out ls-remote is retried: a single attempt at a tight bound converts
+ * slow successes (measured up to 14s) into failures. Backoff is short; the
+ * stall is usually gone on the next draw. Mutations are never retried. */
+const GIT_PROBE_ATTEMPTS = 3
+const GIT_PROBE_RETRY_BACKOFF_MS = 200
 /** R1680: worktree-remove cleanup is correctness-critical, not latency-critical;
  * under host load it can exceed the interactive window and must not fail work.
  * Now equal to GIT_TIMEOUT_MS, but kept as a named constant so the cleanup call
@@ -1187,22 +1192,35 @@ function createGit(
     timeoutMs = GIT_TIMEOUT_MS,
   ): Promise<GitResult> => {
     const startedAtMs = Date.now()
-    let result
-    try {
-      result = await process.run({
-        argv: ["git", "-C", repo, ...args],
-        cwd: repo,
-        env,
-        timeoutMs,
-        ...(stdoutChunks === undefined
-          ? {}
-          : {
-              onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => {
-                if (output.stream === "stdout") stdoutChunks.push(output.chunk.slice())
-              },
-            }),
-      })
-    } catch (cause) {
+    const attempts = args[0] === "ls-remote" ? GIT_PROBE_ATTEMPTS : 1
+    let result: ProcessResult | undefined
+    let lastUnstartable: unknown
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        result = await process.run({
+          argv: ["git", "-C", repo, ...args],
+          cwd: repo,
+          env,
+          timeoutMs,
+          ...(stdoutChunks === undefined
+            ? {}
+            : {
+                onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => {
+                  if (output.stream === "stdout") stdoutChunks.push(output.chunk.slice())
+                },
+              }),
+        })
+        lastUnstartable = undefined
+      } catch (cause) {
+        lastUnstartable = cause
+        result = undefined
+      }
+      if (result !== undefined && !result.timedOut) break
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, GIT_PROBE_RETRY_BACKOFF_MS * attempt))
+      }
+    }
+    if (result === undefined) {
       // Failing to START git is not the same event as git failing, and until now only the second
       // one was survivable: every call passes `cwd: repo` as well as `git -C repo`, so a directory
       // that does not exist makes posix_spawn throw ENOENT before git runs. `allowFailure` promises
@@ -1210,9 +1228,9 @@ function createGit(
       // was instead killing the whole process (the recovery scan that meets exactly that estate).
       // Same treatment as the timeout below: a failed result for tolerant callers, a named throw
       // for the rest.
-      const detail = cause instanceof Error ? cause.message : String(cause)
+      const detail = lastUnstartable instanceof Error ? lastUnstartable.message : String(lastUnstartable)
       const message = `yrd: git ${args.join(" ")} could not be started in '${repo}': ${detail}`
-      if (!allowFailure) throw new Error(message, { cause })
+      if (!allowFailure) throw new Error(message, { cause: lastUnstartable })
       return {
         code: GIT_UNSTARTABLE_CODE,
         stdout: "",
