@@ -234,6 +234,19 @@ export const CandidateChangeSchema = z
   .strict()
 export type CandidateChange = Readonly<z.infer<typeof CandidateChangeSchema>>
 
+export const ComponentModelChangeAuthorizationSchema = z
+  .object({
+    operation: z.enum(["add", "remove"]),
+    path: z.string().trim().min(1),
+    ruling: z.uuid(),
+    authorizer: z.string().trim().min(1),
+    pr: QueueMemberIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+  })
+  .strict()
+export type ComponentModelChangeAuthorization = Readonly<z.infer<typeof ComponentModelChangeAuthorizationSchema>>
+
 /** Immutable attempted integration. Its content identity is derived from the
  * queue/base plus ordered revision heads and their immutable compositions. */
 export type Candidate = Readonly<{
@@ -247,6 +260,7 @@ export type Candidate = Readonly<{
   changes?: readonly CandidateChange[]
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
+  componentModelChanges?: readonly ComponentModelChangeAuthorization[]
   /** answers: Did preparation find this immutable Candidate mergeable? tense: historical. */
   mergeability: "unknown" | "mergeable" | "conflicting"
   createdAt: string
@@ -335,6 +349,7 @@ export const CandidateSchema = z
     changes: z.array(CandidateChangeSchema).min(1).optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
+    componentModelChanges: z.array(ComponentModelChangeAuthorizationSchema).min(1).optional(),
     mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
     createdAt: z.iso.datetime({ offset: true }),
   })

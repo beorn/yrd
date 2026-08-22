@@ -42,8 +42,9 @@ export const ChangeTerminalAssociationSchema = z
   })
 export type ChangeTerminalAssociation = Readonly<z.infer<typeof ChangeTerminalAssociationSchema>>
 /** Open key/value labels on a change revision. The same noun as km's node
- * `props`: yrd stores and echoes them, never interprets them. Each key is a
- * fact — set once, idempotent to repeat, conflicting values refuse. */
+ * `props`: each key is a fact — set once, idempotent to repeat, conflicting
+ * values refuse. Plugins may interpret a namespaced key only through an
+ * explicitly injected authority; every other prop remains opaque. */
 export const ChangePropsSchema = z
   .record(z.string(), z.string())
   .refine((props) => Object.keys(props).length > 0, { message: "props cannot be empty" })

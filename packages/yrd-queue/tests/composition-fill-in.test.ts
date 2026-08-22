@@ -23,6 +23,8 @@ import { failureFact } from "@yrd/core"
 import { createProcess, shellCommand } from "@yrd/process"
 import {
   GitCheckEvidenceSchema,
+  Queues,
+  assertComponentModelAuthorizationsAvailable,
   gitCandidatePreparer,
   gitCheckStep,
   type CandidatePreparationInput,
@@ -99,7 +101,11 @@ async function authoredCarrier(repo: string, rootBase: string, minCommit: string
   return head
 }
 
-function preparation(rootBase: string, headSha: string): CandidatePreparationInput {
+function preparation(
+  rootBase: string,
+  headSha: string,
+  props?: Readonly<Record<string, string>>,
+): CandidatePreparationInput {
   return {
     id: "C1",
     queueId: "refs/heads/main",
@@ -114,12 +120,112 @@ function preparation(rootBase: string, headSha: string): CandidatePreparationInp
         revision: 1,
         headSha,
         baseSha: rootBase,
+        ...(props === undefined ? {} : { props }),
       },
     ],
   }
 }
 
+async function deletionCarrier(repo: string, rootBase: string): Promise<string> {
+  await git(repo, ["switch", "-qc", "issue/remove-dep", rootBase])
+  await git(repo, ["rm", "-q", "dep"])
+  await git(repo, ["rm", "-q", "-f", ".gitmodules"])
+  await writeFile(join(repo, "feature.txt"), "remove obsolete component\n")
+  await git(repo, ["add", "feature.txt"])
+  await git(repo, ["commit", "-qm", "carrier: remove dep + cleanup"])
+  const head = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  return head
+}
+
 describe("authored-gitlink fill-in — the queue writes the shaset from each submodule's main", () => {
+  it("spends a ruling on one immutable revision while keeping its retries idempotent", () => {
+    const ruling = "195c96a6-a461-4c98-a97d-5537e76aa9fd"
+    const authorization = {
+      operation: "remove" as const,
+      path: "dep",
+      ruling,
+      authorizer: "@cto",
+      pr: "PR1",
+      revision: 1,
+      headSha: "a".repeat(40),
+    }
+    const queues = Queues.empty({ batchSize: 1 })
+    const spent = {
+      ...queues,
+      candidates: {
+        C1: {
+          id: "C1",
+          queueId: "refs/heads/main",
+          baseSha: "b".repeat(40),
+          revs: [{ pr: "PR1", n: 1, head: "a".repeat(40) }],
+          componentModelChanges: [authorization],
+          mergeability: "mergeable" as const,
+          createdAt: "2026-08-21T00:00:00.000Z",
+        },
+      },
+    }
+
+    expect(() =>
+      assertComponentModelAuthorizationsAvailable(spent, { componentModelChanges: [authorization] }),
+    ).not.toThrow()
+    const error = (() => {
+      try {
+        assertComponentModelAuthorizationsAvailable(spent, {
+          componentModelChanges: [{ ...authorization, pr: "PR2", headSha: "c".repeat(40) }],
+        })
+      } catch (thrown) {
+        return thrown
+      }
+      return undefined
+    })()
+    expect(failureFact(error)).toMatchObject({ kind: "refusal", code: "component-model-ruling-spent" })
+  })
+
+  it("admits an exact verdict-backed component deletion and records its one-shot evidence", async () => {
+    const { repo, rootBase } = await baseRepo()
+    const headSha = await deletionCarrier(repo, rootBase)
+    const ruling = "195c96a6-a461-4c98-a97d-5537e76aa9fd"
+    const requests: unknown[] = []
+    await using process = createProcess({ cwd: repo })
+
+    const prepared = await gitCandidatePreparer({
+      inject: { process },
+      repo,
+      authorizeComponentModelChange: async (request) => {
+        requests.push(request)
+        return { authorizer: "@cto" }
+      },
+    })(preparation(rootBase, headSha, { "component-model-change": `remove dep; ruling ${ruling}` }))
+
+    expect(requests).toEqual([{ operation: "remove", path: "dep", ruling, pr: "PR1", revision: 1, headSha }])
+    expect(prepared.componentModelChanges).toEqual([
+      { operation: "remove", path: "dep", ruling, authorizer: "@cto", pr: "PR1", revision: 1, headSha },
+    ])
+    expect(prepared.sha).toBeDefined()
+    expect(await gitlinkAt(repo, prepared.sha as string)).toBe("")
+    expect(await git(repo, ["show", `${prepared.sha as string}:feature.txt`])).toBe("remove obsolete component")
+  })
+
+  it("refuses a component deletion when the ruling prop is absent or the host cannot resolve it", async () => {
+    const { repo, rootBase } = await baseRepo()
+    const headSha = await deletionCarrier(repo, rootBase)
+    await using process = createProcess({ cwd: repo })
+
+    for (const props of [
+      undefined,
+      { "component-model-change": "remove dep; ruling 195c96a6-a461-4c98-a97d-5537e76aa9fd" },
+    ]) {
+      const error = await Promise.resolve(
+        gitCandidatePreparer({ inject: { process }, repo })(preparation(rootBase, headSha, props)),
+      ).then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      )
+      expect(failureFact(error)?.code).toMatch(/^(?:authored-gitlink|component-model-authorizer-unavailable)$/u)
+    }
+  })
+
   it("fills in main's newest commit past the authored floor, as one gitlinks-only shaset commit", async () => {
     const { repo, module, moduleA, rootBase } = await baseRepo()
     // The floor landed on the submodule's main, and main moved further.

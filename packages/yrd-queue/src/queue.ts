@@ -1052,7 +1052,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/canceled": QueueRunCanceledFactSchema,
         "queue/run/settled": SettledEventSchema,
       },
-      projectionVersion: "queues-v10-ttl-holds",
+      projectionVersion: "queues-v11-component-model-ruling-spend",
       project: projectQueues,
       compact: (state, complete) => {
         const runtime = complete as unknown as DeepReadonly<RuntimeState>
@@ -3129,7 +3129,9 @@ function createQueue<Shape extends ChangeShape>(
       const submit = snapshot.bays.submits[branch]
       return {
         branch,
-        ...(record === undefined ? {} : { record, eligibility: ChangeEligibility(snapshot, record, steps, needsPersonOwner) }),
+        ...(record === undefined
+          ? {}
+          : { record, eligibility: ChangeEligibility(snapshot, record, steps, needsPersonOwner) }),
         ...(submit === undefined ? {} : { submit }),
         ...(record !== undefined || submit === undefined ? {} : { unrecorded: unrecordedSubmit(branch, submit) }),
       }
@@ -3405,6 +3407,45 @@ function queueFailedEvent(
   })
 }
 
+function sameComponentModelAuthorization(
+  left: NonNullable<Candidate["componentModelChanges"]>[number],
+  right: NonNullable<Candidate["componentModelChanges"]>[number],
+): boolean {
+  return (
+    left.operation === right.operation &&
+    left.path === right.path &&
+    left.ruling === right.ruling &&
+    left.authorizer === right.authorizer &&
+    left.pr === right.pr &&
+    left.revision === right.revision &&
+    left.headSha === right.headSha
+  )
+}
+
+/** One ruling is a one-shot decision about one immutable change, never a
+ * standing permission. Candidate facts are retained in the Journal projection,
+ * so the spend survives retries, restarts, and terminal-run compaction. */
+export function assertComponentModelAuthorizationsAvailable(
+  queues: DeepReadonly<QueuesState>,
+  candidate: DeepReadonly<Pick<Candidate, "componentModelChanges">>,
+): void {
+  const prior = Object.values(queues.candidates).flatMap((entry) => entry.componentModelChanges ?? [])
+  const claimed = [...prior]
+  for (const authorization of candidate.componentModelChanges ?? []) {
+    const existing = claimed.find(({ ruling }) => ruling === authorization.ruling)
+    if (existing !== undefined && !sameComponentModelAuthorization(existing, authorization)) {
+      raiseFailure(
+        "refusal",
+        "component-model-ruling-spent",
+        `yrd: component-model ruling '${authorization.ruling}' is already spent by ` +
+          `${existing.pr} revision ${existing.revision} (${existing.operation} ${existing.path}); ` +
+          `ask @cto for a new ruling for ${authorization.operation} ${authorization.path}`,
+      )
+    }
+    claimed.push(authorization)
+  }
+}
+
 function createQueueCommands(
   steps: readonly RuntimeStep[],
   byName: ReadonlyMap<string, RuntimeStep>,
@@ -3445,6 +3486,9 @@ function createQueueCommands(
       }
       const key = admissionJobKey(args.pr, args.candidate.baseSha, args.index, step.revision)
       if (state.jobs.byKey[key] !== undefined) return { events: [] }
+      if (state.queues.candidates[args.candidate.id] === undefined) {
+        assertComponentModelAuthorizationsAvailable(state.queues, args.candidate)
+      }
       return {
         events: [
           ...(state.queues.candidates[args.candidate.id] === undefined
@@ -3619,6 +3663,9 @@ function createQueueCommands(
       if (requiresPreparedCandidate && args.candidate === undefined) {
         throw new Error("yrd: queue run requires prepared Candidate facts")
       }
+      if (args.candidate !== undefined && state.queues.candidates[args.candidate.id] === undefined) {
+        assertComponentModelAuthorizationsAvailable(state.queues, args.candidate)
+      }
       const started = startRun(
         state.queues,
         Queues.nextId(state.queues),
@@ -3708,6 +3755,9 @@ function createQueueCommands(
       if (prs.length === 0) throw new Error(`yrd: queue run '${parent.id}' has no isolation part ${args.part}`)
       if (requiresPreparedCandidate && args.candidate === undefined) {
         throw new Error("yrd: queue isolation requires prepared Candidate facts")
+      }
+      if (args.candidate !== undefined && state.queues.candidates[args.candidate.id] === undefined) {
+        assertComponentModelAuthorizationsAvailable(state.queues, args.candidate)
       }
       const selected = parent.steps.map((planned) => requirePlannedStep(byName, planned))
       const parentCandidate = state.queues.candidates[parent.candidateId]
@@ -4730,6 +4780,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     if (existing !== undefined) {
       throw new Error(`yrd: duplicate Candidate '${candidate.id}'`)
     }
+    assertComponentModelAuthorizationsAvailable(state.queues, candidate)
     return {
       queues: {
         ...state.queues,

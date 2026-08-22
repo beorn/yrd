@@ -76,6 +76,7 @@ import {
   withMerge,
   withStep,
   type CandidatePool,
+  type ComponentModelChangeAuthorizer,
   CheckpointMigrationAttestationSchema,
   CHECKPOINT_MIGRATION_TRAILER,
   type CheckpointMigrationAttestation,
@@ -337,6 +338,9 @@ export type DefaultYrdAppOptions = Readonly<{
   candidatePool?: CandidatePool
   /** Runtime Runner identity recorded on fresh Jobs. */
   runnerId?: string
+  /** Host authority for one-shot component additions/removals. Standalone Yrd
+   * deliberately has none and refuses such changes. */
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer
 }>
 
 type DefaultYrdRuntimeAppOptions = DefaultYrdAppOptions &
@@ -1029,6 +1033,7 @@ function candidateStep(
   candidatePool: CandidatePool | undefined,
   kind: "check" | "action",
   checkpointMigration?: NonNullable<GitCheckOptions["checkpointMigration"]>,
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
 ): RuntimeStep {
   const command = shellCommand(stepCommand(name, config))
   const checkProcess: Pick<Process, "run"> = {
@@ -1093,6 +1098,7 @@ function candidateStep(
           : { environmentPassthrough: config.environmentPassthrough }),
         ...(candidatePool === undefined ? {} : { candidatePool }),
         ...(checkpointMigration === undefined ? {} : { checkpointMigration }),
+        ...(authorizeComponentModelChange === undefined ? {} : { authorizeComponentModelChange }),
       }),
       {
         revision,
@@ -1303,6 +1309,7 @@ function configuredQueueSteps(
         options.candidatePool,
         descriptor.kind,
         index === certificationIndex ? options.checkpointMigrationCertification?.attestCandidate : undefined,
+        options.authorizeComponentModelChange,
       )
     }
     return eraseStep(
@@ -1684,6 +1691,9 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         artifactRoot: join(options.stateDir, "artifacts"),
       }),
       ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
+      ...(options.authorizeComponentModelChange === undefined
+        ? {}
+        : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
     }),
     recordMerge: gitMergeRecorder({ inject: { process: options.process }, repo: options.repo }),
     runner: (jobs) => {
@@ -2517,6 +2527,7 @@ export type YrdHostOptions = Readonly<{
   workspaceLifecycle?: GitWorkspaceLifecycleHooks
   /** Opaque logical submitter supplied by an embedding host; standalone Yrd defaults to operator. */
   defaultSubmitter?: string
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer
   /**
    * Runs once after the host is fully closed and before the executable
    * boundary terminates. Detached background work belongs here rather than
@@ -2525,7 +2536,10 @@ export type YrdHostOptions = Readonly<{
   afterCommand?: () => void
 }>
 
-export type YrdProcessHostOptions = Pick<YrdHostOptions, "workspaceLifecycle" | "defaultSubmitter" | "afterCommand"> &
+export type YrdProcessHostOptions = Pick<
+  YrdHostOptions,
+  "workspaceLifecycle" | "defaultSubmitter" | "afterCommand" | "authorizeComponentModelChange"
+> &
   Readonly<{
     /** The composition host's declared handle for the selected repository
      * (`code`, `pm`) — the queue LABEL run names lead with (item 36). Absent
@@ -2730,6 +2744,9 @@ async function createYrdRuntimeHost(
       process,
       config: loaded.config,
       defaultSubmitter,
+      ...(options.authorizeComponentModelChange === undefined
+        ? {}
+        : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
       scope,
       log,
       candidatePool,
@@ -2842,6 +2859,9 @@ async function createYrdRuntimeHost(
       queueReadModel: Object.freeze({ snapshot: queueReadModel.snapshot }),
       process,
       environment: env,
+      ...(options.authorizeComponentModelChange === undefined
+        ? {}
+        : { componentModelChangeAuthorizer: options.authorizeComponentModelChange }),
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
@@ -3170,6 +3190,9 @@ async function runYrdProcessHost(
             ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
             ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
             ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
+            ...(options.authorizeComponentModelChange === undefined
+              ? {}
+              : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
           },
           residentSeed,
           posture === "viewer" ? "viewer" : "active",

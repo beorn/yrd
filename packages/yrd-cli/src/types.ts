@@ -10,6 +10,7 @@ import type {
   QueueCommands,
   QueuesState,
   RepositoryMergeRecordSearchResult,
+  ComponentModelChangeAuthorizer,
 } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
 import type {
@@ -144,6 +145,7 @@ export type YrdCliServices = Readonly<{
   base?: string
   /** Exact host environment inherited by Bay child processes. */
   environment?: NodeJS.ProcessEnv
+  componentModelChangeAuthorizer?: ComponentModelChangeAuthorizer
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The

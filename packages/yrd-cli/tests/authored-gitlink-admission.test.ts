@@ -138,7 +138,7 @@ type GateArgs = Parameters<typeof requireQueueableSubmodulePins>
 
 // Only the fields this gate actually reads. Cast at the boundary rather than building a whole PR:
 // widening the fixture would make it look like the gate depends on more than it does.
-function changeFixture(headSha: string): GateArgs[0] {
+function changeFixture(headSha: string, props?: Readonly<Record<string, string>>): GateArgs[0] {
   return {
     id: "PR9001",
     name: "hand-bumped pin",
@@ -147,7 +147,16 @@ function changeFixture(headSha: string): GateArgs[0] {
     state: "open",
     merged: false,
     issue: "@i/10-merge-queue/shaset-model",
-    revs: [{ n: 1, head: headSha, base: "main", baseSha: headSha, pushedAt: "2026-08-18T00:00:00.000Z" }],
+    revs: [
+      {
+        n: 1,
+        head: headSha,
+        base: "main",
+        baseSha: headSha,
+        pushedAt: "2026-08-18T00:00:00.000Z",
+        ...(props === undefined ? {} : { props }),
+      },
+    ],
     reviews: [],
     comments: [],
     checkRequests: [],
@@ -157,12 +166,21 @@ function changeFixture(headSha: string): GateArgs[0] {
 async function admissionOutcome(
   root: string,
   headSha: string,
+  options: Readonly<{
+    props?: Readonly<Record<string, string>>
+    authorizeComponentModelChange?: NonNullable<GateArgs[1]["componentModelChangeAuthorizer"]>
+  }> = {},
 ): Promise<{ outcome: "admitted" } | { outcome: "refused"; kind: string; code: string; message: string }> {
   await using process = createProcess()
-  const services = { process } as unknown as GateArgs[1]
+  const services = {
+    process,
+    ...(options.authorizeComponentModelChange === undefined
+      ? {}
+      : { componentModelChangeAuthorizer: options.authorizeComponentModelChange }),
+  } as unknown as GateArgs[1]
   const io = { cwd: root } as unknown as GateArgs[2]
   try {
-    await requireQueueableSubmodulePins(changeFixture(headSha), services, io)
+    await requireQueueableSubmodulePins(changeFixture(headSha, options.props), services, io)
   } catch (error) {
     const fact = failureFact(error)
     if (fact === undefined) throw error
@@ -228,5 +246,22 @@ describe("pre-admission gate for hand-written gitlinks — step (d)'s admission 
     // returning "admitted", composition will refuse what the gate just admitted.
     expect(refusal).toMatchObject({ kind: "refusal", code: "authored-gitlink" })
     expect(refusal.message).toContain("dep")
+  })
+
+  it("admits a hand-added gitlink only when the exact @cto ruling resolves", async () => {
+    const { root, headSha } = await superprojectWithHandAddedPin()
+    const ruling = "195c96a6-a461-4c98-a97d-5537e76aa9fd"
+    const requests: unknown[] = []
+
+    await expect(
+      admissionOutcome(root, headSha, {
+        props: { "component-model-change": `add dep; ruling ${ruling}` },
+        authorizeComponentModelChange: async (request) => {
+          requests.push(request)
+          return { authorizer: "@cto" }
+        },
+      }),
+    ).resolves.toEqual({ outcome: "admitted" })
+    expect(requests).toEqual([{ operation: "add", path: "dep", ruling, pr: "PR9001", revision: 1, headSha }])
   })
 })

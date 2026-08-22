@@ -35,6 +35,7 @@ import type {
   IntegrationProof,
   ChangeShape,
   ChangeSnapshot,
+  ComponentModelChangeAuthorization,
   QueueSubmoduleResolutionEvidence,
   Run,
   SourceRewrite,
@@ -42,6 +43,7 @@ import type {
 import {
   SubmoduleMainOutcomesSchema,
   CandidateChangeSchema,
+  ComponentModelChangeAuthorizationSchema,
   IntegrationProofSchema,
   QueueSubmoduleResolutionEvidenceSchema,
   SourceRewriteSchema,
@@ -258,6 +260,7 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   changes: z.array(CandidateChangeSchema).min(1).optional(),
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
   submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
+  componentModelChanges: z.array(ComponentModelChangeAuthorizationSchema).min(1).optional(),
   comparison: GitCheckComparisonEvidenceSchema.optional(),
   certificate: GateCertificateSchema.optional(),
   /** Current check attempt; absent only in replay-era Job output. */
@@ -273,6 +276,7 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   changes: true,
   sourceRewrites: true,
   submoduleResolutions: true,
+  componentModelChanges: true,
   certificate: true,
 }).strict()
 type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
@@ -518,7 +522,7 @@ function configuredCommand<Shape extends ChangeShape>(
     // time, which could silently disagree with the verdict a reader trusts
     // (22896). The inner logic is exactly what this function returned before;
     // wrapping it only adds the one write point every branch now shares.
-    const outcome = await (async (): Promise<JobResult<CommandEvidence>> => {
+    const outcome = ((): JobResult<CommandEvidence> => {
       // A descendant that outlived the command and held its output pipe open is a
       // distinct, more-actionable failure than a plain output stall (a process
       // leaked, and it wedged the queue until run() abandoned the drain). Surface
@@ -2471,7 +2475,11 @@ async function deriveFrozenCodeCarrier(
     return {
       kind: "gitlink-extra",
       paths: extraPaths,
-      values: extraPaths.map((path) => ({ path, expected: "absent", actual: candidateGitlinks.get(path)!.to })),
+      values: extraPaths.map((path) => {
+        const actual = candidateGitlinks.get(path)
+        if (actual === undefined) throw new Error(`yrd: candidate gitlink census lost '${path}'`)
+        return { path, expected: "absent", actual: actual.to }
+      }),
     }
   }
   const droppedGitlinks: GitlinkValueMismatch[] = []
@@ -3566,6 +3574,7 @@ type CandidatePreparation =
         changes: readonly CandidateChange[]
         sourceRewrites: readonly SourceRewrite[]
         submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
+        componentModelChanges: readonly ComponentModelChangeAuthorization[]
       }>
     }>
   | CandidateFailure
@@ -3592,6 +3601,7 @@ async function prepareCandidate(
   artifactRoot: string,
   refuse?: RefusePathsPolicy,
   provisionPinIntent?: PinIntentProvisioner,
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
 ): Promise<CandidatePreparation> {
   const guilty: { id?: string } = {}
   const prepared = await prepareCandidateMembers(
@@ -3605,6 +3615,7 @@ async function prepareCandidate(
     artifactRoot,
     refuse,
     provisionPinIntent,
+    authorizeComponentModelChange,
   )
   if (prepared.status !== "failed" || guilty.id === undefined || prepared.error.pr !== undefined) return prepared
   return { ...prepared, error: { ...prepared.error, pr: guilty.id } }
@@ -3621,9 +3632,11 @@ async function prepareCandidateMembers(
   artifactRoot: string,
   refuse?: RefusePathsPolicy,
   provisionPinIntent?: PinIntentProvisioner,
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
 ): Promise<CandidatePreparation> {
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
+  const componentModelChanges: ComponentModelChangeAuthorization[] = []
   const changes: CandidateChange[] = []
   const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string): void => {
     if (pr.intent !== undefined || pr.changeId === undefined) return
@@ -3758,9 +3771,17 @@ async function prepareCandidateMembers(
         // each value in from that submodule's main. Added or deleted gitlinks
         // and min commits not on main keep the authored-gitlink refusal,
         // raised inside the fill helper.
-        const filled = await fillAuthoredGitlinksFromMain(git, repo, path, pr, inspected.output)
+        const filled = await fillAuthoredGitlinksFromMain(
+          git,
+          repo,
+          path,
+          pr,
+          inspected.output,
+          authorizeComponentModelChange,
+        )
         if (filled.status === "failed") return filled
         authoredFill = filled.output
+        componentModelChanges.push(...filled.output.componentModelChanges)
       }
     }
     const before = await git.commit(path, "HEAD")
@@ -3835,7 +3856,13 @@ async function prepareCandidateMembers(
   }
   return {
     status: "passed",
-    output: { sha: await git.commit(path, "HEAD"), changes, sourceRewrites, submoduleResolutions },
+    output: {
+      sha: await git.commit(path, "HEAD"),
+      changes,
+      sourceRewrites,
+      submoduleResolutions,
+      componentModelChanges,
+    },
   }
 }
 
@@ -3880,7 +3907,21 @@ export type GitCandidatePreparerOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   candidatePool?: CandidatePool
   provisionPinIntent?: PinIntentProvisioner
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer
 }>
+
+export type ComponentModelChangeAuthorizationRequest = Readonly<{
+  operation: "add" | "remove"
+  path: string
+  ruling: string
+  pr: string
+  revision: number
+  headSha: string
+}>
+
+export type ComponentModelChangeAuthorizer = (
+  request: ComponentModelChangeAuthorizationRequest,
+) => Promise<Readonly<{ authorizer: string }>>
 
 /** Construct and publish the ONE immutable Candidate before Runner admission.
  * `git merge-tree` classifies ordinary conflicts without a checkout; the
@@ -3919,6 +3960,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
         undefined,
         options.provisionPinIntent,
+        options.authorizeComponentModelChange,
       )
       if (candidate.status === "failed") {
         throw createFailure({
@@ -3983,6 +4025,9 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         ...(candidate.output.submoduleResolutions.length === 0
           ? {}
           : { submoduleResolutions: candidate.output.submoduleResolutions }),
+        ...(candidate.output.componentModelChanges.length === 0
+          ? {}
+          : { componentModelChanges: candidate.output.componentModelChanges }),
         mergeability: "mergeable",
       }
     }
@@ -4895,6 +4940,36 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
   return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
 }
 
+const COMPONENT_MODEL_CHANGE_PROP = "component-model-change"
+const COMPONENT_MODEL_CHANGE_VALUE =
+  /^(?<operation>add|remove) (?<path>[^;\s][^;]*); ruling (?<ruling>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/u
+
+export function parseComponentModelChangeAuthorizationValue(
+  pr: string,
+  value: string | undefined,
+): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha"> | undefined {
+  if (value === undefined) return undefined
+  const match = COMPONENT_MODEL_CHANGE_VALUE.exec(value.trim())
+  if (match?.groups === undefined) {
+    throw codeCarrierRefusal(
+      "component-model-authorization-invalid",
+      `PR '${pr}' has malformed '${COMPONENT_MODEL_CHANGE_PROP}' prop; expected ` +
+        `'<add|remove> <gitlink-path>; ruling <@cto-verdict-message-id>'`,
+    )
+  }
+  return {
+    operation: match.groups["operation"] as "add" | "remove",
+    path: match.groups["path"] as string,
+    ruling: match.groups["ruling"] as string,
+  }
+}
+
+export function parseComponentModelChangeAuthorization(
+  pr: StepExecution["prs"][number],
+): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha"> | undefined {
+  return parseComponentModelChangeAuthorizationValue(pr.id, pr.props?.[COMPONENT_MODEL_CHANGE_PROP])
+}
+
 /** What composing one PR wrote into the candidate: the certified source
  * rewrites, plus the paths the shaset provisioner regenerated (today exactly
  * `bun.lock`, or nothing) in the same shaset commit. Queue-composed submodule
@@ -4928,25 +5003,67 @@ async function fillAuthoredGitlinksFromMain(
   path: string,
   pr: StepExecution["prs"][number],
   gitlinks: readonly string[],
+  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
 ): Promise<
   | Readonly<{
       status: "passed"
       output: Readonly<{
         updates: readonly GitlinkUpdate[]
         filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
+        componentModelChanges: readonly ComponentModelChangeAuthorization[]
       }>
     }>
   | CandidateFailure
 > {
   const updates: GitlinkUpdate[] = []
   const filledPins: Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[] = []
+  const componentModelChanges: ComponentModelChangeAuthorization[] = []
   const refused: string[] = []
+  const declared = parseComponentModelChangeAuthorization(pr)
   for (const gitlink of gitlinks) {
     const authored = await readGitlink(git, path, pr.headSha, gitlink)
     const current = await readGitlink(git, path, "HEAD", gitlink)
     if (authored === undefined || current === undefined) {
-      // An added or deleted gitlink: outside the update-only shaset write.
-      refused.push(gitlink)
+      const operation = authored === undefined ? "remove" : "add"
+      if (declared?.operation !== operation || declared.path !== gitlink) {
+        refused.push(gitlink)
+        continue
+      }
+      if (authorizeComponentModelChange === undefined) {
+        return candidateFailure(
+          "component-model-authorizer-unavailable",
+          `PR '${pr.id}' requests '${operation} ${gitlink}' under ruling '${declared.ruling}', but this Yrd host ` +
+            `has no verdict-message resolver; ask @cto for the ruling and run through the hh Yrd host`,
+          ".",
+          [gitlink],
+        )
+      }
+      let authorization: Readonly<{ authorizer: string }>
+      try {
+        authorization = await authorizeComponentModelChange({
+          ...declared,
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+        })
+      } catch (cause) {
+        return candidateFailure(
+          "component-model-authorization-refused",
+          `PR '${pr.id}' component-model ruling '${declared.ruling}' did not authorize '${operation} ${gitlink}': ` +
+            `${cause instanceof Error ? cause.message : String(cause)}`,
+          ".",
+          [gitlink],
+        )
+      }
+      componentModelChanges.push(
+        ComponentModelChangeAuthorizationSchema.parse({
+          ...declared,
+          authorizer: authorization.authorizer,
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+        }),
+      )
       continue
     }
     const submoduleRepo = join(repo, gitlink)
@@ -4980,12 +5097,14 @@ async function fillAuthoredGitlinksFromMain(
     const workflow = await intentSubmissionWorkflow(git, path, "HEAD", pr.headSha, refused, pr.issue)
     return candidateFailure(
       "authored-gitlink",
-      `PR '${pr.id}' changes generated-only gitlinks [${refused.join(", ")}]; ${workflow}`,
+      `PR '${pr.id}' changes generated-only gitlinks [${refused.join(", ")}]; ${workflow}; ` +
+        `for an addition or deletion, ask @cto for an exact ruling and carry ` +
+        `--prop '${COMPONENT_MODEL_CHANGE_PROP}=<add|remove> <path>; ruling <verdict-message-id>' on this revision`,
       ".",
       refused,
     )
   }
-  return { status: "passed", output: { updates, filledPins } }
+  return { status: "passed", output: { updates, filledPins, componentModelChanges } }
 }
 
 async function composePR(
@@ -7030,6 +7149,7 @@ export type GitCheckOptions = ProcessDependency &
      * the runner-context path gets the provisioner through prepareCandidate
      * instead. */
     provisionPinIntent?: PinIntentProvisioner
+    authorizeComponentModelChange?: ComponentModelChangeAuthorizer
     /** Generate data-only checkpoint migration evidence from the exact target
      * Candidate checkout inside this certified check invocation. */
     checkpointMigration?: (input: {
@@ -7178,6 +7298,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     candidatePool?: CandidatePool
     refuse?: RefusePathsPolicy
     provisionPinIntent?: PinIntentProvisioner
+    authorizeComponentModelChange?: ComponentModelChangeAuthorizer
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -7201,6 +7322,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
       options.refuse,
       options.provisionPinIntent,
+      options.authorizeComponentModelChange,
     )
     if (candidate.status === "failed") return onFailure(candidate)
     await proveCandidateSubmoduleReachability(
@@ -7231,6 +7353,9 @@ async function withPinnedCandidate<Output extends JsonValue>(
         ...(candidate.output.submoduleResolutions.length === 0
           ? {}
           : { submoduleResolutions: candidate.output.submoduleResolutions }),
+        ...(candidate.output.componentModelChanges.length === 0
+          ? {}
+          : { componentModelChanges: candidate.output.componentModelChanges }),
       }),
     )
   })
@@ -7247,6 +7372,7 @@ async function withStepCandidate<Output extends JsonValue>(
     candidatePool?: CandidatePool
     refuse?: RefusePathsPolicy
     provisionPinIntent?: PinIntentProvisioner
+    authorizeComponentModelChange?: ComponentModelChangeAuthorizer
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -7296,6 +7422,9 @@ async function withStepCandidate<Output extends JsonValue>(
       ...(candidate.changes === undefined ? {} : { changes: candidate.changes }),
       ...(candidate.sourceRewrites === undefined ? {} : { sourceRewrites: candidate.sourceRewrites }),
       ...(candidate.submoduleResolutions === undefined ? {} : { submoduleResolutions: candidate.submoduleResolutions }),
+      ...(candidate.componentModelChanges === undefined
+        ? {}
+        : { componentModelChanges: candidate.componentModelChanges }),
     }),
   )
 }
@@ -7318,6 +7447,9 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
           artifactRoot: options.artifactRoot,
           ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
           ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
+          ...(options.authorizeComponentModelChange === undefined
+            ? {}
+            : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
         },
         (failure) => failed(failure.error.code, failure.error.message, failure.output),
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {

@@ -74,6 +74,7 @@ import {
   pruneCandidateRefs,
   sweepCandidateRefs,
   applyHostFindingFilter,
+  parseComponentModelChangeAuthorizationValue,
   sweepUncarriedRefs,
   type CandidateRefSweepResult,
   type QueuesState,
@@ -3499,7 +3500,11 @@ async function runBaySession(
   const { identity } = provisioned
   let { bay } = provisioned
   if (bay.path !== undefined) await services.checks?.install(bay.path)
-  printBayResolution(io, { ...identity, effectiveBase: await app.bays.effectiveBase(bay.id) }, identity.reattached ? "reattached" : "new")
+  printBayResolution(
+    io,
+    { ...identity, effectiveBase: await app.bays.effectiveBase(bay.id) },
+    identity.reattached ? "reattached" : "new",
+  )
 
   let child: ProcessResult
   try {
@@ -4261,13 +4266,34 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
   // deleted) gitlink can never be filled in the way an updated one can — always refuse.
   const added = await addedSubmodulePins({ process: services.process, repo, baseSha, pins: changed })
   if (added.length > 0) {
-    raiseFailure(
-      "refusal",
-      "authored-gitlink",
-      `yrd: PR '${pr.id}' adds generated-only gitlinks [${added.map(({ path }) => path).join(", ")}]; a merge ` +
-        "request's gitlink diff can only bump an existing submodule, never add one; authorize the " +
-        "component-model addition as an ordinary code change",
-    )
+    const declared = parseComponentModelChangeAuthorizationValue(pr.id, changeProps(pr)?.["component-model-change"])
+    const exact = added.length === 1 && declared?.operation === "add" && declared.path === added[0]?.path
+    if (!exact || services.componentModelChangeAuthorizer === undefined) {
+      raiseFailure(
+        "refusal",
+        services.componentModelChangeAuthorizer === undefined && exact
+          ? "component-model-authorizer-unavailable"
+          : "authored-gitlink",
+        `yrd: PR '${pr.id}' adds generated-only gitlinks [${added.map(({ path }) => path).join(", ")}]; ` +
+          "ask @cto for an exact component-model ruling and carry " +
+          "--prop 'component-model-change=add <path>; ruling <verdict-message-id>' on this revision through the hh Yrd host",
+      )
+    }
+    try {
+      await services.componentModelChangeAuthorizer({
+        ...declared,
+        pr: pr.id,
+        revision: changeRevisionNumber(pr),
+        headSha,
+      })
+    } catch (cause) {
+      raiseFailure(
+        "refusal",
+        "component-model-authorization-refused",
+        `yrd: PR '${pr.id}' component-model ruling '${declared.ruling}' did not authorize ` +
+          `'add ${declared.path}': ${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+    }
   }
 
   const publications = await submodulePinPublications({ process: services.process, pins: changed })
@@ -9401,7 +9427,7 @@ export async function refreshTrackedQueueRevisions(
     // Drop entries for candidates that moved or left the tracked set: a new
     // authored revision must observe immediately, not inherit a skip window.
     const live = new Set(candidates.map((candidate) => trackedObservationKey(candidate, currentChangeRev(candidate))))
-    for (const key of [...observation.keys()]) {
+    for (const key of observation.keys()) {
       if (!live.has(key)) observation.delete(key)
     }
   }
