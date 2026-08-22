@@ -4689,6 +4689,41 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("active")
   })
 
+  it("admin bay prune decides a missing worktree from its persisted head", async () => {
+    const root = mkdtempSync(join(tmpdir(), "yrd-bay-prune-missing-worktree-"))
+    const remote = join(root, "remote.git")
+    const repo = join(root, "repo")
+    const missingBay = join(root, "missing-bay")
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+    try {
+      execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" })
+      execFileSync("git", ["init", "-q", "-b", "main", repo], { stdio: "ignore" })
+      git(repo, "config", "user.name", "Yrd Test")
+      git(repo, "config", "user.email", "yrd@example.invalid")
+      writeFileSync(join(repo, "README.md"), "base\n")
+      git(repo, "add", "README.md")
+      git(repo, "commit", "-qm", "base")
+      git(repo, "remote", "add", "origin", remote)
+      git(repo, "push", "-u", "origin", "main")
+
+      const headSha = git(repo, "rev-parse", "HEAD")
+      const app = await createApp({ bayPath: missingBay, provisionedHead: headSha })
+      await openTestBay(app, { name: "missing-worktree", branch: "task/missing-worktree" })
+      const output = outputIO({ cwd: repo, now: () => Date.parse("2026-07-12T12:01:00.000Z") })
+
+      const exit = await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        examined: 1,
+        outcomes: { pruned: ["B1"], kept: [], paged: [] },
+        histogram: { pruned: 1, keptByReason: {}, pagedByReason: {} },
+      })
+      expect(exit, output.stderr()).toBe(0)
+    } finally {
+      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
   it("counts a multi-reason Bay once in the conservation histogram", () => {
     const result = runInternals.bayPruneOutcomes(
       [

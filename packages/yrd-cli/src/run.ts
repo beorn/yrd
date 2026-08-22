@@ -3855,6 +3855,11 @@ function originBranchMissing(repoRoot: string, branch: string, remoteTrackingFre
   }
 }
 
+function requiredPersistedBayHead(head: string | undefined): string {
+  if (head === undefined) throw new Error("persisted Bay head is unavailable")
+  return head
+}
+
 /** Gather live facts for one bay; classification stays pure in bay-status.ts (22290). */
 function gatherBayStatusFacts(
   app: YrdCliApp,
@@ -3910,13 +3915,18 @@ function gatherBayStatusFacts(
       }
     }
 
-    if (worktreeMissing !== true) {
+    const persistedHead = bay.headSha
+    if (worktreeMissing !== true || persistedHead !== undefined) {
       try {
-        const head = gitSync(path, ["rev-parse", "HEAD"]).trim()
+        const gitRoot = worktreeMissing === true ? repoRoot : path
+        const head =
+          worktreeMissing === true
+            ? requiredPersistedBayHead(persistedHead)
+            : gitSync(path, ["rev-parse", "HEAD"]).trim()
         // Prefer superproject origin/main when bay is a linked worktree of the repo.
         const originMain = gitSync(repoRoot, ["rev-parse", "origin/main"]).trim()
         try {
-          gitSync(path, ["merge-base", "--is-ancestor", head, originMain])
+          gitSync(gitRoot, ["merge-base", "--is-ancestor", head, originMain])
           tipMerged = true
           tipDurableAt = "origin/main"
           aheadOfOrigin = 0
@@ -3924,7 +3934,7 @@ function gatherBayStatusFacts(
         } catch {
           tipMerged = false
           try {
-            const counts = gitSync(path, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
+            const counts = gitSync(gitRoot, ["rev-list", "--left-right", "--count", `${originMain}...${head}`])
               .trim()
               .split(/\s+/u)
               .map(Number)
@@ -3934,7 +3944,7 @@ function gatherBayStatusFacts(
             tipMergedUnknown = true
           }
           try {
-            uniquePatches = gitSync(path, ["cherry", originMain, head])
+            uniquePatches = gitSync(gitRoot, ["cherry", originMain, head])
               .split("\n")
               .filter((line) => line.startsWith("+ ")).length
             if (uniquePatches === 0) {
@@ -3942,7 +3952,7 @@ function gatherBayStatusFacts(
               tipDurableAt = "origin/main (same changes)"
               tipMergedUnknown = undefined
             } else if (remoteTrackingFresh) {
-              const remoteRef = gitSync(path, [
+              const remoteRef = gitSync(gitRoot, [
                 "for-each-ref",
                 "--format=%(refname:short)",
                 "--contains",
@@ -3966,7 +3976,9 @@ function gatherBayStatusFacts(
       } catch {
         tipMergedUnknown = true
       }
+    }
 
+    if (worktreeMissing !== true) {
       try {
         const stash = gitSync(path, ["stash", "list"])
         // Best-effort: count stashes whose message mentions bay id/branch/name.
