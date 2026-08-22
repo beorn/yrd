@@ -3043,13 +3043,18 @@ function printBayResolution(
     bay: string
     branch: string
     issue?: string
+    effectiveBase?: Readonly<{ base: string; baseSha?: string }>
   }>,
   resolution: string,
   write: (text: string) => unknown = io.stdout,
 ): void {
+  const base =
+    resolved.effectiveBase === undefined
+      ? ""
+      : `, base ${resolved.effectiveBase.base}${resolved.effectiveBase.baseSha === undefined ? "" : `@${resolved.effectiveBase.baseSha.slice(0, 12)}`}`
   write(
     `bay ${resolved.bay} → ${resolution} ${resolved.branch}, ` +
-      `${resolved.issue === undefined ? "no issue linked" : `linked ${resolved.issue}`}\n`,
+      `${resolved.issue === undefined ? "no issue linked" : `linked ${resolved.issue}`}${base}\n`,
   )
 }
 
@@ -3465,7 +3470,12 @@ async function openPersistentBay(
   if (opened === undefined) return 1
   if (opened.bay.path === undefined) throw new Error(`yrd: Bay '${opened.bay.id}' opened without a worktree path`)
   await services.checks?.install(opened.bay.path)
-  printBayResolution(io, opened.identity, opened.identity.reattached ? "reattached" : "new", io.stderr)
+  printBayResolution(
+    io,
+    { ...opened.identity, effectiveBase: await app.bays.effectiveBase(opened.bay.id) },
+    opened.identity.reattached ? "reattached" : "new",
+    io.stderr,
+  )
   io.stdout(`${opened.bay.path}\n`)
   return 0
 }
@@ -3489,7 +3499,7 @@ async function runBaySession(
   const { identity } = provisioned
   let { bay } = provisioned
   if (bay.path !== undefined) await services.checks?.install(bay.path)
-  printBayResolution(io, identity, identity.reattached ? "reattached" : "new")
+  printBayResolution(io, { ...identity, effectiveBase: await app.bays.effectiveBase(bay.id) }, identity.reattached ? "reattached" : "new")
 
   let child: ProcessResult
   try {
@@ -4021,8 +4031,12 @@ async function bayStatusCommand(
 
   const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
-  const reports: BayStatusReport[] = bays.map((bay) =>
-    classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
+  const reports: BayStatusReport[] = await Promise.all(
+    bays.map(async (bay) => {
+      const facts = gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())
+      const effectiveBase = await app.bays.effectiveBase(bay.id)
+      return classifyBayStatus({ ...facts, effectiveBase })
+    }),
   )
   // Aggregate exit: any BLOCK → 1; else any UNKNOWN → 2; else 0.
   // YrdCliExitCode is 0|1|2|3; bay status uses the 0/1/2 subset (2 = unknown).
