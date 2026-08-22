@@ -16,7 +16,9 @@ export function requireLinearRootTip(identity: string, branch: string, parents: 
     "refusal",
     "merge-tip-carrier",
     `yrd: ${identity}. The submitted branch tip is a merge commit with ${parents.length} parents; ` +
-      `Yrd requires a linear root carrier. linear rebuild required: merge inside the affected component repository, ` +
+      `Yrd requires a linear root carrier. linear rebuild required: before fast-forwarding, print what the FF would drag in with ` +
+      `'git cherry <estate-pin> <component-main>' (empty unique list = no-op; non-empty is the dragged set); ` +
+      `then merge inside the affected component repository, ` +
       `fast-forward that component's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
       `then run 'yrd pr submit ${branch}'`,
   )
