@@ -3,6 +3,7 @@
  * @level l2
  * @consumer @yrd/queue Git step adapters
  */
+import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
@@ -5159,6 +5160,47 @@ describe("Queue command adapters", () => {
       ["sh", "-c", "printf shell"],
     ])
     expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([undefined, undefined])
+  })
+
+  it("defaults command artifacts under the git dir, not cwd/.yrd-artifacts", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-gitdir-artifacts-"))
+    roots.push(cwd)
+    execFileSync("git", ["init", "-q"], { cwd })
+    const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], { cwd, encoding: "utf8" }).trim()
+    const process: Pick<Process, "run"> = {
+      async run() {
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout: "",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        }
+      },
+    }
+    const step = configuredCommandStep<ChangeShape>({
+      inject: { process },
+      command: ["true"],
+      cwd,
+      purpose: "check",
+    })
+    await step(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        shape: { results: {} },
+      } as StepExecution<ChangeShape>,
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+    expect(existsSync(join(cwd, ".yrd-artifacts")), "must not write into the working tree").toBe(false)
+    expect(existsSync(join(gitDir, "yrd", "artifacts", "R1", "0-check", "attempt-1", "terminal.json"))).toBe(true)
+    expect(
+      execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }).trim(),
+      "a completed command run must leave the working tree clean",
+    ).toBe("")
   })
 
   it("streams exact stdout and stderr artifacts before a configured command settles", async () => {

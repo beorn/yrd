@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, join, resolve, sep } from "node:path"
@@ -413,6 +414,19 @@ const RETIRED_PLACEHOLDERS = new Map([
   ["{base}", "$YRD_BASE"],
 ])
 
+/** Command receipts belong in the git dir, not the working tree.
+ * `cwd/.yrd-artifacts` is un-ignored in shared main and freezes the updater. */
+function defaultCommandArtifactRoot(cwd: string): string {
+  const gitDir = spawnSync("git", ["-C", cwd, "rev-parse", "--absolute-git-dir"], {
+    encoding: "utf8",
+  })
+  if (gitDir.status === 0) {
+    const dir = gitDir.stdout.trim()
+    if (dir.length > 0) return resolve(dir, "yrd", "artifacts")
+  }
+  return resolve(cwd, ".yrd-artifacts")
+}
+
 export function configuredCommandStep<Shape extends ChangeShape>(
   options: ConfiguredCommandOptions<Shape>,
 ): StepRunner<Shape, CommandEvidence> {
@@ -463,7 +477,7 @@ function configuredCommand<Shape extends ChangeShape>(
       YRD_TARGET: input.targetSha ?? primary.headSha,
       ...options.variables?.(input),
     }
-    const artifactRoot = resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts"))
+    const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd))
     const artifactSink = await createArtifactSink(artifactRoot, input, context.attempt)
     const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
     let result: Awaited<ReturnType<Process["run"]>>
