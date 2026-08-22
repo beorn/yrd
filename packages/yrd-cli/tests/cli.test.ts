@@ -2648,6 +2648,7 @@ describe("runYrd", () => {
           "fetch",
           "--quiet",
           "--no-tags",
+          "--no-recurse-submodules",
           "origin",
           `+refs/heads/${PR1640_BRANCH}:refs/remotes/origin/${PR1640_BRANCH}`,
         ],

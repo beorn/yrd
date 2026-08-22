@@ -63,7 +63,14 @@ export async function observeFreshRemoteBranch(
 ): Promise<FreshRemoteBranch> {
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
-  const fetched = await runGit(process, cwd, ["fetch", "--quiet", "--no-tags", "origin", `+${source}:${target}`])
+  const fetched = await runGit(process, cwd, [
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-recurse-submodules",
+    "origin",
+    `+${source}:${target}`,
+  ])
   if (fetched.timedOut || fetched.exitCode !== 0) {
     return { ok: false, phase: "fetch", detail: gitFailure(fetched), target }
   }
