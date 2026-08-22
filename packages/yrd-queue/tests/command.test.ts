@@ -7721,12 +7721,17 @@ describe("Queue command adapters", () => {
       expect.objectContaining({ action: "fast-forwarded", path: "dep-a", pinSha: pins[1] }),
       expect.objectContaining({ action: "fast-forwarded", path: "dep-b", pinSha: pins[0] }),
     ])
-    // Union behavior: queue Git operations lock the shared repository, so the
-    // timeout-robustness lineage owns the 120s default across the whole proof.
+    // Mutations keep 120s (2026-07-23: 30s killed mid-rebase). The queue Git
+    // helper's ls-remote of merge-records must use the probe ceiling so a hung
+    // read does not hold the git-super push lock for 120s (@adhoc/1 2026-08-22).
+    const gitRequests = requests.filter(({ argv }) => argv[0] === "git" && argv.length > 1)
+    const mergeRecordProbes = gitRequests.filter(
+      ({ argv }) => argv.includes("ls-remote") && argv.includes("refs/notes/yrd/merge-records"),
+    )
+    const mutations = gitRequests.filter(({ argv }) => !argv.includes("ls-remote"))
+    expect(mergeRecordProbes.some(({ timeoutMs }) => timeoutMs === 15_000)).toBe(true)
     expect(
-      requests
-        .filter(({ argv, timeoutMs }) => argv[0] === "git" && argv.length > 1 && timeoutMs !== 120_000)
-        .map(({ argv, timeoutMs }) => ({ argv, timeoutMs })),
+      mutations.filter(({ timeoutMs }) => timeoutMs !== 120_000).map(({ argv, timeoutMs }) => ({ argv, timeoutMs })),
     ).toEqual([])
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare") && argv.includes("--quiet"),

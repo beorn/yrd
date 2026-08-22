@@ -1151,6 +1151,11 @@ const CERTIFICATE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-su
 // repository and scale with checkout size; 30s calibrated for an idle host was
 // killing subprocesses mid-mutation under real fleet load (2026-07-23 incident).
 const GIT_TIMEOUT_MS = 120_000
+/** Read-only network probes (`ls-remote`) must not inherit the mutation
+ * ceiling. 120s exists to protect rebases/merges (2026-07-23: 30s killed
+ * mid-mutation). A hung ls-remote held the git-super push lock for that
+ * whole window and blocked every later git call (@adhoc/1 2026-08-22). */
+const GIT_PROBE_TIMEOUT_MS = 15_000
 /** R1680: worktree-remove cleanup is correctness-critical, not latency-critical;
  * under host load it can exceed the interactive window and must not fail work.
  * Now equal to GIT_TIMEOUT_MS, but kept as a named constant so the cleanup call
@@ -1243,14 +1248,16 @@ function createGit(
     }
     return completed
   }
+  const timeoutFor = (args: readonly string[], timeoutMs?: number): number =>
+    timeoutMs ?? (args[0] === "ls-remote" ? GIT_PROBE_TIMEOUT_MS : GIT_TIMEOUT_MS)
   const run = (repo: string, args: readonly string[], allowFailure = false, timeoutMs?: number): Promise<GitResult> =>
-    execute(repo, args, allowFailure, true, undefined, false, timeoutMs)
+    execute(repo, args, allowFailure, true, undefined, false, timeoutFor(args, timeoutMs))
   const raw = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
-    execute(repo, args, allowFailure, false)
+    execute(repo, args, allowFailure, false, undefined, false, timeoutFor(args))
   const probe = (repo: string, args: readonly string[]): Promise<GitResult> =>
-    execute(repo, args, true, true, undefined, true)
+    execute(repo, args, true, true, undefined, true, timeoutFor(args))
   const rawProbe = (repo: string, args: readonly string[]): Promise<GitResult> =>
-    execute(repo, args, true, false, undefined, true)
+    execute(repo, args, true, false, undefined, true, timeoutFor(args))
   const input = async (
     repo: string,
     args: readonly string[],
@@ -1489,7 +1496,7 @@ type MergeRecordRemote = Readonly<{ remote: "origin"; tip?: string }>
 async function synchronizeMergeRecordRef(git: Git, repo: string, run: string): Promise<MergeRecordRemote | undefined> {
   const configured = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
   if (configured.code !== 0 || configured.stdout === "") return undefined
-  const advertised = await git.run(repo, ["ls-remote", "--refs", "origin", MERGE_RECORD_REF], true)
+  const advertised = await git.run(repo, ["ls-remote", "--refs", "origin", MERGE_RECORD_REF], true, GIT_PROBE_TIMEOUT_MS)
   if (advertised.code !== 0) {
     throw new Error(
       `yrd: merge '${run}' could not read remote record ref '${MERGE_RECORD_REF}': ${advertised.stderr || advertised.stdout}`,
@@ -3288,7 +3295,7 @@ async function inspectLiveQueueBase(git: Git, repo: string, branch: string): Pro
   if (configuredRemote.code !== 0 || configuredRemote.stdout === "") return cached
 
   const sourceRef = `refs/heads/${branch}`
-  const inspected = await git.run(repo, ["ls-remote", "--exit-code", "origin", sourceRef], true)
+  const inspected = await git.run(repo, ["ls-remote", "--exit-code", "origin", sourceRef], true, GIT_PROBE_TIMEOUT_MS)
   const live = /^([0-9a-f]{40,64})\s+refs\/heads\/.+$/iu.exec(inspected.stdout)?.[1]
   if (inspected.code !== 0 || live === undefined) {
     throw codeCarrierRefusal(
