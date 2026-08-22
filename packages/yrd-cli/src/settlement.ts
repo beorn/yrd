@@ -358,7 +358,7 @@ async function loadSettlementHook(
   // A blank owner is a host bug, and the quiet reading of it — "ownerless, so
   // observe but never settle" — looks exactly like a healthy drain while every
   // terminal fact goes unacknowledged.
-  if (hook.owner !== undefined && hook.owner.trim() === "") {
+  if (hook.owner?.trim() === "") {
     throw new Error(`yrd: settlement hook ${specifier} returned a blank owner; omit the owner to observe only`)
   }
   return hook
@@ -549,6 +549,7 @@ export function drainYrdSettlementNotices(noticeDir: string, write: (text: strin
     try {
       return directory.readSync()
     } catch (error) {
+      // silent-fallback-allow: ENOENT is end-of-dir; other errors already wrote
       if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return null
       write(`yrd: cannot scan prior settlement warnings (${detail(error)})\n`)
       return null

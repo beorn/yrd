@@ -190,8 +190,9 @@ async function lockfileState(path: string, lockfile: string): Promise<LockfileSt
   try {
     const bytes = await readFile(join(path, lockfile))
     return { bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") }
-  } catch {
-    return undefined
+  } catch (error) {
+    if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined
+    throw error
   }
 }
 

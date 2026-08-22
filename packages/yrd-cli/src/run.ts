@@ -1115,8 +1115,8 @@ function readPinComparison(queueCwd: string, runnerSha: string): RunnerPinCompar
       const counted = Number(gitSync(pin.submoduleRoot, ["rev-list", "--count", `${runnerSha}..${pin.pinSha}`]).trim())
       if (Number.isSafeInteger(counted) && counted > 0) return { state: "behind", commits: counted }
     } catch {
-      // Fall through to the unknown below: ancestry held but the count did
-      // not, which is a read failure, not a distance.
+      // silent-fallback-allow: ancestry held but rev-list count failed; caller
+      // gets state unknown, not a fabricated distance.
     }
     return { state: "unknown", reason: `cannot count ${runnerSha.slice(0, 10)}..${pin.pinSha.slice(0, 10)}` }
   }

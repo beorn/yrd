@@ -121,7 +121,10 @@ export async function readStorageState(path: string): Promise<StorageState | und
           usedPercent: percent(bytesTotal - bytesFree, bytesTotal),
         },
       }
-    } catch {
+    } catch (error) {
+      const code =
+        error !== null && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error
       const parent = dirname(probe)
       if (parent === probe) return undefined
       probe = parent

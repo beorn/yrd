@@ -190,11 +190,7 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   unknownEventNames(): readonly UnknownEventNameSummary[]
   /** `unknownNames: "skip"` (default) omits quarantined frames from the
    * stream; `"raw"` yields their stored envelopes for diagnostic surfaces. */
-  events(
-    after?: Cursor,
-    before?: Cursor,
-    options?: Readonly<{ unknownNames?: "skip" | "raw" }>,
-  ): AsyncIterable<Event>
+  events(after?: Cursor, before?: Cursor, options?: Readonly<{ unknownNames?: "skip" | "raw" }>): AsyncIterable<Event>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 }>
@@ -373,8 +369,8 @@ function schemaFieldNames(schema: EventSchema): readonly string[] {
   try {
     json = z.toJSONSchema(schema, { io: "input" })
   } catch {
-    // A payload shape JSON Schema cannot express carries no field vocabulary.
-    // Callers see that as an empty map, never as a silent guarantee.
+    // silent-fallback-allow: JSON Schema cannot express this payload shape;
+    // callers see an empty field map, never a silent guarantee.
     return []
   }
   const names = new Set<string>()
@@ -1289,8 +1285,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
         ? {}
         : { checkpoint: { identity: checkpointIdentity, cursor: checkpointCursor } }),
     }),
-    unknownEventNames: () =>
-      [...projection.unknownEvents.values()].toSorted((a, b) => a.name.localeCompare(b.name)),
+    unknownEventNames: () => [...projection.unknownEvents.values()].toSorted((a, b) => a.name.localeCompare(b.name)),
     dispatch,
     /**
      * Yield the journal's events in cursor order, `after` through `before`.
