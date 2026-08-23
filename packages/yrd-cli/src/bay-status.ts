@@ -11,8 +11,14 @@
 import type { YrdBayProtection } from "./types.ts"
 
 export const YRD_BAY_PROTECTIONS_ENV = "YRD_BAY_PROTECTIONS" as const
-export const YRD_BAY_PROTECTIONS_SCHEMA = "yrd-bay-protections/1" as const
+export const YRD_BAY_PROTECTIONS_SCHEMA = "yrd-bay-protections/2" as const
 export const YRD_BAY_PROTECTION_UNKNOWN_SOURCE = "live-process-cwd-unavailable" as const
+export const YRD_BAY_PROTECTION_PROVIDERS = [
+  "hab-launch-claims",
+  "inhab-launch-records",
+  "live-process-cwds",
+  "herdr-live-sessions",
+] as const
 export const HISTORICAL_BAY_OWNER_AGE_FLOOR_MS = 48 * 60 * 60 * 1_000
 
 export function freshOriginBranchMissing(exitCode: number | null): boolean | undefined {
@@ -87,7 +93,7 @@ export type BayStatusFacts = Readonly<{
   /** Repo-global stash entries attributed to this bay (best-effort). */
   stashAttributed?: number
   stashUnknown?: boolean
-  /** Informational only — open change does not block local removal. */
+  /** Live changes whose submit/repair path still consumes this Bay. */
   openChangeIds?: readonly string[]
   /** Live queue SHA `pr create` will consume. */
   effectiveBase?: Readonly<{ base: string; baseSha?: string }>
@@ -121,9 +127,46 @@ export function parseYrdBayProtections(raw: string | undefined): readonly YrdBay
   if (envelope["schema"] !== YRD_BAY_PROTECTIONS_SCHEMA) {
     throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.schema must be ${JSON.stringify(YRD_BAY_PROTECTIONS_SCHEMA)}`)
   }
+  const providerRows = envelope["providers"]
+  if (!Array.isArray(providerRows)) throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.providers must be an array`)
+  const seenProviders = new Set<string>()
+  const unavailableProviders: YrdBayProtection[] = []
+  for (const [index, row] of providerRows.entries()) {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) {
+      throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.providers[${index}] must be an object`)
+    }
+    const provider = row as Record<string, unknown>
+    const name = protectionProviderText(provider["provider"], index, "provider")
+    if (!(YRD_BAY_PROTECTION_PROVIDERS as readonly string[]).includes(name)) {
+      throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.providers[${index}].provider is unknown: ${JSON.stringify(name)}`)
+    }
+    if (seenProviders.has(name)) {
+      throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.providers contains duplicate ${JSON.stringify(name)}`)
+    }
+    seenProviders.add(name)
+    const status = protectionProviderText(provider["status"], index, "status")
+    if (status !== "complete" && status !== "unavailable") {
+      throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.providers[${index}].status must be "complete" or "unavailable"`)
+    }
+    const evidence = protectionProviderText(provider["evidence"], index, "evidence")
+    if (status === "unavailable") {
+      unavailableProviders.push({
+        bay: "*",
+        path: "*",
+        source: YRD_BAY_PROTECTION_UNKNOWN_SOURCE,
+        evidence: `provider ${name} unavailable: ${evidence}`,
+      })
+    }
+  }
+  const missingProviders = YRD_BAY_PROTECTION_PROVIDERS.filter((provider) => !seenProviders.has(provider))
+  if (missingProviders.length > 0) {
+    throw new TypeError(
+      `${YRD_BAY_PROTECTIONS_ENV}.providers missing required provider(s): ${missingProviders.join(", ")}`,
+    )
+  }
   const rows = envelope["protections"]
   if (!Array.isArray(rows)) throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.protections must be an array`)
-  return rows.map((row, index) => {
+  const protections = rows.map((row, index) => {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
       throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.protections[${index}] must be an object`)
     }
@@ -135,6 +178,7 @@ export function parseYrdBayProtections(raw: string | undefined): readonly YrdBay
       evidence: protectionText(protection["evidence"], index, "evidence"),
     }
   })
+  return [...protections, ...unavailableProviders]
 }
 
 export function protectionEvidenceForBay(
@@ -172,26 +216,62 @@ function protectionText(value: unknown, index: number, field: string): string {
   return value
 }
 
-export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
-  if (facts.closedDegenerate === true) {
-    const lines: readonly BayStatusLine[] = [
-      { class: "owner", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace owner" },
-      { class: "consumer", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace consumer" },
-      { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no worktree path was ever recorded" },
-      { class: "commits", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace tip to preserve" },
-      { class: "stash", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace stash" },
-      { class: "pr", verdict: "PASS", evidence: "closed-degenerate Bay can release its branch identity" },
-    ]
-    return {
-      bay: facts.bayId,
-      name: facts.name,
-      branch: facts.branch,
-      wrapper: "git",
-      lines,
-      exit: 0,
-      safe: true,
+function protectionProviderText(value: unknown, index: number, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${YRD_BAY_PROTECTIONS_ENV}.providers[${index}].${field} must be a non-empty string`)
+  }
+  return value
+}
+
+function livePRLine(prs: readonly string[]): BayStatusLine {
+  return {
+    class: "pr",
+    verdict: prs.length === 0 ? "PASS" : "BLOCK",
+    evidence:
+      prs.length === 0
+        ? "no live PR references this Bay"
+        : `live PR(s) ${prs.join(", ")} still references this Bay; submit/repair requires its workspace carrier`,
+  }
+}
+
+function classifyClosedDegenerateBay(facts: BayStatusFacts): BayStatusReport {
+  const consumers = facts.protectedBy ?? []
+  const gaps = facts.protectionGaps ?? []
+  let consumer: BayStatusLine
+  if (consumers.length > 0) {
+    consumer = { class: "consumer", verdict: "BLOCK", evidence: consumers.join("; ") }
+  } else if (gaps.length > 0) {
+    consumer = { class: "consumer", verdict: "UNKNOWN", evidence: gaps.join("; ") }
+  } else {
+    consumer = {
+      class: "consumer",
+      verdict: "PASS",
+      evidence: "closed-degenerate Bay has no live external consumer reference",
     }
   }
+  const lines: readonly BayStatusLine[] = [
+    { class: "owner", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace owner" },
+    consumer,
+    { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no worktree path was ever recorded" },
+    { class: "commits", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace tip to preserve" },
+    { class: "stash", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace stash" },
+    livePRLine(facts.openChangeIds ?? []),
+  ]
+  const blocked = lines.some((line) => line.verdict === "BLOCK")
+  const unknown = lines.some((line) => line.verdict === "UNKNOWN")
+  return {
+    bay: facts.bayId,
+    name: facts.name,
+    branch: facts.branch,
+    wrapper: "git",
+    lines,
+    exit: blocked ? 1 : unknown ? 2 : 0,
+    safe: blocked ? false : unknown ? null : true,
+  }
+}
+
+export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
+  if (facts.closedDegenerate === true) return classifyClosedDegenerateBay(facts)
   const lines: BayStatusLine[] = []
 
   // owner
@@ -379,23 +459,12 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     })
   }
 
-  // pr — informational only
-  const prs = facts.openChangeIds ?? []
-  lines.push({
-    class: "pr",
-    verdict: "PASS",
-    evidence:
-      prs.length === 0
-        ? "no open PR on this branch (informational; open PR does not block local removal)"
-        : `open PR(s) ${prs.join(", ")} (informational; work is on remote — does not block local removal)`,
-  })
+  // pr — submit and repair still consume the Bay until an immutable carrier
+  // replaces that dependency, so a live change is a hard inbound reference.
+  lines.push(livePRLine(facts.openChangeIds ?? []))
 
-  const hasBlock = lines.some((line) => line.verdict === "BLOCK")
-  const hasUnknown = lines.some((line) => line.verdict === "UNKNOWN")
-  // Blocking classes for exit code exclude informational `pr`.
-  const material = lines.filter((line) => line.class !== "pr")
-  const materialBlock = material.some((line) => line.verdict === "BLOCK")
-  const materialUnknown = material.some((line) => line.verdict === "UNKNOWN")
+  const materialBlock = lines.some((line) => line.verdict === "BLOCK")
+  const materialUnknown = lines.some((line) => line.verdict === "UNKNOWN")
 
   let exit: 0 | 1 | 2
   let safe: boolean | null
@@ -409,10 +478,6 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
     exit = 0
     safe = true
   }
-
-  // silence unused (pr still contributes to report lines)
-  void hasBlock
-  void hasUnknown
 
   return {
     bay: facts.bayId,

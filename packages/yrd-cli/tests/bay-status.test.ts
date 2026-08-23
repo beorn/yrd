@@ -26,6 +26,13 @@ const base: BayStatusFacts = {
   openChangeIds: [],
 }
 
+const completeProviders = [
+  { provider: "hab-launch-claims", status: "complete", evidence: "read Hab launch claims" },
+  { provider: "inhab-launch-records", status: "complete", evidence: "read Inhab launch records" },
+  { provider: "live-process-cwds", status: "complete", evidence: "read live process CWDs" },
+  { provider: "herdr-live-sessions", status: "complete", evidence: "read Herdr live sessions" },
+]
+
 describe("parseOwnerPid", () => {
   it("reads trailing :PID from name or BY", () => {
     expect(parseOwnerPid("bay:12345")).toBe(12345)
@@ -45,7 +52,8 @@ describe("freshOriginBranchMissing", () => {
 
 describe("host-owned Bay protections", () => {
   const encoded = JSON.stringify({
-    schema: "yrd-bay-protections/1",
+    schema: "yrd-bay-protections/2",
+    providers: completeProviders,
     protections: [
       {
         bay: "B198",
@@ -70,9 +78,31 @@ describe("host-owned Bay protections", () => {
   it("fails loud on a malformed protection envelope", () => {
     expect(() =>
       parseYrdBayProtections(
-        '{"schema":"yrd-bay-protections/1","protections":[{"bay":"B1","path":"/repo/.bays/B1","source":"host"}]}',
+        JSON.stringify({
+          schema: "yrd-bay-protections/2",
+          providers: completeProviders,
+          protections: [{ bay: "B1", path: "/repo/.bays/B1", source: "host" }],
+        }),
       ),
     ).toThrow(/protection.*evidence/i)
+  })
+
+  it("fails loud when the declared host provider census is incomplete", () => {
+    expect(() =>
+      parseYrdBayProtections(
+        JSON.stringify({
+          schema: "yrd-bay-protections/2",
+          providers: [
+            {
+              provider: "hab-launch-claims",
+              status: "complete",
+              evidence: "read 0 current Hab launch claims",
+            },
+          ],
+          protections: [],
+        }),
+      ),
+    ).toThrow(/providers.*missing.*inhab-launch-records/u)
   })
 })
 
@@ -196,6 +226,19 @@ describe("classifyBayStatus", () => {
     expect(report.lines.find((line) => line.class === "worktree")?.evidence).toMatch(/closed-degenerate/u)
   })
 
+  it("keeps a closed-degenerate Bay unknown when the host census is incomplete", () => {
+    const report = classifyBayStatus({
+      bayId: "B280",
+      name: "pathless",
+      branch: "task/pathless",
+      closedDegenerate: true,
+      protectionGaps: ["provider inhab-launch-records unavailable"],
+    })
+
+    expect(report).toMatchObject({ exit: 2, safe: null })
+    expect(report.lines.find((line) => line.class === "consumer")).toMatchObject({ verdict: "UNKNOWN" })
+  })
+
   it("accepts a missing workspace when a fresh origin census proves its branch is gone", () => {
     const report = classifyBayStatus({
       ...base,
@@ -216,15 +259,18 @@ describe("classifyBayStatus", () => {
     })
   })
 
-  it("open PR does not block (informational PASS)", () => {
+  it("blocks removal while a live PR still references the Bay", () => {
     const report = classifyBayStatus({
       ...base,
       ownerPid: 1,
       ownerAlive: false,
       openChangeIds: ["PR99"],
     })
-    expect(report.exit).toBe(0)
-    expect(report.lines.find((line) => line.class === "pr")?.evidence).toMatch(/PR99/)
+    expect(report).toMatchObject({ exit: 1, safe: false })
+    expect(report.lines.find((line) => line.class === "pr")).toMatchObject({
+      verdict: "BLOCK",
+      evidence: expect.stringMatching(/PR99.*references this Bay/u),
+    })
   })
 
   it("human format names every class with evidence", () => {
