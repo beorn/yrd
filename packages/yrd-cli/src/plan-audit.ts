@@ -216,7 +216,7 @@ export function planDeltas(
  * Any other delta (a changed command revision, a dropped step, a reorder, a
  * batch change) means this process's step definitions are stale: Runs still
  * follow git for WHICH steps run, but the commands they execute and the
- * admission projections come from the set this process built at startup. */
+ * checks-before-queueing projections come from the set this process built at startup. */
 export function installedPlanStale(
   base: string,
   tip: DeclaredPlanAt,
@@ -239,7 +239,7 @@ export function installedPlanStale(
     missing.length > 0
       ? `Every Run at this tip would refuse with declared-step-not-installed because ${missing.join(", ")} ` +
         `${missing.length === 1 ? "has" : "have"} no Job in ${subject}. `
-      : "Runs read WHICH steps run from git, but the commands they execute and the admission projections come " +
+      : "Runs read WHICH steps run from git, but the commands they execute and the checks-before-queueing projections come " +
         `from the step definitions ${subject} built at startup, which no longer match the tip. `
   return {
     code: "installed-plan-stale",
