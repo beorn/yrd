@@ -34,6 +34,7 @@ import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
+import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
 const silentLog = createLogger("test", [{ level: "silent" }])
@@ -120,9 +121,10 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   const repo = await realpath(repoPath)
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
+  await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "main\n")
   await writeFile(join(repo, ".yrd.yml"), 'checks: [{check: {run: "true"}}]\n')
-  await git(repo, "add", "README.md", ".yrd.yml")
+  await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
   await git(repo, "switch", "-qc", "issue/feature")
   await writeFile(join(repo, "feature.txt"), "feature\n")
@@ -149,9 +151,10 @@ async function staleRemoteBranchRepository(): Promise<{
   await git(root, "init", "-q", "-b", "main", author)
   await git(author, "config", "user.name", "Yrd Test")
   await git(author, "config", "user.email", "yrd@example.invalid")
+  await installDeclaredYrdEntry(author)
   await writeFile(join(author, "README.md"), "main\n")
   await writeFile(join(author, ".yrd.yml"), 'checks: [{check: {run: "true"}}]\n')
-  await git(author, "add", "README.md", ".yrd.yml")
+  await git(author, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(author, "commit", "-qm", "main")
   await initBareMain(author, remote)
   await git(author, "remote", "add", "origin", remote)
@@ -392,6 +395,7 @@ async function staleBaseUnrelatedPinRepository(): Promise<{
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await git(repo, "config", "protocol.file.allow", "always")
   await git(repo, "remote", "add", "origin", rootRemote)
+  await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "root\n")
   await writeFile(
     join(repo, ".yrd.yml"),
@@ -401,7 +405,7 @@ checks: [{check: {run: "true"}}]
 `,
   )
   await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
-  await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep")
+  await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep", "bin/yrd")
   await git(repo, "commit", "-qm", "published root base")
   await git(repo, "push", "-qu", "origin", "main")
 
@@ -459,6 +463,7 @@ async function unpublishedSubmodulePinRepository(): Promise<{
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await git(repo, "config", "protocol.file.allow", "always")
   await git(repo, "remote", "add", "origin", rootRemote)
+  await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "root\n")
   await writeFile(
     join(repo, ".yrd.yml"),
@@ -468,7 +473,7 @@ checks: [{check: {run: "true"}}]
 `,
   )
   await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRemote, "dep")
-  await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep")
+  await git(repo, "add", "README.md", ".yrd.yml", ".gitmodules", "dep", "bin/yrd")
   await git(repo, "commit", "-qm", "published root base")
   await git(repo, "push", "-qu", "origin", "main")
   await git(repo, "switch", "-qc", branch)
@@ -4046,6 +4051,10 @@ checks: [{check: {run: "true"}}]
     await git(observer, "add", "local.txt")
     await git(observer, "commit", "-qm", "divergent local commit")
     const localHead = await git(observer, "rev-parse", "HEAD")
+    // This test targets the pushed ref's merge-tip gate. Submitting while
+    // standing on the divergent local branch correctly triggers the earlier
+    // working-tree/ref mismatch refusal instead.
+    await git(observer, "switch", "-q", "main")
     let stdout = ""
     let stderr = ""
 
@@ -4063,7 +4072,7 @@ checks: [{check: {run: "true"}}]
     )
     expect(exitCode, stderr).toBe(1)
     expect(stdout).toBe("")
-    expect(JSON.parse(stderr)).toMatchObject({
+    expect(JSON.parse(stderr), stderr).toMatchObject({
       failure: { kind: "refusal", code: "merge-tip-carrier" },
     })
     expect(stderr).toContain(`local '${branch}' is '${localHead}'`)
