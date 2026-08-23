@@ -16,6 +16,12 @@ export type FreshRemoteBranch =
   | Readonly<{ ok: true; head: string; target: string }>
   | Readonly<{ ok: false; phase: "fetch" | "resolve"; detail: string; target: string }>
 
+export type LiveBranchObservation =
+  | FreshRemoteBranch
+  | Readonly<{ ok: false; phase: "observer"; detail: string; target: string }>
+
+export type BranchCommitResolver = (ref: string) => string | undefined | Promise<string | undefined>
+
 async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]): Promise<ProcessResult> {
   const request = {
     argv: ["git", "-C", cwd, ...args],
@@ -97,4 +103,32 @@ export async function observeFreshRemoteBranch(
     return { ok: false, phase: "resolve", detail: gitFailure(resolved), target }
   }
   return { ok: true, head, target }
+}
+
+/** Observe one branch through the caller's deterministic Git facts in tests,
+ * or the exact refreshed-origin mechanism in production. This keeps branch
+ * freshness as one capability: recut and read surfaces may attach different
+ * remedies, but they cannot quietly disagree about which commit is live. */
+export async function observeLiveBranch(
+  process: Pick<Process, "run"> | undefined,
+  cwd: string,
+  branch: string,
+  resolveCommit?: BranchCommitResolver,
+): Promise<LiveBranchObservation> {
+  const target = `refs/remotes/origin/${branch}`
+  if (resolveCommit !== undefined) {
+    const head = (await resolveCommit(`origin/${branch}`)) ?? (await resolveCommit(branch))
+    return head === undefined
+      ? {
+          ok: false,
+          phase: "resolve",
+          detail: `neither 'origin/${branch}' nor '${branch}' resolves to a commit`,
+          target,
+        }
+      : { ok: true, head: head.toLowerCase(), target }
+  }
+  if (process === undefined) {
+    return { ok: false, phase: "observer", detail: "no Git process is installed", target }
+  }
+  return observeFreshRemoteBranch(process, cwd, branch)
 }

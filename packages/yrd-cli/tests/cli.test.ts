@@ -616,14 +616,23 @@ function runYrd(
       // its base. Answering that with silence, as this stub answers everything
       // else, claims the repository has no shared history — which the gate
       // refuses rather than guess at. Give it one plausible merge base.
-      run: async (request) => ({
-        stdout: request.argv.includes("merge-base") ? `${"0".repeat(39)}1\n` : "",
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-        durationMs: 0,
-        timedOut: false,
-      }),
+      run: async (request) => {
+        const target = request.argv.find((arg) => arg.startsWith("refs/remotes/origin/") && arg.endsWith("^{commit}"))
+        const branch = target?.slice("refs/remotes/origin/".length, -"^{commit}".length)
+        const observed = branch === undefined ? undefined : app.bays.pr(branch)
+        return {
+          stdout: request.argv.includes("merge-base")
+            ? `${"0".repeat(39)}1\n`
+            : observed === undefined
+              ? ""
+              : `${currentChangeRev(observed).head}\n`,
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+          durationMs: 0,
+          timedOut: false,
+        }
+      },
       reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
     },
     ...services,
@@ -2426,7 +2435,7 @@ describe("runYrd", () => {
     expect(status.stdout()).toContain("HISTORY")
     expect(status.stdout()).toContain("1→2")
 
-    const detail = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    const detail = remergeIO(app, "PR1", { now: () => Date.parse("2026-07-09T12:00:00.000Z") })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
     expect(detail.stdout()).toContain(`SOURCE READY ${sourceReadyAt}`)
     expect(detail.stdout()).toContain("HISTORY rev1→rev2")
@@ -2501,7 +2510,7 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), io.io, services)).toBe(0)
     }
 
-    const detail = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    const detail = remergeIO(app, "PR1", { now: () => Date.parse("2026-07-09T12:00:00.000Z") })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
     const view = detail.stdout()
 
@@ -14599,6 +14608,71 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(visible).toContain("The description body.")
     // The issue URL is an OSC 8 hyperlink target in the detail identity area.
     expect(view.stdout()).toContain("]8;;https://example.test/issues/7")
+  })
+
+  it("separates the live branch head from the frozen revision in pr view", async () => {
+    const app = await createApp()
+    const branch = "task/frozen-source-view"
+    const liveHead = "2".repeat(40)
+    const requests: ProcessRequest[] = []
+    const submit = commitMetaIO("fix(cli): expose frozen source")
+    expect(await runYrd(app, yrd("pr", "submit", branch, "--base", "main"), submit.io), submit.stderr()).toBe(0)
+
+    const view = outputIO({ columns: 140 })
+    expect(
+      await runYrd(app, yrd("pr", "view", branch), view.io, {
+        process: {
+          run: async (request) => {
+            requests.push(request)
+            return {
+              stdout: request.argv.includes("rev-parse") ? `${liveHead}\n` : "",
+              stderr: "",
+              exitCode: 0,
+              signal: null,
+              durationMs: 0,
+              timedOut: false,
+            }
+          },
+          reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+        },
+      }),
+      view.stderr(),
+    ).toBe(0)
+    const rows = stripAnsi(view.stdout()).split("\n")
+    const source = rows.find((row) => row.includes("SOURCE"))
+    const frozen = rows.find((row) => row.includes("FROZEN REV 1"))
+
+    expect(source).toContain(branch)
+    expect(source).toContain(liveHead)
+    expect(source).not.toContain(HEAD_SHA)
+    expect(frozen).toContain(HEAD_SHA)
+    expect(frozen).not.toContain(liveHead)
+    expect(rows.join("\n")).toContain("BRANCH MOVED")
+    expect(rows.join("\n")).toContain("recut before review")
+    expect(requests.map((request) => request.argv)).toContainEqual([
+      "git",
+      "-C",
+      "/repo",
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "origin",
+      `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+    ])
+  })
+
+  it("fails loudly when human pr view cannot observe the live branch", async () => {
+    const app = await createApp()
+    const branch = "task/unobservable-source"
+    const submit = commitMetaIO("fix(cli): require live source evidence")
+    expect(await runYrd(app, yrd("pr", "submit", branch, "--base", "main"), submit.io), submit.stderr()).toBe(0)
+
+    const view = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", branch), view.io, { process: undefined }), view.stderr()).toBe(2)
+    expect(view.stderr()).toContain(branch)
+    expect(view.stderr()).toContain("no Git process is installed")
+    expect(view.stdout()).toBe("")
   })
 
   function metadataPr(overrides: Partial<PR> = {}): PR {

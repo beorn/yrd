@@ -2,7 +2,7 @@ import { changeDeliveryState, changeRevisionLineage, type PR, type ChangeRev } f
 import { raiseFailure } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
-import { observeFreshRemoteBranch } from "./remote-branch.ts"
+import { observeLiveBranch, type LiveBranchObservation } from "./remote-branch.ts"
 import type { YrdCliIO, YrdCliServices } from "./types.ts"
 
 const GIT_TIMEOUT_MS = 30_000
@@ -28,25 +28,28 @@ function gitFailure(result: ProcessResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
 }
 
-async function freshRemoteBranch(
-  process: Pick<Process, "run">,
-  cwd: string,
-  branch: string,
-  remedy: string,
-): Promise<string> {
-  const observed = await observeFreshRemoteBranch(process, cwd, branch)
+function requireObservedBranch(observed: LiveBranchObservation, pr: PR, remedy: string, injected: boolean): string {
+  if (!observed.ok && observed.phase === "observer") {
+    raiseFailure(
+      "configuration",
+      "recut-branch-observer-missing",
+      `yrd: cannot refresh live branch '${pr.branch}' before recutting PR '${pr.id}'; ${observed.detail}`,
+    )
+  }
   if (!observed.ok && observed.phase === "fetch") {
     raiseFailure(
       "configuration",
       "recut-branch-refresh-failed",
-      `yrd: could not refresh live branch '${branch}' from origin: ${observed.detail}\n${remedy}`,
+      `yrd: could not refresh live branch '${pr.branch}' from origin: ${observed.detail}\n${remedy}`,
     )
   }
   if (!observed.ok) {
     raiseFailure(
       "configuration",
       "recut-branch-head-missing",
-      `yrd: refreshed live branch '${branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
+      injected
+        ? `yrd: cannot verify PR '${pr.id}' because ${observed.detail}`
+        : `yrd: refreshed live branch '${pr.branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
     )
   }
   return observed.head
@@ -60,26 +63,6 @@ async function liveBranchHead(
   io: YrdCliIO,
 ): Promise<string> {
   const cwd = io.cwd ?? globalThis.process.cwd()
-  if (io.pruneGit !== undefined) {
-    const git = io.pruneGit(cwd)
-    const head = (await git.resolveCommit(`origin/${pr.branch}`)) ?? (await git.resolveCommit(pr.branch))
-    if (head === undefined) {
-      raiseFailure(
-        "configuration",
-        "recut-branch-head-missing",
-        `yrd: cannot verify PR '${pr.id}' because neither 'origin/${pr.branch}' nor '${pr.branch}' resolves to a commit`,
-      )
-    }
-    return head
-  }
-  const process = services.process
-  if (process === undefined) {
-    raiseFailure(
-      "configuration",
-      "recut-branch-observer-missing",
-      `yrd: cannot refresh live branch '${pr.branch}' before recutting PR '${pr.id}'; no Git process is installed`,
-    )
-  }
   const queueFlag = options.queue === true ? " --queue" : ""
   const remedy =
     `remedy: request credential-bearing Yrd publication for branch '${pr.branch}' on base '${recorded.base}' ` +
@@ -89,7 +72,9 @@ async function liveBranchHead(
     `if the publication Job cannot run: escalate to @chief for a credential-bearing publish — this branch is ` +
     `never pushed by hand, not even as an emergency fallback.\n` +
     (options.queue === true ? "" : `then retry:\n  yrd pr recut ${pr.id} --preflight`)
-  return freshRemoteBranch(process, cwd, pr.branch, remedy)
+  const git = io.pruneGit?.(cwd)
+  const observed = await observeLiveBranch(services.process, cwd, pr.branch, git?.resolveCommit)
+  return requireObservedBranch(observed, pr, remedy, git !== undefined)
 }
 
 async function commitRangeEvidence(

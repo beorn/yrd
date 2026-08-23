@@ -118,6 +118,7 @@ import {
   type YrdContext,
 } from "./invocation.ts"
 import { requireUnqualifiedRunSelector, resolveCanonicalRunSelector } from "./qualified-run-ref.ts"
+import { observeLiveBranch } from "./remote-branch.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
@@ -5983,6 +5984,37 @@ async function viewPr(
   command = "pr.view",
 ): Promise<void> {
   const pr = requiredPr(app, selector)
+  const json = jsonEnabled(options)
+  let liveSource: Readonly<{ head: string }> | undefined
+  if (!json) {
+    const cwd = io.cwd ?? globalThis.process.cwd()
+    const git = io.pruneGit?.(cwd)
+    const observed = await observeLiveBranch(services.process, cwd, pr.branch, git?.resolveCommit)
+    if (!observed.ok && observed.phase === "observer") {
+      raiseFailure(
+        "configuration",
+        "pr-view-branch-observer-missing",
+        `yrd: cannot observe live branch '${pr.branch}' while viewing PR '${pr.id}'; ${observed.detail}`,
+      )
+    }
+    if (!observed.ok && observed.phase === "fetch") {
+      raiseFailure(
+        "configuration",
+        "pr-view-branch-refresh-failed",
+        `yrd: could not refresh live branch '${pr.branch}' from origin while viewing PR '${pr.id}': ${observed.detail}\n` +
+          `retry: yrd pr view ${pr.id}`,
+      )
+    }
+    if (!observed.ok) {
+      raiseFailure(
+        "configuration",
+        "pr-view-branch-head-missing",
+        `yrd: cannot resolve live branch '${pr.branch}' while viewing PR '${pr.id}': ${observed.detail}\n` +
+          `inspect: git rev-parse --verify origin/${pr.branch}^{commit}`,
+      )
+    }
+    liveSource = { head: observed.head }
+  }
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
@@ -5997,7 +6029,7 @@ async function viewPr(
   const publication = projectPublication(publicationJob(app, pr))
   await printResultWithWarnings(
     io,
-    jsonEnabled(options),
+    json,
     {
       command,
       pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
@@ -6010,6 +6042,7 @@ async function viewPr(
     },
     createElement(ChangeDetailView, {
       pr,
+      liveSource,
       eligibility,
       runs,
       attempts,

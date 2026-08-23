@@ -19,6 +19,7 @@ import {
   queueTimelineDisplayRows,
   queueTimelineProjection,
   ChangeDetailData,
+  type QueueStatusResult,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -922,6 +923,46 @@ describe("queue timeline 21106 contract", () => {
     expect(rendered).not.toContain("No run recorded.")
     expect(rendered).not.toContain("LANDING -")
   })
+
+  it("renders a failed required check as an actionable revision row, never ready", () => {
+    const result = queueTimelineStories["contract-overview"].snapshot.results[0]
+    if (result === undefined) throw new Error("contract-overview is missing its queue result")
+    const failedCheck = {
+      ...result,
+      eligibilities: [
+        ...(result.eligibilities ?? []).filter((eligibility) => eligibility.pr !== "PR1"),
+        {
+          pr: "PR1",
+          revision: 1,
+          runnable: false,
+          reason: {
+            code: "required-check-failed",
+            message: "required check 'yrd-admission' failed in R1; fix branch and push",
+          },
+          review: { required: false, approved: false, stale: false },
+          checks: { status: "failed", run: "R1" },
+        },
+      ],
+    } satisfies QueueStatusResult
+    const projection = queueTimelineProjection([failedCheck], {
+      now: Date.parse("2026-07-13T12:00:00.000Z"),
+      windowMs: 6 * 60 * 60_000,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: queueTimelineAdmissionTimes([failedCheck]),
+    })
+    const row = projection.rows.find((candidate) => candidate.pr === "PR1")
+
+    expect(row?.status).toBe("rev")
+    expect(row?.detail).toContain("yrd-admission")
+    expect(row?.failure).toEqual({
+      code: "required-check-failed",
+      message: "required check 'yrd-admission' failed in R1; fix branch and push",
+    })
+  })
+
   it("freezes AGE at the first terminal outcome while open rows keep aging", () => {
     const results = queueTimelineStories["contract-overview"].snapshot.results
     const now = Date.parse("2026-07-13T12:00:00.000Z")

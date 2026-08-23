@@ -2025,7 +2025,13 @@ export function queueDisplayState(
   // Callers that DO have a word for a closed record read `delivery`.
   if (pr.state === "closed") return { kind, terminal: true, native, delivery: native, preRun: undefined }
   const delivery = options.eligibility?.reason?.code === "needs-author" ? "needs-author" : native
-  return { kind, terminal: false, native, delivery, preRun: preRunBand(pr, native, options.runs ?? []) }
+  return {
+    kind,
+    terminal: false,
+    native,
+    delivery,
+    preRun: preRunBand(pr, native, options.runs ?? [], options.eligibility),
+  }
 }
 
 /**
@@ -2041,8 +2047,14 @@ export function queueDisplayState(
  * Terminal records never reach here — {@link queueDisplayState} returns before
  * calling it — which is the whole point of the guard living in one place.
  */
-function preRunBand(pr: PR, native: ChangeDeliveryState, runs: readonly Run[]): "draft" | "rev" | "ready" | undefined {
+function preRunBand(
+  pr: PR,
+  native: ChangeDeliveryState,
+  runs: readonly Run[],
+  eligibility: ChangeEligibility | undefined,
+): "draft" | "rev" | "ready" | undefined {
   if (native === "needs-author") return "rev"
+  if (eligibility?.reason?.code === "required-check-failed") return "rev"
   if (native === "submitted" || native === "ready") return "ready"
   if (native === "pushed") return lastFailedSubmission(pr) === undefined ? "draft" : "rev"
   if (native === "rejected") {
@@ -2605,7 +2617,8 @@ function timelineNonIntegratedRows(
   return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentChangeRev(pr)
     const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-    const display = queueDisplayState(pr, { runs })
+    const eligibility = eligibilityForCurrentRevision(result, pr)
+    const display = queueDisplayState(pr, { runs, eligibility })
     const status = display.preRun
     if (status === undefined) return []
     if (status === "ready" && activeRevisions.has(revisionKey)) return []
@@ -2616,7 +2629,6 @@ function timelineNonIntegratedRows(
     const revisionLineage = [timelineRevisionLineage(pr)]
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
     const candidate = latestCandidateForCurrentRevision(result, pr)
-    const eligibility = eligibilityForCurrentRevision(result, pr)
     const blockingReason = eligibility?.runnable === false ? eligibility.reason : undefined
     const readyDetail = withTimelineLineage(
       blockingReason?.message ?? (position === undefined ? "queued" : `position ${position}`),
@@ -2660,7 +2672,7 @@ function timelineNonIntegratedRows(
 
     // draft | rev — pushed, pre-queue WIP anchored on registration (pushedAt).
     const registeredAt = revision.pushedAt
-    const detail = status === "rev" ? revisionDetail(pr, runs) : "draft"
+    const detail = status === "rev" ? (blockingReason?.message ?? revisionDetail(pr, runs)) : "draft"
     return [
       {
         id: `${pr.base}:draft:${pr.id}:${revision.n}:${revision.head}`,
@@ -3917,6 +3929,7 @@ export function collapseRecomposedSources(
 
 export function ChangeDetailView({
   pr,
+  liveSource,
   eligibility,
   runs,
   attempts = [],
@@ -3924,6 +3937,7 @@ export function ChangeDetailView({
   position,
 }: {
   pr: PR
+  liveSource?: Readonly<{ head: string }>
   eligibility?: ChangeEligibility
   runs: readonly Run[]
   attempts?: readonly QueueAttempt[]
@@ -3971,10 +3985,27 @@ export function ChangeDetailView({
           <Text bold>TITLE</Text> {pr.title}
         </Text>
       )}
-      <Text>
-        <Text bold>SOURCE</Text> <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {pr.branch} <Text bold>HEAD</Text>{" "}
-        {revision.head}
-      </Text>
+      {liveSource === undefined ? (
+        <Text>
+          <Text bold>FROZEN SOURCE</Text> <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {pr.branch}{" "}
+          <Text bold>REV {revision.n} HEAD</Text> {revision.head}
+        </Text>
+      ) : (
+        <>
+          <Text>
+            <Text bold>SOURCE</Text> <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {pr.branch}{" "}
+            <Text bold>LIVE HEAD</Text> {liveSource.head}
+          </Text>
+          <Text>
+            <Text bold>FROZEN REV {revision.n}</Text> <Text bold>HEAD</Text> {revision.head}
+          </Text>
+          {liveSource.head === revision.head ? null : (
+            <Text wrap="wrap">
+              <Text bold>BRANCH MOVED</Text> — live branch differs from frozen rev {revision.n}; recut before review
+            </Text>
+          )}
+        </>
+      )}
       <Text>
         <Text bold>BASE</Text> {pr.base}
         {revision.baseSha === undefined ? null : `@${revision.baseSha}`}
