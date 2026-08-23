@@ -1003,17 +1003,23 @@ export type QueuePlugin<Shape extends ChangeShape> = (<
 export function withQueue<const Steps extends readonly AnyStepDef[]>(
   options: QueueOptions<Steps> & ValidateStepChain<Steps>,
 ): QueuePlugin<FinalShape<Steps>> {
-  const steps = installSteps(options.steps)
+  const steps = installSteps(options.steps, options.defaultSteps)
   const progress = validateQueueProgressPolicy(options.progress ?? DEFAULT_QUEUE_PROGRESS_POLICY)
   const trimmedOwner = options.needsPersonOwner?.trim()
   const needsPersonOwner = trimmedOwner === undefined || trimmedOwner === "" ? DEFAULT_NEEDS_PERSON_OWNER : trimmedOwner
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   const batchSize = effectiveBatchSize(options.batch)
-  const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
-  validateSequence(defaults ?? steps, false)
+  validateSequence(declaredDefaultSteps(steps), false)
+  // The declared plan is DELIBERATELY not seeded into the initial state. The
+  // projection's checkpoint identity is a hash of `initialState` (plus the
+  // registered event schemas), so while the declared check set lived here an
+  // ordinary `.yrd.yml` edit was indistinguishable from a schema change: it
+  // invalidated every stored checkpoint, forced a replay a retention-evicted
+  // journal cannot serve, and refused any Candidate carrying it with
+  // `checkpoint-migration-certificate-missing`. The declaration reaches the
+  // plan through the installed step set instead (`declaredDefaultSteps`).
   const initial = Queues.empty({
     batchSize,
-    ...(defaults === undefined ? {} : { defaultSteps: defaults.map((step) => step.name) }),
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
@@ -1125,7 +1131,16 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
   return Object.freeze(install) as unknown as QueuePlugin<FinalShape<Steps>>
 }
 
-type RuntimeStep = AnyStepDef
+/** An installed step, plus the one bit that says whether the queue's DECLARED
+ * configuration puts it in the default plan.
+ *
+ * The marker lives on the installed set — not in `QueuesState` — because the
+ * declaration is a property of this process's configuration, and the durable
+ * state is a record of what already ran. Before 23192 the default plan was read
+ * back out of `queues.defaultSteps`, so a checkpoint written before a check was
+ * declared kept that check from ever executing, and no restart could activate
+ * it: replaying the checkpoint replayed the stale list. */
+type RuntimeStep = AnyStepDef & Readonly<{ declaredDefault: boolean }>
 type QueueActions = Readonly<{
   refresh(): Promise<unknown>
   admissionStep(args: AdmissionStepArgs): Promise<CommandResult>
@@ -1878,7 +1893,7 @@ function createQueue<Shape extends ChangeShape>(
     baseSha: string,
     runOptions?: RunJobOptions,
   ): Promise<RevisionAdmissionOutcome> => {
-    const selected = admissionSteps(runtime().queues, steps)
+    const selected = admissionSteps(steps)
     const prior = changeAdmission(pr)
     const freshRetry = prior?.status === "refused" && hasFreshRevisionCheckAuthority(runtime(), pr, steps)
     if (
@@ -2023,7 +2038,7 @@ function createQueue<Shape extends ChangeShape>(
     if (baseSha === undefined) return undefined
     const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
     if (snapshot === undefined) return undefined
-    for (const [index, step] of admissionSteps(runtime().queues, steps).entries()) {
+    for (const [index, step] of admissionSteps(steps).entries()) {
       if (requestedStep !== undefined && step.name !== requestedStep) continue
       const job =
         jobs.getByKey(admissionJobKey(snapshot, baseSha, index, step.revision)) ??
@@ -2164,7 +2179,7 @@ function createQueue<Shape extends ChangeShape>(
         }
         if (
           blockingQueuePause(snapshot, pr) !== undefined ||
-          admissionSteps(snapshot.queues, steps).length === 0 ||
+          admissionSteps(steps).length === 0 ||
           runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined ||
           (selection !== "explicit" && admissionLineHolder(snapshot, steps, pr) !== undefined)
         ) {
@@ -2235,7 +2250,7 @@ function createQueue<Shape extends ChangeShape>(
       if (options.continueAdmissions?.() === false) break
       await actions.refresh()
       const snapshot = runtime()
-      const selected = admissionSteps(snapshot.queues, steps)
+      const selected = admissionSteps(steps)
       // Admission verdicts no longer mint Runs, but replay can still contain an
       // admission Run from before the cutover. Legacy Runs predate explicit
       // settlement claims, so activeQueueRuns() cannot discover all of them;
@@ -2494,7 +2509,7 @@ function createQueue<Shape extends ChangeShape>(
             ),
           )
           const requested = requestedPRs(snapshot.bays, args, consumed, intentCutoff)
-          const authoritySteps = selectSteps(steps, args.steps ?? snapshot.queues.defaultSteps)
+          const authoritySteps = requestedOrDeclaredSteps(steps, args.steps)
           const authorityGaps = selectorless
             ? requested.flatMap((pr) => {
                 const requestedSnapshot = Queues.snapshot(pr)
@@ -3493,7 +3508,7 @@ function createQueueCommands(
           `yrd: required checks target stale revision ${args.pr.revision} (${args.pr.headSha}) of PR '${args.pr.id}'`,
         )
       }
-      const selected = admissionSteps(state.queues, steps)
+      const selected = admissionSteps(steps)
       const step = selected[args.index]
       if (step === undefined || step.name !== args.step) {
         throw new Error(`yrd: required check ${args.index} is '${step?.name ?? "missing"}', not '${args.step}'`)
@@ -3589,7 +3604,7 @@ function createQueueCommands(
     params: QueueRunArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
-      const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
+      const selected = requestedOrDeclaredSteps(steps, args.steps)
       const selection = stepSelection(
         state.queues,
         steps,
@@ -5003,13 +5018,60 @@ function clearAdmissionRefusals(queues: DeepReadonly<QueuesState>, prs: readonly
   }
 }
 
-function installSteps(definitions: readonly AnyStepDef[]): readonly RuntimeStep[] {
+function installSteps(definitions: readonly AnyStepDef[], declared?: readonly string[]): readonly RuntimeStep[] {
   const names = new Set<string>()
   for (const step of definitions) {
     if (names.has(step.name)) throw new Error(`yrd: queue step '${step.name}' is already installed`)
     names.add(step.name)
   }
-  return Object.freeze([...definitions])
+  // An absent declaration means "every installed step", exactly as an absent
+  // `--steps` selection did. A present one is validated here — the single place
+  // the declared plan is resolved — so an unknown or repeated name fails at
+  // construction rather than silently narrowing the plan at run time.
+  const selected = declared === undefined ? undefined : new Set(declared)
+  if (selected !== undefined && declared !== undefined) {
+    if (selected.size !== declared.length) throw new Error("yrd: queue.run: duplicate step name")
+    for (const name of selected) {
+      if (!names.has(name)) throw new Error(`yrd: queue step '${name}' is not installed`)
+    }
+  }
+  return Object.freeze(
+    definitions.map((step) => Object.freeze({ ...step, declaredDefault: selected?.has(step.name) ?? true })),
+  )
+}
+
+/** The plan the configuration DECLARES, in installed order — the authority for
+ * every default-authority run. `selectSteps` has always ignored the requested
+ * ordering and returned installed order, so filtering the marked set is the
+ * same list it produced, sourced from the declaration instead of the state. */
+function declaredDefaultSteps(steps: readonly RuntimeStep[]): RuntimeStep[] {
+  return steps.filter((step) => step.declaredDefault)
+}
+
+/** The plan a run request executes: an explicit `--steps` selection when the
+ * caller gave one, the declared default plan otherwise. Never the durable
+ * `queues.defaultSteps` — that copy is history (23192). */
+function requestedOrDeclaredSteps(steps: readonly RuntimeStep[], requested?: readonly string[]): RuntimeStep[] {
+  return requested === undefined ? declaredDefaultSteps(steps) : selectSteps(steps, requested)
+}
+
+/** The stored step list a restored checkpoint carries, when it disagrees with
+ * what the configuration now declares.
+ *
+ * Quiet by construction once every live checkpoint was written by this code:
+ * `queues.defaultSteps` is no longer seeded from configuration, so only a
+ * checkpoint predating 23192 can hold one. While one does, the divergence is
+ * reported — never used. */
+function supersededStepPlan(
+  queues: DeepReadonly<QueuesState>,
+  declared: readonly RuntimeStep[],
+): readonly StepName[] | undefined {
+  const stored = queues.defaultSteps
+  if (stored === undefined) return undefined
+  const names = declared.map((step) => step.name)
+  return stored.length === names.length && stored.every((name, index) => name === names[index])
+    ? undefined
+    : [...stored]
 }
 
 function descriptor(step: RuntimeStep | QueueStep): InstalledStep {
@@ -5041,7 +5103,9 @@ function stepSelection(
 ): StepSelection {
   const names = selected.map((step) => step.name)
   const selectedNames = new Set(names)
-  const configuredNames = new Set(selectSteps(installed, queues.defaultSteps).map((step) => step.name))
+  const declared = declaredDefaultSteps(installed)
+  const configuredNames = new Set(declared.map((step) => step.name))
+  const superseded = authority === "configured" ? supersededStepPlan(queues, declared) : undefined
   const plan = installed.filter((step) => selectedNames.has(step.name) || configuredNames.has(step.name))
   const omittedSteps =
     authority === "explicit"
@@ -5060,7 +5124,12 @@ function stepSelection(
       : []
   return {
     authority,
+    // Which list judged this Run is only half the record; where the list came
+    // from is the other half, and without it a reader cannot tell a plan the
+    // configuration declared from one a stored projection supplied (23192).
+    source: authority === "explicit" ? "requested" : "declared",
     steps: names,
+    ...(superseded === undefined ? {} : { supersededSteps: superseded }),
     ...(omittedSteps.length === 0 ? {} : { omittedSteps }),
   }
 }
@@ -6446,6 +6515,28 @@ function auditQueues(
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
+  // The one place the durable step list and the declared one are compared. A
+  // restored projection that predates 23192 still carries `defaultSteps`; the
+  // declared plan is what runs, so the stored list can only ever be stale — and
+  // a stale list nobody reports is how a declared check went unexecuted for a
+  // night while `queue audit` said clean. Print BOTH lists and name each side.
+  const declaredPlan = declaredDefaultSteps(steps)
+  const supersededPlan = supersededStepPlan(state.queues, declaredPlan)
+  if (supersededPlan !== undefined) {
+    findings.push({
+      code: "step-plan-drift",
+      message:
+        `Queue saved state carries step plan ${supersededPlan.join("\u2192")} (recorded by an earlier ` +
+        `configuration), while the declared configuration is ` +
+        `${declaredPlan.map((step) => step.name).join("\u2192")}. The declared plan is what runs; the saved ` +
+        "list is history and is never planned from. It clears when this projection next writes a checkpoint.",
+      specimen: "queue:step-plan",
+      resolution: [
+        "No action is required for the executed plan: runs already use the declared configuration.",
+        "Confirm the declared plan with 'yrd queue audit' after the next checkpoint write.",
+      ],
+    })
+  }
   const queued = admissionQueue(state, steps)
   const refusalFindings = admissionRefusalAuditFindings(state, queued, progress, needsPersonOwner)
   findings.push(...refusalFindings)
@@ -6769,7 +6860,7 @@ function resumableQueueRoots(
 ): Run[] {
   const explicit = explicitPRs(state.bays, args)
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
-  const admissions = admissionSteps(state.queues, steps)
+  const admissions = admissionSteps(steps)
   const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
   const indexed = (explicit ?? []).flatMap((pr) => {
     const id = latestRootRunId(state.queues.index, Queues.snapshot(pr))
@@ -6807,8 +6898,10 @@ function needsSettlement(state: DeepReadonly<RuntimeState>, run: Run): boolean {
   })
 }
 
-function admissionSteps(queues: DeepReadonly<QueuesState>, steps: readonly RuntimeStep[]): RuntimeStep[] {
-  const selected = selectSteps(steps, queues.defaultSteps)
+/** The admission plan: the declared plan up to (excluding) the first merge —
+ * the checks a revision must pass before it may enter a Queue run. */
+function admissionSteps(steps: readonly RuntimeStep[]): RuntimeStep[] {
+  const selected = declaredDefaultSteps(steps)
   const boundary = selected.findIndex((step) => step.kind === "merge")
   return boundary < 0 ? selected : selected.slice(0, boundary)
 }
@@ -6836,7 +6929,7 @@ function unstartedAdmission(
 ): boolean {
   return (
     run.stepSelection?.authority === "admission" &&
-    samePlan(run.steps, admissionSteps(queues, steps)) &&
+    samePlan(run.steps, admissionSteps(steps)) &&
     run.steps.every((step) => step.job === undefined || step.job.status === "queued")
   )
 }
@@ -6893,7 +6986,7 @@ function admissionQueue(
   steps: readonly RuntimeStep[],
   targets?: ReadonlySet<string>,
 ): PR[] {
-  const selected = admissionSteps(state.queues, steps)
+  const selected = admissionSteps(steps)
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
     .filter((pr) => targets === undefined || targets.has(pr.id))
@@ -6954,7 +7047,7 @@ function admissionQueue(
  * invisible.
  */
 function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
-  const selected = selectSteps(steps, state.queues.defaultSteps)
+  const selected = declaredDefaultSteps(steps)
   if (!selected.some((step) => step.kind === "merge")) return []
   return Object.values(state.bays.prs)
     .filter((pr) => {
@@ -7142,7 +7235,7 @@ function checkEligibility(
 ): ChangeEligibility["checks"] {
   const request = checkRequest(pr)
   const timing = request === undefined ? {} : { queuedAt: request.at }
-  const selected = admissionSteps(state.queues, steps)
+  const selected = admissionSteps(steps)
   if (selected.length === 0) return { status: "passed", ...timing }
   const admission = changeAdmission(pr)
   const requestedBase = request?.baseSha ?? changeBaseSha(pr)
@@ -7295,7 +7388,7 @@ function projectRevisionAdmissionJobs(
   steps: readonly RuntimeStep[],
   queuedAt: string | undefined,
 ): ChangeCheckRecord[] | undefined {
-  const selected = admissionSteps(state.queues, steps)
+  const selected = admissionSteps(steps)
   const jobs = currentRevisionAdmissionJobs(state, pr, steps)
   if (jobs === undefined) return undefined
   return selected.map((step, index) => {
@@ -7354,7 +7447,7 @@ function currentRevisionAdmissionJobs(
   if (baseSha === undefined) return undefined
   const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
   if (snapshot === undefined) return undefined
-  const jobs = admissionSteps(state.queues, steps).map((step, index) => {
+  const jobs = admissionSteps(steps).map((step, index) => {
     const id =
       state.jobs.byKey[admissionJobKey(snapshot, baseSha, index, step.revision)] ??
       state.jobs.byKey[admissionJobKey(snapshot, baseSha, index)]
@@ -7784,7 +7877,7 @@ function ChangeEligibility(
   const checks = checkEligibility(state, pr, steps)
   const exhaustedAutomaticAdmissions =
     checks.status === "failed" &&
-    automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(state.queues, steps))
+    automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(steps))
   const verdict = (reason?: ChangeEligibility["reason"]): ChangeEligibility => ({
     pr: pr.id,
     revision: changeRevisionNumber(pr),

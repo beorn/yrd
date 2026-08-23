@@ -19,6 +19,8 @@ export type {
   QueueAuditEmission,
   QueueAuditFinding,
   QueueAuditResult,
+  QueueEnvironmentAuditComparison,
+  QueueEnvironmentAuditEmission,
   YrdCliApp,
   YrdCliExitCode,
   YrdCliIO,

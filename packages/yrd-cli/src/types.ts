@@ -51,11 +51,32 @@ export type YrdBayProtection = Readonly<{
 
 /** Optional operator capabilities supplied by a queue-environment plugin. The
  * CLI never simulates these lifecycle operations when no plugin owns them. */
+/** What an environment audit actually COMPARED.
+ *
+ * A zero-finding audit is a result only when it can say how many declarations
+ * it read and against what; without a denominator, "nothing drifted" and
+ * "nothing was there to check" are the same sentence. */
+export type QueueEnvironmentAuditComparison = Readonly<{
+  /** Resolved path of the installed-baseline authority file. */
+  baselinePath: string
+  /** Installed baselines compared — the denominator. */
+  baselines: number
+  /** The bases compared, named. */
+  bases: readonly string[]
+  /** Which live side each baseline was compared against. `runtime` is absent
+   * when no live queue runtime is wired to compare with. */
+  against: readonly ("configured" | "runtime")[]
+}>
+
+export type QueueEnvironmentAuditEmission = QueueAuditEmission &
+  Readonly<{ comparison: QueueEnvironmentAuditComparison }>
+
 export type YrdCliQueueAdministration = Readonly<{
   /** A PRODUCER: findings are built here, so the closed emission type applies —
    * a plugin cannot invent a code no consumer whitelists. Readers of the
-   * concatenated audit keep the open {@link QueueAuditResult}. */
-  auditEnvironment?(): Promise<QueueAuditEmission>
+   * concatenated audit keep the open {@link QueueAuditResult}. Refuses rather
+   * than returning an empty comparison when the installed baseline is absent. */
+  auditEnvironment?(): Promise<QueueEnvironmentAuditEmission>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
 }>

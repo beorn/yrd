@@ -88,12 +88,12 @@ import {
   type IntegratedShape,
   type PinIntentProvisioner,
   type ChangeShape,
-  type QueueAuditEmission,
   type StepDef,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
 import {
+  installedBaselineCreationRemedy,
   installedBaselineDrift,
   readInstalledBaselines,
   removeInstalledBaseline,
@@ -181,6 +181,7 @@ import type {
   YrdCliQueueAdministration,
   YrdCliServices,
 } from "./types.ts"
+import type { QueueEnvironmentAuditComparison, QueueEnvironmentAuditEmission } from "./types.ts"
 import { createQueueReadModel } from "./queue-read-model.ts"
 import { queueReadBases } from "./queue-read-boundary.ts"
 import { MergeAuthorityBoundary } from "./merge-authority-boundary.ts"
@@ -2223,7 +2224,7 @@ function queueAdministration(
     return { base, baseSha }
   }
   return Object.freeze({
-    async auditEnvironment(): Promise<QueueAuditEmission> {
+    async auditEnvironment(): Promise<QueueEnvironmentAuditEmission> {
       // Re-derive the selected config's queue descriptor from disk on EVERY
       // audit so a config change after startup is proven, not masked by a stale snapshot.
       // The audit proves THREE-WAY equality (merge-queue R41b): runtime
@@ -2234,11 +2235,31 @@ function queueAdministration(
       // agree is the runtime leg proven, so a resident built before another
       // process's migration fails loud instead of certifying baseline == disk
       // while it still executes the old queue policy.
-      const [baselines, current] = await Promise.all([
+      const [stored, current] = await Promise.all([
         readInstalledBaselines(repository.stateDir),
         deriveConfiguredQueue(),
       ])
+      // An ABSENT authority file is not an empty one. Iterating `{}` here found
+      // nothing and reported no drift, so `queue audit` answered "clean" for a
+      // queue it had never compared against anything — the exact silent-zero
+      // this audit exists to prevent, and the reason a declared-but-unexecuted
+      // check survived two reviews (23193).
+      if (!stored.present) {
+        raiseFailure(
+          "refusal",
+          "installed-baseline-missing",
+          `yrd: no installed baseline at ${stored.path}, so this audit has nothing to compare and cannot ` +
+            `report whether the queue drifted. ${installedBaselineCreationRemedy(defaultBase)}`,
+        )
+      }
+      const baselines = stored.baselines
       const runtime = runtimeQueue?.()
+      const comparison: QueueEnvironmentAuditComparison = {
+        baselinePath: stored.path,
+        baselines: Object.keys(baselines).length,
+        bases: Object.keys(baselines).toSorted(),
+        against: runtime === undefined ? ["configured"] : ["configured", "runtime"],
+      }
       const baselineFindings = Object.values(baselines).flatMap((baseline) => {
         const configDrift = installedBaselineDrift(baseline, current)
         if (configDrift !== undefined) return [configDrift]
@@ -2249,7 +2270,7 @@ function queueAdministration(
       // immutable artifact cannot change, and a hot-reloading dev run is
       // meant to. The runtime does not second-guess that choice by
       // comparing its own checkout to a pin.
-      return { findings: baselineFindings }
+      return { findings: baselineFindings, comparison }
     },
     async provision(base) {
       const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredQueue()])
@@ -2264,7 +2285,7 @@ function queueAdministration(
       // Deinit must clear the stored baseline by key WITHOUT requiring the base
       // ref to resolve: a deleted stale base is exactly the case whose prescribed
       // remedy is `yrd admin queue deinit <base>`, so a wedged ref must not block it.
-      const stored = (await readInstalledBaselines(repository.stateDir))[base]
+      const stored = (await readInstalledBaselines(repository.stateDir)).baselines[base]
       const baseSha = (await resolveCommit(process, repository.repo, base)) ?? stored?.baseSha
       const released = (await removeInstalledBaseline(repository.stateDir, base)) ? ["installed-baseline"] : []
       if (baseSha === undefined) {
@@ -2620,10 +2641,19 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
     if (administration.auditEnvironment === undefined) {
       throw new Error("yrd: runner health audit is unavailable")
     }
-    const audit = await administration.auditEnvironment()
+    // The audit still runs EAGERLY here — the probe closes its process and
+    // scope in `finally`, so a deferred audit would have no runtime left. A
+    // REFUSAL is carried forward rather than thrown out of construction: the
+    // health classifier owns what an absent installed baseline means for a
+    // service (never installed vs. running unguarded), and it cannot classify
+    // a failure that already escaped past it.
+    const audit = await administration.auditEnvironment().then(
+      (result) => () => Promise.resolve(result),
+      (error: unknown) => () => Promise.reject(error),
+    )
     return Object.freeze({
       base: loaded.config.base,
-      queue: Object.freeze({ auditEnvironment: () => Promise.resolve(audit) }),
+      queue: Object.freeze({ auditEnvironment: audit }),
     })
   } finally {
     try {

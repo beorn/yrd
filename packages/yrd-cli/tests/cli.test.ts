@@ -36,7 +36,14 @@ import {
   type ChangeDeliveryState,
   type ChangeRev,
 } from "@yrd/bay"
-import { runYrd as runYrdRaw, type QueueAuditEmission, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
+import {
+  runYrd as runYrdRaw,
+  type QueueAuditEmission,
+  type QueueEnvironmentAuditComparison,
+  type QueueEnvironmentAuditEmission,
+  type YrdCliIO,
+  type YrdCliServices,
+} from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import {
   Command,
@@ -853,6 +860,19 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
     since: "2026-07-09T12:00:00.000Z",
     completeness: "queue-only",
     legacy: [{ path, frames }],
+  }
+}
+
+/** A stubbed environment audit still has to say WHAT IT COMPARED: the emission
+ * type makes a denominator-free audit unrepresentable, because a bare
+ * `findings: []` reads the same whether nothing drifted or nothing was ever
+ * read (23193). Stubs declare one installed baseline unless they say otherwise. */
+function stubAuditComparison(bases: readonly string[] = ["main"]): QueueEnvironmentAuditComparison {
+  return {
+    baselinePath: "/state/installed-baseline.json",
+    baselines: bases.length,
+    bases,
+    against: ["configured"],
   }
 }
 
@@ -3412,6 +3432,7 @@ describe("runYrd", () => {
       queue: {
         auditEnvironment: async () => ({
           findings: [{ code, message: `queue base 'main' ${code} blocks the resident` }],
+          comparison: stubAuditComparison(),
         }),
       },
     })
@@ -6533,6 +6554,7 @@ describe("runYrd", () => {
     const services: YrdCliServices = {
       queue: {
         auditEnvironment: async () => ({
+          comparison: stubAuditComparison(),
           findings: [
             {
               code: "config-drift",
@@ -7645,7 +7667,9 @@ describe("runYrd", () => {
       lastMerged: null,
     }
     let findings: QueueAuditEmission["findings"] = []
-    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings }) } }
+    const services: YrdCliServices = {
+      queue: { auditEnvironment: async () => ({ findings, comparison: stubAuditComparison() }) },
+    }
     const lockRelease = Promise.withResolvers<void>()
     const lockAcquired = Promise.withResolvers<void>()
     let lock: Promise<void> | undefined
@@ -8416,7 +8440,9 @@ describe("runYrd", () => {
       }),
     )
     const app = await createApp()
-    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings: [] }) } }
+    const services: YrdCliServices = {
+      queue: { auditEnvironment: async () => ({ findings: [], comparison: stubAuditComparison() }) },
+    }
     try {
       // Deliberately the "absent" health state (no lease, no queued work on
       // THIS app) rather than "healthy" — a stale draft must page regardless
@@ -8613,7 +8639,9 @@ describe("runYrd", () => {
       }),
     )
     const app = await createApp()
-    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings: [] }) } }
+    const services: YrdCliServices = {
+      queue: { auditEnvironment: async () => ({ findings: [], comparison: stubAuditComparison() }) },
+    }
     try {
       // Deliberately the "absent" health state (no lease, no queued work on
       // THIS app) rather than "healthy" — an unrouted needs-person merge
@@ -12647,7 +12675,10 @@ describe("runYrd", () => {
         // in-repo producer can write it (QueueAuditFindingEmission forbids
         // exactly that), so the cast is what makes the foreign case expressible.
         auditEnvironment: async () =>
-          ({ findings: [{ code: "operator-finding", message: "inspect runner" }] }) as unknown as QueueAuditEmission,
+          ({
+            findings: [{ code: "operator-finding", message: "inspect runner" }],
+            comparison: stubAuditComparison(),
+          }) as unknown as QueueEnvironmentAuditEmission,
         provision: async (base?: string) => ({ base: base ?? "main", ready: true }),
         deprovision: async (base?: string) => ({ base: base ?? "main", released: true }),
       },

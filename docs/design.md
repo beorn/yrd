@@ -398,6 +398,54 @@ argv-array (no string interpolation into `sh -c`); Git ref/branch/issue names
 are treated as hostile input at every boundary (they ride argv, never shell
 text, and are schema-validated on intake).
 
+**C11. The step plan is DECLARED, never restored.** The list of steps a Run
+executes is derived from the queue's declared configuration at plan time
+(`.yrd.yml` checks plus the built-in `merge`, read from the base branch per
+C5). `QueuesState.defaultSteps` is history: a copy some earlier process wrote,
+never an input to a plan. Three consequences, and each one paid for itself:
+
+- **Restoring saved state cannot change what runs.** While a plan was read back
+  out of the projection, a checkpoint written before a check was declared kept
+  that check from ever executing — and restarting could not activate it, because
+  the restart replayed the same saved list.
+- **A config change is not a schema change.** The projection's checkpoint
+  identity hashes the composition's initial state and registered event schemas.
+  While the declared step list sat in that initial state, editing `.yrd.yml`'s
+  `checks` moved the identity: it invalidated every stored checkpoint (a replay
+  a retention-evicted journal cannot serve) and refused any Candidate carrying
+  the edit with `checkpoint-migration-certificate-missing`. Steps register no
+  per-step event schema, so which steps are installed is not a persisted
+  contract and is deliberately outside the identity.
+- **Every Run says which list judged it and where that list came from.**
+  `stepSelection.source` is `declared` (the configured plan) or `requested` (an
+  explicit `--steps` selection); `stepSelection.steps` is the list itself.
+  When a restored projection still carries a `defaultSteps` that disagrees with
+  the declaration, the Run records the superseded list in
+  `stepSelection.supersededSteps` and `queue audit` emits `step-plan-drift`
+  naming both lists and their sources. The declared plan is what runs; the
+  stored one is only reported.
+
+**C12. The installed baseline is required INPUT to the audit, not optional
+context.** `installed-baseline.json` under the state dir has exactly one writer,
+`yrd admin queue init <base>` (`yrd admin init` is a different command — config
+scaffold plus pre-submit hook — and never writes it). Reading it reports whether
+the file was PRESENT, separately from how many baselines it held:
+
+- **Absent ⇒ refuse.** `queue audit` and the run-start freshness gate both
+  refuse with `installed-baseline-missing`, naming the resolved path and the
+  creating command. Iterating an absent file as an empty one made "nothing
+  drifted" and "nothing was read" the same sentence, and that clean answer was
+  cited as evidence while the queue ran a plan its config did not declare.
+- **Present ⇒ state the denominator.** The audit reports how many baselines it
+  compared, which bases, and against what (the current config-derived
+  descriptor, and this process's runtime when one is wired). A zero finding
+  count without that population is not a result.
+- **Between `deinit` and `init` there is no authority**, so the queue cannot
+  certify freshness and does not start Runs until `init` restores it. The
+  supervisor health probe is the one consumer that reads the same absence as
+  `absent` — the service was never installed here — and it still carries the
+  refusal's code and remedy in its payload.
+
 ## D. Current code → target (refit map, not a rewrite)
 
 The implementation is close to the target; this is vocabulary + object

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep, QueueAuditEmission } from "@yrd/queue"
+import type { QueueEnvironmentAuditComparison, QueueEnvironmentAuditEmission, YrdCliServices } from "../src/types.ts"
 import { failureFact } from "@yrd/core"
 import { createYrdHost } from "../src/host.ts"
 import { uncarriedLine } from "../src/queue-status-view.tsx"
@@ -78,6 +79,19 @@ function historicalV3NativeMergeRevision(env?: Readonly<Record<string, string>>)
       }),
     )
     .digest("hex")
+}
+
+/** A stubbed environment audit still has to say WHAT IT COMPARED: the emission
+ * type makes a denominator-free audit unrepresentable, because a bare
+ * `findings: []` reads the same whether nothing drifted or nothing was ever
+ * read (23193). Stubs declare one installed baseline unless they say otherwise. */
+function stubAuditComparison(bases: readonly string[] = ["main"]): QueueEnvironmentAuditComparison {
+  return {
+    baselinePath: "/state/installed-baseline.json",
+    baselines: bases.length,
+    bases,
+    against: ["configured"],
+  }
 }
 
 describe("installed baseline drift", () => {
@@ -201,21 +215,38 @@ describe("installed baseline drift", () => {
 })
 
 describe("installed baseline persistence", () => {
-  it("reads an absent installed baseline as empty", async () => {
-    expect(await readInstalledBaselines(await tempDir("yrd-baseline-"))).toEqual({})
+  it("distinguishes an absent authority file from an empty one, and names where it looked", async () => {
+    // This test used to assert `toEqual({})` — it certified the silent zero
+    // that let `queue audit` report no drift for a queue it had never compared
+    // against anything (23193). An absent file and a file with no baselines are
+    // different answers and must not share a spelling.
+    const stateDir = await tempDir("yrd-baseline-")
+    expect(await readInstalledBaselines(stateDir)).toEqual({
+      path: installedBaselinePath(stateDir),
+      present: false,
+      baselines: {},
+    })
+
+    await writeInstalledBaseline(stateDir, baseline([step("check", "check-v1")]))
+    await removeInstalledBaseline(stateDir, "main")
+    const afterRemoval = await readInstalledBaselines(stateDir)
+    expect(afterRemoval.present, "removing the last base deletes the file, so the authority is absent again").toBe(
+      false,
+    )
+    expect(afterRemoval.baselines).toEqual({})
   })
 
   it("round-trips baselines per base and deletes the file with the last base", async () => {
     const stateDir = await tempDir("yrd-baseline-")
     await writeInstalledBaseline(stateDir, baseline([step("check", "check-v1")]))
     await writeInstalledBaseline(stateDir, baseline([step("check", "check-v1")], "release/2.0"))
-    const baselines = await readInstalledBaselines(stateDir)
+    const { baselines } = await readInstalledBaselines(stateDir)
     expect(Object.keys(baselines).sort()).toEqual(["main", "release/2.0"])
     expect(await removeInstalledBaseline(stateDir, "release/2.0")).toBe(true)
-    expect(Object.keys(await readInstalledBaselines(stateDir))).toEqual(["main"])
+    expect(Object.keys((await readInstalledBaselines(stateDir)).baselines)).toEqual(["main"])
     expect(await removeInstalledBaseline(stateDir, "missing")).toBe(false)
     expect(await removeInstalledBaseline(stateDir, "main")).toBe(true)
-    expect(await readInstalledBaselines(stateDir)).toEqual({})
+    expect(await readInstalledBaselines(stateDir)).toMatchObject({ present: false, baselines: {} })
   })
 
   it("fails loud on a malformed installed baseline", async () => {
@@ -237,7 +268,7 @@ describe("installed baseline persistence", () => {
       writeInstalledBaseline(stateDir, baseline([step("check", "check-v3")], "release/3.0")),
       removeInstalledBaseline(stateDir, "main"),
     ])
-    const baselines = await readInstalledBaselines(stateDir)
+    const { baselines } = await readInstalledBaselines(stateDir)
     expect(Object.keys(baselines).sort()).toEqual(["release/2.0", "release/3.0"])
     const raw = await readFile(installedBaselinePath(stateDir), "utf8")
     expect(() => JSON.parse(raw) as unknown).not.toThrow()
@@ -391,7 +422,7 @@ appendFileSync(marker, "ready\\n")
     ]
     const services = {
       queue: {
-        auditEnvironment: async () => ({ findings }),
+        auditEnvironment: async () => ({ findings, comparison: stubAuditComparison() }),
         deprovision: async (base: string) => {
           lifecycle.push(`deinit:${base}`)
           return { base, released: ["installed-baseline"] }
@@ -413,7 +444,10 @@ appendFileSync(marker, "ready\\n")
     await expect(
       requireFreshInstalledBaseline({
         queue: {
-          auditEnvironment: async () => ({ findings: [{ code: "config-drift", message: "stale baseline" }] }),
+          auditEnvironment: async () => ({
+            findings: [{ code: "config-drift", message: "stale baseline" }],
+            comparison: stubAuditComparison(),
+          }),
           provision: async (base: string) => {
             lifecycle.push(`init:${base}`)
             return { base }
@@ -432,7 +466,10 @@ appendFileSync(marker, "ready\\n")
     await requireFreshInstalledBaseline({
       queue: {
         auditEnvironment: async () =>
-          ({ findings: [{ code: "operator-finding", message: "inspect" }] }) as unknown as QueueAuditEmission,
+          ({
+            findings: [{ code: "operator-finding", message: "inspect" }],
+            comparison: stubAuditComparison(),
+          }) as unknown as QueueEnvironmentAuditEmission,
       },
     })
   })
@@ -446,6 +483,7 @@ appendFileSync(marker, "ready\\n")
           queue: {
             auditEnvironment: async () => ({
               findings: [{ code: "runtime-drift", message: "runtime steps diverge" }],
+              comparison: stubAuditComparison(),
             }),
             provision: async (base: string) => {
               lifecycle.push(`init:${base}`)
@@ -541,9 +579,44 @@ async function queueRepository(check: string): Promise<string> {
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, ".yrd.yml"), `base: main\nbatch: 1\nchecks:\n  - {check: {run: "${check}"}}\n`)
-  await git(repo, "add", ".yrd.yml")
+  // `createGitPushReceiver` resolves its managed hook entry from the DECLARED
+  // main repository and refuses when it has none, so every host-backed case in
+  // this file threw before reaching its assertion — an audit suite that proved
+  // nothing about the audit. The fixture supplies the entry it names.
+  await mkdir(join(repo, "bin"), { recursive: true })
+  await writeFile(join(repo, "bin", "yrd"), "#!/usr/bin/env bun\n")
+  await git(repo, "add", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "queue config")
   return repo
+}
+
+/** A clean environment audit is only clean if it COMPARED something.
+ *
+ * Every call site below used to assert `toEqual({ findings: [] })` — a bare
+ * zero with no denominator, which an audit over an absent baseline produced
+ * just as readily as an audit that found no drift (23193). Asserting the
+ * population alongside the zero is what makes these tests able to fail. */
+async function expectComparedClean(administration: YrdCliServices["queue"]): Promise<void> {
+  const audit = await administration?.auditEnvironment?.()
+  expect(audit?.findings).toEqual([])
+  expect(audit?.comparison.baselines, "a clean audit must name the population it compared").toBeGreaterThan(0)
+}
+
+/** Between `queue deinit` and `queue init` the authority file is gone, so the
+ * audit has nothing to compare and the run gate cannot certify freshness.
+ * Both refuse by name. Reporting a clean audit here — the previous behaviour —
+ * is the vacuous pass that let expensive Runs start unguarded (23193). */
+async function expectRefusesWithoutBaseline(services: YrdCliServices): Promise<void> {
+  const audit = await services.queue?.auditEnvironment?.().then(
+    () => undefined,
+    (reason: unknown) => reason,
+  )
+  expect(failureFact(audit)?.code).toBe("installed-baseline-missing")
+  const gate = await requireFreshInstalledBaseline(services).then(
+    () => undefined,
+    (reason: unknown) => reason,
+  )
+  expect(failureFact(gate)?.code).toBe("installed-baseline-missing")
 }
 
 describe("host installed baseline", () => {
@@ -563,8 +636,8 @@ describe("host installed baseline", () => {
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.services.queue?.provision?.("main")
-      expect((await readInstalledBaselines(host.repository.stateDir)).main?.batchSize).toBe(effective)
-      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      expect((await readInstalledBaselines(host.repository.stateDir)).baselines.main?.batchSize).toBe(effective)
+      await expectComparedClean(host.services.queue)
     } finally {
       await host.close()
     }
@@ -633,7 +706,7 @@ describe("host installed baseline", () => {
     const resident = await createYrdHost({ cwd: repo })
     try {
       await resident.services.queue?.provision?.("main")
-      const current = (await readInstalledBaselines(resident.repository.stateDir)).main
+      const current = (await readInstalledBaselines(resident.repository.stateDir)).baselines.main
       if (current?.batchSize === undefined) throw new Error("expected current provisioned main baseline")
       const foreign = {
         ...current,
@@ -652,8 +725,8 @@ describe("host installed baseline", () => {
       // Follow gate re-provisions through the one true descriptor path — not a
       // second revision family — and the audit is clean afterwards.
       await requireFreshInstalledBaseline(resident.services, { reloadInPlace: { base: "main" } })
-      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
-      const healed = (await readInstalledBaselines(resident.repository.stateDir)).main
+      await expectComparedClean(resident.services.queue)
+      const healed = (await readInstalledBaselines(resident.repository.stateDir)).baselines.main
       expect(healed?.steps.map((s) => s.revision)).toEqual(current.steps.map((s) => s.revision))
     } finally {
       await resident.close()
@@ -666,7 +739,7 @@ describe("host installed baseline", () => {
     const reloadRequested = new Error("reload requested")
     try {
       await resident.services.queue?.provision?.("main")
-      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await expectComparedClean(resident.services.queue)
 
       await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 2\nchecks:\n  - {check: {run: "true"}}\n')
       await git(repo, "add", ".yrd.yml")
@@ -689,7 +762,7 @@ describe("host installed baseline", () => {
         }),
       ).rejects.toBe(reloadRequested)
 
-      expect((await readInstalledBaselines(resident.repository.stateDir)).main?.batchSize).toBe(2)
+      expect((await readInstalledBaselines(resident.repository.stateDir)).baselines.main?.batchSize).toBe(2)
     } finally {
       await resident.close()
     }
@@ -700,7 +773,7 @@ describe("host installed baseline", () => {
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.services.queue?.provision?.("main")
-      const current = (await readInstalledBaselines(host.repository.stateDir)).main
+      const current = (await readInstalledBaselines(host.repository.stateDir)).baselines.main
       if (current?.batchSize === undefined) throw new Error("expected current provisioned main baseline")
       const foreign = {
         ...current,
@@ -716,7 +789,7 @@ describe("host installed baseline", () => {
       await expect(requireFreshInstalledBaseline(host.services)).rejects.toMatchObject({
         failure: { kind: "refusal", code: "config-drift" },
       })
-      const after = (await readInstalledBaselines(host.repository.stateDir)).main
+      const after = (await readInstalledBaselines(host.repository.stateDir)).baselines.main
       expect(after?.steps.map((s) => s.revision)).toEqual(foreign.steps.map((s) => s.revision))
     } finally {
       await host.close()
@@ -730,7 +803,7 @@ describe("host installed baseline", () => {
       await host.services.queue?.provision?.("main")
       const stored = await readFile(installedBaselinePath(host.repository.stateDir), "utf8")
       expect(JSON.parse(stored)).toMatchObject({ version: 1, baselines: { main: { base: "main" } } })
-      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await expectComparedClean(host.services.queue)
     } finally {
       await host.close()
     }
@@ -749,9 +822,9 @@ describe("host installed baseline", () => {
       )
       const deprovisioned = (await drifted.services.queue?.deprovision?.("main")) as { released: string[] }
       expect(deprovisioned.released).toEqual(["installed-baseline"])
-      expect(await drifted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await expectRefusesWithoutBaseline(drifted.services)
       await drifted.services.queue?.provision?.("main")
-      expect(await drifted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await expectComparedClean(drifted.services.queue)
       await requireFreshInstalledBaseline(drifted.services)
     } finally {
       await drifted.close()
@@ -764,7 +837,7 @@ describe("host installed baseline", () => {
     try {
       await resident.services.queue?.provision?.("main")
       // Three-way equal (runtime == baseline == disk) → clean.
-      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await expectComparedClean(resident.services.queue)
 
       // Disk moves to v2 while runtime and baseline stay v1: the DISK leg —
       // exactly ONE finding with the migration remedy (existing class).
@@ -782,7 +855,7 @@ describe("host installed baseline", () => {
       try {
         await migrator.services.queue?.deprovision?.("main")
         await migrator.services.queue?.provision?.("main")
-        expect(await migrator.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+        await expectComparedClean(migrator.services.queue)
       } finally {
         await migrator.close()
       }
@@ -807,7 +880,7 @@ describe("host installed baseline", () => {
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.services.queue?.provision?.("stale/base")
-      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await expectComparedClean(host.services.queue)
     } finally {
       await host.close()
     }
@@ -830,8 +903,7 @@ describe("host installed baseline", () => {
       }
       expect(deprovisioned.released).toEqual(["installed-baseline"])
       expect(deprovisioned.baseSha).toMatch(/^[0-9a-f]{40}$/u)
-      expect(await after.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
-      await requireFreshInstalledBaseline(after.services)
+      await expectRefusesWithoutBaseline(after.services)
     } finally {
       await after.close()
     }

@@ -483,7 +483,7 @@ checks: [{check: {run: "true"}}]
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
-  it("derives a deterministic config-sensitive checkpoint manifest from the production definition builder", async () => {
+  it("derives a deterministic checkpoint manifest that a queue-config change does not move", async () => {
     const { repo } = await repository()
     await using runtimeProcess = createProcess({ cwd: repo })
     const config: ResolvedYrdProjectConfig = {
@@ -526,7 +526,16 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // retires the correlation pair from every schema that carries props — an
     // intentional persisted-contract change, so the identity moves and the
     // correlation-era predecessor gains a retained edge below.
-    expect(first.manifest.targetIdentity).toBe("2267a28ea7be952a07e1d3fa351a7d8e2112a810af227229364617749518f32f")
+    // Conscious update 2026-08-23 (23192): the declared step list left
+    // `initialState`. While it lived there, an ordinary `.yrd.yml` checks edit
+    // was indistinguishable from a schema change — it invalidated every stored
+    // checkpoint and refused any Candidate carrying it with
+    // `checkpoint-migration-certificate-missing`, so the declared check could
+    // not be adopted at all. Nothing plans from the persisted copy any more, so
+    // it is not a persisted contract and does not belong in the identity.
+    // Registering a NEW step still moves the identity (a new job definition is
+    // a real persisted contract) — see docs/design.md § Step plan.
+    expect(first.manifest.targetIdentity).toBe("288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
@@ -557,7 +566,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
       to: first.manifest.targetIdentity,
     })
-    expect(changed.manifest.targetIdentity).not.toBe(first.manifest.targetIdentity)
+    // 23192: a queue-CONFIG change must NOT move the projection identity.
+    // While the declared step list sat in `initialState` it did, and an
+    // ordinary `.yrd.yml` checks edit then demanded a checkpoint migration
+    // certificate no operator can produce for one — discarding the stored
+    // checkpoint, which a retention-evicted journal cannot replay from the
+    // beginning. The identity tracks the persisted event/state contract;
+    // installed steps register no per-step schema and are not part of it.
+    expect(changed.manifest.targetIdentity).toBe(first.manifest.targetIdentity)
   })
 
   it("binds installed-step revisions to the host axes, not to the launcher's own version", () => {
@@ -1876,10 +1892,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    expect(app.state().queues).toMatchObject({
-      batchSize: 1,
-      defaultSteps: ["security", "merge", "publish"],
-    })
+    expect(app.state().queues).toMatchObject({ batchSize: 1 })
+    // The configured plan reaches runs through the INSTALLED step set, not
+    // through durable state: `queues.defaultSteps` is no longer seeded from
+    // configuration, so a checkpoint can never supply a plan the configuration
+    // does not declare, and a `.yrd.yml` edit is not a state change (23192).
+    expect(app.state().queues.defaultSteps).toBeUndefined()
+    expect(app.queue.steps().map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(Object.keys(app.commands.bay)).toEqual([
       "open",
       "refresh",

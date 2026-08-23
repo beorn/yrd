@@ -54,6 +54,7 @@ import {
   requireLinearRootTip,
   SUPPORTED_VERSIONS,
   type DeepReadonly,
+  type FailureFact,
   type JournalSnapshot,
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
@@ -231,6 +232,7 @@ import {
 import type {
   JournalRetentionObservation,
   JournalRetentionPolicy,
+  QueueEnvironmentAuditComparison,
   YrdBayProtection,
   YrdCliApp,
   YrdCliExitCode,
@@ -1235,7 +1237,7 @@ async function runnerGitHealth(cwd: string): Promise<RunnerGitHealth> {
   }
   const headSha = gitSync(cwd, ["rev-parse", "HEAD"]).trim().toLowerCase()
   const dirty = gitSync(cwd, ["status", "--porcelain"]).trim() !== ""
-  const baselines = await readInstalledBaselines(join(gitDir, "yrd"))
+  const { baselines } = await readInstalledBaselines(join(gitDir, "yrd"))
   return {
     cwd,
     headSha,
@@ -1426,6 +1428,47 @@ export function residentDriverLastMerged(app: YrdCliApp, base: string): QueueDri
       .toSorted((left, right) => left.at.localeCompare(right.at))
       .at(-1) ?? null
   )
+}
+
+/** The probe's answer when the health read itself failed.
+ *
+ * One typed exception: an ABSENT installed baseline. A baseline is what a queue
+ * service IS in a repository, so its absence means nothing was ever installed
+ * here — `absent`, the same answer a repository with no runner gets, not a page.
+ * The refusal is still carried into the payload by code and remedy, never
+ * swallowed: `queue audit` and the run gate both refuse on that same absence,
+ * and this is the one consumer for which "not installed" is the honest reading
+ * (23193). A runner HOLDING the drain lease over a queue with no baseline is a
+ * different condition and stays unhealthy, as does every other failure.
+ */
+function runnerHealthFailure(
+  error: unknown,
+  observed: Readonly<{ service: string; leaseHeld: boolean | undefined; git: RunnerGitHealth }>,
+): Readonly<{ payload: RunnerHealthPayload; exitCode: YrdCliExitCode }> {
+  const fact = failureFact(error) ?? {
+    code: "runner-health-failed",
+    message: error instanceof Error ? error.message : String(error),
+  }
+  const held = observed.leaseHeld === true
+  const absent = fact.code === "installed-baseline-missing" && !held
+  return {
+    exitCode: absent ? 1 : 2,
+    payload: {
+      schema: "hab-service-health/1",
+      command: "queue.list.check",
+      service: observed.service,
+      state: absent ? "absent" : "unhealthy",
+      running: held,
+      error: actionableFailure(fact),
+      facts: {
+        lease: observed.leaseHeld === undefined ? "unknown" : held ? "held" : "free",
+        runnerStatus: "missing",
+        queueProgress: { state: "unknown" },
+        launcher: runnerLauncherFacts(),
+        git: observed.git,
+      },
+    },
+  }
 }
 
 async function queueRunnerHealth(
@@ -1687,29 +1730,7 @@ async function queueRunnerHealth(
       },
     }
   } catch (error) {
-    const fact = failureFact(error) ?? {
-      code: "runner-health-failed",
-      message: error instanceof Error ? error.message : String(error),
-    }
-    const lease = leaseHeld === undefined ? "unknown" : leaseHeld ? "held" : "free"
-    return {
-      exitCode: 2,
-      payload: {
-        schema: "hab-service-health/1",
-        command: "queue.list.check",
-        service,
-        state: "unhealthy",
-        running: leaseHeld === true,
-        error: actionableFailure(fact),
-        facts: {
-          lease,
-          runnerStatus: "missing",
-          queueProgress: { state: "unknown" },
-          launcher: runnerLauncherFacts(),
-          git,
-        },
-      },
-    }
+    return runnerHealthFailure(error, { service, leaseHeld, git })
   }
 }
 
@@ -6662,13 +6683,42 @@ async function queueAuditFindings(
   services: YrdCliServices,
   now?: string,
 ): Promise<readonly QueueAuditFinding[]> {
+  return (await queueAuditReport(app, services, now)).findings
+}
+
+/** The audit's findings AND what produced them. Splitting the denominator out
+ * of the finding list is what lets a zero say which population it is zero over
+ * (23193); callers that only render findings use {@link queueAuditFindings}. */
+async function queueAuditReport(
+  app: Pick<YrdCliApp, "queue">,
+  services: YrdCliServices,
+  now?: string,
+): Promise<Readonly<{ findings: readonly QueueAuditFinding[]; comparison?: QueueEnvironmentAuditComparison }>> {
   // The widening boundary: both inputs are QueueAuditEmission, so every code
   // above this line is closed over YRD_QUEUE_AUDIT_FINDING_CODES. Downstream is
   // display and JSON, where a finding may equally be one a foreign version
   // wrote, so the open QueueAuditFinding is the honest type from here on.
   const core = app.queue.audit(now === undefined ? undefined : { now })
   const environment = await services.queue?.auditEnvironment?.()
-  return [...core.findings, ...(environment?.findings ?? [])]
+  return {
+    findings: [...core.findings, ...(environment?.findings ?? [])],
+    ...(environment?.comparison === undefined ? {} : { comparison: environment.comparison }),
+  }
+}
+
+/** One line naming what the environment leg compared, printed whether or not
+ * anything was found. Without it a clean audit and an unwired one print the
+ * same word — and an operator cited the clean one as evidence twice. */
+export function queueAuditComparisonLine(comparison: QueueEnvironmentAuditComparison | undefined): string {
+  if (comparison === undefined) {
+    return "environment audit: not wired for this invocation — no installed baseline was compared."
+  }
+  const bases = comparison.bases.length === 0 ? "no base" : comparison.bases.join(", ")
+  const plural = comparison.baselines === 1 ? "baseline" : "baselines"
+  return (
+    `environment audit: compared ${String(comparison.baselines)} installed ${plural} (${bases}) ` +
+    `against ${comparison.against.join(" and ")}, from ${comparison.baselinePath}.`
+  )
 }
 
 function admissionBlockedPrs(
@@ -8095,19 +8145,19 @@ async function queueAudit(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const now = new Date(io.now?.() ?? Date.now()).toISOString()
+  const report = await queueAuditReport(app, services, now)
   const result = {
-    findings: (await queueAuditFindings(app, services, now)).map((finding) => ({
-      ...finding,
-      ...actionableFailure(finding),
-    })),
+    findings: report.findings.map((finding) => ({ ...finding, ...actionableFailure(finding) })),
+    ...(report.comparison === undefined ? {} : { comparison: report.comparison }),
   }
+  const denominator = queueAuditComparisonLine(report.comparison)
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.audit", ...result },
     result.findings.length === 0
-      ? "queue audit clean"
-      : result.findings.map((finding) => formatActionableFailure(finding)).join("\n\n"),
+      ? `queue audit clean\n${denominator}`
+      : `${result.findings.map((finding) => formatActionableFailure(finding)).join("\n\n")}\n\n${denominator}`,
   )
   return result.findings.length === 0 ? 0 : 1
 }

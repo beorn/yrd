@@ -45,13 +45,33 @@ export function installedBaselinePath(stateDir: string): string {
   return join(stateDir, "installed-baseline.json")
 }
 
-export async function readInstalledBaselines(stateDir: string): Promise<Readonly<Record<string, InstalledBaseline>>> {
+/** One read of the installed-baseline authority, with the two facts a caller
+ * cannot reconstruct afterwards: WHERE it looked, and whether the file was
+ * there at all.
+ *
+ * `present: false` is deliberately not collapsible into an empty record.
+ * `queue audit` used to iterate the `{}` an absent file produced, find nothing
+ * and report no drift — an absence of INPUT reported in the same words as an
+ * absence of drift, which is how a queue running three of its four declared
+ * checks was certified clean twice in one night. Callers for whom absence is
+ * legitimate (the first `provision`, a `deprovision` of a base that was never
+ * installed) read `.baselines`; callers that must COMPARE something read
+ * `.present` first and refuse. */
+export type InstalledBaselineRead = Readonly<{
+  /** Resolved path of the authority file, present or not. Every refusal and
+   * every audit denominator names it. */
+  path: string
+  present: boolean
+  baselines: Readonly<Record<string, InstalledBaseline>>
+}>
+
+export async function readInstalledBaselines(stateDir: string): Promise<InstalledBaselineRead> {
   const path = installedBaselinePath(stateDir)
   let text: string
   try {
     text = await readFile(path, "utf8")
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path, present: false, baselines: {} }
     throw error
   }
   let parsed: unknown
@@ -68,7 +88,15 @@ export async function readInstalledBaselines(stateDir: string): Promise<Readonly
       `yrd: installed baseline at ${path} is malformed: ${result.error.message}`,
     )
   }
-  return result.data.baselines
+  return { path, present: true, baselines: result.data.baselines }
+}
+
+/** The exact command that creates the authority file. `yrd admin init` is a
+ * DIFFERENT command — it scaffolds config and installs the pre-submit hook and
+ * never writes a baseline — and conflating the two sends an operator to the one
+ * that cannot fix it. */
+export function installedBaselineCreationRemedy(base: string): string {
+  return `Run 'yrd admin queue init ${base}' to install the queue baseline for base '${base}'.`
 }
 
 /** Minimal filesystem seam for the atomic replace. Explicit DI so a test can
@@ -120,7 +148,7 @@ export async function writeInstalledBaseline(
   fs: BaselineFsOps = {},
 ): Promise<void> {
   await withBaselineWriteLock(stateDir, async () => {
-    const baselines = await readInstalledBaselines(stateDir)
+    const { baselines } = await readInstalledBaselines(stateDir)
     await replaceBaselineFile(stateDir, { ...baselines, [baseline.base]: baseline }, fs)
   })
 }
@@ -131,7 +159,7 @@ export async function removeInstalledBaseline(
   fs: BaselineFsOps = {},
 ): Promise<boolean> {
   return withBaselineWriteLock(stateDir, async () => {
-    const baselines = await readInstalledBaselines(stateDir)
+    const { baselines } = await readInstalledBaselines(stateDir)
     if (baselines[base] === undefined) return false
     const rest = Object.fromEntries(Object.entries(baselines).filter(([key]) => key !== base))
     if (Object.keys(rest).length === 0) {
