@@ -33,7 +33,7 @@ function requireObservedBranch(observed: LiveBranchObservation, pr: Change, reme
     raiseFailure(
       "configuration",
       "recut-branch-observer-missing",
-      `yrd: cannot refresh live branch '${pr.branch}' before recutting PR '${pr.id}'; ${observed.detail}`,
+      `yrd: cannot refresh live branch '${pr.branch}' before re-merging PR '${pr.id}'; ${observed.detail}`,
     )
   }
   if (!observed.ok && observed.phase === "fetch") {
@@ -150,17 +150,17 @@ async function commitTree(services: Pick<YrdCliServices, "process">, io: YrdCliI
   return tree
 }
 
-/** Either the recut may proceed on its recorded source, or the PR opted into
+/** Either the re-merge may proceed on its recorded source, or the PR opted into
  * tracking and its branch moved, so the caller must re-record the live head
  * before continuing. Every other drift already refused inside the check. */
 export type RemergeBranchFreshness =
   | Readonly<{ status: "fresh" }>
   | Readonly<{ status: "tracked-drift"; recorded: ChangeRev; liveHead: string }>
 
-/** Manual recut is reproducible: it operates on a recorded immutable source.
+/** Manual re-merge is reproducible: it operates on a recorded immutable source.
  * If the authored branch moved, implicit selection is ambiguous and must stop
  * before Git composition, journal writes, or Queue admission. Explicit
- * `--revision` is the deliberate replay spelling; resident freshness recuts
+ * `--revision` is the deliberate replay spelling; habitant freshness re-merges
  * are already bound to admitted authority and bypass this author-facing gate.
  *
  * A TRACKED PR (`yrd pr submit --track`) answered that ambiguity up front: the
@@ -203,7 +203,7 @@ export async function requireImplicitRemergeBranchFreshness(
     "refusal",
     "recut-branch-moved",
     `yrd: PR '${pr.id}' recorded revision ${recorded.n} head '${recorded.head}', but live branch ` +
-      `'${pr.branch}' is '${liveHead}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
+      `'${pr.branch}' is '${liveHead}'. Re-merge-by-PR is reproducible and will not silently replay stale work.\n` +
       `${await commitRangeEvidence(services, io, recorded.head, liveHead)}\n` +
       `To record the live head and finish the requested recut:\n  yrd pr ${recordVerb} ${pr.branch}\n` +
       `  yrd pr recut ${pr.id}${queueFlag}\n` +

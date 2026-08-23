@@ -135,7 +135,7 @@ describe("queue liveness status render (item 4)", () => {
     try {
       await app.waitForLayoutStable()
       expect(app.text).toContain(
-        "NO RUNNER - resident runner [31337] died 0:45 ago, no exit marker; restart it: yrd queue run main",
+        "NO RUNNER - habitant runner [31337] died 0:45 ago, no exit marker; restart it: yrd queue run main",
       )
       expect(app.text, "a departed runner is not a queue nobody staffed").not.toContain("has ever drained")
     } finally {

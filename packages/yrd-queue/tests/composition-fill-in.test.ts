@@ -1,5 +1,5 @@
 /**
- * @failure The queue lands an authored gitlink verbatim while that submodule's main has
+ * @failure The queue merges an authored gitlink verbatim while that submodule's main has
  *          already moved past it, so the merged root pins a commit that is not the newest
  *          commit on the submodule's main — or the fill-in write rewrites values it has no
  *          authority over (queue-composed submodule commits, intent targets).
@@ -10,7 +10,7 @@
  * the queue resolves that submodule's main; when main contains the floor, the carrier
  * composes — the content merges as authored, and a queue-written shaset commit on top
  * fills each submodule value in from its main, recorded as a submodule resolution, so
- * checks judge THAT tree and authored values never land as-is. A min commit not on its
+ * checks judge THAT tree and authored values never merge as-is. A min commit not on its
  * submodule's main keeps the authored-gitlink refusal (the composition-side backstop until
  * step (d) deletes it). Queue-composed submodule commits are by construction never on
  * main and ride verbatim — the fill-in never touches the composed leg.
@@ -24,7 +24,7 @@ import { createProcess, shellCommand } from "@yrd/process"
 import {
   GitCheckEvidenceSchema,
   Queues,
-  assertComponentModelAuthorizationsAvailable,
+  assertSubmoduleModelAuthorizationsAvailable,
   gitCandidatePreparer,
   gitCheckStep,
   type CandidatePreparationInput,
@@ -130,7 +130,7 @@ async function deletionCarrier(repo: string, rootBase: string): Promise<string> 
   await git(repo, ["switch", "-qc", "issue/remove-dep", rootBase])
   await git(repo, ["rm", "-q", "dep"])
   await git(repo, ["rm", "-q", "-f", ".gitmodules"])
-  await writeFile(join(repo, "feature.txt"), "remove obsolete component\n")
+  await writeFile(join(repo, "feature.txt"), "remove obsolete submodule\n")
   await git(repo, ["add", "feature.txt"])
   await git(repo, ["commit", "-qm", "carrier: remove dep + cleanup"])
   const head = await git(repo, ["rev-parse", "HEAD"])
@@ -168,7 +168,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     }
 
     expect(() =>
-      assertComponentModelAuthorizationsAvailable(spent, { componentModelChanges: [authorization] }),
+      assertSubmoduleModelAuthorizationsAvailable(spent, { componentModelChanges: [authorization] }),
     ).not.toThrow()
     const recut = {
       ...authorization,
@@ -182,10 +182,10 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
         rangeDiff: "=" as const,
       },
     }
-    expect(() => assertComponentModelAuthorizationsAvailable(spent, { componentModelChanges: [recut] })).not.toThrow()
+    expect(() => assertSubmoduleModelAuthorizationsAvailable(spent, { componentModelChanges: [recut] })).not.toThrow()
     const error = (() => {
       try {
-        assertComponentModelAuthorizationsAvailable(spent, {
+        assertSubmoduleModelAuthorizationsAvailable(spent, {
           componentModelChanges: [{ ...authorization, pr: "PR2", headSha: "c".repeat(40) }],
         })
       } catch (thrown) {
@@ -196,7 +196,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     expect(failureFact(error)).toMatchObject({ kind: "refusal", code: "component-model-ruling-spent" })
   })
 
-  it("admits an exact verdict-backed component deletion and records its one-shot evidence", async () => {
+  it("admits an exact verdict-backed submodule deletion and records its one-shot evidence", async () => {
     const { repo, rootBase } = await baseRepo()
     const headSha = await deletionCarrier(repo, rootBase)
     const ruling = "195c96a6-a461-4c98-a97d-5537e76aa9fd"
@@ -206,7 +206,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     const prepared = await gitCandidatePreparer({
       inject: { process },
       repo,
-      authorizeComponentModelChange: async (request) => {
+      authorizeSubmoduleModelChange: async (request) => {
         requests.push(request)
         return { authorizer: "@cto" }
       },
@@ -237,10 +237,10 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     ])
     expect(prepared.sha).toBeDefined()
     expect(await gitlinkAt(repo, prepared.sha as string)).toBe("")
-    expect(await git(repo, ["show", `${prepared.sha as string}:feature.txt`])).toBe("remove obsolete component")
+    expect(await git(repo, ["show", `${prepared.sha as string}:feature.txt`])).toBe("remove obsolete submodule")
   })
 
-  it("refuses a component deletion when the ruling prop is absent or the host cannot resolve it", async () => {
+  it("refuses a submodule deletion when the ruling prop is absent or the host cannot resolve it", async () => {
     const { repo, rootBase } = await baseRepo()
     const headSha = await deletionCarrier(repo, rootBase)
     await using process = createProcess({ cwd: repo })
@@ -261,7 +261,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
 
   it("fills in main's newest commit past the authored floor, as one gitlinks-only shaset commit", async () => {
     const { repo, module, moduleA, rootBase } = await baseRepo()
-    // The floor landed on the submodule's main, and main moved further.
+    // The floor merged on the submodule's main, and main moved further.
     const moduleB = await moduleCommit(module, "main", moduleA, "b")
     const moduleM = await moduleCommit(module, "main", moduleB, "m")
     const headSha = await authoredCarrier(repo, rootBase, moduleB)

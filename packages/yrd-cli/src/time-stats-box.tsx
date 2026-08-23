@@ -121,7 +121,7 @@ function bucketWidth(bucket: QueueStatsBucket): number {
  * One hour bucket's day-boundary marker, its own one-character column
  * (operator ruling 2026-08-18) rather than a glyph fused onto the hour label.
  * Rendered by every hour-bearing row — the header and each STATS_ROWS row —
- * keyed identically off `bucket.dayBoundary`, so the `│` lands at the same
+ * keyed identically off `bucket.dayBoundary`, so the `│` merges at the same
  * screen column on every row and reads as one vertical rule through the box.
  * Present only where a boundary actually falls: an always-present empty
  * column would cost two characters (width + gap) per hour, every hour, for a
@@ -226,7 +226,7 @@ const STATS_ROWS: readonly StatsRow[] = [
     value: (bucket) => countCell(bucket, bucket.runs.integrated),
   },
   {
-    // Non-landing success (admission-only). Not a fail, not integrated (21801).
+    // Non-merge success (admission-only). Not a fail, not integrated (21801).
     label: "PASS",
     color: "$fg-success",
     value: (bucket) => countCell(bucket, bucket.runs.passed),
@@ -234,7 +234,7 @@ const STATS_ROWS: readonly StatsRow[] = [
   {
     // Muted, not green (operator ruling 2026-08-18): a duplicate merge is not
     // a fresh success the way MERGED/PASS are, so it does not earn the same
-    // success color. Ordered directly above FAILS — the two rows a landing
+    // success color. Ordered directly above FAILS — the two rows a merge
     // could have gone to instead of a clean MERGED.
     label: "DUP",
     color: "$fg-muted",

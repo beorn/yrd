@@ -15,7 +15,7 @@ import {
   YRD_LIFECYCLE_LEVELS,
   createYrdLogger,
   observeYrdLifecycle,
-  residentObservability,
+  habitantObservability,
   resolveYrdObservability,
 } from "../src/observability.ts"
 
@@ -97,7 +97,7 @@ describe("Yrd observability controls", () => {
   })
 })
 
-describe("resident runner observability", () => {
+describe("habitant runner observability", () => {
   it("raises the default warn to debug so lifecycle starts and completions print", () => {
     // The long-lived follow-runner's stderr IS a log stream; at the default
     // warn it never prints a run/step start or successful completion. Bump
@@ -105,11 +105,11 @@ describe("resident runner observability", () => {
     // formatter keeps that richer event stream concise while JSONL stays full.
     const base = resolveYrdObservability({}, {})
     expect(base).toMatchObject({ level: "warn", explicitLevel: false })
-    expect(residentObservability(base)).toMatchObject({ level: "debug", explicitLevel: false })
+    expect(habitantObservability(base)).toMatchObject({ level: "debug", explicitLevel: false })
   })
 
   it("never overrides an explicit operator level (--log-level / LOG_LEVEL / -v / -q)", () => {
-    // Each of these is an explicit choice; the resident honours it verbatim.
+    // Each of these is an explicit choice; the habitant honours it verbatim.
     for (const config of [
       resolveYrdObservability({}, { LOG_LEVEL: "warn" }), // explicit warn stays warn
       resolveYrdObservability({}, { LOG_LEVEL: "error" }),
@@ -117,19 +117,19 @@ describe("resident runner observability", () => {
       resolveYrdObservability({ verbose: 2 }, {}),
       resolveYrdObservability({ logLevel: "debug" }, {}),
     ]) {
-      expect(residentObservability(config)).toEqual(config)
+      expect(habitantObservability(config)).toEqual(config)
     }
   })
 
   it("leaves a non-default resolved level untouched even without an explicit flag", () => {
     // Defensive: only the exact default (warn + not-explicit) is bumped.
     const trace = { level: "trace", spans: true, explicitLevel: false } as const
-    expect(residentObservability(trace)).toEqual(trace)
+    expect(habitantObservability(trace)).toEqual(trace)
   })
 
   it("admits only lifecycle-start DEBUG by default while keeping all warnings loud", () => {
     const human: string[] = []
-    const config = residentObservability(resolveYrdObservability({}, {}))
+    const config = habitantObservability(resolveYrdObservability({}, {}))
     const log = createYrdLogger(
       config,
       (text) => human.push(text),
@@ -152,7 +152,7 @@ describe("resident runner observability", () => {
 
   it("preserves explicitly requested DEBUG on the human sink", () => {
     const human: string[] = []
-    const config = residentObservability(resolveYrdObservability({ logLevel: "debug" }, {}))
+    const config = habitantObservability(resolveYrdObservability({ logLevel: "debug" }, {}))
     const log = createYrdLogger(
       config,
       (text) => human.push(text),
@@ -232,7 +232,7 @@ describe("Yrd lifecycle records", () => {
   })
 
   it("inherits scope-bound runner/host/pane without re-declaring them per event", async () => {
-    // The resident binds its identity ONCE at the logger scope (residentRunnerLog
+    // The habitant binds its identity ONCE at the logger scope (habitantRunnerLog
     // = log.child({ runner, host, pane })). A lifecycle observed under that scope
     // must inherit those fields WITHOUT the observe options re-passing them, so
     // per-event payloads carry only event-specific fields.
@@ -354,7 +354,7 @@ describe("Yrd lifecycle records", () => {
     log.end()
   })
 
-  it("leaves command failures to the CLI while residents retain their lifecycle records", async () => {
+  it("leaves command failures to the CLI while habitants retain their lifecycle records", async () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
 

@@ -344,7 +344,7 @@ describe("queue timeline chrome 21106", () => {
         pid: 342,
         startedAt: new Date(NOW - (3 * 60 + 45) * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
-        command: "bun vendor/yrd/bin/yrd.ts --resident",
+        command: "bun vendor/yrd/bin/yrd.ts --habitant",
       },
     }
     const render = createRenderer({ cols: 120, rows: 40 })
@@ -371,7 +371,7 @@ describe("queue timeline chrome 21106", () => {
         pid: 342,
         startedAt: new Date(NOW - 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
-        command: "resident runner",
+        command: "habitant runner",
         queueProgress: { state: "healthy", observedAt: new Date(NOW - 2_000).toISOString() },
       },
     }
@@ -455,7 +455,7 @@ describe("queue timeline chrome 21106", () => {
         pid: 342,
         startedAt: new Date(NOW - 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
-        command: "resident runner",
+        command: "habitant runner",
         queueProgress: {
           state: "stalled",
           observedAt: new Date(NOW - 2_000).toISOString(),
@@ -522,7 +522,7 @@ describe("queue timeline chrome 21106", () => {
         pid: 342,
         startedAt: new Date(NOW - 2 * 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
-        command: "resident runner",
+        command: "habitant runner",
         queueProgress: { state: "healthy", observedAt: new Date(NOW - 60_000).toISOString() },
       },
     }
@@ -556,14 +556,14 @@ describe("queue timeline chrome 21106", () => {
         pid: 342,
         startedAt: new Date(NOW - 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
-        command: "resident runner",
+        command: "habitant runner",
         queueProgress: {
           state: "stalled",
           observedAt: new Date(NOW - 2_000).toISOString(),
           findings: [
             {
               code: "queue-progress-stalled",
-              message: "Queue main has ready work and no landing",
+              message: "Queue main has ready work and no merge",
               since: "2026-07-13T11:00:00.000Z",
               blockedMs: 60 * 60_000,
             },
@@ -576,7 +576,7 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("NO PROGRESS — Queue main has ready work and no landing")
+      expect(app.text).toContain("NO PROGRESS — Queue main has ready work and no merge")
     } finally {
       app.unmount()
     }
@@ -747,7 +747,7 @@ describe("queue timeline chrome 21106", () => {
         pid: 342,
         startedAt: new Date(NOW - 60_000).toISOString(),
         lastTickAt: new Date(NOW - 60_000).toISOString(),
-        command: "resident runner",
+        command: "habitant runner",
       },
     }
     const app = createRenderer({ cols: 120, rows: 40 })(

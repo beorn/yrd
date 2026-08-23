@@ -1,7 +1,7 @@
 /**
  * @failure An intent-integrated Run's member id is an intent id with no retained PR, so every
  * retained-PR join in the queue/log read views throws and `yrd queue` / `yrd log` crash for
- * the whole repository the moment the first carrier-free pin intent lands.
+ * the whole repository the moment the first carrier-free pin intent merges.
  * @level l2
  * @consumer @yrd/cli `yrd queue` / `yrd log` operators
  */
@@ -31,7 +31,7 @@ function contractResults(): readonly QueueStatusResult[] {
 }
 
 /** A carrier-free pin-intent member, shaped like the Queue's materialized
- * ChangeSnapshot for a landed intent (the real R1480/I2 shape). Its id is an
+ * ChangeSnapshot for a merged intent (the real R1480/I2 shape). Its id is an
  * intent id, so it can never resolve against the retained PR list. */
 function intentMember(id: string = "I2"): Member {
   return {

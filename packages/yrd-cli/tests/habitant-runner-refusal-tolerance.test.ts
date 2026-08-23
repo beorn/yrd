@@ -1,20 +1,20 @@
 /**
- * @failure A resident queue runner dies when a peer holds the queue or withdraws a PR mid-compose, idling the whole merge queue; and its recovery echoes a bare non-loggily stderr message instead of loggily-only output.
+ * @failure A habitant queue runner dies when a peer holds the queue or withdraws a PR mid-compose, idling the whole merge queue; and its recovery echoes a bare non-loggily stderr message instead of loggily-only output.
  * @level l2
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  */
 import { describe, expect, it } from "vitest"
 import { ChangeCheckabilityConflict } from "@yrd/bay"
 import { createFailure } from "@yrd/core"
 import { QueueRunningConflict } from "@yrd/queue"
 import { followQueueRuns } from "../src/run.ts"
-import { createResponseResidentHarness as harness } from "./support/resident-harness.ts"
+import { createResponseHabitantHarness as harness } from "./support/habitant-harness.ts"
 
-describe("resident runner — a busy queue never kills the watch loop (Defect 1)", () => {
+describe("habitant runner — a busy queue never kills the watch loop (Defect 1)", () => {
   it("defers with a loud loggily warn and processes the NEXT cycle when the queue frees", async () => {
     const h = harness([
       // Cycle 1: a peer already holds the base — the compose refusal that used to
-      // exit the resident (rc=1) and force an external supervisor to relaunch it.
+      // exit the habitant (rc=1) and force an external supervisor to relaunch it.
       () => Promise.reject(new QueueRunningConflict("main", "R551")),
       // Cycle 2: the queue has freed; the runner keeps going and drains normally.
       () => {
@@ -36,7 +36,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
   })
 
   it("still dies on a busy conflict for a one-shot targeted run — no next interval", async () => {
-    // Recovery-by-defer is only for the looping resident watch. A targeted
+    // Recovery-by-defer is only for the looping habitant watch. A targeted
     // `queue run PR1` propagates the refusal so the caller sees the outcome.
     const h = harness([() => Promise.reject(new QueueRunningConflict("main", "R551"))])
     await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
@@ -66,7 +66,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
     })
   })
 
-  it("flushes a pending busy summary when the resident exits before a successful cycle", async () => {
+  it("flushes a pending busy summary when the habitant exits before a successful cycle", async () => {
     const h = harness([
       () => Promise.reject(new QueueRunningConflict("main", "R551")),
       () => {
@@ -84,7 +84,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
   })
 })
 
-describe("resident runner — a busy journal never kills the watch loop", () => {
+describe("habitant runner — a busy journal never kills the watch loop", () => {
   it("logs a transient lock anywhere in the cycle and processes the next cycle", async () => {
     const h = harness([
       () => {
@@ -128,11 +128,11 @@ describe("resident runner — a busy journal never kills the watch loop", () => 
   })
 })
 
-describe("resident runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {
+describe("habitant runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {
   it("skips with a loud loggily warn and processes the NEXT cycle with the remaining PRs", async () => {
     const h = harness([
       // Cycle 1: a peer withdrew a candidate PR between this runner's compose
-      // snapshot and its check request — the throw that exited the resident.
+      // snapshot and its check request — the throw that exited the habitant.
       () => Promise.reject(new ChangeCheckabilityConflict("PR364", "withdrawn")),
       // Cycle 2: the withdrawn PR is gone from the submitted set; the remaining
       // runnable PRs compose normally, then the watch stops.
@@ -161,8 +161,8 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
   })
 
   it("skips when a PR is already integrated mid-compose (22306 #3)", async () => {
-    // Multi-driver / same-runner race: PR lands between snapshot and the next
-    // admit/run; "integrated, not admissible" must not kill the resident.
+    // Multi-driver / same-runner race: PR merges between snapshot and the next
+    // admit/run; "integrated, not admissible" must not kill the habitant.
     const h = harness([
       () => Promise.reject(new ChangeCheckabilityConflict("PR1578", "integrated")),
       () => {
@@ -182,7 +182,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
   it.each(["authored-gitlink", "merge-tip-carrier"] as const)(
     "skips the PR-scoped refusal %s without dying (22306 class)",
     async (code) => {
-      // @ci 2026-07-25: a single PR's authored-gitlink killed the whole resident.
+      // @ci 2026-07-25: a single PR's authored-gitlink killed the whole habitant.
       // Architectural acceptance: any PR-scoped refusal is a cycle skip, not exit 1.
       const { createFailure } = await import("@yrd/core")
       const h = harness([
@@ -214,7 +214,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
     // A candidate that adds a nested submodule names paths the base checkout
     // lacks. Materializing it spawned git in a directory that does not exist;
     // the bare posix_spawn ENOENT carried no FailureFact, so the classifier
-    // could not contain it and the whole resident exited mid-admission.
+    // could not contain it and the whole habitant exited mid-admission.
     // The absent directory is always DERIVED from the candidate under
     // admission — a bay, scratch, or reference checkout — so it is per-PR by
     // construction and belongs in the same cycle-skip belt.
@@ -244,7 +244,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
   })
 })
 
-describe("resident runner — tolerated skips are loggily-only (Defect 3)", () => {
+describe("habitant runner — tolerated skips are loggily-only (Defect 3)", () => {
   it("emits NO bare 'yrd:' stderr echo when it defers a busy cycle", async () => {
     const h = harness([
       () => Promise.reject(new QueueRunningConflict("main", "R551")),
@@ -256,7 +256,7 @@ describe("resident runner — tolerated skips are loggily-only (Defect 3)", () =
     await followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)
     // Loud via the structured log stream…
     expect(h.warnings.length).toBeGreaterThan(0)
-    // …and NOT duplicated as a bare human-readable stderr echo in resident mode.
+    // …and NOT duplicated as a bare human-readable stderr echo in habitant mode.
     expect(h.stderr.join("")).toBe("")
   })
 

@@ -11,7 +11,7 @@
  * `maxWidth` clamp for a `wrap="truncate"` Text as a direct COLUMN child
  * (@si/render/truncate-clip-bordered-column) — rows were rescued by flexily's
  * min-content query, columns were not. The original remedy swapped every
- * prose rail here to `wrap="wrap"`; once silvery's root fix landed, that swap
+ * prose rail here to `wrap="wrap"`; once silvery's root fix merged, that swap
  * was reverted back to `truncate` (@yrd/core/stale-runner-never-recycles's
  * sibling bead), so this file now proves the CLIPPED shape — border intact,
  * content elided with `…` — instead of the wrapped one. `boxRows` below is
@@ -165,10 +165,10 @@ describe("RUNNER box bounded hanging command (item 29 — the item-13 deviation 
   // eliding with `…` — so a long command can never push the run list off a
   // narrow pane, while every other rail left-aligns with the command column.
   const LONG_COMMAND = [
-    "bun /very/long/install/path/vendor/yrd/bin/yrd.ts queue run code --resident",
+    "bun /very/long/install/path/vendor/yrd/bin/yrd.ts queue run code --habitant",
     "--lease-ms 300000 --artifact-root /repo/.git/yrd/artifacts --log-level debug",
     "--journal /repo/.git/yrd/journal.db --state-dir /repo/.git/yrd/state",
-    "--config /repo/.yrd.yml --runner-name resident-code --heartbeat-ms 5000",
+    "--config /repo/.yrd.yml --runner-name habitant-code --heartbeat-ms 5000",
   ].join(" ")
 
   it("wraps the command into hanging rows capped at three, eliding the tail", () => {
@@ -177,7 +177,7 @@ describe("RUNNER box bounded hanging command (item 29 — the item-13 deviation 
     for (const row of rows) expect(row.length).toBeLessThanOrEqual(72)
     expect(rows.at(-1)).toMatch(/…$/u)
     // Short text stays a single unelided row.
-    expect(boundedHangingLines("resident runner [84042]", 40, 3)).toEqual(["resident runner [84042]"])
+    expect(boundedHangingLines("habitant runner [84042]", 40, 3)).toEqual(["habitant runner [84042]"])
   })
 
   it("keeps the run list on screen under a narrow pane with the wrapped command hanging off the $ gutter", async () => {

@@ -96,7 +96,7 @@ function rowContaining(app: { text: string }, needle: string): string {
  * Assert the titled metrics box is a clean rectangle: the interior rows carry the left/right
  * `│` border at the box's own columns and the bottom row is an unbroken
  * `╰──…──╯`. This catches a row drawn over a box border (the reported glitch),
- * since a content glyph landing where a border cell belongs fails the check.
+ * since a content glyph merge where a border cell belongs fails the check.
  */
 function assertBoxClean(text: string, title: string): number {
   const rows = text.split("\n")
@@ -160,7 +160,7 @@ describe("QueueStatsPanel", () => {
     expect(rows[headerRow]).toContain("RUNS")
     expect(rows.filter((row) => row.includes("RUNS"))).toHaveLength(1)
     // DUP sits just above FAILS (operator ruling 2026-08-18) — the two rows a
-    // landing could have gone to instead of a clean MERGED.
+    // merge could have gone to instead of a clean MERGED.
     const countRows = ["ALL", "MERGED", "PASS", "DUP", "FAILS"].map((label) =>
       rows.findIndex((row) => row.includes(label)),
     )
@@ -170,10 +170,10 @@ describe("QueueStatsPanel", () => {
 
   it("draws the midnight boundary as its own column running through the header and every data row", () => {
     // Two active hours either side of LOCAL midnight: 00:10 today, 23:05
-    // yesterday. Local `Date` component constructors throughout (matching
+    // yesterday. Local `Date` submodule constructors throughout (matching
     // the day-boundary test in time-stats.test.ts) so the crossing is real
     // regardless of the test runner's own TZ — a UTC ISO fixture would only
-    // land on a local midnight by coincidence of that TZ's offset.
+    // merge on a local midnight by coincidence of that TZ's offset.
     const boundaryNow = new Date(2026, 6, 16, 0, 20).toISOString()
     const facts: readonly QueueTerminalFact[] = [
       fact({ run: "today-hour", terminalAtMs: new Date(2026, 6, 16, 0, 10).getTime(), outcome: "passed" }),
@@ -207,7 +207,7 @@ describe("QueueStatsPanel", () => {
     expect(failsRow[boundaryX]).toBe("│")
   })
 
-  it("shows Run counts, landed-PR counts, and duration averages using the compact vocabulary", () => {
+  it("shows Run counts, merged-PR counts, and duration averages using the compact vocabulary", () => {
     const render = createRenderer({ cols: 126, rows: 30 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestFactMs: HORIZON, width: 126 }))
     expect(rowContaining(app, "ALL")).toMatch(/ALL\s+2\b/u)

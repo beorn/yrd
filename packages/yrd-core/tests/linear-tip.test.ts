@@ -1,11 +1,11 @@
 /**
- * @failure A merge-tip refusal that says "fast-forward that component's main"
+ * @failure A merge-tip refusal that says "fast-forward that submodule's main"
  *          without listing what the FF would drag in is the 3652bfe class:
- *          a rejected commit on component main, one pin-bump from the estate.
+ *          a rejected commit on submodule main, one pin-bump from the estate.
  * @level l1
  * @consumer @yrd/core
  *
- * Refs: @chief 62a8019c — print `git cherry <estate-pin> <component-main>`
+ * Refs: @chief 62a8019c — print `git cherry <estate-pin> <submodule-main>`
  * before the FF verb. Not a sibling of 23140 (review door); this is the
  * worker-facing remedy text.
  */
@@ -30,13 +30,13 @@ describe("requireLinearRootTip", () => {
     }
   })
 
-  it("names git cherry <estate-pin> <component-main> before instructing the FF", () => {
+  it("names git cherry <estate-pin> <submodule-main> before instructing the FF", () => {
     try {
       requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"])
       throw new Error("expected refusal")
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      expect(message).toMatch(/git cherry <estate-pin> <component-main>/u)
+      expect(message).toMatch(/git cherry <estate-pin> <submodule-main>/u)
       expect(message).toMatch(/fast-forward/iu)
     }
   })
@@ -76,7 +76,7 @@ describe("requireLinearRootTip", () => {
 
 describe("cherryFfInstruction", () => {
   it("prints the git cherry command when the unique list is not in hand", () => {
-    expect(cherryFfInstruction()).toMatch(/git cherry <estate-pin> <component-main>/u)
+    expect(cherryFfInstruction()).toMatch(/git cherry <estate-pin> <submodule-main>/u)
     expect(cherryFfInstruction()).toMatch(/empty unique list = no-op/u)
   })
 

@@ -528,7 +528,7 @@ const integratedPr = terminalFixturePr(
   "2026-07-13T10:30:00.000Z",
   "2026-07-13T10:55:00.000Z",
   "R4",
-  "Land the durable patch",
+  "Merge the durable patch",
   { submitter: "@agent/7" },
 )
 const rejectedPr = terminalFixturePr(

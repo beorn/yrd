@@ -1,7 +1,7 @@
 /**
  * @failure Composition stops absorbing a stale carrier — one that never touched
  * a gitlink but whose base moved its submodule pins on — and either refuses it
- * as authored or lands it carrying the older pin.
+ * as authored or merges it carrying the older pin.
  * @level l2
  * @consumer @yrd/queue candidate preparer
  */
@@ -37,7 +37,7 @@ async function gitlinkAt(repo: string, ref: string, path = "dep"): Promise<strin
  * A superproject pinning `dep` at A, a carrier branched from there that only
  * adds a file, and a base that has since advanced the pin to B without the
  * carrier's involvement. This is the ordinary shape of any branch that sat
- * while main landed a submodule bump.
+ * while main merged a submodule bump.
  */
 async function staleCarrierRepository(): Promise<{
   repo: string
@@ -94,7 +94,7 @@ describe("composition absorbs a stale carrier's base pin movement", () => {
     const fixture = await staleCarrierRepository()
     expect(fixture.moduleA).not.toBe(fixture.moduleB)
     // The carrier's own tree still holds the old pin; only composition decides
-    // which one lands.
+    // which one merges.
     expect(await gitlinkAt(fixture.repo, fixture.headSha)).toBe(fixture.moduleA)
     expect(await gitlinkAt(fixture.repo, fixture.currentBaseSha)).toBe(fixture.moduleB)
     await using process = createProcess()

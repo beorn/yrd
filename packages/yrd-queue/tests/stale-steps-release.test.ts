@@ -1,5 +1,5 @@
 /**
- * @failure A queued run whose not-yet-started next step drifts from the installed step revision throws `command-refused` at the advance path, killing the selectorless resident compose instead of releasing the run for a fresh re-admission.
+ * @failure A queued run whose not-yet-started next step drifts from the installed step revision throws `command-refused` at the advance path, killing the selectorless habitant compose instead of releasing the run for a fresh re-admission.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -100,7 +100,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
       // First passed; the SECOND step was never requested — that is the pending
-      // boundary the drift lands on when the config moves.
+      // boundary the drift merges on when the config moves.
       expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("completed")
       expect(app.queue.get("R1")?.steps[1]?.job).toBeUndefined()
     }
@@ -138,7 +138,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       })
     }
 
-    // Replay after the requested current Job's definition moved. The resident
+    // Replay after the requested current Job's definition moved. The habitant
     // compose path must retire R1 before Jobs.run sees the stale revision.
     await using replayed = await createApp("second-v2", journal, id)
     await expect(replayed.queue.run({ prs: ["PR1"] }, runtime)).resolves.toBeDefined()

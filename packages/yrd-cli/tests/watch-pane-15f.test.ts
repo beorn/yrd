@@ -142,7 +142,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("JOB"))
       const rows = app.text.split("\n")
-      // The newest-output default lands on the merge step. The composite RUN
+      // The newest-output default merges on the merge step. The composite RUN
       // identity/timing header leads the tab strip; selected step internals
       // begin with JOB.
       const runFactsY = rows.findIndex((l) => l.includes("Started "))

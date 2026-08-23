@@ -1,10 +1,10 @@
 /**
- * The resident runner's self-check on its OWN source freshness — box 1 of
+ * The habitant runner's self-check on its OWN source freshness — box 1 of
  * @yrd/core/stale-runner-never-recycles.
  *
- * A resident boots once and serves for hours. Its code is whatever the source
+ * A habitant boots once and serves for hours. Its code is whatever the source
  * checkout held at startup; the checkout keeps moving underneath it. On
- * 2026-08-14 a resident served three pins-old code for ~3h while the pin
+ * 2026-08-14 a habitant served three pins-old code for ~3h while the pin
  * advanced four times, silently applying yesterday's gates to today's landings.
  * The `resident-runner-driver-stale` page fired and nothing acted on it, so the
  * runner is made to act on itself: notice the gap, finish the in-flight run,
@@ -18,24 +18,24 @@
  */
 
 /**
- * Commits behind the source checkout before a resident considers itself stale.
- * Two, not one: a single commit is routinely the landing that the resident
+ * Commits behind the source checkout before a habitant considers itself stale.
+ * Two, not one: a single commit is routinely the merge that the habitant
  * itself just produced, and recycling on it would restart the runner after
  * every merge. Two means the world moved on without us.
  */
-export const RESIDENT_SOURCE_STALE_BEHIND = 2
+export const HABITANT_SOURCE_STALE_BEHIND = 2
 
 /**
- * Consecutive observations that must agree before the resident acts. One
+ * Consecutive observations that must agree before the habitant acts. One
  * observation can catch a checkout mid-write — a submodule pin bump is not
  * atomic with the working tree it names — and a recycle is far too expensive
  * to spend on a torn read. Two consecutive cycles at the same head bound the
  * exposure to one poll interval while making a transient disagree harmless.
  */
-export const RESIDENT_SOURCE_STALE_OBSERVATIONS = 2
+export const HABITANT_SOURCE_STALE_OBSERVATIONS = 2
 
 /** One cycle's answer to "how far has my source checkout moved past me?". */
-export type ResidentSourceObservation = Readonly<{
+export type HabitantSourceObservation = Readonly<{
   /** The sha this process booted from, or undefined when the source identity is
    * dirty/attested/unknown — unmeasurable, and never stale. */
   bootedSha: string | undefined
@@ -52,7 +52,7 @@ export type ResidentSourceObservation = Readonly<{
 }>
 
 /** A run of consecutive observations that agree the source has moved on. */
-export type ResidentSourceStall = Readonly<{
+export type HabitantSourceStall = Readonly<{
   bootedSha: string
   headSha: string
   behind: number
@@ -60,11 +60,11 @@ export type ResidentSourceStall = Readonly<{
 }>
 
 /**
- * The last recycle this resident lineage attempted, read back after the
+ * The last recycle this habitant lineage attempted, read back after the
  * re-exec. It is the only evidence a fresh process has that it is the SECOND
  * try, and it is what separates a recycle that works from a restart loop.
  */
-export type ResidentSourceRecycle = Readonly<{
+export type HabitantSourceRecycle = Readonly<{
   /** The sha the previous process was running when it gave up. */
   bootedSha: string
   /** The sha it expected to come back as. */
@@ -72,14 +72,14 @@ export type ResidentSourceRecycle = Readonly<{
   attemptedAt: string
 }>
 
-export type ResidentSourceAction =
+export type HabitantSourceAction =
   /** Nothing to do: current, unmeasurable, or the window has not closed yet. */
   | Readonly<{ kind: "serve" }>
   /** Finish the in-flight run, then exit unclean so the supervisor re-execs. */
   | Readonly<{ kind: "recycle"; bootedSha: string; headSha: string; behind: number; observations: number }>
   /**
    * We already recycled for exactly this gap and came back running exactly the
-   * same code. Restarting again cannot help — whatever the resident boots from
+   * same code. Restarting again cannot help — whatever the habitant boots from
    * is not the checkout that moved — so it must NOT be tried again. Serving
    * stale beats a runner that spends its restart budget flapping and leaves the
    * queue with no runner at all.
@@ -98,10 +98,10 @@ export type ResidentSourceAction =
  * superseded anyway.
  */
 export function foldSourceStaleness(
-  previous: ResidentSourceStall | undefined,
-  observation: ResidentSourceObservation,
-  threshold: number = RESIDENT_SOURCE_STALE_BEHIND,
-): ResidentSourceStall | undefined {
+  previous: HabitantSourceStall | undefined,
+  observation: HabitantSourceObservation,
+  threshold: number = HABITANT_SOURCE_STALE_BEHIND,
+): HabitantSourceStall | undefined {
   const { bootedSha, headSha, behind } = observation
   if (bootedSha === undefined || headSha === undefined || behind === undefined) return undefined
   if (behind < threshold) return undefined
@@ -118,7 +118,7 @@ export function foldSourceStaleness(
  * Rule on a closed window.
  *
  * The `checkout-behind` verdict is the whole reason this takes the prior
- * recycle as an argument. A resident boots from the live checkout, so a recycle
+ * recycle as an argument. A habitant boots from the live checkout, so a recycle
  * is only an actuator when that checkout is the thing that moved. When it is
  * not — a frozen checkout during a custody hold, a launcher whose source
  * identity is misrecorded, a shim resolving a different tree — the re-exec
@@ -127,11 +127,11 @@ export function foldSourceStaleness(
  * bound; the supervisor's restart budget is the outer guard behind it, not the
  * first line of defense.
  */
-export function decideResidentSource(
-  stall: ResidentSourceStall | undefined,
-  lastRecycle: ResidentSourceRecycle | undefined,
-  observations: number = RESIDENT_SOURCE_STALE_OBSERVATIONS,
-): ResidentSourceAction {
+export function decideHabitantSource(
+  stall: HabitantSourceStall | undefined,
+  lastRecycle: HabitantSourceRecycle | undefined,
+  observations: number = HABITANT_SOURCE_STALE_OBSERVATIONS,
+): HabitantSourceAction {
   if (stall === undefined || stall.observations < observations) return { kind: "serve" }
   const { bootedSha, headSha, behind } = stall
   if (lastRecycle?.bootedSha === bootedSha && lastRecycle.headSha === headSha) {

@@ -1,5 +1,5 @@
 /**
- * @failure A field added to a shipped bay event lands without declaring which
+ * @failure A field added to a shipped bay event merges without declaring which
  * reader version can read it, so a newer writer emits a key every pinned reader
  * refuses — one row then strands the whole fleet, and no reader can recover.
  * This snapshot is the ratchet: growing a payload changes it, and the change

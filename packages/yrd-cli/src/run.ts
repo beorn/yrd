@@ -82,7 +82,7 @@ import {
   pruneCandidateRefs,
   sweepCandidateRefs,
   applyHostFindingFilter,
-  parseComponentModelChangeAuthorizationValue,
+  parseSubmoduleModelChangeAuthorizationValue,
   sweepUncarriedRefs,
   type CandidateRefSweepResult,
   type QueuesState,
@@ -165,7 +165,7 @@ import {
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
-  type ResidentInstalledPlan,
+  type HabitantInstalledPlan,
   type RunnerSourcePin,
   type UncarriedObservation,
   uncarriedCoverageFloor,
@@ -187,13 +187,13 @@ import {
   formatRemedyCommand,
   planRefusalRemedies,
   refusalRemedyKey,
-  RESIDENT_REFUSAL_STALL_CYCLES,
+  HABITANT_REFUSAL_STALL_CYCLES,
   type RefusalRemedyPlan,
   type RemedyStep,
-  type ResidentRefusalObservation,
-  type ResidentRefusalStall,
+  type HabitantRefusalObservation,
+  type HabitantRefusalStall,
 } from "./refusal-remedy.ts"
-import { reconcileChangeMerges, type ChangeMerge } from "./pr-landing.ts"
+import { reconcileChangeMerges, type ChangeMerge } from "./pr-merged.ts"
 import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { applyChangeState, changeStateDeps, type ChangeState } from "./change-state.ts"
@@ -253,11 +253,11 @@ import type {
 } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION, yrdSourceRoot } from "./version.ts"
 import {
-  decideResidentSource,
+  decideHabitantSource,
   foldSourceStaleness,
-  RESIDENT_SOURCE_STALE_BEHIND,
-  type ResidentSourceRecycle,
-  type ResidentSourceStall,
+  HABITANT_SOURCE_STALE_BEHIND,
+  type HabitantSourceRecycle,
+  type HabitantSourceStall,
 } from "./source-staleness.ts"
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
@@ -380,7 +380,7 @@ const queueGitDirs = new Map<string, string | undefined>()
 
 /** `git rev-parse --git-common-dir` for the queue repository.
  *
- * `residentRunnerStatus` sits on top of this, and `queueListSnapshot` calls that
+ * `habitantRunnerStatus` sits on top of this, and `queueListSnapshot` calls that
  * unconditionally — once per 1s watch tick AND once per focus/cursor change. The
  * lookup is `execFileSync`, so an uncached call BLOCKS the watch UI on a git fork
  * for every keypress. The value is immutable for the lifetime of the process, so
@@ -395,10 +395,10 @@ function queueGitDir(cwd: string): string | undefined {
 /** One identity per queue. The journal lives under the git COMMON directory,
  * so every linked worktree of a repository reads and writes the SAME queue —
  * an identity derived from the invocation cwd made a worktree's yrd report the
- * resident runner as owning a foreign queue (`/hh#main` vs
+ * habitant runner as owning a foreign queue (`/hh#main` vs
  * `/hh/.worktrees/hh-wt4#main`, 2026-08-16) while both were the one journal.
  * The path half is therefore the common dir's owning worktree, which is also
- * exactly what a resident started in the main worktree has always recorded, so
+ * exactly what a habitant started in the main worktree has always recorded, so
  * existing heartbeats compare equal. Outside a repository the resolved path
  * stands in; the callers that reach that case already raise
  * `runner-health-unavailable` on the missing git dir. */
@@ -422,54 +422,54 @@ function readQueueGitDir(cwd: string): string | undefined {
     // silent-fallback-allow: `rev-parse --git-common-dir` fails exactly when `cwd`
     // is not inside a Git repository. That is a legitimate ABSENCE, and it is
     // reported loudly by every caller rather than swallowed here —
-    // `residentRunnerLeaseHeld` and `runnerGitHealth` raise
-    // `runner-health-unavailable` naming the cwd, and `residentRunnerStatusPath`
-    // returns undefined so `residentRunnerStatus` answers "no resident runner".
+    // `habitantRunnerLeaseHeld` and `runnerGitHealth` raise
+    // `runner-health-unavailable` naming the cwd, and `habitantRunnerStatusPath`
+    // returns undefined so `habitantRunnerStatus` answers "no habitant runner".
     // The only information discarded is git's wording of "not a repository".
     return undefined
   }
 }
 
-const RESIDENT_RUNNER_HEARTBEAT_MS = 5_000
+const HABITANT_RUNNER_HEARTBEAT_MS = 5_000
 
-/** How often the resident follow loop runs its unscoped lease-expiry recovery
+/** How often the habitant follow loop runs its unscoped lease-expiry recovery
  * sweep (D1b). Startup reclaim is one-shot; this settles ghosts left by runners
  * that die AFTER it. A constant, not config — the throttle is measured in wall
  * time via `io.now`, so a busy tick cadence cannot starve or spam it. */
-const RESIDENT_RECOVERY_SWEEP_MS = 60_000
-const RESIDENT_MAINTENANCE_INTERVAL_MS = 60_000
+const HABITANT_RECOVERY_SWEEP_MS = 60_000
+const HABITANT_MAINTENANCE_INTERVAL_MS = 60_000
 
 /** Exit code when a hard signal cuts an unfinished drain short, leaving in-flight
  * work (D3). An operator-requested stop that FINISHES (drain complete) exits 0;
- * a signal-forced interruption exits non-zero so the resident breaker records
+ * a signal-forced interruption exits non-zero so the habitant breaker records
  * the failure instead of mistaking interrupted work for a clean lifetime. */
-const RESIDENT_INTERRUPTED_EXIT: YrdCliExitCode = 3
-/** A resident that restarts itself out of presumptive poisoned-observer state
+const HABITANT_INTERRUPTED_EXIT: YrdCliExitCode = 3
+/** A habitant that restarts itself out of presumptive poisoned-observer state
  * (22474 specimen 3) exits with the same UNCLEAN code as a signal-forced stop:
  * both mean "this runner stopped with queue work outstanding" and must count
- * against the resident breaker. The distinguishing evidence is the loud
+ * against the habitant breaker. The distinguishing evidence is the loud
  * `resident-refusal-stall-restart` record, not the code. */
-const RESIDENT_POISONED_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
-/** A resident that recycles itself onto a source its own checkout has moved past
+const HABITANT_POISONED_EXIT: YrdCliExitCode = HABITANT_INTERRUPTED_EXIT
+/** A habitant that recycles itself onto a source its own checkout has moved past
  * (@yrd/core/stale-runner-never-recycles box 1) exits with the same UNCLEAN code
  * as every other "stopped with queue work outstanding" case, so the supervisor's
  * restart budget counts it and a flapping checkout cannot restart forever.
  * The distinguishing evidence is the typed `resident-source-stale-restart`
  * record, never the code — the code is deliberately not a new dialect. */
-const RESIDENT_SOURCE_STALE_EXIT: YrdCliExitCode = RESIDENT_INTERRUPTED_EXIT
+const HABITANT_SOURCE_STALE_EXIT: YrdCliExitCode = HABITANT_INTERRUPTED_EXIT
 
-/** Overrides {@link RESIDENT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
+/** Overrides {@link HABITANT_SOURCE_STALE_BEHIND}; `0` disables the recycle and
  * leaves the staleness visible-only. A runtime knob rather than project config:
- * it describes how this HOST supervises a resident process, not anything about
- * the repository being landed. */
+ * it describes how this HOST supervises a habitant process, not anything about
+ * the repository being merged. */
 const RESIDENT_SOURCE_STALE_BEHIND_ENV = "YRD_RESIDENT_SOURCE_STALE_BEHIND"
 
 /** Read the recycle threshold. An unparseable value is raised, never defaulted:
  * an operator who set the knob to disable a recycle and got the default instead
  * would learn about it from an unexplained restart. */
-function residentSourceStaleThreshold(env: NodeJS.ProcessEnv = process.env): number {
+function habitantSourceStaleThreshold(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env[RESIDENT_SOURCE_STALE_BEHIND_ENV]?.trim()
-  if (raw === undefined || raw === "") return RESIDENT_SOURCE_STALE_BEHIND
+  if (raw === undefined || raw === "") return HABITANT_SOURCE_STALE_BEHIND
   const parsed = Number(raw)
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
     raiseFailure(
@@ -481,34 +481,34 @@ function residentSourceStaleThreshold(env: NodeJS.ProcessEnv = process.env): num
   return parsed
 }
 
-function residentRunnerStatusPath(cwd: string, stateDir?: string): string | undefined {
+function habitantRunnerStatusPath(cwd: string, stateDir?: string): string | undefined {
   if (stateDir !== undefined) return join(stateDir, "resident-runner", "status.json")
   const gitDir = queueGitDir(cwd)
   return gitDir === undefined ? undefined : join(gitDir, "yrd", "resident-runner", "status.json")
 }
 
-function residentRunnerTimestamp(value: unknown, field: string): string {
+function habitantRunnerTimestamp(value: unknown, field: string): string {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${field} is invalid`)
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: habitant runner ${field} is invalid`)
   }
   return value
 }
 
-/** One resident-observed {@link QueueAuditFinding}, validated field-by-field.
+/** One habitant-observed {@link QueueAuditFinding}, validated field-by-field.
  * Shared by every status-file field that carries findings verbatim from the
  * canonical audit (`queueProgress.findings`, `staleDrafts`) so the wire
  * contract for "what is a valid finding" cannot drift between them. `context`
  * names the owning field in every raised message. */
 function parseQueueAuditFinding(value: unknown, context: string): QueueAuditFinding {
   if (typeof value !== "object" || value === null) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${context} is invalid`)
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: habitant runner ${context} is invalid`)
   }
   const record = value as Record<string, unknown>
   if (typeof record.code !== "string" || typeof record.message !== "string") {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      `yrd: resident runner ${context} identity is invalid`,
+      `yrd: habitant runner ${context} identity is invalid`,
     )
   }
   for (const field of [
@@ -525,7 +525,7 @@ function parseQueueAuditFinding(value: unknown, context: string): QueueAuditFind
       raiseFailure(
         "infrastructure",
         "resident-runner-status-invalid",
-        `yrd: resident runner ${context} ${field} is invalid`,
+        `yrd: habitant runner ${context} ${field} is invalid`,
       )
     }
   }
@@ -536,35 +536,35 @@ function parseQueueAuditFinding(value: unknown, context: string): QueueAuditFind
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      `yrd: resident runner ${context} resolution is invalid`,
+      `yrd: habitant runner ${context} resolution is invalid`,
     )
   }
   if (record.count !== undefined && (!Number.isSafeInteger(record.count) || (record.count as number) < 0)) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${context} count is invalid`)
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: habitant runner ${context} count is invalid`)
   }
   if (record.since !== undefined && (typeof record.since !== "string" || !Number.isFinite(Date.parse(record.since)))) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${context} since is invalid`)
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: habitant runner ${context} since is invalid`)
   }
   if (record.blockedMs !== undefined && (!Number.isSafeInteger(record.blockedMs) || (record.blockedMs as number) < 0)) {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      `yrd: resident runner ${context} blockedMs is invalid`,
+      `yrd: habitant runner ${context} blockedMs is invalid`,
     )
   }
   return record as QueueAuditFinding
 }
 
-function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | undefined {
+function parseHabitantRunnerProgress(value: unknown): QueueRunnerProgress | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "object" || value === null) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner queueProgress is invalid")
   }
   const progress = value as Record<string, unknown>
   const observedAt =
     progress.observedAt === undefined
       ? undefined
-      : residentRunnerTimestamp(progress.observedAt, "queueProgress observedAt")
+      : habitantRunnerTimestamp(progress.observedAt, "queueProgress observedAt")
   // Status records from progress-aware runners before the observation-time
   // contract remain readable, but their un-timestamped belief is not health.
   if (progress.state === "healthy") return observedAt === undefined ? undefined : { state: "healthy", observedAt }
@@ -572,10 +572,10 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
     const findings = progress.findings.map((finding) => parseQueueAuditFinding(finding, "queueProgress finding"))
     return observedAt === undefined ? undefined : { state: "stalled", observedAt, findings }
   }
-  raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner queueProgress is invalid")
+  raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner queueProgress is invalid")
 }
 
-/** Shared by every resident-status field that carries a plain array of
+/** Shared by every habitant-status field that carries a plain array of
  * findings (unlike `queueProgress`, no wrapping state/observedAt envelope) —
  * presence already means "measured", and an empty array is a real, common
  * answer ("no stale drafts", "nothing needs a person"), so it is never
@@ -584,28 +584,28 @@ function parseResidentRunnerProgress(value: unknown): QueueRunnerProgress | unde
 function parseFindingsField(value: unknown, field: string): readonly QueueAuditFinding[] | undefined {
   if (value === undefined) return undefined
   if (!Array.isArray(value)) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${field} is invalid`)
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: habitant runner ${field} is invalid`)
   }
   return value.map((finding) => parseQueueAuditFinding(finding, `${field} finding`))
 }
 
-const ResidentInstalledPlanSchema = z
+const HabitantInstalledPlanSchema = z
   .object({
     batchSize: z.number().int().min(1),
     steps: z.array(InstalledStepSchema).min(1),
   })
   .strict()
 
-/** Absent is a real answer (a resident older than the field); a present value
+/** Absent is a real answer (a habitant older than the field); a present value
  * that does not parse is a broken wire, never silently "not published". */
-function parseResidentInstalledPlan(value: unknown): ResidentInstalledPlan | undefined {
+function parseHabitantInstalledPlan(value: unknown): HabitantInstalledPlan | undefined {
   if (value === undefined) return undefined
-  const parsed = ResidentInstalledPlanSchema.safeParse(value)
+  const parsed = HabitantInstalledPlanSchema.safeParse(value)
   if (!parsed.success) {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      `yrd: resident runner installedPlan is invalid: ${parsed.error.message}`,
+      `yrd: habitant runner installedPlan is invalid: ${parsed.error.message}`,
     )
   }
   return parsed.data
@@ -614,21 +614,21 @@ function parseResidentInstalledPlan(value: unknown): ResidentInstalledPlan | und
 function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "object" || value === null) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner driver is invalid")
   }
   const driver = value as Record<string, unknown>
   if (typeof driver.queueId !== "string" || driver.queueId.trim() === "") {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver queueId is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner driver queueId is invalid")
   }
   if (typeof driver.epoch !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(driver.epoch)) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner driver epoch is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner driver epoch is invalid")
   }
-  // A resident outlives the CLI that reads it, so this key is a cross-process
+  // A habitant outlives the CLI that reads it, so this key is a cross-process
   // wire between two independently-versioned processes: the reader must accept
-  // what an older resident writes. `lastLanded` is the pre-2026-08-18 spelling
-  // of this same field (the land->merge rename); a resident started before that
+  // what an older habitant writes. `lastLanded` is the pre-2026-08-18 spelling
+  // of this same field (the land->merge rename); a habitant started before that
   // rename keeps writing it for its whole lifetime. Absent BOTH spellings is
-  // unknown, never "nothing has landed" -- the same rule the sibling
+  // unknown, never "nothing has merged" -- the same rule the sibling
   // `missingUpdateClocks` states on this record.
   const reported = driver.lastMerged ?? driver.lastLanded
   let lastMerged: QueueDriverEpoch["lastMerged"]
@@ -645,7 +645,7 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
       raiseFailure(
         "infrastructure",
         "resident-runner-status-invalid",
-        "yrd: resident runner driver lastMerged is invalid",
+        "yrd: habitant runner driver lastMerged is invalid",
       )
     }
     lastMerged = { commit: merged.commit, at: merged.at }
@@ -655,7 +655,7 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner driver lastMerged is invalid",
+      "yrd: habitant runner driver lastMerged is invalid",
     )
   }
   return { queueId: driver.queueId, epoch: driver.epoch, lastMerged }
@@ -664,17 +664,17 @@ function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
 function parseUncarriedObservation(value: unknown): UncarriedObservation | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "object" || value === null) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner uncarried is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner uncarried is invalid")
   }
   const observation = value as Record<string, unknown>
   if (!Number.isSafeInteger(observation.count) || (observation.count as number) < 0) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner uncarried count is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner uncarried count is invalid")
   }
   if (!Number.isSafeInteger(observation.scanned) || (observation.scanned as number) < 0) {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner uncarried scanned count is invalid",
+      "yrd: habitant runner uncarried scanned count is invalid",
     )
   }
   if (
@@ -684,7 +684,7 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner uncarried missing update-clock count is invalid",
+      "yrd: habitant runner uncarried missing update-clock count is invalid",
     )
   }
   if (
@@ -694,7 +694,7 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner uncarried measurable count is invalid",
+      "yrd: habitant runner uncarried measurable count is invalid",
     )
   }
   const count = observation.count as number
@@ -705,7 +705,7 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner uncarried counts exceed its scanned population",
+      "yrd: habitant runner uncarried counts exceed its scanned population",
     )
   }
   // Every finding comes from a ref the sweep could measure, so a count above
@@ -715,11 +715,11 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner uncarried measurable count disagrees with its own population",
+      "yrd: habitant runner uncarried measurable count disagrees with its own population",
     )
   }
-  const observedAt = residentRunnerTimestamp(observation.observedAt, "uncarried observedAt")
-  // Minted, never spread: a `status.json` written by an older resident carries
+  const observedAt = habitantRunnerTimestamp(observation.observedAt, "uncarried observedAt")
+  // Minted, never spread: a `status.json` written by an older habitant carries
   // no coverage fields, and re-deriving them HERE is what keeps a stale record
   // honest rather than letting it reach a renderer as a bare count.
   return uncarriedObservation({
@@ -734,7 +734,7 @@ function parseUncarriedObservation(value: unknown): UncarriedObservation | undef
 function parseJournalRetentionPolicy(value: unknown): JournalRetentionPolicy {
   if (value === "disabled") return value
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner retention policy is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner retention policy is invalid")
   }
   const policy = value as Record<string, unknown>
   const keys = Object.keys(policy).toSorted()
@@ -744,7 +744,7 @@ function parseJournalRetentionPolicy(value: unknown): JournalRetentionPolicy {
     (policy.keepDays !== undefined && (!Number.isSafeInteger(policy.keepDays) || (policy.keepDays as number) < 1)) ||
     keys.some((key) => key !== "keepFrames" && key !== "keepDays")
   ) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner retention policy is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner retention policy is invalid")
   }
   return {
     keepFrames: policy.keepFrames as number,
@@ -758,7 +758,7 @@ function parseJournalRetentionObservation(value: unknown): JournalRetentionObser
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner retention observation is invalid",
+      "yrd: habitant runner retention observation is invalid",
     )
   }
   const observation = value as Record<string, unknown>
@@ -766,7 +766,7 @@ function parseJournalRetentionObservation(value: unknown): JournalRetentionObser
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner retention observation source is invalid",
+      "yrd: habitant runner retention observation source is invalid",
     )
   }
   if (
@@ -776,52 +776,52 @@ function parseJournalRetentionObservation(value: unknown): JournalRetentionObser
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner retention observation generation is invalid",
+      "yrd: habitant runner retention observation generation is invalid",
     )
   }
   return {
     policy: parseJournalRetentionPolicy(observation.policy),
     source: "mutable-journal",
-    observedAt: residentRunnerTimestamp(observation.observedAt, "retention observedAt"),
+    observedAt: habitantRunnerTimestamp(observation.observedAt, "retention observedAt"),
     generation: observation.generation,
   }
 }
 
-function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
+function parseHabitantRunnerStatus(text: string): QueueTimelineRunner {
   let value: unknown
   try {
     value = JSON.parse(text)
   } catch {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner status is not JSON")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner status is not JSON")
   }
   if (typeof value !== "object" || value === null) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner status is not an object")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner status is not an object")
   }
   const record = value as Record<string, unknown>
   if (!Number.isSafeInteger(record.pid) || (record.pid as number) <= 0) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner pid is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner pid is invalid")
   }
-  const startedAt = residentRunnerTimestamp(record.startedAt, "startedAt")
-  const lastTickAt = residentRunnerTimestamp(record.lastTickAt, "lastTickAt")
-  const queueProgress = parseResidentRunnerProgress(record.queueProgress)
+  const startedAt = habitantRunnerTimestamp(record.startedAt, "startedAt")
+  const lastTickAt = habitantRunnerTimestamp(record.lastTickAt, "lastTickAt")
+  const queueProgress = parseHabitantRunnerProgress(record.queueProgress)
   const driver = parseQueueDriverEpoch(record.driver)
   const uncarried = parseUncarriedObservation(record.uncarried)
   const retention = parseJournalRetentionObservation(record.retention)
   const staleDrafts = parseFindingsField(record.staleDrafts, "staleDrafts")
   const needsPerson = parseFindingsField(record.needsPerson, "needsPerson")
-  const installedPlan = parseResidentInstalledPlan(record.installedPlan)
+  const installedPlan = parseHabitantInstalledPlan(record.installedPlan)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner lastTickAt precedes startedAt",
+      "yrd: habitant runner lastTickAt precedes startedAt",
     )
   }
   if (record.command !== undefined && typeof record.command !== "string") {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner command is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner command is invalid")
   }
   if (record.clean !== undefined && typeof record.clean !== "boolean") {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner clean flag is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner clean flag is invalid")
   }
   if (
     record.implementationSource !== undefined &&
@@ -831,7 +831,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-invalid",
-      "yrd: resident runner implementationSource is invalid",
+      "yrd: habitant runner implementationSource is invalid",
     )
   }
   if (
@@ -839,7 +839,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     (!Array.isArray(record.journalVersions) ||
       record.journalVersions.some((version) => !Number.isSafeInteger(version) || (version as number) < 1))
   ) {
-    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner journalVersions is invalid")
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: habitant runner journalVersions is invalid")
   }
   return {
     pid: record.pid as number,
@@ -853,7 +853,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(needsPerson === undefined ? {} : { needsPerson }),
     ...(installedPlan === undefined ? {} : { installedPlan }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
-    ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
+    ...(record.exitedAt === undefined ? {} : { exitedAt: habitantRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
     implementationSource:
       record.implementationSource === undefined ? "unknown" : (record.implementationSource as string),
@@ -861,11 +861,11 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   }
 }
 
-export async function residentRunnerStatus(cwd: string, stateDir?: string): Promise<QueueTimelineRunner | null> {
-  const path = residentRunnerStatusPath(cwd, stateDir)
+export async function habitantRunnerStatus(cwd: string, stateDir?: string): Promise<QueueTimelineRunner | null> {
+  const path = habitantRunnerStatusPath(cwd, stateDir)
   if (path === undefined) return null
   try {
-    return parseResidentRunnerStatus(await readFile(path, "utf8"))
+    return parseHabitantRunnerStatus(await readFile(path, "utf8"))
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
     throw cause
@@ -875,7 +875,7 @@ export async function residentRunnerStatus(cwd: string, stateDir?: string): Prom
 /** Whether the recorded pid still names a live process. ESRCH is proof it is
  * gone; EPERM proves the opposite — a process exists that this user does not
  * own — so only ESRCH may retire a runner. */
-function residentRunnerRunning(pid: number): boolean {
+function habitantRunnerRunning(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
@@ -902,7 +902,7 @@ function residentRunnerRunning(pid: number): boolean {
  * observation keeps the reason alongside the filtered runner, and asks the pid
  * ONCE — a second probe could disagree with the first if the pid exits between
  * them, and report a live runner that is also departed. */
-function observeResidentRunner(
+function observeHabitantRunner(
   runner: QueueTimelineRunner | null,
 ): Readonly<{ runner: QueueTimelineRunner | null; absence?: QueueRunnerAbsence }> {
   if (runner === null) return { runner: null, absence: { kind: "never" } }
@@ -919,7 +919,7 @@ function observeResidentRunner(
       },
     }
   }
-  if (residentRunnerRunning(runner.pid)) return { runner }
+  if (habitantRunnerRunning(runner.pid)) return { runner }
   // No exit marker and no process: it died without recording anything, so the
   // last heartbeat is the last moment it is known to have been alive.
   return {
@@ -928,8 +928,8 @@ function observeResidentRunner(
   }
 }
 
-export function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
-  return observeResidentRunner(runner).runner
+export function activeHabitantRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
+  return observeHabitantRunner(runner).runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -952,7 +952,7 @@ type RunnerGitHealth = Readonly<{
 
 /** The toolchain THIS invocation is running on. Step identity no longer depends
  * on the launcher's bun/node versions (22374), but which binary is in the
- * caller's PATH remains the discriminating read whenever a resident and an
+ * caller's PATH remains the discriminating read whenever a habitant and an
  * operator disagree — and `execPath` is the part that names the install rather
  * than merely a version two installs can share. */
 type RunnerLauncherFacts = Readonly<{
@@ -984,7 +984,7 @@ type RunnerHealthFacts = Readonly<{
   launcher: RunnerLauncherFacts
   git: RunnerGitHealth
   /** What the plan audit compared for this probe: the tip's declared plan
-   * against the plan the live resident published (23192 leg c), with the
+   * against the plan the live habitant published (23192 leg c), with the
    * legs it could not run named. Absent only when the audit itself failed. */
   planAudit?: QueueEnvironmentAuditComparison
 }>
@@ -999,19 +999,19 @@ type RunnerHealthPayload = Readonly<{
   facts: RunnerHealthFacts
 }>
 
-type ResidentRunnerLeaseObservation = Readonly<{
+type HabitantRunnerLeaseObservation = Readonly<{
   held: boolean
   driver?: Readonly<{ queueId: string; epoch: string }>
 }>
 
-function residentRunnerLeaseDriver(message: string): ResidentRunnerLeaseObservation["driver"] {
+function habitantRunnerLeaseDriver(message: string): HabitantRunnerLeaseObservation["driver"] {
   const match = /holder=queue=(.*?) epoch=([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})(?:;|\))/iu.exec(message)
   const queueId = match?.[1]
   const epoch = match?.[2]
   return queueId === undefined || epoch === undefined ? undefined : { queueId, epoch }
 }
 
-async function residentRunnerLeaseObservation(cwd: string): Promise<ResidentRunnerLeaseObservation> {
+async function habitantRunnerLeaseObservation(cwd: string): Promise<HabitantRunnerLeaseObservation> {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) {
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
@@ -1022,15 +1022,15 @@ async function residentRunnerLeaseObservation(cwd: string): Promise<ResidentRunn
   } catch (error) {
     const fact = failureFact(error)
     if (fact?.code === "exclusive-busy") {
-      const driver = residentRunnerLeaseDriver(fact.message)
+      const driver = habitantRunnerLeaseDriver(fact.message)
       return { held: true, ...(driver === undefined ? {} : { driver }) }
     }
     throw error
   }
 }
 
-export async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
-  return (await residentRunnerLeaseObservation(cwd)).held
+export async function habitantRunnerLeaseHeld(cwd: string): Promise<boolean> {
+  return (await habitantRunnerLeaseObservation(cwd)).held
 }
 
 function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<RunnerGitDistance, "base" | "baseSha"> {
@@ -1059,7 +1059,7 @@ function yrdSourceCheckout(): string | undefined {
   return existsSync(join(root, ".git")) ? root : undefined
 }
 
-/** How far a source checkout has advanced past the sha a resident booted from,
+/** How far a source checkout has advanced past the sha a habitant booted from,
  * plus the head it advanced to. Both are needed together: the head is what a
  * recycle would come back as, and comparing behind-counts across cycles is only
  * meaningful when they were measured against the same head. */
@@ -1072,7 +1072,7 @@ type SourceAdvance = Readonly<{ headSha: string; behind: number | undefined }>
  * two commits git can resolve, including two unrelated histories that merely
  * share an object database — and that is not a hypothetical: the `/hh` queue
  * repository holds Yrd's own commits, so comparing a `vendor/yrd` sha against
- * the `/hh` checkout's HEAD returned 37576 for a resident that was exactly
+ * the `/hh` checkout's HEAD returned 37576 for a habitant that was exactly
  * current. A count is only "how far behind am I" when the booted sha is an
  * ANCESTOR of the head; anything else (diverged, rewound, unrelated) is
  * unmeasurable and must answer undefined rather than a confident number.
@@ -1096,7 +1096,7 @@ function readSourceAdvance(sourceRoot: string, runnerSha: string): SourceAdvance
   }
 }
 
-/** One comparison of a resident's booted source against the queue repository's
+/** One comparison of a habitant's booted source against the queue repository's
  * RECORDED pin (@i/10-merge-queue/23041-staleness-measures-the-observer).
  * `unpinned` is the one state the watcher renders as silence: the queue
  * repository records no Yrd submodule, or the source is not a plain git sha,
@@ -1114,7 +1114,7 @@ export type RunnerPinComparison = RunnerSourcePin | Readonly<{ state: "unpinned"
  * the running code, applied to each recorded submodule's working tree — because
  * a host repository may pin Yrd anywhere, and Yrd source must not assume its
  * own location inside a host. `origin/main` (not HEAD) is deliberate: the
- * recorded pin is a claim about what the queue's landing branch prescribes,
+ * recorded pin is a claim about what the queue's merge branch prescribes,
  * and a local checkout mid-rebase must not move it.
  */
 function queueRecordedYrdPin(
@@ -1174,7 +1174,7 @@ function queueRecordedYrdPin(
 }
 
 /** Exit-zero probe for relating two commits. Exit 1 (not an ancestor) and a
- * missing object both land in the same `false` here; the caller distinguishes
+ * missing object both merge in the same `false` here; the caller distinguishes
  * them by probing BOTH directions — two clean falses with resolvable objects
  * means diverged, anything unresolvable means unrelatable, and each answers a
  * loud unknown rather than a number. */
@@ -1189,7 +1189,7 @@ function gitIsAncestor(root: string, ancestor: string, descendant: string): bool
 
 /** Uncached single read behind {@link runnerPinBehind}. The count runs in the
  * queue's own submodule working tree — the repository that owns both the pin
- * and (in any deployment where a resident booted from it) the booted sha —
+ * and (in any deployment where a habitant booted from it) the booted sha —
  * never in the observer's checkout, whose history is what the pre-fix figure
  * wrongly tracked. */
 function readPinComparison(queueCwd: string, runnerSha: string): RunnerPinComparison {
@@ -1222,7 +1222,7 @@ function readPinComparison(queueCwd: string, runnerSha: string): RunnerPinCompar
 }
 
 /** Cached answer for {@link runnerPinBehind}, keyed by queue repository and the
- * resident sha it was computed against. */
+ * habitant sha it was computed against. */
 type RunnerPinBehindEntry = Readonly<{ runnerSha: string; answer: RunnerPinComparison; computedAt: number }>
 const runnerPinBehindCache = new Map<string, RunnerPinBehindEntry>()
 
@@ -1230,19 +1230,19 @@ const runnerPinBehindCache = new Map<string, RunnerPinBehindEntry>()
  * also runs once per focus/cursor change (see `queueGitDir`'s doc comment on why
  * an uncached git fork there is a bug, not a feature) — this TTL keeps the
  * pin-resolution forks off that per-keystroke path while still catching a
- * pin advance within one poll tick. The resident's own self-check deliberately
+ * pin advance within one poll tick. The habitant's own self-check deliberately
  * does NOT come through here: it needs consecutive observations to be genuinely
  * consecutive reads, which a cache at the poll cadence would quietly collapse. */
 const RUNNER_PIN_BEHIND_TTL_MS = 15_000
 
-/** How the resident runner's booted source (`implementationSource`, captured
+/** How the habitant runner's booted source (`implementationSource`, captured
  * once at its startup) relates to the queue repository's RECORDED Yrd pin.
  *
  * This is the watcher's figure, and its base is the pin — never any checkout's
  * HEAD. The pre-fix read counted `runnerSha..HEAD` in the OBSERVER'S OWN Yrd
  * checkout, so the number tracked whoever was looking: an observer two commits
- * ahead rendered a pin-exact resident as "28 behind pin", and moving the
- * recorded pin did not move the display. The resident's own recycle self-check
+ * ahead rendered a pin-exact habitant as "28 behind pin", and moving the
+ * recorded pin did not move the display. The habitant's own recycle self-check
  * (`readSourceAdvance` against the checkout it booted from) is a DIFFERENT
  * question — "has my source moved under me" — and deliberately keeps its own
  * base. */
@@ -1251,7 +1251,7 @@ export function runnerPinBehind(
   implementationSource: string | undefined,
   now: number,
 ): RunnerPinComparison {
-  const runnerSha = residentBootedSha(implementationSource)
+  const runnerSha = habitantBootedSha(implementationSource)
   if (runnerSha === undefined) return { state: "unpinned" }
   const cached = runnerPinBehindCache.get(queueCwd)
   if (cached?.runnerSha === runnerSha && now - cached.computedAt < RUNNER_PIN_BEHIND_TTL_MS) {
@@ -1262,10 +1262,10 @@ export function runnerPinBehind(
   return answer
 }
 
-/** The commit a resident booted from, or undefined when its source identity is
+/** The commit a habitant booted from, or undefined when its source identity is
  * not a plain git sha (`dirty:` working-tree builds, an absent identity). A
  * source that cannot be named cannot be compared, and is never stale. */
-function residentBootedSha(implementationSource: string | undefined): string | undefined {
+function habitantBootedSha(implementationSource: string | undefined): string | undefined {
   const match = implementationSource === undefined ? null : /^git:([0-9a-f]{40,64})$/u.exec(implementationSource)
   return match === null ? undefined : (match[1] ?? "").toLowerCase()
 }
@@ -1337,19 +1337,19 @@ function runnerDriverHealthError(
   if (runner.driver === undefined) {
     return runnerHealthError(
       "resident-runner-driver-unknown",
-      "resident runner heartbeat is fresh but does not identify its queue driver epoch",
-      ["Restart the resident queue runner with the installed Yrd source."],
+      "habitant runner heartbeat is fresh but does not identify its queue driver epoch",
+      ["Restart the habitant queue runner with the installed Yrd source."],
     )
   }
   if (runner.driver.queueId !== expectedQueueId) {
     return runnerHealthError(
       "resident-runner-driver-mismatch",
-      `resident runner owns '${runner.driver.queueId}', not expected queue '${expectedQueueId}'`,
-      ["Stop the mismatched resident and start the runner from the expected repository."],
+      `habitant runner owns '${runner.driver.queueId}', not expected queue '${expectedQueueId}'`,
+      ["Stop the mismatched habitant and start the runner from the expected repository."],
     )
   }
-  // A resident that reports no merge position is not thereby unhealthy: a live
-  // resident omits the key entirely until it has merged something, and one
+  // A habitant that reports no merge position is not thereby unhealthy: a live
+  // habitant omits the key entirely until it has merged something, and one
   // started before the 2026-08-18 land->merge rename spells it `lastLanded`.
   // Either way there is nothing to compare, so this check abstains -- the same
   // shape as the `expectedLastMerged !== undefined` guard on the other side.
@@ -1362,17 +1362,17 @@ function runnerDriverHealthError(
   ) {
     return runnerHealthError(
       "resident-runner-driver-stale",
-      "resident runner heartbeat does not report the queue's latest landed commit",
-      ["Inspect the resident runner log and restart it if its driver epoch is no longer advancing."],
+      "habitant runner heartbeat does not report the queue's latest merged commit",
+      ["Inspect the habitant runner log and restart it if its driver epoch is no longer advancing."],
     )
   }
   return undefined
 }
 
-/** Project the resident's canonical progress findings into its lightweight
+/** Project the habitant's canonical progress findings into its lightweight
  * status record. The supervisor can then prove outcome progress without
  * replaying Journal history in its health probe. */
-export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerProgress {
+export function habitantQueueProgress(app: YrdCliApp, now: string): QueueRunnerProgress {
   const findings = app.queue
     .audit({ now })
     .findings.filter(
@@ -1396,7 +1396,7 @@ export function residentQueueProgress(app: YrdCliApp, now: string): QueueRunnerP
 }
 
 /** Hours to milliseconds for `.yrd.yml` `drafts.pageAfterHours`. Named rather
- * than inlined `* 3_600_000` at each of its two call sites (resident heartbeat
+ * than inlined `* 3_600_000` at each of its two call sites (habitant heartbeat
  * setup, watch snapshot build) so both read the identical config the identical
  * way. */
 function draftPageThresholdMs(config: Pick<ResolvedYrdProjectConfig, "drafts">): number {
@@ -1405,7 +1405,7 @@ function draftPageThresholdMs(config: Pick<ResolvedYrdProjectConfig, "drafts">):
 
 /**
  * `draft-stranded` findings old enough to page, projected from the canonical
- * audit exactly like {@link residentQueueProgress} — never re-derived from PR
+ * audit exactly like {@link habitantQueueProgress} — never re-derived from PR
  * state directly, so the finding a watcher or health check sees and the one
  * `queue audit` prints for the same draft can never disagree.
  *
@@ -1468,10 +1468,10 @@ export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): str
   return findings.map((finding) => `[admission-refusal-needs-person] ${finding.message}`)
 }
 
-/** Exact latest landing driven for one queue. The epoch heartbeat publishes
+/** Exact latest merge driven for one queue. The epoch heartbeat publishes
  * this content so a probe can distinguish the right driver from an unrelated
- * resident process with the same service name. */
-export function residentDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
+ * habitant process with the same service name. */
+export function habitantDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
   return (
     Object.values(stateOf(app).bays.prs)
       .flatMap((pr) => {
@@ -1536,10 +1536,10 @@ async function queueRunnerHealth(
   const audit = services.queue?.auditEnvironment
   const base = baseIdentity(services.base ?? "main")
   let leaseHeld: boolean | undefined
-  let leaseDriver: ResidentRunnerLeaseObservation["driver"]
+  let leaseDriver: HabitantRunnerLeaseObservation["driver"]
   let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false }
   try {
-    const lease = await residentRunnerLeaseObservation(cwd)
+    const lease = await habitantRunnerLeaseObservation(cwd)
     leaseHeld = lease.held
     leaseDriver = lease.driver
     if (audit === undefined) {
@@ -1549,7 +1549,7 @@ async function queueRunnerHealth(
         "yrd: queue.audit capability is not installed; runner health cannot read the plan the base declares",
       )
     }
-    const runner = activeResidentRunner(await residentRunnerStatus(cwd))
+    const runner = activeHabitantRunner(await habitantRunnerStatus(cwd))
     git = runnerGitHealth(cwd, base)
     const auditResult = await audit()
     const now = io.now?.() ?? Date.now()
@@ -1611,8 +1611,8 @@ async function queueRunnerHealth(
             running: false,
             error: runnerHealthError(
               "resident-runner-missing",
-              "the queue has work but no resident runner owns the drain lease",
-              ["Start or restart the resident queue runner."],
+              "the queue has work but no habitant runner owns the drain lease",
+              ["Start or restart the habitant queue runner."],
             ),
             facts,
           },
@@ -1640,14 +1640,14 @@ async function queueRunnerHealth(
           service,
           state: "unhealthy",
           running: true,
-          error: runnerHealthError("resident-runner-unhealthy", `resident runner lease is held but ${detail}`, [
-            "Inspect the lease owner and resident log, then stop that owner before starting a replacement.",
+          error: runnerHealthError("resident-runner-unhealthy", `habitant runner lease is held but ${detail}`, [
+            "Inspect the lease owner and habitant log, then stop that owner before starting a replacement.",
           ]),
           facts,
         },
       }
     }
-    const expectedLastMerged = app === undefined ? undefined : residentDriverLastMerged(app, base)
+    const expectedLastMerged = app === undefined ? undefined : habitantDriverLastMerged(app, base)
     const driverError =
       runner === null ? undefined : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), expectedLastMerged)
     if (driverError !== undefined) {
@@ -1668,15 +1668,15 @@ async function queueRunnerHealth(
       leaseDriver === undefined
         ? runnerHealthError(
             "resident-runner-lease-content-unknown",
-            "resident runner lease is held but does not name its queue driver epoch",
-            ["Restart the resident queue runner with the installed Yrd source."],
+            "habitant runner lease is held but does not name its queue driver epoch",
+            ["Restart the habitant queue runner with the installed Yrd source."],
           )
         : runner?.driver !== undefined &&
             (leaseDriver.queueId !== runner.driver.queueId || leaseDriver.epoch !== runner.driver.epoch)
           ? runnerHealthError(
               "resident-runner-lease-content-mismatch",
-              "resident runner lease content does not match its heartbeat driver epoch",
-              ["Stop the mismatched resident and start one replacement for the expected queue."],
+              "habitant runner lease content does not match its heartbeat driver epoch",
+              ["Stop the mismatched habitant and start one replacement for the expected queue."],
             )
           : undefined
     if (leaseContentError !== undefined) {
@@ -1704,8 +1704,8 @@ async function queueRunnerHealth(
           running: true,
           error: runnerHealthError(
             "resident-runner-progress-unknown",
-            "resident runner heartbeat is fresh but reports no queue outcome progress",
-            ["Restart the resident queue runner with the installed Yrd source."],
+            "habitant runner heartbeat is fresh but reports no queue outcome progress",
+            ["Restart the habitant queue runner with the installed Yrd source."],
           ),
           facts,
         },
@@ -1722,10 +1722,10 @@ async function queueRunnerHealth(
           running: true,
           error: runnerHealthError(
             "resident-runner-progress-stale",
-            `resident runner heartbeat is fresh but its queue outcome observation is ${
+            `habitant runner heartbeat is fresh but its queue outcome observation is ${
               progressAgeMs === undefined ? "invalid" : `stale by ${String(progressAgeMs)}ms`
             }`,
-            ["Restart the resident queue runner with the installed Yrd source."],
+            ["Restart the habitant queue runner with the installed Yrd source."],
           ),
           facts,
         },
@@ -1743,7 +1743,7 @@ async function queueRunnerHealth(
           error: runnerHealthError(
             "resident-runner-no-progress",
             queueProgress.findings.map((finding) => finding.message).join("\n"),
-            ["Inspect queue audit and the resident log before restarting the runner."],
+            ["Inspect queue audit and the habitant log before restarting the runner."],
           ),
           facts,
         },
@@ -1754,7 +1754,7 @@ async function queueRunnerHealth(
     if (runnerStatus === "fresh" && hasQueuedWork && runnerAgeMs !== undefined && runner !== null) {
       const runnerUptimeMs = now - Date.parse(runner.startedAt)
       if (runnerUptimeMs >= 3 * 60 * 60_000) {
-        const expectedLastMerged = app === undefined ? undefined : residentDriverLastMerged(app, base)
+        const expectedLastMerged = app === undefined ? undefined : habitantDriverLastMerged(app, base)
         const lastMergedMs = expectedLastMerged ? Date.parse(expectedLastMerged.at) : 0
         const noMergeMs = now - lastMergedMs
         if (noMergeMs >= 3 * 60 * 60_000) {
@@ -1770,7 +1770,7 @@ async function queueRunnerHealth(
               running: true,
               error: runnerHealthError(
                 "resident-runner-stalled-no-merge",
-                `resident runner has cycled for >${uptimeFormatted} hours with a non-empty ready set and no merge for >${noMergeFormatted} hours`,
+                `habitant runner has cycled for >${uptimeFormatted} hours with a non-empty ready set and no merge for >${noMergeFormatted} hours`,
                 ["Inspect the queue audit and restore delivery progress; process presence alone is not progress."],
               ),
               facts,
@@ -1796,7 +1796,7 @@ async function queueRunnerHealth(
   }
 }
 
-/** Second liveness clock for active seats. Unlike the resident heartbeat, this
+/** Second liveness clock for active seats. Unlike the habitant heartbeat, this
  * invocation reconstructs queue progress from the loaded state and then uses
  * the same runner-health decision as the Hab timer probe. It is advisory: the
  * requested command still runs. Human invocations report the observation on
@@ -1811,23 +1811,23 @@ async function runClientDeadMan(
   const cwd = io.cwd ?? process.cwd()
   const base = baseIdentity(services.base ?? "main")
   const nowMs = io.now?.() ?? Date.now()
-  const queueProgress = residentQueueProgress(app, new Date(nowMs).toISOString())
-  const runner = activeResidentRunner(await residentRunnerStatus(cwd))
+  const queueProgress = habitantQueueProgress(app, new Date(nowMs).toISOString())
+  const runner = activeHabitantRunner(await habitantRunnerStatus(cwd))
   const runnerAgeMs = runner === null ? undefined : Math.max(0, nowMs - Date.parse(runner.lastTickAt))
   const runnerError =
     runner === null
       ? queuedDeliveryCount(app) > 0
         ? runnerHealthError(
             "resident-runner-missing",
-            "the queue has work but no resident runner owns the drain lease",
-            ["Start or restart the resident queue runner."],
+            "the queue has work but no habitant runner owns the drain lease",
+            ["Start or restart the habitant queue runner."],
           )
         : undefined
       : runnerAgeMs !== undefined && runnerAgeMs > RUNNER_STALE_MS
-        ? runnerHealthError("resident-runner-unhealthy", `resident runner heartbeat is stale by ${runnerAgeMs}ms`, [
-            "Inspect the resident runner log, then restart it.",
+        ? runnerHealthError("resident-runner-unhealthy", `habitant runner heartbeat is stale by ${runnerAgeMs}ms`, [
+            "Inspect the habitant runner log, then restart it.",
           ])
-        : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), residentDriverLastMerged(app, base))
+        : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), habitantDriverLastMerged(app, base))
   const observations = [
     ...(queueProgress.state === "stalled"
       ? queueProgress.findings.map((finding) => ({ code: finding.code, cause: finding.message }))
@@ -1863,7 +1863,7 @@ async function checkQueueRunner(
     ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
     ...gitLines,
     // The denominator, printed whether or not anything was found: which plan
-    // the probe compared against the tip (the resident's published one, or
+    // the probe compared against the tip (the habitant's published one, or
     // none and why), so a clean probe never reads as an unread one.
     ...(result.payload.facts.planAudit === undefined ? [] : [queueAuditComparisonLine(result.payload.facts.planAudit)]),
   ].join("\n")
@@ -1882,26 +1882,26 @@ async function checkQueueRunner(
   return result.exitCode
 }
 
-export type ResidentRunnerReclaim = Readonly<{ reclaim: false }> | Readonly<{ reclaim: true; runner: string }>
+export type HabitantRunnerReclaim = Readonly<{ reclaim: false }> | Readonly<{ reclaim: true; runner: string }>
 
 /**
- * Decide whether an incoming resident runner should reclaim the leases of the
- * prior resident recorded in `status.json`. The prior resident is reclaimable
+ * Decide whether an incoming habitant runner should reclaim the leases of the
+ * prior habitant recorded in `status.json`. The prior habitant is reclaimable
  * only when it is a different process that is no longer alive; a live prior pid
  * (or an absent status file) yields no reclaim. `isProcessAlive` is injected so
  * the decision is unit-testable without spawning a process.
  */
-export function planResidentRunnerReclaim(
+export function planHabitantRunnerReclaim(
   prior: QueueTimelineRunner | null,
   currentPid: number,
   isProcessAlive: (pid: number) => boolean,
-): ResidentRunnerReclaim {
+): HabitantRunnerReclaim {
   if (prior === null || prior.pid === currentPid) return { reclaim: false }
   if (isProcessAlive(prior.pid)) return { reclaim: false }
   return { reclaim: true, runner: `yrd-cli:${prior.pid}` }
 }
 
-function residentRunnerProcessAlive(pid: number): boolean {
+function habitantRunnerProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
@@ -1913,23 +1913,23 @@ function residentRunnerProcessAlive(pid: number): boolean {
   }
 }
 
-async function reclaimDeadResidentRunner(app: YrdCliApp, io: YrdCliIO): Promise<void> {
+async function reclaimDeadHabitantRunner(app: YrdCliApp, io: YrdCliIO): Promise<void> {
   const cwd = io.cwd ?? process.cwd()
-  const prior = await residentRunnerStatus(cwd)
-  const decision = planResidentRunnerReclaim(prior, process.pid, residentRunnerProcessAlive)
+  const prior = await habitantRunnerStatus(cwd)
+  const decision = planHabitantRunnerReclaim(prior, process.pid, habitantRunnerProcessAlive)
   if (!decision.reclaim) return
   const runs = await app.queue.recover({
     recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
-    reason: "previous resident runner disappeared",
+    reason: "previous habitant runner disappeared",
     runner: decision.runner,
   })
   if (runs.length === 0) return
-  io.stderr(`Reclaimed ${runs.length} run(s) from a departed resident runner ${decision.runner}.\n`)
+  io.stderr(`Reclaimed ${runs.length} run(s) from a departed habitant runner ${decision.runner}.\n`)
 }
 
-type ResidentRunnerHeartbeat = Readonly<{
+type HabitantRunnerHeartbeat = Readonly<{
   check(): void
-  /** Publish terminal progress evidence before a typed resident control transfer. */
+  /** Publish terminal progress evidence before a typed habitant control transfer. */
   recordProgress(progress: QueueRunnerProgress): Promise<void>
   /** Stop the heartbeat and leave an exit marker in status.json (never delete it).
    * `clean` = true for an operator/drain stop, false for a signal-forced/crash exit. */
@@ -1954,7 +1954,7 @@ function heartbeatDelay(intervalMs: number, signal: AbortSignal): Promise<boolea
   })
 }
 
-export async function startResidentRunnerHeartbeat(
+export async function startHabitantRunnerHeartbeat(
   io: YrdCliIO,
   options: Readonly<{
     intervalMs?: number
@@ -1980,24 +1980,24 @@ export async function startResidentRunnerHeartbeat(
      * page-worthy the moment it exists
      * (@i/10-merge-queue/22918-needs-person-unowned). */
     needsPerson?: (now: string) => readonly QueueAuditFinding[]
-    /** The step plan this resident built — published so the supervisor
+    /** The step plan this habitant built — published so the supervisor
      * probe can compare it against the base tip's declared plan without a
      * runtime of its own (23192 leg c). Read once: it is static for the pid. */
-    installedPlan?: () => ResidentInstalledPlan
+    installedPlan?: () => HabitantInstalledPlan
   }> = {},
-): Promise<ResidentRunnerHeartbeat> {
+): Promise<HabitantRunnerHeartbeat> {
   const cwd = io.cwd ?? process.cwd()
-  const path = residentRunnerStatusPath(cwd)
+  const path = habitantRunnerStatusPath(cwd)
   if (path === undefined) {
     raiseFailure(
       "infrastructure",
       "resident-runner-status-unavailable",
-      `yrd: cannot resolve resident runner status path from '${cwd}'`,
+      `yrd: cannot resolve habitant runner status path from '${cwd}'`,
     )
   }
-  const intervalMs = options.intervalMs ?? RESIDENT_RUNNER_HEARTBEAT_MS
+  const intervalMs = options.intervalMs ?? HABITANT_RUNNER_HEARTBEAT_MS
   if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
-    throw new RangeError("yrd: resident runner heartbeat interval must be a positive integer")
+    throw new RangeError("yrd: habitant runner heartbeat interval must be a positive integer")
   }
   const directory = join(path, "..")
   const temporary = `${path}.${process.pid}.tmp`
@@ -2006,12 +2006,12 @@ export async function startResidentRunnerHeartbeat(
     raiseFailure(
       "refusal",
       "runtime-source-unavailable",
-      "yrd: resident runner startup did not capture an implementation source; not serving",
+      "yrd: habitant runner startup did not capture an implementation source; not serving",
     )
   }
   const nowIso = (): string => {
     const now = io.now?.() ?? Date.now()
-    if (!Number.isFinite(now) || now < 0) throw new TypeError("yrd: resident runner heartbeat clock is invalid")
+    if (!Number.isFinite(now) || now < 0) throw new TypeError("yrd: habitant runner heartbeat clock is invalid")
     return new Date(now).toISOString()
   }
   const startedAt = nowIso()
@@ -2021,7 +2021,7 @@ export async function startResidentRunnerHeartbeat(
     raiseFailure(
       "configuration",
       "resident-retention-generation-unavailable",
-      "yrd: resident retention policy cannot be attested without a driver generation",
+      "yrd: habitant retention policy cannot be attested without a driver generation",
     )
   }
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
@@ -2030,8 +2030,8 @@ export async function startResidentRunnerHeartbeat(
   if (installedPlan?.steps.length === 0) {
     raiseFailure(
       "configuration",
-      "resident-installed-plan-empty",
-      "yrd: resident runner has no installed steps to publish; a queue with no plan cannot serve",
+      "habitant-installed-plan-empty",
+      "yrd: habitant runner has no installed steps to publish; a queue with no plan cannot serve",
     )
   }
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
@@ -2051,7 +2051,7 @@ export async function startResidentRunnerHeartbeat(
       ...(uncarried === undefined ? {} : { uncarried }),
       // Unlike `uncarried`, an EMPTY array is a meaningful, common measurement
       // ("no stale drafts", "nothing needs a person") and is written as such —
-      // only a caller that never wired the option at all (an older resident)
+      // only a caller that never wired the option at all (an older habitant)
       // omits the key.
       ...(staleDrafts === undefined ? {} : { staleDrafts }),
       ...(needsPerson === undefined ? {} : { needsPerson }),
@@ -2114,8 +2114,8 @@ export async function startResidentRunnerHeartbeat(
         stop.abort()
         await loop
         // NEVER delete status.json on close. Overwrite it atomically with an exit
-        // marker instead: a successor resident reads this (not null) and reclaims
-        // this pid's leases via planResidentRunnerReclaim, clean or not — the
+        // marker instead: a successor habitant reads this (not null) and reclaims
+        // this pid's leases via planHabitantRunnerReclaim, clean or not — the
         // deletion used to strand ghosts because the null-status path skipped
         // reclaim. queue.recover is idempotent, so reclaiming a clean exit is a
         // no-op. `clean` records whether this was an operator/drain stop (true) or
@@ -2403,18 +2403,18 @@ function trackerDeliveryV2(
     case "pushed":
       return { ...identity, status: "pushed", at: revision.pushedAt }
     // `ready` is revision-admission evidence inside Yrd. The delivery remains
-    // externally submitted until it reaches a terminal landing state.
+    // externally submitted until it reaches a terminal merge state.
     case "ready":
     case "submitted":
       return revision.submittedAt === undefined
         ? undefined
         : { ...identity, status: "submitted", at: revision.submittedAt }
     case "needs-author":
-      refusal(`trackerBridge v2 cannot project needs-author PR '${pr.id}' without an attributed result`)
+      refusal(`trackerBridge v2 cannot project needs-author change '${pr.id}' without an attributed result`)
     case "rejected":
       if (pr.rejectedAt === undefined) return undefined
       if (pr.terminalRun === undefined) {
-        refusal(`trackerBridge v1 cannot project rejected PR '${pr.id}' without a typed Queue bounce run`)
+        refusal(`trackerBridge v1 cannot project rejected change '${pr.id}' without a typed Queue bounce run`)
       }
       const bounce = { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) }
       return {
@@ -2425,7 +2425,7 @@ function trackerDeliveryV2(
       }
     case "integrated": {
       const merge = ChangeMergeOutcome(pr)
-      if (merge.outcome !== "landed") refusal(`integrated PR '${pr.id}' has no canonical landing outcome`)
+      if (merge.outcome !== "landed") refusal(`integrated change '${pr.id}' has no canonical merge outcome`)
       return {
         ...identity,
         status: "integrated",
@@ -2437,7 +2437,7 @@ function trackerDeliveryV2(
     case "already-landed": {
       const merge = ChangeMergeOutcome(pr)
       if (merge.outcome !== "already-landed") {
-        refusal(`PR '${pr.id}' is recorded as already merged but has no canonical equivalence proof`)
+        refusal(`change '${pr.id}' is recorded as already merged but has no canonical equivalence proof`)
       }
       return {
         ...identity,
@@ -2490,7 +2490,7 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
   }
   if (status === "integrated") {
     if (delivery.status !== "integrated") {
-      throw new TypeError(`trackerBridge v1 status mapping for '${delivery.status}' lost its landing`)
+      throw new TypeError(`trackerBridge v1 status mapping for '${delivery.status}' lost its merge`)
     }
     return {
       ...identity,
@@ -2974,7 +2974,7 @@ function projectChangeTaskStatusWithEligibility(
   merge?: ChangeMerge,
 ): ChangeListStatusProjection {
   const projected = projectChangeTaskStatus(pr)
-  // A proven landing is the strongest projection there is: it contradicts the
+  // A proven merge is the strongest projection there is: it contradicts the
   // recorded state with content, so it wins over both the native state and the
   // eligibility projection. `nativeStatus` keeps the record readable (22376).
   if (merge !== undefined) {
@@ -3025,7 +3025,7 @@ async function provisionBay(
   if (bay?.path === undefined || bay.status !== "active") refusal(`bay '${name}' did not become active`)
   if (options.expectedHead !== undefined && bay.headSha?.toLowerCase() !== options.expectedHead.toLowerCase()) {
     const expected =
-      pr === undefined ? `expected head ${options.expectedHead}` : `PR '${pr}' revision head ${options.expectedHead}`
+      pr === undefined ? `expected head ${options.expectedHead}` : `change '${pr}' revision head ${options.expectedHead}`
     const recovery =
       pr === undefined ? "" : `; run 'yrd bay close ${name}', then retry 'yrd pr checkout ${pr} --bay ${name}'`
     refusal(`bay '${name}' HEAD ${bay.headSha ?? "(missing)"} does not match ${expected}${recovery}`)
@@ -3095,10 +3095,10 @@ function bayOpenIdentity(
   }
   if (targetedPr !== undefined) {
     if (!isLiveChange(targetedPr)) {
-      refusal(`PR '${targetedPr.id}' is ${changeDeliveryState(targetedPr)}; --pr requires a live PR`)
+      refusal(`change '${targetedPr.id}' is ${changeDeliveryState(targetedPr)}; --pr requires a live change`)
     }
     if (issue !== undefined && targetedPr.issue !== undefined && issue !== targetedPr.issue) {
-      refusal(`--issue '${issue}' does not match PR '${targetedPr.id}' issue '${targetedPr.issue}'`)
+      refusal(`--issue '${issue}' does not match change '${targetedPr.id}' issue '${targetedPr.issue}'`)
     }
     return {
       claim: issue ?? targetedPr.name ?? branchSeed,
@@ -3135,7 +3135,7 @@ function bayOpenIdentity(
   if (isForeignBranch(branch)) {
     refusal(
       `claim '${claim}' collides with existing branch '${branch}'; ` +
-        "link a distinct draft PR branch to the claim, then reopen the bay",
+        "link a distinct draft change branch to the claim, then reopen the bay",
     )
   }
   return { claim, bay, branch, ...(issue === undefined ? {} : { issue }), reattached: false }
@@ -3157,7 +3157,7 @@ async function resolveBayOpen(
   const targetedPr =
     options.pr === undefined
       ? undefined
-      : (app.bays.pr(options.pr) ?? refusal(`no PR '${options.pr}'; create it explicitly before using --pr`))
+      : (app.bays.pr(options.pr) ?? refusal(`no change '${options.pr}'; create it explicitly before using --pr`))
   const generated = generatedBayName()
   const branchSeed =
     issue === undefined
@@ -3245,7 +3245,7 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** A resident's first signal is a graceful drain: stop admitting work but let
+/** A habitant's first signal is a graceful drain: stop admitting work but let
  * the current child finish. A second signal closes the host and its Process,
  * which remains the hard-interrupt path. One-shot commands still forward their
  * drain signal directly to children. */
@@ -3529,7 +3529,7 @@ async function prepareOwnedBay(
       const refreshed = await refreshBay(app, existing, io)
       if (refreshed.dirty === true) {
         refusal(
-          `bay '${refreshed.id}' holds uncommitted changes; checkpoint them before ensuring its draft PR; inspect it with:\n` +
+          `bay '${refreshed.id}' holds uncommitted changes; checkpoint them before ensuring its draft change; inspect it with:\n` +
             `  ${guestAttachCommand(refreshed, preResolved.guestArgv)}`,
         )
       }
@@ -3696,7 +3696,7 @@ async function runBaySession(
   }
 }
 
-/** Record or reuse the one draft PR for an issue branch. The issue ensure
+/** Record or reuse the one draft change for an issue branch. The issue ensure
  * surface delegates to the public `pr create` core so PR identity, revision,
  * and tracking cannot drift. */
 async function ensureIssueDraft(
@@ -3752,7 +3752,7 @@ export function handoffBayMissingRemedy(selector: string, branch: string): strin
     `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
     `Open one from the packet's PR first:\n` +
     `  yrd bay open --pr ${branch}\n` +
-    `then re-run this command. --pr takes the PR selector or its branch name; if no PR exists for ` +
+    `then re-run this command. --pr takes the change selector or its branch name; if no PR exists for ` +
     `'${branch}' yet, run 'yrd pr create' from the pushed branch, then 'bay open --pr'.`
   )
 }
@@ -4387,10 +4387,10 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
   if (services.process === undefined) return
   const repo = io.cwd ?? process.cwd()
   const headSha = changeHead(pr)
-  // Not changeBaseSha(pr). That field is set at create, re-set at recut, and chased
+  // Not changeBaseSha(pr). That field is set at create, re-set at re-merge, and chased
   // forward to track current main while the author's head stays exactly where
   // they left it, so a two-dot diff from it reports every pin that moved on
-  // main as this PR's authorship and refuses a branch for a gitlink it never
+  // main as this change's authorship and refuses a branch for a gitlink it never
   // touched. The queue's own composition gate has always measured from a live
   // merge base; this pre-admission gate now asks the question the same way.
   const baseSha = await authoredSubmodulePinBase({ process: services.process, repo, base: pr.base, headSha })
@@ -4398,7 +4398,7 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
     raiseFailure(
       "refusal",
       "pr-base-unresolved",
-      `yrd: PR '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}'; ` + "fetch the base branch, then retry",
+      `yrd: change '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}'; ` + "fetch the base branch, then retry",
     )
   }
   const changed = await changedSubmodulePins({
@@ -4411,14 +4411,14 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
 
   // Two kinds of changed gitlink, two questions — and the KIND must be decided first.
   //
-  // Queue-carried pins (a composition or a recut) are not author min commits: the queue's own
+  // Queue-carried pins (a composition or a re-merge) are not author min commits: the queue's own
   // publication job pushes the commit to a branch ref, and submodule main is PROMOTED at
   // merge. Asking main-ancestry at admission would deadlock that pipeline by construction —
   // the pin cannot be on main until the very merge being admitted — so the whole question
   // there is reachability: can the queue fetch this commit from the submodule's origin?
   //
   // Authored pins are the shaset model's min commits, and the min commit is submodule-main-first:
-  // the submodule's own workflow must have landed the commit on that submodule's MAIN.
+  // the submodule's own workflow must have merged the commit on that submodule's MAIN.
   // Reachability was the old oracle for these too, which is exactly the gap it left — a pin
   // on someone's unmerged side branch counted as published, and only the authored-gitlink
   // backstop caught it.
@@ -4437,7 +4437,7 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
       raiseFailure(
         "refusal",
         "submodule-pin-unpublished",
-        `yrd: PR '${pr.id}' changes unpublished submodule pins:\n${detail}`,
+        `yrd: change '${pr.id}' changes unpublished submodule pins:\n${detail}`,
       )
     }
     return
@@ -4448,21 +4448,21 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
   // deleted) gitlink can never be filled in the way an updated one can — always refuse.
   const added = await addedSubmodulePins({ process: services.process, repo, baseSha, pins: changed })
   if (added.length > 0) {
-    const declared = parseComponentModelChangeAuthorizationValue(pr.id, changeProps(pr)?.["component-model-change"])
+    const declared = parseSubmoduleModelChangeAuthorizationValue(pr.id, changeProps(pr)?.["component-model-change"])
     const exact = added.length === 1 && declared?.operation === "add" && declared.path === added[0]?.path
-    if (!exact || services.componentModelChangeAuthorizer === undefined) {
+    if (!exact || services.submoduleModelChangeAuthorizer === undefined) {
       raiseFailure(
         "refusal",
-        services.componentModelChangeAuthorizer === undefined && exact
+        services.submoduleModelChangeAuthorizer === undefined && exact
           ? "component-model-authorizer-unavailable"
           : "authored-gitlink",
-        `yrd: PR '${pr.id}' adds generated-only gitlinks [${added.map(({ path }) => path).join(", ")}]; ` +
+        `yrd: change '${pr.id}' adds generated-only gitlinks [${added.map(({ path }) => path).join(", ")}]; ` +
           "ask @cto for an exact component-model ruling and carry " +
           "--prop 'component-model-change=add <path>; ruling <verdict-message-id>' on this revision through the hh Yrd host",
       )
     }
     try {
-      await services.componentModelChangeAuthorizer({
+      await services.submoduleModelChangeAuthorizer({
         ...declared,
         pr: pr.id,
         revision: changeRevisionNumber(pr),
@@ -4472,7 +4472,7 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
       raiseFailure(
         "refusal",
         "component-model-authorization-refused",
-        `yrd: PR '${pr.id}' component-model ruling '${declared.ruling}' did not authorize ` +
+        `yrd: change '${pr.id}' component-model ruling '${declared.ruling}' did not authorize ` +
           `'add ${declared.path}': ${cause instanceof Error ? cause.message : String(cause)}`,
       )
     }
@@ -4490,10 +4490,10 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
     raiseFailure(
       "refusal",
       "component-main-inspection-failed",
-      `yrd: PR '${pr.id}' changes submodule pins whose submodule main could not be inspected:\n${detail}`,
+      `yrd: change '${pr.id}' changes submodule pins whose submodule main could not be inspected:\n${detail}`,
     )
   }
-  const offMain = publications.filter((entry) => entry.state === "off-component-main")
+  const offMain = publications.filter((entry) => entry.state === "off-submodule-main")
   if (offMain.length > 0) {
     const detail = offMain
       .map(
@@ -4506,7 +4506,7 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
     raiseFailure(
       "refusal",
       "submodule-pin-unpublished",
-      `yrd: PR '${pr.id}' changes submodule pins that are not on their submodule's main:\n${detail}`,
+      `yrd: change '${pr.id}' changes submodule pins that are not on their submodule's main:\n${detail}`,
     )
   }
   // Every remaining pin is a straightforward update, published and on its submodule's main —
@@ -4560,7 +4560,7 @@ function projectPublication(job: Job | undefined): PublicationProjection | undef
       job: job.id,
       status: "publication-required",
       continuation: input.continuation,
-      detail: "waiting for the one-shot or resident queue runner",
+      detail: "waiting for the one-shot or habitant queue runner",
     }
   }
   if (job.status === "in_progress" || job.status === "waiting") {
@@ -4603,7 +4603,7 @@ async function publishPr(
   const pr = requiredPr(app, selector)
   const revision = currentChangeRev(pr)
   const baseSha = changeBaseSha(pr)
-  if (baseSha === undefined) raiseFailure("refusal", "pr-base-missing", `yrd: PR '${pr.id}' has no immutable base SHA`)
+  if (baseSha === undefined) raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)
   const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
   const submodules = await changedSubmodulePins({
     process,
@@ -4632,7 +4632,7 @@ async function publishPr(
       raiseFailure(
         "refusal",
         "publication-request-conflict",
-        `yrd: PR '${pr.id}' revision ${revision.n} already has publication Job '${job.id}' with different request details`,
+        `yrd: change '${pr.id}' revision ${revision.n} already has publication Job '${job.id}' with different request details`,
       )
     }
     if (job.status === "completed" && (job.conclusion === "failure" || job.conclusion === "timed_out")) {
@@ -4640,7 +4640,7 @@ async function publishPr(
     }
   }
   const publication = projectPublication(job)
-  if (publication === undefined) throw new Error(`yrd: PR '${pr.id}' publication request produced no Job`)
+  if (publication === undefined) throw new Error(`yrd: change '${pr.id}' publication request produced no Job`)
   await printResult(
     io,
     jsonEnabled(options),
@@ -4660,10 +4660,10 @@ async function readyPr(
   const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
   if (refusalExit !== undefined) return refusalExit
   // The linear-root rule, before the expensive gate: a merge-tip head cannot
-  // land, so refuse on the cheap lineage read instead of after paying for the
+  // merge, so refuse on the cheap lineage read instead of after paying for the
   // required checks.
   requireLinearRootTip(
-    `PR '${selected.id}' head '${changeHead(selected)}'`,
+    `change '${selected.id}' head '${changeHead(selected)}'`,
     selected.branch,
     await requiredParents(changeHead(selected), io),
   )
@@ -4671,10 +4671,10 @@ async function readyPr(
   await runRequiredChecks(services, io)
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
+  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after ready`)
   if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
   pr = app.bays.pr(pr.id)
-  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after requesting checks`)
+  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after requesting checks`)
   const eligibility = app.queue.eligibility(pr.id)
   await printResult(
     io,
@@ -4803,7 +4803,7 @@ async function remergeChange(
     io,
     jsonEnabled(options),
     outcome.output,
-    `${outcome.current.id} revision ${revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
+    `${outcome.current.id} revision ${revision} ${outcome.unchanged ? "already matches" : "re-merge onto"} ${outcome.result.baseSha}`,
   )
   return changeDeliveryState(outcome.current) === "needs-author" ? 1 : 0
 }
@@ -4867,8 +4867,8 @@ async function executeRemergeChange(
     raiseFailure(
       "refusal",
       "recut-current-changed",
-      `yrd: PR '${pr.id}' current revision changed from ${expectedCurrent.revision}@${expectedCurrent.headSha} ` +
-        `to ${currentRevision.n}@${currentRevision.head} before the recut was computed`,
+      `yrd: change '${pr.id}' current revision changed from ${expectedCurrent.revision}@${expectedCurrent.headSha} ` +
+        `to ${currentRevision.n}@${currentRevision.head} before the re-merge was computed`,
     )
   }
   if (
@@ -4877,7 +4877,7 @@ async function executeRemergeChange(
     delivery === "withdrawn" ||
     delivery === "canceled"
   ) {
-    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${delivery}; a finished change cannot be recut`)
+    raiseFailure("refusal", "terminal-target", `yrd: change '${pr.id}' is ${delivery}; a finished change cannot be re-merge`)
   }
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
@@ -4885,7 +4885,7 @@ async function executeRemergeChange(
   const fromRevision = options.revision ?? currentRevision.n
   const source = pr.revs.find((revision) => revision.n === fromRevision)
   if (source === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
+    raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${fromRevision}`)
   }
   const certificate = proposedHeadSha === undefined ? undefined : ("frozen-code-carrier-v1" as const)
   const currentReview = app.bays.reviewState(pr.id).current
@@ -4895,7 +4895,7 @@ async function executeRemergeChange(
       raiseFailure(
         "refusal",
         "review-rejected",
-        `yrd: PR '${pr.id}' was rejected by ${currentReview.by} for revision ${currentRevision.n}; ` +
+        `yrd: change '${pr.id}' was rejected by ${currentReview.by} for revision ${currentRevision.n}; ` +
           `to replace that revision-bound verdict, ask ${currentReview.by} to run ` +
           `'yrd pr review ${pr.id} --approve --by ${currentReview.by}'. ` +
           `To answer with new content instead, push the corrected head to '${pr.branch}', then run ` +
@@ -4903,11 +4903,11 @@ async function executeRemergeChange(
       )
     }
     if (approvedCurrentReview === undefined) {
-      raiseFailure("refusal", "review-required", `yrd: PR '${pr.id}' needs approval for revision ${currentRevision.n}`)
+      raiseFailure("refusal", "review-required", `yrd: change '${pr.id}' needs approval for revision ${currentRevision.n}`)
     }
   }
-  // Refuse to silently discard a green check: if the PR's current head already
-  // holds a passing check for its current revision, recutting supersedes that
+  // Refuse to silently discard a green check: if the change's current head already
+  // holds a passing check for its current revision, re-merging supersedes that
   // revision and throws the passing result away. Require an explicit --force so
   // the discard is a deliberate operator choice, never a mechanical accident.
   const checksPassed = app.queue.eligibility(pr.id).checks.status === "passed"
@@ -4915,7 +4915,7 @@ async function executeRemergeChange(
     raiseFailure(
       "refusal",
       "recut-would-discard-green",
-      `yrd: PR '${pr.id}' revision ${currentRevision.n} already passed its checks; recut would discard that result. ` +
+      `yrd: change '${pr.id}' revision ${currentRevision.n} already passed its checks; re-merge would discard that result. ` +
         "Re-run with --force to override.",
     )
   }
@@ -5054,7 +5054,7 @@ async function executeRemergeChange(
     current = requiredPr(app, pr.id)
     if (!unchanged) {
       const by = io.runner ?? "operator"
-      const reason = `PR recut superseded revision ${source.n}`
+      const reason = `PR re-merge superseded revision ${source.n}`
       await app.queue.cancelAdmissionJobs({ pr: pr.id, revision: expectedCurrent.revision, by, reason })
       if (expectedCurrent.track === true) {
         await cancelSupersededRevisionRuns(
@@ -5070,7 +5070,7 @@ async function executeRemergeChange(
     current = requiredPr(app, current.id)
     const currentDelivery = changeDeliveryState(current)
     if (currentDelivery !== "submitted" && currentDelivery !== "ready") {
-      raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${currentDelivery}, not ready`)
+      raiseFailure("refusal", "recut-not-ready", `yrd: change '${current.id}' is ${currentDelivery}, not ready`)
     }
     if (!app.bays.checksRequested(current.id)) {
       await app.bays.requestChecks({ pr: current.id, expectedCurrent: queueExpectedCurrent })
@@ -5108,12 +5108,12 @@ async function reviewPr(
     ...(options.note === undefined ? {} : { note: options.note }),
   })
   const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after review`)
+  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after review`)
   const review =
     options.ref === undefined
       ? app.bays.reviewState(pr.id).current
       : pr.reviews.findLast((candidate) => candidate.ref === options.ref)
-  if (review === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain its current review`)
+  if (review === undefined) throw new Error(`yrd: change '${pr.id}' did not retain its current review`)
   await printResult(
     io,
     jsonEnabled(options),
@@ -5146,7 +5146,7 @@ async function requestReviewPr(
     by: options.by ?? io.runner ?? "operator",
   })
   const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after request-review`)
+  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after request-review`)
   await printResult(
     io,
     jsonEnabled(options),
@@ -5174,10 +5174,10 @@ async function commentPr(
     ...(options.ref === undefined ? {} : { ref: options.ref }),
   })
   const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after comment`)
+  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after comment`)
   const comment =
     options.ref === undefined ? pr.comments.at(-1) : pr.comments.findLast((candidate) => candidate.ref === options.ref)
-  if (comment === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain its comment`)
+  if (comment === undefined) throw new Error(`yrd: change '${pr.id}' did not retain its comment`)
   await printResult(
     io,
     jsonEnabled(options),
@@ -5192,11 +5192,11 @@ async function changeChecks(
   options: JsonOption & Readonly<{ follow?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  if (selectors.length === 0) usage("pr checks requires at least one PR selector")
+  if (selectors.length === 0) usage("pr checks requires at least one change selector")
   let checks: readonly ChangeCheckViewRecord[] = changeCheckRecords(app, selectors)
   if (options.follow === true) {
     const missing = checks.find((check) => check.status === "not-requested")
-    if (missing !== undefined) refusal(`PR '${missing.pr}' has no requested checks; submit it before following`)
+    if (missing !== undefined) refusal(`change '${missing.pr}' has no requested checks; submit it before following`)
     checks = await followCheckRecords(app, selectors, checks, io)
   }
   if (jsonEnabled(options)) {
@@ -5316,7 +5316,7 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
 }
 
 /** Effective title/description for a submit: an explicit flag wins, else a
- * value already on the PR is carried forward, else the head commit subject/body
+ * value already on the change is carried forward, else the head commit subject/body
  * (with an issue reference) seeds the default. The commit is only read when a default
  * is actually needed, so carried-forward revisions never re-derive it. */
 async function resolveSubmitMetadata(
@@ -5344,7 +5344,7 @@ async function resolveSubmitMetadata(
 
 /** One spelling of the tracking opt-in across every surface that records it. */
 const TRACK_OPTION_DESCRIPTION =
-  "merge into latest: the resident records, preflights, and queues later branch pushes as frozen revisions"
+  "merge into latest: the habitant records, preflights, and queues later branch pushes as frozen revisions"
 
 type ChangeSelectionOptions = {
   follow?: boolean
@@ -5371,12 +5371,12 @@ function bayBindingRefusal(
   delivery: string,
   remedy: string,
 ): never {
-  refusal(`bay '${bay.id}' is bound to PR '${pr.id}' (${delivery}); ${remedy}`)
+  refusal(`bay '${bay.id}' is bound to change '${pr.id}' (${delivery}); ${remedy}`)
 }
 
-/** `pr create` past-draft refusal. When the PR was reached through a Bay
+/** `pr create` past-draft refusal. When the change was reached through a Bay
  * binding — a bare `pr create` resolving the cwd Bay, or a Bay selector — the
- * caller never named the PR, so the refusal must say which binding produced it
+ * caller never named the change, so the refusal must say which binding produced it
  * and that a branch selector is the way past it (B94, 2026-08-19: two bare
  * `pr create` refusals named only the finished PR). */
 function createOnlyRefusal(
@@ -5387,7 +5387,7 @@ function createOnlyRefusal(
   if (bay !== undefined) {
     bayBindingRefusal(bay, pr, delivery, "pass a branch — yrd pr create <branch>")
   }
-  refusal(`PR '${pr.id}' is already ${delivery}; create is only for a draft PR`)
+  refusal(`change '${pr.id}' is already ${delivery}; create is only for a draft change`)
 }
 
 type ChangeSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"
@@ -5467,7 +5467,7 @@ async function applyChangeSelection(
         ...(io.runner === undefined ? {} : { by: io.runner }),
       })
       const requested = app.bays.pr(pr.id)
-      if (requested === undefined) throw new Error(`yrd: PR '${pr.id}' disappeared after request-review`)
+      if (requested === undefined) throw new Error(`yrd: change '${pr.id}' disappeared after request-review`)
       pr = requested
     }
     prs.push(pr)
@@ -5590,7 +5590,7 @@ function refuseTerminalBaySubmitBinding(app: YrdCliApp, selectors: readonly stri
 }
 
 /**
- * A submit into a repository that declares `landing: none` refuses HERE, before
+ * A submit into a repository that declares `merge: none` refuses HERE, before
  * the required-check hook runs, because everything after this point is work
  * spent on a candidate nothing will ever pick up.
  *
@@ -5615,15 +5615,15 @@ async function refuseSubmitWithoutMergeAuthority(
   // runner is coming, because "submit failed" invites a retry and a retry
   // cannot help.
   const message =
-    `'${repo}' declares no landing authority (selected config 'landing: none'), so its queue has no runner and ` +
+    `'${repo}' declares no merge authority (selected config 'merge: none'), so its queue has no runner and ` +
     "nothing will ever drain this change; merge the work through whatever authority that repository does " +
-    "have, or set 'landing: expected' once a runner exists"
+    "have, or set 'merge: expected' once a runner exists"
   if (jsonEnabled(options)) {
     io.stderr(
       stableJson({
         command: "pr.submit",
         repo,
-        failure: { kind: "refusal", code: "no-landing-authority", message },
+        failure: { kind: "refusal", code: "no-merge-authority", message },
       }),
     )
     return 1
@@ -5645,7 +5645,7 @@ async function applyChangeSelectionVerb(
     refuseTerminalBaySubmitBinding(app, selectors, io)
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
       // Guards first, and in the same loop, so the cheap verdict on THIS
-      // carrier lands before its expensive one starts.
+      // carrier merges before its expensive one starts.
       await runPreSubmitGuards(services, { ...io, cwd: context.cwd }, undefined, context.ref)
       await runRequiredChecks(
         services,
@@ -5680,18 +5680,18 @@ async function applyChangeSelectionVerb(
     await printChangeSelectionResult(io, options, command, result)
     return 0
   }
-  // Q1 — a same-head resubmit of a landed branch returns the frozen landed PR
+  // Q1 — a same-head resubmit of a merged branch returns the frozen merged PR
   // (integrated or equivalence-proven already-landed, exit 0). It is not checkable and must not be admitted;
   // surface the informational note in the result envelope and drain only the
   // live submissions.
   for (const pr of prs) {
     if (changeDeliveryState(pr) === "integrated") {
       warnings.push(
-        `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
+        `already merged as change '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.commit})`}`,
       )
     } else if (changeDeliveryState(pr) === "already-landed") {
       warnings.push(
-        `already merged as PR '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
+        `already merged as change '${pr.id}'${pr.integration === undefined ? "" : ` (${pr.integration.baseSha})`}`,
       )
     }
   }
@@ -5778,7 +5778,7 @@ type ChangeMergeOutcome =
       at: string
       run?: string
     }>
-  | Readonly<{ outcome: "not-landed"; status: Exclude<ChangeDeliveryState, "integrated" | "already-landed"> }>
+  | Readonly<{ outcome: "not-merged"; status: Exclude<ChangeDeliveryState, "integrated" | "already-landed"> }>
 
 function ChangeMergeOutcome(pr: DeepReadonly<Change>): ChangeMergeOutcome {
   const delivery = changeDeliveryState(pr)
@@ -5791,7 +5791,7 @@ function ChangeMergeOutcome(pr: DeepReadonly<Change>): ChangeMergeOutcome {
       pr.alreadyLandedAt === undefined ||
       hasRunProof === hasRefreshProof
     ) {
-      refusal(`PR '${pr.id}' is recorded as already merged but is missing its canonical equivalence proof`)
+      refusal(`change '${pr.id}' is recorded as already merged but is missing its canonical equivalence proof`)
     }
     return {
       outcome: "already-landed",
@@ -5804,9 +5804,9 @@ function ChangeMergeOutcome(pr: DeepReadonly<Change>): ChangeMergeOutcome {
       ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
     }
   }
-  if (delivery !== "integrated") return { outcome: "not-landed", status: delivery }
+  if (delivery !== "integrated") return { outcome: "not-merged", status: delivery }
   if (pr.integration === undefined || pr.integratedAt === undefined) {
-    refusal(`integrated PR '${pr.id}' is missing canonical landing proof`)
+    refusal(`integrated change '${pr.id}' is missing canonical merge proof`)
   }
   return {
     outcome: "landed",
@@ -5981,8 +5981,8 @@ function changeListRetainedRows<T extends Readonly<{ id: string; state: string }
 // `pr list` emits TWO state words on every row and `--state` has to serve
 // both, filtering whichever field defines the value it was given.
 //
-// `state` is the PR record's own field — PR.state in yrd-bay/src/model.ts,
-// "is the PR record open or closed?". `--state open` and `--state closed`
+// `state` is the change record's own field — PR.state in yrd-bay/src/model.ts,
+// "is the change record open or closed?". `--state open` and `--state closed`
 // filter it directly.
 const CHANGE_LIST_RECORD_STATES: readonly Change["state"][] = ["open", "closed"]
 const CHANGE_LIST_RECORD_STATE_HELP = CHANGE_LIST_RECORD_STATES.join(", ")
@@ -6144,14 +6144,14 @@ async function viewPr(
       raiseFailure(
         "configuration",
         "pr-view-branch-observer-missing",
-        `yrd: cannot observe live branch '${pr.branch}' while viewing PR '${pr.id}'; ${observed.detail}`,
+        `yrd: cannot observe live branch '${pr.branch}' while viewing change '${pr.id}'; ${observed.detail}`,
       )
     }
     if (!observed.ok && observed.phase === "fetch") {
       raiseFailure(
         "configuration",
         "pr-view-branch-refresh-failed",
-        `yrd: could not refresh live branch '${pr.branch}' from origin while viewing PR '${pr.id}': ${observed.detail}\n` +
+        `yrd: could not refresh live branch '${pr.branch}' from origin while viewing change '${pr.id}': ${observed.detail}\n` +
           `retry: yrd pr view ${pr.id}`,
       )
     }
@@ -6159,7 +6159,7 @@ async function viewPr(
       raiseFailure(
         "configuration",
         "pr-view-branch-head-missing",
-        `yrd: cannot resolve live branch '${pr.branch}' while viewing PR '${pr.id}': ${observed.detail}\n` +
+        `yrd: cannot resolve live branch '${pr.branch}' while viewing change '${pr.id}': ${observed.detail}\n` +
           `inspect: git rev-parse --verify origin/${pr.branch}^{commit}`,
       )
     }
@@ -6184,7 +6184,7 @@ async function viewPr(
       command,
       pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
       eligibility: projectEligibilityTaskStatus(eligibility),
-      landing: ChangeMergeOutcome(pr),
+      merge: ChangeMergeOutcome(pr),
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,
@@ -6245,7 +6245,7 @@ async function viewChangeRuns(
     return
   }
   refusal(
-    `journal changed while reading PR '${selector}' runs; retry with 'yrd pr runs ${selector}${jsonEnabled(options) ? " --json" : ""}'`,
+    `journal changed while reading change '${selector}' runs; retry with 'yrd pr runs ${selector}${jsonEnabled(options) ? " --json" : ""}'`,
   )
 }
 
@@ -6262,7 +6262,7 @@ async function diffPr(
   try {
     diff = gitSync(cwd, ["diff", ...(options.stat === true ? ["--stat"] : []), `${base}...${changeHead(pr)}`, "--"])
   } catch (error) {
-    refusal(`cannot diff PR '${pr.id}': ${error instanceof Error ? error.message : String(error)}`)
+    refusal(`cannot diff change '${pr.id}': ${error instanceof Error ? error.message : String(error)}`)
   }
   const composition = changeComposition(pr)
   const rendered =
@@ -6479,7 +6479,7 @@ function changeFact(pr: DeepReadonly<Change>): Readonly<{
 }
 
 function selectedCheckPRs(app: YrdCliApp, selectors: readonly string[]): Change[] {
-  // Was a hand-rolled `no PR '<selector>'`, a third spelling of a fact the bay
+  // Was a hand-rolled `no change '<selector>'`, a third spelling of a fact the bay
   // model already words. Routing through requiredPr keeps ONE not-found
   // message, so the searched-count reaches every surface instead of the one
   // that happened to be fixed.
@@ -6811,10 +6811,10 @@ export function queueAuditComparisonLine(comparison: QueueEnvironmentAuditCompar
         : `from '${tip.configAuthority}' blob ${short(tip.configBlobSha)}.`),
     installed === undefined
       ? `plan audit: no installed plan was compared against the tip — ${
-          comparison.installedUnavailable ?? "this invocation built no queue runtime and read no resident heartbeat"
+          comparison.installedUnavailable ?? "this invocation built no queue runtime and read no habitant heartbeat"
         }.`
       : installed.source === "resident-heartbeat"
-        ? `plan audit: the resident runner${installed.pid === undefined ? "" : ` (pid ${String(installed.pid)})`} ` +
+        ? `plan audit: the habitant runner${installed.pid === undefined ? "" : ` (pid ${String(installed.pid)})`} ` +
           `published installed ${arrow(installed.steps)} (batch ${String(installed.batchSize)}) in its heartbeat; ` +
           "compared against the tip."
         : `plan audit: this process installed ${arrow(installed.steps)} (batch ${String(installed.batchSize)}); compared against the tip.`,
@@ -7373,13 +7373,13 @@ async function observeQueueList(
   }
   const cwd = io.cwd ?? process.cwd()
   const now = io.now?.() ?? Date.now()
-  const observation = observeResidentRunner(await residentRunnerStatus(cwd, io.stateDir))
+  const observation = observeHabitantRunner(await habitantRunnerStatus(cwd, io.stateDir))
   const observedRunner = observation.runner
   // Measured against the queue repository's RECORDED pin, never any checkout's
   // HEAD. The two prior bases were both wrong the same way — `cwd` counted
-  // across unrelated histories ("37576 behind pin" for a current resident),
+  // across unrelated histories ("37576 behind pin" for a current habitant),
   // and the observer's own Yrd checkout counted the observer ("28 behind pin"
-  // for a pin-exact resident, tracking commits only the watcher had).
+  // for a pin-exact habitant, tracking commits only the watcher had).
   const sourcePin = observedRunner === null ? undefined : runnerPinBehind(cwd, observedRunner.implementationSource, now)
   const runner =
     observedRunner === null || sourcePin === undefined || sourcePin.state === "unpinned"
@@ -7449,10 +7449,10 @@ async function buildQueueListSnapshot(
   const base = results.some((result) => result.base === primaryBase) ? primaryBase : (results[0]?.base ?? primaryBase)
   const runnerRefusal = runner === null ? queueRunnerRefusal(app) : undefined
   // Computed directly from `app`, like `runnerRefusal` above — never read back
-  // off a resident's heartbeat, which may be stale or (watching a repository
-  // with no resident yet) simply absent. Watch has the journal in hand and can
+  // off a habitant's heartbeat, which may be stale or (watching a repository
+  // with no habitant yet) simply absent. Watch has the journal in hand and can
   // always afford this; the health PROBE cannot, which is why it reads the
-  // resident-precomputed field instead (queueRunnerHealth in this file).
+  // habitant-precomputed field instead (queueRunnerHealth in this file).
   const staleDrafts = staleDraftFindings(
     app,
     new Date(now).toISOString(),
@@ -7480,7 +7480,7 @@ async function buildQueueListSnapshot(
     ...(io.repositoryRoot === undefined ? {} : { repositoryRoot: io.repositoryRoot }),
     // The composition host's declared handle names its configured base's
     // queue (`code`, `pm`); other bases in the same journal stay unnamed
-    // until per-queue config labels land (item 36 / the 37i machinery).
+    // until per-queue config labels merge (item 36 / the 37i machinery).
     ...(io.repositoryLabel === undefined
       ? {}
       : { queueNames: new Map([[baseIdentity(requestedBase), io.repositoryLabel]]) }),
@@ -7796,7 +7796,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   ].join(" ")
   const human = [
     "Yrd delivery briefing",
-    "Pick an issue -> work in a bay -> submit a PR -> the queue runs checks and merges it.",
+    "Pick an issue -> work in a bay -> submit a change -> the queue runs checks and merges it.",
     "Loop:",
     ...briefing.loop.map((step, index) => `${index + 1}. ${step}`),
     `Live: ${live}`,
@@ -8188,7 +8188,7 @@ export type InstalledPlanStaleFinding = Readonly<{ code: "installed-plan-stale";
  *
  * A Run reads WHICH steps run from git at its own base sha and refuses a step
  * it cannot execute (`declared-step-not-installed`), so correctness does not
- * depend on this gate. What the gate buys is the remedy: a resident that
+ * depend on this gate. What the gate buys is the remedy: a habitant that
  * discovers the gap here, before composing a candidate, reloads itself in
  * place and continues, instead of refusing every candidate it prepares until
  * someone restarts it by hand. A one-shot refuses loudly; it has no next cycle
@@ -8199,7 +8199,7 @@ export async function requireInstalledDeclaredPlan(
   services: YrdCliServices,
   options: Readonly<{
     reloadInPlace?: Readonly<{
-      /** Unwind the resident completely, then replace this process image.
+      /** Unwind the habitant completely, then replace this process image.
        * `reloads` is the consecutive count the replacement starts from. */
       request?: (finding: InstalledPlanStaleFinding, reloads: number) => never
       /** This process's place in its reload lineage (inherited from the exec
@@ -8228,7 +8228,7 @@ export async function requireInstalledDeclaredPlan(
   const reload = options.reloadInPlace
   if (stale === undefined) {
     // A pass that found nothing stale ends the chain: whatever this process
-    // was exec'd to fix is fixed, and the next reload — if a later landing
+    // was exec'd to fix is fixed, and the next reload — if a later merge
     // needs one — starts counting from one again.
     if (reload?.lineage !== undefined) reload.lineage.consecutiveReloads = 0
     return
@@ -8271,7 +8271,7 @@ class YrdRuntimeReloadRequest extends Error {
   }
 }
 
-/** Typed control transfer: unwind the resident heartbeat before the process
+/** Typed control transfer: unwind the habitant heartbeat before the process
  * host closes leases/resources and performs the same-PID exec. */
 export function requestYrdRuntimeReload(finding: InstalledPlanStaleFinding, reloads: number): never {
   throw new YrdRuntimeReloadRequest(finding, reloads)
@@ -8341,17 +8341,17 @@ function sweepGit(process: Pick<Process, "run">): RefGit {
 const UNCARRIED_TTL_MS = 10 * 60 * 1000
 const UNCARRIED_AGE_BOUND_MS = 24 * 60 * 60 * 1000
 
-/** How often the resident recomputes the sweep. It costs seconds, so it cannot
+/** How often the habitant recomputes the sweep. It costs seconds, so it cannot
  * ride the heartbeat; stranded work is a minutes-to-hours concern, not a
  * per-tick one. */
 const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
 
 /**
- * The resident's uncarried sweeper.
+ * The habitant's uncarried sweeper.
  *
  * The heartbeat writer is synchronous and the sweep is seconds of git I/O, so
  * this keeps the last OBSERVATION and refreshes it out of band. `observe()`
- * never blocks a tick and never invents a value: before the first sweep lands
+ * never blocks a tick and never invents a value: before the first sweep merges
  * it returns undefined, which the rail renders as an honest "no observation
  * yet" rather than 0.
  *
@@ -8504,7 +8504,7 @@ async function queueUncarried(
  * ref, no live Run names it, the retention window has passed, and the ref still
  * resolves to the SHA the sweep read. Anything unknown, unclaimed or unclocked is
  * reported and kept — `docs/design.md` states that retaining beats guessing here,
- * because this namespace is the only evidence a landed composition ever existed.
+ * because this namespace is the only evidence a merged composition ever existed.
  */
 async function queueCandidateRefs(
   app: YrdCliApp,
@@ -8560,10 +8560,10 @@ async function queueCandidateRefs(
   return 0
 }
 
-/** Why one repository-proven landing did not become a journal index row.
+/** Why one repository-proven merge did not become a journal index row.
  *
  * `already-indexed` and `intent-carrier` are the two that describe a healthy estate: the row is
- * there, or the landing was never a PR and has no `pr/integrated` row to rebuild. Every other
+ * there, or the merge was never a change and has no `pr/integrated` row to rebuild. Every other
  * reason is a gap the operator still owns. */
 type IndexRebuildSkip = Readonly<{
   pr: string
@@ -8623,11 +8623,11 @@ function mergeInstant(record: MergeRecordBody): number {
 }
 
 /**
- * What repository truth can do for one PR's index row, from one merge record.
+ * What repository truth can do for one change's index row, from one merge record.
  *
  * `yrd why <selector> --repair` and `yrd doctor --rebuild-index-from-repo` are
  * the same repair at different breadths, and had drifted into two copies of the
- * same "does this record cover the PR's CURRENT revision" predicate and the same
+ * same "does this record cover the change's CURRENT revision" predicate and the same
  * eight-field `reconcileMerge` argument. Each caller still owns its own
  * reporting: the bulk path names every skip, the selector path stays quiet, and
  * only the bulk path treats a merged record with no merged commit as a refusal.
@@ -8680,8 +8680,8 @@ function mergeRepair(record: MergeRecordBody, pr: JournalPR): MergeRepair {
 /** Rebuild every missing `pr/integrated` index row from repository truth alone.
  *
  * The bulk sibling of `yrd why <selector> --repair`, with the same per-change predicate: a row is
- * only written when the record's change matches the PR's current revision exactly. Repo truth
- * cannot recreate a PR that the journal has never seen — a merge record proves a landing, not a
+ * only written when the record's change matches the change's current revision exactly. Repo truth
+ * cannot recreate a change that the journal has never seen — a merge record proves a merge, not a
  * PR's existence — so those changes are reported as skipped, never silently dropped.
  */
 async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): Promise<IndexRebuildReport> {
@@ -8695,10 +8695,10 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
   const merged = records.filter((entry) => entry.record.merge.result === "merged")
   // The journal's own count, read once, up front — independent of anything the repo scan below
   // finds. It is the fact that tells a `pr-unknown` skip apart from a wiped journal: one skip says
-  // "this PR", `knownPrs === 0` says "no PR at all, and every skip below is that same fact."
+  // "this change", `knownPrs === 0` says "no PR at all, and every skip below is that same fact."
   const knownPrs = Object.keys(stateOf(app).bays.prs).length
 
-  // One PR can appear in several attempts; only its latest merged attempt describes the landing.
+  // One PR can appear in several attempts; only its latest merged attempt describes the merge.
   const latest = new Map<string, Readonly<{ record: MergeRecordBody; change: MergeRecordBody["changes"][number] }>>()
   let changes = 0
   for (const entry of merged) {
@@ -8710,16 +8710,16 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     }
   }
 
-  // A landed pin intent is not a PR and never had a `pr/integrated` row: `mergeRecordBody` fills
+  // A merged pin intent is not a change and never had a `pr/integrated` row: `mergeRecordBody` fills
   // `changes[].pr` from the queue MEMBER's own id, and that field is `QueueMemberIdSchema` — a
   // union whose arms are pinned to the shapes their mints write, so the record itself says which
-  // kind of member landed. Asking the journal for a PR under an intent id can only ever answer
-  // "unknown", which is why most of this repository's landings reported a PR gap that was never a
+  // kind of member merged. Asking the journal for a change under an intent id can only ever answer
+  // "unknown", which is why most of this repository's merges reported a change gap that was never a
   // PR — 58 of the 115 merged records under the live merge-record ref carry an intent id
-  // (`I102`…`yrdpin#181`), 57 a PR id, none anything else (read 2026-08-14). The intent RAIL that
+  // (`I102`…`yrdpin#181`), 57 a change id, none anything else (read 2026-08-14). The intent RAIL that
   // once held those records as `app.intents` is retired (2026-08-18) — there is no live lookup
   // left to name which submodule a given intent id advanced — but the id SHAPE alone is still
-  // sufficient: any id this schema accepts is a pin-intent landing by construction (the mint that
+  // sufficient: any id this schema accepts is a pin-intent merge by construction (the mint that
   // wrote it never wrote anything else), so it never carries a `pr/integrated` row and is never a
   // gap.
   const rebuilt: { pr: string; revision: number; run: string; commit: string }[] = []
@@ -8730,15 +8730,15 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
       skipped.push({ pr: prId, revision: change.revision, run, reason, detail })
     }
     // One record's contradictions belong to that record. A recovery scan that dies on the first
-    // one hides every landing behind it, and the estate it runs on is damaged by definition.
+    // one hides every merge behind it, and the estate it runs on is damaged by definition.
     try {
       if (IntentRecordIdSchema.safeParse(prId).success) {
-        skip("intent-carrier", `queue member is pin intent '${prId}'; a pin landing carries no pr/integrated row`)
+        skip("intent-carrier", `queue member is pin intent '${prId}'; a pin merge carries no pr/integrated row`)
         continue
       }
       const pr = app.bays.pr(prId)
       if (pr === undefined) {
-        skip("pr-unknown", "no PR in the journal; a merge record proves a landing, not a PR's existence")
+        skip("pr-unknown", "no PR in the journal; a merge record proves a merge, not a change's existence")
         continue
       }
       const repair = mergeRepair(record, pr)
@@ -8798,16 +8798,16 @@ function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
   const considered = report.rebuilt.length + report.skipped.length
   const unverified = report.unverifiable.length
   // `knownPrs === 0` with at least one `pr-unknown` skip is not "this run found a gap or two" —
-  // it is every candidate landing hitting the SAME wall, because there is no PR entity anywhere
+  // it is every candidate merge hitting the SAME wall, because there is no PR entity anywhere
   // in the journal to attach an index row to. Say that once, at the top, before the per-record
   // detail repeats it N times: the flag repairs a known PR's missing index row, it does not
-  // reconstruct a PR entity the journal has never seen (Remnant 2, @yrd/core/doctor-rebuild-hardening).
+  // reconstruct a change entity the journal has never seen (Remnant 2, @yrd/core/doctor-rebuild-hardening).
   const journalEmpty = knownPrs === 0 && report.skipped.some((entry) => entry.reason === "pr-unknown")
   const lines = [
     ...(journalEmpty
       ? [
           "the journal holds zero PR entities — every pr-unknown skip below repeats that one fact",
-          "--rebuild-index-from-repo repairs a KNOWN PR's missing index row; it cannot recreate a PR",
+          "--rebuild-index-from-repo repairs a KNOWN PR's missing index row; it cannot recreate a change",
           "entity the journal has never seen (see @yrd/core/doctor-rebuild-hardening Remnant 2)",
         ]
       : []),
@@ -8818,10 +8818,10 @@ function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
         ? ""
         : `, ${String(unverified)} record${unverified === 1 ? "" : "s"} the scan could not verify`),
     // `changes` counts every change in every merged attempt; one queue member can
-    // appear in several, and only its latest merged attempt describes the landing.
+    // appear in several, and only its latest merged attempt describes the merge.
     // Naming that collapse is what turns an unexplained shortfall into arithmetic
-    // the reader can check: rebuilt + skipped = the distinct landings considered.
-    `${String(changes)} change${changes === 1 ? " collapses" : "s collapse"} to ${String(considered)} distinct landing${considered === 1 ? "" : "s"} — rebuilt ${String(report.rebuilt.length)}, skipped ${String(report.skipped.length)}`,
+    // the reader can check: rebuilt + skipped = the distinct merges considered.
+    `${String(changes)} change${changes === 1 ? " collapses" : "s collapse"} to ${String(considered)} distinct merge${considered === 1 ? "" : "s"} — rebuilt ${String(report.rebuilt.length)}, skipped ${String(report.skipped.length)}`,
   ]
   for (const entry of report.rebuilt) {
     lines.push(`  REBUILT ${entry.pr} revision ${String(entry.revision)} via ${entry.run} at ${entry.commit}`)
@@ -9036,17 +9036,17 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
   }
 
   const cwd = io.cwd ?? process.cwd()
-  const statusSource = residentRunnerStatusPath(cwd, io.stateDir) ?? "resident-runner/status.json"
-  const lease = await residentRunnerLeaseObservation(cwd)
-  const resident = observeResidentRunner(await residentRunnerStatus(cwd, io.stateDir)).runner
-  if (lease.held !== (resident !== null)) {
+  const statusSource = habitantRunnerStatusPath(cwd, io.stateDir) ?? "resident-runner/status.json"
+  const lease = await habitantRunnerLeaseObservation(cwd)
+  const habitant = observeHabitantRunner(await habitantRunnerStatus(cwd, io.stateDir)).runner
+  if (lease.held !== (habitant !== null)) {
     raiseFailure(
       "infrastructure",
       "resident-retention-source-disagreement",
-      `yrd: resident runner lease and ${statusSource} disagree about whether a writer is active`,
+      `yrd: habitant runner lease and ${statusSource} disagree about whether a writer is active`,
     )
   }
-  if (resident === null) {
+  if (habitant === null) {
     return {
       advisory: true,
       floor,
@@ -9054,14 +9054,14 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
         active: false,
         armed: false,
         policy: "not-applicable",
-        source: `resident runner lease + ${statusSource}`,
+        source: `habitant runner lease + ${statusSource}`,
         observedAt,
       },
       checkpoint: checkpointReport,
     }
   }
 
-  const ageMs = Math.max(0, nowMs - Date.parse(resident.lastTickAt))
+  const ageMs = Math.max(0, nowMs - Date.parse(habitant.lastTickAt))
   if (ageMs > RUNNER_STALE_MS) {
     raiseFailure(
       "infrastructure",
@@ -9071,29 +9071,29 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
   }
   if (
     lease.driver === undefined ||
-    resident.driver === undefined ||
-    lease.driver.queueId !== resident.driver.queueId ||
-    lease.driver.epoch !== resident.driver.epoch
+    habitant.driver === undefined ||
+    lease.driver.queueId !== habitant.driver.queueId ||
+    lease.driver.epoch !== habitant.driver.epoch
   ) {
     raiseFailure(
       "infrastructure",
       "resident-retention-source-disagreement",
-      `yrd: resident runner lease driver does not match ${statusSource}`,
+      `yrd: habitant runner lease driver does not match ${statusSource}`,
     )
   }
-  const retention = resident.retention
+  const retention = habitant.retention
   if (retention === undefined) {
     raiseFailure(
       "infrastructure",
       "resident-retention-observation-missing",
-      `yrd: active resident ${String(resident.pid)} has no retention observation in ${statusSource}`,
+      `yrd: active habitant ${String(habitant.pid)} has no retention observation in ${statusSource}`,
     )
   }
-  if (retention.generation !== resident.driver.epoch || retention.observedAt !== resident.lastTickAt) {
+  if (retention.generation !== habitant.driver.epoch || retention.observedAt !== habitant.lastTickAt) {
     raiseFailure(
       "infrastructure",
       "resident-retention-observation-mismatch",
-      `yrd: retention observation in ${statusSource} does not match its resident generation and source-read time`,
+      `yrd: retention observation in ${statusSource} does not match its habitant generation and source-read time`,
     )
   }
 
@@ -9104,7 +9104,7 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
       active: true,
       armed: retention.policy !== "disabled",
       policy: retention.policy,
-      pid: resident.pid,
+      pid: habitant.pid,
       generation: retention.generation,
       source: statusSource,
       observedAt: retention.observedAt,
@@ -9188,8 +9188,8 @@ async function configDoctor(
     ].join("\n"),
     warnings,
   )
-  // A landing repo truth proves but the index still cannot carry is a real gap, not a clean run —
-  // and so is a note the scan could not verify at all. A pin landing is neither: it has no
+  // A merge repo truth proves but the index still cannot carry is a real gap, not a clean run —
+  // and so is a note the scan could not verify at all. A pin merge is neither: it has no
   // pr/integrated row to be missing.
   const unrebuilt =
     (indexRebuild !== undefined &&
@@ -9418,7 +9418,7 @@ function refuseRetiredQueueAdministration(command: "init" | "deinit"): never {
     `yrd: admin queue ${command} is retired and does nothing. It used to ${
       command === "init" ? "write" : "remove"
     } installed-baseline.json, the stored step plan the audit compared against; that file no longer ` +
-      "exists (23192/23193): each Run reads its plan from .yrd.yml at its own base sha, and a stale resident " +
+      "exists (23192/23193): each Run reads its plan from .yrd.yml at its own base sha, and a stale habitant " +
       "reloads itself. " +
       (command === "init"
         ? "Run 'yrd admin init' to install the managed pre-submit hook, and 'yrd queue audit' to compare git " +
@@ -9539,24 +9539,24 @@ async function finishQueue(
   )
 }
 
-type ResidentCycleRecovery = Readonly<{
+type HabitantCycleRecovery = Readonly<{
   message: string
   props: Record<string, unknown>
   busy?: Readonly<{ base: string; run: string }>
 }>
 
-type ResidentBusyWindow = Readonly<{ base: string; run: string; suppressed: number }>
+type HabitantBusyWindow = Readonly<{ base: string; run: string; suppressed: number }>
 
 /**
  * Keep one loud warning for a busy queue, then count exact repeats until the
- * queue frees (or the resident exits). Other recoveries stay one-for-one and
+ * queue frees (or the habitant exits). Other recoveries stay one-for-one and
  * flush any pending busy summary before their own warning.
  */
-function createResidentRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
-  report(recovery: ResidentCycleRecovery): void
+function createHabitantRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
+  report(recovery: HabitantCycleRecovery): void
   flush(): void
 }> {
-  let busy: ResidentBusyWindow | null = null
+  let busy: HabitantBusyWindow | null = null
   const flush = (): void => {
     if (busy !== null && busy.suppressed > 0) {
       log.warn?.(`Queue ${busy.base} is still busy; skipped ${busy.suppressed} repeated messages.`, {
@@ -9591,46 +9591,46 @@ function createResidentRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
  * Classify a mid-compose error as a losable resident-runner race worth skipping
  * this cycle for, or `undefined` to propagate (fail-loud). Narrow and typed —
  * never message-matching: a concurrent Job settlement, a peer already running
- * the queue, or a candidate PR that reached a terminal status mid-compose. Each
- * returns a single structured (loggily) warn; the resident emits no bare stderr
+ * the queue, or a candidate change that reached a terminal status mid-compose. Each
+ * returns a single structured (loggily) warn; the habitant emits no bare stderr
  * duplicate. The next cycle re-snapshots — the busy queue frees, the departed
  * PR is gone from the submitted set — so the loop makes progress on what remains.
  */
-function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefined {
+function habitantCycleRecovery(error: unknown): HabitantCycleRecovery | undefined {
   if (isConcurrentSettlementConflict(error)) {
     return {
-      message: "resident runner skipped a cycle lost to a concurrent Job settlement",
+      message: "habitant runner skipped a cycle lost to a concurrent Job settlement",
       props: { action: "resident-cancel-skip", job: error.jobId, status: error.actual, reason: error.message },
     }
   }
   if (isQueueRunningConflict(error)) {
     return {
-      message: "resident runner deferred a cycle — the queue is already running",
+      message: "habitant runner deferred a cycle — the queue is already running",
       props: { action: "resident-busy-defer", base: error.base, run: error.runId, reason: error.message },
       busy: { base: error.base, run: error.runId },
     }
   }
   if (isConcurrentCheckabilityConflict(error)) {
     return {
-      message: "resident runner skipped a cycle — a candidate PR left the checkable set mid-compose",
+      message: "habitant runner skipped a cycle — a candidate change left the checkable set mid-compose",
       props: { action: "resident-withdraw-skip", pr: error.prId, status: error.status, reason: error.message },
     }
   }
   // 22306 architectural belt: any remaining PR-scoped refusal that escaped the
-  // per-candidate wrap is still a cycle skip, not a resident death. Covers
+  // per-candidate wrap is still a cycle skip, not a habitant death. Covers
   // authored-gitlink / recut-certificate / pr-not-admissible and the rest of
   // the needs-author + recut-lineage composition buckets if they bubble out.
   // 22584 adds spawn-cwd-missing: every spawn directory Yrd derives is candidate
   // content (bay, scratch, and reference checkouts, down to nested submodule
   // paths a candidate ADDS but the base lacks), so an absent one is per-candidate
-  // by construction. The resident's OWN root is re-proven by every other command
+  // by construction. The habitant's OWN root is re-proven by every other command
   // in the cycle, so a genuinely absent root keeps warning loudly each interval —
   // and the message names the absolute path, which the bare posix_spawn ENOENT
   // this replaces never did.
   const fact = failureFact(error)
   if (fact?.kind === "infrastructure" && fact.code === "journal-busy") {
     return {
-      message: "resident runner skipped a cycle because the journal was temporarily locked",
+      message: "habitant runner skipped a cycle because the journal was temporarily locked",
       props: { action: "resident-journal-busy-skip", code: fact.code, reason: fact.message },
     }
   }
@@ -9661,7 +9661,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
       fact.code === "spawn-cwd-missing"
     if (changeScoped) {
       return {
-        message: "resident runner skipped a cycle lost to a per-PR failure",
+        message: "habitant runner skipped a cycle lost to a per-PR failure",
         props: { action: "resident-pr-refusal-skip", code: fact.code, reason: fact.message },
       }
     }
@@ -9669,7 +9669,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   return undefined
 }
 
-export type ResidentTrackedRevisionTransition =
+export type HabitantTrackedRevisionTransition =
   | Readonly<{
       status: "applied"
       pr: string
@@ -9713,8 +9713,8 @@ function trackedPreflightNeedsPerson(pr: Change, revision: ChangeRev): boolean {
 }
 
 /**
- * Codes `freshRemoteBranch` raises while OBSERVING one tracked PR's branch, each
- * a fact about THAT branch: deleted on origin after landing (the routine `fatal:
+ * Codes `freshRemoteBranch` raises while OBSERVING one tracked change's branch, each
+ * a fact about THAT branch: deleted on origin after merging (the routine `fatal:
  * couldn't find remote ref`, exit 128), a fetch that timed out, or a refreshed
  * ref that will not resolve to a commit. Observing one candidate is per-candidate
  * work, so these defer that candidate and the cycle moves on.
@@ -9736,7 +9736,7 @@ const TRACKED_OBSERVATION_CODES: ReadonlySet<string> = new Set([
  * Process-scoped re-observation backoff, keyed by {pr, revision, head}. A branch
  * that cannot be observed is usually structural (deleted on origin and not
  * restored), and its observation is a live `git fetch` at the HEAD of the cycle —
- * a 30s timeout there stalls every other tracked PR. So each consecutive failure
+ * a 30s timeout there stalls every other tracked change. So each consecutive failure
  * doubles the number of cycles skipped before the next attempt, capped, which
  * bounds both the wasted fetch and the log noise while still ALWAYS retrying, so
  * a restored branch resumes without an operator turn. Any new authored revision
@@ -9753,13 +9753,13 @@ function trackedObservationKey(pr: Change, revision: Pick<ChangeRev, "n" | "head
 }
 
 /**
- * Observe opted-in PR branches before the resident's normal base-freshness
+ * Observe opted-in PR branches before the habitant's normal base-freshness
  * pass. When a branch moved, certify the exact observed SHA directly as the
  * successor revision. The frozen SHA and expected-current fact flow through
  * preflight together, so an interrupted cycle never leaves a provisional
  * authored revision behind.
  *
- * `observation` is the caller's re-observation backoff. The resident owns one for
+ * `observation` is the caller's re-observation backoff. The habitant owns one for
  * its lifetime; a one-shot or programmatic caller omits it and observes every
  * candidate exactly once, which is the whole of its cycle.
  */
@@ -9768,7 +9768,7 @@ export async function refreshTrackedQueueRevisions(
   services: YrdCliServices,
   io: YrdCliIO,
   observation?: TrackedObservationBackoff,
-): Promise<readonly ResidentTrackedRevisionTransition[]> {
+): Promise<readonly HabitantTrackedRevisionTransition[]> {
   const candidates = Object.values(stateOf(app).bays.prs)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
@@ -9778,7 +9778,7 @@ export async function refreshTrackedQueueRevisions(
       (left, right) =>
         baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
     )
-  const outcomes: ResidentTrackedRevisionTransition[] = []
+  const outcomes: HabitantTrackedRevisionTransition[] = []
   if (observation !== undefined) {
     // Drop entries for candidates that moved or left the tracked set: a new
     // authored revision must observe immediately, not inherit a skip window.
@@ -9810,7 +9810,7 @@ export async function refreshTrackedQueueRevisions(
       if (failure?.kind !== "configuration" || !TRACKED_OBSERVATION_CODES.has(failure.code)) throw error
       const attempts = (backoff?.failures ?? 0) + 1
       observation?.set(observationKey, { failures: attempts, skipped: 0 })
-      const outcome: ResidentTrackedRevisionTransition = {
+      const outcome: HabitantTrackedRevisionTransition = {
         status: "deferred",
         pr: candidate.id,
         branch: candidate.branch,
@@ -9820,7 +9820,7 @@ export async function refreshTrackedQueueRevisions(
         message: failure.message,
       }
       outcomes.push(outcome)
-      app.log.warn?.(`Could not observe tracked PR ${candidate.id}'s branch; it remains queued for another cycle.`, {
+      app.log.warn?.(`Could not observe tracked change ${candidate.id}'s branch; it remains queued for another cycle.`, {
         action: "queue-track-observation-deferred",
         attempts,
         ...outcome,
@@ -9849,7 +9849,7 @@ export async function refreshTrackedQueueRevisions(
       )
       await applyPreflightVerdict(app, services, classified, io, { track: true })
       const current = currentChangeRev(requiredPr(app, candidate.id))
-      const outcome: ResidentTrackedRevisionTransition = {
+      const outcome: HabitantTrackedRevisionTransition = {
         status: "applied",
         pr: candidate.id,
         branch: candidate.branch,
@@ -9862,7 +9862,7 @@ export async function refreshTrackedQueueRevisions(
         recorded: freshness.status === "tracked-drift",
       }
       outcomes.push(outcome)
-      app.log.info?.("Prepared the latest tracked PR revision for the merge queue's entry checks.", {
+      app.log.info?.("Prepared the latest tracked change revision for the merge queue's entry checks.", {
         action: "queue-track-prepared",
         ...outcome,
       })
@@ -9891,7 +9891,7 @@ export async function refreshTrackedQueueRevisions(
           if (settlementFailure?.kind !== "refusal" || settlementFailure.code !== "comment-current-changed") {
             throw settlementError
           }
-          const outcome: ResidentTrackedRevisionTransition = {
+          const outcome: HabitantTrackedRevisionTransition = {
             status: "deferred",
             pr: candidate.id,
             branch: candidate.branch,
@@ -9901,13 +9901,13 @@ export async function refreshTrackedQueueRevisions(
             message: settlementFailure.message,
           }
           outcomes.push(outcome)
-          app.log.info?.("Skipped settling a tracked PR preflight because the PR changed.", {
+          app.log.info?.("Skipped settling a tracked change preflight because the change changed.", {
             action: "queue-track-settlement-deferred",
             ...outcome,
           })
           continue
         }
-        const outcome: ResidentTrackedRevisionTransition = {
+        const outcome: HabitantTrackedRevisionTransition = {
           status: "needs-person",
           pr: currentPr.id,
           branch: currentPr.branch,
@@ -9925,7 +9925,7 @@ export async function refreshTrackedQueueRevisions(
       }
       const deferredRevision =
         classified === undefined ? before : { n: classified.revision, head: classified.evidence.headSha }
-      const outcome: ResidentTrackedRevisionTransition = {
+      const outcome: HabitantTrackedRevisionTransition = {
         status: "deferred",
         pr: candidate.id,
         branch: candidate.branch,
@@ -9935,7 +9935,7 @@ export async function refreshTrackedQueueRevisions(
         message: failure.message,
       }
       outcomes.push(outcome)
-      app.log.warn?.(`Could not prepare tracked PR ${candidate.id}; it remains queued for another cycle.`, {
+      app.log.warn?.(`Could not prepare tracked change ${candidate.id}; it remains queued for another cycle.`, {
         action: "queue-track-deferred",
         ...outcome,
       })
@@ -9944,7 +9944,7 @@ export async function refreshTrackedQueueRevisions(
   return outcomes
 }
 
-type ResidentQueueFreshnessTransition =
+type HabitantQueueFreshnessTransition =
   | Readonly<{
       status: "settled"
       pr: string
@@ -9990,18 +9990,18 @@ type ResidentQueueFreshnessTransition =
     }>
 
 /**
- * Apply the admitted -> refreshed Queue transition before the resident takes
+ * Apply the admitted -> refreshed Queue transition before the habitant takes
  * its next run snapshot. The transition deliberately stays inside the existing
- * serialized resident cycle: it reuses the installed recutter and journal
+ * serialized habitant cycle: it reuses the installed recutter and journal
  * rather than starting another writer or scheduler.
  */
 export async function refreshAdmittedQueueRevisions(
   app: YrdCliApp,
   services: Pick<YrdCliServices, "recut">,
   io: YrdCliIO,
-): Promise<readonly ResidentQueueFreshnessTransition[]> {
+): Promise<readonly HabitantQueueFreshnessTransition[]> {
   const snapshot = stateOf(app)
-  const outcomes: ResidentQueueFreshnessTransition[] = []
+  const outcomes: HabitantQueueFreshnessTransition[] = []
   const interrupted = Object.values(snapshot.bays.prs).filter(
     (pr) => currentChangeRev(pr).recut?.transition?.to === "refreshed",
   )
@@ -10089,7 +10089,7 @@ export async function refreshAdmittedQueueRevisions(
       raiseFailure(
         "infrastructure",
         "queue-base-unresolved",
-        `yrd: automatic recut could not resolve the merge-queue base '${candidate.base}' for PR '${candidate.id}'`,
+        `yrd: automatic re-merge could not resolve the merge-queue base '${candidate.base}' for change '${candidate.id}'`,
       )
     }
     if (candidateRevision.baseSha === target.headSha) {
@@ -10225,7 +10225,7 @@ export async function refreshAdmittedQueueRevisions(
   return outcomes
 }
 
-/** What the resident did about one wedged PR this cycle. */
+/** What the habitant did about one wedged PR this cycle. */
 export type RefusalRemedyOutcome =
   | Readonly<{
       status: "applied"
@@ -10258,7 +10258,7 @@ export type RefusalRemedyOutcome =
       resolution: readonly string[]
     }>
 
-/** Re-record the branch's corrected head onto the PR — the in-process spelling
+/** Re-record the branch's corrected head onto the change — the in-process spelling
  * of the `yrd pr submit|create <branch>` step the printed remedy leads with. */
 async function applyRedeliveryStep(
   app: YrdCliApp,
@@ -10306,7 +10306,7 @@ async function applyPreflightVerdict(
     raiseFailure(
       "refusal",
       "refusal-remedy-needs-withdraw",
-      `yrd: PR '${preflight.pr}' preflight verdict SUBSUMED-WITHDRAW is an operator decision; run: ${preflight.next}`,
+      `yrd: change '${preflight.pr}' preflight verdict SUBSUMED-WITHDRAW is an operator decision; run: ${preflight.next}`,
     )
   }
   if (preflight.verdict === "FRESH-NOOP") {
@@ -10334,7 +10334,7 @@ async function applyPreflightVerdict(
       expectedCurrent: remergeExpectedCurrent,
       queue: true,
       admit: false,
-      ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}),
+      ...(preflight.verdict === "RE-MERGE-FORCE" ? { force: true } : {}),
     },
     io,
   )
@@ -10360,13 +10360,13 @@ async function applyRefusalRemedy(
       continue
     }
     // The printed `--apply` command executes this exact verdict in-process, so
-    // a human and the resident both consume the same preflight decision.
+    // a human and the habitant both consume the same preflight decision.
     const preflight = await preflightRemerge(app, step.pr, { queue: step.queue }, io)
     commands.push(preflight.next)
     await applyPreflightVerdict(app, services, preflight, io)
     verdict = preflight.verdict
   }
-  if (verdict === undefined) throw new Error(`yrd: PR '${plan.pr}' remedy ran no preflight step`)
+  if (verdict === undefined) throw new Error(`yrd: change '${plan.pr}' remedy ran no preflight step`)
   return verdict
 }
 
@@ -10376,13 +10376,13 @@ async function applyRefusalRemedy(
  *
  * The admission/compose path refuses an authored-gitlink carrier with a message
  * that names exact intent submission. Intent declarations are an author-owned
- * judgment, not a PR mutation, so this loop settles that refusal as
+ * judgment, not a change mutation, so this loop settles that refusal as
  * needs-person. Mechanical code-carrier remedies still run here because a
- * successful recut produces a new revision and makes progress.
+ * successful re-merge produces a new revision and makes progress.
  *
- * Runs inside the existing serialized resident cycle beside
+ * Runs inside the existing serialized habitant cycle beside
  * {@link refreshAdmittedQueueRevisions}: same installed recutter, same journal,
- * no second writer or scheduler. Applies at most one remedy per PR revision, so
+ * no second writer or scheduler. Applies at most one remedy per change revision, so
  * a remedy that fails degrades to the printed refusal rather than becoming its
  * own loop; a remedy that succeeds produces a new revision, which is what makes
  * progress instead of repetition.
@@ -10401,7 +10401,7 @@ export async function applyRefusalRemedies(
     // printed refusal, never re-arm itself on the next cycle.
     attempted.add(plan.key)
     // …and the revision the attempt LEAVES BEHIND. A remedy re-records the
-    // branch, so a half-applied one lands the PR on a fresh revision with a
+    // branch, so a half-applied one merges the change on a fresh revision with a
     // fresh key — without this the "once per revision" bound would be satisfied
     // by a loop that mints a new revision every cycle. The runner never
     // remedies its own output; a human's next push mints a different revision
@@ -10481,7 +10481,7 @@ export async function applyRefusalRemedies(
 /** Reduce the live refusal ledger and this cycle's run count to the
  * poisoned-observer observation. Reads only projected state — no extra git or
  * network work on a cycle that already did none. */
-function observeResidentRefusals(app: YrdCliApp, runs: number): ResidentRefusalObservation {
+function observeHabitantRefusals(app: YrdCliApp, runs: number): HabitantRefusalObservation {
   const snapshot = stateOf(app)
   const refusals = Object.values(snapshot.queues.admissionRefusals).filter(
     (refusal) => refusal.settlement === undefined,
@@ -10503,15 +10503,15 @@ function observeResidentRefusals(app: YrdCliApp, runs: number): ResidentRefusalO
  * runner should restart itself (22474 specimen 3). Off (window cleared) for a
  * targeted one-shot, which has no next cycle to break out of.
  */
-function residentRefusalHealth(
+function habitantRefusalHealth(
   app: YrdCliApp,
-  stall: ResidentRefusalStall | undefined,
+  stall: HabitantRefusalStall | undefined,
   runs: number,
   watching: boolean,
-): Readonly<{ stall: ResidentRefusalStall | undefined; restart: boolean }> {
+): Readonly<{ stall: HabitantRefusalStall | undefined; restart: boolean }> {
   if (!watching) return { stall: undefined, restart: false }
-  const next = foldRefusalStall(stall, observeResidentRefusals(app, runs))
-  if (next === undefined || next.cycles < RESIDENT_REFUSAL_STALL_CYCLES) return { stall: next, restart: false }
+  const next = foldRefusalStall(stall, observeHabitantRefusals(app, runs))
+  if (next === undefined || next.cycles < HABITANT_REFUSAL_STALL_CYCLES) return { stall: next, restart: false }
   app.log.warn?.(
     `Queue runner could not start any candidate for ${next.cycles} consecutive cycles with nothing changing; restarting.`,
     {
@@ -10526,9 +10526,9 @@ function residentRefusalHealth(
 
 /** Where a recycle attempt is left for the process that replaces us. It sits
  * beside `status.json` under the same resident-runner directory, because it has
- * exactly that lifetime: one queue repository's resident lineage. */
-function residentSourceRecyclePath(cwd: string, stateDir?: string): string | undefined {
-  const status = residentRunnerStatusPath(cwd, stateDir)
+ * exactly that lifetime: one queue repository's habitant lineage. */
+function habitantSourceRecyclePath(cwd: string, stateDir?: string): string | undefined {
+  const status = habitantRunnerStatusPath(cwd, stateDir)
   return status === undefined ? undefined : join(status, "..", "source-recycle.json")
 }
 
@@ -10536,11 +10536,11 @@ function residentSourceRecyclePath(cwd: string, stateDir?: string): string | und
  * (no recycle has ever been attempted here) and reads as "no prior attempt"; a
  * malformed or unreadable record reads the same way, since the only thing it
  * gates is ONE extra restart that the supervisor's budget also bounds. */
-async function readResidentSourceRecycle(
+async function readHabitantSourceRecycle(
   cwd: string,
   stateDir: string | undefined,
-): Promise<ResidentSourceRecycle | undefined> {
-  const path = residentSourceRecyclePath(cwd, stateDir)
+): Promise<HabitantSourceRecycle | undefined> {
+  const path = habitantSourceRecyclePath(cwd, stateDir)
   if (path === undefined) return undefined
   try {
     const parsed: unknown = JSON.parse(await readFile(path, "utf8"))
@@ -10563,12 +10563,12 @@ async function readResidentSourceRecycle(
 
 /** Record the attempt BEFORE exiting, so the process that replaces us can tell a
  * recycle that worked from one that changed nothing. */
-async function writeResidentSourceRecycle(
+async function writeHabitantSourceRecycle(
   cwd: string,
   stateDir: string | undefined,
-  recycle: ResidentSourceRecycle,
+  recycle: HabitantSourceRecycle,
 ): Promise<void> {
-  const path = residentSourceRecyclePath(cwd, stateDir)
+  const path = habitantSourceRecyclePath(cwd, stateDir)
   if (path === undefined) return
   await mkdir(join(path, ".."), { recursive: true })
   await writeFile(path, `${stableJson(recycle)}\n`, "utf8")
@@ -10576,40 +10576,40 @@ async function writeResidentSourceRecycle(
 
 /**
  * Fold one settled cycle into the source-staleness window and say whether this
- * resident should recycle itself onto the code its own checkout now holds —
+ * habitant should recycle itself onto the code its own checkout now holds —
  * box 1 of @yrd/core/stale-runner-never-recycles.
  *
- * Gated on `resident`, not merely on the selectorless loop: exiting is only an
+ * Gated on `habitant`, not merely on the selectorless loop: exiting is only an
  * actuator when something re-execs us. A one-shot `yrd queue run code --once`
  * and a bare programmatic follow have no supervisor and must finish their work
  * on whatever code they started with.
  *
  * The read is deliberately uncached and deliberately based on the checkout the
- * resident booted from — NOT the recorded pin `runnerPinBehind` serves the
+ * habitant booted from — NOT the recorded pin `runnerPinBehind` serves the
  * watcher (a cache at the poll cadence would let one git read satisfy two
  * observations that are supposed to be independent, and "has my source moved
  * under me" is a different question from "am I where the pin says").
  */
-export async function residentSourceHealth(
+export async function habitantSourceHealth(
   app: YrdCliApp,
   io: YrdCliIO,
-  stall: ResidentSourceStall | undefined,
-  resident: boolean,
+  stall: HabitantSourceStall | undefined,
+  habitant: boolean,
   threshold: number,
-): Promise<Readonly<{ stall: ResidentSourceStall | undefined; recycle: boolean }>> {
-  if (!resident || threshold === 0) return { stall: undefined, recycle: false }
-  const bootedSha = residentBootedSha(io.implementationSource)
+): Promise<Readonly<{ stall: HabitantSourceStall | undefined; recycle: boolean }>> {
+  if (!habitant || threshold === 0) return { stall: undefined, recycle: false }
+  const bootedSha = habitantBootedSha(io.implementationSource)
   const sourceRoot = io.sourceCheckout ?? yrdSourceCheckout()
   const advance =
     bootedSha === undefined || sourceRoot === undefined ? undefined : readSourceAdvance(sourceRoot, bootedSha)
   const next = foldSourceStaleness(stall, { bootedSha, headSha: advance?.headSha, behind: advance?.behind }, threshold)
   const cwd = io.cwd ?? process.cwd()
-  const action = decideResidentSource(next, await readResidentSourceRecycle(cwd, io.stateDir))
+  const action = decideHabitantSource(next, await readHabitantSourceRecycle(cwd, io.stateDir))
   if (action.kind === "serve") return { stall: next, recycle: false }
   if (action.kind === "checkout-behind") {
     // The one case a recycle cannot fix, and the reason this is not a bare
     // restart-on-drift: we already restarted for this exact gap and came back
-    // running the same commit. Whatever the resident boots from is not the
+    // running the same commit. Whatever the habitant boots from is not the
     // checkout that moved — a custody freeze holding the source back, a
     // launcher attesting a stale identity, a shim resolving another tree — so
     // name the checkout and the remedy instead of burning the restart budget.
@@ -10626,7 +10626,7 @@ export async function residentSourceHealth(
     )
     return { stall: next, recycle: false }
   }
-  await writeResidentSourceRecycle(cwd, io.stateDir, {
+  await writeHabitantSourceRecycle(cwd, io.stateDir, {
     bootedSha: action.bootedSha,
     headSha: action.headSha,
     attemptedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
@@ -10646,7 +10646,7 @@ export async function residentSourceHealth(
 }
 
 /**
- * D1b — the resident's per-tick unscoped lease-expiry recovery sweep. `recover`
+ * D1b — the habitant's per-tick unscoped lease-expiry recovery sweep. `recover`
  * with NO runner arg settles any orphaned running Job whose lease has lapsed,
  * regardless of the runner that left it or where a run's cursor sits — the
  * automatic settle that one-shot startup reclaim (pid-scoped, last pid only) can
@@ -10655,16 +10655,16 @@ export async function residentSourceHealth(
  * and cheap when nothing lapsed. Logs a loud structured warn ONLY when it actually
  * settles something — loggily-only, since the runner's stdout is a log stream.
  */
-export async function residentRecoverySweep(
+export async function habitantRecoverySweep(
   app: Pick<YrdCliApp, "queue" | "log">,
   io: Pick<YrdCliIO, "now">,
   lastSweepAt: number,
 ): Promise<number> {
   const sweepNow = io.now?.() ?? Date.now()
-  if (sweepNow - lastSweepAt < RESIDENT_RECOVERY_SWEEP_MS) return lastSweepAt
+  if (sweepNow - lastSweepAt < HABITANT_RECOVERY_SWEEP_MS) return lastSweepAt
   const settled = await app.queue.recover({
     recoveryTime: new Date(sweepNow).toISOString(),
-    reason: "resident lease-expiry sweep",
+    reason: "habitant lease-expiry sweep",
   })
   if (settled.length > 0) {
     app.log.warn?.(`Stopped abandoned queue runs: ${settled.map((run) => run.id).join(", ")}.`, {
@@ -10677,7 +10677,7 @@ export async function residentRecoverySweep(
 }
 
 /**
- * Run every revision-preparation robot in the resident's single-writer cycle.
+ * Run every revision-preparation robot in the habitant's single-writer cycle.
  * Ordering is load-bearing: track the authored branch first, refresh that
  * frozen revision onto the queue base second, then repair prior admission
  * refusals. The return value tells the caller whether to re-prove its installed
@@ -10691,7 +10691,7 @@ function preparationBaselineChanged(before: YrdCliState, after: YrdCliState): bo
   return keys.some((key) => key !== "admissionRefusals" && before.queues[key] !== after.queues[key])
 }
 
-async function prepareResidentQueueCycle(
+async function prepareHabitantQueueCycle(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
@@ -10738,35 +10738,35 @@ export async function followQueueRuns(
   const scope = io.scope ?? app.scope
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
-  const resident = io.runner?.startsWith("yrd-cli:") === true
+  const habitant = io.runner?.startsWith("yrd-cli:") === true
   const base = baseIdentity(services.base ?? "main")
-  const recoveryReporter = createResidentRecoveryReporter(app.log)
-  // Reclaim a prior resident's leases BEFORE the heartbeat overwrites status.json —
-  // once it writes, the departed pid is lost. The exclusive resident lock guarantees
-  // that prior resident is not concurrently running as a resident.
-  if (resident) await reclaimDeadResidentRunner(app, io)
+  const recoveryReporter = createHabitantRecoveryReporter(app.log)
+  // Reclaim a prior habitant's leases BEFORE the heartbeat overwrites status.json —
+  // once it writes, the departed pid is lost. The exclusive habitant lock guarantees
+  // that prior habitant is not concurrently running as a habitant.
+  if (habitant) await reclaimDeadHabitantRunner(app, io)
   // Loaded once at startup, never per-tick — the same tradeoff `queueProgress`
-  // and `uncarried` already make for resident-side facts that do not need to
-  // react to a config edit mid-run. A restarted resident picks up a changed
+  // and `uncarried` already make for habitant-side facts that do not need to
+  // react to a config edit mid-run. A restarted habitant picks up a changed
   // `drafts.pageAfterHours` the same way it picks up any other config change.
-  const draftThresholdMs = resident
+  const draftThresholdMs = habitant
     ? draftPageThresholdMs((await loadYrdConfig({ repo: io.cwd ?? process.cwd(), defaultBase: base })).config)
     : 0
-  const heartbeat = resident
-    ? await startResidentRunnerHeartbeat(io, {
-        queueProgress: (now) => residentQueueProgress(app, now),
+  const heartbeat = habitant
+    ? await startHabitantRunnerHeartbeat(io, {
+        queueProgress: (now) => habitantQueueProgress(app, now),
         uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
         staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
         needsPerson: (now) => needsPersonFindings(app, now),
         // The plan THIS process built, from the live runtime object, so the
-        // supervisor probe compares the resident's own set against the tip
+        // supervisor probe compares the habitant's own set against the tip
         // (23192 leg c) rather than re-deriving one from config.
         installedPlan: () => ({ batchSize: app.queue.state().batchSize, steps: app.queue.steps() }),
         ...(io.journalRetentionPolicy === undefined ? {} : { retention: io.journalRetentionPolicy }),
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
           ...(io.driver === undefined ? {} : { epoch: io.driver.epoch }),
-          lastMerged: () => residentDriverLastMerged(app, base),
+          lastMerged: () => habitantDriverLastMerged(app, base),
         },
       })
     : undefined
@@ -10788,14 +10788,14 @@ export async function followQueueRuns(
   const observation: TrackedObservationBackoff = new Map()
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
-  let stall: ResidentRefusalStall | undefined
+  let stall: HabitantRefusalStall | undefined
   // Consecutive cycles observing this process's own source checkout ahead of the
   // commit it booted from (@yrd/core/stale-runner-never-recycles box 1). Like the
   // refusal window above it is process-scoped: it is a claim about THIS process,
   // and the durable half — whether a recycle was already tried for this exact gap
   // — is the `source-recycle.json` record, not this variable.
-  let sourceStall: ResidentSourceStall | undefined
-  const sourceStaleThreshold = residentSourceStaleThreshold()
+  let sourceStall: HabitantSourceStall | undefined
+  const sourceStaleThreshold = habitantSourceStaleThreshold()
   let firstCycle = true
   let lastMaintenanceAt = 0
 
@@ -10811,27 +10811,27 @@ export async function followQueueRuns(
       await app.queue.expirePauses(new Date(cycleNow).toISOString())
       const holdExpired = app.state() !== beforeHoldExpiry
       const maintenanceDue =
-        starting || cycleNow < lastMaintenanceAt || cycleNow - lastMaintenanceAt >= RESIDENT_MAINTENANCE_INTERVAL_MS
+        starting || cycleNow < lastMaintenanceAt || cycleNow - lastMaintenanceAt >= HABITANT_MAINTENANCE_INTERVAL_MS
       if (!starting && !refreshed && !holdExpired && !maintenanceDue && !drainRequested()) {
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
+        if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
+        return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
       }
       firstCycle = false
       // Re-read the base tip's declared plan before EACH cycle: a config change
-      // while watching reloads the resident in place, never lets a fresh cycle
+      // while watching reloads the habitant in place, never lets a fresh cycle
       // prepare candidates a stale step set would then refuse.
       await gate()
       if (maintenanceDue) lastMaintenanceAt = cycleNow
       let runRequired = starting || refreshed || holdExpired
-      // D1b — bounded maintenance lease-expiry recovery sweep. ONLY the resident
+      // D1b — bounded maintenance lease-expiry recovery sweep. ONLY the habitant
       // runs it: it holds the exclusive lease, so its unscoped `recover` write is
       // single-writer safe. (A one-shot or a bare programmatic followQueueRuns
       // caller — no runner identity — never sweeps.)
-      if (resident && maintenanceDue) {
+      if (habitant && maintenanceDue) {
         const beforeRecovery = app.state()
-        lastSweepAt = await residentRecoverySweep(app, io, lastSweepAt)
+        lastSweepAt = await habitantRecoverySweep(app, io, lastSweepAt)
         runRequired ||= app.state() !== beforeRecovery
       }
       // The optional default preserves the narrow followQueueRuns test/programmatic
@@ -10840,18 +10840,18 @@ export async function followQueueRuns(
       // 22474 — a wedged PR whose refusal printed a deterministic remedy gets
       // that remedy applied here, once per revision, before the next compose
       // snapshot. Same recutter, same serialized cycle as the freshness pass.
-      // A mechanical recut may itself take long enough for the declared plan
+      // A mechanical re-merge may itself take long enough for the declared plan
       // to move. Re-read it before admitting the fresh revision; never start a
-      // Run under the pre-recut gate snapshot.
-      if (await prepareResidentQueueCycle(app, services, io, remedied, observation)) {
+      // Run under the pre-re-merge gate snapshot.
+      if (await prepareHabitantQueueCycle(app, services, io, remedied, observation)) {
         runRequired = true
         await gate()
       }
       if (!runRequired && !drainRequested()) {
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
+        if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
-        return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
+        return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
       }
       const runs = await runQueues(app, selectors, options, io)
       recoveryReporter.flush()
@@ -10870,23 +10870,23 @@ export async function followQueueRuns(
       // 22474 specimen 3 — self-health. A long-lived drain that refuses EVERY
       // candidate, cycle after cycle, against a world that is not moving has
       // stopped being evidence about the PRs and become evidence about itself.
-      // Gated on the selectorless loop, not on resident identity: a targeted
+      // Gated on the selectorless loop, not on habitant identity: a targeted
       // one-shot has no next cycle to break out of.
-      const health = residentRefusalHealth(app, stall, runs.length, selectors.length === 0)
+      const health = habitantRefusalHealth(app, stall, runs.length, selectors.length === 0)
       stall = health.stall
-      // Exit UNCLEAN so the derived resident lifetime re-execs a fresh process
+      // Exit UNCLEAN so the derived habitant lifetime re-execs a fresh process
       // with fresh observation state — mechanically the SIGINT + `yrd queue run` an
       // operator performed by hand, minus the 2.5h wait. The heartbeat's
       // close(cleanShutdown=false) in the finally releases the lease.
-      if (health.restart) return RESIDENT_POISONED_EXIT
+      if (health.restart) return HABITANT_POISONED_EXIT
       // Box 1 of @yrd/core/stale-runner-never-recycles. Same boundary and same
       // reasoning as the poisoned-observer exit above, one step further out: the
       // in-flight run has just finished, so exiting here drains cleanly rather
       // than abandoning work, and the unclean code makes the supervisor re-exec
       // a process that reads the source the checkout has since moved to.
-      const source = await residentSourceHealth(app, io, sourceStall, resident, sourceStaleThreshold)
+      const source = await habitantSourceHealth(app, io, sourceStall, habitant, sourceStaleThreshold)
       sourceStall = source.stall
-      if (source.recycle) return RESIDENT_SOURCE_STALE_EXIT
+      if (source.recycle) return HABITANT_SOURCE_STALE_EXIT
       if (drainRequested()) {
         if (runs.every(Queues.terminal)) {
           // Operator drain finished with no in-flight work left — the one clean stop.
@@ -10896,25 +10896,25 @@ export async function followQueueRuns(
         }
         // The drain has NOT finished (a run is still in flight), yet a hard signal
         // is forcing the stop now. That is "exiting with in-flight work due to a
-        // signal": stay unclean and exit non-zero so the resident breaker records
+        // signal": stay unclean and exit non-zero so the habitant breaker records
         // the failed lifetime. A single drain signal (no scope abort) still loops
         // below and finishes the drain cleanly.
-        if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
+        if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
         await scope.sleep(interval)
         return null
       }
       if (selectors.length > 0) return exit
-      if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
+      if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
       await sleepUntilDrain(scope.sleep(interval), drainSignal)
       heartbeat?.check()
-      return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
+      return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
     } catch (error) {
       // One typed recovery boundary owns the complete selectorless cycle. A
       // journal lock can surface while refreshing, preparing, or committing
       // the run. Multi-tenant races can surface at the same boundaries. All
-      // recognized cases are losable for a resident and fatal for a one-shot;
+      // recognized cases are losable for a habitant and fatal for a one-shot;
       // unknown failures still propagate and stop the runner (fail-loud).
-      const recovery = selectors.length === 0 ? residentCycleRecovery(error) : undefined
+      const recovery = selectors.length === 0 ? habitantCycleRecovery(error) : undefined
       if (recovery === undefined) throw error
       recoveryReporter.report(recovery)
       heartbeat?.check()
@@ -10922,10 +10922,10 @@ export async function followQueueRuns(
         await scope.sleep(interval)
         return null
       }
-      if (scope.signal.aborted) return RESIDENT_INTERRUPTED_EXIT
+      if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
       await sleepUntilDrain(scope.sleep(interval), drainSignal)
       heartbeat?.check()
-      return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
+      return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
     }
   }
 
@@ -11301,7 +11301,7 @@ function changeMergeRefusalDetail(
     return {
       next: inspect,
       guidance: { inspect, resubmit },
-      message: `PR '${pr.id}' latest Run '${latestRun.id}' was rejected; see: ${inspect}; then ${resubmit}`,
+      message: `change '${pr.id}' latest Run '${latestRun.id}' was rejected; see: ${inspect}; then ${resubmit}`,
       run: latestRun.id,
       outcome: "rejected",
     }
@@ -11312,7 +11312,7 @@ function changeMergeRefusalDetail(
     return {
       next: inspect,
       guidance: { inspect, resubmit },
-      message: `PR '${pr.id}' current revision failed required checks; see: ${inspect}; then ${resubmit}`,
+      message: `change '${pr.id}' current revision failed required checks; see: ${inspect}; then ${resubmit}`,
     }
   }
   if (delivery === "submitted" || delivery === "ready") {
@@ -11320,7 +11320,7 @@ function changeMergeRefusalDetail(
     return {
       next: watch,
       guidance: { watch },
-      message: `PR '${pr.id}' is queued${position === undefined ? "" : ` at position ${position}`}; watch: ${watch}`,
+      message: `change '${pr.id}' is queued${position === undefined ? "" : ` at position ${position}`}; watch: ${watch}`,
     }
   }
   if (delivery === "rejected") {
@@ -11329,15 +11329,15 @@ function changeMergeRefusalDetail(
     return {
       next: inspect,
       guidance: { inspect, fixPush },
-      message: `PR '${pr.id}' ${projectedStatus === "needs-author" ? "needs author changes" : "was rejected"}; see: ${inspect}; then ${fixPush}`,
+      message: `change '${pr.id}' ${projectedStatus === "needs-author" ? "needs author changes" : "was rejected"}; see: ${inspect}; then ${fixPush}`,
     }
   }
   if (delivery === "pushed") {
     const submit = `yrd pr submit ${pr.branch}`
-    return { next: submit, guidance: { submit }, message: `PR '${pr.id}' is not queued; submit it: ${submit}` }
+    return { next: submit, guidance: { submit }, message: `change '${pr.id}' is not queued; submit it: ${submit}` }
   }
   const view = `yrd pr view ${pr.id}`
-  return { next: view, guidance: { view }, message: `PR '${pr.id}' is ${delivery}; see: ${view}` }
+  return { next: view, guidance: { view }, message: `change '${pr.id}' is ${delivery}; see: ${view}` }
 }
 
 function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
@@ -11346,13 +11346,13 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
 
 /**
  * The in-toto Statement projection over a durable merge record, for `--json`
- * consumers that want the landing in attestation shape.
+ * consumers that want the merge in attestation shape.
  *
- * `builderId` is the queue that produced the landing. It is deliberately not a
+ * `builderId` is the queue that produced the merge. It is deliberately not a
  * `MergeRecordBody` field — the record is checksummed and the projection is free
  * to change — so it comes from the journal's own run. Both ways the projection
  * can be absent are named rather than dropped from the payload: a refused or
- * canceled attempt minted no landed commit to be the Statement's subject, and a
+ * canceled attempt minted no merged commit to be the Statement's subject, and a
  * record whose run the journal has never seen has no builder to attribute.
  */
 function mergeStatement(
@@ -11368,7 +11368,7 @@ function mergeStatement(
   const statement = mergeRecordToStatement(record, run.queueId)
   return statement === undefined
     ? {
-        statementUnavailable: `merge '${record.merge.id}' is ${record.merge.result}, so it minted no landed commit to attest`,
+        statementUnavailable: `merge '${record.merge.id}' is ${record.merge.result}, so it minted no merged commit to attest`,
       }
     : { statement }
 }
@@ -11384,7 +11384,7 @@ async function explainMerge(
     const proof = await services.mergeRecords.find(selector)
     if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
       // The refusal is correct — a single answer must not come from a partially
-      // verified estate — but it was indistinguishable from "your landing is
+      // verified estate — but it was indistinguishable from "your merge is
       // broken", and for two days it was the SAME text for every selector. So say
       // the one thing that separates those: whether THIS selector's own record
       // verified, and how many records the estate could not prove.
@@ -11413,7 +11413,7 @@ async function explainMerge(
           own === undefined
             ? "  the estate could not be enumerated, so this selector's own record is unknown"
             : own
-              ? `  this selector's OWN record verified — the refusal is the estate's, not this landing's`
+              ? `  this selector's OWN record verified — the refusal is the estate's, not this merge's`
               : `  this selector's own record did not verify either`,
           unprovable === undefined
             ? ""
@@ -11443,7 +11443,7 @@ async function explainMerge(
         }
       }
       // Nothing-new is a first-class outcome, not a defect: the change was already
-      // contained, so "at <commit>" would print the BASE and read as a fresh landing.
+      // contained, so "at <commit>" would print the BASE and read as a fresh merge.
       // Derived here by predicate — the record stores the facts, never the label.
       const nothingNew = mergeJoinedNothing(latest.record)
       const human =
@@ -11527,7 +11527,7 @@ function addExamples(program: CliCommand, name: string): void {
     [`$ ${bay} open --bay fix`, "open and keep a scratch Bay"],
     [`$ ${bay} run @km/test/fix -- make test`, "run one scoped command"],
     [`$ ${bay} in fix`, "open a guest shell in one Bay"],
-    [`$ ${bay} submit`, "submit the current bay as a PR"],
+    [`$ ${bay} submit`, "submit the current bay as a change"],
   ]
   examples.push(
     [`$ ${name} pr list`, "inspect active PRs"],
@@ -11543,12 +11543,12 @@ function addQueueExamples(queue: CliCommand, name: string): void {
   const repository = `${name} --repo <repository>`
   queue.addHelpSection("Examples:", [
     [`$ ${name} queue`, "list active queues"],
-    [`$ ${repository} queue run PR7 --steps check,merge`, "run selected steps for one PR"],
+    [`$ ${repository} queue run PR7 --steps check,merge`, "run selected steps for one change"],
     [`$ ${name} log --base release/2.0`, "show completed work for a base"],
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
     [`$ ${repository} queue pause --reason maintenance --for 30m --allow PR7`, "pause all but selected PRs"],
     [`$ ${repository} queue recover --json`, "recover expired runner leases"],
-    [`$ ${repository} queue run`, "resident follow-runner: keep the default queue moving"],
+    [`$ ${repository} queue run`, "habitant follow-runner: keep the default queue moving"],
   ])
 }
 
@@ -11662,7 +11662,7 @@ function buildProgram(
       runtimeServices = loaded.services
       runtimeIO[RuntimeInvocationCwd] = bootstrap.ambientCwd
       Object.assign(io, loaded.io)
-      if (invocation.posture !== "resident-queue-run" && invocation.posture !== "one-shot-queue-run") {
+      if (invocation.posture !== "habitant-queue-run" && invocation.posture !== "one-shot-queue-run") {
         await runClientDeadMan(runtimeApp, runtimeServices, io, !jsonOutputRequested(program, invocation.args))
       }
     })
@@ -11695,7 +11695,7 @@ function buildProgram(
     .option(
       "--rebuild-index-from-repo",
       "rebuild missing pr/integrated index rows for PRs the journal already knows, from every proven " +
-        "merge record in the repository (cannot recreate a PR entity the journal has never seen)",
+        "merge record in the repository (cannot recreate a change entity the journal has never seen)",
     )
     .option(
       "--retract-unprovable",
@@ -11708,7 +11708,7 @@ function buildProgram(
     .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
   program
     .command("why <selector>")
-    .description("prove one PR landing from repository truth and its journal index")
+    .description("prove one change merge from repository truth and its journal index")
     .option("--repair", "append a missing pr/integrated index row from repository proof")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
@@ -11829,7 +11829,7 @@ function buildProgram(
   bay
     .command("close [selector...]")
     .description("close work bays (checks bay status first; needs --force to override)")
-    .option("--withdraw", "withdraw a live PR before closing")
+    .option("--withdraw", "withdraw a live change before closing")
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
@@ -11844,7 +11844,7 @@ function buildProgram(
     .command("log")
     .description("show queue history, newest first")
     .option("--base <branch>", "scope log to one base branch")
-    .option("--pr <pr>", "scope log to one PR")
+    .option("--pr <pr>", "scope log to one change")
     .option("--failed", "show rejected history only")
     .option("--since <duration>", "show history within a duration")
     .option("-L, --limit <count>", "limit history rows", int, 20)
@@ -11856,10 +11856,10 @@ function buildProgram(
     .command("watch [filter...]")
     .description("alias for queue ls --watch")
     .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope watch to one PR")
+    .option("--pr <pr>", "scope watch to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
-    .option("--latest", "show only the latest Run for each PR")
+    .option("--latest", "show only the latest Run for each change")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
       setExit(await watchQueue(installed(), filters, options, io, installedServices()))
@@ -11884,7 +11884,7 @@ function buildProgram(
   // all four states are bare top-level verbs too.
   //
   // Root `yrd submit` IS this verb (@cto 2026-08-19, cliverbs ruling-a): it
-  // used to be an alias for `yrd pr submit`, which stays untouched as the PR
+  // used to be an alias for `yrd pr submit`, which stays untouched as the change
   // path. The two are the same user intent at two phases — the receiver
   // already dual-writes `refs/yrd/submit/<branch>` on carrier push
   // (`writeSubmitRefForCarrier`, commented "phase 2 re-points readers at this
@@ -11892,7 +11892,7 @@ function buildProgram(
   // `change`/`mr`/`pr` remain one noun for the merge-request RECORD.
   const CHANGE_STATE_HELP = {
     draft: "move branches into draft — the default state, and how a submitted branch is unsubmitted",
-    submit: "approve branches to land, naming each branch's current tip as the approved commit",
+    submit: "approve branches to merge, naming each branch's current tip as the approved commit",
     archive: "shelve branches — deletes each branch, which the receiver files under refs/yrd/archive/",
     ignore: "keep branches out of the queue's view without archiving them",
   } as const satisfies Record<ChangeState, string>
@@ -11986,12 +11986,12 @@ function buildProgram(
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
     .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope the queue timeline to one PR")
+    .option("--pr <pr>", "scope the queue timeline to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
-    .option("--latest", "show only the latest Run for each PR")
+    .option("--latest", "show only the latest Run for each change")
     .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe resident lease, heartbeat, declared-plan freshness, and Git distance")
+    .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
     .option("--json", "emit stable JSON")
     .action(listQueue)
   queue
@@ -11999,12 +11999,12 @@ function buildProgram(
     .description("show the queue timeline")
     .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
     .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope the queue timeline to one PR")
+    .option("--pr <pr>", "scope the queue timeline to one change")
     .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
-    .option("--latest", "show only the latest Run for each PR")
+    .option("--latest", "show only the latest Run for each change")
     .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe resident lease, heartbeat, declared-plan freshness, and Git distance")
+    .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
     .option("--json", "emit stable JSON")
     .action(listQueue)
   queue
@@ -12050,7 +12050,7 @@ function buildProgram(
     .action(async (options) => recoverQueue(installed(), installedServices(), options, io))
   queue
     .command("run [selector...]")
-    .description("drain the queue — resident follow by default; --once or PR selectors for a single pass")
+    .description("drain the queue — habitant follow by default; --once or PR selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
     .option("--once", "drain the default queue exactly once, then exit")
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
@@ -12264,23 +12264,23 @@ function buildProgram(
     .description("edit the issue link, note, title, description, or branch tracking")
     .option("--issue <ref>", "set the tracker-neutral issue reference")
     .option("--note <text>", "set the delivery note")
-    .option("--title <text>", "set the PR subject")
-    .option("--description <text>", "set the PR description body")
+    .option("--title <text>", "set the change subject")
+    .option("--description <text>", "set the change description body")
     .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--untrack", "stop tracking: a stale head again blocks the recut")
+    .option("--untrack", "stop tracking: a stale head again blocks the re-merge")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
-  // Off the help surface (I23: "recut disappears — resubmitting is submit
+  // Off the help surface (I23: "re-merge disappears — resubmitting is submit
   // again"); the verb keeps working for the flows that learned it.
   const remerge = pr
-    .command("recut <selector>", { hidden: true })
-    .description("recut a change revision onto the current base")
+    .command("re-merge <selector>", { hidden: true })
+    .description("re-merge a change revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--ref <ref>", "certify an independently authored candidate commit")
-    .option("--preflight", "classify recut, withdraw, force, or no-op without changing anything")
+    .option("--preflight", "classify re-merge, withdraw, force, or no-op without changing anything")
     .option("--apply", "execute the regenerative verdict computed by --preflight")
     .option("--queue", "submit the fresh revision and request its configured checks")
-    .option("--force", "recut even when the current revision already passed its checks")
+    .option("--force", "re-merge even when the current revision already passed its checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(await remergeChange(installed(), installedServices(), selector, options, io)),
@@ -12289,7 +12289,7 @@ function buildProgram(
   // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
   pr.command("publish <selector>", { hidden: true })
     .description("request credential-bearing publication of one immutable change revision")
-    .option("--queue", "recut and queue the revision after publishing succeeds")
+    .option("--queue", "re-merge and queue the revision after publishing succeeds")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
   pr.command("ready <selector>", { hidden: true })

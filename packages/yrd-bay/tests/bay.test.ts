@@ -589,7 +589,7 @@ describe("withBays", () => {
     expect(stable.bay).toBe("B1")
   })
 
-  it("mints a fresh delivery PR for a new head on a landed branch (Q1), no delivery-nonce branch", async () => {
+  it("mints a fresh delivery PR for a new head on a merged branch (Q1), no delivery-nonce branch", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
     const at = "2026-01-01T00:00:00.000Z"
@@ -609,7 +609,7 @@ describe("withBays", () => {
             ts: at,
             data: {
               pr: "PR1",
-              branch: "topic/landed",
+              branch: "topic/merged",
               base: "main",
               headSha: HEAD_1,
               baseSha: BASE,
@@ -649,19 +649,19 @@ describe("withBays", () => {
       resolveRevision: async () => HEAD_2,
       run: runtime,
     }
-    // Q1: resubmitting the landed branch with a NEW head mints a fresh delivery
+    // Q1: resubmitting the merged branch with a NEW head mints a fresh delivery
     // PR (revision 1) automatically — no hand-made `-delivery-<nonce>` branch,
     // no refusal. The integrated PR1 stays frozen.
-    const minted = await app.bays.submitSelection("topic/landed", submitOptions)
+    const minted = await app.bays.submitSelection("topic/merged", submitOptions)
     expect(changeFacts(minted)).toMatchObject({
       id: "PR2",
-      branch: "topic/landed",
+      branch: "topic/merged",
       delivery: "submitted",
       current: { head: HEAD_2, n: 1 },
     })
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "integrated", current: { head: HEAD_1 } })
     // The branch selector now resolves to the live delivery, not the frozen PR.
-    expect(changeFacts(app.bays.pr("topic/landed"))).toMatchObject({ id: "PR2", delivery: "submitted" })
+    expect(changeFacts(app.bays.pr("topic/merged"))).toMatchObject({ id: "PR2", delivery: "submitted" })
   })
 
   it("refuses a terminal result that does not transition the current PR revision", async () => {
@@ -1451,7 +1451,7 @@ describe("withBays", () => {
     })
   })
 
-  it("projects an exact integrated revision as landed even after its Bay closes", async () => {
+  it("projects an exact integrated revision as merged even after its Bay closes", async () => {
     const identity: { changeId?: string } = {}
     const integrate = command({
       title: "Integrate the lifecycle fixture",
@@ -1482,7 +1482,7 @@ describe("withBays", () => {
     await using app = await createYrd(definition, {
       inject: { journal: createMemoryJournal(), clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
     })
-    const opened = await app.bays.open({ name: "landed-lifecycle", by: "test" })
+    const opened = await app.bays.open({ name: "merged-lifecycle", by: "test" })
     await finishJob(app, opened)
     await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
     await app.bays.submit({ pr: "PR1" })
@@ -1491,7 +1491,7 @@ describe("withBays", () => {
     await app.dispatch(app.commands.fixture.integrate, undefined)
     expect(app.bays.branchLifecycles()[0]).toMatchObject({
       bay: "B1",
-      branch: "issue/landed-lifecycle",
+      branch: "issue/merged-lifecycle",
       headSha: HEAD_1,
       status: "landed",
       landed: { pr: "PR1", revision: 1, at: "2026-01-01T00:00:00.000Z", commit: BASE },
@@ -2838,7 +2838,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     expect(reopened.withdrawnAt).toBeUndefined()
   })
 
-  it("Q1: resubmitting a landed branch at the SAME head is an 'already merged' no-op, not a refusal or a new revision", async () => {
+  it("Q1: resubmitting a merged branch at the SAME head is an 'already merged' no-op, not a refusal or a new revision", async () => {
     const nextId = ids()
     const at = "2026-01-01T00:00:00.000Z"
     const seededCommand = { id: nextId(), op: "fixture.integrated" }
@@ -2856,7 +2856,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
             id: nextId(),
             name: "pr/pushed",
             ts: at,
-            data: { pr: "PR1", branch: "topic/landed", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 },
+            data: { pr: "PR1", branch: "topic/merged", base: "main", headSha: HEAD_1, baseSha: BASE, revision: 1 },
           },
           { id: nextId(), name: "pr/submitted", ts: at, data: { pr: "PR1", revision: 1, headSha: HEAD_1 } },
           {
@@ -2873,9 +2873,9 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     await using app = await createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
 
     const before = await Array.fromAsync(app.events())
-    // Same landed head → returns the frozen integrated PR (with its merge SHA),
+    // Same merged head → returns the frozen integrated PR (with its merge SHA),
     // no throw, no new PR, no new revision, no journal event.
-    const already = await app.bays.submitSelection("topic/landed", directOptions(HEAD_1))
+    const already = await app.bays.submitSelection("topic/merged", directOptions(HEAD_1))
     expect(changeFacts(already)).toMatchObject({
       id: "PR1",
       delivery: "integrated",

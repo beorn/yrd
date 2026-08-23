@@ -1,7 +1,7 @@
 /**
- * @failure The resident runner reports more than one human row per event, buries the failing step's err slug, drops a run-owned failure into silence, repeats scope-bound identity, inlines output spew, or points at an artifact that does not exist.
+ * @failure The habitant runner reports more than one human row per event, buries the failing step's err slug, drops a run-owned failure into silence, repeats scope-bound identity, inlines output spew, or points at an artifact that does not exist.
  * @level l2
- * @consumer @yrd/cli resident follow-runner operators
+ * @consumer @yrd/cli habitant follow-runner operators
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -11,12 +11,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { Event } from "loggily"
 import { stripAnsi } from "silvery"
 import { parseChangeSelector } from "@yrd/bay"
-import { formatResidentLogLine, timelineStatusGlyph } from "../src/runner-timeline.ts"
+import { formatHabitantLogLine, timelineStatusGlyph } from "../src/runner-timeline.ts"
 
 // A fixed event time so generic notice prefixes remain deterministic.
 const AT = Date.parse("2026-07-16T18:40:23.000Z")
 
-// The session-constant identity the resident binds ONCE at its logger scope.
+// The session-constant identity the habitant binds ONCE at its logger scope.
 const RUNNER_SCOPE = { runner: "yrd-cli:42", host: "unimac", pane: "wC:p7" }
 
 let priorTZ: string | undefined
@@ -66,7 +66,7 @@ describe("shared status presentation vocabulary", () => {
   })
 })
 
-describe("resident runner step-row grammar", () => {
+describe("habitant runner step-row grammar", () => {
   const stepPassed = log("yrd:jobs:check", "info", "check succeeded", {
     ...RUNNER_SCOPE,
     lifecycle: "check",
@@ -82,7 +82,7 @@ describe("resident runner step-row grammar", () => {
   })
 
   it("reports a passing step once with the linked-tag grammar and named duration", () => {
-    const plain = formatResidentLogLine(stepPassed, { color: false })
+    const plain = formatHabitantLogLine(stepPassed, { color: false })
     expect(visible(plain)).toBe("[main#324/0-check] finished duration=34s")
     expect(plain?.split("\n").filter(Boolean)).toHaveLength(1)
   })
@@ -90,7 +90,7 @@ describe("resident runner step-row grammar", () => {
   it("keeps lifecycle narration stable across local time zones", () => {
     process.env.TZ = "Asia/Kolkata"
     try {
-      const plain = formatResidentLogLine(stepPassed, { color: false })
+      const plain = formatHabitantLogLine(stepPassed, { color: false })
       expect(visible(plain)).toBe("[main#324/0-check] finished duration=34s")
     } finally {
       process.env.TZ = "UTC"
@@ -98,14 +98,14 @@ describe("resident runner step-row grammar", () => {
   })
 
   it("uses bracketed run identity without exposing an internal namespace", () => {
-    const plain = formatResidentLogLine(stepPassed, { color: false })
+    const plain = formatHabitantLogLine(stepPassed, { color: false })
     expect(plain).toContain("main#324/0-check")
     expect(plain).not.toContain("yrd:jobs:check ")
     expect(plain).not.toContain("yrd:queue:run ")
   })
 
   it("keeps the full structured record in JSONL instead of the human narration row", () => {
-    const plain = formatResidentLogLine(stepPassed, { color: false })
+    const plain = formatHabitantLogLine(stepPassed, { color: false })
     expect(plain).not.toContain('{"')
     expect(plain).not.toContain('"lifecycle"')
     expect(plain).not.toContain("yrd-cli:42")
@@ -153,7 +153,7 @@ describe("resident runner step-row grammar", () => {
     })
 
     try {
-      const runRow = formatResidentLogLine(runStarted, { color: false, artifactRoot })
+      const runRow = formatHabitantLogLine(runStarted, { color: false, artifactRoot })
       expect(visible(runRow)).toBe(
         "[main#324] admitted pr#411.2 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
       )
@@ -162,7 +162,7 @@ describe("resident runner step-row grammar", () => {
       expect(runRow).toContain(`\x1b]8;;${pathToFileURL(runDir).href}\x1b\\[main#324]`)
       expect(runRow).not.toContain("log=")
 
-      const stepRow = formatResidentLogLine(stepStarted, { color: false, artifactRoot })
+      const stepRow = formatHabitantLogLine(stepStarted, { color: false, artifactRoot })
       expect(visible(stepRow)).toBe("[main#324/0-check] starting")
       expect(stepRow).toContain(`\x1b]8;;${pathToFileURL(stepDir).href}\x1b\\[main#324/0-check]`)
       expect(stepRow).not.toContain("log=")
@@ -183,10 +183,10 @@ describe("resident runner step-row grammar", () => {
       outcome: "started",
       completion: true,
     })
-    expect(formatResidentLogLine(completionStarted, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine(completionStarted, { color: false })).toBeUndefined()
   })
 
-  it("does not re-admit a continuing run on a later resident poll", () => {
+  it("does not re-admit a continuing run on a later habitant poll", () => {
     const continuation = log("yrd:queue:run", "debug", "run started", {
       ...RUNNER_SCOPE,
       lifecycle: "run",
@@ -196,11 +196,11 @@ describe("resident runner step-row grammar", () => {
       continuation: true,
       prs: [{ pr: "PR411", revision: 2, issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link" }],
     })
-    expect(formatResidentLogLine(continuation, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine(continuation, { color: false })).toBeUndefined()
   })
 
   it("colorizes a passing step: bold tag, green finished, dim named duration", () => {
-    const colored = formatResidentLogLine(stepPassed, { color: true })
+    const colored = formatHabitantLogLine(stepPassed, { color: true })
     expect(colored).toContain("\x1b[1mmain#324") // bold run ref
     expect(colored).toContain("\x1b[32mfinished") // green verb
     expect(colored).toContain("\x1b[2mduration=34s") // dim duration
@@ -222,11 +222,11 @@ describe("resident runner step-row grammar", () => {
   })
 
   it("reports a failing step as ONE ERROR row with the canonical err slug", () => {
-    const plain = formatResidentLogLine(stepFailed, { color: false })
+    const plain = formatHabitantLogLine(stepFailed, { color: false })
     expect(grammar(plain)).toBe(
       '[main#324/1-merge] failed duration=3.4s err=merge-conflict cause="refused to merge unrelated histories"',
     )
-    const colored = formatResidentLogLine(stepFailed, { color: true })
+    const colored = formatHabitantLogLine(stepFailed, { color: true })
     expect(colored).toContain("\x1b[31mfailed") // red verb
   })
 
@@ -240,7 +240,7 @@ describe("resident runner step-row grammar", () => {
       artifacts: [{ name: "stderr", path: stderr }],
     })
     try {
-      const plain = formatResidentLogLine(withArtifact, { color: false, artifactRoot })
+      const plain = formatHabitantLogLine(withArtifact, { color: false, artifactRoot })
       expect(visible(plain)).toContain("[main#324/1-merge] failed")
       expect(plain).toContain(`\x1b]8;;${pathToFileURL(dirname(stderr)).href}\x1b\\[main#324/1-merge]`)
       expect(plain).not.toContain("log=")
@@ -255,7 +255,7 @@ describe("resident runner step-row grammar", () => {
     const attemptDir = join(artifactRoot, "R324", "1-merge", "attempt-1")
     mkdirSync(attemptDir, { recursive: true })
     try {
-      const plain = formatResidentLogLine(stepFailed, { color: false, artifactRoot })
+      const plain = formatHabitantLogLine(stepFailed, { color: false, artifactRoot })
       expect(visible(plain)).toContain("[main#324/1-merge] failed")
       expect(plain).toContain(`\x1b]8;;${pathToFileURL(attemptDir).href}\x1b\\[main#324/1-merge]`)
       expect(plain).not.toContain("log=")
@@ -268,7 +268,7 @@ describe("resident runner step-row grammar", () => {
   it("never fabricates a link when neither a recorded artifact nor attempt home exists", () => {
     const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-runner-missing-"))
     try {
-      const plain = formatResidentLogLine(stepFailed, { color: false, artifactRoot })
+      const plain = formatHabitantLogLine(stepFailed, { color: false, artifactRoot })
       expect(plain).not.toContain("log=")
       expect(plain).not.toContain("\x1b]8;;")
     } finally {
@@ -282,7 +282,7 @@ describe("resident runner step-row grammar", () => {
       ...(stepFailed.props as Record<string, unknown>),
       artifacts: [{ kind: "stderr", uri }],
     })
-    const plain = formatResidentLogLine(withArtifact, { color: false })
+    const plain = formatHabitantLogLine(withArtifact, { color: false })
     expect(visible(plain)).toContain("[main#324/1-merge] failed")
     expect(visible(plain)).not.toContain("stderr")
     expect(plain).toContain(`\x1b]8;;${uri}`)
@@ -298,7 +298,7 @@ describe("resident runner step-row grammar", () => {
         message: `push failed\n${marker.repeat(1_000)}`,
       },
     })
-    const plain = grammar(formatResidentLogLine(withLongCause, { color: false }))
+    const plain = grammar(formatHabitantLogLine(withLongCause, { color: false }))
     expect(plain).toContain('cause="push failed ')
     expect(plain).toContain("…")
     expect(plain.length).toBeLessThan(500)
@@ -311,7 +311,7 @@ describe("resident runner step-row grammar", () => {
       stdout: "thousands of stdout lines",
       stderr: "thousands of stderr lines",
     })
-    const plain = formatResidentLogLine(withSpew, { color: false, artifactRoot: "/repo/.git/yrd/artifacts" })
+    const plain = formatHabitantLogLine(withSpew, { color: false, artifactRoot: "/repo/.git/yrd/artifacts" })
     expect(plain).not.toContain("thousands of stdout lines")
     expect(plain).not.toContain("thousands of stderr lines")
   })
@@ -321,16 +321,16 @@ describe("resident runner step-row grammar", () => {
       ...stepFailed.props,
       attempt: 2,
     } as Record<string, unknown>)
-    expect(visible(formatResidentLogLine(retry, { color: false }))).toContain("[main#324/1-merge#2] failed")
+    expect(visible(formatHabitantLogLine(retry, { color: false }))).toContain("[main#324/1-merge#2] failed")
   })
 
-  it("uses the shared short slug vocabulary in resident log rows", () => {
+  it("uses the shared short slug vocabulary in habitant log rows", () => {
     const remergeFailure = log("yrd:jobs:merge", "error", "merge failed", {
       ...stepFailed.props,
       error: { code: "recut-certificate-missing", message: "certificate absent" },
     } as Record<string, unknown>)
 
-    expect(grammar(formatResidentLogLine(remergeFailure, { color: false }))).toContain("err=recut-cert-missing")
+    expect(grammar(formatHabitantLogLine(remergeFailure, { color: false }))).toContain("err=recut-cert-missing")
   })
 
   it("carries the composed PR list on batched step start and finish rows", () => {
@@ -358,10 +358,10 @@ describe("resident runner step-row grammar", () => {
       error: undefined,
     } as Record<string, unknown>)
 
-    expect(visible(formatResidentLogLine(started, { color: false }))).toBe(
+    expect(visible(formatHabitantLogLine(started, { color: false }))).toBe(
       "[main#330/1-merge] starting prs=pr#411.2,pr#412.1,pr#413.3",
     )
-    expect(visible(formatResidentLogLine(batch, { color: false }))).toBe(
+    expect(visible(formatHabitantLogLine(batch, { color: false }))).toBe(
       "[main#330/1-merge] failed prs=pr#411.2,pr#412.1,pr#413.3 duration=3m42s err=batch-conflict",
     )
   })
@@ -382,12 +382,12 @@ describe("resident runner step-row grammar", () => {
       error: { code: "stale-pr", message: "pinned base moved" },
       prs: [{ pr: "PR9", revision: 1, branch: "issue/stale" }],
     })
-    const plain = grammar(formatResidentLogLine(runOwned, { color: false }))
+    const plain = grammar(formatHabitantLogLine(runOwned, { color: false }))
     expect(plain).toBe('[main#7] failed duration=120ms err=stale-pr cause="pinned base moved"')
   })
 })
 
-describe("resident runner settlement summary", () => {
+describe("habitant runner settlement summary", () => {
   it("prints the run's final stale class and truthful automatic next action", () => {
     const runSettled = log("yrd:queue:run", "info", "run settled", {
       ...RUNNER_SCOPE,
@@ -400,7 +400,7 @@ describe("resident runner settlement summary", () => {
       error: { code: "stale-base", message: "the queue base advanced" },
       prs: [{ pr: "PR411", revision: 2 }],
     })
-    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+    expect(visible(formatHabitantLogLine(runSettled, { color: false }))).toBe(
       "[main#324] settled status=failed class=stale next=auto-recut pr=PR411.2",
     )
   })
@@ -415,7 +415,7 @@ describe("resident runner settlement summary", () => {
       error: { code: "job-lost", message: "runner stopped renewing the lease" },
       prs: [{ pr: "PR412", revision: 3 }],
     })
-    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+    expect(visible(formatHabitantLogLine(runSettled, { color: false }))).toBe(
       "[main#325] settled status=failed class=timeout next=auto-requeue pr=PR412.3",
     )
   })
@@ -436,7 +436,7 @@ describe("resident runner settlement summary", () => {
       error: { code, message: `${code} fixture` },
       prs: [{ pr: "PR413", revision: 4 }],
     })
-    expect(visible(formatResidentLogLine(runSettled, { color: false }))).toBe(
+    expect(visible(formatHabitantLogLine(runSettled, { color: false }))).toBe(
       `[main#326] settled status=failed class=${statusClass} next=${next} pr=PR413.4`,
     )
   })
@@ -453,8 +453,8 @@ describe("resident runner settlement summary", () => {
       summary: "settled: 1 failed, 1 passed",
       durationMs: 90_000,
     })
-    expect(formatResidentLogLine(composeDone, { color: false })).toBeUndefined()
-    expect(formatResidentLogLine(composeMixed, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine(composeDone, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine(composeMixed, { color: false })).toBeUndefined()
   })
 
   it("suppresses low-level storage chatter (INFO/DEBUG) — it stays in the JSONL sink", () => {
@@ -464,18 +464,18 @@ describe("resident runner settlement summary", () => {
       outcome: "succeeded",
       durationMs: 0,
     })
-    expect(formatResidentLogLine(lock, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine(lock, { color: false })).toBeUndefined()
   })
 })
 
-describe("resident runner notices", () => {
+describe("habitant runner notices", () => {
   it("keeps non-lifecycle DEBUG bookkeeping in JSONL only", () => {
     const processExit = log("yrd:process", "debug", "Command finished.", {
       argv: ["git", "status"],
       stdout: "large command output",
       exitCode: 0,
     })
-    expect(formatResidentLogLine(processExit, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine(processExit, { color: false })).toBeUndefined()
   })
 
   it("surfaces non-lifecycle DEBUG when the operator explicitly requested debug", () => {
@@ -483,7 +483,7 @@ describe("resident runner notices", () => {
       argv: ["git", "status"],
       exitCode: 0,
     })
-    const plain = formatResidentLogLine(processExit, { color: false, includeDebug: true })
+    const plain = formatHabitantLogLine(processExit, { color: false, includeDebug: true })
     expect(plain).toContain("DEBUG yrd:process Command finished.")
     expect(plain).toContain('"exitCode":0')
   })
@@ -494,7 +494,7 @@ describe("resident runner notices", () => {
       outcome: "refused",
       reason: "another run is composing",
     })
-    const plain = formatResidentLogLine(refusal, { color: false })
+    const plain = formatHabitantLogLine(refusal, { color: false })
     expect(plain).toContain("18:40:23 WARN yrd:queue:compose compose refused — queue busy")
     expect(plain).toContain('"reason":"another run is composing"')
     expect(plain).not.toContain("unimac")
@@ -507,7 +507,7 @@ describe("resident runner notices", () => {
       mode: "drain",
       recovery: ["yrd", "--repo", "/srv/code", "queue", "recover"],
     })
-    const plain = formatResidentLogLine(drain, { color: false })
+    const plain = formatHabitantLogLine(drain, { color: false })
     expect(plain).toContain("graceful drain requested")
     expect(plain).toContain('"recovery":["yrd","--repo","/srv/code","queue","recover"]')
     expect(plain).not.toContain("yrd-cli:42")
@@ -526,13 +526,13 @@ describe("resident runner notices", () => {
       diagnostic: "invalid-duration",
       durationMs: 0,
     })
-    const plain = formatResidentLogLine(diag, { color: false })
+    const plain = formatHabitantLogLine(diag, { color: false })
     expect(plain).toContain("check duration invalid")
     expect(plain).not.toContain("finished")
     expect(plain).not.toContain("failed")
   })
 
   it("ignores span events on the human stream", () => {
-    expect(formatResidentLogLine({ kind: "span" } as unknown as Event, { color: false })).toBeUndefined()
+    expect(formatHabitantLogLine({ kind: "span" } as unknown as Event, { color: false })).toBeUndefined()
   })
 })

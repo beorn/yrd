@@ -6,7 +6,7 @@
  * @consumer @i/10-merge-queue/b-derivation-sites — step (b)'s entry seam
  *
  * CHARACTERIZATION, not specification — the (a) pattern applied to (b)'s seam. Every
- * assertion pins what `synthesizeGitlinkWrapper` does TODAY, so changes to this file land
+ * assertion pins what `synthesizeGitlinkWrapper` does TODAY, so changes to this file merge
  * DELIBERATELY, in the same commit as the mechanism. The (b) provisioner lift flipped the
  * one marked case here: the single-update provisioner refusal became multi-update support,
  * and the provisioner now runs for every gitlink-bearing wrapper call.

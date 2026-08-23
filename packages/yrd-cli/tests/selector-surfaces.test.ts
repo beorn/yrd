@@ -346,8 +346,8 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(output.stderr()).toContain("searched 1 change(s)")
   })
 
-  /** A recutter whose output never depends on selector casing. */
-  function stubRecutter(): { recut: YrdCliServices["recut"] } {
+  /** A remerger whose output never depends on selector casing. */
+  function stubRemerger(): { recut: YrdCliServices["recut"] } {
     return {
       recut: {
         recut: async () => ({
@@ -366,7 +366,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     await submitOnePR(app)
     const output = remergeOutputIO()
 
-    expect(await runYrd(app, yrd("pr", "recut", "pr1", "--json"), output.io, stubRecutter()), output.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "recut", "pr1", "--json"), output.io, stubRemerger()), output.stderr()).toBe(0)
     expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
   })
 
@@ -400,7 +400,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     // The sanctioned retry: recut the folded selector back into the queue.
     const requeued = remergeOutputIO()
     expect(
-      await runYrd(app, yrd("pr", "recut", "pr1", "--queue", "--json"), requeued.io, stubRecutter()),
+      await runYrd(app, yrd("pr", "recut", "pr1", "--queue", "--json"), requeued.io, stubRemerger()),
       requeued.stderr(),
     ).toBe(0)
     expect(JSON.parse(requeued.stdout())).toMatchObject({ pr: "PR1" })

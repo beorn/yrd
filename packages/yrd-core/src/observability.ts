@@ -14,7 +14,7 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   settled: "info",
   // One-shot commands report their final error at the CLI boundary. Keeping
   // lifecycle failures at INFO avoids printing the same failure twice; the
-  // resident runner enables INFO and still records every background outcome.
+  // habitant runner enables INFO and still records every background outcome.
   recovered: "warn",
   failed: "info",
 } as const satisfies Record<string, Exclude<LogLevel, "silent">>)

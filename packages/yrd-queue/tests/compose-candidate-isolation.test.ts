@@ -1,5 +1,5 @@
 /**
- * @failure A single poisoned candidate (a stuck run whose drifted post-merge step refuses the advance) aborts the WHOLE selectorless compose and kills the resident, instead of being skipped loud so the rest of the drain proceeds.
+ * @failure A single poisoned candidate (a stuck run whose drifted post-merge step refuses the advance) aborts the WHOLE selectorless compose and kills the habitant, instead of being skipped loud so the rest of the drain proceeds.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -261,7 +261,7 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
     await using replayed = await createApp("deploy-v2", journal, id, log)
 
     // The selectorless compose survives — it does NOT throw the command-refused
-    // that would otherwise kill the resident.
+    // that would otherwise kill the habitant.
     await expect(replayed.queue.run({}, runtime)).resolves.toBeDefined()
 
     const skips = events.filter(
@@ -401,7 +401,7 @@ describe("compose member isolation — one refusing member never zeroes its whol
     expect(refusals[secondHealthy.id]).toBeUndefined()
   })
 
-  it("ejects TWO poisoned members in one bounded drain and still lands the survivors", async () => {
+  it("ejects TWO poisoned members in one bounded drain and still merges the survivors", async () => {
     const poisoned: string[] = []
     await using app = await createApp(
       "deploy-v1",

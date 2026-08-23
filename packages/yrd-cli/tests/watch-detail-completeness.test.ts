@@ -3,7 +3,7 @@
  *
  * Layered on the run→tabs→step reorder: the batched members' subject / reviews
  * / comments / check-requests / revision history, the integration proof detail
- * beyond the landed SHA (REWRITES/SUBMODULES), and the per-step artifacts label
+ * beyond the merged SHA (REWRITES/SUBMODULES), and the per-step artifacts label
  * + checkpoint. Every timestamp uses the local detail clock (never a raw ISO
  * string); the PR facts set `bgConflict="ignore"` on author-authored strings.
  */
@@ -34,11 +34,11 @@ const rewrite: SourceRewrite = {
   candidateRef: "refs/yrd/candidate/R4",
   patchId: "e".repeat(40),
   rangeDiff: "=",
-  payload: ["feat: land the durable patch"],
+  payload: ["feat: merge the durable patch"],
 }
 
 function integratedRunData(): QueueShowData {
-  const pr = fixturePr("PR4", "integrated", "2026-07-13T10:30:00.000Z", "Land the durable patch")
+  const pr = fixturePr("PR4", "integrated", "2026-07-13T10:30:00.000Z", "Merge the durable patch")
   const run = fixtureRun("R4", [pr], "passed", "2026-07-13T10:40:00.000Z", {
     finishedAt: "2026-07-13T10:55:00.000Z",
     steps: [
@@ -63,7 +63,7 @@ function integratedRunData(): QueueShowData {
 }
 
 describe("watch detail completeness — run-level integration proof detail (item J)", () => {
-  it("keeps the landing sentence exact and carries REWRITES as a separate fact", () => {
+  it("keeps the merge sentence exact and carries REWRITES as a separate fact", () => {
     const app = createRenderer({ cols: 120, rows: 30 })(
       createElement(QueueShowView, { data: integratedRunData(), compact: true, section: "run" }),
     )

@@ -58,12 +58,12 @@ describe("uncarriedLine", () => {
     expect(uncarriedLine(observed(3, 60_000, 4784), NOW)).toContain("3 of 4784 refs")
   })
 
-  it("reports refs without retained update clocks on the resident rail", () => {
+  it("reports refs without retained update clocks on the habitant rail", () => {
     expect(uncarriedLine(observed(3, 60_000, 4784, 12), NOW)).toContain("12 refs without retained update clocks")
   })
 
-  it("does not interpret an old resident's missing clock field as complete coverage", () => {
-    // The shape a pre-coverage resident's status.json still deserializes to:
+  it("does not interpret an old habitant's missing clock field as complete coverage", () => {
+    // The shape a pre-coverage habitant's status.json still deserializes to:
     // no clock counts at all. Minting is the repair — it is what stops that
     // record reaching a renderer as a bare count.
     const oldObservation = uncarriedObservation({
@@ -108,7 +108,7 @@ describe("uncarriedLine", () => {
     expect(line).toContain("<1% of 1000 candidates measurable")
   })
 
-  it("does not claim a candidate population an older resident never recorded", () => {
+  it("does not claim a candidate population an older habitant never recorded", () => {
     const line = uncarriedLine(observed(3, 60_000, 4784, 12), NOW)
     expect(line).toContain("against an unknown candidate population")
     expect(line).not.toContain("candidates measurable")
@@ -132,7 +132,7 @@ describe("uncarriedLine", () => {
 describe("uncarriedObservation — coverage travels ON the record, not beside it", () => {
   it("mints the floor as a FIELD, so a JSON emission cannot serialize the count without it", () => {
     // Five machine consumers serialize this object (queue.uncarried --json,
-    // queue.list, the watch stream, RunnerHealthFacts, the resident heartbeat).
+    // queue.list, the watch stream, RunnerHealthFacts, the habitant heartbeat).
     // Every one of them used to carry a bare `count`. Making coverage a field
     // rather than a call-site concern fixes them all by construction.
     const observation = uncarriedObservation({
@@ -202,7 +202,7 @@ describe("uncarriedFloorCount", () => {
   })
 
   it("treats unknown coverage as a floor, never as complete coverage", () => {
-    // An older resident that cannot report its clock gap has not proven it had
+    // An older habitant that cannot report its clock gap has not proven it had
     // none; assuming completeness is how a partial sweep reads as a total.
     expect(uncarriedFloorCount(7, undefined)).toBe("≥7")
   })

@@ -38,8 +38,8 @@ const MERGED_SHA = "b".repeat(40)
 const BASE_TREE = "e".repeat(40)
 const OTHER_TREE = "f".repeat(40)
 const OTHER_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
-const RECUT_HEAD = "9".repeat(40)
-const RECUT_TREE = "8".repeat(40)
+const REMERGE_HEAD = "9".repeat(40)
+const REMERGE_TREE = "8".repeat(40)
 const RECORDED_TREE = "1".repeat(40)
 const LIVE_TREE = "2".repeat(40)
 
@@ -170,13 +170,13 @@ function trackGit(branchHead: () => string): PruneGitFacts {
         ref === RECORDED_HEAD ||
         ref === LIVE_HEAD ||
         ref === NEXT_LIVE_HEAD ||
-        ref === RECUT_HEAD
+        ref === REMERGE_HEAD
         ? ref
         : undefined
     },
     isAncestor: () => false,
     // The merged tree differs from the target tip's tree, so the payload is
-    // genuinely unlanded: the preflight verdict is RECUT, not SUBSUMED.
+    // genuinely unmerged: the preflight verdict is RECUT, not SUBSUMED.
     mergeTree: () => OTHER_TREE,
     treeOf: (sha) => {
       if (sha === TARGET_BASE_SHA) return BASE_TREE
@@ -322,9 +322,9 @@ describe("implicit recut of a moved branch", () => {
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: LIVE_HEAD })
 
     const remerge = vi.fn(async () => ({
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))
@@ -389,7 +389,7 @@ describe("implicit recut of a moved branch", () => {
     const remerge = vi.fn(async () => ({
       headSha: LIVE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: true,
     }))
@@ -448,12 +448,12 @@ describe("implicit recut of a moved branch", () => {
   })
 })
 
-describe("resident merge-into-latest", () => {
+describe("habitant merge-into-latest", () => {
   it("certifies a tracked branch push directly and queues the frozen recut without an operator turn", async () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
     await submitBranch(app, () => head, "--track")
-    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-resident-r1" })
+    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-habitant-r1" })
     head = LIVE_HEAD
 
     const output = outputIO(() => head)
@@ -471,9 +471,9 @@ describe("resident merge-into-latest", () => {
       },
     }
     const remerge = vi.fn(async () => ({
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))
@@ -498,7 +498,7 @@ describe("resident merge-into-latest", () => {
       track: true,
       revs: [
         { n: 1, head: RECORDED_HEAD },
-        { n: 2, head: RECUT_HEAD, recut: { fromRevision: 1, certificate: "frozen-code-carrier-v1" } },
+        { n: 2, head: REMERGE_HEAD, recut: { fromRevision: 1, certificate: "frozen-code-carrier-v1" } },
       ],
     })
     expect(output.stderr()).toBe("")
@@ -519,9 +519,9 @@ describe("resident merge-into-latest", () => {
 
     const output = outputIO(() => head)
     const remerge = vi.fn(async () => ({
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))
@@ -580,9 +580,9 @@ describe("resident merge-into-latest", () => {
         })
       }
       return {
-        headSha: RECUT_HEAD,
+        headSha: REMERGE_HEAD,
         baseSha: TARGET_BASE_SHA,
-        treeSha: RECUT_TREE,
+        treeSha: REMERGE_TREE,
         patchId: OTHER_PATCH_ID,
         unchanged: false,
       }
@@ -611,7 +611,7 @@ describe("resident merge-into-latest", () => {
     expect(app.bays.pr("PR1")?.revs).toMatchObject([
       { n: 1, head: RECORDED_HEAD },
       { n: 2, head: NEXT_LIVE_HEAD },
-      { n: 3, head: RECUT_HEAD },
+      { n: 3, head: REMERGE_HEAD },
     ])
   })
 
@@ -669,9 +669,9 @@ describe("resident merge-into-latest", () => {
     const remerge = vi.fn(async () => {
       await app.bays.editPr({ pr: "PR1", track: false })
       return {
-        headSha: RECUT_HEAD,
+        headSha: REMERGE_HEAD,
         baseSha: TARGET_BASE_SHA,
-        treeSha: RECUT_TREE,
+        treeSha: REMERGE_TREE,
         patchId: OTHER_PATCH_ID,
         unchanged: false,
       }
@@ -726,18 +726,18 @@ describe("resident merge-into-latest", () => {
       reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
     }
     const broadCancel = vi.fn(app.queue.cancel.bind(app.queue))
-    const residentApp = { ...app, queue: { ...app.queue, cancel: broadCancel } }
+    const habitantApp = { ...app, queue: { ...app.queue, cancel: broadCancel } }
     const remerge = vi.fn(async () => ({
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))
 
     await expect(
       runInternals.refreshTrackedQueueRevisions(
-        residentApp,
+        habitantApp,
         { process, recut: { recut: remerge } } as YrdCliServices,
         outputIO(() => head).io,
       ),
@@ -766,18 +766,18 @@ describe("resident merge-into-latest", () => {
       ...app.bays,
       submit,
     }
-    const residentApp = { ...app, bays }
+    const habitantApp = { ...app, bays }
     const remerge = vi.fn(async () => ({
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))
 
     await expect(
       runInternals.refreshTrackedQueueRevisions(
-        residentApp,
+        habitantApp,
         { recut: { recut: remerge } } as YrdCliServices,
         outputIO(() => head).io,
       ),
@@ -793,7 +793,7 @@ describe("resident merge-into-latest", () => {
     expect(remerge).toHaveBeenCalledWith(
       expect.objectContaining({ revision: 1, headSha: RECORDED_HEAD, proposedHeadSha: LIVE_HEAD }),
     )
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: RECUT_HEAD })
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: REMERGE_HEAD })
   })
 
   it("does not record stale tracking intent when --untrack wins during branch observation", async () => {
@@ -910,16 +910,16 @@ describe("resident merge-into-latest", () => {
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 2,
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       reviewCarried: false,
       expectedCurrent: { revision: 2, headSha: LIVE_HEAD },
     })
     await app.bays.submit({ pr: "PR1" })
-    head = RECUT_HEAD
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: RECUT_HEAD })
+    head = REMERGE_HEAD
+    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: REMERGE_HEAD })
     expect(app.bays.checksRequested("PR1")).toBe(false)
 
     const output = outputIO(() => head)
@@ -953,7 +953,7 @@ describe("resident merge-into-latest", () => {
         status: "deferred",
         pr: "PR1",
         revision: 3,
-        headSha: RECUT_HEAD,
+        headSha: REMERGE_HEAD,
         code: "recut-current-changed",
       },
     ])
@@ -991,9 +991,9 @@ describe("resident merge-into-latest", () => {
     head = LIVE_HEAD
     const output = outputIO(() => head)
     const remerge = vi.fn(async () => ({
-      headSha: RECUT_HEAD,
+      headSha: REMERGE_HEAD,
       baseSha: TARGET_BASE_SHA,
-      treeSha: RECUT_TREE,
+      treeSha: REMERGE_TREE,
       patchId: OTHER_PATCH_ID,
       unchanged: false,
     }))

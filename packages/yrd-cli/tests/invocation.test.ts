@@ -74,7 +74,7 @@ describe("normalizeYrdInvocation", () => {
   it.each([
     {
       argv: ["/usr/bin/bun", "/repo/bin/yrd", "queue", "run"],
-      expected: { args: ["queue", "run"], posture: "resident-queue-run", queueRunMode: "follow" },
+      expected: { args: ["queue", "run"], posture: "habitant-queue-run", queueRunMode: "follow" },
     },
     {
       argv: ["yrd", "queue", "run", "PR7"],

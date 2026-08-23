@@ -372,7 +372,7 @@ export function isNonCheckableChangeState(state: ChangeDeliveryState): boolean {
 /**
  * A check request was refused because the PR's current status does not permit
  * it. Always thrown, never returned, so a genuine caller error still fails
- * loud. The carried `prId`/`status` let a resident, multi-tenant runner tell a
+ * loud. The carried `prId`/`status` let a habitant, multi-tenant runner tell a
  * losable concurrent-terminal race (a peer withdrew/canceled/integrated/already-landed the PR
  * between the runner's compose snapshot and its check request — see
  * isConcurrentCheckabilityConflict) apart from a real caller error, without
@@ -394,7 +394,7 @@ export class ChangeCheckabilityConflict extends Error {
  * True when an error is a ChangeCheckabilityConflict whose PR had already reached a
  * terminal status — i.e. a concurrent writer withdrew/canceled/integrated/already-landed the
  * PR between a runtime's compose snapshot and its check request. This is a
- * normal, losable race for a long-lived resident runner: skip this cycle and
+ * normal, losable race for a long-lived habitant runner: skip this cycle and
  * continue; the next cycle re-snapshots without the departed PR and composes
  * the remaining runnable ones.
  */
@@ -457,7 +457,7 @@ const ChangeAdmissionBaseSchema = z.object({
    * base can consume no authority recorded against that exact base. Requiring a
    * positive count made that ordinary state unrepresentable: the drain built a
    * record its own fact schema refused, and `yrd queue run` died on a raw Zod
-   * dump every pass with the fleet's only landing path shut behind it.
+   * dump every pass with the fleet's only merge path shut behind it.
    *
    * Zero must also stay distinct from absent. `requestCount ?? 1` reads absent
    * as one legacy authority, so recording zero by OMITTING the field would
@@ -551,7 +551,7 @@ export const ChangeRemergeProofSchema = z
     treeSha: GitShaSchema,
     reviewCarried: z.boolean(),
     /** Explicit proof contract for a frozen proposed code carrier. Mechanical
-     * base-refresh recuts and legacy journal rows use their existing proof. */
+     * base-refresh re-merges and legacy journal rows use their existing proof. */
     certificate: ChangeRemergeCertificateSchema.optional(),
     /** Durable non-ancestral identity mapping for the root and any rewritten
      * submodule heads. Missing only while replaying pre-provenance journals. */
@@ -573,7 +573,7 @@ export type ChangeRev = Readonly<{
   props?: ChangeProps
   composition?: CompositionV1
   recut?: ChangeRemergeProof
-  /** Admission is a verdict about this immutable revision, not a landing
+  /** Admission is a verdict about this immutable revision, not a merge
    * attempt. A later base revalidation replaces it on the same revision. */
   admission?: ChangeAdmission
 }> &
@@ -673,10 +673,10 @@ export type Change = Readonly<{
   state: "open" | "closed"
   /** answers: Has the rebuildable index recorded this PR as merged? tense: historical. */
   merged: boolean
-  /** Opt-in "merge into latest": when true, the resident observes the live
+  /** Opt-in "merge into latest": when true, the habitant observes the live
    * branch before each Queue cycle. A moved head is recorded as a revision,
    * preflighted, and prepared for Queue admission when its verdict permits; a
-   * manual implicit recut uses the same recording rule. Each run still executes
+   * manual implicit re-merge uses the same recording rule. Each run still executes
    * one frozen recorded revision. Absent means untracked — the reproducibility
    * refusal stands. */
   track?: boolean
@@ -686,7 +686,7 @@ export type Change = Readonly<{
   comments: readonly ChangeComment[]
   checkRequests: readonly ChangeCheckRequest[]
   /** Current requested-reviewer set (latest pr/review-requested fact wins;
-   * revision-independent, so recuts and new revisions keep the request).
+   * revision-independent, so re-merges and new revisions keep the request).
    * Optional like `regressions`: absent means no request was ever recorded,
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
@@ -877,7 +877,7 @@ export function reviewState(pr: Change): ChangeReviewState {
 /** Requested-reviewer projection, never a stored status: a submitted PR whose
  * requested set is non-empty and lacks a current-revision verdict from the
  * given reviewer (or, with no reviewer argument, from any requested reviewer).
- * Verdicts are revision-bound while requests are not, so a recut without a
+ * Verdicts are revision-bound while requests are not, so a re-merge without a
  * carried review naturally reopens this projection. */
 export function needsReview(pr: Change, reviewer?: string): boolean {
   const delivery = changeDeliveryState(pr)
@@ -892,7 +892,7 @@ export function needsReview(pr: Change, reviewer?: string): boolean {
 }
 
 /** Mechanically certified revision ancestry for one logical PR payload.
- * Ordinary authored revisions start a new lineage; recuts retain the source
+ * Ordinary authored revisions start a new lineage; re-merges retain the source
  * revision through their persisted `fromRevision` proof. */
 export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr).n): readonly ChangeRev[] {
   const byRevision = new Map(pr.revs.map((candidate) => [candidate.n, candidate]))
@@ -935,7 +935,7 @@ export function checksRequested(pr: Change): boolean {
  *
  * A request asks "check this tree". The tree is `headSha`, and nothing else
  * here identifies it. The revision ordinal does not: a mechanical rebuild that
- * lands on byte-identical content mints a new ordinal while the head — and so
+ * merges on byte-identical content mints a new ordinal while the head — and so
  * the meaning of the request — is unchanged. Keying on the ordinal made such a
  * rebuild discard the request, so the carrier fell out of the queue, the runner
  * re-requested, admission passed, and the next rebuild discarded it again.
@@ -986,7 +986,7 @@ export const BranchUnsubmitSchema = z
   .strict()
 export type BranchUnsubmit = z.infer<typeof BranchUnsubmitSchema>
 
-/** A projected, still-standing submit ref: what was approved, for which base, and when the fact landed. */
+/** A projected, still-standing submit ref: what was approved, for which base, and when the fact merged. */
 export type ProjectedBranchSubmit = Readonly<{
   sha: string
   base: string

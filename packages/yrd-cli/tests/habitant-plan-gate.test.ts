@@ -1,5 +1,5 @@
 /**
- * @failure A resident keeps starting Runs after the base tip's declared plan moved under it, or unwinds for an in-place reload without recording why in its heartbeat — so the cause of the control transfer is lost and the supervisor reads a silent restart.
+ * @failure A habitant keeps starting Runs after the base tip's declared plan moved under it, or unwinds for an in-place reload without recording why in its heartbeat — so the cause of the control transfer is lost and the supervisor reads a silent restart.
  * @level l2
  * @consumer @yrd/cli host
  */
@@ -9,8 +9,8 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { raiseFailure } from "@yrd/core"
 import { uncarriedLine } from "../src/queue-status-view.tsx"
-import { followQueueRuns, requestYrdRuntimeReload, residentRunnerStatus } from "../src/run.ts"
-import { createResidentHarness } from "./support/resident-harness.ts"
+import { followQueueRuns, requestYrdRuntimeReload, habitantRunnerStatus } from "../src/run.ts"
+import { createHabitantHarness } from "./support/habitant-harness.ts"
 
 const roots: string[] = []
 
@@ -30,7 +30,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 async function queueRepository(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-resident-plan-gate-"))
+  const root = await mkdtemp(join(tmpdir(), "yrd-habitant-plan-gate-"))
   roots.push(root)
   const repo = join(root, "repo")
   await git(root, "init", "-q", "-b", "main", repo)
@@ -42,13 +42,13 @@ async function queueRepository(): Promise<string> {
   return repo
 }
 
-describe("the resident's per-cycle declared-plan gate", () => {
+describe("the habitant's per-cycle declared-plan gate", () => {
   it("re-reads the declared plan before every working cycle, gate before run", async () => {
     let gateCalls = 0
-    const harness = createResidentHarness({ run: async () => [] })
+    const harness = createHabitantHarness({ run: async () => [] })
     const gate = async (): Promise<void> => {
       gateCalls += 1
-      // A config change lands between the first and the second cycle.
+      // A config change merges between the first and the second cycle.
       if (gateCalls >= 2) throw new Error("declared plan moved mid-watch")
     }
     await expect(followQueueRuns(harness.app, [], { json: true, interval: 1 }, harness.io, gate)).rejects.toThrow(
@@ -60,10 +60,10 @@ describe("the resident's per-cycle declared-plan gate", () => {
     expect(harness.runCalls()).toBe(1)
   })
 
-  it("records the stale-plan finding in the resident heartbeat before unwinding for reload", async () => {
+  it("records the stale-plan finding in the habitant heartbeat before unwinding for reload", async () => {
     const repo = await queueRepository()
     const headSha = await git(repo, "rev-parse", "HEAD")
-    const harness = createResidentHarness({ run: async () => [] })
+    const harness = createHabitantHarness({ run: async () => [] })
     Object.assign(harness.io, {
       cwd: repo,
       repositoryRoot: repo,
@@ -80,10 +80,10 @@ describe("the resident's per-cycle declared-plan gate", () => {
         requestYrdRuntimeReload(finding, 1)
       }),
     ).rejects.toMatchObject({ name: "YrdRuntimeReloadRequest", reloads: 1 })
-    await expect(residentRunnerStatus(repo)).resolves.toMatchObject({
+    await expect(habitantRunnerStatus(repo)).resolves.toMatchObject({
       clean: false,
       queueProgress: { state: "stalled", observedAt: expect.any(String), findings: [finding] },
-      // The plan this resident built rides every heartbeat, so the supervisor
+      // The plan this habitant built rides every heartbeat, so the supervisor
       // probe can compare it against the tip without a runtime of its own.
       installedPlan: {
         batchSize: 1,
@@ -98,7 +98,7 @@ describe("the resident's per-cycle declared-plan gate", () => {
   it("records the reload-exhausted refusal in the heartbeat before the unclean exit", async () => {
     const repo = await queueRepository()
     const headSha = await git(repo, "rev-parse", "HEAD")
-    const harness = createResidentHarness({ run: async () => [] })
+    const harness = createHabitantHarness({ run: async () => [] })
     Object.assign(harness.io, {
       cwd: repo,
       repositoryRoot: repo,
@@ -112,7 +112,7 @@ describe("the resident's per-cycle declared-plan gate", () => {
         raiseFailure("refusal", "installed-plan-reload-exhausted", message)
       }),
     ).rejects.toMatchObject({ failure: { code: "installed-plan-reload-exhausted" } })
-    await expect(residentRunnerStatus(repo)).resolves.toMatchObject({
+    await expect(habitantRunnerStatus(repo)).resolves.toMatchObject({
       clean: false,
       queueProgress: {
         state: "stalled",
@@ -133,17 +133,17 @@ describe("the resident's per-cycle declared-plan gate", () => {
       implementationSource: `git:${"a".repeat(40)}`,
     }
     await writeFile(statusPath, `${JSON.stringify({ ...baseStatus, installedPlan: { batchSize: 1, steps: [] } })}\n`)
-    await expect(residentRunnerStatus(repo)).rejects.toMatchObject({
+    await expect(habitantRunnerStatus(repo)).rejects.toMatchObject({
       failure: { code: "resident-runner-status-invalid" },
     })
-    // Absent is a real answer: a resident older than the field.
+    // Absent is a real answer: a habitant older than the field.
     await writeFile(statusPath, `${JSON.stringify(baseStatus)}\n`)
-    await expect(residentRunnerStatus(repo)).resolves.not.toHaveProperty("installedPlan")
+    await expect(habitantRunnerStatus(repo)).resolves.not.toHaveProperty("installedPlan")
   })
 })
 
-describe("resident status round-trip", () => {
-  it("round-trips old and current uncarried observations through resident status", async () => {
+describe("habitant status round-trip", () => {
+  it("round-trips old and current uncarried observations through habitant status", async () => {
     const repo = await queueRepository()
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     await mkdir(join(statusPath, ".."), { recursive: true })
@@ -162,7 +162,7 @@ describe("resident status round-trip", () => {
       })}\n`,
       "utf8",
     )
-    const current = await residentRunnerStatus(repo)
+    const current = await habitantRunnerStatus(repo)
     // The stored record carries the raw counts; the READ re-mints its coverage,
     // so a status.json written before coverage existed still cannot reach a
     // renderer — or a JSON consumer — as a bare count
@@ -187,7 +187,7 @@ describe("resident status round-trip", () => {
       })}\n`,
       "utf8",
     )
-    const legacy = await residentRunnerStatus(repo)
+    const legacy = await habitantRunnerStatus(repo)
     expect(uncarriedLine(legacy?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain("push-clock coverage unknown")
 
     for (const uncarried of [
@@ -195,7 +195,7 @@ describe("resident status round-trip", () => {
       { count: 40, scanned: 50, missingUpdateClocks: 20, observedAt: "2026-08-13T20:00:30.000Z" },
     ]) {
       await writeFile(statusPath, `${JSON.stringify({ ...baseStatus, uncarried })}\n`, "utf8")
-      await expect(residentRunnerStatus(repo)).rejects.toMatchObject({
+      await expect(habitantRunnerStatus(repo)).rejects.toMatchObject({
         failure: { code: "resident-runner-status-invalid" },
       })
     }

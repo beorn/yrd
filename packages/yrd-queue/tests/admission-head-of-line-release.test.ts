@@ -16,11 +16,11 @@ const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
-/** The resident runner always installs `continueAdmissions` (it is how a drain
+/** The habitant runner always installs `continueAdmissions` (it is how a drain
  * signal interrupts the loop), and that is exactly the shape that admits ONE PR
  * per drain turn. A one-shot `queue run` leaves it undefined and dispatches the
  * whole queue in one turn, so only this shape can wedge head-of-line. */
-const RESIDENT = { runner: "local", leaseMs: 60_000, continueAdmissions: () => true }
+const HABITANT = { runner: "local", leaseMs: 60_000, continueAdmissions: () => true }
 
 function ids(initial = 0): () => string {
   let value = initial
@@ -142,7 +142,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
       await submitBranch(app, "issue/ready-three"),
     ]
 
-    await app.queue.run({}, RESIDENT)
+    await app.queue.run({}, HABITANT)
 
     const state = app.state()
     expect(state.bays.prs[head.id]?.integration).toBeUndefined()
@@ -163,7 +163,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
     refused.add(head.id)
     await submitBranch(app, "issue/ready-one")
 
-    await app.queue.run({}, RESIDENT)
+    await app.queue.run({}, HABITANT)
 
     // One cycle, one streak increment — releasing the head must not turn a single
     // refusal into a per-turn retry loop against the same PR.
@@ -185,7 +185,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
     for (const pr of poisoned) refused.add(pr.id)
     const trailing = await submitBranch(app, "issue/ready-last")
 
-    await app.queue.run({}, RESIDENT)
+    await app.queue.run({}, HABITANT)
 
     const state = app.state()
     for (const pr of poisoned) expect(state.bays.prs[pr.id]?.integration).toBeUndefined()
@@ -199,6 +199,6 @@ describe("admission head-of-line release — a refused PR never blocks the ready
       refused.add((await submitBranch(app, branch)).id)
     }
 
-    await expect(app.queue.run({}, RESIDENT)).resolves.toEqual([])
+    await expect(app.queue.run({}, HABITANT)).resolves.toEqual([])
   })
 })

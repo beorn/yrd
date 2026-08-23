@@ -1,5 +1,5 @@
 /**
- * @failure Two bun binaries on one host produced two revision families that the resident and operators swapped forever (22374).
+ * @failure Two bun binaries on one host produced two revision families that the habitant and operators swapped forever (22374).
  * @level l1
  * @consumer @yrd/queue step-revision-drift
  */
@@ -24,7 +24,7 @@ function revision(toolchain: ToolchainFingerprint): string {
  * A step's identity must depend on what the step DOES, not on which launcher
  * happened to invoke `yrd`. The live specimen: the same host carried
  * `bun 1.3.14` on operator shells and `bun 1.3.13` on the supervisor's frozen
- * PATH, so the resident and every operator computed different revisions for
+ * PATH, so the habitant and every operator computed different revisions for
  * byte-identical config and overwrote each other's installed baseline on every
  * drain. The visible symptom was `config-drift` — naming the config, which had
  * never changed.

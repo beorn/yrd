@@ -1,6 +1,6 @@
 /**
  * UNCARRIED refs: deciding whether a ref that reached the remote and never
- * became a carrier is genuinely stranded.
+ * became a change is genuinely stranded.
  *
  * The name is deliberate, and not the one the bead uses. "Unsubmitted" is
  * already taken on the status view, where it means a REGISTERED PR sitting at
@@ -27,12 +27,12 @@ export type PushedRefFact = Readonly<{
   tipSha: string
   /** Clone-local observation/update time of the ref, epoch ms. */
   observedAtMs: number
-  /** A carrier (PR) already exists for this ref. */
+  /** A change record already exists for this ref. */
   carried: boolean
   /** Commits on this ref with no patch-equivalent counterpart on the base. */
   uniqueCommits: number
   /** Commits already applied to the base under a different sha — a regenerated
-   * carrier's contribution. Ancestry cannot see these; patch-equivalence can. */
+   * regenerated merged result's contribution. Ancestry cannot see these; patch-equivalence can. */
   equivalentCommits: number
   payloadKind: PayloadKind
   pinDirection: PinDirection
@@ -49,7 +49,7 @@ export type PushedRefFact = Readonly<{
  *
  * `gitlink-only` matters because commit counts are MEANINGLESS for it: at the
  * superproject level a submodule pointer bump is a unique patch by
- * construction, even when the content behind the pointer already landed or is
+ * construction, even when the content behind the pointer already merged or is
  * older than trunk's. Cherry counts pointers, not payload.
  */
 export type PayloadKind = "content" | "gitlink-only"
@@ -102,7 +102,7 @@ export function compareRevisions(left: string, right: string): number {
  *
  * `forward` — the branch pin contains trunk's, a real advance.
  * `aligned` — pins are equal; nothing to carry.
- * `backward` — trunk's pin contains the branch's, so landing it rolls back.
+ * `backward` — trunk's pin contains the branch's, so merge it rolls back.
  * `diverged` — neither contains the other; unsafe for the same reason.
  * `none` — the ref touches no gitlinks.
  *
@@ -129,7 +129,7 @@ export function compareRevisions(left: string, right: string): number {
 export type PinDirection = "forward" | "aligned" | "backward" | "diverged" | "none"
 
 /**
- * `rescue` — real unlanded work that trunk can safely take.
+ * `rescue` — real unmerged work that trunk can safely take.
  * `rebase-required` — carrying this as-is would revert trunk; its author must
  * rebase. Emphatically NOT a rescue: a finding that says "carry this" about a
  * backward pin causes the exact loss the rail exists to prevent.
@@ -172,12 +172,12 @@ function formatAge(ms: number): string {
 
 /**
  * Judge one pushed ref. Returns a finding only when every condition holds:
- * no carrier, past the TTL, inside the age bound, and carrying work that has
- * not landed by ANY route.
+ * no change record, past the TTL, inside the age bound, and carrying work that has
+ * not merged by ANY route.
  *
- * The landedness half is not an optimisation. Measured over the 24-hour window
+ * The mergedness half is not an optimisation. Measured over the 24-hour window
  * this rail would actually watch, seven of eleven uncarried refs had already
- * landed — six ancestral and one regenerated with all six commits applied.
+ * merged — six ancestral and one regenerated with all six commits applied.
  * Reporting those is not a smaller problem than missing a stranded branch; it
  * is the problem that kills the rail.
  *
@@ -218,8 +218,8 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
   })
 
   // DIVERGED outranks every commit count. Each side holds something the other
-  // lacks, so carrying it as-is drops trunk's half however much unlanded work
-  // rides along. Reporting "N unlanded commits" about such a ref invites exactly
+  // lacks, so carrying it as-is drops trunk's half however much unmerged work
+  // rides along. Reporting "N unmerged commits" about such a ref invites exactly
   // the carry that loses trunk's work.
   if (fact.pinDirection === "diverged") {
     return build(
@@ -235,30 +235,30 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
   // `backward` is silence, not a warning, and getting that wrong is how this
   // rail generates its own false alarms: backward means trunk CONTAINS the
   // branch's pin, so there is nothing to carry and nothing to rebase — the work
-  // is already home. A sweep that flags every spent carrier as a revert risk
+  // is already home. A sweep that flags every spent change as a revert risk
   // reports the whole fleet's history as danger.
   if (fact.payloadKind === "gitlink-only") {
     if (fact.pinDirection !== "forward") return undefined
     return build("rescue", "it advances a submodule pin that trunk does not yet carry")
   }
 
-  // Content payload: landedness decides first. Zero unlanded commits means SPENT
-  // — the work integrated, and the queue regenerating the carrier is why the tip
+  // Content payload: mergedness decides first. Zero unmerged commits means SPENT
+  // — the work integrated, and the queue regenerating the merged result is why the tip
   // is not ancestral. That is not a stranded branch.
   if (fact.uniqueCommits === 0) return undefined
 
-  // Real unlanded content, but the pins would roll back. The content is worth
+  // Real unmerged content, but the pins would roll back. The content is worth
   // rescuing; THIS BRANCH is not the way to do it.
   if (fact.pinDirection === "backward") {
     return build(
       "rebase-required",
-      `${fact.uniqueCommits} unlanded ${fact.uniqueCommits === 1 ? "commit" : "commits"}, but its submodule pin would move BACKWARD — rebase before carrying`,
+      `${fact.uniqueCommits} unmerged ${fact.uniqueCommits === 1 ? "commit" : "commits"}, but its submodule pin would move BACKWARD — rebase before carrying`,
     )
   }
 
   const total = fact.uniqueCommits + fact.equivalentCommits
-  // The split, never a bare verdict: a partially landed branch told only that
+  // The split, never a bare verdict: a partially merged branch told only that
   // it is "unfinished" invites its author to redo the commits that shipped.
   const applied = fact.equivalentCommits === 0 ? "" : `, ${fact.equivalentCommits} of ${total} already applied`
-  return build("rescue", `${fact.uniqueCommits} unlanded ${fact.uniqueCommits === 1 ? "commit" : "commits"}${applied}`)
+  return build("rescue", `${fact.uniqueCommits} unmerged ${fact.uniqueCommits === 1 ? "commit" : "commits"}${applied}`)
 }

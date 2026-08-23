@@ -341,9 +341,9 @@ describe("pinned-submodule warning surface", () => {
 
   // The point of separating warnings from defects: inside a superproject the
   // ambient warning is always present, so if it decided the exit code, doctor
-  // would report 1 whether or not repository truth proves a landing the index
+  // would report 1 whether or not repository truth proves a merge the index
   // cannot carry — and the operator would have no way to tell the two apart.
-  it("still fails on an unrebuilt landing that the ambient warning used to mask", async () => {
+  it("still fails on an unrebuilt merge that the ambient warning used to mask", async () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
     const record = {
@@ -357,7 +357,7 @@ describe("pinned-submodule warning surface", () => {
         startedAt: "2026-08-12T20:00:00.000Z",
         finishedAt: "2026-08-12T20:01:00.000Z",
       },
-      // No such PR in the journal: repo truth proves a landing the index cannot carry.
+      // No such PR in the journal: repo truth proves a merge the index cannot carry.
       changes: [
         {
           pr: "PR404",
@@ -453,7 +453,7 @@ describe("pinned-submodule warning surface", () => {
   it("does not emit the warning on the live --watch viewer", async () => {
     const root = await superproject(TWO_SUBMODULES)
     const app = await appFor(root)
-    // An aborted scope makes the resident viewer emit one bounded snapshot and
+    // An aborted scope makes the habitant viewer emit one bounded snapshot and
     // exit. The warn is wired into listQueues/the dashboard, never watchQueue.
     const controller = new AbortController()
     controller.abort()

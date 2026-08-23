@@ -88,7 +88,7 @@ describe("ensureWorkspaceDependencies", () => {
   })
 
   // A submodule pin advance that moves that submodule's dependency specs makes
-  // the superproject lockfile stale the instant it lands, and gitlinks land
+  // the superproject lockfile stale the instant it merges, and gitlinks merge
   // alone — so the cure can ride neither before nor with the advance, and
   // --frozen-lockfile deadlocks the intent forever (runs R2303/05/06/08).
   describe("stale lockfile caused by a submodule pin advance", () => {

@@ -14,13 +14,13 @@ import {
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
- * resident follow-runner's human narration. Its INFO/ERROR lifecycle rows read one state
+ * habitant follow-runner's human narration. Its INFO/ERROR lifecycle rows read one state
  * transition per row — `[<base>#<run>/<index>-<step>] starting|finished` —
  * with the bracketed identity itself linking to the owned artifact directory.
  * Keeping these helpers here (not in the queue view .tsx) means the headless
  * logger never imports React or the Silvery reconciler.
  *
- * The resident stream reports EACH step exactly once — success at INFO, failure
+ * The habitant stream reports EACH step exactly once — success at INFO, failure
  * at ERROR. The enclosing run/compose settlements are redundant roll-ups of what
  * a step row already carried, so they are dropped from the human stream (they
  * stay, full-fidelity, in the JSONL file sink). A run that failed with no step
@@ -70,7 +70,7 @@ function formatLifecycleDuration(milliseconds: number): string {
  * distinction while JSONL keeps each event's complete namespace. */
 const RUN_SCOPE = "yrd:queue:run"
 
-/** Session-constant identity bound ONCE at the resident logger scope
+/** Session-constant identity bound ONCE at the habitant logger scope
  * (runner/host/pane). Elided from every row's JSON tail so a constant never
  * dominates the human stream; the JSONL file sink still records it in full. */
 const SESSION_SCOPE_FIELDS = new Set(["runner", "host", "pane"])
@@ -111,7 +111,7 @@ type OutcomeProps = Readonly<{
   prs?: readonly ChangeProps[]
 }>
 
-type ResidentLogFormatOptions = Readonly<{
+type HabitantLogFormatOptions = Readonly<{
   color: boolean
   artifactRoot?: string
   includeDebug?: boolean
@@ -146,9 +146,9 @@ function artifactHome(props: OutcomeProps, artifactRoot: string): string | undef
   return join(artifactRoot, props.run, `${props.index}-${props.step}`, `attempt-${props.attempt}`)
 }
 
-/** Resolve the artifact home a resident event owns. The host creates this
+/** Resolve the artifact home a habitant event owns. The host creates this
  * before formatting the start row so a printed OSC8 target already exists. */
-export function residentArtifactHome(event: Event, artifactRoot: string): string | undefined {
+export function habitantArtifactHome(event: Event, artifactRoot: string): string | undefined {
   if (event.kind !== "log") return undefined
   return artifactHome((event.props ?? {}) as OutcomeProps, artifactRoot)
 }
@@ -383,7 +383,7 @@ function jsonTail(props: Record<string, unknown>, color: boolean): string {
  * - every other INFO/WARN/ERROR event → a loggily-style notice (prefix +
  *   message + JSON tail), so drain, refusals, recovery, and diagnostics stay loud.
  */
-export function formatResidentLogLine(event: Event, options: ResidentLogFormatOptions): string | undefined {
+export function formatHabitantLogLine(event: Event, options: HabitantLogFormatOptions): string | undefined {
   if (event.kind !== "log") return undefined
   const { color } = options
   const namespace = event.namespace

@@ -1,6 +1,6 @@
 /**
  * @failure A branch selector resolves to a frozen terminal PR instead of the
- * live delivery (or a mutating verb targets a landed PR), or a new mutating
+ * live delivery (or a mutating verb targets a merged PR), or a new mutating
  * verb forgets the shared live-PR guard and silently mutates by a stale branch.
  * @level l2
  * @consumer @yrd/bay
@@ -98,7 +98,7 @@ const mint = (tip: string) => ({ base: "main", resolveRevision: async () => tip,
 describe("resolvePR live-preference + requireLivePR mutation guard", () => {
   it("resolves a branch with one terminal + one live PR to the live one, for reads and mutating verbs", async () => {
     await using app = await appWithIntegrated("topic/b", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
-    // Q1 mints a fresh live delivery (PR2) on the landed branch.
+    // Q1 mints a fresh live delivery (PR2) on the merged branch.
     await app.bays.submitSelection("topic/b", mint(HEAD_2))
 
     // Read: the branch selector resolves the LIVE PR, not the frozen integrated one.

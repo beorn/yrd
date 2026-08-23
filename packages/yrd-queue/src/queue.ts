@@ -148,9 +148,9 @@ import { compactQueuesState, queueRetentionRoot } from "./retention.ts"
 /**
  * A queue command refused to compose because a peer's Queue run already holds
  * the base branch. Always thrown, never returned, so a genuine caller error
- * still fails loud. The carried `base`/`runId` let a resident, multi-tenant
+ * still fails loud. The carried `base`/`runId` let a habitant, multi-tenant
  * runner tell this losable "the queue is busy right now" race apart from other
- * failures — without matching on the message text. For a long-lived resident
+ * failures — without matching on the message text. For a long-lived habitant
  * watch this is losable: the peer's run settles and frees the base by the next
  * interval, so defer and retry (see isQueueRunningConflict). A one-shot
  * targeted `queue run <selector>` still sees it propagate — it has no next
@@ -169,7 +169,7 @@ export class QueueRunningConflict extends Error {
 }
 
 /** True when an error is a QueueRunningConflict — a peer already holds the base.
- * A losable race for a resident runner: defer this cycle and retry next. */
+ * A losable race for a habitant runner: defer this cycle and retry next. */
 export function isQueueRunningConflict(error: unknown): error is QueueRunningConflict {
   return error instanceof QueueRunningConflict
 }
@@ -481,7 +481,7 @@ export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 /**
  * Refusals a retry cannot change, because the fact they report is fixed for the
  * revision that carries it: non-ancestral gitlink commits do not become
- * ancestral, and a certified recut base the authoritative base never descended
+ * ancestral, and a certified re-merge base the authoritative base never descended
  * from does not become ancestral either. Both need a NEW revision, so the queue
  * parks them on the first refusal rather than re-refusing them at the head.
  *
@@ -759,21 +759,21 @@ export type QueueProgressPolicy = Readonly<{
   noLandingMs: number
   refusalCount: number
   /**
-   * Admission checks required inside the no-landing window before a TRIED queue
+   * Admission checks required inside the no-merge window before a TRIED queue
    * reads as stuck. A duration alone fires 37 times across this journal's
    * history, and an alarm that fires 37 times is an alarm somebody mutes: gaps
    * between merges reach 53 minutes at the 90th percentile.
    *
    * ZERO checks is deliberately NOT quiet, and that asymmetry is the whole
-   * point. Two different failures both look like "no landing":
+   * point. Two different failures both look like "no merge":
    *
-   *   - tried and failing — many attempts, nothing lands. Needs this floor.
+   *   - tried and failing — many attempts, nothing merges. Needs this floor.
    *   - never tried at all — work is ready, the runner is alive, and NOTHING
    *     has attempted it. PR685 sat ready at position 1 for 65 minutes over a
    *     live runner while `queue audit` stayed empty (@cto, 2026-08-10).
    *
-   * A landing restarts the window, so a candidate whose only check request
-   * predates that landing has zero checks inside it. Treating zero as "too
+   * A merge restarts the window, so a candidate whose only check request
+   * predates that merge has zero checks inside it. Treating zero as "too
    * quiet to alarm" would hide precisely the queue that is asleep over ready
    * work. Only the middle band — tried recently, but not much — stays silent,
    * because that is ordinary retry cadence.
@@ -1388,7 +1388,7 @@ function createQueue<Shape extends ChangeShape>(
     }
     const empty = QueueRunNoSubmittedPRsSchema.safeParse(value)
     if (empty.success) {
-      // info, not warn: an empty FIFO is the resident runner's normal state
+      // info, not warn: an empty FIFO is the habitant runner's normal state
       // most of the day, and a warning that fires every tick is the noise
       // that gets a channel muted. The line still exists, with its population,
       // so an honest empty is distinguishable from a run that never looked.
@@ -1632,7 +1632,7 @@ function createQueue<Shape extends ChangeShape>(
           // and the transition guard throws. That guard protects state
           // integrity and stays; HERE the condition is recoverable: the Job is
           // already settled, so record a loud typed skip and keep composing
-          // instead of killing the resident runner. The skip is
+          // instead of killing the habitant runner. The skip is
           // terminal-state-verified against the refreshed projection — any
           // failure while the Job is still live propagates unchanged.
           await actions.refresh()
@@ -1723,7 +1723,7 @@ function createQueue<Shape extends ChangeShape>(
    * THE SET PASSED IN MUST BE THE SET THE DRAIN ADMITS FROM. A carrier admitted
    * against a base that no check request of its own names has its authority
    * counted against the wrong triple, so the verdict decides on evidence nobody
-   * refreshed for it — the shape that shut the fleet's only landing path
+   * refreshed for it — the shape that shut the fleet's only merge path
    * (@yrd/core/refresh-coverage-gap). Callers get that set from
    * {@link admissionQueue} when the drain is selectorless and from their own
    * explicit targets when it is not; see the compose path below.
@@ -1762,7 +1762,7 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   // 22332: ids reserved by in-flight prepares. `nextCandidateId` reads the
-  // journal-only max, and the journal row lands after the prepare, so two
+  // journal-only max, and the journal row merges after the prepare, so two
   // concurrent prepares would otherwise both be handed the same `C<n>`. The ref
   // no longer depends on this id — it is content-addressed — but the JOURNAL
   // identity still has to be unique, which is what this set protects.
@@ -1869,7 +1869,7 @@ function createQueue<Shape extends ChangeShape>(
   const verdictRequestCount = (pr: DeepReadonly<Change>, baseSha: string): number | "unresolved" => {
     const tally = revisionCheckRequestTally(pr, baseSha)
     if (tally.status === "unresolved") {
-      log.warn?.("queue admission could not resolve the base of every check request for this tree", {
+      log.warn?.("queue checks before queueing could not resolve the base of every check request for this tree", {
         action: "admission-request-count-unresolved",
         pr: pr.id,
         revision: changeRevisionNumber(pr),
@@ -2151,7 +2151,7 @@ function createQueue<Shape extends ChangeShape>(
           reason: refusal.reason,
         })
       } catch (error) {
-        // Bookkeeping must never convert a survivable skip into a resident kill,
+        // Bookkeeping must never convert a survivable skip into a habitant kill,
         // but it must never fail quietly either — an unrecorded cycle is exactly
         // the blindness this ledger exists to remove.
         log.error?.("queue could not journal a required-check failure; the wedge oracle will under-count", {
@@ -2261,7 +2261,7 @@ function createQueue<Shape extends ChangeShape>(
         await cancelRevisionAdmissionJobs(pr, `PR became ${delivery}`)
       }
     }
-    // PRs this drain already refused. A resident drain dispatches ONE queued PR
+    // PRs this drain already refused. A habitant drain dispatches ONE queued PR
     // per turn (see below), so without this set a refused head is re-picked as
     // the head every turn and the drain ends having admitted nothing — the
     // head-of-line wedge (22474): PR1791 held the whole queue through 44
@@ -2302,7 +2302,7 @@ function createQueue<Shape extends ChangeShape>(
       const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined).filter(
         (pr) => !released.has(pr.id),
       )
-      // A resident (`continueAdmissions` installed) admits one PR per turn so a
+      // A habitant (`continueAdmissions` installed) admits one PR per turn so a
       // drain signal can interrupt between admissions; a one-shot dispatches the
       // whole queue in a single turn and needs no release.
       const turn = options.continueAdmissions === undefined ? queued : queued.slice(0, 1)
@@ -2474,9 +2474,9 @@ function createQueue<Shape extends ChangeShape>(
           const selection = args.prs !== undefined && args.prs.length > 0 ? "explicit" : undefined
           const explicitStepAuthority = args.steps !== undefined
           // A selectorless compose is a multi-candidate drain (the long-lived
-          // resident's default path, and any bare `queue run`): one candidate lost
+          // habitant's default path, and any bare `queue run`): one candidate lost
           // to a typed refusal must not abort the whole compose nor kill the
-          // resident. Skip it LOUD and continue. A targeted one-shot run has no
+          // habitant. Skip it LOUD and continue. A targeted one-shot run has no
           // other candidate to fall through to, so it stays fail-loud, and a
           // non-refusal (a real bug) always propagates.
           const selectorless = args.prs === undefined || args.prs.length === 0
@@ -2487,7 +2487,7 @@ function createQueue<Shape extends ChangeShape>(
               const fact = failureFact(error)
               if (!selectorless || fact?.kind !== "refusal") throw error
               // A stale-plan batch can never isolate under the installed catalog.
-              // Retire it once so it cannot poison every future resident cycle.
+              // Retire it once so it cannot poison every future habitant cycle.
               if (fact.code === "stale-plan") {
                 await actions.retireStalePlan(candidateId)
                 log.warn?.("Skipped an outdated batch because its PRs can no longer be tested together.", {
@@ -2607,7 +2607,7 @@ function createQueue<Shape extends ChangeShape>(
             : [...requested, ...refusedAdmissions].filter((pr) => !authorityGapIds.has(pr.id) && checksRequested(pr))
           const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
           // Every carrier this drain can ADMIT, which is strictly more than the
-          // ones it selected for landing. A selectorless `drainAdmissions` walks
+          // ones it selected for merging. A selectorless `drainAdmissions` walks
           // `admissionQueue` unfiltered — it applies `targets` only for an
           // explicit selection — and that queue also holds `pushed` carriers,
           // which `requestedPRs` never returns and `refusedRevisionAdmissions`
@@ -2631,7 +2631,7 @@ function createQueue<Shape extends ChangeShape>(
           const refreshable = [...checked, ...admissible.filter((pr) => !checkedIds.has(pr.id))]
           // Admission is revision-owned evidence, not a Queue Run. Revalidate
           // each requested revision against this cycle's base before selecting
-          // landing work. The driver still settles any historical active
+          // merge work. The driver still settles any historical active
           // admission Run before recording a new immutable revision verdict.
           try {
             await refreshCheckIdentities(refreshable, resolveCycleBase)
@@ -2833,7 +2833,7 @@ function createQueue<Shape extends ChangeShape>(
               // A submitted PR whose configured plan is entirely admission work can
               // already be satisfied by a retained successful Run. The command is
               // then an intentional idempotent no-op; keep draining later candidates
-              // instead of terminating a resident runner at the first cached PR.
+              // instead of terminating a habitant runner at the first cached PR.
               if (
                 startedEvent === undefined &&
                 started.events.every((event) => event.name === "queue/candidate/created")
@@ -2938,15 +2938,15 @@ function createQueue<Shape extends ChangeShape>(
         )
       }
       // Multi-tenant, deadlock-free cancel. This runs as a SEPARATE cli process
-      // from the resident follow-runner. Journal the run cancellation FIRST: it
+      // from the habitant follow-runner. Journal the run cancellation FIRST: it
       // marks the record canceled (advanceQueue then stops reconciling it, so no
       // pr/canceled) and releases authority so the still-submitted PRs re-queue on
       // a future drain. THEN cancel the active job to abort in-flight work. We
       // NEVER synchronously cancel our own loop's active merge from inside the
       // drive loop (that deadlocks: the loop holds the queue writer while blocked
-      // mid-merge). When the run's merge is in flight in the resident, this
+      // mid-merge). When the run's merge is in flight in the habitant, this
       // journaled job cancellation surfaces there as a typed settlement conflict
-      // that residentCycleRecovery honors at the next safe cycle boundary — no
+      // that habitantCycleRecovery honors at the next safe cycle boundary — no
       // second scheduler, no daemon.
       await actions.cancelRun(args)
       const active = run.steps[run.cursor]?.job
@@ -2963,7 +2963,7 @@ function createQueue<Shape extends ChangeShape>(
       return canceled
     },
     async recover(recoverOptions) {
-      // Capture ownership at the synchronous API boundary. A resident runner can
+      // Capture ownership at the synchronous API boundary. A habitant runner can
       // settle and release a lost root while recovery is entering its observed
       // async operation; that race must not erase the run from recovery evidence.
       const rootsBeforeRecovery = activeQueueRootIds(runtime().queues.authority)
@@ -3300,7 +3300,7 @@ function deliveryIdentity(pr: DeepReadonly<ChangeSnapshot>): YrdDeliveryIdentity
     pr: pr.id,
     revision: pr.revision,
     headSha: pr.headSha,
-    // Carried so the resident runner's timeline rows can name the branch — the
+    // Carried so the habitant runner's timeline rows can name the branch — the
     // watch-pane grammar (`R604 PR411.2  branch (merge ✓)`) needs it.
     branch: pr.branch,
     ...(pr.issue === undefined ? {} : { issue: pr.issue }),
@@ -3314,7 +3314,7 @@ function stepObservation(input: StepExecution): JobObservation {
     identity: { run: input.run, step: input.step },
     attributes: {
       index: input.index,
-      // The run's base, carried so the resident timeline can name a step row
+      // The run's base, carried so the habitant timeline can name a step row
       // `[<base>#<run> <index>:<step>]`; every PR in a run shares its base.
       ...(input.prs[0]?.base === undefined ? {} : { base: input.prs[0].base }),
       prs: input.prs.map(deliveryIdentity),
@@ -3460,7 +3460,7 @@ function queueFailedEvent(
   })
 }
 
-function sameComponentModelSource(
+function sameSubmoduleModelSource(
   left: NonNullable<Candidate["componentModelChanges"]>[number]["source"],
   right: NonNullable<Candidate["componentModelChanges"]>[number]["source"],
 ): boolean {
@@ -3474,7 +3474,7 @@ function sameComponentModelSource(
   )
 }
 
-function sameComponentModelAuthorization(
+function sameSubmoduleModelAuthorization(
   left: NonNullable<Candidate["componentModelChanges"]>[number],
   right: NonNullable<Candidate["componentModelChanges"]>[number],
 ): boolean {
@@ -3486,7 +3486,7 @@ function sameComponentModelAuthorization(
     left.pr === right.pr
   if (!sameDecision) return false
   if (left.revision === right.revision && left.headSha === right.headSha) {
-    return left.patchId === right.patchId && sameComponentModelSource(left.source, right.source)
+    return left.patchId === right.patchId && sameSubmoduleModelSource(left.source, right.source)
   }
   if (left.patchId === undefined || right.patchId === undefined || left.patchId !== right.patchId) return false
   return (
@@ -3500,7 +3500,7 @@ function sameComponentModelAuthorization(
 /** One ruling is a one-shot decision about one immutable change, never a
  * standing permission. Candidate facts are retained in the Journal projection,
  * so the spend survives retries, restarts, and terminal-run compaction. */
-export function assertComponentModelAuthorizationsAvailable(
+export function assertSubmoduleModelAuthorizationsAvailable(
   queues: DeepReadonly<QueuesState>,
   candidate: DeepReadonly<Pick<Candidate, "componentModelChanges">>,
 ): void {
@@ -3508,7 +3508,7 @@ export function assertComponentModelAuthorizationsAvailable(
   const claimed = [...prior]
   for (const authorization of candidate.componentModelChanges ?? []) {
     const existing = claimed.filter(({ ruling }) => ruling === authorization.ruling)
-    if (existing.length > 0 && !existing.some((entry) => sameComponentModelAuthorization(entry, authorization))) {
+    if (existing.length > 0 && !existing.some((entry) => sameSubmoduleModelAuthorization(entry, authorization))) {
       const first = existing[0] as (typeof existing)[number]
       raiseFailure(
         "refusal",
@@ -3563,7 +3563,7 @@ function createQueueCommands(
       const key = admissionJobKey(args.pr, args.candidate.baseSha, args.index, step.revision)
       if (state.jobs.byKey[key] !== undefined) return { events: [] }
       if (state.queues.candidates[args.candidate.id] === undefined) {
-        assertComponentModelAuthorizationsAvailable(state.queues, args.candidate)
+        assertSubmoduleModelAuthorizationsAvailable(state.queues, args.candidate)
       }
       return {
         events: [
@@ -3740,7 +3740,7 @@ function createQueueCommands(
         throw new Error("yrd: queue run requires prepared Candidate facts")
       }
       if (args.candidate !== undefined && state.queues.candidates[args.candidate.id] === undefined) {
-        assertComponentModelAuthorizationsAvailable(state.queues, args.candidate)
+        assertSubmoduleModelAuthorizationsAvailable(state.queues, args.candidate)
       }
       const started = startRun(
         state.queues,
@@ -3833,7 +3833,7 @@ function createQueueCommands(
         throw new Error("yrd: queue isolation requires prepared Candidate facts")
       }
       if (args.candidate !== undefined && state.queues.candidates[args.candidate.id] === undefined) {
-        assertComponentModelAuthorizationsAvailable(state.queues, args.candidate)
+        assertSubmoduleModelAuthorizationsAvailable(state.queues, args.candidate)
       }
       const selected = parent.steps.map((planned) => requirePlannedStep(byName, planned))
       const parentCandidate = state.queues.candidates[parent.candidateId]
@@ -4085,7 +4085,7 @@ function createQueueCommands(
   })
 
   const reconcileMerge = command({
-    title: "Reconcile one repository-proven landing into the journal index",
+    title: "Reconcile one repository-proven merge into the journal index",
     params: ChangeIntegratedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof ChangeIntegratedSchema>) {
       const pr = state.bays.prs[args.pr]
@@ -4225,8 +4225,8 @@ function queueAuthorityReleaseReason(
     error?.code === "stale-check" ||
     error?.code === "stale-steps" ||
     error?.code === "stale-plan" ||
-    // The authoritative root may already have landed when publication of its
-    // derived component-main refs hits a transient push/fetch failure. The
+    // The authoritative root may already have merged when publication of its
+    // derived submodule-main refs hits a transient push/fetch failure. The
     // promotion is idempotent and the root must never be compensated; release
     // the same PR revision so a fresh merge attempt reconciles the missing refs.
     error?.code === "component-main-promotion-failed" ||
@@ -4636,7 +4636,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const invalidated = invalidateChangeAuthority(state.queues.authority, token.pr, "pushed")
     return {
       queues: {
-        // A push or recut is the operator's answer to the refusal: the old streak
+        // A push or re-merge is the operator's answer to the refusal: the old streak
         // describes a revision that no longer exists, so it must not keep the
         // wedge finding alive against fresh content.
         ...clearAdmissionRefusals(state.queues, [token.pr]),
@@ -4856,7 +4856,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     if (existing !== undefined) {
       throw new Error(`yrd: duplicate Candidate '${candidate.id}'`)
     }
-    assertComponentModelAuthorizationsAvailable(state.queues, candidate)
+    assertSubmoduleModelAuthorizationsAvailable(state.queues, candidate)
     return {
       queues: {
         ...state.queues,
@@ -4902,7 +4902,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const record: QueueRecord = { ...replayed, queueId, candidateId }
     const queues = {
       // Admission succeeded for every member PR, so their refusal streaks end
-      // here — "consecutive refusals WITHOUT admission" is the whole claim.
+      // here — "consecutive refusals WITHOUT queueing" is the whole claim.
       ...clearAdmissionRefusals(
         state.queues,
         record.prs.map(({ id }) => id),
@@ -5564,12 +5564,12 @@ function advanceQueue(
   const events: EventDraft[] = []
   if (planned.kind === "merge") {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
-    // A landed member's `.intent` field, when set, is a historical "carrier-free
+    // A merged member's `.intent` field, when set, is a historical "carrier-free
     // pin intent" — a shape the retired intent rail minted and this Run record
     // stored verbatim. No live code produces one anymore, and the intent rail's
     // own bookkeeping (`state.intents`) is gone, so there is nothing left to
-    // record it against; the merge lands exactly as it would for any other
-    // member, and only the ordinary PR-landing bookkeeping below applies to it.
+    // record it against; the merge merges exactly as it would for any other
+    // member, and only the ordinary PR-merge bookkeeping below applies to it.
     const changeSnapshots = record.prs.filter((member) => member.intent === undefined)
     for (const current of samePayloadPRs(state.bays, changeSnapshots)) {
       const alreadyMerged = shape.integration.alreadyLanded
@@ -5613,7 +5613,7 @@ function advanceQueue(
       const revision = currentChangeRev(current)
       if (revision.changeId === undefined) {
         // A current merge record proves only the stable identity it names. Keep a
-        // pre-identity same-payload record readable, but never infer that it landed.
+        // pre-identity same-payload record readable, but never infer that it merged.
         continue
       }
       events.push(
@@ -6024,7 +6024,7 @@ type TolerantQueueReader = Readonly<{
  * unreadable record is therefore a veto over every other — the exact structure
  * that took the merge queue down for 2h22m on 2026-08-17, where a comparator
  * that threw inside `toSorted` removed `pr list`, `queue audit`, `bay status`,
- * the resident's own progress probe and `queue recover` — the tool that repairs
+ * the habitant's own progress probe and `queue recover` — the tool that repairs
  * precisely that state — from a fleet with no other way back.
  *
  * That comparator is deleted, but its SHAPE is not: recovery still shared its
@@ -6677,7 +6677,7 @@ function queueProgressAuditFindings(
             `${neverStarted.length === 1 ? "PR" : "PRs"} that never started required checks for ` +
             `${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
           resolution: [
-            `Start or restart the resident queue runner, then verify it requests required checks for '${first.id}'.`,
+            `Start or restart the habitant queue runner, then verify it requests required checks for '${first.id}'.`,
           ],
           pr: first.id,
           specimen: `queue:${base}:never-started`,
@@ -6717,7 +6717,7 @@ function queueProgressAuditFindings(
       code: "queue-progress-stalled",
       message:
         `Queue '${base}' has ${started.length} required-check ${started.length === 1 ? "PR" : "PRs"} queued and ` +
-        `no landing for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${admissionChecks} admission ` +
+        `no merge for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${admissionChecks} pre-queue ` +
         `${admissionChecks === 1 ? "check" : "checks"}; head is '${first.id}'.`,
       pr: first.id,
       specimen: `queue:${base}`,
@@ -6734,7 +6734,7 @@ function latestQueueMergeMs(state: DeepReadonly<RuntimeState>, base: string): nu
     .filter((pr) => baseIdentity(pr.base) === base)
     .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
     .filter((at): at is string => at !== undefined)
-    .map((at) => parseAuditTime(at, "landing time"))
+    .map((at) => parseAuditTime(at, "merge time"))
     .reduce<number | undefined>((latest, at) => (latest === undefined ? at : Math.max(latest, at)), undefined)
 }
 
@@ -7077,7 +7077,7 @@ function admissionQueue(
  *
  * This is deliberately broader than `admissionQueue`: a successful admission
  * removes a PR from the next admission pass, but it remains outstanding until a
- * Queue run lands (or otherwise changes its delivery state). Progress auditing
+ * Queue run merges (or otherwise changes its delivery state). Progress auditing
  * must span that gap or the exact "admission passes, nothing merges" failure is
  * invisible.
  */
@@ -7155,7 +7155,7 @@ function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] 
  * hand). A PR carrying a live admission-refusal streak has demonstrably NOT
  * gotten in, so it stops holding the line while keeping its queue position: it
  * is still retried on its own turn, and its streak clears the moment it is
- * admitted, pushed, or recut ({@link QueueAdmissionRefusal}).
+ * admitted, pushed, or re-merge ({@link QueueAdmissionRefusal}).
  *
  * Only PRs strictly AHEAD of `pr` are considered, so a PR with a stale streak
  * of its own is never blocked by the very PRs it outranks.
@@ -7228,7 +7228,7 @@ type RevisionCheckRequestTally =
  * Identity is the head, matching {@link checkRequest}, and deliberately NOT the
  * revision ordinal. `303e7845` removed the ordinal from `checkRequest` because a
  * request asks "check this tree" and the ordinal identifies nothing about the
- * tree: a mechanical rebuild lands on byte-identical content and mints a new
+ * tree: a mechanical rebuild merges on byte-identical content and mints a new
  * ordinal while the head, and so the meaning of every request already recorded,
  * is unchanged. This counter kept the ordinal, so the two disagreed about what
  * a request IS. A byte-identical rebuild then read zero authorities for work
@@ -7691,7 +7691,7 @@ function runnablePRs(
  *   gitlink-free root, correct a declared source range or payload).
  * - infra-retry: the queue's own machinery, never the submitted branch — a git
  *   push / update-ref that can fail on a network/remote blip, scratch cleanup,
- *   or a composition that built a candidate the landing floor refuses. Retried
+ *   or a composition that built a candidate the merge floor refuses. Retried
  *   with backoff by the env-storm path (21622 condition 4); never routed to the
  *   author. The cure is always another composition, so the retry is the remedy.
  * - recut-lineage: owned by the auto-recut slice, which classifies these on its
@@ -7706,7 +7706,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "authored-gitlink",
     "carrier-drops-landed",
     // Author-actionable like its siblings, but the action is "close", not
-    // "re-author": the carrier's pins already landed, so there is nothing to
+    // "re-author": the carrier's pins already merged, so there is nothing to
     // rebuild.
     "carrier-pin-already-landed",
     "composition-invalid",
@@ -7723,7 +7723,7 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "refused-path",
     "refused-path-inspection",
     // The remedy is the same linear rebuild `carrier-drops-landed` prescribes;
-    // only the instrument that caught the lost landing differs.
+    // only the instrument that caught the lost merge differs.
     "unauthored-path-deletion",
     "wrapper-mismatch",
     "source-missing",
@@ -7739,11 +7739,11 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // a fetch/probe blip, cured by retrying, exactly as the same code is
     // treated on the merge path's release ladder.
     "component-main-inspection-failed",
-    // The landing floor caught a candidate whose tree predates work already on
+    // The merge floor caught a candidate whose tree predates work already on
     // the base. The submitted branches are blameless — nothing they authored
     // deletes those paths — so this must never present as needs-author; a fresh
     // composition against the current base is the whole remedy.
-    "landing-unauthored-deletion",
+    "merge-unauthored-deletion",
     "source-publish",
     "scratch-cleanup-failed",
     "wrapper-generation",
@@ -7765,7 +7765,7 @@ function admissionFailureKind(
 type InfraRetryCompositionFailure =
   | "carrier-inspection"
   | "component-main-inspection-failed"
-  | "landing-unauthored-deletion"
+  | "merge-unauthored-deletion"
   | "source-publish"
   | "scratch-cleanup-failed"
   | "wrapper-generation"
@@ -7858,7 +7858,7 @@ function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string 
 
 /** The action line of an admission-refused eligibility message. A settled
  * refusal is the remedy classifier's judgment made durable: no mechanical
- * remedy exists, so printing the recut drill after it points the reader back
+ * remedy exists, so printing the re-merge drill after it points the reader back
  * into the loop the settlement closed (2026-08-19). Print the judgment fact
  * instead — including WHO decides, through the same `needsPersonOwner`
  * resolution the audit's needs-person finding carries, so the reader-facing
@@ -8135,7 +8135,7 @@ function pinnedChangeError(
       // there is nothing left to verify a historical "carrier-free pin intent"
       // member against. Fail loud rather than silently trust or silently drop
       // it: any run still carrying one from before the rail's deletion ends
-      // here, cleanly, instead of hanging or corrupting a landing.
+      // here, cleanly, instead of hanging or corrupting a merge.
       return {
         code: "stale-intent",
         message: `Intent '${intent.id}' can no longer be verified: the intent rail that tracked it is retired`,

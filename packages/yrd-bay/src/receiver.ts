@@ -21,7 +21,7 @@ const SUBMIT_PREFIX = "refs/for/"
 /**
  * The branch-is-change model's approval fact (bead-branch-is-change, phase 1).
  * `refs/yrd/submit/<branch>` names the exact commit its author approves to
- * land — pushing it IS the API, exactly like `refs/for/` is for Gerrit-shaped
+ * merge — pushing it IS the API, exactly like `refs/for/` is for Gerrit-shaped
  * submission. Distinct from `SUBMIT_PREFIX` above: that namespace names a
  * CHANGE that predates its branch; this one approves a commit on a branch
  * that already exists.
@@ -70,7 +70,7 @@ const ReceiverTargetSchema = z
     base: GitRefSchema,
     baseSha: GitShaSchema,
     /**
-     * The carrier branch this change lands on. A `refs/heads/` push already
+     * The carrier branch this change merges on. A `refs/heads/` push already
      * names its branch in the ref, so this stays absent there. A `refs/for/`
      * push does NOT — the ref names the change — so the resolver, which is
      * what opens the bay, is the only party that knows it.
@@ -1069,7 +1069,7 @@ async function readPushedBlob(
  * dependency cycle — the receiver only ever reads the blob). Runs at BOTH
  * pre-receive and post-receive, same as `validatePin`/`validateSubmitCarrier`
  * above, so a config the base's own queue schema would refuse is rejected at
- * the push itself — the same "unlandable" guarantee those two already give
+ * the push itself — the same "unmergeable" guarantee those two already give
  * gitlink pins and carrier ancestry, closing the gap PR1337 fell through
  * (typecheck, lockfile and manifest gates all passed; nothing ever asked
  * whether the pushed .yrd.yml itself would parse).
@@ -1116,7 +1116,7 @@ async function checkNotStale(
  * (bead-branch-is-change): (a) reachable from the branch's own current tip —
  * a submit approves a commit that was actually pushed, not one invented out
  * of thin air — and (b) not already an ancestor of the base branch — a submit
- * approves work still worth landing, not history already on main. The two
+ * approves work still worth merging, not history already on main. The two
  * failures are named distinctly per the model doc ("a dangling sha and an
  * already-landed sha are different refusals"). Deletion (unsubmit) skips this
  * entirely — retracting an approval is unconditional, and git's own old-value
@@ -1153,13 +1153,13 @@ async function validateSubmitRefValue(
     { env: options.env, allowFailure: true },
   )
   check(baseTip.code === 0, `base branch '${target.base}' does not resolve in the main repository`)
-  const landed = await receiverGit(receiver, ["merge-base", "--is-ancestor", update.newSha, baseTip.stdout], {
+  const merged = await receiverGit(receiver, ["merge-base", "--is-ancestor", update.newSha, baseTip.stdout], {
     env: options.env,
     allowFailure: true,
     includeMainObjects: true,
   })
   check(
-    landed.code !== 0,
+    merged.code !== 0,
     `submit ref '${update.ref}' names ${update.newSha.slice(0, 12)}, which is already an ancestor of base branch '${target.base}'; nothing left to submit`,
   )
   return target.base
@@ -1188,12 +1188,12 @@ async function isAncestorOfBase(
     { env, allowFailure: true },
   )
   if (baseTip.code !== 0) return false
-  const landed = await receiverGit(receiver, ["merge-base", "--is-ancestor", sha, baseTip.stdout], {
+  const merged = await receiverGit(receiver, ["merge-base", "--is-ancestor", sha, baseTip.stdout], {
     env,
     allowFailure: true,
     includeMainObjects: true,
   })
-  return landed.code === 0
+  return merged.code === 0
 }
 
 /**
@@ -1201,7 +1201,7 @@ async function isAncestorOfBase(
  * definition verbatim: reachable from the branch's current tip AND not yet
  * an ancestor of its resolved base. Used only by the ignore-refusal check in
  * `authorize()` ("submitted work can never be hidden") — a merged submit is
- * not live, so ignoring a branch whose only submit already landed is fine,
+ * not live, so ignoring a branch whose only submit already merged is fine,
  * the same way the model doc treats "merged" as no longer needing protection.
  * If the base cannot be resolved at all (no bay tracks this branch any more),
  * this reads as NOT live rather than refusing blind on an unprovable fact —
@@ -1229,10 +1229,10 @@ async function isSubmitLive(
 }
 
 /**
- * The archive shelf name a deleted branch lands on — the branch as a path
+ * The archive shelf name a deleted branch merges on — the branch as a path
  * PREFIX, the archived commit's FULL sha as the final segment (review-panel
  * revision of the original `<branch>-<shortsha>` suffix format; amends the
- * shape landed in phase 1a). Two collision classes this kills structurally,
+ * shape merged in phase 1a). Two collision classes this kills structurally,
  * not just probabilistically: re-archiving a branch at IDENTICAL content (the
  * full path is then byte-identical too — see `applyArchival`'s `update`, not
  * `create`, for why that is now a legal no-op rather than a refusal) and a
@@ -1342,7 +1342,7 @@ async function writeSubmitRefForCarrier(
 /**
  * Draft and ignore are mutually exclusive per branch (bead-branch-is-change,
  * "Scope"): accepting a write to one clears the other for the SAME branch.
- * The requested ref's own write already landed via git's native receive-pack
+ * The requested ref's own write already merged via git's native receive-pack
  * by the time this runs (post-receive, same timing as `applyArchival`) — this
  * only performs the EXTRA half, a single atomic delete of whichever ref the
  * opposite namespace holds, CAS'd on its current value so a concurrent writer
@@ -1369,7 +1369,7 @@ async function sweepOppositeScopeRef(
  * `readPushedBlob`'s separate job for the admission gate). Mirrors
  * `readConfigFromBase` in `@yrd/cli/host.ts`: resolve the base's current tip
  * in the MAIN repository, then read the blob there — the base is already
- * landed, so unlike `readPushedBlob` this never needs the receiver's own
+ * merged, so unlike `readPushedBlob` this never needs the receiver's own
  * quarantine object access.
  */
 async function readBaseBlob(
@@ -1532,7 +1532,7 @@ async function authorize(
       `scope refs under ${DRAFT_REF_PREFIX} or ${IGNORE_REF_PREFIX} are accepted, got '${update.ref}'`,
   )
 
-  // A branch deletion translates to archival instead of landing on the
+  // A branch deletion translates to archival instead of merging on the
   // intake path below — there are no new commits here for intake to process,
   // only a branch that stops existing under `refs/heads/` and starts existing
   // under `refs/yrd/archive/` instead. No precondition to check beyond
@@ -1565,12 +1565,12 @@ async function authorize(
   const branch = intent === undefined ? update.ref.slice(BRANCH_PREFIX.length) : resolved.branch
   check(
     branch !== undefined,
-    `submit ref '${update.ref}' was admitted without a carrier branch; the resolver must name the branch the change lands on`,
+    `submit ref '${update.ref}' was admitted without a carrier branch; the resolver must name the branch the change merges on`,
   )
   await validBranch(receiver, branch, "intake branch")
   const target = normalizeTarget(resolved, receiver)
   await validBranch(receiver, target.base, "base branch")
-  // The ref and the resolver must agree about where this lands. They are two
+  // The ref and the resolver must agree about where this merges. They are two
   // independent statements of the same fact, and a disagreement means the
   // change would gate against a base its author never named.
   check(

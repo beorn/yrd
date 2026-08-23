@@ -32,7 +32,7 @@ function shaDigest(sha: string): Readonly<Record<string, string>> {
  * Project a durable MergeRecordBody onto an in-toto Statement shape. `builderId` is the queue
  * identity (Candidate.queueId) — not a MergeRecordBody field, so it is supplied by the caller
  * rather than defaulted here. Returns undefined for non-merged rows: a Statement needs a subject,
- * and a refused or canceled attempt minted no landed sha.
+ * and a refused or canceled attempt minted no merged sha.
  */
 export function mergeRecordToStatement(record: MergeRecordBody, builderId: string): InTotoStatement | undefined {
   const mergedCommit = record.merge.mergedCommit

@@ -1,6 +1,6 @@
 /**
  * Stable human aliases for failure codes that do not scan at queue-table width.
- * Domain/journal facts keep their lossless code; list, watch, and resident-log
+ * Domain/journal facts keep their lossless code; list, watch, and habitant-log
  * projections call {@link failureSlug} at the presentation boundary.
  */
 export const FAILURE_SLUGS = Object.freeze({

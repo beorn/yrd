@@ -5,7 +5,7 @@ export type StatusPresentationState =
   | "running"
   | "done"
   | "integrated"
-  /** Step success without a merge/landing proof (admission-only phantom). */
+  /** Step success without a merge/merge proof (admission-only phantom). */
   | "passed"
   | "failed"
   | "env"
@@ -43,7 +43,7 @@ export const FAILURE_BREAKDOWN_CLASSES: readonly FailureBreakdownClass[] = [
   "other",
 ]
 
-export type StatusAutomation = "auto-requeue" | "auto-recut" | "none"
+export type StatusAutomation = "auto-requeue" | "auto-re-merge" | "none"
 export type FailureDisposition = Readonly<{
   state: FailureStatusClass
   automation: StatusAutomation
@@ -95,7 +95,7 @@ const STATUS_PRESENTATIONS = {
   running: LIFECYCLE_PRESENTATIONS.working,
   done: LIFECYCLE_PRESENTATIONS.done,
   integrated: LIFECYCLE_PRESENTATIONS.done,
-  // Non-landing success must NOT share the green check with real merges
+  // Non-merge success must NOT share the green check with real merges
   // (@yrd/core/21096-cli-ux/21801; audit 22323: outcome=passed admission-only).
   passed: { glyph: "◌", color: "$fg-warning" },
   failed: LIFECYCLE_PRESENTATIONS.fail,
@@ -169,7 +169,7 @@ export function statusPresentationState(status: string): StatusPresentationState
 }
 
 /** The one status → glyph/color vocabulary shared by queue rows, notices,
- * workflow tabs, and resident settlement narration. */
+ * workflow tabs, and habitant settlement narration. */
 export function statusPresentation(status: string): StatusPresentation {
   return STATUS_PRESENTATIONS[statusPresentationState(status)]
 }
@@ -188,12 +188,12 @@ const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKE
 
 /**
  * One code-aware decision for every status consumer. Classification alone is
- * insufficient: stale-base is mechanically recut, stale-check/config drift is
+ * insufficient: stale-base is mechanically re-merge, stale-check/config drift is
  * requeued unchanged, and stale-pr is an obsolete historical run with no retry
  * of its own. Keep those journal-observable distinctions intact.
  */
 export function failureDisposition(code: string): FailureDisposition {
-  if (code === "stale-base") return { state: "stale", automation: "auto-recut", owner: "queue" }
+  if (code === "stale-base") return { state: "stale", automation: "auto-re-merge", owner: "queue" }
   if (AUTO_REQUEUE_STALE_FAILURE_CODES.has(code)) {
     return { state: "stale", automation: "auto-requeue", owner: "queue" }
   }

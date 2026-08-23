@@ -67,7 +67,7 @@ function workspace(): BayWorkspace {
 }
 
 /** Check-only plan: every configured step is admission work, so a refusal here
- * lands in `dispatchAdmissions` — the path that never mints a run record. */
+ * merges in `dispatchAdmissions` — the path that never mints a run record. */
 function checkOnlyPlugin(
   prepareCandidate: CandidatePreparer,
   /** Derived from the shipped default so a new policy field cannot silently
@@ -163,7 +163,7 @@ async function submitAndRequestChecks(app: SubmissionApp, branch: string) {
  * asks whether the queue has been TRIED and still not moved, not merely whether
  * it has waited, so any fixture that probes the stalled finding has to supply
  * the attempts a real stalled queue accumulates. Timing matters: the window
- * restarts at the last landing, so attempts must be issued on the clock the
+ * restarts at the last merge, so attempts must be issued on the clock the
  * assertion is about.
  */
 async function requestChecksTimes(app: SubmissionApp, pr: string, times: number): Promise<void> {
@@ -229,10 +229,10 @@ function refuseForever(
   }
 }
 
-/** The resident's own drain shape: `continueAdmissions` is how a drain signal
+/** The habitant's own drain shape: `continueAdmissions` is how a drain signal
  * interrupts the loop, and it is also what makes admissions one PR per turn —
  * the only shape in which a refused head can hold the line. */
-const RESIDENT = { ...runtime, continueAdmissions: () => true }
+const HABITANT = { ...runtime, continueAdmissions: () => true }
 
 describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
   it("records a refusal reported by an external queue preparation robot", async () => {
@@ -416,7 +416,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     blocked.id = head.id
     const behind = await submitAndRequestChecks(app, "issue/ready-behind-the-stale-head")
 
-    await app.queue.run({}, RESIDENT)
+    await app.queue.run({}, HABITANT)
 
     const refusal = app.state().queues.admissionRefusals[head.id]
     expect(refusal).toMatchObject({
@@ -509,10 +509,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.eligibility(head.id).checks.position).toBe(1)
   })
 
-  it("keeps a passed admission in the no-landing progress population until delivery", async () => {
+  it("keeps a passed admission in the no-merge progress population until delivery", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read, true)
-    const pr = await submitAndRequestChecks(app, "issue/admitted-without-landing")
+    const pr = await submitAndRequestChecks(app, "issue/admitted-without-merge")
     await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
 
     await app.queue.run({}, runtime)
@@ -550,7 +550,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
         `Queue 'main' has 1 submitted PR that never started required checks for 30m00s ` +
         `(since 2026-01-01T00:00:00.000Z); head is '${pr.id}'.`,
       resolution: [
-        `Start or restart the resident queue runner, then verify it requests required checks for '${pr.id}'.`,
+        `Start or restart the habitant queue runner, then verify it requests required checks for '${pr.id}'.`,
       ],
       pr: pr.id,
       specimen: "queue:main:never-started",
@@ -573,7 +573,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     if (ignored === undefined) throw new Error("submitted PR was not recorded")
 
     clock.set("2026-01-01T00:20:00.000Z")
-    const merged = await submitAndRequestChecks(app, "issue/unrelated-landing")
+    const merged = await submitAndRequestChecks(app, "issue/unrelated-merge")
     await app.queue.run({ prs: [merged.id] }, runtime)
     expect(app.bays.pr(merged.id)?.integratedAt).toBe("2026-01-01T00:20:00.000Z")
     expect(app.bays.pr(ignored.id)?.integratedAt).toBeUndefined()
@@ -598,14 +598,14 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
    * alarm somebody mutes.
    *
    * `queueProgressAuditFindings` implements the middle two conjuncts. The CLI
-   * composes its result with the resident heartbeat rather than pushing runtime
+   * composes its result with the habitant heartbeat rather than pushing runtime
    * liveness into the queue package. This pins the audit half: ONE admission check is a queue barely
    * tried, not a queue trying and failing, so it must not read as stalled. The
    * count is computable from state today — `ChangeCheckRequest` already carries `at`
    * — so this needs no new recording, only the predicate.
    *
    * The clocks deliberately stay separate: `QueueAuditOptions` is `{ now?: string }`,
-   * and yrd-cli depends on @yrd/queue and not the reverse. The resident status
+   * and yrd-cli depends on @yrd/queue and not the reverse. The habitant status
    * carries both a heartbeat time and a timestamped projection of this audit.
    */
   it("does not call a queue stalled on a single admission check", async () => {
@@ -682,7 +682,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       undefined,
       { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
     )
-    const pr = await submitAndRequestChecks(app, "issue/no-landing")
+    const pr = await submitAndRequestChecks(app, "issue/no-merge")
     blocked = pr.id
     await app.queue.run({}, runtime)
 
@@ -706,10 +706,10 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     )
   })
 
-  it("uses a real landing as the next progress clock while queued work remains", async () => {
+  it("uses a real merge as the next progress clock while queued work remains", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read)
-    const first = await submitAndRequestChecks(app, "issue/lands-first")
+    const first = await submitAndRequestChecks(app, "issue/merges-first")
     const second = await submitAndRequestChecks(app, "issue/remains-queued")
     await requestChecksTimes(app, second.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 2)
 
@@ -726,7 +726,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await app.queue.run({ prs: [first.id] }, runtime)
     expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:30:00.000Z")
     expect(app.bays.pr(second.id)?.integratedAt).toBeUndefined()
-    // No further attempts follow the landing on purpose. The landing restarts
+    // No further attempts follow the merge on purpose. The merge restarts
     // the window, so `second` now carries ZERO checks inside it — the shape of a
     // runner asleep over ready work, which must stay loud.
     expect(app.queue.audit({ now: "2026-01-01T00:59:59.999Z" }).findings).not.toContainEqual(
@@ -1065,7 +1065,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     let blocked = ""
     // recut-base-diverged is structurally permanent (auto-settles needs-person
     // on the first refusal) and is NOT a needs-author code, so the PR stays
-    // `submitted` — the exact shape the resident's settleNeedsPerson leaves
+    // `submitted` — the exact shape the habitant's settleNeedsPerson leaves
     // behind, reaching the settled admission-refusal verdict directly.
     await using app = await createApp(
       refuseForever(() => blocked, {
@@ -1124,7 +1124,7 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
   // any check request existed. The audit's head-of-line sort compared that PR
   // with a comparator that THREW on a missing current check request, so every
   // surface that computes audit findings died — pr list, queue audit, bay
-  // status, the resident runner's own progress probe (which crashlooped it into
+  // status, the habitant runner's own progress probe (which crashlooped it into
   // restart suppression), and `queue recover`, the tool whose job is settling
   // exactly this shape. A comparator asserts nothing: the ordering is total
   // (check-request time, else source-ready time) and the state is PRONOUNCED
@@ -1168,7 +1168,7 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
     )
 
     // And the settlement the remedy loop applies to this disposition still
-    // lands — the repair path itself must stay reachable over this state.
+    // merges — the repair path itself must stay reachable over this state.
     await app.queue.settleAdmissionRefusal({
       pr: pr.id,
       revision: 1,

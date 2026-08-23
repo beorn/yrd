@@ -88,7 +88,7 @@ export type RepositoryGitDirSelection = Readonly<{
  *
  * Each step that is DECLARED and wrong refuses by name rather than falling
  * through to the next: a typo in `YRD_REPO` silently answering from the cwd's
- * repository is how out-of-band state lands beside a repository nobody asked
+ * repository is how out-of-band state merges beside a repository nobody asked
  * about.
  */
 export function repositoryGitDir(selection: RepositoryGitDirSelection): string {

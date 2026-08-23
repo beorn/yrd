@@ -77,10 +77,10 @@ describe("queue member ids discriminate", () => {
     }
   })
 
-  it("carries a landed intent at the change positions that record a queue member", () => {
+  it("carries a merged intent at the change positions that record a queue member", () => {
     // `command.ts` fills both of these from the member's own `id`, so an intent
-    // that lands writes its intent id here. They must be member positions, not
-    // PR positions, or the tightened PR arm would refuse a real landing.
+    // that merges writes its intent id here. They must be member positions, not
+    // PR positions, or the tightened PR arm would refuse a real merge.
     const change = {
       changeId: `I${"a".repeat(40)}`,
       revision: 1,

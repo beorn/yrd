@@ -1,5 +1,5 @@
 /**
- * @failure A resident asked to reload itself in place replaces its process image before its runtime, leases and log are closed, or a failed execve exits in a way its supervisor cannot restart.
+ * @failure A habitant asked to reload itself in place replaces its process image before its runtime, leases and log are closed, or a failed execve exits in a way its supervisor cannot restart.
  * @level l2
  * @consumer @yrd/cli host
  */
@@ -146,7 +146,7 @@ describe("in-place runtime reload", () => {
     expect(execs).toEqual([1, 2, 3, 1])
   })
 
-  it("closes the resident runtime before replacing the exact process image", async () => {
+  it("closes the habitant runtime before replacing the exact process image", async () => {
     const calls: string[] = []
     const replacement = new Error("execve replaced the process")
     const execPath = "/usr/bin/bun"
@@ -196,14 +196,14 @@ describe("in-place runtime reload", () => {
     expect(failureFact(failure)).toEqual({
       kind: "infrastructure",
       code: "runtime-reload-exec-failed",
-      message: "yrd: resident runtime reload failed: ENOENT: immutable entry disappeared",
+      message: "yrd: habitant runtime reload failed: ENOENT: immutable entry disappeared",
     })
   })
 
-  it("a failed exec leaves the exact resident argv restartable by its supervisor", async () => {
+  it("a failed exec leaves the exact habitant argv restartable by its supervisor", async () => {
     const root = await tempDir("yrd-reload-restart-")
     const marker = join(root, "attempts.log")
-    const worker = join(root, "resident.ts")
+    const worker = join(root, "habitant.ts")
     const runtimeReloadUrl = new URL("../src/runtime-reload.ts", import.meta.url).href
     await writeFile(
       worker,

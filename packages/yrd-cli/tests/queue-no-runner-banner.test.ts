@@ -29,11 +29,11 @@ describe("NO RUNNER banner", () => {
     const idle = queueNoRunnerBanner(projection({ runnerAbsence: { kind: "never" } }), NOW - 3_600_000, NOW)
 
     expect(died).toBe(
-      "NO RUNNER - resident runner [4242] died 1:30 ago, no exit marker; restart it: yrd queue run main",
+      "NO RUNNER - habitant runner [4242] died 1:30 ago, no exit marker; restart it: yrd queue run main",
     )
-    expect(stopped).toBe("NO RUNNER - resident runner [4242] stopped 1:30 ago; restart it: yrd queue run main")
+    expect(stopped).toBe("NO RUNNER - habitant runner [4242] stopped 1:30 ago; restart it: yrd queue run main")
     expect(never).toBe("NO RUNNER - no runner has ever drained this queue; start one: yrd queue run main")
-    expect(idle).toBe("NO RUNNER - queue last drained 1:00:00 ago, none resident since; start one: yrd queue run main")
+    expect(idle).toBe("NO RUNNER - queue last drained 1:00:00 ago, none habitant since; start one: yrd queue run main")
 
     // The regression this file exists for: the four lines collapsed to two.
     expect(new Set([died, stopped, never, idle]).size).toBe(4)

@@ -1,7 +1,7 @@
 /**
- * @failure The resident can mistake an author-owned intent remedy for a safe PR rewrite, or re-apply a failed mechanical remedy every cycle instead of degrading to the printed refusal.
+ * @failure The habitant can mistake an author-owned intent remedy for a safe PR rewrite, or re-apply a failed mechanical remedy every cycle instead of degrading to the printed refusal.
  * @level l2
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  */
 import { describe, expect, it } from "vitest"
 import { createFailure } from "@yrd/core"
@@ -157,7 +157,7 @@ function harness(
   return { app, io, services, calls, infos, warns, ops: () => calls.map((call) => call.op) }
 }
 
-describe("resident refusal remedies — only PR-local drills are self-applied", () => {
+describe("habitant refusal remedies — only PR-local drills are self-applied", () => {
   it("settles authored-gitlink as needs-person without mutating the PR", async () => {
     const h = harness({
       code: "authored-gitlink",
@@ -275,7 +275,7 @@ describe("resident refusal remedies — only PR-local drills are self-applied", 
       expect.objectContaining({ status: "escalated", pr: "PR1791", code: "recut-certificate" }),
     ])
     expect(h.ops()).toEqual(["queue.settleAdmissionRefusal"])
-    // A restarted resident has an empty process-local Set. The durable Queue
+    // A restarted habitant has an empty process-local Set. The durable Queue
     // settlement remains authoritative and must still suppress re-selection.
     expect(await applyRefusalRemedies(h.app, h.services, h.io, new Set())).toEqual([])
     expect(h.warns).toContainEqual(

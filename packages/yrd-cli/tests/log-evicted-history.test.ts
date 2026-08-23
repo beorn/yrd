@@ -64,7 +64,7 @@ function evictedThrough(app: CliApp): number {
  * the whole history and checkpoints it at head — the moment eviction runs.
  *
  * Reopening is what makes the fixture deterministic. Within one session
- * checkpoints are debt-driven and land whenever the cadence decides; app open
+ * checkpoints are debt-driven and merge whenever the cadence decides; app open
  * always saves one, so the eviction happens at a known point and the returned
  * app is the one a user would be holding afterwards.
  */

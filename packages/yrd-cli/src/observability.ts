@@ -17,7 +17,7 @@ export type YrdObservability = Readonly<{
   file?: string
   spans: boolean
   /** True when the operator chose the level (--log-level / LOG_LEVEL / -v / -q).
-   * The resident follow-runner only bumps its default level when this is false. */
+   * The habitant follow-runner only bumps its default level when this is false. */
   explicitLevel: boolean
 }>
 
@@ -61,7 +61,7 @@ function setting(value: string | undefined): string | undefined {
  * An explicit level still wins, from any of the three sources that count as an
  * operator choice (`--log-level`, `-v`/`-q`, `LOG_LEVEL`), and `explicitLevel`
  * deliberately stays false here — DEBUG selects a default, it is not the
- * operator pinning a level, and `residentObservability` keys off that. */
+ * operator pinning a level, and `habitantObservability` keys off that. */
 export function resolveYrdObservability(
   flags: YrdObservabilityFlags,
   env: Readonly<Record<string, string | undefined>>,
@@ -97,41 +97,41 @@ export function resolveYrdObservability(
   })
 }
 
-/** The resident follow-runner's stderr IS a narration stream, so at the default
+/** The habitant follow-runner's stderr IS a narration stream, so at the default
  * `warn` it would lose run/step starts and successful completions. Bump the
- * resolved policy to `debug` at the resident entry, but ONLY when the operator
+ * resolved policy to `debug` at the habitant entry, but ONLY when the operator
  * left the level at its default (never overriding an explicit
- * `--log-level`/`LOG_LEVEL`/`-v`/`-q`). The resident human formatter admits only
+ * `--log-level`/`LOG_LEVEL`/`-v`/`-q`). The habitant human formatter admits only
  * concise lifecycle highlights; JSONL retains the full structured stream. */
-export function residentObservability(config: YrdObservability): YrdObservability {
+export function habitantObservability(config: YrdObservability): YrdObservability {
   if (config.explicitLevel || config.level !== "warn") return config
   return Object.freeze({ ...config, level: "debug" })
 }
 
-const RESIDENT_LIFECYCLE_NAMESPACES = ["yrd:jobs", "yrd:queue:run", "yrd:runner"] as const
+const HABITANT_LIFECYCLE_NAMESPACES = ["yrd:jobs", "yrd:queue:run", "yrd:runner"] as const
 
-function residentLifecycleNamespace(namespace: string): boolean {
-  return RESIDENT_LIFECYCLE_NAMESPACES.some(
+function habitantLifecycleNamespace(namespace: string): boolean {
+  return HABITANT_LIFECYCLE_NAMESPACES.some(
     (candidate) => namespace === candidate || namespace.startsWith(`${candidate}:`),
   )
 }
 
-/** Preserve loggily's zero-cost conditional calls for the implicit resident
+/** Preserve loggily's zero-cost conditional calls for the implicit habitant
  * policy. Its pipeline needs DEBUG/INFO only for lifecycle narration, so an
  * unrelated child must still expose neither method — otherwise every process,
  * Git, and projection debug payload is eagerly built and discarded downstream. */
-function gateImplicitResidentLogger(logger: ConditionalLogger): ConditionalLogger {
+function gateImplicitHabitantLogger(logger: ConditionalLogger): ConditionalLogger {
   return new Proxy(logger, {
     get(target, property, receiver): unknown {
       if (
         (property === "debug" || property === "info" || property === "trace") &&
-        !residentLifecycleNamespace(target.name)
+        !habitantLifecycleNamespace(target.name)
       ) {
         return undefined
       }
       if (property === "child" || property === "logger") {
         const createChild = Reflect.get(target, property, target) as (...args: unknown[]) => ConditionalLogger
-        return (...args: unknown[]) => gateImplicitResidentLogger(createChild.apply(target, args))
+        return (...args: unknown[]) => gateImplicitHabitantLogger(createChild.apply(target, args))
       }
       return Reflect.get(target, property, receiver) as unknown
     },
@@ -139,12 +139,12 @@ function gateImplicitResidentLogger(logger: ConditionalLogger): ConditionalLogge
 }
 
 /** Create the one host-owned logger fan-out. The file sink is structured JSONL.
- * When a `human` formatter is supplied (the resident follow-runner), the stderr
+ * When a `human` formatter is supplied (the habitant follow-runner), the stderr
  * sink renders each Event through it — a scannable timeline row, or `undefined`
  * to suppress that row from the human stream. Without it, the default console
  * format is used.
  *
- * The implicit resident default is deliberately a branched policy: every
+ * The implicit habitant default is deliberately a branched policy: every
  * WARN/ERROR reaches the human sink, while DEBUG/INFO is admitted only from the
  * three lifecycle namespaces that form the narration. An explicitly selected
  * level/DEBUG filter keeps the ordinary single policy. A configured JSONL file
@@ -170,20 +170,20 @@ export function createYrdLogger(
           },
           objectMode: true,
         }
-  const implicitResident =
+  const implicitHabitant =
     human !== undefined && config.level === "debug" && !config.explicitLevel && config.debug === undefined
   const lifecycleLevel = (event: Event): Event | null =>
     event.kind === "log" && (event.level === "debug" || event.level === "info") ? event : null
-  const pipeline: ConfigElement[] = implicitResident
+  const pipeline: ConfigElement[] = implicitHabitant
     ? [
         { level: "debug", spans: false },
         [{ level: "warn", spans: false }, stderrSink],
-        [{ level: "debug", ns: [...RESIDENT_LIFECYCLE_NAMESPACES], spans: false }, lifecycleLevel, stderrSink],
+        [{ level: "debug", ns: [...HABITANT_LIFECYCLE_NAMESPACES], spans: false }, lifecycleLevel, stderrSink],
       ]
     : [scope, stderrSink]
   if (config.file !== undefined) {
     pipeline.push(
-      implicitResident
+      implicitHabitant
         ? [
             { level: "debug", spans: config.spans },
             { file: config.file, format: "json" },
@@ -192,7 +192,7 @@ export function createYrdLogger(
     )
   }
   const created = createLogger("yrd", pipeline)
-  const logger = implicitResident && config.file === undefined ? gateImplicitResidentLogger(created) : created
+  const logger = implicitHabitant && config.file === undefined ? gateImplicitHabitantLogger(created) : created
   let disposed = false
   const dispose = (): void => {
     if (disposed) return

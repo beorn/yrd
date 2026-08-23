@@ -141,7 +141,7 @@ const HEAD_SHA = "1".repeat(40)
 const MERGED_SHA = "b".repeat(40)
 const PR1640_RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
 const PR1640_LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
-const PR1640_BRANCH = "task/@yrd/core/22366-post-landing-component-main"
+const PR1640_BRANCH = "task/@yrd/core/22366-post-merge-component-main"
 const JOB_PREPARE_PASS_ID = "00000000-0000-7000-8000-000000000101"
 const JOB_CHECK_FAILED_ID = "00000000-0000-7000-8000-000000000102"
 const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
@@ -1347,20 +1347,20 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
-  it("refuses a submit into a repository that declares no landing authority", async () => {
+  it("refuses a submit into a repository that declares no merge authority", async () => {
     // A repository whose queue will never be driven accepted two carriers on
     // 2026-08-05, printed `submitted`, and passed their checks. They sat ready
-    // for an hour looking byte-identical to work that would land. The failure
+    // for an hour looking byte-identical to work that would merge. The failure
     // was knowable at the call and instead became a mystery an hour later.
     //
     // The discriminator has to be DECLARED, and that is not a preference. The
     // repository in that incident had terminalAttempts=0 and earliestFactMs=null
     // — it genuinely WAS a brand-new queue, indistinguishable in its own state
     // from one whose runner is about to be armed. No predicate over queue
-    // history separates them, so `landing:` says out loud what cannot be
+    // history separates them, so `merge:` says out loud what cannot be
     // inferred. Absent, it is "expected", which is why every other test here
     // (and every repository that has never heard of the key) is unaffected.
-    const repo = mkdtempSync(join(tmpdir(), "yrd-landing-authority-"))
+    const repo = mkdtempSync(join(tmpdir(), "yrd-merge-authority-"))
     try {
       const submitInto = async (yml: string | undefined, authoritativeMerge?: "expected" | "none") => {
         if (yml === undefined) rmSync(join(repo, ".yrd.yml"), { force: true })
@@ -1380,29 +1380,29 @@ describe("runYrd", () => {
         return { code, ...output }
       }
 
-      const refused = await submitInto("landing: none\n")
+      const refused = await submitInto("merge: none\n")
       expect(refused.code, refused.stderr()).toBe(1)
       expect(refused.stdout()).toBe("")
       // The message has to carry BOTH facts or it relocates the mystery instead
       // of ending it: WHICH repository, and that nothing will ever pick this up.
       expect(refused.stderr()).toContain(repo)
-      expect(refused.stderr()).toContain("no landing authority")
+      expect(refused.stderr()).toContain("no merge authority")
       expect(JSON.parse(refused.stderr())).toMatchObject({
         command: "pr.submit",
-        failure: { kind: "refusal", code: "no-landing-authority" },
+        failure: { kind: "refusal", code: "no-merge-authority" },
       })
 
       // The process host has already resolved the selected config from the
       // named base. Mutable worktree bytes cannot override that authority.
-      const baseAuthority = await submitInto("landing: expected\n", "none")
+      const baseAuthority = await submitInto("merge: expected\n", "none")
       expect(baseAuthority.code, baseAuthority.stderr()).toBe(1)
       expect(JSON.parse(baseAuthority.stderr())).toMatchObject({
         command: "pr.submit",
-        failure: { kind: "refusal", code: "no-landing-authority" },
+        failure: { kind: "refusal", code: "no-merge-authority" },
       })
 
       // Declaring the authority explicitly is the ordinary case and unaffected.
-      const declared = await submitInto("landing: expected\n")
+      const declared = await submitInto("merge: expected\n")
       expect(declared.code, declared.stderr()).toBe(0)
       expect(JSON.parse(declared.stdout())).toMatchObject({ command: "pr.submit" })
 
@@ -1455,18 +1455,18 @@ describe("runYrd", () => {
     expect(app.bays.get("pr-pr1")).toMatchObject({ status: "active", headSha: HEAD_SHA })
   })
 
-  it("Q1: resubmitting a landed branch reports already-merged for the same head and mints a fresh delivery for a new head", async () => {
+  it("Q1: resubmitting a merged branch reports already-merged for the same head and mints a fresh delivery for a new head", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
-    expect(app.bays.pr("PR1")).toMatchObject({ branch: "topic/landed", state: "closed", merged: true })
+    expect(app.bays.pr("PR1")).toMatchObject({ branch: "topic/merged", state: "closed", merged: true })
     const before = await Array.fromAsync(app.events())
 
-    // Same landed head → informational "already merged", exit 0, no new PR, no event.
+    // Same merged head → informational "already merged", exit 0, no new PR, no event.
     const merged = outputIO({ resolveRevision: async () => HEAD_SHA })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), merged.io), merged.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), merged.io), merged.stderr()).toBe(0)
     const mergedOut = JSON.parse(merged.stdout()) as Readonly<{
       prs: readonly { id: string; status: string }[]
       warnings?: readonly string[]
@@ -1477,10 +1477,10 @@ describe("runYrd", () => {
 
     // New head → mints a fresh delivery PR (revision 1), exit 0, no hand-made delivery branch.
     const minted = outputIO({ resolveRevision: async () => "2".repeat(40) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), minted.io), minted.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), minted.io), minted.stderr()).toBe(0)
     expect(JSON.parse(minted.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ id: "PR2", branch: "topic/landed", status: "submitted" }],
+      prs: [{ id: "PR2", branch: "topic/merged", status: "submitted" }],
     })
   })
 
@@ -1491,7 +1491,7 @@ describe("runYrd", () => {
       expected: {
         command: "pr.view",
         pr: { id: "PR1" },
-        landing: { outcome: "not-landed", status: "submitted" },
+        merge: { outcome: "not-merged", status: "submitted" },
       },
     },
     {
@@ -2004,11 +2004,11 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
     const created = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(
-      await runYrd(app, yrd("pr", "create", "topic/resident-carrier", "--json"), created.io),
+      await runYrd(app, yrd("pr", "create", "topic/habitant-carrier", "--json"), created.io),
       created.stderr(),
     ).toBe(0)
 
-    const remerge = remergeIO(app, "PR1", { residentLeaseHeld: () => Promise.resolve(true) })
+    const remerge = remergeIO(app, "PR1", { habitantLeaseHeld: () => Promise.resolve(true) })
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
     expect(checkedRevisions).toEqual([])
     expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
@@ -2020,13 +2020,13 @@ describe("runYrd", () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ waitingCheck: true, checkedRevisions })
     await app.bays.submit({
-      branch: "topic/resident-ready",
+      branch: "topic/habitant-ready",
       headSha: HEAD_SHA,
       base: "main",
       draft: true,
     })
 
-    const ready = outputIO({ residentLeaseHeld: () => Promise.resolve(true) })
+    const ready = outputIO({ habitantLeaseHeld: () => Promise.resolve(true) })
     expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(0)
 
     expect(checkedRevisions).toEqual([])
@@ -2286,7 +2286,7 @@ describe("runYrd", () => {
   it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
-    // Drain PR1 into a resident run: the waiting check leaves R1 non-terminal.
+    // Drain PR1 into a habitant run: the waiting check leaves R1 non-terminal.
     expect(await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       { id: "R1", status: "waiting", prs: [{ id: "PR1", revision: 1 }] },
     ])
@@ -2308,7 +2308,7 @@ describe("runYrd", () => {
     // check job qualifies). The canceled run must STAY inert here — recovery must
     // not turn a cancel into a pr/canceled and strip PR1 out of the queue. This is
     // the load-bearing guard: without it, recovery rejects/cancels the member PR.
-    await app.queue.recover({ recoveryTime: "2026-07-09T12:05:00.000Z", reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: "2026-07-09T12:05:00.000Z", reason: "habitant restart" })
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
     expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1 })
 
@@ -2492,8 +2492,8 @@ describe("runYrd", () => {
    * @i/10-merge-queue/a-counter-that-means-two-things.
    *
    * The revision counter increments both when a candidate is recut and when the
-   * recut that finally lands is built, so `43 → 45` cannot be told apart from
-   * `43 → 44 → landed`. Two readers watched PR537 climb during an 89-minute
+   * recut that finally merges is built, so `43 → 45` cannot be told apart from
+   * `43 → 44 → merged`. Two readers watched PR537 climb during an 89-minute
    * stall and both called it futile churn, while revision 45 was the merge.
    *
    * The fact that separates the two is ALREADY RECORDED and ALREADY RENDERED.
@@ -2518,7 +2518,7 @@ describe("runYrd", () => {
       clock: () => new Date(Date.parse("2026-07-09T10:00:00.000Z") + clockTick++ * 60_000).toISOString(),
     })
     // Every recut returns the SAME head. That is the pathological carrier: the
-    // mechanical rebuild lands on byte-identical content over and over, which is
+    // mechanical rebuild merges on byte-identical content over and over, which is
     // how PR537 printed `0d7566e4e3ae→0d7566e4e3ae` about forty times.
     //
     // Note `unchanged: false` rather than true. A recut that reports itself
@@ -2833,7 +2833,7 @@ describe("runYrd", () => {
     const beforeCycle = await Array.fromAsync(app.events()).then((events) => events.length)
     const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
 
-    expect(cycle, "resident cycles need a queue-owned base-advance recut seam").toBeTypeOf("function")
+    expect(cycle, "habitant cycles need a queue-owned base-advance recut seam").toBeTypeOf("function")
     await cycle(app, services, io)
     expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
     const secondAdmissionJob = revisionAdmissionJob(app, "PR1")
@@ -2959,14 +2959,14 @@ describe("runYrd", () => {
       3, 3, 2, 2, 2,
     ])
 
-    await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
-    await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
+    await app.bays.closePr({ pr: "PR1", reason: "candidate merged" })
+    await app.bays.closePr({ pr: "PR2", reason: "candidate merged" })
     targetBase = "e".repeat(40)
     await refresh(app, services, io)
     expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4"])
 
-    await app.bays.closePr({ pr: "PR3", reason: "candidate landed" })
-    await app.bays.closePr({ pr: "PR4", reason: "candidate landed" })
+    await app.bays.closePr({ pr: "PR3", reason: "candidate merged" })
+    await app.bays.closePr({ pr: "PR4", reason: "candidate merged" })
     targetBase = "d".repeat(40)
     await refresh(app, services, io)
     expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4", "PR5"])
@@ -2997,7 +2997,7 @@ describe("runYrd", () => {
             })
           }
           return Promise.resolve({
-            // The recutter has proven that the resolved Queue base already
+            // The remerger has proven that the resolved Queue base already
             // contains every authored path. Nothing remains to admit or merge.
             headSha: nextBase,
             baseSha: nextBase,
@@ -3066,7 +3066,7 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterSettlement)
 
     // The same-cycle refresh proves that terminal settlement releases the
-    // selector immediately instead of merely hiding PR1 for one resident tick.
+    // selector immediately instead of merely hiding PR1 for one habitant tick.
     // The in-memory app's canonical base resolver is intentionally fixed at
     // BASE_SHA, independent of the refresh seam's injected next-base oracle.
     const runs = await app.queue.run({}, { runner: "yrd-cli", leaseMs: 60_000 })
@@ -3074,12 +3074,12 @@ describe("runYrd", () => {
     expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
   })
 
-  it("runs admitted-to-refreshed as a resident pre-run transition", async () => {
+  it("runs admitted-to-refreshed as a habitant pre-run transition", async () => {
     const nextBase = "b".repeat(40)
     const nextHead = "3".repeat(40)
     const patchId = "d".repeat(40)
     const app = await createApp({ waitingCheck: true })
-    await app.bays.submit({ branch: "issue/resident-refresh", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.submit({ branch: "issue/habitant-refresh", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,
@@ -3131,7 +3131,7 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
-  it("keeps a five-carrier convoy tail flat until each resident candidate batch reaches the front", async () => {
+  it("keeps a five-carrier convoy tail flat until each habitant candidate batch reaches the front", async () => {
     let targetBase = "f".repeat(40)
     let now = 0
     const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
@@ -3143,7 +3143,7 @@ describe("runYrd", () => {
     for (const [index, oldHead] of oldHeads.entries()) {
       const pr = `PR${index + 1}`
       await app.bays.submit({
-        branch: `issue/resident-convoy-${index + 1}`,
+        branch: `issue/habitant-convoy-${index + 1}`,
         headSha: oldHead,
         baseSha: BASE_SHA,
         draft: true,
@@ -3175,7 +3175,7 @@ describe("runYrd", () => {
     })
     const services = { recut: { recut: remerge } } as unknown as YrdCliServices
     const controller = new AbortController()
-    const beforeResident = await Array.fromAsync(app.events()).then((events) => events.length)
+    const beforeHabitant = await Array.fromAsync(app.events()).then((events) => events.length)
     const snapshots: Array<{
       recuts: string[]
       revisions: number[]
@@ -3190,7 +3190,7 @@ describe("runYrd", () => {
       scope: {
         signal: controller.signal,
         sleep: async () => {
-          const residentEvents = (await Array.fromAsync(app.events())).slice(beforeResident)
+          const habitantEvents = (await Array.fromAsync(app.events())).slice(beforeHabitant)
           snapshots.push({
             recuts: [...remergeIds],
             revisions: ["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n),
@@ -3200,7 +3200,7 @@ describe("runYrd", () => {
                 .checkRequests.filter(({ revision }) => revision === 3)
                 .map(({ revision }) => `${pr}@${revision}`),
             ),
-            jobs: residentEvents.flatMap(({ name, data }) => {
+            jobs: habitantEvents.flatMap(({ name, data }) => {
               if (name !== "job/requested") return []
               const match = /^admission:(PR\d+):(\d+):/.exec((data as { key?: string }).key ?? "")
               return match === null ? [] : [`${match[1]}@${match[2]}`]
@@ -3209,15 +3209,15 @@ describe("runYrd", () => {
           })
           sleeps += 1
           if (sleeps === 1) {
-            await app.bays.closePr({ pr: "PR1", reason: "candidate landed" })
-            await app.bays.closePr({ pr: "PR2", reason: "candidate landed" })
+            await app.bays.closePr({ pr: "PR1", reason: "candidate merged" })
+            await app.bays.closePr({ pr: "PR2", reason: "candidate merged" })
             targetBase = "e".repeat(40)
             now += 60_000
             return
           }
           if (sleeps === 2) {
-            await app.bays.closePr({ pr: "PR3", reason: "candidate landed" })
-            await app.bays.closePr({ pr: "PR4", reason: "candidate landed" })
+            await app.bays.closePr({ pr: "PR3", reason: "candidate merged" })
+            await app.bays.closePr({ pr: "PR4", reason: "candidate merged" })
             targetBase = "d".repeat(40)
             now += 60_000
             return
@@ -3231,7 +3231,7 @@ describe("runYrd", () => {
       runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, async () => undefined, services),
     ).resolves.toBe(3)
 
-    // Each snapshot is taken after the resident's refresh + admission pass and
+    // Each snapshot is taken after the habitant's refresh + admission pass and
     // before the simulated base move. The tail therefore proves zero work until
     // its candidate batch reaches the front, followed by exactly one recut/check.
     expect(snapshots).toEqual([
@@ -3260,7 +3260,7 @@ describe("runYrd", () => {
     expect(remerge).toHaveBeenCalledTimes(5)
   })
 
-  it("does not count a refused freshness pass as resident cycle progress", async () => {
+  it("does not count a refused freshness pass as habitant cycle progress", async () => {
     const nextBase = "b".repeat(40)
     const app = await createApp()
     await app.bays.submit({
@@ -3443,8 +3443,8 @@ describe("runYrd", () => {
     expect(queueRun, "an unchanged idle tick must not traverse and compose the full queue").toHaveBeenCalledTimes(1)
   })
 
-  it("exits non-zero on every resident refusal, so a stopped runner is never mistaken for a drained queue", async () => {
-    // A resident that refuses has stopped serving the queue. If it exited zero,
+  it("exits non-zero on every habitant refusal, so a stopped runner is never mistaken for a drained queue", async () => {
+    // A habitant that refuses has stopped serving the queue. If it exited zero,
     // every supervisor above it — hab, a shell loop, CI — would read the stop as
     // a completed drain and not restart it, and the queue would sit unattended
     // behind a green exit. Refusals classify to 1 (invocation.ts
@@ -3465,7 +3465,7 @@ describe("runYrd", () => {
     }
 
     // The installed plan is not the one the tip declares, and no process host
-    // is wired to exec a replacement in place: the resident must die and be
+    // is wired to exec a replacement in place: the habitant must die and be
     // restarted rather than refuse every candidate it prepares.
     const runtime = outputIO()
     const app = await createApp()
@@ -3478,7 +3478,7 @@ describe("runYrd", () => {
     })
 
     // The one-shot path shares the gate and must agree: a refusal is a refusal
-    // whether or not a resident is following.
+    // whether or not a habitant is following.
     const once = outputIO()
     const onceApp = await createApp()
     expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse)).toBe(1)
@@ -3573,7 +3573,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("recovers a journaled freshness transition when the resident stops before canceling its predecessor", async () => {
+  it("recovers a journaled freshness transition when the habitant stops before canceling its predecessor", async () => {
     const nextHead = "3".repeat(40)
     const nextBase = "b".repeat(40)
     const treeSha = "c".repeat(40)
@@ -3595,7 +3595,7 @@ describe("runYrd", () => {
     const predecessorJob = revisionAdmissionJob(app, "PR1")
     expect(predecessorJob).toMatchObject({ status: "waiting" })
 
-    // This is the durable point after auto-recut and before the resident's
+    // This is the durable point after auto-recut and before the habitant's
     // best-effort predecessor cancellation. A process exit here must leave the
     // successor submitted/checkable so the next ordinary Queue drain recovers.
     await app.bays.recut({
@@ -3637,7 +3637,7 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
-  it("does not overwrite an authored revision that arrives while resident freshness is computing", async () => {
+  it("does not overwrite an authored revision that arrives while habitant freshness is computing", async () => {
     const branch = "issue/auto-recut-cas"
     const remergeHead = "2".repeat(40)
     const authoredHead = "3".repeat(40)
@@ -4330,7 +4330,7 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("queues authoritative checks at plain submit and runs them during the later landing drain", async () => {
+  it("queues authoritative checks at plain submit and runs them during the later merge drain", async () => {
     const checkRuns: string[] = []
     const app = await createApp({ checkRuns })
 
@@ -4392,7 +4392,7 @@ describe("runYrd", () => {
     expect(JSON.parse(view.stdout())).toMatchObject({
       command: "pr.view",
       pr: { id: "PR1", status: "submitted", checkRequests: [expect.any(Object)] },
-      landing: { status: "submitted" },
+      merge: { status: "submitted" },
     })
     expect(await Array.fromAsync(reader.events())).toHaveLength(events.length)
   })
@@ -5111,7 +5111,7 @@ describe("runYrd", () => {
     // the one submit path that never met the linear-root check at all: the
     // branch resolver (where submit enforces it) is deliberately skipped for
     // an ACTIVE bay, so the merge tip sailed into the ledger and was refused
-    // only later, on the landing path (PR1364 shape, 2026-08-19).
+    // only later, on the merge path (PR1364 shape, 2026-08-19).
     const submit = outputIO({
       cwd: "/repo/.bays/B1",
       parents: async () => ["e".repeat(40), "f".repeat(40)],
@@ -5470,7 +5470,7 @@ describe("runYrd", () => {
     expect(JSON.parse(merged.stdout())).toMatchObject({
       command: "pr.view",
       pr: { id: "PR1", state: "closed", merged: true, taskStatus: "done" },
-      landing: {
+      merge: {
         outcome: "landed",
         landingSha: MERGED_SHA,
         baseSha: MERGED_SHA,
@@ -5530,7 +5530,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), submit.io)).toBe(
       0,
     )
-    // Two resolutions per submit: the staged draft pass (where refusals land
+    // Two resolutions per submit: the staged draft pass (where refusals merge
     // before anything is queued — the PR1128 ordering) and the real submit,
     // the same shape pr.submit has always had.
     expect(resolved).toEqual(["topic/direct", "topic/direct"])
@@ -6040,7 +6040,7 @@ describe("runYrd", () => {
     expect(currentChecks[0]).not.toHaveProperty("run")
   })
 
-  it("runs a plain submission's authoritative check and merge in the later landing drain", async () => {
+  it("runs a plain submission's authoritative check and merge in the later merge drain", async () => {
     const checkRuns: string[] = []
     const app = await createApp({ checkRuns })
     const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
@@ -6572,7 +6572,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("does not report a no-landing stall after an immutable revision refusal settles", async () => {
+  it("does not report a no-merge stall after an immutable revision refusal settles", async () => {
     await using app = await createApp({
       prepareCandidate: () => {
         throw createFailure({
@@ -6627,7 +6627,7 @@ describe("runYrd", () => {
     expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
     const check = revisionAdmissionJob(app, "PR1")
     if (check === undefined) throw new Error("expected requested check")
-    // A known resident started this check with a FUTURE lease, then died — a fresh
+    // A known habitant started this check with a FUTURE lease, then died — a fresh
     // (unexpired) ghost the lease-expiry sweep cannot yet settle.
     await app.dispatch(app.commands.job.transition, {
       type: "start",
@@ -6986,7 +6986,7 @@ describe("runYrd", () => {
       fact("R-future", "rejected", 1_000, [1_000], now + 1),
     ]
 
-    // windowMs = 6h so the per-24h projection is 4× the landed count (2 → 8);
+    // windowMs = 6h so the per-24h projection is 4× the merged count (2 → 8);
     // oldestOpenMs is a live-queue fact the caller supplies, null when absent.
     expect(queueFlowMetrics(facts, { now, windowMs: 6 * 60 * minute })).toEqual({
       windowMs: 6 * 60 * minute,
@@ -7004,7 +7004,7 @@ describe("runYrd", () => {
         canceled: 0,
       },
       decisionRejection: { rejected: 1, decisions: 4, rate: 1 / 4 },
-      throughput: { landed: 2, per24h: 8 },
+      throughput: { merged: 2, per24h: 8 },
       oldestOpenMs: null,
       activeRun: {
         allTerminal: {
@@ -7065,7 +7065,7 @@ describe("runYrd", () => {
         canceled: 0,
       },
       decisionRejection: { rejected: 0, decisions: 0, rate: null },
-      throughput: { landed: 0, per24h: 0 },
+      throughput: { merged: 0, per24h: 0 },
       oldestOpenMs: 42 * minute,
       activeRun: {
         allTerminal: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
@@ -7080,7 +7080,7 @@ describe("runYrd", () => {
   it("windows flow metrics independently of the timeline row-listing window", () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
-    // One landed Run that finished 8h ago: outside a 6h listing window, inside 24h.
+    // One merged Run that finished 8h ago: outside a 6h listing window, inside 24h.
     const merged = fakeRun({
       id: "R1",
       status: "passed",
@@ -7124,15 +7124,15 @@ describe("runYrd", () => {
       metricsWindowMs: 24 * 60 * minute,
     })
 
-    // The 6h listing window drops the 8h-old landing from both projections' rows.
+    // The 6h listing window drops the 8h-old merge from both projections' rows.
     expect(shared.rows.map((row) => row.pr)).toEqual(["PR5"])
     expect(widened.rows.map((row) => row.pr)).toEqual(["PR5"])
-    // Metrics honor their own window: 6h sees no landing, 24h counts it.
+    // Metrics honor their own window: 6h sees no merge, 24h counts it.
     expect(shared.metrics.terminalAttempts).toBe(0)
-    expect(shared.metrics.throughput).toEqual({ landed: 0, per24h: 0 })
+    expect(shared.metrics.throughput).toEqual({ merged: 0, per24h: 0 })
     expect(widened.metrics.terminalAttempts).toBe(1)
     expect(widened.metrics.outcomes.integrated).toBe(1)
-    expect(widened.metrics.throughput).toEqual({ landed: 1, per24h: 1 })
+    expect(widened.metrics.throughput).toEqual({ merged: 1, per24h: 1 })
     expect(widened.metrics.windowMs).toBe(24 * 60 * minute)
     // Oldest-open is a live-queue fact, independent of either window.
     expect(shared.oldestOpenMs).toBe(60 * minute)
@@ -7154,7 +7154,7 @@ describe("runYrd", () => {
         steps: [],
         integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
       })
-    // One landing 8h ago (inside the 24h metrics window) and one 3 days ago
+    // One merge 8h ago (inside the 24h metrics window) and one 3 days ago
     // (outside 24h, inside a week). Both are dropped from the 6h listing rows.
     const recent = merge("R1", "PR1", "1".repeat(40), "2026-07-13T04:00:00.000Z")
     const older = merge("R2", "PR2", "2".repeat(40), "2026-07-10T12:00:00.000Z")
@@ -7186,7 +7186,7 @@ describe("runYrd", () => {
       rowLimit: 20,
       submissionTimes: new Map(prs.map((pr) => [queueRevisionKey(currentChangeSnapshot(pr)), pr.submittedAt!])),
     })
-    // The 24h metrics window counts only the recent landing.
+    // The 24h metrics window counts only the recent merge.
     expect(projection.metrics.terminalAttempts).toBe(1)
     // timeStatsFacts span the FULL retained horizon — both landings — so the
     // calendar panel never inherits the 24h aggregate window.
@@ -7529,7 +7529,7 @@ describe("runYrd", () => {
     expect(first).toContain("#1 ✓")
     expect(first).toContain("@cto")
     // An adjacent member of the SAME run keeps its own TIME/STATUS cells —
-    // Round 8 blanked them, making a co-landed PR print exactly like one that
+    // Round 8 blanked them, making a co-merged PR print exactly like one that
     // was never attempted (@i/10-merge-queue/22925, operator 2026-08-17).
     // Item 38 refines the RUN cell only: the shared id renders on the FIRST
     // member row and the partner carries the muted `·` membership dot.
@@ -7558,7 +7558,7 @@ describe("runYrd", () => {
     throw new Error("no unused pid available for the departed-runner probe")
   }
 
-  it("projects fresh, stale, dead-pid, and absent resident runner heartbeats", async () => {
+  it("projects fresh, stale, dead-pid, and absent habitant runner heartbeats", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-status-"))
     execFileSync("git", ["init", "-q", repo])
     const statusDir = join(repo, ".git", "yrd", "resident-runner")
@@ -7637,7 +7637,7 @@ describe("runYrd", () => {
       // Last heartbeat 11:59:55, read at 12:00:20 — a runner gone 25s with no
       // exit marker of its own.
       expect(dead.stdout()).toContain(
-        `NO RUNNER - resident runner [${departedPid}] died 0:25 ago, no exit marker; restart it: yrd queue run main`,
+        `NO RUNNER - habitant runner [${departedPid}] died 0:25 ago, no exit marker; restart it: yrd queue run main`,
       )
       expect(dead.stdout(), "a departed runner is not a late one").not.toContain("RUNNER STALE")
 
@@ -7654,7 +7654,7 @@ describe("runYrd", () => {
       })
       expect(await runYrd(app, yrd("queue", "list"), stopped.io), stopped.stderr()).toBe(0)
       expect(stopped.stdout()).toContain(
-        `NO RUNNER - resident runner [${departedPid}] stopped 0:20 ago; restart it: yrd queue run main`,
+        `NO RUNNER - habitant runner [${departedPid}] stopped 0:20 ago; restart it: yrd queue run main`,
       )
 
       rmSync(statusPath)
@@ -7736,7 +7736,7 @@ describe("runYrd", () => {
         running: false,
         error: {
           code: "resident-runner-missing",
-          resolution: ["Start or restart the resident queue runner."],
+          resolution: ["Start or restart the habitant queue runner."],
         },
         facts: { lease: "free", runnerStatus: "missing" },
       })
@@ -7801,13 +7801,13 @@ describe("runYrd", () => {
           driver,
         }),
       )
-      // A resident outlives the CLI reading it, so its status is a wire between
+      // A habitant outlives the CLI reading it, so its status is a wire between
       // two independently-versioned processes. On 2026-08-18 a rename of this
       // key (lastLanded -> lastMerged) made every fresh CLI REFUSE against a
-      // resident started minutes earlier: `queue list`, `why` and the watch
+      // habitant started minutes earlier: `queue list`, `why` and the watch
       // pane's status poll all exited 3 while the queue itself kept merging
       // fine. The old spelling is read, and an unreported position reads
-      // healthy -- a live resident omits the key until it has merged anything,
+      // healthy -- a live habitant omits the key until it has merged anything,
       // so absence has never meant a fault.
       writeFileSync(
         join(stateDir, "resident-runner", "status.json"),
@@ -8053,7 +8053,7 @@ describe("runYrd", () => {
         running: true,
         error: {
           code: "installed-plan-stale",
-          resolution: ["Restart the resident queue runner so it builds the steps the base declares."],
+          resolution: ["Restart the habitant queue runner so it builds the steps the base declares."],
         },
       })
 
@@ -8063,7 +8063,7 @@ describe("runYrd", () => {
       expect(human.stdout()).toContain("main tip 11111111 (config blob 22222222) declares")
       expect(human.stdout()).toContain("step 'affected-tests' is declared at the tip but not installed in this process")
       expect(human.stdout()).toContain(
-        "resolve: Restart the resident queue runner so it builds the steps the base declares.",
+        "resolve: Restart the habitant queue runner so it builds the steps the base declares.",
       )
       expect(human.stdout()).toContain(`git main: ahead=1 behind=0 tip=${baseSha.slice(0, 12)}`)
     } finally {
@@ -8073,16 +8073,16 @@ describe("runYrd", () => {
     }
   })
 
-  it("projects canonical queue-progress findings into the resident heartbeat without re-deriving readiness", async () => {
+  it("projects canonical queue-progress findings into the habitant heartbeat without re-deriving readiness", async () => {
     const app = await createApp()
     const project = (
       runInternals as typeof runInternals & {
-        residentQueueProgress(app: TestApp, now: string): unknown
+        habitantQueueProgress(app: TestApp, now: string): unknown
       }
-    ).residentQueueProgress
+    ).habitantQueueProgress
     const noMerge = {
       code: "queue-progress-stalled",
-      message: "Queue 'main' has one required-check PR queued and no landing for 30m",
+      message: "Queue 'main' has one required-check PR queued and no merge for 30m",
       pr: "PR1",
       specimen: "queue:main",
       count: 1,
@@ -8092,7 +8092,7 @@ describe("runYrd", () => {
     const neverStarted = {
       code: "queue-never-started",
       message: "Queue 'main' has one submitted PR that never started required checks for 30m",
-      resolution: ["Start the resident queue runner and verify it requests checks for PR1."],
+      resolution: ["Start the habitant queue runner and verify it requests checks for PR1."],
       pr: "PR1",
       specimen: "queue:main:never-started",
       count: 1,
@@ -8193,7 +8193,7 @@ describe("runYrd", () => {
         }),
       ).toBe(0)
       expect(output.stderr()).toContain("yrd: dead-man:")
-      expect(output.stderr()).toContain("no resident runner owns the drain lease")
+      expect(output.stderr()).toContain("no habitant runner owns the drain lease")
     } finally {
       await app.close()
       safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
@@ -8239,7 +8239,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("writes never-started queue progress into a live resident heartbeat", async () => {
+  it("writes never-started queue progress into a live habitant heartbeat", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-never-started-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -8253,11 +8253,11 @@ describe("runYrd", () => {
       expect(app.bays.checksRequested("PR1")).toBe(false)
 
       now += 30 * 60_000
-      const heartbeat = await runInternals.startResidentRunnerHeartbeat(
+      const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
         outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io,
         {
           intervalMs: 60_000,
-          queueProgress: (observedAt) => runInternals.residentQueueProgress(app, observedAt),
+          queueProgress: (observedAt) => runInternals.habitantQueueProgress(app, observedAt),
           driver: { queueId: `${repo}#main`, lastMerged: () => null },
         },
       )
@@ -8277,7 +8277,7 @@ describe("runYrd", () => {
                 since: "2026-07-13T12:00:00.000Z",
                 blockedMs: 30 * 60_000,
                 resolution: [
-                  "Start or restart the resident queue runner, then verify it requests required checks for 'PR1'.",
+                  "Start or restart the habitant queue runner, then verify it requests required checks for 'PR1'.",
                 ],
               },
             ],
@@ -8300,11 +8300,11 @@ describe("runYrd", () => {
    * orphaned-run-recovery.test.ts), but nothing that watches the queue ever
    * read it — 22 drafts sat a day unnoticed despite an audit that had the
    * answer the whole time. These three tests prove the finding actually
-   * reaches a live seat: the resident heartbeat (this test), `queue list
+   * reaches a live seat: the habitant heartbeat (this test), `queue list
    * --check` (the fleet health surface), and `queue list` / `queue list
    * --watch` (the same loader `yrd watch` renders).
    */
-  it("writes page-worthy stale drafts into the resident heartbeat, gated by the page threshold", async () => {
+  it("writes page-worthy stale drafts into the habitant heartbeat, gated by the page threshold", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-stale-drafts-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -8326,7 +8326,7 @@ describe("runYrd", () => {
       // own 15-minute existence grace) but well under the 4-hour default page
       // threshold. It must stay OUT of the heartbeat, or every ordinary
       // push-review-submit pause would page.
-      const stillQuiet = await runInternals.startResidentRunnerHeartbeat(
+      const stillQuiet = await runInternals.startHabitantRunnerHeartbeat(
         outputIO({
           cwd: repo,
           runner: `yrd-cli:${process.pid}`,
@@ -8350,7 +8350,7 @@ describe("runYrd", () => {
       // 4.5 hours on: past the page threshold. Must reach the heartbeat WITH
       // owner attribution, and must never disagree with queue audit's own
       // reading of the identical PR at the identical clock.
-      const paging = await runInternals.startResidentRunnerHeartbeat(
+      const paging = await runInternals.startHabitantRunnerHeartbeat(
         outputIO({
           cwd: repo,
           runner: `yrd-cli:${process.pid}`,
@@ -8454,7 +8454,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("surfaces a resident-observed stale draft as a non-fatal warning in `queue list --check`", async () => {
+  it("surfaces a habitant-observed stale draft as a non-fatal warning in `queue list --check`", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-stale-drafts-"))
     execFileSync("git", ["init", "-q", "-b", "main", repo])
     execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
@@ -8574,7 +8574,7 @@ describe("runYrd", () => {
    * settles (the loop is over), and nothing replaced it. These three tests
    * prove the `admission-refusal-needs-person` finding (@yrd/queue
    * `auditQueues`) reaches a live seat exactly like a stale draft does: the
-   * resident heartbeat (this test), `queue list --check` (the fleet health
+   * habitant heartbeat (this test), `queue list --check` (the fleet health
    * surface), and `queue list` / `queue list --watch` (the same loader
    * `yrd watch` renders). Unlike a draft, there is no page-after grace: a
    * settlement already only happens once the queue gave up on its own
@@ -8583,7 +8583,7 @@ describe("runYrd", () => {
    * ROLE — never the revision's recorded submitter, and never omitted: an
    * unconfigured repository shows the explicit unowned default.
    */
-  it("writes an unrouted needs-person change into the resident heartbeat", async () => {
+  it("writes an unrouted needs-person change into the habitant heartbeat", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-needs-person-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -8609,7 +8609,7 @@ describe("runYrd", () => {
         reason: "two fixed gitlink commits are non-ancestral",
       })
 
-      const heartbeat = await runInternals.startResidentRunnerHeartbeat(
+      const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
         outputIO({
           cwd: repo,
           runner: `yrd-cli:${process.pid}`,
@@ -8636,7 +8636,7 @@ describe("runYrd", () => {
           },
         ])
         // Must never disagree with queue audit's own reading of the identical
-        // PR — the resident projects the canonical audit, never a second
+        // PR — the habitant projects the canonical audit, never a second
         // derivation of it.
         expect(app.queue.audit({ now: "2026-07-09T12:05:00.000Z" }).findings).toContainEqual(
           expect.objectContaining({ code: "admission-refusal-needs-person", pr: pr.id }),
@@ -8651,7 +8651,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("surfaces a resident-observed needs-person change as a non-fatal warning in `queue list --check`", async () => {
+  it("surfaces a habitant-observed needs-person change as a non-fatal warning in `queue list --check`", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-needs-person-"))
     execFileSync("git", ["init", "-q", "-b", "main", repo])
     execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
@@ -8661,7 +8661,7 @@ describe("runYrd", () => {
     execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
     const stateDir = join(repo, ".git", "yrd", "resident-runner")
     mkdirSync(stateDir, { recursive: true })
-    // A configured repository's resident wrote this: `.yrd.yml`
+    // A configured repository's habitant wrote this: `.yrd.yml`
     // `needsPerson.owner: "@ci"` flowed onto the finding (@yrd/queue
     // `auditQueues`), so the health surface must carry the role through
     // verbatim — the probe has no journal and could never re-derive it.
@@ -8772,7 +8772,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
+  it("writes atomic habitant runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -8783,7 +8783,7 @@ describe("runYrd", () => {
     }
     let now = Date.parse("2026-07-13T12:00:00.000Z")
     try {
-      const heartbeat = await runInternals.startResidentRunnerHeartbeat(
+      const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
         Object.assign(outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, now: () => now }).io, {
           implementationSource,
         }),
@@ -8841,9 +8841,9 @@ describe("runYrd", () => {
       expect(marker).toMatchObject({ pid: process.pid, exitedAt: "2026-07-13T12:00:02.000Z", clean: true })
       // The successor reads the marker (not null) and, seeing a different dead pid,
       // reclaims — exactly what a deleted status file used to silently skip.
-      const prior = await runInternals.residentRunnerStatus(repo)
+      const prior = await runInternals.habitantRunnerStatus(repo)
       expect(prior).toMatchObject({ pid: process.pid, exitedAt: "2026-07-13T12:00:02.000Z", clean: true })
-      expect(runInternals.planResidentRunnerReclaim(prior, process.pid + 1, () => false)).toEqual({
+      expect(runInternals.planHabitantRunnerReclaim(prior, process.pid + 1, () => false)).toEqual({
         reclaim: true,
         runner: `yrd-cli:${process.pid}`,
       })
@@ -8852,12 +8852,12 @@ describe("runYrd", () => {
     }
   })
 
-  it("refuses a resident heartbeat when startup could not identify the loaded implementation", async () => {
+  it("refuses a habitant heartbeat when startup could not identify the loaded implementation", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-unknown-"))
     execFileSync("git", ["init", "-q", repo])
     try {
       const attempt = await runInternals
-        .startResidentRunnerHeartbeat(
+        .startHabitantRunnerHeartbeat(
           outputIO({ cwd: repo, runner: `yrd-cli:${process.pid}`, implementationSource: undefined }).io,
           {
             intervalMs: 5,
@@ -9131,9 +9131,9 @@ describe("runYrd", () => {
     expect(projection.pause).toMatchObject({ reason: "operator freeze", allowedPRs: ["PR6"] })
     expect(projection.oldestOpenMs).toBe(80 * minute)
     // The flow aggregate is self-contained: it carries the same oldest-open age
-    // and a per-24h throughput projected from the landed count over the window.
+    // and a per-24h throughput projected from the merged count over the window.
     expect(projection.metrics.oldestOpenMs).toBe(80 * minute)
-    expect(projection.metrics.throughput).toEqual({ landed: 1, per24h: 4 })
+    expect(projection.metrics.throughput).toEqual({ merged: 1, per24h: 4 })
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr])).toEqual([
       ["pending", "ready", "PR4", "PR4"],
       ["pending", "ready", "PR6", "PR6"],
@@ -9322,7 +9322,7 @@ describe("runYrd", () => {
       // words. `all` moved to the top line's pill group (item 32).
       expect.soft(filter).toContain("since=6:00:00 open running done failed")
       // The STATS frame reads the same retained terminal facts at every tier.
-      // The landed per-24h throughput fact stays in projection.metrics for JSON.
+      // The merged per-24h throughput fact stays in projection.metrics for JSON.
       expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
       expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
@@ -9367,7 +9367,7 @@ describe("runYrd", () => {
         ["×", "pr#3.1"],
         // PR2 is the adjacent member of PR1's Run and carries the SAME marker,
         // so anchoring on pr#1.1 asserts the run's glyph once (22925 gave
-        // co-landed members their own marker rather than suppressing it).
+        // co-merged members their own marker rather than suppressing it).
         ["✓", "pr#1.1"],
       ] as const) {
         const row = styled.lines.findIndex((row) => row.includes(anchor))
@@ -11171,7 +11171,7 @@ describe("runYrd", () => {
         run: {
           run: "R1",
           prs: [{ id: "PR1" }],
-          landing: expect.any(String),
+          merge: expect.any(String),
           steps: expect.arrayContaining([
             expect.objectContaining({
               uuid: expect.any(String),
@@ -11226,7 +11226,7 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("integrated")
   })
 
-  it("shows run proof slices, revisions, timings, evidence, checkpoint, and landing proof", async () => {
+  it("shows run proof slices, revisions, timings, evidence, checkpoint, and merge proof", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
@@ -11241,7 +11241,7 @@ describe("runYrd", () => {
     // Present-facts rule: this run records no checkpoint, so no placeholder.
     expect(human.stdout()).not.toContain("CHECKPOINT -")
     expect(human.stdout()).toContain("EVIDENCE")
-    expect(human.stdout()).toContain("LANDING")
+    expect(human.stdout()).toContain("MERGE")
     expect(human.stdout()).toContain("check")
 
     const json = outputIO()
@@ -11267,7 +11267,7 @@ describe("runYrd", () => {
     })
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
-    expect(parsed.runs[0]?.steps[0]).toHaveProperty("landing")
+    expect(parsed.runs[0]?.steps[0]).toHaveProperty("merge")
   })
 
   it("keeps every submitted revision clock lossless in pr runs", async () => {
@@ -12770,8 +12770,8 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([1_000])
   })
 
-  it("announces one resident runner across idle follow polls while JSON stays silent", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "yrd-resident-watch-presence-"))
+  it("announces one habitant runner across idle follow polls while JSON stays silent", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-habitant-watch-presence-"))
     execFileSync("git", ["init", "-q", repo])
     const runner = `yrd-cli:${process.pid}`
     const presence = `Queue runner ${runner} active; following the default queue every 1s (Ctrl-C drains).\n`
@@ -12815,7 +12815,7 @@ describe("runYrd", () => {
   })
 
   it("routes follow, --once, and selector runs to the right presence and projection", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "yrd-resident-follow-projection-"))
+    const repo = mkdtempSync(join(tmpdir(), "yrd-habitant-follow-projection-"))
     execFileSync("git", ["init", "-q", repo])
     const runner = `yrd-cli:${process.pid}`
     const presence = `Queue runner ${runner} active; following the default queue every 1s (Ctrl-C drains).\n`
@@ -12835,7 +12835,7 @@ describe("runYrd", () => {
 
     try {
       // A PR selector is a one-shot pass: it drains, prints the interactive run
-      // table, and never announces the resident follow-runner.
+      // table, and never announces the habitant follow-runner.
       const selectedHuman = outputIO({ cwd: repo, runner })
       expect(await runYrd(await readyApp(), yrd("queue", "run", "PR1"), selectedHuman.io), selectedHuman.stderr()).toBe(
         0,
@@ -12850,7 +12850,7 @@ describe("runYrd", () => {
       expect(onceHuman.stdout()).not.toContain("Queue runner ")
       expect(onceHuman.stdout()).toContain("STATE")
 
-      // Follow (the default with no selector) is the resident runner: it
+      // Follow (the default with no selector) is the habitant runner: it
       // announces presence once and keeps stdout a loggily-only log stream — the
       // interactive run table is the `queue watch` viewer's surface, never the
       // follow-runner's.
@@ -13026,7 +13026,7 @@ describe("runYrd", () => {
       human.stderr(),
     ).toBe(0)
     expect(human.stdout()).toContain("already up to date — joined nothing new to 'main'")
-    // The line must not read as a fresh landing: no bare "at <commit>" claim.
+    // The line must not read as a fresh merge: no bare "at <commit>" claim.
     expect(human.stdout()).not.toContain(`at ${BASE_SHA}\n`)
   })
 
@@ -13100,7 +13100,7 @@ describe("runYrd", () => {
   // run is also in hand. Absence is named on the payload rather than dropped:
   // a missing `statement` key alone cannot distinguish "not attestable" from
   // "nobody wired the projection".
-  it("projects a landed merge record as an in-toto Statement attributed to its queue", async () => {
+  it("projects a merged merge record as an in-toto Statement attributed to its queue", async () => {
     await using app = await createApp()
     await app.bays.submit({ branch: "issue/attested", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     const revision = currentChangeRev(app.bays.pr("PR1")!)
@@ -13214,7 +13214,7 @@ describe("runYrd", () => {
 })
 
 describe("queue run — follow-by-default mode selection (#62)", () => {
-  // `queue run` with no selector and no --once IS the resident follow-runner;
+  // `queue run` with no selector and no --once IS the habitant follow-runner;
   // a single pass is explicit via a PR selector or --once. The retired
   // --follow/--watch flags are rejected. The loop calls scope.sleep after each
   // cycle; a one-shot pass never sleeps — the observable mode discriminator.
@@ -13233,7 +13233,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     }
   }
 
-  it("enters resident follow mode with no selector and no --once (the default)", async () => {
+  it("enters habitant follow mode with no selector and no --once (the default)", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     const tracked = trackedScope()
@@ -13681,7 +13681,7 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
   }
 }
 
-describe("typed issue landing bridge", () => {
+describe("typed issue merge bridge", () => {
   it("keeps a queued submitted revision externally submitted in both tracker bridges", async () => {
     const issueRef = "@yrd/core/22494-trackerbridge-drops-submitted-delivery"
     await using app = await createApp()
@@ -13845,7 +13845,7 @@ describe("typed issue landing bridge", () => {
     const human = outputIO()
     expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
     expect(human.stdout()).toContain("PR1 rev1 already-landed")
-    expect(human.stdout()).toContain(`ALREADY LANDED ${HEAD_SHA} TREE ${equivalentTreeSha} = BASE`)
+    expect(human.stdout()).toContain(`ALREADY MERGED ${HEAD_SHA} TREE ${equivalentTreeSha} = BASE`)
     expect(human.stdout()).toContain(`${BASE_SHA} TREE ${equivalentTreeSha}`)
   })
 
@@ -14322,11 +14322,11 @@ describe("typed issue landing bridge", () => {
     expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io), human.stderr()).toBe(0)
     for (const visibleFact of [
       "REGRESSION high DETECTED 2026-07-09T13:00:00.000Z RECORDED 2026-07-09T15:00:00.000Z",
-      `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalMerge}`,
+      `ORIGINAL ${originalIssue} PR1 R1 MERGE ${originalMerge}`,
       "artifact://tty/21091-red",
       "hab:turn/original-implementation",
       "wire:verdict/original-review",
-      `REPAIR ${repairIssue} PR2 R2 LANDING ${repairMerge}`,
+      `REPAIR ${repairIssue} PR2 R2 MERGE ${repairMerge}`,
     ]) {
       expect(human.stdout()).toContain(visibleFact)
     }
@@ -14589,7 +14589,7 @@ describe("journal version skew fail-loud", () => {
 })
 
 describe("queue run — follow-runner output is loggily/JSON only (#undead runner-loggily-only)", () => {
-  // The resident follow-runner (`queue run`, follow-by-default) is a background
+  // The habitant follow-runner (`queue run`, follow-by-default) is a background
   // service whose stdout is a log. The QueueRunsView table (RUN/PRS/STATE/STEPS)
   // is the interactive `queue watch` viewer's surface, not the follow-runner's —
   // it must never be dumped into the log stream. In human mode the follow-runner
@@ -15119,7 +15119,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
-  it("coalesces resident heartbeats until a clock pulse but rebuilds on runner identity changes", async () => {
+  it("coalesces habitant heartbeats until a clock pulse but rebuilds on runner identity changes", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-watch-runner-token-"))
     const stateDir = join(root, "yrd")
     const statusPath = join(stateDir, "resident-runner", "status.json")
@@ -15685,7 +15685,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       return { repo, stateDir, app }
     }
 
-    async function withHeldResident<T>(
+    async function withHeldHabitant<T>(
       stateDir: string,
       driver: Readonly<{ queueId: string; epoch: string }>,
       status: Readonly<Record<string, unknown>>,
@@ -15720,7 +15720,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       }
     }
 
-    it("reports a complete advisory observation when lease and status agree there is no resident", async () => {
+    it("reports a complete advisory observation when lease and status agree there is no habitant", async () => {
       const { repo, stateDir, app } = await retentionDoctorFixture()
       try {
         const output = outputIO({ cwd: repo, stateDir })
@@ -15749,7 +15749,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       }
     })
 
-    it("refuses a live resident whose heartbeat lacks the writer-policy observation", async () => {
+    it("refuses a live habitant whose heartbeat lacks the writer-policy observation", async () => {
       const { repo, stateDir, app } = await retentionDoctorFixture()
       const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
       const lockRelease = Promise.withResolvers<void>()
@@ -15911,7 +15911,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const { repo, stateDir, app } = await retentionDoctorFixture()
       const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
       try {
-        await withHeldResident(
+        await withHeldHabitant(
           stateDir,
           driver,
           {
@@ -15938,11 +15938,11 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       }
     })
 
-    it("refuses a writer-policy observation from another resident generation", async () => {
+    it("refuses a writer-policy observation from another habitant generation", async () => {
       const { repo, stateDir, app } = await retentionDoctorFixture()
       const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
       try {
-        await withHeldResident(
+        await withHeldHabitant(
           stateDir,
           driver,
           {
@@ -15972,7 +15972,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const leaseDriver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
       const statusEpoch = "22222222-2222-4222-8222-222222222222"
       try {
-        await withHeldResident(
+        await withHeldHabitant(
           stateDir,
           leaseDriver,
           {
@@ -16002,7 +16002,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const { repo, stateDir, app } = await retentionDoctorFixture()
       const driver = { queueId: `${repo}#main`, epoch: "11111111-1111-4111-8111-111111111111" }
       try {
-        await withHeldResident(
+        await withHeldHabitant(
           stateDir,
           driver,
           {
@@ -16205,16 +16205,16 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         output.stderr(),
       ).toBe(1)
       expect(output.stdout()).toContain("SKIPPED PR1 revision 1 pr-unknown")
-      expect(output.stdout()).toContain("a merge record proves a landing, not a PR's existence")
+      expect(output.stdout()).toContain("a merge record proves a merge, not a PR's existence")
     })
 
     // Contract 4 / doctor-rebuild-hardening: a wiped journal reads as N identical
-    // "pr-unknown" skips, one per landing, with nothing at the top of the report
+    // "pr-unknown" skips, one per merge, with nothing at the top of the report
     // naming the actual condition — the journal holds no PR entities at all, so
     // every skip below is the same fact repeated, not N separate gaps. An operator
     // reading this after real data loss deserves the ONE sentence that tells them
     // what happened and what the flag can and cannot do about it.
-    it("names the journal itself as empty, once, instead of repeating pr-unknown per landing", async () => {
+    it("names the journal itself as empty, once, instead of repeating pr-unknown per merge", async () => {
       await using app = await createApp()
       const output = outputIO()
       const prIds = ["PR1", "PR2", "PR3"]
@@ -16261,14 +16261,14 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(human.stdout()).toContain("the journal holds zero PR entities")
       expect(human.stdout()).toContain("repairs a KNOWN PR's missing index row")
       expect(human.stdout()).toContain("entity the journal has never seen")
-      // Still every landing named underneath — the aggregate line is in ADDITION
+      // Still every merge named underneath — the aggregate line is in ADDITION
       // to the per-record detail, never a replacement for it.
       for (const prId of prIds) {
         expect(human.stdout()).toContain(`SKIPPED ${prId} revision 1 pr-unknown`)
       }
     })
 
-    it("leaves an already-indexed landing alone and says so", async () => {
+    it("leaves an already-indexed merge alone and says so", async () => {
       await using app = await createApp()
       await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
       const revision = currentChangeRev(app.bays.pr("PR1")!)
@@ -16281,7 +16281,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), second.io, services), second.stderr()).toBe(
         0,
       )
-      expect(second.stdout()).toContain("1 change collapses to 1 distinct landing — rebuilt 0, skipped 1")
+      expect(second.stdout()).toContain("1 change collapses to 1 distinct merge — rebuilt 0, skipped 1")
       expect(second.stdout()).toContain("SKIPPED PR1 revision 1 already-indexed")
     })
 
@@ -16335,10 +16335,10 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     const CURRENT_PIN = "a".repeat(40)
     const TARGET_SHA = "b".repeat(40)
 
-    /** A landed pin intent records its OWN id in `changes[].pr` — `mergeRecordBody` fills that
+    /** A merged pin intent records its OWN id in `changes[].pr` — `mergeRecordBody` fills that
      * field from the queue member's id, and `MergeRecordChange.pr` is `QueueMemberIdSchema`, a
      * union that discriminates PR ids from intent ids. So the record itself says which kind of
-     * member landed; `app.bays.pr()` returning undefined for an intent id is the expected answer,
+     * member merged; `app.bays.pr()` returning undefined for an intent id is the expected answer,
      * never evidence of a missing PR. */
     const intentRecord = (member: string) => ({
       merge: {
@@ -16356,12 +16356,12 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       pins: [{ path: SUBMODULE, before: CURRENT_PIN, after: TARGET_SHA }],
     })
 
-    it("buckets a landed intent carrier as a healthy skip, never a PR gap", async () => {
+    it("buckets a merged intent carrier as a healthy skip, never a PR gap", async () => {
       // The intent rail itself is retired (this carrier's own commit): there is
       // no more `app.intents` to submit through or consult, so doctor can no
       // longer distinguish "a known intent record" from "an id merely shaped
       // like one" — and it no longer needs to. Any id `IntentRecordIdSchema`
-      // accepts is a pin-intent landing by construction (the mint that wrote it
+      // accepts is a pin-intent merge by construction (the mint that wrote it
       // never wrote anything else), so it is always a healthy skip, never a gap.
       await using app = await createApp()
       const output = outputIO()
@@ -16391,7 +16391,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       }
       // A merged record with no merged commit: repository truth that contradicts itself, for a PR
       // the journal knows, so the scan reaches the contradiction rather than an earlier skip. It
-      // comes FIRST so a scan that aborts on it never reaches the landing it could still rebuild.
+      // comes FIRST so a scan that aborts on it never reaches the merge it could still rebuild.
       const contradictory = {
         merge: {
           id: "R-poisoned",

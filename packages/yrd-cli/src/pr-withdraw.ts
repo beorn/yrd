@@ -80,7 +80,7 @@ function spendLine(spend: PayloadSpend): string {
   return `${spend.pr} r${spend.revision} head ${spend.headSha} on '${spend.branch}'`
 }
 
-/** Closing an unlanded change is not housekeeping: it spends the
+/** Closing an unmerged change is not housekeeping: it spends the
  * payload identity, and every other branch is barred from that commit
  * afterwards. The verb reads reversible, so the spend is stated and
  * acknowledged BEFORE the first event — never a silent success. The
@@ -177,7 +177,7 @@ type PruneRow = Readonly<{
   detail: string
 }>
 
-export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
+export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RE-MERGE" | "RE-MERGE-FORCE" | "FRESH-NOOP"
 
 export type RemergePreflightResult = Readonly<{
   command: "pr.recut.preflight"
@@ -238,7 +238,7 @@ function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
 
 /** A merge moves the base before its Job can record `pr/integrated`. During
  * that side-effect boundary, pruning the exact revision would cancel its own
- * landing and replace the truthful integration with `pr/withdrawn` (22454). */
+ * merge and replace the truthful integration with `pr/withdrawn` (22454). */
 function mergeRunOwningRevision(app: YrdCliApp, pr: Change): Run | undefined {
   const revision = currentChangeRev(pr)
   return Queues.ids(app.state().queues)
@@ -258,7 +258,7 @@ function mergeRunOwningRevision(app: YrdCliApp, pr: Change): Run | undefined {
 
 function mergeOwnedPruneRow(pr: Change, run: Run): PruneRow {
   const revision = currentChangeRev(pr)
-  const reason = `merge run '${run.id}' owns the in-flight landing for revision ${revision.n} (${revision.head})`
+  const reason = `merge run '${run.id}' owns the in-flight merge for revision ${revision.n} (${revision.head})`
   return {
     pr: pr.id,
     branch: pr.branch,
@@ -342,12 +342,12 @@ export type RemergePreflightOptions = JsonOption &
   }>
 
 /** Classify one immutable PR revision against one resolved target without
- * creating refs, appending journal events, or calling the recutter. Exact
+ * creating refs, appending journal events, or calling the remerger. Exact
  * ancestry/tree equivalence authorizes withdrawal; patch-id is attribution
  * evidence only because stable patch IDs intentionally ignore whitespace. */
 /** Classify a PR against its live base and print the verdict plus the ONE exact
  * command that follows from it. The result is returned as well as printed, so a
- * mechanical caller (the resident's self-applied-remedy pass, 22474) runs the
+ * mechanical caller (the habitant's self-applied-remedy pass, 22474) runs the
  * same `next` a human would have read off the terminal — one decision function,
  * never a second copy of the verdict rules. */
 export async function preflightRemerge(
@@ -431,7 +431,7 @@ export async function preflightRemerge(
   // the first evaluation, with the SAME refusal the submit path raises — not
   // after the whole preflight investment (2026-08-19: a merge-tip carrier ran
   // this gate clean and was refused only at submit). Subsumed heads are
-  // exempt: their payload already landed, and a linear rebuild of spent
+  // exempt: their payload already merged, and a linear rebuild of spent
   // content is advice that cannot succeed — withdrawal stays the verdict.
   if (!subsumed) {
     const parents =
@@ -463,7 +463,7 @@ export async function preflightRemerge(
       "refusal",
       "recut-needs-authored-change",
       `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
-        "an unchanged recut cannot resolve it — push new authored content, then retry the printed remedy",
+        "an unchanged re-merge cannot resolve it — push new authored content, then retry the printed remedy",
     )
   }
   const certifiedCurrentBase =
@@ -472,13 +472,13 @@ export async function preflightRemerge(
     ? "SUBSUMED-WITHDRAW"
     : reauthorizing
       ? requiresForce
-        ? "RECUT-FORCE"
-        : "RECUT"
+        ? "RE-MERGE-FORCE"
+        : "RE-MERGE"
       : certifiedCurrentBase
         ? "FRESH-NOOP"
         : requiresForce
-          ? "RECUT-FORCE"
-          : "RECUT"
+          ? "RE-MERGE-FORCE"
+          : "RE-MERGE"
   const revisionFlag =
     options.revision === undefined || options.proposedHeadSha !== undefined ? "" : ` --revision ${source.n}`
   const queueFlag = options.queue === true ? " --queue" : ""
@@ -488,12 +488,12 @@ export async function preflightRemerge(
     verdict === "SUBSUMED-WITHDRAW"
       ? // The subsumed proof (head reachable from the base, or merging it reproduces
         // the base tree exactly) IS the payload-spend acknowledgement: content that
-        // already landed has nothing left to resubmit. Printed WITH the flag so the
+        // already merged has nothing left to resubmit. Printed WITH the flag so the
         // command runs as written rather than refusing whoever pastes it.
         `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
-      : verdict === "RECUT-FORCE"
+      : verdict === "RE-MERGE-FORCE"
         ? `${remergeCommand} --force`
-        : verdict === "RECUT"
+        : verdict === "RE-MERGE"
           ? remergeCommand
           : options.queue === true
             ? `yrd pr ready ${pr.id}`
@@ -538,7 +538,7 @@ export async function preflightRemerge(
 }
 
 /** `yrd admin pr prune [--dry-run]` — scan every live PR against its base tip and
- * withdraw the ones whose content already landed (head is an ancestor of the
+ * withdraw the ones whose content already merged (head is an ancestor of the
  * base, or merging head into the base reproduces the base tree exactly).
  * Prints one explicit verdict per PR; --dry-run emits no events. */
 export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: YrdCliIO): Promise<void> {
@@ -741,7 +741,7 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       if (unique.length === 0) return []
       // Two batched calls, independent of row count. `cat-file --batch-check`
       // names which commits this repository actually has; `rev-list --no-walk`
-      // then lists the ones that are NOT reachable from the base tip. Landed is
+      // then lists the ones that are NOT reachable from the base tip. Merged is
       // the difference — never the absence of an object, which would let a
       // shallow or unfetched checkout invent landings.
       const presence = git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], [], `${unique.join("\n")}\n`)

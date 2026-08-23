@@ -44,7 +44,7 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 }
 
 describe("queueLandingLabel", () => {
-  it("dedupes commit==landing SHAs to one SHA and keeps distinct pairs", () => {
+  it("dedupes commit==merge SHAs to one SHA and keeps distinct pairs", () => {
     expect(queueMergeLabel("abcdef123456@abcdef123456")).toBe("abcdef123456")
     expect(queueMergeLabel("bbbbbbbbbbbb@aaaaaaaaaaaa")).toBe("bbbbbbbbbbbb@aaaaaaaaaaaa")
     expect(queueMergeLabel("-")).toBe("-")

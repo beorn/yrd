@@ -30,7 +30,7 @@ async function git(repo: string, args: readonly string[]): Promise<string> {
 
 /**
  * The live shape a recut carrier reaches the certificate check in: `head` is a
- * proper descendant of the authoritative base (so it neither drops landed work
+ * proper descendant of the authoritative base (so it neither drops merged work
  * nor is already contained), and `diverged` sits on a lineage the authoritative
  * base never took — the certified base a queued revision keeps pointing at
  * after main moves along a different history.
@@ -60,9 +60,9 @@ async function carrierRepository(): Promise<{
   const diverged = await git(repo, ["rev-parse", "HEAD"])
 
   await git(repo, ["switch", "-q", "main"])
-  await writeFile(join(repo, "landed.txt"), "landed on main\n")
-  await git(repo, ["add", "landed.txt"])
-  await git(repo, ["commit", "-qm", "land work on main"])
+  await writeFile(join(repo, "merged.txt"), "merged on main\n")
+  await git(repo, ["add", "merged.txt"])
+  await git(repo, ["commit", "-qm", "merge work on main"])
   const base = await git(repo, ["rev-parse", "HEAD"])
 
   await git(repo, ["switch", "-q", "-c", "issue/feature", base])

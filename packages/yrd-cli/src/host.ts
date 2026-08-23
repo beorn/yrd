@@ -79,7 +79,7 @@ import {
   withMerge,
   withStep,
   type CandidatePool,
-  type ComponentModelChangeAuthorizer,
+  type SubmoduleModelChangeAuthorizer,
   CheckpointMigrationAttestationSchema,
   CHECKPOINT_MIGRATION_TRAILER,
   type CheckpointMigrationAttestation,
@@ -148,8 +148,8 @@ import {
 } from "./config.ts"
 import { classifyFailure, resolveInvocation, type RuntimePosture } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
-import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
-import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
+import { createYrdLogger, habitantObservability, resolveYrdObservability } from "./observability.ts"
+import { formatHabitantLogLine, habitantArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { createChangePublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
@@ -168,11 +168,11 @@ import {
   type YrdSettlementLaunch,
 } from "./settlement.ts"
 import {
-  activeResidentRunner,
+  activeHabitantRunner,
   canonicalQueueId,
   isYrdRuntimeReloadRequest,
-  residentRunnerLeaseHeld,
-  residentRunnerStatus,
+  habitantRunnerLeaseHeld,
+  habitantRunnerStatus,
   runYrdHelp,
   runYrdProcessRuntime,
   runtimeReloadEnv,
@@ -201,8 +201,8 @@ type QueueTargetResolver = NonNullable<YrdCliIO["resolveQueueTarget"]>
 
 /** Viewer projections are immutable for one invocation, so they may share one
  * queue-target read. Active postures observe a changing queue and must resolve
- * the target on every cycle; caching it for a resident turns every later base
- * advance into an endless same-base recut loop. */
+ * the target on every cycle; caching it for a habitant turns every later base
+ * advance into an endless same-base re-merge loop. */
 export function createPostureQueueTargetResolver(
   posture: RuntimePosture,
   resolveTarget: QueueTargetResolver,
@@ -246,7 +246,7 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // per-composition (initialState + registered events differ by host
   // options), so a retained edge measured in a harness does not cover a
   // deployment. 2026-08-18: PR1305 shipped with only the harness value and
-  // every production boot refused (R2732) until this entry landed — measure
+  // every production boot refused (R2732) until this entry merged — measure
   // retained edges from the production journal's stored identity, never a
   // test app.
   "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7",
@@ -278,7 +278,7 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // on 2026-08-21; this is the deployment identity, not a harness value.
   "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691",
   // The PRODUCTION composition immediately before component-model
-  // authorization receipts gained stable patch IDs and optional recut source
+  // authorization receipts gained stable patch IDs and optional re-merge source
   // proofs. The prior receipt fields remain optional for replay, so the shared
   // migration preserves every stored Candidate verbatim. Measured from the
   // live /hh journal refusal while probing component commit 1ce1967d on
@@ -306,7 +306,7 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // Measured from that journal's own refusal on 2026-08-23 (288eb203→ae0d2084,
   // history evicted through cursor 27609). It is retained because the
   // deployment really is sitting on it — a predecessor is whatever the journal
-  // stores, not whatever landed on main.
+  // stores, not whatever merged on main.
   "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
 ])
 
@@ -391,7 +391,7 @@ export type DefaultYrdAppOptions = Readonly<{
   runnerId?: string
   /** Host authority for one-shot component additions/removals. Standalone Yrd
    * deliberately has none and refuses such changes. */
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
 }>
 
 type DefaultYrdRuntimeAppOptions = DefaultYrdAppOptions &
@@ -769,9 +769,9 @@ const DEFAULT_GUARD_TIMEOUT_MS = 60_000
 /**
  * Pre-submit guards: the cheap, in-lane half of the local gate.
  *
- * A required check answers "would this land green?" and pays for that answer
+ * A required check answers "would this merge green?" and pays for that answer
  * with a quarantined worktree, a submodule population and a workspace install —
- * minutes, per candidate. That price is right for a landing gate and wrong for
+ * minutes, per candidate. That price is right for a merge gate and wrong for
  * an authoring rule. When the only thing wrong with a carrier is that a bead's
  * H1 is twelve characters too long, the author learns it two minutes after
  * submitting, having already consumed a queue slot, and pays the whole round
@@ -779,9 +779,9 @@ const DEFAULT_GUARD_TIMEOUT_MS = 60_000
  *
  * A guard is the other shape. It runs in the author's own working repository,
  * in one process spawn, BEFORE the revision is registered — so a refusal costs
- * no queue slot and lands while the author is still looking at the terminal. It
+ * no queue slot and merges while the author is still looking at the terminal. It
  * is deliberately NOT re-run by the Queue against the Candidate: a guard is an
- * authoring rule, not landing evidence, and re-running it there would put a
+ * authoring rule, not merge evidence, and re-running it there would put a
  * lint in the merge path where a check belongs.
  *
  *   check                            guard
@@ -791,7 +791,7 @@ const DEFAULT_GUARD_TIMEOUT_MS = 60_000
  *   `yrd check`, submit, AND the     submit and ready only
  *     Queue before merge
  *   minutes                          one spawn
- *   the landing gate                 authoring hygiene
+ *   the merge gate                 authoring hygiene
  *
  * Yrd stays repository-agnostic: it owns WHEN a guard runs, WHAT it is told
  * (base and candidate SHAs, in the environment) and HOW a refusal surfaces,
@@ -1045,7 +1045,7 @@ function recordLockfileRegeneration(artifactRoot: string, step: string, evidence
 
 /** Provision a manifest-changing pin before Queue fixes the Candidate identity.
  * The callback may generate exactly bun.lock; @yrd/queue owns staging and the
- * final samePaths proof so checked bytes and landed bytes cannot diverge. */
+ * final samePaths proof so checked bytes and merged bytes cannot diverge. */
 export function createPinIntentProvisioner(
   options: Readonly<{
     process: Pick<Process, "run">
@@ -1115,7 +1115,7 @@ function candidateStep(
   candidatePool: CandidatePool | undefined,
   kind: "check" | "action",
   checkpointMigration?: NonNullable<GitCheckOptions["checkpointMigration"]>,
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer,
 ): RuntimeStep {
   const command = shellCommand(stepCommand(name, config))
   const checkProcess: Pick<Process, "run"> = {
@@ -1181,7 +1181,7 @@ function candidateStep(
           : { environmentPassthrough: config.environmentPassthrough }),
         ...(candidatePool === undefined ? {} : { candidatePool }),
         ...(checkpointMigration === undefined ? {} : { checkpointMigration }),
-        ...(authorizeComponentModelChange === undefined ? {} : { authorizeComponentModelChange }),
+        ...(authorizeSubmoduleModelChange === undefined ? {} : { authorizeSubmoduleModelChange }),
       }),
       {
         revision,
@@ -1327,7 +1327,7 @@ async function resolveGateScriptShas(
         "gate-script-missing-at-base",
         `yrd: gate script '${path}' does not exist at ${sha.slice(0, 8)}, the commit whose config declares it. ` +
           "Gate scripts execute at the base ref's version, so a script must be ON the base before a check may " +
-          "declare it; a change adding both lands the script first (it takes effect for the NEXT change).",
+          "declare it; a change adding both merges the script first (it takes effect for the NEXT change).",
       )
     }
     entries.push([path, resolved.stdout.trim()])
@@ -1398,7 +1398,7 @@ async function declaredPlanAt(
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
   // Gate scripts resolve at THIS sha, exactly like the config: a script edit
-  // landing on the base changes the derived revision from that commit on,
+  // merge on the base changes the derived revision from that commit on,
   // which is how the record names the script version that judged each run.
   const gateScriptShas = await resolveGateScriptShas(process, repository.repo, loaded.config, sha)
   return {
@@ -1522,7 +1522,7 @@ function configuredQueueSteps(
         options.candidatePool,
         descriptor.kind,
         index === certificationIndex ? options.checkpointMigrationCertification?.attestCandidate : undefined,
-        options.authorizeComponentModelChange,
+        options.authorizeSubmoduleModelChange,
       )
     }
     return eraseStep(
@@ -1701,7 +1701,7 @@ async function readConfigFromBase(
 
 /** Read the step plan the config declares at ONE EXACT base sha.
  *
- * The per-Run authority (C5, C11): `.yrd.yml` at the commit the Run is landing
+ * The per-Run authority (C5, C11): `.yrd.yml` at the commit the Run is merging
  * onto, never a copy this process cached at startup and never durable state.
  * Both the blob id and the derived list are returned so the Run records what it
  * was judged by, and `queue audit` can compare that against the config now with
@@ -1721,7 +1721,7 @@ export async function readDeclaredPlanAtBase(
       "refusal",
       "queue-config-missing-at-base",
       `yrd: base ${baseSha.slice(0, 8)} has no queue config at '${authority}', so it declares no step plan. ` +
-        "A Run's checks come from the config at the commit it lands onto; commit one to that base before queuing.",
+        "A Run's checks come from the config at the commit it merges onto; commit one to that base before queuing.",
     )
   }
   const shown = await process.run({ argv: ["git", "-C", repo, "show", object], cwd: repo, env })
@@ -1971,9 +1971,9 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         artifactRoot: join(options.stateDir, "artifacts"),
       }),
       ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
-      ...(options.authorizeComponentModelChange === undefined
+      ...(options.authorizeSubmoduleModelChange === undefined
         ? {}
-        : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
+        : { authorizeSubmoduleModelChange: options.authorizeSubmoduleModelChange }),
     }),
     recordMerge: gitMergeRecorder({ inject: { process: options.process }, repo: options.repo }),
     runner: (jobs) => {
@@ -2039,7 +2039,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // read boundary, so everything downstream — fill, compact, the process
         // that runs on the migrated state — sees only the current vocabulary.
         const folded = foldLegacyCorrelationDeep(state) as typeof state
-        // Every retained edge lands on the CURRENT identity, so a stored
+        // Every retained edge merges on the CURRENT identity, so a stored
         // checkpoint predates every state field added since its writer ran.
         // Fill those from initial values BEFORE compacting — compaction and
         // validation both assume the current contract (2026-08-18: intents-v2
@@ -2137,11 +2137,11 @@ export function targetImplementationEntrypoint(
   const insideBays = bayPath !== undefined && bayPath !== ".." && !bayPath.startsWith(`..${sep}`)
   if (outsideAssembly || insideBays) {
     // Standalone consumers install Yrd outside the repository being admitted,
-    // and a resident runner executes Yrd from a bay INSIDE the repository's
+    // and a habitant runner executes Yrd from a bay INSIDE the repository's
     // bays root — untracked, so no Candidate tree can contain it. Both are
     // fixed implementations across this Candidate; only config is
     // target-owned. Mapping a bay path into the Candidate composes a phantom
-    // path (2026-08-17: every resident substrate-pair refused with Module
+    // path (2026-08-17: every habitant substrate-pair refused with Module
     // not found <warm-bay>/.bays/<runner-bay>/vendor/yrd/bin/yrd.ts).
     // Composed roots resolve Yrd inside the Candidate instead.
     return join(implementationRoot, "bin", "yrd.ts")
@@ -2313,14 +2313,14 @@ const INTAKE_POLICY =
   "no active bay tracks this branch — open one with `yrd bay open --bay <name>`, or push a branch an active bay already tracks"
 
 /**
- * Resolves what a pushed ref lands on: a branch push must find an active bay,
+ * Resolves what a pushed ref merges on: a branch push must find an active bay,
  * a submit push carries its own answer.
  *
  * The asymmetry is the point. A `refs/for/<base>/<change>` push predates its bay
  * by construction — that is what "push IS submit" means — so it cannot be
  * authorized by "an active bay tracks this branch", and asking it to be is how
  * the whole namespace stayed unreachable. Intake does not need a bay either:
- * `bay.intake` takes `bay` as optional and mints a PR from branch/name/base
+ * `bay.intake` takes `bay` as optional and mints a change from branch/name/base
  * alone. The PR is the unit of intake; a bay is a workspace that usually
  * happens to exist.
  */
@@ -2388,7 +2388,7 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  *
  * A `refs/heads/` push already IS its branch, so this is a no-op there. A
  * `refs/for/<base>/<change>` push names a CHANGE, and the carrier is derived —
- * which means nothing creates it unless intake does. Without this the PR is
+ * which means nothing creates it unless intake does. Without this the change is
  * admitted and then permanently undeliverable: the pre-submit gate resolves the
  * PR's branch and finds no such ref, so it refuses with
  * `required-check candidate '<branch>' is missing` and the change can never
@@ -2397,7 +2397,7 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  *
  * It also gives the pushed head an anchor of its own. Until now it was
  * reachable only through whatever branch the pusher happened to hold, so moving
- * that branch orphaned the PR.
+ * that branch orphaned the change.
  *
  * Fast-forward only, under a compare-and-swap: `update-ref <ref> <new> <old>`
  * fails if anyone moved the carrier in between, so a concurrent writer is a
@@ -2459,7 +2459,7 @@ async function intakeResult(
   process: Pick<Process, "run">,
   repo: string,
 ): Promise<void> {
-  // Before the dispatch, never after: a PR that exists without its carrier is
+  // Before the dispatch, never after: a change that exists without its carrier is
   // exactly the undeliverable state this exists to prevent, and a failure here
   // leaves the result for the next drain to retry.
   await materializeCarrier(process, repo, result)
@@ -2501,12 +2501,12 @@ function queueAdministration(
     configAuthority: string
     configPath?: string
     /** The installed leg's subject. A full host compares its OWN runtime; the
-     * supervisor probe, which builds none, compares the plan the live resident
+     * supervisor probe, which builds none, compares the plan the live habitant
      * PUBLISHED in its heartbeat. `records` is absent when the invocation
      * opened no journal. */
     runtime?: Readonly<{
       source: "this-process" | "resident-heartbeat"
-      /** Pid of the resident whose published plan is compared. */
+      /** Pid of the habitant whose published plan is compared. */
       pid?: number
       installed(): QueuePlanDescriptor
       records?(): readonly QueueRecord[]
@@ -2543,7 +2543,7 @@ function queueAdministration(
           tip,
           installed,
           runtime.source === "resident-heartbeat"
-            ? `the resident runner${runtime.pid === undefined ? "" : ` (pid ${String(runtime.pid)})`}`
+            ? `the habitant runner${runtime.pid === undefined ? "" : ` (pid ${String(runtime.pid)})`}`
             : undefined,
         )
         if (stale !== undefined) findings.push(stale)
@@ -2622,18 +2622,18 @@ function queueAdministration(
   })
 }
 
-type ResidentRunnerSeed = Readonly<{
+type HabitantRunnerSeed = Readonly<{
   id: string
   epoch: string
   host: string
   pane?: string
 }>
 
-type ResidentRunnerIdentity = ResidentRunnerSeed & Readonly<{ queueId: string }>
+type HabitantRunnerIdentity = HabitantRunnerSeed & Readonly<{ queueId: string }>
 
-type ResidentRunnerLease = Readonly<{ close(): Promise<void> }>
+type HabitantRunnerLease = Readonly<{ close(): Promise<void> }>
 
-function residentRunnerSeed(env: NodeJS.ProcessEnv): ResidentRunnerSeed {
+function habitantRunnerSeed(env: NodeJS.ProcessEnv): HabitantRunnerSeed {
   const pane = [env.HERDR_PANE_ID, env.CMUX_SURFACE_ID]
     .map((value) => value?.trim())
     .find((value): value is string => value !== undefined && value !== "")
@@ -2645,7 +2645,7 @@ function residentRunnerSeed(env: NodeJS.ProcessEnv): ResidentRunnerSeed {
   })
 }
 
-function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerSeed, queueId?: string): ConditionalLogger {
+function habitantRunnerLog(log: ConditionalLogger, identity: HabitantRunnerSeed, queueId?: string): ConditionalLogger {
   return log.child({
     runner: identity.id,
     ...(queueId === undefined ? {} : { driverQueue: queueId }),
@@ -2655,7 +2655,7 @@ function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerSeed,
   })
 }
 
-function residentRunnerLockOwnerPid(stateDir: string): number | undefined {
+function habitantRunnerLockOwnerPid(stateDir: string): number | undefined {
   try {
     const value = JSON.parse(readFileSync(join(stateDir, "resident-runner", "writer.lock"), "utf8")) as {
       pid?: unknown
@@ -2677,7 +2677,7 @@ function processAlive(pid: number): boolean {
   }
 }
 
-function assertResidentSupportsJournalVersion(stateDir: string, target: number): void {
+function assertHabitantSupportsJournalVersion(stateDir: string, target: number): void {
   let record: Readonly<{
     pid?: unknown
     exitedAt?: unknown
@@ -2710,16 +2710,16 @@ function assertResidentSupportsJournalVersion(stateDir: string, target: number):
     raiseFailure(
       "refusal",
       "journal-resident-version-skew",
-      `yrd: live resident pid ${String(record.pid)} supports journal v${String(capability)} but bump target is v${String(target)}; stop or upgrade that resident first`,
+      `yrd: live habitant pid ${String(record.pid)} supports journal v${String(capability)} but bump target is v${String(target)}; stop or upgrade that habitant first`,
     )
   }
 }
 
-async function acquireResidentRunner(
+async function acquireHabitantRunner(
   stateDir: string,
-  identity: ResidentRunnerIdentity,
+  identity: HabitantRunnerIdentity,
   log: ConditionalLogger,
-): Promise<ResidentRunnerLease> {
+): Promise<HabitantRunnerLease> {
   const runnerLog = log.child("runner")
   // When a prior owner died hard, the kernel may still be releasing the flock
   // for a beat after the pid is gone. Retry briefly if the lock body names a
@@ -2738,20 +2738,20 @@ async function acquireResidentRunner(
     )
     try {
       await Promise.race([acquired.promise, held])
-      runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
+      runnerLog.info?.("Habitant runner lease acquired", { runner: identity.id, stateDir })
       let closePromise: Promise<void> | undefined
       return Object.freeze({
         close: () =>
           (closePromise ??= (async () => {
             released.resolve()
             await held
-            runnerLog.info?.("Resident runner lease released", { runner: identity.id, stateDir })
+            runnerLog.info?.("Habitant runner lease released", { runner: identity.id, stateDir })
           })()),
       })
     } catch (error) {
       lastError = error
       if (failureFact(error)?.code !== "exclusive-busy") throw error
-      const ownerPid = residentRunnerLockOwnerPid(stateDir)
+      const ownerPid = habitantRunnerLockOwnerPid(stateDir)
       const ownerDead = ownerPid !== undefined && !processAlive(ownerPid)
       if (!ownerDead || attempt === attempts - 1) break
       runnerLog.warn?.("resident-runner lock busy with dead owner pid; retrying reclaim", {
@@ -2765,7 +2765,7 @@ async function acquireResidentRunner(
   const error = lastError
   if (failureFact(error)?.code === "exclusive-busy") {
     const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
-    const ownerPid = residentRunnerLockOwnerPid(stateDir)
+    const ownerPid = habitantRunnerLockOwnerPid(stateDir)
     const deadHint =
       ownerPid !== undefined && !processAlive(ownerPid)
         ? ` Owner pid ${ownerPid} is dead — if re-arm keeps failing, inspect \`lsof ${join(stateDir, "resident-runner", "writer.lock")}\` for a live holder.`
@@ -2783,7 +2783,7 @@ async function closeRuntime(
   app: YrdCliApp | undefined,
   process: Process,
   scope: Scope,
-  resident?: ResidentRunnerLease,
+  habitant?: HabitantRunnerLease,
   candidatePool?: CandidatePool,
 ): Promise<void> {
   try {
@@ -2800,7 +2800,7 @@ async function closeRuntime(
         try {
           await scope[Symbol.asyncDispose]()
         } finally {
-          await resident?.close()
+          await habitant?.close()
         }
       }
     }
@@ -2815,7 +2815,7 @@ function queueRecoveryArgv(repositoryRoot: string): readonly string[] {
 }
 
 /** Announce a graceful drain as ONE structured loggily record — never a bare
- * wrapped stderr paragraph, since the resident runner's stderr IS its log
+ * wrapped stderr paragraph, since the habitant runner's stderr IS its log
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
  * viewer can surface them without parsing prose. */
 export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal, repositoryRoot: string): void {
@@ -2902,7 +2902,7 @@ export type YrdHostOptions = Readonly<{
   workspaceLifecycle?: GitWorkspaceLifecycleHooks
   /** Opaque logical submitter supplied by an embedding host; standalone Yrd defaults to operator. */
   defaultSubmitter?: string
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
   /**
    * Runs once after the host is fully closed and before the executable
    * boundary terminates. Detached background work belongs here rather than
@@ -2913,7 +2913,7 @@ export type YrdHostOptions = Readonly<{
 
 export type YrdProcessHostOptions = Pick<
   YrdHostOptions,
-  "workspaceLifecycle" | "defaultSubmitter" | "afterCommand" | "authorizeComponentModelChange"
+  "workspaceLifecycle" | "defaultSubmitter" | "afterCommand" | "authorizeSubmoduleModelChange"
 > &
   Readonly<{
     /** The composition host's declared handle for the selected repository
@@ -2921,7 +2921,7 @@ export type YrdProcessHostOptions = Pick<
      * for standalone invocations, which have no config handles yet. */
     repositoryLabel?: string
     /** Host-evaluated uncarried exemptions. Copied onto IO so both the
-     * `queue uncarried` command and the resident sweeper share one adapter. */
+     * `queue uncarried` command and the habitant sweeper share one adapter. */
     uncarriedFilter?: YrdCliIO["filterUncarriedFindings"]
   }>
 
@@ -2938,7 +2938,7 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
 }
 
 /**
- * Build only the read-only plan audit needed by the resident health command.
+ * Build only the read-only plan audit needed by the habitant health command.
  * It reads the base tip's declared plan from git but deliberately has no app
  * and no journal, so its cost cannot grow with delivery history — and its
  * comparison says which legs that leaves unread rather than reporting them
@@ -2960,23 +2960,23 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
     // The probe builds no runtime, so its installed leg is the plan the LIVE
-    // resident published in its heartbeat (23192 leg c). Liveness is judged
+    // habitant published in its heartbeat (23192 leg c). Liveness is judged
     // exactly as the health classifier judges it: an exit marker or a dead pid
-    // means nothing is serving, and a resident older than the field published
+    // means nothing is serving, and a habitant older than the field published
     // nothing — each named in the comparison, never compared as empty.
-    const resident = activeResidentRunner(await residentRunnerStatus(repository.repo, repository.stateDir))
-    const published = resident?.installedPlan
+    const habitant = activeHabitantRunner(await habitantRunnerStatus(repository.repo, repository.stateDir))
+    const published = habitant?.installedPlan
     const administration = queueAdministration(process, repository, {
       base: loaded.config.base,
       configAuthority: loaded.path === undefined ? ".yrd.yml" : relative(repository.repo, loaded.path),
       ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
-      ...(resident !== undefined && resident !== null && published !== undefined
-        ? { runtime: { source: "resident-heartbeat", pid: resident.pid, installed: () => published } }
+      ...(habitant !== undefined && habitant !== null && published !== undefined
+        ? { runtime: { source: "resident-heartbeat", pid: habitant.pid, installed: () => published } }
         : {
             installedUnavailable:
-              resident === null || resident === undefined
-                ? "no live resident runner, so no installed plan was published to compare"
-                : `the resident runner (pid ${String(resident.pid)}) published no installed plan — it predates the ` +
+              habitant === null || habitant === undefined
+                ? "no live habitant runner, so no installed plan was published to compare"
+                : `the habitant runner (pid ${String(habitant.pid)}) published no installed plan — it predates the ` +
                   "field; restart it to publish one",
           }),
     })
@@ -3052,9 +3052,9 @@ async function createViewerReceiver(repository: YrdRepository, process: Process)
 
 async function createYrdRuntimeHost(
   options: YrdRuntimeHostOptions,
-  residentSeed: ResidentRunnerSeed | undefined,
+  habitantSeed: HabitantRunnerSeed | undefined,
   mode: "active" | "viewer",
-): Promise<YrdHost & Readonly<{ resident?: ResidentRunnerIdentity }>> {
+): Promise<YrdHost & Readonly<{ habitant?: HabitantRunnerIdentity }>> {
   const scope = createScope("yrd-host")
   const ownsLog = options.log === undefined
   const log =
@@ -3067,26 +3067,26 @@ async function createYrdRuntimeHost(
     withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } })),
   )
   let app: YrdCliApp | undefined
-  let residentLease: ResidentRunnerLease | undefined
+  let habitantLease: HabitantRunnerLease | undefined
   let candidatePool: CandidatePool | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
-    const resident =
-      residentSeed === undefined
+    const habitant =
+      habitantSeed === undefined
         ? undefined
         : Object.freeze({
-            ...residentSeed,
+            ...habitantSeed,
             // The canonical id and the historical `resolve(repo)#base` agree
-            // for a resident started in the main worktree — which every
-            // production resident is — so recorded heartbeats stay comparable.
+            // for a habitant started in the main worktree — which every
+            // production habitant is — so recorded heartbeats stay comparable.
             queueId: canonicalQueueId(repository.repo, baseIdentity(loaded.config.base)),
           })
-    if (resident !== undefined) {
-      residentLease = await acquireResidentRunner(
+    if (habitant !== undefined) {
+      habitantLease = await acquireHabitantRunner(
         repository.stateDir,
-        resident,
-        residentRunnerLog(log, resident, resident.queueId),
+        habitant,
+        habitantRunnerLog(log, habitant, habitant.queueId),
       )
     }
     using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
@@ -3126,11 +3126,11 @@ async function createYrdRuntimeHost(
     }
     const implementationSource =
       options.implementationSource ?? (await implementationSourceIdentity(process, discoveredImplementationSource))
-    if (resident !== undefined && implementationSource === undefined) {
+    if (habitant !== undefined && implementationSource === undefined) {
       raiseFailure(
         "refusal",
         "runtime-source-unavailable",
-        "yrd: resident runner cannot determine the implementation source it loaded; not starting",
+        "yrd: habitant runner cannot determine the implementation source it loaded; not starting",
       )
     }
     app = await createDefaultYrdRuntimeApp({
@@ -3144,13 +3144,13 @@ async function createYrdRuntimeHost(
       config: loaded.config,
       ...(loaded.path === undefined ? {} : { configAuthority: relative(repository.repo, loaded.path) }),
       defaultSubmitter,
-      ...(options.authorizeComponentModelChange === undefined
+      ...(options.authorizeSubmoduleModelChange === undefined
         ? {}
-        : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
+        : { authorizeSubmoduleModelChange: options.authorizeSubmoduleModelChange }),
       scope,
       log,
       candidatePool,
-      runnerId: resident?.id ?? `yrd-cli:${globalThis.process.pid}`,
+      runnerId: habitant?.id ?? `yrd-cli:${globalThis.process.pid}`,
       ...(implementationSource === undefined ? {} : { implementationSource }),
       ...(discoveredImplementationSource === undefined
         ? {}
@@ -3270,7 +3270,7 @@ async function createYrdRuntimeHost(
         },
         bump: (version: number) => {
           if (mode !== "active") throw new Error("yrd: viewer runtime cannot bump the Journal version")
-          assertResidentSupportsJournalVersion(repository.stateDir, version)
+          assertHabitantSupportsJournalVersion(repository.stateDir, version)
           return (journal as MutableJournal).administration.bump(version)
         },
       }),
@@ -3279,13 +3279,13 @@ async function createYrdRuntimeHost(
       resolveBayWorkspacePath: (bay: string, recordedPath?: string) =>
         resolveBayWorkspacePath({ baysRoot: repository.baysRoot, bay, recordedPath }),
       environment: env,
-      ...(options.authorizeComponentModelChange === undefined
+      ...(options.authorizeSubmoduleModelChange === undefined
         ? {}
-        : { componentModelChangeAuthorizer: options.authorizeComponentModelChange }),
+        : { submoduleModelChangeAuthorizer: options.authorizeSubmoduleModelChange }),
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
-      (closePromise ??= closeRuntime(app, process, scope, residentLease, candidatePool).finally(() => {
+      (closePromise ??= closeRuntime(app, process, scope, habitantLease, candidatePool).finally(() => {
         if (ownsLog) log.end()
       }))
     return Object.freeze({
@@ -3294,7 +3294,7 @@ async function createYrdRuntimeHost(
       config: loaded.config,
       receiver,
       process,
-      ...(resident === undefined ? {} : { resident }),
+      ...(habitant === undefined ? {} : { habitant }),
       ...(implementationSource === undefined ? {} : { implementationSource }),
       ...(mode === "active" ? { journalRetention: (journal as MutableJournal).retention } : {}),
       services,
@@ -3303,7 +3303,7 @@ async function createYrdRuntimeHost(
       [Symbol.asyncDispose]: close,
     })
   } catch (error) {
-    await closeRuntime(app, process, scope, residentLease, candidatePool)
+    await closeRuntime(app, process, scope, habitantLease, candidatePool)
     if (ownsLog) log.end()
     throw error
   }
@@ -3420,7 +3420,7 @@ function defaultIO(): YrdCliIO {
     rows: process.stdout.rows,
     cwd: process.cwd(),
     ...(process.env.HAB_SERVICE_NAME?.trim() ? { healthServiceName: process.env.HAB_SERVICE_NAME.trim() } : {}),
-    residentLeaseHeld: (cwd) => residentRunnerLeaseHeld(cwd),
+    habitantLeaseHeld: (cwd) => habitantRunnerLeaseHeld(cwd),
   }
   if (!interactive) return io
   return withLiveRenderer(io, async (element, options) => {
@@ -3569,34 +3569,34 @@ async function runYrdProcessHost(
         : {}),
       async load(context, posture) {
         const runner =
-          posture === "resident-queue-run" || posture === "one-shot-queue-run" ? residentRunnerSeed(env) : undefined
-        const residentSeed = posture === "resident-queue-run" ? runner : undefined
-        // The resident follow-runner logs at DEBUG-by-default (see
-        // residentObservability) so run/step starts and successful completions
+          posture === "habitant-queue-run" || posture === "one-shot-queue-run" ? habitantRunnerSeed(env) : undefined
+        const habitantSeed = posture === "habitant-queue-run" ? runner : undefined
+        // The habitant follow-runner logs at DEBUG-by-default (see
+        // habitantObservability) so run/step starts and successful completions
         // reach its concise human formatter; one-shot commands keep WARN.
         const observability =
-          residentSeed === undefined ? context.observability : residentObservability(context.observability)
-        // For the resident, the stderr log stream renders as scannable
+          habitantSeed === undefined ? context.observability : habitantObservability(context.observability)
+        // For the habitant, the stderr log stream renders as scannable
         // watch-timeline rows (JSON stays in the JSONL file sink); one-shot
         // commands keep the default console format.
-        const residentArtifacts: { root: string | undefined } = { root: undefined }
+        const habitantArtifacts: { root: string | undefined } = { root: undefined }
         const human =
-          residentSeed === undefined
+          habitantSeed === undefined
             ? undefined
-            : (event: Parameters<typeof formatResidentLogLine>[0]) => {
-                const artifactRoot = residentArtifacts.root
+            : (event: Parameters<typeof formatHabitantLogLine>[0]) => {
+                const artifactRoot = habitantArtifacts.root
                 if (artifactRoot !== undefined) {
-                  const home = residentArtifactHome(event, artifactRoot)
+                  const home = habitantArtifactHome(event, artifactRoot)
                   if (home !== undefined) mkdirSync(home, { recursive: true })
                 }
-                return formatResidentLogLine(event, {
+                return formatHabitantLogLine(event, {
                   color: io.color === true,
                   ...(artifactRoot === undefined ? {} : { artifactRoot }),
                   includeDebug: observability.explicitLevel || observability.debug !== undefined,
                 })
               }
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
-        const runtimeLog = runner === undefined ? log : residentRunnerLog(log, runner)
+        const runtimeLog = runner === undefined ? log : habitantRunnerLog(log, runner)
         const selectedImplementationSource = io.implementationSource ?? sourceAttestation
         const activeHost = await createYrdRuntimeHost(
           {
@@ -3610,14 +3610,14 @@ async function runYrdProcessHost(
             ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
             ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
             ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
-            ...(options.authorizeComponentModelChange === undefined
+            ...(options.authorizeSubmoduleModelChange === undefined
               ? {}
-              : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
+              : { authorizeSubmoduleModelChange: options.authorizeSubmoduleModelChange }),
           },
-          residentSeed,
+          habitantSeed,
           posture === "viewer" ? "viewer" : "active",
         )
-        const resident = activeHost.resident
+        const habitant = activeHost.habitant
         const resolveReadQueueTarget = createPostureQueueTargetResolver(posture, (ref, cwd) =>
           io.resolveQueueTarget === undefined
             ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
@@ -3630,20 +3630,20 @@ async function runYrdProcessHost(
             ),
           )
         }
-        residentArtifacts.root = join(activeHost.repository.stateDir, "artifacts")
+        habitantArtifacts.root = join(activeHost.repository.stateDir, "artifacts")
         host = activeHost
         const runnerLog = runtimeLog.child("runner")
         oneShotRunner = posture === "one-shot-queue-run" ? runner?.id : undefined
         shutdownLog = runnerLog
         const drain =
-          posture === "resident-queue-run" || posture === "bracketed-bay-open" ? new AbortController() : undefined
+          posture === "habitant-queue-run" || posture === "bracketed-bay-open" ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
           drain === undefined
             ? undefined
             : (signal) => {
                 drain.abort(signal)
-                if (posture === "resident-queue-run") {
+                if (posture === "habitant-queue-run") {
                   reportGracefulShutdown(runnerLog, signal, activeHost.repository.repo)
                 } else {
                   runtimeLog.warn?.(`Bay work was interrupted by ${signal}; preserving the Bay instead of closing it.`)
@@ -3660,11 +3660,11 @@ async function runYrdProcessHost(
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
             stateDir: activeHost.repository.stateDir,
             ...(runner === undefined ? {} : { runner: runner.id }),
-            ...(resident === undefined ? {} : { driver: { queueId: resident.queueId, epoch: resident.epoch } }),
+            ...(habitant === undefined ? {} : { driver: { queueId: habitant.queueId, epoch: habitant.epoch } }),
             ...(runner === undefined || activeHost.implementationSource === undefined
               ? {}
               : { implementationSource: activeHost.implementationSource }),
-            ...(resident === undefined || activeHost.journalRetention === undefined
+            ...(habitant === undefined || activeHost.journalRetention === undefined
               ? {}
               : { journalRetentionPolicy: activeHost.journalRetention }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
@@ -3701,7 +3701,7 @@ async function runYrdProcessHost(
           env: runtimeReloadEnv(env, error),
           execve: (execPath, execArgv, execEnv) => {
             const execve = globalThis.process.execve
-            if (execve === undefined) throw new Error("this Bun runtime cannot reload a resident with execve")
+            if (execve === undefined) throw new Error("this Bun runtime cannot reload a habitant with execve")
             return execve(execPath, [...execArgv], execEnv)
           },
         })
@@ -3865,12 +3865,12 @@ export async function runYrdExecutable(): Promise<never> {
 
   // The runner's worker starts BEFORE the runner does and lives beside it; a
   // one-shot command's worker starts after the command committed its facts.
-  const resident = settlement?.resident === true
-  if (resident) settlement?.spawn(true)
+  const habitant = settlement?.habitant === true
+  if (habitant) settlement?.spawn(true)
   const exitCode = await runYrdProcessHost(plan === undefined ? argv : composeYrdArgv(argv, plan.args), io, true, {
     ...options,
     ...(plan?.kind === "repository" ? { repositoryLabel: plan.repository.name } : {}),
-    ...(settlement === undefined || resident ? {} : { afterCommand: () => settlement?.spawn(false) }),
+    ...(settlement === undefined || habitant ? {} : { afterCommand: () => settlement?.spawn(false) }),
   })
   globalThis.process.exit(exitCode)
 }

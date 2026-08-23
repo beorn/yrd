@@ -8,7 +8,7 @@
  * reused the id, produced a different tree, and refused itself against its own
  * create-only pin. Deriving the name from the composed SHA at publish time makes
  * that impossible rather than merely recoverable: different tree, different SHA,
- * different ref. Identical evidence lands on the same name and the create is an
+ * different ref. Identical evidence merges on the same name and the create is an
  * idempotent no-op. This mirrors the source side, where each rewritten tip is
  * already published content-addressed at `refs/heads/yrd/candidates/<newTipSha>`.
  *
@@ -25,7 +25,7 @@
  * now reads both namespaces in one `for-each-ref` and judges them by the same
  * rule — one retention window, one command, not two sweepers to keep in sync. A
  * source-tip ref is claimed through `Candidate.sourceRewrites` (the submodule-
- * wrapper case) or `Candidate.revs[].head` (the direct-recut case: `remergeDirectChange`
+ * wrapper case) or `Candidate.revs[].head` (the direct-re-merge case: `remergeDirectChange`
  * publishes the ref straight from a PR's certified head, with no per-source
  * record). KNOWN GAP: refs `publishSourceCandidate` pushes into a SUBMODULE's own
  * origin (`source.repo !== "."`, e.g. `vendor/silvery`) live in that submodule's
@@ -97,7 +97,7 @@ export type CandidateRefFinding = Readonly<{
  * What the sweep saw, not just what it found.
  *
  * `scanned = live + withinRetention + reclaimable + unclaimed + noClock`. The
- * identity is asserted by the tests: a ref that lands in no bucket, or in two,
+ * identity is asserted by the tests: a ref that merges in no bucket, or in two,
  * is a sweep that quietly under-reports, and this namespace already spent ~2000
  * refs proving nobody notices that on their own.
  */
@@ -172,7 +172,7 @@ function recordIsTerminal(record: DeepReadonly<QueueRecord>): boolean {
  *
  * A live Candidate can hold ownership four ways: its own root ref/sha
  * (`candidate.ref`/`candidate.sha`), a source-tip ref per rewritten submodule
- * (`sourceRewrites[]`), and — for a direct PR recut that never went through a
+ * (`sourceRewrites[]`), and — for a direct PR re-merge that never went through a
  * submodule wrapper — the revision head itself (`revs[].head`), which is exactly
  * the sha `remergeDirectChange` published the source-tip ref under.
  */
@@ -217,7 +217,7 @@ export async function sweepCandidateRefs(
   // Both keys, because the ~2000 legacy refs are `C<n>`-named while everything
   // published after 22332 is SHA-named. One index answers for both eras, and for
   // both namespaces: a source-tip ref is claimed via `sourceRewrites[]` or, for a
-  // direct recut with no submodule wrapper, via `revs[].head` (see
+  // direct re-merge with no submodule wrapper, via `revs[].head` (see
   // `liveCandidateOwners`) — claimed by ANY candidate, terminal or not, same as
   // the root ref/sha keys below.
   const byRef = new Map<string, string>()

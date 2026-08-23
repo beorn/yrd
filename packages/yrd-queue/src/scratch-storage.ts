@@ -17,10 +17,10 @@ type CommonDirGit = Readonly<{
  * temp dir.
  *
  * A merge worktree materializes the entire tree, which is tens of thousands of
- * inodes per run. When that landed on a tmpfs `/tmp`, an unrelated session's
+ * inodes per run. When that merged on a tmpfs `/tmp`, an unrelated session's
  * test scratch could exhaust the tmpfs INODE table (bytes still half free) and
  * every merge on every queue failed with `No space left on device` — a total
- * landing outage for ~65 minutes on 2026-08-14 (R2224-R2235), which cleared by
+ * merge outage for ~65 minutes on 2026-08-14 (R2224-R2235), which cleared by
  * itself the moment the unrelated holder released its inodes.
  *
  * `.git/yrd/` already hosts the queue's artifacts, deployments and pre-submit

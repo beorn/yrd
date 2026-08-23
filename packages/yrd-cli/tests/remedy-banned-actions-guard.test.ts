@@ -1,8 +1,8 @@
 /**
  * @failure  A remedy/refusal string anywhere in the yrd tool surface tells its
- *           reader to run a git command the project's landing-path rules
+ *           reader to run a git command the project's merge-path rules
  *           forbid — a hand-push to a submodule's `refs/heads/*`, a
- *           cherry-pick onto a landing path, `--force-with-lease`, or
+ *           cherry-pick onto a merge path, `--force-with-lease`, or
  *           destructive git (`reset --hard` / `stash` / `checkout .` /
  *           `clean -f`) against a checkout the guard has not proven is the
  *           pipeline's own ephemeral worktree. An operator who follows the
@@ -17,13 +17,13 @@
  * — colocated with `yrd-cli`, which owns 5 of the 5 confirmed offenders as of
  * 2026-08-13 (`intent-admission.ts` x4, `run.ts` x1) — but it scans every
  * package's `src/` tree (every nested `.ts` file under `packages/<pkg>/src/`),
- * not just yrd-cli's own, since a future offender can land in any package. Drop it at that path
+ * not just yrd-cli's own, since a future offender can merge in any package. Drop it at that path
  * unmodified; `import.meta.dirname` walks up 3 levels (`tests/` -> `yrd-cli/` ->
  * `packages/` -> repo root) to find `packages/<pkg>/src`, so it is location-sensitive to
  * exactly that depth.
  *
  * EXPECTED RED at HEAD as of 2026-08-13, by design (reproduce-first): the 5
- * confirmed offenders below are still live. Land the guard together with (or
+ * confirmed offenders below are still live. Merge the guard together with (or
  * immediately before) their fix — see the sweep's `patch-plan.md` — so this
  * test is the regression fence, not a report.
  *

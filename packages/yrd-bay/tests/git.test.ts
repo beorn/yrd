@@ -931,7 +931,7 @@ describe("createGitWorkspace", () => {
     const pool = join(root, "pool")
     await git(repo, ["worktree", "add", "-q", pool, "-b", "pool"])
     // Reproduce the incident: extensions.worktreeConfig was enabled by an earlier run, then a stray
-    // core.bare=true landed in the SHARED config and propagated to every linked worktree.
+    // core.bare=true merged in the SHARED config and propagated to every linked worktree.
     await git(repo, ["config", "extensions.worktreeConfig", "true"])
     await git(repo, ["config", "core.bare", "true"])
     expect((await git(pool, ["rev-parse", "--is-bare-repository"])).stdout).toBe("true")

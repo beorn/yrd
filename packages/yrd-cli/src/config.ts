@@ -154,7 +154,7 @@ const ChecksSchema = z
  * Deliberately NOT `StepObjectSchema`. A step carries `runner`, `mode`,
  * `comparison`, `classification` and the rest of the Queue's execution
  * vocabulary, none of which a guard has any meaning for — a guard never runs in
- * the Queue, never composes onto base, and never produces landing evidence.
+ * the Queue, never composes onto base, and never produces merge evidence.
  * Reusing the step schema would advertise a dozen keys that silently do
  * nothing, which is a worse duplication than two small schemas.
  *
@@ -385,9 +385,9 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
  *
  * This is the fix for PR1337 (2026-08-19): a `.yrd.yml` carrying an invalid
  * `test-fast.comparison: gate-residuals` key passed typecheck, lockfile and
- * manifest gates — none of them parse `.yrd.yml` — then wedged the resident
+ * manifest gates — none of them parse `.yrd.yml` — then wedged the habitant
  * queue runner for 31 minutes the moment its own config load (always FROM
- * THE BASE REF, `readConfigFromBase` in `host.ts`) hit the newly-landed key.
+ * THE BASE REF, `readConfigFromBase` in `host.ts`) hit the newly-merged key.
  * Nothing before this function ever asked whether the PUSHED `.yrd.yml`
  * itself would parse.
  *

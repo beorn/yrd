@@ -161,7 +161,7 @@ export type QueueWatchSnapshot = Readonly<{
    * `drafts.pageAfterHours`) — a visible row, never only a `queue audit`
    * record nobody ran. Absent/empty both mean "no stale drafts"; the pane
    * never distinguishes not-yet-measured from measured-and-clean here, unlike
-   * the resident status file, because a live watch snapshot always measures. */
+   * the habitant status file, because a live watch snapshot always measures. */
   staleDrafts?: readonly QueueAuditFinding[]
   /** `admission-refusal-needs-person` findings — changes whose
    * admission refusal settled `needs-person` and stopped being retried, so no
@@ -1429,7 +1429,7 @@ export function QueueWatchFrame({
   // dynamically — while a concrete Set is a specific choice pinned to those
   // bases, so a snapshot that relabels (a queue appears or drains away)
   // cannot silently move the operator's choice onto a different queue. A
-  // toggle that lands back on the full set collapses to `undefined` so the
+  // toggle that merges back on the full set collapses to `undefined` so the
   // dynamic default resumes.
   const [shownQueues, setShownQueues] = useState<ReadonlySet<string> | undefined>(undefined)
   const queues = snapshot.projection?.queues

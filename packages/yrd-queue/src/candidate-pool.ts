@@ -113,7 +113,7 @@ export function createCandidatePoolGit(
         // A timed-out subprocess was killed mid-operation. For allowFailure
         // callers (best-effort cleanup like `worktree remove`, `rebase --abort`)
         // that is a FAILED RESULT they already handle — throwing here instead
-        // escaped past every refusal path and killed the resident (2026-07-23).
+        // escaped past every refusal path and killed the habitant (2026-07-23).
         const message = `yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`
         if (!allowFailure) throw new Error(message)
         return { code: result.exitCode === 0 ? 124 : result.exitCode, stdout: result.stdout.trim(), stderr: message }

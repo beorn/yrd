@@ -167,7 +167,7 @@ async function manifestDependencySpecs(
  * This is the authorization question behind relaxing `--frozen-lockfile`: a
  * superproject lockfile is stale *and uncurable ahead of time* exactly when a
  * gitlink advance changes the dependency specs inside that submodule, because
- * gitlinks land alone. Every other staleness — a hand-edited manifest, a
+ * gitlinks merge alone. Every other staleness — a hand-edited manifest, a
  * forgotten lockfile commit — must keep refusing, so an unreadable pin is a
  * loud refusal here and never an assumption of drift.
  */
@@ -185,7 +185,7 @@ export async function submoduleManifestDrift(
   ])
   const drifts: SubmoduleManifestDrift[] = []
   for (const change of gitlinkChanges(raw, options)) {
-    // A DELETION has no candidate side to compare: the component is leaving, so its
+    // A DELETION has no candidate side to compare: the submodule is leaving, so its
     // manifests cannot drift against anything. Discriminate on the NULL PIN and never
     // on materialization failure — the docblock above requires an unreadable pin to
     // stay a loud refusal, and skipping on a missing workdir would hide a genuinely

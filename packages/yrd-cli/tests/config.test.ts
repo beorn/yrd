@@ -16,7 +16,7 @@ import {
 } from "../src/config.ts"
 
 describe("Yrd v4 config", () => {
-  it("loads the one-line checks vocabulary and installs merge as landing machinery", async () => {
+  it("loads the one-line checks vocabulary and installs merge as merge machinery", async () => {
     const loaded = await loadYrdConfig({
       repo: "/repo",
       defaultBase: "main",
@@ -103,8 +103,8 @@ describe("Yrd v4 config", () => {
   // cannot import this schema directly, so the receiver only reads the pushed
   // blob and hands it here). PR1337 (2026-08-19): this exact invalid key
   // passed typecheck, lockfile and manifest gates — none of them parse
-  // `.yrd.yml` — then wedged the resident for 31 minutes once its config load
-  // (always from the base ref) hit the newly-landed key.
+  // `.yrd.yml` — then wedged the habitant for 31 minutes once its config load
+  // (always from the base ref) hit the newly-merged key.
   describe("validatePushedYrdConfig — the queue's own admission gate for a pushed .yrd.yml", () => {
     it("refuses the PR1337 shape: a comparison value the schema does not accept", () => {
       expect(() =>
@@ -160,8 +160,8 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
 
   // "merge" was a deleted key here once (an unrelated, older feature); it is
   // now the live key name for the merge-authority setting (formerly
-  // `landing:`), so it no longer belongs in this deleted-keys list -- see
-  // the `merge`/`landing` read-both coverage below instead.
+  // `merge:`), so it no longer belongs in this deleted-keys list -- see
+  // the `merge`/`merge` read-both coverage below instead.
   it.each(["steps", "journal", "refuse", "do", "notify", "shared-main", "typecheck-admission"])(
     "refuses deleted config key '%s' loudly",
     (key) => {

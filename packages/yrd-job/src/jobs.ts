@@ -706,7 +706,7 @@ export function isTerminalJobStatus(status: Job["status"]): boolean {
 /**
  * A transition guard rejected a Job change because the Job's current status did
  * not permit it. Always thrown, never returned, so an invalid single-writer
- * transition still fails loud. The carried `actual`/`expected` let a resident,
+ * transition still fails loud. The carried `actual`/`expected` let a habitant,
  * multi-tenant runner tell a losable concurrent-settlement race (a peer moved
  * the Job to a terminal state under it — see isConcurrentSettlementConflict)
  * apart from a genuine programmer error, without matching on the message text.
@@ -729,7 +729,7 @@ export class JobStateConflict extends Error {
  * True when an error is a JobStateConflict whose Job had already reached a
  * terminal status — i.e. a concurrent writer completed the Job between a
  * runtime's snapshot and its action. This is a normal,
- * losable race for a long-lived resident runner: skip and continue. A conflict
+ * losable race for a long-lived habitant runner: skip and continue. A conflict
  * against a still-live status (queued/in_progress/waiting) is NOT losable — it
  * signals a real invalid transition and must keep propagating (fail-loud).
  */

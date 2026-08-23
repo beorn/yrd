@@ -1,6 +1,6 @@
 /**
  * @failure N=90 git calls per queue run at 20–40% per-call stall is
- *          overdetermined failure; a single-shot timeout cannot land.
+ *          overdetermined failure; a single-shot timeout cannot merge.
  * @level l3
  * @consumer @yrd/queue createGit and @yrd/cli pr submit
  */

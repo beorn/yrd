@@ -54,7 +54,7 @@ describe("queue watch cursor movement", () => {
       const perKeypress = tally.reads
 
       // POSITIVE CONTROL, and it is load-bearing: if the keypress never reached
-      // the component the counter would read zero and this test would pass
+      // the submodule the counter would read zero and this test would pass
       // having proved nothing. The frame must actually have re-rendered.
       expect(before, "the keypress must actually move the cursor and repaint").not.toBe(app.text)
 

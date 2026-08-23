@@ -1,5 +1,5 @@
 /**
- * @failure The RUNNER box's `source git:<sha>` line never flags a resident
+ * @failure The RUNNER box's `source git:<sha>` line never flags a habitant
  *          running a stale checkout: a watcher had to cross-reference the
  *          pin by hand to notice the runner kept executing old code while
  *          the pin advanced several times underneath it.
@@ -48,14 +48,14 @@ async function renderedText(sourcePin: RunnerSourcePin | undefined): Promise<str
 }
 
 describe("RUNNER box source staleness flag (@yrd/core/stale-runner-never-recycles box 2)", () => {
-  it("flags the source line inline when the resident is behind the recorded pin", async () => {
+  it("flags the source line inline when the habitant is behind the recorded pin", async () => {
     const text = await renderedText({ state: "behind", commits: 3 })
     expect(text).toContain(`source git:${RUNNER_SHA} (3 behind pin)`)
   })
 
-  it("states at-pin POSITIVELY when the resident sits exactly on the recorded pin", async () => {
+  it("states at-pin POSITIVELY when the habitant sits exactly on the recorded pin", async () => {
     // "at pin" is a measured claim, not a default: silence is reserved for
-    // queues with no pin at all, so a healthy pinned resident says so.
+    // queues with no pin at all, so a healthy pinned habitant says so.
     const text = await renderedText({ state: "at" })
     expect(text).toContain(`source git:${RUNNER_SHA} (at pin)`)
   })

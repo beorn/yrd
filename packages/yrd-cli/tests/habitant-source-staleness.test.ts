@@ -1,53 +1,53 @@
 /**
- * @failure A resident runner served three-pins-old code for ~3h while its source
+ * @failure A habitant runner served three-pins-old code for ~3h while its source
  *          checkout advanced four times underneath it. The driver-stale page
  *          fired and nothing acted on it: no mechanism existed to notice the gap
  *          and recycle, so the queue kept applying yesterday's gates to today's
  *          landings until an operator restarted the runner by hand.
  * @level   l1
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  *
  * Box 1 of @yrd/core/stale-runner-never-recycles — the pure half. The git read
  * that feeds these observations is proved in runner-source-behind.test.ts; the
  * loop wiring, the logs and the durable attempt record in
- * resident-source-recycle.test.ts.
+ * habitant-source-recycle.test.ts.
  */
 import { describe, expect, it } from "vitest"
 import {
-  decideResidentSource,
+  decideHabitantSource,
   foldSourceStaleness,
-  RESIDENT_SOURCE_STALE_BEHIND,
-  RESIDENT_SOURCE_STALE_OBSERVATIONS,
-  type ResidentSourceObservation,
-  type ResidentSourceStall,
+  HABITANT_SOURCE_STALE_BEHIND,
+  HABITANT_SOURCE_STALE_OBSERVATIONS,
+  type HabitantSourceObservation,
+  type HabitantSourceStall,
 } from "../src/source-staleness.ts"
 
 const BOOTED = "a".repeat(40)
 const HEAD = "b".repeat(40)
 const NEWER_HEAD = "c".repeat(40)
 
-function behind(count: number | undefined, headSha: string | undefined = HEAD): ResidentSourceObservation {
+function behind(count: number | undefined, headSha: string | undefined = HEAD): HabitantSourceObservation {
   return { bootedSha: BOOTED, headSha, behind: count }
 }
 
 /** Fold the same observation `times` in a row, as consecutive cycles would. */
-function after(times: number, observation: ResidentSourceObservation): ResidentSourceStall | undefined {
-  let window: ResidentSourceStall | undefined
+function after(times: number, observation: HabitantSourceObservation): HabitantSourceStall | undefined {
+  let window: HabitantSourceStall | undefined
   for (let cycle = 0; cycle < times; cycle += 1) window = foldSourceStaleness(window, observation)
   return window
 }
 
-describe("resident source staleness — the window", () => {
+describe("habitant source staleness — the window", () => {
   it("counts consecutive observations of the same gap at the same head", () => {
     expect(after(1, behind(2))?.observations).toBe(1)
     expect(after(2, behind(2))?.observations).toBe(2)
     expect(after(9, behind(4))?.observations).toBe(9)
   })
 
-  it("opens no window below the threshold — one commit is routinely our own landing", () => {
+  it("opens no window below the threshold — one commit is routinely our own merge", () => {
     expect(foldSourceStaleness(undefined, behind(1))).toBeUndefined()
     expect(after(5, behind(1))).toBeUndefined()
-    expect(foldSourceStaleness(undefined, behind(RESIDENT_SOURCE_STALE_BEHIND))?.observations).toBe(1)
+    expect(foldSourceStaleness(undefined, behind(HABITANT_SOURCE_STALE_BEHIND))?.observations).toBe(1)
   })
 
   it("opens no window on an unmeasurable read — undefined is not zero and not evidence", () => {
@@ -78,29 +78,29 @@ describe("resident source staleness — the window", () => {
   })
 })
 
-describe("resident source staleness — the verdict", () => {
+describe("habitant source staleness — the verdict", () => {
   it("serves on until the window closes, then recycles", () => {
-    expect(decideResidentSource(undefined, undefined).kind).toBe("serve")
-    expect(decideResidentSource(after(RESIDENT_SOURCE_STALE_OBSERVATIONS - 1, behind(2)), undefined).kind).toBe("serve")
+    expect(decideHabitantSource(undefined, undefined).kind).toBe("serve")
+    expect(decideHabitantSource(after(HABITANT_SOURCE_STALE_OBSERVATIONS - 1, behind(2)), undefined).kind).toBe("serve")
 
-    const action = decideResidentSource(after(RESIDENT_SOURCE_STALE_OBSERVATIONS, behind(2)), undefined)
+    const action = decideHabitantSource(after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2)), undefined)
     expect(action).toMatchObject({
       kind: "recycle",
       bootedSha: BOOTED,
       headSha: HEAD,
       behind: 2,
-      observations: RESIDENT_SOURCE_STALE_OBSERVATIONS,
+      observations: HABITANT_SOURCE_STALE_OBSERVATIONS,
     })
   })
 
   it("carries the head a recycle is aiming at, so the restart is auditable", () => {
-    const action = decideResidentSource(after(2, behind(7, NEWER_HEAD)), undefined)
+    const action = decideHabitantSource(after(2, behind(7, NEWER_HEAD)), undefined)
     expect(action).toMatchObject({ kind: "recycle", headSha: NEWER_HEAD, behind: 7 })
   })
 
   it("refuses a SECOND recycle for the same gap — the restart changed nothing, so it cannot help", () => {
-    const stall = after(RESIDENT_SOURCE_STALE_OBSERVATIONS, behind(2))
-    const action = decideResidentSource(stall, {
+    const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2))
+    const action = decideHabitantSource(stall, {
       bootedSha: BOOTED,
       headSha: HEAD,
       attemptedAt: "2026-08-14T22:39:00.000Z",
@@ -118,8 +118,8 @@ describe("resident source staleness — the verdict", () => {
     // We came back running HEAD (the recycle worked), and the checkout has since
     // advanced again. The stale record names the OLD booted sha, so it must not
     // suppress this genuinely new gap.
-    const stall = after(RESIDENT_SOURCE_STALE_OBSERVATIONS, { bootedSha: HEAD, headSha: NEWER_HEAD, behind: 2 })
-    const action = decideResidentSource(stall, {
+    const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, { bootedSha: HEAD, headSha: NEWER_HEAD, behind: 2 })
+    const action = decideHabitantSource(stall, {
       bootedSha: BOOTED,
       headSha: HEAD,
       attemptedAt: "2026-08-14T22:39:00.000Z",
@@ -128,8 +128,8 @@ describe("resident source staleness — the verdict", () => {
   })
 
   it("recycles when a prior attempt aimed at a DIFFERENT head, even from the same booted sha", () => {
-    const stall = after(RESIDENT_SOURCE_STALE_OBSERVATIONS, behind(2, NEWER_HEAD))
-    const action = decideResidentSource(stall, {
+    const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2, NEWER_HEAD))
+    const action = decideHabitantSource(stall, {
       bootedSha: BOOTED,
       headSha: HEAD,
       attemptedAt: "2026-08-14T22:39:00.000Z",

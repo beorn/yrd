@@ -87,7 +87,7 @@ describe("actionable failure projection", () => {
     }
   })
 
-  it("surfaces the queue's own fast-forward-the-component's-main instruction as cause, never re-deriving it", () => {
+  it("surfaces the queue's own fast-forward-the-submodule's-main instruction as cause, never re-deriving it", () => {
     // intentSubmissionWorkflow (yrd-queue/src/command.ts) already speaks this
     // prose into the failure message; oneLineCause preserves it verbatim
     // because no quoted 'yrd ...' command follows it to strip. The projection
@@ -112,26 +112,26 @@ describe("actionable failure projection", () => {
       message:
         "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
         "own main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1); " +
-        "before fast-forwarding, print what the FF would drag in with 'git cherry <estate-pin> <component-main>' " +
+        "before fast-forwarding, print what the FF would drag in with 'git cherry <estate-pin> <submodule-main>' " +
         "(empty unique list = no-op; non-empty is the dragged set)",
     })
 
-    expect(failure.cause).toMatch(/git cherry <estate-pin> <component-main>/u)
+    expect(failure.cause).toMatch(/git cherry <estate-pin> <submodule-main>/u)
     expect(failure.cause).toMatch(/empty unique list = no-op/u)
     expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })
 
-  it("does not project an unexecutable mechanical remedy for a component addition or deletion", () => {
-    for (const change of ["new component 'vendor/new'", "component 'vendor/old' is deleted"]) {
+  it("does not project an unexecutable mechanical remedy for a submodule addition or deletion", () => {
+    for (const change of ["new submodule 'vendor/new'", "submodule 'vendor/old' is deleted"]) {
       const projected = actionableFailure({
         code: "authored-gitlink",
         message:
           `yrd: PR 'PR42' changes generated-only gitlinks [vendor/example]; ${change}; ` +
-          "pin intents advance existing components only; a gitlink bump cannot express this component-model change",
+          "a change of min commits advances existing submodules only; a gitlink bump cannot express this component-model change",
       })
       expect(projected.resolution).toEqual([
         "Escalate the component-model addition or deletion; a gitlink bump only advances an existing " +
-          "component, never adds or removes one.",
+          "submodule, never adds or removes one.",
       ])
     }
   })

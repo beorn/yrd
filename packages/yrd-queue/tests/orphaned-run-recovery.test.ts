@@ -158,7 +158,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await joblessRun(log)
 
-    await app.queue.recover({ recoveryTime: STALE, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: STALE, reason: "habitant restart" })
 
     const run = app.queue.get("R1")
     expect(run?.status).toBe("completed")
@@ -183,7 +183,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
 
     // The legitimate transient window: a run whose cursor step is between the
     // previous Job finishing and the next advance. Settling here would abort live work.
-    await app.queue.recover({ recoveryTime: FRESH, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: FRESH, reason: "habitant restart" })
 
     expect(app.queue.get("R1")?.status, "a run inside the orphan grace is still live").toBe("queued")
     expect(app.queue.get("R1")?.error).toBeUndefined()
@@ -192,9 +192,9 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
   it("settling an orphan twice is a no-op, not a duplicate failure", async () => {
     await using app = await joblessRun()
 
-    await app.queue.recover({ recoveryTime: STALE, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: STALE, reason: "habitant restart" })
     const settled = app.queue.get("R1")
-    await app.queue.recover({ recoveryTime: STALE, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: STALE, reason: "habitant restart" })
 
     expect(app.queue.get("R1")).toEqual(settled)
   })
@@ -233,7 +233,7 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
 /**
  * A pushed-but-never-submitted PR is invisible to the audit
  * (@i/10-merge-queue/drafts-strand-silently, #undead). The siblings above are
- * RUN-shaped gaps; this one never becomes a run at all: `pr/pushed` lands, no
+ * RUN-shaped gaps; this one never becomes a run at all: `pr/pushed` merges, no
  * `pr/submitted` follows, and the draft sits outside every projection the audit
  * walks — it ages nothing and pages nobody until outage forensics find it.
  * Live specimens 2026-08-13: PR846/849/856/886 stranded 9-22 HOURS, each

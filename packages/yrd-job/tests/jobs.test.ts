@@ -1241,7 +1241,7 @@ describe("Jobs", () => {
       app.jobs.recover({
         now: "2026-01-01T00:00:02.000Z",
         runner: "yrd-cli:111",
-        reason: "previous resident runner disappeared",
+        reason: "previous habitant runner disappeared",
       }),
     ).resolves.toEqual([dead, expired])
 
@@ -1251,7 +1251,7 @@ describe("Jobs", () => {
     expect(app.jobs.state().byId[dead!]).toMatchObject({
       status: "completed",
       conclusion: "timed_out",
-      lostReason: "previous resident runner disappeared",
+      lostReason: "previous habitant runner disappeared",
     })
     expect(app.jobs.state().byId[expired!]).toMatchObject({
       status: "completed",
@@ -1399,7 +1399,7 @@ describe("Jobs", () => {
     // check), so the lease would do no work and the test could not fail for the
     // reason it claims. Unnamed, the settlement is driven purely by the lapsed
     // lease — which is what still has to protect us now that renewal is
-    // unconditional — and it lands without retry and without merge.
+    // unconditional — and it merges without retry and without merge.
     await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).resolves.toEqual([JOB_ID])
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
       status: "completed",
@@ -1776,7 +1776,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     // starts the Job and blocks in execute; a peer cancels the Job; the runner's
     // stale projection still shows it owning a running Job, so it commits a finish
     // that re-folds the journal and meets the canceled Job — the escaping throw
-    // that killed the resident runner on 2026-07-15.
+    // that killed the habitant runner on 2026-07-15.
     const journal = createMemoryJournal()
     const executing = Promise.withResolvers<void>()
     const release = Promise.withResolvers<{ status: "completed"; conclusion: "success"; output: Result }>()

@@ -52,7 +52,7 @@ let launcherPath: string | undefined
  *
  * Building costs one small write, so there is no cache to invalidate and no
  * staleness to reason about: every call rewrites deterministic content. The
- * write lands through a rename so a second run in the same worktree can never
+ * write merges through a rename so a second run in the same worktree can never
  * observe a half-written script.
  */
 export function installedYrdLauncher(): string {

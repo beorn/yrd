@@ -9,7 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { residentRunnerStatus } from "../src/run.ts"
+import { habitantRunnerStatus } from "../src/run.ts"
 
 const roots: string[] = []
 
@@ -56,11 +56,11 @@ describe("queue git-common-dir lookup", () => {
     execFileSync("git", ["init", "-q", repo])
     const counter = installGitCounter()
     try {
-      // One `queueListSnapshot` calls `residentRunnerStatus` once, and `yrd watch`
+      // One `queueListSnapshot` calls `habitantRunnerStatus` once, and `yrd watch`
       // runs a snapshot per 1s tick AND per focus/cursor change. 25 stands in for
       // 25 keypresses: the fork budget must not grow with them.
       for (let tick = 0; tick < 25; tick++) {
-        expect(await residentRunnerStatus(repo)).toBeNull()
+        expect(await habitantRunnerStatus(repo)).toBeNull()
       }
       expect(commonDirForks(counter.logPath)).toBe(1)
     } finally {
@@ -74,7 +74,7 @@ describe("queue git-common-dir lookup", () => {
     const counter = installGitCounter()
     try {
       for (let tick = 0; tick < 25; tick++) {
-        expect(await residentRunnerStatus(notARepo)).toBeNull()
+        expect(await habitantRunnerStatus(notARepo)).toBeNull()
       }
       expect(commonDirForks(counter.logPath)).toBe(1)
     } finally {

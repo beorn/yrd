@@ -1,6 +1,6 @@
 /**
  * @failure A pushed ref that never became a carrier stays invisible to the
- * queue, or the rail that would surface it drowns in refs that already landed
+ * queue, or the rail that would surface it drowns in refs that already merged
  * or were abandoned months ago.
  * @level l1
  * @consumer @yrd/queue
@@ -14,8 +14,8 @@
  * pushed task/* refs carry no PR, and 1,502 of them are older than seven days.
  * A rail with no age bound pages on all 1,546 on its first run and is switched
  * off the same day. Bounded to 24 hours it is eleven rows — of which SEVEN had
- * already landed (six ancestral, one regenerated with every commit applied).
- * Without the landedness half the rail is 64% false positives in exactly the
+ * already merged (six ancestral, one regenerated with every commit applied).
+ * Without the mergedness half the rail is 64% false positives in exactly the
  * window it cares about.
  */
 import { describe, expect, it } from "vitest"
@@ -86,7 +86,7 @@ describe("compareRevisions", () => {
 })
 
 describe("classifyPushedRef", () => {
-  it("reports a pushed ref with unlanded commits and no carrier", () => {
+  it("reports a pushed ref with unmerged commits and no carrier", () => {
     const finding = classifyPushedRef(fact(), OPTIONS)
     expect(finding?.code).toBe("pushed-not-submitted")
     expect(finding?.ref).toBe("task/example")
@@ -122,7 +122,7 @@ describe("classifyPushedRef", () => {
     expect(classifyPushedRef(fact({ observedAtMs: NOW - 8 * 24 * HOUR }), OPTIONS)).toBeUndefined()
   })
 
-  it("ignores a ref whose commits all landed, however they landed", () => {
+  it("ignores a ref whose commits all merged, however they merged", () => {
     // Ancestral: nothing unique left.
     expect(classifyPushedRef(fact({ uniqueCommits: 0 }), OPTIONS)).toBeUndefined()
     // Regenerated: the carrier that merged was not this head, but every commit
@@ -168,17 +168,17 @@ describe("classifyPushedRef", () => {
  *
  * I had DIRECTION blindness: `git cherry` counts patch-equivalence, and for a
  * gitlink bump the patch IS the pointer, so pointer values are never equivalent
- * even when the content behind them already landed. Cherry counts pointers, not
+ * even when the content behind them already merged. Cherry counts pointers, not
  * payload, and it reported four "unique commits" on a branch that would have
  * deleted five modules from trunk.
  *
- * @fable/0 had LANDEDNESS blindness: a branch whose work landed under a
+ * @fable/0 had MERGEDNESS blindness: a branch whose work merged under a
  * regenerated head has a non-ancestral tip and a pin trunk has moved past, so it
  * reads as a revert risk when it is merely SPENT. Two such rows in their table
  * were carriers of mine that had already integrated.
  *
  * Neither verdict implies the other. Direction says which way the pin walks;
- * landedness says whether there is anything to walk it for.
+ * mergedness says whether there is anything to walk it for.
  */
 /**
  * P0(f), the union-validation gate. Assigned by @chief because I earned it:
@@ -194,7 +194,7 @@ describe("classifyPushedRef", () => {
  * THE FIXTURE RECORDS FACTS, NOT BRANCH NAMES, and that choice is the whole
  * design. A branch→verdict table would rot the instant trunk moved, which is
  * precisely the defect this predicate exists to catch: one specimen below went
- * FORWARD → DIVERGED in six minutes because another seat landed a commit, with
+ * FORWARD → DIVERGED in six minutes because another seat merged a commit, with
  * no act by its author. Facts→verdict is stable; branch→verdict is a table with
  * a shelf life, and we published four of those in one evening, three wrong.
  */
@@ -212,7 +212,7 @@ describe("union validation gate — every specimen any seat measured", () => {
       uniqueCommits: 2,
       equivalentCommits: 0,
       expect: "rescue",
-      note: "tribe pins identical; the only one safely landed",
+      note: "tribe pins identical; the only one safely merged",
     },
     {
       ref: "task/i10-status-root-narrow-linear-dev3",
@@ -230,7 +230,7 @@ describe("union validation gate — every specimen any seat measured", () => {
       uniqueCommits: 7,
       equivalentCommits: 2,
       expect: "rebase-required",
-      note: "ag would lose 40, bearly 6; partially landed",
+      note: "ag would lose 40, bearly 6; partially merged",
     },
     {
       ref: "task/maddoc-top-bar-r2",
@@ -353,8 +353,8 @@ describe("classifyPushedRef — pin direction", () => {
     ).toBeUndefined()
   })
 
-  it("warns on a backward pin when there IS unlanded content — rebase, do not carry", () => {
-    // ag-lock-survives-crash-dev5 shape: real unlanded files riding beside pins
+  it("warns on a backward pin when there IS unmerged content — rebase, do not carry", () => {
+    // ag-lock-survives-crash-dev5 shape: real unmerged files riding beside pins
     // that would drop 40 ag commits. The content is worth rescuing; this branch
     // is not the way to do it.
     const finding = classifyPushedRef(
@@ -371,7 +371,7 @@ describe("classifyPushedRef — pin direction", () => {
   })
 
   it("says NOTHING about a gitlink-only ref whose pin already matches trunk", () => {
-    // Spent: the bump landed and trunk now carries it. Cherry still calls its
+    // Spent: the bump merged and trunk now carries it. Cherry still calls its
     // commits unique, which is exactly the trap — so the count is not consulted
     // for a gitlink-only payload.
     expect(classifyPushedRef(fact({ payloadKind: "gitlink-only", pinDirection: "aligned" }), OPTIONS)).toBeUndefined()
@@ -382,7 +382,7 @@ describe("classifyPushedRef — pin direction", () => {
 
   it("still says nothing about a SPENT content branch even when its pin is forward", () => {
     // PR705/PR706 shape: integrated, tip non-ancestral because the queue
-    // regenerated the carrier, zero unlanded commits. Landedness decides here,
+    // regenerated the carrier, zero unmerged commits. Mergedness decides here,
     // not direction.
     expect(classifyPushedRef(fact({ uniqueCommits: 0, pinDirection: "forward" }), OPTIONS)).toBeUndefined()
   })

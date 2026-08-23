@@ -1134,7 +1134,7 @@ describe("SQLite Journal", () => {
     ])
   })
 
-  it("types SQLite busy failures so a resident can retry the journal operation", async () => {
+  it("types SQLite busy failures so a habitant can retry the journal operation", async () => {
     const dir = await directory()
     const journal = testJournal(dir)
     await accepted(journal, frame("before-busy"), 0)

@@ -81,7 +81,7 @@ describe("queue timeline attempt scanning", () => {
     // narrowed re-filter inside `queueShowData`, and its attempt spread — plus a
     // couple of per-Run reads, so ~3x the attempt count however many Runs exist.
     // Rescanning per Run instead costs `attempts.length` for the row build and
-    // again for the detail build FOR EVERY RUN, landing near
+    // again for the detail build FOR EVERY RUN, merge near
     // `attempts.length * runIds.length * 2` and growing as the queue accumulates
     // Runs. With this fixture that is 2100 reads against 903.
     expect(tally.reads).toBeLessThanOrEqual(attempts.length * 4)

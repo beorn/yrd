@@ -33,7 +33,7 @@ export type GatherOptions = Readonly<{
 }>
 
 /**
- * Which way a submodule pin moves, answered IN THE COMPONENT REPO.
+ * Which way a submodule pin moves, answered IN THE SUBMODULE REPO.
  *
  * Running this from the superproject is the trap that cost two seats an evening:
  * the superproject's object store cannot read submodule objects at all — not the
@@ -65,7 +65,7 @@ async function pinDirection(
  * Gather the facts for one remote ref.
  *
  * The ordering matters: cheap disqualifiers first, so a sweep over thousands of
- * refs does no component-repo work for the ones it will discard anyway. On this
+ * refs does no submodule-repo work for the ones it will discard anyway. On this
  * fleet 1,502 of 1,546 uncarried refs are older than a week and die at the age
  * bound before any git object is read.
  */
@@ -75,7 +75,7 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
 
   // Three-dot: what this ref CHANGED relative to the merge base. Two-dot would
   // include everything the base gained since, and would call a ref that touched
-  // nothing a gitlink carrier.
+  // nothing a gitlink change.
   const changed = (await git.run(repo, ["diff", "--name-only", `${base}...${ref}`]))
     .split("\n")
     .filter((line) => line !== "")
@@ -95,7 +95,7 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
       break
     }
     const one = await pinDirection(git, `${repo}/${path}`, basePin, branchPin)
-    // Worst case wins across multiple components: one backward pin is enough to
+    // Worst case wins across multiple submodules: one backward pin is enough to
     // make the whole ref unsafe to carry as-is.
     if (one === "diverged") {
       direction = "diverged"
@@ -107,7 +107,7 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
 
   // Patch-equivalence, and it is meaningless for a gitlink payload — a pointer
   // bump is a unique patch by construction even when the content behind it
-  // landed. The predicate ignores these for gitlink-only refs; they are gathered
+  // merged. The predicate ignores these for gitlink-only refs; they are gathered
   // anyway so a finding can report them without a second pass.
   const cherry = (await git.optional(repo, ["cherry", base, ref])) ?? ""
   const lines = cherry.split("\n").filter((line) => line !== "")

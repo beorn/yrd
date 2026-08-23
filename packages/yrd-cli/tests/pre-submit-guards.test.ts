@@ -258,9 +258,9 @@ describe("what a guard is told, and what it refuses to guess", () => {
     // Base moves on and adds a bead the branch never touched. Two-dot would hand
     // that file to the guard and refuse this author for somebody else's edit.
     await git(repo, "switch", "-q", "main")
-    await writeFile(join(repo, "@yrd", "core", "21002-landed-later.md"), `# ${"y".repeat(120)}\n`)
+    await writeFile(join(repo, "@yrd", "core", "21002-merged-later.md"), `# ${"y".repeat(120)}\n`)
     await git(repo, "add", "@yrd")
-    await git(repo, "commit", "-qm", "land a bead on main")
+    await git(repo, "commit", "-qm", "merge a bead on main")
     await git(repo, "switch", "-q", "issue/code-only")
 
     await using process = createProcess({ cwd: repo })

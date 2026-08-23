@@ -31,7 +31,7 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 const BRANCH_GLYPH = ""
 
 function integratedRun(): QueueShowData {
-  const pr = fixturePr("PR42", "integrated", "2026-07-13T10:30:00.000Z", "Land the durable patch")
+  const pr = fixturePr("PR42", "integrated", "2026-07-13T10:30:00.000Z", "Merge the durable patch")
   const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
     finishedAt: "2026-07-13T10:55:00.000Z",
     steps: [
@@ -118,7 +118,7 @@ function deltaRun(): QueueShowData {
 
 describe("detail pane top — the RUN status box, no identity title above it (item 23)", () => {
   it("opens the detail on the status box border and gives the cursor member its own boxed header", async () => {
-    const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
+    const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Merge it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:55:00.000Z",
     })
@@ -249,7 +249,7 @@ describe("watch detail composite header + status notice", () => {
       const topBorderY = rows.findLastIndex((line, index) => index < noticeY && line.includes("╭"))
       // `lastIndexOf`, not `indexOf`: the status box's border now carries the
       // RUN identity right in its top border (operator spec item 1), so on a
-      // narrow pane that border can land on the SAME row as the split-pane's
+      // narrow pane that border can merge on the SAME row as the split-pane's
       // list-side RUNNER box border. The detail pane is always the rightmost
       // region, so its own "╭" is the last one on a shared row.
       const borderX = rows[topBorderY]?.lastIndexOf("╭") ?? -1
@@ -353,7 +353,7 @@ describe("watch detail composite header + status notice", () => {
   )
 })
 
-describe("detail run facts — natural timing sentence + landing, no RUN/BASE duplication", () => {
+describe("detail run facts — natural timing sentence + merge, no RUN/BASE duplication", () => {
   it("drops the RUN header and BASE rows when the title renders them above", () => {
     const app = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: integratedRun(), compact: true, section: "run", titleAbove: true }),
@@ -369,7 +369,7 @@ describe("detail run facts — natural timing sentence + landing, no RUN/BASE du
       expect(app.text).toContain("Started 03:40:00, ended 03:55:00 (total 15:00, wait 0)")
       expect(app.text).not.toContain("TIMELINE")
       expect(app.text).toContain(`Committed as ${"b".repeat(40)} on main`)
-      expect(app.text).not.toContain("LANDING")
+      expect(app.text).not.toContain("MERGE")
 
       expect(app.text.split("\n").findIndex((row) => row.startsWith("Started "))).toBeLessThan(
         app.text.split("\n").findIndex((row) => row.startsWith("Committed as ")),
@@ -379,12 +379,12 @@ describe("detail run facts — natural timing sentence + landing, no RUN/BASE du
     }
   })
 
-  it("collapses START/END + TOTAL/ACTIVE/WAIT into one sentence while keeping the landing separate", () => {
+  it("collapses START/END + TOTAL/ACTIVE/WAIT into one sentence while keeping the merge separate", () => {
     const app = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: integratedRun(), compact: true, section: "run", titleAbove: true }),
     )
     try {
-      // One natural sentence carries clocks/duration; the landing sentence owns the proof SHA.
+      // One natural sentence carries clocks/duration; the merge sentence owns the proof SHA.
       expect(app.text).toContain("Started 03:40:00, ended 03:55:00 (total 15:00, wait 0)")
       const timingRow = app.text.split("\n").find((row) => row.includes("Started ")) ?? ""
       expect(timingRow).not.toContain("bbbbbbbbbbbb")

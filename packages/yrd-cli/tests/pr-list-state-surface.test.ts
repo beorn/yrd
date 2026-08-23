@@ -1,11 +1,11 @@
 /**
- * @failure `yrd pr list` silently drops rows it selected, hides its own window with no count of what it withheld, or labels a PR whose head is already on the base branch as if its content never landed (22376).
+ * @failure `yrd pr list` silently drops rows it selected, hides its own window with no count of what it withheld, or labels a PR whose head is already on the base branch as if its content never merged (22376).
  * @level l2
  * @consumer @yrd/cli pr list
  *
  * Two live specimens from 2026-07-25, both on the PR-state surface, both
  * answering "what is outstanding?" with something false in opposite
- * directions: the first hid live work, the second hid landed work.
+ * directions: the first hid live work, the second hid merged work.
  */
 import { execFileSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -252,18 +252,18 @@ describe("pr list bounded-window disclosure (22376)", () => {
   })
 })
 
-describe("pr list landing reconciliation (22376)", () => {
+describe("pr list merge reconciliation (22376)", () => {
   /**
    * The live specimen: `pr list` reported `pr#1658.5 − withdrawn` while
-   * `git merge-base --is-ancestor 5ac4f5a219dc origin/main` said LANDED — the
-   * resident runner had merged rev5 an hour earlier and the author's withdrawal
+   * `git merge-base --is-ancestor 5ac4f5a219dc origin/main` said MERGED — the
+   * habitant runner had merged rev5 an hour earlier and the author's withdrawal
    * arrived on top of the completed merge. An author who trusts `withdrawn`
    * re-cuts a branch already on main, and duplicate landings of the same
    * content are exactly what the ancestry model cannot clean up afterwards.
    */
-  it("reports the landing when a withdrawal arrives on top of it", async () => {
+  it("reports the merge when a withdrawal arrives on top of it", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/landed", headSha: MERGED_HEAD, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/merged", headSha: MERGED_HEAD, base: "main", baseSha: BASE_SHA })
     await app.bays.closePr({ pr: "PR1", reason: "author changed their mind" })
 
     const json = outputIO({ pruneGit: () => mergeGit() })
@@ -296,10 +296,10 @@ describe("pr list landing reconciliation (22376)", () => {
   })
 
   /** The fake above proves the projection; this proves the plumbing under it —
-   * real Git, one batched answer, against a landed head, an unlanded head, and
+   * real Git, one batched answer, against a merged head, an unmerged head, and
    * a head this repository has never seen. */
-  it("answers landed / unlanded / absent from one real batched Git query", () => {
-    const dir = mkdtempSync(join(tmpdir(), "yrd-pr-list-landing-"))
+  it("answers merged / unmerged / absent from one real batched Git query", () => {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-pr-list-merge-"))
     const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim()
     try {
       git("init", "-q", "-b", "main")
@@ -309,8 +309,8 @@ describe("pr list landing reconciliation (22376)", () => {
       git("add", ".")
       git("commit", "-qm", "base")
 
-      git("switch", "-q", "-c", "topic/landed")
-      writeFileSync(join(dir, "landed.md"), "landed\n")
+      git("switch", "-q", "-c", "topic/merged")
+      writeFileSync(join(dir, "merged.md"), "merged\n")
       git("add", ".")
       git("commit", "-qm", "landed")
       const mergedHead = git("rev-parse", "HEAD")
@@ -322,7 +322,7 @@ describe("pr list landing reconciliation (22376)", () => {
       const liveHead = git("rev-parse", "HEAD")
 
       git("switch", "-q", "main")
-      git("merge", "-q", "--no-ff", "-m", "merge landed", mergedHead)
+      git("merge", "-q", "--no-ff", "-m", "merge merged", mergedHead)
       const baseSha = git("rev-parse", "HEAD")
 
       const facts = createPruneGitFacts(dir)
@@ -338,7 +338,7 @@ describe("pr list landing reconciliation (22376)", () => {
     }
   })
 
-  it("never probes git for a PR whose recorded state already claims a landing", async () => {
+  it("never probes git for a PR whose recorded state already claims a merge", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/live", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
 

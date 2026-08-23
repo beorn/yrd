@@ -1,9 +1,9 @@
 /**
  * @yrd/core/21096-cli-ux/21801 + @yrd/core/22323
  *
- * Perfect landing detectors from the 6h phantom-merge audit (96 PHANTOM / 36 LANDED):
- *   - outcome=integrated (merge proof present) → LANDED (glyph ✓, word "done")
- *   - outcome=passed without integration proof → NON-LANDING (glyph ◌, word "pass")
+ * Perfect merge detectors from the 6h phantom-merge audit (96 PHANTOM / 36 MERGED):
+ *   - outcome=integrated (merge proof present) → MERGED (glyph ✓, word "done")
+ *   - outcome=passed without integration proof → NON-MERGE (glyph ◌, word "pass")
  * Duration is secondary and must not drive the verdict.
  */
 import { describe, expect, it } from "vitest"
@@ -43,7 +43,7 @@ function admissionOnlyRun() {
 }
 
 function mergedRun() {
-  const pr = fixturePr("PR8", "submitted", "2026-07-25T05:00:00.000Z", "Landed merge", {
+  const pr = fixturePr("PR8", "submitted", "2026-07-25T05:00:00.000Z", "Merged merge", {
     headSha: HEAD_SHA,
   })
   const admission = fixtureJob("job-admission", "passed", {
@@ -107,7 +107,7 @@ describe("21801 non-landing detector (perfect signals)", () => {
     const show = queueShowData(run)
     expect(show.outcome).toBe("passed")
     expect(show.mergeVerdict).toBe("non-landing")
-    expect(show.landing).toBe("-")
+    expect(show.merge).toBe("-")
     expect(show.integration).toBeUndefined()
     expect(show.stepNames).toEqual(["bead-identity-admission"])
     expect(show.glyph).toBe("◌")
@@ -138,7 +138,7 @@ describe("21801 non-landing detector (perfect signals)", () => {
     expect(detail?.stepNames).toEqual(["bead-identity-admission"])
   })
 
-  it("merge with integration proof remains landed: status done, green check", () => {
+  it("merge with integration proof remains merged: status done, green check", () => {
     const { pr, run } = mergedRun()
     expect(run.integration).toBeDefined()
 

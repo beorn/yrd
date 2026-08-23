@@ -1,7 +1,7 @@
 /**
- * @failure One tracked PR whose branch cannot be observed — deleted on origin after landing, or a fetch that times out — throws out of the resident's tracking pass and stops revision preparation for EVERY other tracked PR until an operator restarts the runner.
+ * @failure One tracked PR whose branch cannot be observed — deleted on origin after merging, or a fetch that times out — throws out of the habitant's tracking pass and stops revision preparation for EVERY other tracked PR until an operator restarts the runner.
  * @level l2
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  *
  * Drives the REAL `freshRemoteBranch` arm: no `io.pruneGit`, a real Git
  * repository with a real `origin`, and the installed `@yrd/process`. Every other
@@ -43,7 +43,7 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
 
 /**
  * A real repository whose `origin` carries `main` and HEALTHY but NOT DELETED —
- * the routine post-landing state that makes one tracked PR unobservable while
+ * the routine post-merge state that makes one tracked PR unobservable while
  * every other tracked PR is perfectly fine.
  */
 async function repository() {
@@ -76,7 +76,7 @@ async function repository() {
   const healthyLive = await commit("healthy-live.txt", "healthy pushed later")
   await git(repo, ["push", "-q", "origin", `${HEALTHY}:refs/heads/${HEALTHY}`])
 
-  // A REAL recut of the healthy payload onto main, so the installed recutter
+  // A REAL recut of the healthy payload onto main, so the installed remerger
   // stub returns genuine Git identities rather than invented SHAs.
   await git(repo, ["checkout", "-q", "-b", "recut/healthy", "main"])
   await Bun.write(join(repo, "healthy-recorded.txt"), "healthy-recorded.txt\n")
@@ -161,7 +161,7 @@ function liveIO(repo: string): YrdCliIO {
   } as unknown as YrdCliIO
 }
 
-describe("resident tracking pass — one unobservable branch never stops the others", () => {
+describe("habitant tracking pass — one unobservable branch never stops the others", () => {
   it("defers the PR whose branch is gone from origin and still prepares the healthy tracked PR", async () => {
     const fixture = await repository()
     const events: LogEvent[] = []
@@ -170,10 +170,10 @@ describe("resident tracking pass — one unobservable branch never stops the oth
     const cliApp = app as unknown as YrdCliApp
     // PR1 sorts before PR2 (compareNatural over ids at one base), so the
     // unobservable branch is observed FIRST: before containment it took the
-    // whole pass — and the resident — down before PR2 was ever reached.
+    // whole pass — and the habitant — down before PR2 was ever reached.
     await app.bays.submit({ branch: DELETED, headSha: fixture.deletedHead, base: "main", baseSha: fixture.mainSha })
     await app.bays.submit({ branch: HEALTHY, headSha: fixture.healthyRecorded, base: "main", baseSha: fixture.mainSha })
-    // Tracking is the opt-in that makes the resident OBSERVE these branches.
+    // Tracking is the opt-in that makes the habitant OBSERVE these branches.
     await app.bays.editPr({ pr: "PR1", track: true })
     await app.bays.editPr({ pr: "PR2", track: true })
     // Tip-era gate: observation certifies a successor revision only for an
@@ -196,7 +196,7 @@ describe("resident tracking pass — one unobservable branch never stops the oth
     const services = { process, recut: { recut: remerge } } as unknown as YrdCliServices
 
     // The pass must RESOLVE. Before containment it rejected with
-    // kind:"configuration" recut-branch-refresh-failed and killed the resident.
+    // kind:"configuration" recut-branch-refresh-failed and killed the habitant.
     const outcomes = await runInternals.refreshTrackedQueueRevisions(cliApp, services, io)
 
     // The unobservable PR carries a typed, loud, per-PR outcome…
@@ -207,7 +207,7 @@ describe("resident tracking pass — one unobservable branch never stops the oth
     const deferralWarn = events.find(
       (event) => (event.props as { action?: string } | undefined)?.action === "queue-track-observation-deferred",
     )
-    expect(deferralWarn, "the deferral must be LOUD on the resident's structured stream").toBeDefined()
+    expect(deferralWarn, "the deferral must be LOUD on the habitant's structured stream").toBeDefined()
     expect(deferralWarn?.props).toMatchObject({ pr: "PR1", code: "recut-branch-refresh-failed", attempts: 1 })
 
     // …and the cycle CONTINUED past it: the healthy PR's drift was recorded, so
@@ -226,8 +226,8 @@ describe("resident tracking pass — one unobservable branch never stops the oth
     const healthy = submitted().find((pr) => pr.branch === HEALTHY)
     if (healthy === undefined) throw new Error("expected the healthy tracked PR")
     // Tip semantics: the live head does not become a revision head of its own —
-    // it flows into the recutter as proposedHeadSha and the recut PRODUCT is the
-    // successor revision. Assert the observation reached the recutter, and that
+    // it flows into the remerger as proposedHeadSha and the recut PRODUCT is the
+    // successor revision. Assert the observation reached the remerger, and that
     // the successor is current.
     expect(remerge).toHaveBeenCalledWith(expect.objectContaining({ proposedHeadSha: fixture.healthyLive }))
     expect(healthy.revs).toHaveLength(2)

@@ -893,7 +893,7 @@ describe("Queue", () => {
   // 22332, the C2465 shape: two composes that produce DIFFERENT trees are
   // published without either refusing the other. There is no retry here to make
   // that work — the ref is derived from the evidence, so the second compose
-  // simply lands somewhere else. The old id-named scheme sent both to
+  // simply merges somewhere else. The old id-named scheme sent both to
   // refs/yrd/candidates/C<n> and the second refused itself.
   it("publishes two composes with different trees to different refs, without a refusal (22332)", async () => {
     const trees = [`${"a".repeat(39)}1`, `${"b".repeat(39)}2`]
@@ -1758,12 +1758,12 @@ describe("Queue", () => {
 
   it("drains the next submitted PR after releasing a passed check-only root", async () => {
     await using app = await createQueueApp({ defaultSteps: ["check"] })
-    await submitBranch(app, "issue/resident-first")
+    await submitBranch(app, "issue/habitant-first")
 
     await expect(app.queue.run({}, runtime)).resolves.toMatchObject([
       { id: "R1", status: "completed", conclusion: "success" },
     ])
-    await submitBranch(app, "issue/resident-second")
+    await submitBranch(app, "issue/habitant-second")
 
     await expect(app.queue.run({}, runtime)).resolves.toMatchObject([
       { id: "R2", status: "completed", conclusion: "success" },
@@ -3215,7 +3215,7 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
   })
 
-  it("recovers an expired batch without executing, bisecting, or landing", async () => {
+  it("recovers an expired batch without executing, bisecting, or merge", async () => {
     let checkCalls = 0
     let mergeCalls = 0
     await using app = await createQueueApp({
@@ -3274,7 +3274,7 @@ describe("Queue", () => {
         return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
-    const pr = await submitBranch(app, "issue/dead-resident")
+    const pr = await submitBranch(app, "issue/dead-habitant")
     await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("expected requested check")
@@ -3310,7 +3310,7 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
   })
 
-  it("settles a killed resident runner's expired-lease ghost via the unscoped lease-expiry sweep (D1b)", async () => {
+  it("settles a killed habitant runner's expired-lease ghost via the unscoped lease-expiry sweep (D1b)", async () => {
     // The follow loop's per-tick sweep calls recover with NO runner: it settles a
     // running Job purely because its lease lapsed, no matter who left it. This is
     // the killed-runner ghost the one-shot startup reclaim could not settle.
@@ -3321,11 +3321,11 @@ describe("Queue", () => {
         return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
-    const pr = await submitBranch(app, "issue/killed-resident-ghost")
+    const pr = await submitBranch(app, "issue/killed-habitant-ghost")
     await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("expected requested check")
-    // A resident started this check, then was killed; its lease already lapsed.
+    // A habitant started this check, then was killed; its lease already lapsed.
     await app.dispatch(app.commands.job.transition, {
       type: "start",
       id: job.id,
@@ -3337,7 +3337,7 @@ describe("Queue", () => {
     // Unscoped sweep (the per-tick D1b call): settles the orphan to a typed
     // terminal state — job `lost`, run `failed` — without executing the step.
     await expect(
-      app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z", reason: "resident lease-expiry sweep" }),
+      app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z", reason: "habitant lease-expiry sweep" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: "R1",
@@ -3731,7 +3731,7 @@ describe("Queue", () => {
     expect(app.queue.status("release/2.0").finished).toHaveLength(1)
   })
 
-  it("does not infer a landing for a pre-identity same-payload PR", async () => {
+  it("does not infer a merge for a pre-identity same-payload PR", async () => {
     const journal = createMemoryJournal<unknown>()
     await using app = await createQueueApp({}, journal)
     const canonical = await submitBranch(app, "issue/one")
@@ -4228,7 +4228,7 @@ describe("Queue", () => {
 
   it("keeps a passing admission when a no-delta recut mints a new revision", async () => {
     // @i/10-merge-queue/admission-passes-nothing-merges. Admission records
-    // against revision N; a mechanical rebuild lands on byte-identical content
+    // against revision N; a mechanical rebuild merges on byte-identical content
     // and mints revision N+1; eligibility asks whether the CURRENT revision has
     // a passing admission and the answer is never yes. Each admission triggers
     // the next recut and each recut invalidates the admission before it, so the
@@ -4236,7 +4236,7 @@ describe("Queue", () => {
     //
     // The recut here is the real specimen, not a self-reported no-op: SAME head,
     // and `bays.recut` still mints revision 2. cli.test.ts's own fixture note
-    // says the pathological recutter reports `unchanged: false` precisely
+    // says the pathological remerger reports `unchanged: false` precisely
     // because it "ran and moved nothing", so the unchanged short-circuit in
     // plugin.ts never fires for it.
     await using app = await createQueueApp({
@@ -4273,7 +4273,7 @@ describe("Queue", () => {
     // @yrd/core/refresh-coverage-gap, from the live drain wedge (PR943). Every
     // required check passed, the verdict was never written, and `yrd queue run
     // code --once` died on a raw Zod dump every pass with the fleet's only
-    // landing path shut behind it.
+    // merge path shut behind it.
     //
     // THE GAP. The drain admits against the CYCLE base — main as it is now.
     // `refreshCheckIdentities` is what re-points a carrier's check request at
@@ -4481,7 +4481,7 @@ describe("Queue", () => {
 
     // PR B's admission Job is claimed by a FOREIGN runner holding a live
     // lease: a genuinely in-flight check this drain cannot settle. Under
-    // continuous submissions the resident sees one of these on every tick,
+    // continuous submissions the habitant sees one of these on every tick,
     // so an in-flight check must never gate the merge phase (2026-07-22
     // merge-starvation incidents: three independent reproductions).
     const inflight = await submitBranch(app, "issue/check-in-flight")
@@ -4498,7 +4498,7 @@ describe("Queue", () => {
       leaseExpiresAt: "2026-01-01T00:05:00.000Z",
     })
 
-    // Resident drain tick: the merge phase must run for the checks-passed PR
+    // Habitant drain tick: the merge phase must run for the checks-passed PR
     // in this same tick, not wait for the foreign-held check to settle.
     const runs = await app.queue.run({}, runtime)
     expect(runs).toEqual(
@@ -4564,8 +4564,8 @@ describe("Queue", () => {
       checks: { status: "failed" },
     })
 
-    let residentTurns = 0
-    expect(await replayed.queue.run({}, { ...runtime, continueAdmissions: () => ++residentTurns <= 3 })).toEqual([])
+    let habitantTurns = 0
+    expect(await replayed.queue.run({}, { ...runtime, continueAdmissions: () => ++habitantTurns <= 3 })).toEqual([])
     expect(checks).toBe(1)
     expect(Queues.ids(replayed.state().queues)).toEqual([])
 
@@ -5199,7 +5199,7 @@ describe("Queue", () => {
     expect(authority?.released).toEqual({ reason: "stale-base", ref: failed.id })
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
 
-    // The unchanged revision re-admits and lands once the base settles.
+    // The unchanged revision re-admits and merges once the base settles.
     const retried = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
     expect(retried).toMatchObject([
@@ -5314,9 +5314,9 @@ describe("Queue", () => {
     expect(events.map(({ name }) => name)).not.toContain("queue/batch/isolated")
   })
 
-  it("re-admits a base race against an advancing base and lands once it settles", async () => {
+  it("re-admits a base race against an advancing base and merges once it settles", async () => {
     // A finite base race: the base advances under a finite competitor queue, so
-    // merge is stale for the first attempts and lands once the base stabilizes.
+    // merge is stale for the first attempts and merges once the base stabilizes.
     let merges = 0
     const settleOnAttempt = 3
     await using app = await createQueueApp({
@@ -5682,7 +5682,7 @@ describe("Queue", () => {
     expect(replay.queue.status("main").pause).toMatchObject({ allowedPRs: [allowed.id] })
   })
 
-  it("expires a TTL'd queue hold without stopping the resident that clears it", async () => {
+  it("expires a TTL'd queue hold without stopping the habitant that clears it", async () => {
     const journal = createMemoryJournal()
     let now = "2026-01-01T00:00:00.000Z"
     const app = await createQueueApp({}, journal, () => now)

@@ -1,16 +1,16 @@
 /**
- * @failure A resident queue runner dies when a peer cancels or settles a Job between its snapshot and its action, idling the whole merge queue.
+ * @failure A habitant queue runner dies when a peer cancels or settles a Job between its snapshot and its action, idling the whole merge queue.
  * @level l2
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  */
 import { describe, expect, it } from "vitest"
 import { JobStateConflict } from "@yrd/job"
 import { followQueueRuns } from "../src/run.ts"
-import { createResponseResidentHarness as harness } from "./support/resident-harness.ts"
+import { createResponseHabitantHarness as harness } from "./support/habitant-harness.ts"
 
 const JOB_ID = "00000000-0000-7000-8000-00000000abcd"
 
-describe("resident runner — a concurrently-canceled Job never kills the watch loop", () => {
+describe("habitant runner — a concurrently-canceled Job never kills the watch loop", () => {
   it("logs a loud skip and processes the NEXT cycle after a peer settles a Job mid-pickup", async () => {
     const h = harness([
       // Cycle 1: a peer canceled the Job between this runner's snapshot and its
@@ -27,7 +27,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
 
     // Survived the race AND reached the next interval's work.
     expect(h.runCalls()).toBe(2)
-    // The skip is LOUD and typed — a structured loggily warn only. In resident
+    // The skip is LOUD and typed — a structured loggily warn only. In habitant
     // watch mode output is loggily-only: no bare 'yrd: ' stderr duplicate.
     expect(h.warnings).toContainEqual(
       expect.objectContaining({
@@ -55,7 +55,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
   })
 
   it("does NOT swallow a settlement race for a one-shot targeted run — it has no next interval", async () => {
-    // Recovery-by-skip is only for the looping resident watch. A targeted
+    // Recovery-by-skip is only for the looping habitant watch. A targeted
     // `queue run PR1` propagates the race so the caller sees the outcome.
     const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "completed", "in_progress or waiting"))])
     await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(

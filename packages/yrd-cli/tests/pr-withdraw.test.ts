@@ -75,7 +75,7 @@ const PR473_MERGE_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
 const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
 const PR1640_RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
 const PR1640_LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
-const PR1640_BRANCH = "task/@yrd/core/22366-post-landing-component-main"
+const PR1640_BRANCH = "task/@yrd/core/22366-post-merge-component-main"
 const OVERSIZED_MERGE_TREE_BYTES = 1024 * 1024
 
 function ids(initial = 0): () => string {
@@ -602,7 +602,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 })
 
 /**
- * Closing an unlanded change spends its payload identity: the commit can
+ * Closing an unmerged change spends its payload identity: the commit can
  * never be offered again on another branch. The verb reads like housekeeping,
  * so the spend is disclosed and acknowledged BEFORE any event is emitted.
  */
@@ -682,7 +682,7 @@ describe("pre-spend disclosure on mr close", () => {
   })
 
   it("admin pr prune keeps spending on its own content proof, with no acknowledgement", async () => {
-    // Prune proves the content already landed before it withdraws; that proof
+    // Prune proves the content already merged before it withdraws; that proof
     // IS the acknowledgement, so the interactive gate must not block it.
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
@@ -787,7 +787,7 @@ describe("pr recut --preflight", () => {
 
     // Measured 2026-08-19: a merge-tip carrier ran the whole preflight gate
     // CLEAN (verdict RECUT) and was refused only later, at submit, by the
-    // linear-root rule — the gate passed work the landing path cannot land.
+    // linear-root rule — the gate passed work the merge path cannot merge.
     // The gate must raise the SAME refusal at the first evaluation.
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--json"), output.io)).toBe(1)
     const failure = JSON.parse(output.stderr()) as { failure: { code: string; cause: string } }
@@ -1052,7 +1052,7 @@ describe("pr recut --preflight", () => {
       expectedMessage: "PR 'PR1' was rejected by @reviewer for revision 1",
     },
   ] as const)(
-    "refuses candidate mode before the recutter when effective exact-current approval is $review",
+    "refuses candidate mode before the remerger when effective exact-current approval is $review",
     async ({ review, expectedCode, expectedMessage }) => {
       const fixture = codeCarrierProposalCliRepository()
       git(fixture.repo, "switch", "-q", "issue/approved")
@@ -1302,12 +1302,12 @@ describe("pr recut --preflight", () => {
     expect(pr.revs).toHaveLength(2)
   })
 
-  it("certifies resident tracked drift directly without recording an intermediate authored revision", async () => {
+  it("certifies habitant tracked drift directly without recording an intermediate authored revision", async () => {
     const app = await createCliApp()
-    const branch = "topic/resident-tracked-proposal"
+    const branch = "topic/habitant-tracked-proposal"
     await app.bays.submit({ branch, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.editPr({ pr: "PR1", track: true })
-    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-resident-r1" })
+    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-habitant-r1" })
     const remergeInputs: unknown[] = []
     const output = outputIO({
       pruneGit: () =>
@@ -2035,7 +2035,7 @@ describe("pr recut --preflight", () => {
     expect(output.stdout()).toContain("tree-proof: ancestor=no, merge-tree=identical")
   })
 
-  it("derives pin distance and a matching landing commit with real Git plumbing", async () => {
+  it("derives pin distance and a matching merge commit with real Git plumbing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-"))
     const git = (...args: string[]) =>
       execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
@@ -2057,7 +2057,7 @@ describe("pr recut --preflight", () => {
       git("switch", "main")
       writeFileSync(join(dir, "payload.txt"), "same payload\n")
       git("add", "payload.txt")
-      git("commit", "-m", "landed elsewhere")
+      git("commit", "-m", "merged elsewhere")
       const targetBaseSha = git("rev-parse", "HEAD")
 
       const facts = createPruneGitFacts(dir)
@@ -2260,7 +2260,7 @@ describe("pr prune", () => {
 
   it("keeps the exact revision owned by an active merge run", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/landing", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/merge", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
     expect(app.queue.get("R1")).toMatchObject({
       status: "queued",
@@ -2287,7 +2287,7 @@ describe("pr prune", () => {
           pr: "PR1",
           checks: {},
           verdict: "keep",
-          reason: "merge run 'R1' owns the in-flight landing for revision 1 (1111111111111111111111111111111111111111)",
+          reason: "merge run 'R1' owns the in-flight merge for revision 1 (1111111111111111111111111111111111111111)",
         },
       ],
       summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
@@ -2389,7 +2389,7 @@ describe("pr prune", () => {
     })
   })
 
-  it("does not let an active check-only run hide independently landed content", async () => {
+  it("does not let an active check-only run hide independently merged content", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/checked", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
@@ -2413,7 +2413,7 @@ describe("pr prune", () => {
 
   it("withdraws a PR whose head is already an ancestor of the base tip", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
 
     const checkedAncestry: string[] = []
     const output = outputIO({
@@ -2433,7 +2433,7 @@ describe("pr prune", () => {
       checked: [
         {
           pr: "PR1",
-          branch: "topic/landed",
+          branch: "topic/merged",
           headSha: HEAD_SHA,
           base: "main",
           baseSha: BASE_SHA,
@@ -2520,7 +2520,7 @@ describe("pr prune", () => {
 
   it("emits nothing under --dry-run while naming what it would withdraw", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     const before = (await Array.fromAsync(app.events())).length
 
     const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })

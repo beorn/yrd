@@ -1,7 +1,7 @@
 /**
  * @failure yrd pr submit/create fails closed on a 30s ls-remote/fetch timeout
  *          while a clear-window probe of the same ref is 1.8s and a loaded
- *          window is 45s+ — workers cannot land (hh @i/16-work/bead-close-204).
+ *          window is 45s+ — workers cannot merge (hh @i/16-work/bead-close-204).
  * @level l3
  * @consumer yrd pr submit / pr create origin advertisement
  */

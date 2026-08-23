@@ -2,7 +2,7 @@
  * @failure A newer writer emits an event payload field that every pinned reader
  * refuses. `journalEvent(reader, schema)` binds a minimum reader version to the
  * event NAME only, so growing an existing event's payload leaves that number
- * untouched: the writer-side check passes, the row lands, and every reader
+ * untouched: the writer-side check passes, the row merges, and every reader
  * pinned below the new field strands on it — the reported specimen being one
  * `bay/opened` row carrying `by` against `actor`-pinned readers. The strand is
  * not recoverable by the reader, so the write is what has to refuse.
@@ -93,7 +93,7 @@ describe("journal field vocabulary", () => {
 
   it("publishes every field's required reader version so a package can pin its vocabulary", () => {
     // A snapshot of this map is the ratchet: a field added to a shipped event
-    // changes it, so the field cannot land without declaring its version.
+    // changes it, so the field cannot merge without declaring its version.
     expect(journalEventVocabulary({ [OPENED]: journalEvent(1, OpenedSchema, { by: 2 }) })).toEqual({
       [OPENED]: { reader: 1, fields: { actor: 1, by: 2 } },
     })

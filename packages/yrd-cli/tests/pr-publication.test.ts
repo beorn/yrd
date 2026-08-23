@@ -70,15 +70,15 @@ describe("PR publication Git transport", () => {
     await using process = createProcess()
     const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
     expect(changed).toEqual([{ path: "dep", pin, repository: join(root, "dep") }])
-    // Before the submodule lands the commit on its main: off it, with main's sha named.
+    // Before the submodule merges the commit on its main: off it, with main's sha named.
     const mainBefore = await git(submoduleRemote, ["rev-parse", "refs/heads/main"])
     await expect(submodulePinPublications({ process, pins: changed })).resolves.toEqual([
-      { state: "off-component-main", pin: changed[0], mainSha: mainBefore },
+      { state: "off-submodule-main", pin: changed[0], mainSha: mainBefore },
     ])
 
     await git(submodule, ["push", "-q", "origin", "main"])
     await expect(submodulePinPublications({ process, pins: changed })).resolves.toEqual([
-      { state: "on-component-main", pin: changed[0] },
+      { state: "on-submodule-main", pin: changed[0] },
     ])
   })
 
@@ -114,7 +114,7 @@ describe("PR publication Git transport", () => {
     const changed = await changedSubmodulePins({ process, repo: root, baseSha, headSha })
     const publications = await submodulePinPublications({ process, pins: changed })
 
-    // "Could not tell" and "not on main" have opposite remedies — one says land the commit,
+    // "Could not tell" and "not on main" have opposite remedies — one says merge the commit,
     // the other says the probe never reached the submodule — so the state must say which.
     expect(publications).toHaveLength(1)
     expect(publications[0]).toMatchObject({ state: "undetermined", pin: changed[0] })
@@ -122,7 +122,7 @@ describe("PR publication Git transport", () => {
     expect(undetermined.reason).toContain("could not refresh submodule main")
   })
 
-  it("delegates exact component-first and root-last publication to git-super", async () => {
+  it("delegates exact submodule-first and root-last publication to git-super", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "yrd-pr-publication-"))
     roots.push(fixture)
     const submoduleSource = join(fixture, "component-source")

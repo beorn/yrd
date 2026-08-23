@@ -41,9 +41,9 @@ function stablePath(path: string): string {
 /**
  * Construction-time identity for the native merge implementation.
  *
- * Native merge semantics run inside the long-lived resident. Advance this
+ * Native merge semantics run inside the long-lived habitant. Advance this
  * generation whenever those semantics change so the three-way installed
- * baseline audit fences a resident that still has the prior implementation
+ * baseline audit fences a habitant that still has the prior implementation
  * loaded instead of letting it execute under a current-looking identity.
  */
 const NATIVE_MERGE_IMPLEMENTATION_REVISION = "yrd-native-merge-v4"
@@ -55,7 +55,7 @@ const NATIVE_MERGE_IMPLEMENTATION_REVISION = "yrd-native-merge-v4"
  * `bun` and `node` report whichever binary happened to invoke this process, so
  * a host with two bun installs — an operator shell's and a supervisor's frozen
  * PATH — computed two permanent revision families for byte-identical config.
- * The resident and every operator then overwrote each other's installed
+ * The habitant and every operator then overwrote each other's installed
  * baseline on every drain, and the failure surfaced as `config-drift`: a
  * message naming the config, which had never changed.
  *

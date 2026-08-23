@@ -4,7 +4,7 @@ import { SubmoduleMainOutcomesSchema } from "./model.ts"
 
 /**
  * A cleanup failure changes the terminal verdict, but it must not erase the
- * component-main actions that already happened. Preserve their typed results
+ * submodule-main actions that already happened. Preserve their typed results
  * on the failure so retries and operators can distinguish settled pins from
  * work that still needs an actuator.
  */

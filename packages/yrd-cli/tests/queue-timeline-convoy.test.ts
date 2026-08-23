@@ -1,4 +1,4 @@
-// @failure A co-landed PR renders as a row of dashes, indistinguishable from one that was never attempted
+// @failure A co-merged PR renders as a row of dashes, indistinguishable from one that was never attempted
 // @level l2
 // @consumer @yrd/cli
 
@@ -14,7 +14,7 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 const SUBMITTED_AT = "2026-07-13T11:30:00.000Z"
 const MERGED_AT = "2026-07-13T11:45:00.000Z"
 
-/** The R2649 specimen: three PRs admitted together and landed by ONE run. */
+/** The R2649 specimen: three PRs admitted together and merged by ONE run. */
 const CONVOY = ["PR151", "PR152", "PR153"] as const
 const CONVOY_TITLES = CONVOY.map((id) => `Convoy ${id}`)
 
@@ -64,8 +64,8 @@ function rowFor(rows: readonly string[], needle: string): string {
   return row.trimStart()
 }
 
-describe("convoy visibility — every member of a co-landing renders its own outcome", () => {
-  it("lands three PRs in one run and renders all three as merged", async () => {
+describe("convoy visibility — every member of a co-merge renders its own outcome", () => {
+  it("merges three PRs in one run and renders all three as merged", async () => {
     const rows = await timelineRows(convoySnapshot().projection)
 
     for (const title of CONVOY_TITLES) {
@@ -79,7 +79,7 @@ describe("convoy visibility — every member of a co-landing renders its own out
     // Item 38 reshaped the RUN cell: the id renders bright on the FIRST
     // member row and the rest carry a muted `·` continuation. The 22925
     // defect stays impossible: every member row keeps its own TIME and
-    // merged STATUS, so a landed member can never print as the dash row a
+    // merged STATUS, so a merged member can never print as the dash row a
     // never-attempted PR prints.
     const rows = await timelineRows(convoySnapshot().projection)
     const memberRows = CONVOY_TITLES.map((title) => rowFor(rows, title))

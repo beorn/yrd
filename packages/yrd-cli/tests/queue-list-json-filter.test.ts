@@ -184,7 +184,7 @@ async function list(app: Awaited<ReturnType<typeof createCliApp>>, ...args: stri
 describe("queue list --json answers the same question as the human renderer", () => {
   it("applies --status to the JSON payload, not only to the rendered rows", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.queue.run({ prs: ["PR1"] }, { runner: "json-filter-test", leaseMs: 60_000 })
     await app.bays.submit({ branch: "topic/pending", headSha: "2".repeat(40), base: "main", baseSha: BASE_SHA })
 

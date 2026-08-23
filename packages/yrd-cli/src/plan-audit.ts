@@ -222,8 +222,8 @@ export function installedPlanStale(
   tip: DeclaredPlanAt,
   installed: QueuePlanDescriptor,
   /** Whose installed plan this is: "this process" (the default, a full host
-   * judging its own runtime) or the resident whose PUBLISHED plan the
-   * supervisor probe compares, e.g. "the resident runner (pid 4242)". */
+   * judging its own runtime) or the habitant whose PUBLISHED plan the
+   * supervisor probe compares, e.g. "the habitant runner (pid 4242)". */
   subject = "this process",
 ): QueueAuditFindingEmission | undefined {
   const deltas = planDeltas(tip, installed, {
@@ -256,9 +256,9 @@ export function installedPlanStale(
 }
 
 /** The one remedy for a stale installed plan, spelled once for the audit, the
- * health probe and the resident reload path. */
+ * health probe and the habitant reload path. */
 export const INSTALLED_PLAN_STALE_RESOLUTION =
-  "Restart the resident queue runner so it builds the steps the base declares."
+  "Restart the habitant queue runner so it builds the steps the base declares."
 
 /** A recorded Run disagreeing with the repository is a forensic fact, not
  * something a retry or a restart changes. */

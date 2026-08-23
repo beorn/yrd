@@ -72,7 +72,7 @@ export async function observeOriginBranchAdvertisement(
 
 /** Fetch exactly one authored branch and resolve the remote-tracking commit.
  * Callers own the user-facing failure kind/code/remedy; this is the one Git
- * mechanism shared by submit and recut. */
+ * mechanism shared by submit and re-merge. */
 export async function observeFreshRemoteBranch(
   process: Pick<Process, "run">,
   cwd: string,
@@ -107,7 +107,7 @@ export async function observeFreshRemoteBranch(
 
 /** Observe one branch through the caller's deterministic Git facts in tests,
  * or the exact refreshed-origin mechanism in production. This keeps branch
- * freshness as one capability: recut and read surfaces may attach different
+ * freshness as one capability: re-merge and read surfaces may attach different
  * remedies, but they cannot quietly disagree about which commit is live. */
 export async function observeLiveBranch(
   process: Pick<Process, "run"> | undefined,

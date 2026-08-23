@@ -29,7 +29,7 @@ import { uncarriedObservation, QueueTimelineView } from "../src/queue-status-vie
 
 // Matches dev/queue-timeline-fixtures.ts's own NOW — fixtureSnapshot embeds
 // it as `projection.now`, so the fake clock has to agree with it for the
-// "X ago" math below to land on round, checkable numbers.
+// "X ago" math below to merge on round, checkable numbers.
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
 
 // 2s old at mount: fresh (well under RUNNER_STALE_MS=15s) and stays fresh
@@ -173,7 +173,7 @@ describe("RUNNER box state-conditional coloring (@yrd/cli/runner-box-severity-ne
       ).toEqual(idleWarning)
       // The command line takes the health-marker color: blue while
       // processing, muted when idle — the state-conditional half of item 27.
-      const processingCommand = cellAt(processingApp, "resident runner", "resident runner").fg
+      const processingCommand = cellAt(processingApp, "habitant runner", "habitant runner").fg
       expect(processingCommand, "the running command line is not muted").not.toEqual(
         cellAt(processingApp, "progress measured", "progress measured").fg,
       )

@@ -203,7 +203,7 @@ describe("recovery reads a queue population one record at a time", () => {
     const { log, events } = tracing()
     await using app = await createApp(await seedMixedPopulation(), ids(100), log)
 
-    await app.queue.recover({ recoveryTime: LATER, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: LATER, reason: "habitant restart" })
 
     // The repair that used to be unreachable: R2 is the jobless orphan, and
     // nothing but `recover` can settle it.
@@ -223,7 +223,7 @@ describe("recovery reads a queue population one record at a time", () => {
     const { log, events } = tracing()
     await using app = await createApp(await seedMixedPopulation(), ids(100), log)
 
-    await app.queue.recover({ recoveryTime: LATER, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: LATER, reason: "habitant restart" })
 
     const quarantine = result(events, "recover-unreadable-run-quarantine")
     expect(quarantine, "a skipped record must be reported, never swallowed").toBeDefined()
@@ -237,7 +237,7 @@ describe("recovery reads a queue population one record at a time", () => {
     const { log, events } = tracing()
     await using app = await createApp(await seedMixedPopulation(), ids(100), log)
 
-    await app.queue.recover({ recoveryTime: LATER, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: LATER, reason: "habitant restart" })
 
     // Recovery walks this population four times over (tree, orphaned jobs,
     // jobless runs, stale plans). One bad row is one incident, not four.
@@ -275,7 +275,7 @@ describe("the audit walks the same population through the same reader", () => {
     // so `queue audit` died on the very state `invalid-run` exists to name.
     const findings = app.queue.audit({ now: LATER }).findings
     expect(findings).toContainEqual({ code: "invalid-run", message: EAGER_REFUSAL, run: "R1" })
-    // The unrelated finding still lands: quarantining R1 must not cost R2 its report.
+    // The unrelated finding still merges: quarantining R1 must not cost R2 its report.
     expect(findings).toContainEqual(expect.objectContaining({ code: "orphaned-run", run: "R2", step: "first" }))
   })
 })
@@ -288,7 +288,7 @@ describe("valid state reads exactly as it did before", () => {
     expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
     expect(app.queue.audit({ now: LATER }).findings.some((finding) => finding.code === "invalid-run")).toBe(false)
 
-    await app.queue.recover({ recoveryTime: LATER, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: LATER, reason: "habitant restart" })
 
     expect(app.queue.get("R2")?.error?.code).toBe("orphaned-run")
     expect(app.queue.get("R1"), "a readable finished run is untouched by recovery").toMatchObject({
@@ -307,7 +307,7 @@ describe("valid state reads exactly as it did before", () => {
  * survives that PR — the throwing comparator is deleted and the ordering is
  * total. What is pinned here is the other end of the incident: `queue recover`,
  * the tool the fleet needed and could not run, executing over that PR while an
- * unreadable run record stands beside it, and the remedy settlement landing
+ * unreadable run record stands beside it, and the remedy settlement merge
  * afterwards.
  */
 describe("recover reaches the PR1128 shape with an unreadable record in the same population", () => {
@@ -329,7 +329,7 @@ describe("recover reaches the PR1128 shape with an unreadable record in the same
     await using app = await createApp(journal, ids(100))
     expect(app.state().queues.admissionRefusals[wedged.id]).toMatchObject({ code: "authored-gitlink" })
 
-    await app.queue.recover({ recoveryTime: LATER, reason: "resident restart" })
+    await app.queue.recover({ recoveryTime: LATER, reason: "habitant restart" })
 
     await app.queue.settleAdmissionRefusal({
       pr: wedged.id,

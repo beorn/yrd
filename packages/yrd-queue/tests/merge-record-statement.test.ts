@@ -39,7 +39,7 @@ const merged: MergeRecordBody = MergeRecordBodySchema.parse({
 })
 
 describe("mergeRecordToStatement", () => {
-  it("attests the landed sha as the subject", () => {
+  it("attests the merged sha as the subject", () => {
     expect(mergeRecordToStatement(merged, "queue:main")?.subject).toEqual([
       { name: "CANDIDATE1", digest: { sha1: SHA_MERGED } },
     ])
@@ -133,7 +133,7 @@ describe("mergeJoinedNothing — the nothing-new outcome is a projection over st
     expect(mergeJoinedNothing(record)).toBe(true)
   })
 
-  it("is false for an ordinary landing that moved the base", () => {
+  it("is false for an ordinary merge that moved the base", () => {
     const record = MergeRecordBodySchema.parse({
       merge: { ...base, result: "merged", mergedCommit: SHA_MERGED },
       ...skeleton,

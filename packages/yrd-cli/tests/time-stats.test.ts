@@ -1,4 +1,4 @@
-// @failure Queue statistics drift from local calendar boundaries, journal coverage, landed-PR/run semantics, or distribution/failure truth.
+// @failure Queue statistics drift from local calendar boundaries, journal coverage, merged-PR/run semantics, or distribution/failure truth.
 // @level l1
 // @consumer yrd queue watch QueueStatsPanel
 

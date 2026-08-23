@@ -251,7 +251,7 @@ describe("noun cutover ratchet", () => {
     // Ratchet floor, not zero: the retired-noun cutover is not yet complete.
     // Match public routes and identifier-shaped nouns rather than ordinary prose
     // words such as "line", the task/ branch prefix, or taskStatus projections.
-    // NEVER raise this baseline; lower it as genuine fixes land.
+    // NEVER raise this baseline; lower it as genuine fixes merge.
     const NOUN_CUTOVER_BASELINE = 9
     expect(failures.length, failures.join("\n")).toBeLessThanOrEqual(NOUN_CUTOVER_BASELINE)
   })

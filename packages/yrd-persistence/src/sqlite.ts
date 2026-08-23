@@ -494,7 +494,7 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
               raiseFailure(
                 "refusal",
                 "journal-write-version-floor",
-                `yrd: journal schema v${required.version} exceeds journal floor v${floor}; run 'yrd admin journal bump ${String(required.version)}' after stopping older residents`,
+                `yrd: journal schema v${required.version} exceeds journal floor v${floor}; run 'yrd admin journal bump ${String(required.version)}' after stopping older habitants`,
               )
             }
             if (head !== expectedCursor) return { appended: false as const, cursor: head }

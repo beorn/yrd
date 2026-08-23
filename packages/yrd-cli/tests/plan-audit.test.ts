@@ -1,5 +1,5 @@
 /**
- * @failure `queue audit` certifies a queue clean without comparing anything — an empty journal or an unwired leg prints the same words as "no drift" — or a resident keeps executing a step set the base tip no longer declares, and neither surface names the shas it read.
+ * @failure `queue audit` certifies a queue clean without comparing anything — an empty journal or an unwired leg prints the same words as "no drift" — or a habitant keeps executing a step set the base tip no longer declares, and neither surface names the shas it read.
  * @level l2
  * @consumer @yrd/cli host
  */
@@ -102,7 +102,7 @@ describe("leg c — this process against the base tip", () => {
     expect(finding?.message).toContain("Restart this queue runner so it builds the declared steps.")
     // Structured, because the remedy is not a yrd command the prose
     // projection could lift — without it `queue audit` would print "retry".
-    expect(finding?.resolution).toEqual(["Restart the resident queue runner so it builds the steps the base declares."])
+    expect(finding?.resolution).toEqual(["Restart the habitant queue runner so it builds the steps the base declares."])
   })
 
   it("treats a changed command revision under an unchanged name as stale, with the stale-definition consequence", () => {
@@ -115,7 +115,7 @@ describe("leg c — this process against the base tip", () => {
     )
     expect(finding?.message).not.toContain("declared-step-not-installed")
     expect(finding?.message).toContain(
-      "the commands they execute and the admission projections come from the step definitions this process built at startup",
+      "the commands they execute and the checks-before-queueing projections come from the step definitions this process built at startup",
     )
   })
 })
@@ -487,13 +487,13 @@ describe("the derived plan audit against a real repository", () => {
     }
   })
 
-  it("flags a resident whose installed plan the tip no longer declares, predicts the refusal, and reloads in follow mode", async () => {
+  it("flags a habitant whose installed plan the tip no longer declares, predicts the refusal, and reloads in follow mode", async () => {
     const repo = await queueRepository()
-    const resident = await createYrdHost({ cwd: repo })
+    const habitant = await createYrdHost({ cwd: repo })
     try {
       const tipSha = await commitConfig(repo, TWO_CHECKS, "declare a second check")
       const blobSha = await git(repo, "rev-parse", `${tipSha}:.yrd.yml`)
-      const audit = await resident.services.queue?.auditEnvironment?.({ recordedRuns: 0 })
+      const audit = await habitant.services.queue?.auditEnvironment?.({ recordedRuns: 0 })
       expect(audit?.comparison.tip).toEqual({
         sha: tipSha,
         configAuthority: ".yrd.yml",
@@ -513,7 +513,7 @@ describe("the derived plan audit against a real repository", () => {
       expect(finding?.message).toContain("declared-step-not-installed")
 
       // One-shot: refuse by code.
-      const refusal = await requireInstalledDeclaredPlan(resident.services).then(
+      const refusal = await requireInstalledDeclaredPlan(habitant.services).then(
         () => undefined,
         (reason: unknown) => reason,
       )
@@ -521,7 +521,7 @@ describe("the derived plan audit against a real repository", () => {
 
       // Follow mode: hand the finding to the process host for the in-place reload.
       const requested: string[] = []
-      const reload = await requireInstalledDeclaredPlan(resident.services, {
+      const reload = await requireInstalledDeclaredPlan(habitant.services, {
         reloadInPlace: {
           request: (stale) => {
             requested.push(stale.code)
@@ -535,7 +535,7 @@ describe("the derived plan audit against a real repository", () => {
       expect(requested).toEqual(["installed-plan-stale"])
       expect(reload).toMatchObject({ message: "execve replaced the process" })
     } finally {
-      await resident.close()
+      await habitant.close()
     }
 
     // A process built after the change installs the declared plan: clean.

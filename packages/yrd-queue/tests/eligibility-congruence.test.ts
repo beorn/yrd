@@ -198,7 +198,7 @@ describe("eligibility congruence — one fixture, both surfaces", () => {
       (event) => event.kind === "log" && event.props?.action === "queue-run-no-submitted-prs",
     )
     expect(line).toBeDefined()
-    // info, never warn: the empty FIFO is the resident runner's normal state.
+    // info, never warn: the empty FIFO is the habitant runner's normal state.
     expect(line?.kind === "log" ? line.level : undefined).toBe("info")
     expect(line?.props).toMatchObject({ population: { pushed: 1, withdrawn: 1 }, excluded: 0 })
   })

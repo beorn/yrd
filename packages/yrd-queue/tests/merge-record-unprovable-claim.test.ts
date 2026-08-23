@@ -1,7 +1,7 @@
 /**
  * @failure A merge-record refusal names the Change-Id — the half that VERIFIES whenever reachability
  * is what broke — so every reader is steered at the wrong cause; and the writer can mint the
- * contradiction in the first place, recording generated commits for a landing that joined nothing to
+ * contradiction in the first place, recording generated commits for a merge that joined nothing to
  * history, which no later verification can ever prove.
  * @level l2
  * @consumer yrd why
@@ -47,7 +47,7 @@ async function git(repo: string, args: readonly string[], stdin?: string): Promi
 }
 
 /**
- * Three commits in a line. `predecessor` stands in for the PREVIOUS landing's merge
+ * Three commits in a line. `predecessor` stands in for the PREVIOUS merge's merge
  * commit — the sha the poisoned real-world record (`faba4bfe…`) put in its own
  * `mergedCommit` field — and `generated` is its CHILD carrying a correct Change-Id
  * trailer. A child can never be reachable from its parent, so the record can never
@@ -75,7 +75,7 @@ async function linearRepository(): Promise<
 
   await writeFile(join(repo, "c.txt"), "c\n")
   await git(repo, ["add", "c.txt"])
-  await git(repo, ["commit", "-qm", "later landing"])
+  await git(repo, ["commit", "-qm", "later merge"])
   const tip = await git(repo, ["rev-parse", "HEAD"])
 
   return { repo, predecessor, generated, tip }
@@ -211,7 +211,7 @@ describe("a merge-record refusal names the half that actually failed", () => {
 })
 
 describe("the writer cannot mint a claim no verification could ever prove", () => {
-  it("reports the contradiction when a no-op landing claims generated commits", () => {
+  it("reports the contradiction when a no-op merge claims generated commits", () => {
     const poisoned = record("R2504", "c".repeat(40), {
       changeId: CHANGE_ID,
       pr: "PR1061",
@@ -223,11 +223,11 @@ describe("the writer cannot mint a claim no verification could ever prove", () =
     const claim = unprovableMergeRecordClaim(poisoned)
 
     expect(claim).toBeDefined()
-    expect(claim).toContain("joined nothing to landed history")
+    expect(claim).toContain("joined nothing to merged history")
     expect(claim).toContain("PR1061")
   })
 
-  it("passes a no-op landing that honestly claims no generated commits", () => {
+  it("passes a no-op merge that honestly claims no generated commits", () => {
     const honest = record("R2504", "c".repeat(40), {
       changeId: CHANGE_ID,
       pr: "PR1061",
@@ -238,7 +238,7 @@ describe("the writer cannot mint a claim no verification could ever prove", () =
     expect(unprovableMergeRecordClaim(honest)).toBeUndefined()
   })
 
-  it("passes a real landing that moved the base and claims its generated commit", () => {
+  it("passes a real merge that moved the base and claims its generated commit", () => {
     const real = record(
       "R2505",
       "d".repeat(40),
@@ -348,7 +348,7 @@ describe("a retracted record stops poisoning the estate without rewriting histor
     await retract(repo, poisoned, "generated commit is a child of the recorded mergedCommit")
 
     // A merge record is immutable history. The estate's credibility rests on nobody
-    // being able to rewrite what a landing claimed after the fact, INCLUDING us.
+    // being able to rewrite what a merge claimed after the fact, INCLUDING us.
     expect(await noteBlobFor(repo, "R2504")).toBe(before)
   })
 

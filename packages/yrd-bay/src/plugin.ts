@@ -237,8 +237,8 @@ export type SubmitSelectionOptions = Readonly<{
   issue?: string
   title?: string
   description?: string
-  /** Opt in to resident "merge into latest" and every later manual implicit
-   * recut of this PR (see `PR.track`). Only a live PR records it: tracking
+  /** Opt in to habitant "merge into latest" and every later manual implicit
+   * re-merge of this PR (see `PR.track`). Only a live PR records it: tracking
    * governs future revisions, which a terminal PR no longer has. */
   track?: boolean
   draft?: boolean
@@ -735,7 +735,7 @@ export function createBayJobDefs(workspace: BayWorkspace, publication?: ChangePu
       observe: (input) => ({
         lifecycle: "publication",
         identity: { pr: input.pr, revision: input.revision, headSha: input.headSha },
-        attributes: { continuation: input.continuation, componentCount: input.components.length },
+        attributes: { continuation: input.continuation, submoduleCount: input.components.length },
       }),
       execute: (input, context) => publisher.publish(input, context),
     }),
@@ -1067,8 +1067,8 @@ export function createBays(
   ): Promise<DeepReadonly<Change>> => {
     const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
     const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
-    // Tracking only governs FUTURE resident preparation or a manual implicit
-    // recut, which a terminal PR (an integrated/already-landed same-head
+    // Tracking only governs FUTURE habitant preparation or a manual implicit
+    // re-merge, which a terminal PR (an integrated/already-landed same-head
     // resubmit reaches this seam at exit 0) no longer has. Recording it there
     // would refuse the whole submit, so state loudly that the flag was not
     // recorded instead of pretending it was.
@@ -1120,13 +1120,13 @@ export function createBays(
     let bay = closedBranchAlias
       ? undefined
       : (selectedBay ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay)))
-    // D2 — a branch whose PR reached a non-landed terminal status
+    // D2 — a branch whose PR reached a non-merged terminal status
     // (withdrawn/canceled) mints its next revision automatically down the
     // direct-branch resubmit path below (the reopen preserves the PR identity,
     // so branch→PR stays 1:1). The author no longer hand-makes a delivery branch.
     //
     // Q1 — an integrated/already-landed branch identity is FROZEN evidence, never reopened:
-    //  - addressed by its branch, resubmitting the SAME landed head is an
+    //  - addressed by its branch, resubmitting the SAME merged head is an
     //    informational "already merged" no-op (returns the integrated PR, exit
     //    0 — delivered work is not a dark queue), while a NEW head mints a fresh
     //    delivery PR (revision 1) via the direct-branch path below, so no
@@ -1145,7 +1145,7 @@ export function createBays(
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
       if (mergedHead === changeHead(pr)) return bindSubmission(pr, options)
-      // A new head on a landed branch mints a fresh delivery identity below.
+      // A new head on a merged branch mints a fresh delivery identity below.
     }
 
     if (bay?.status === "active") {
@@ -1178,7 +1178,7 @@ export function createBays(
       // The linear-root rule at the one submit entrance the branch resolver's
       // check never covers: an active Bay's head comes from the workspace
       // refresh, so a merge-tip commit sailed into the ledger and was refused
-      // only on the landing path (PR1364, 2026-08-19). Absence of parent
+      // only on the merge path (PR1364, 2026-08-19). Absence of parent
       // evidence is loud — skipping silently would re-open the hole.
       if (options.resolveParents === undefined) {
         raiseFailure(
@@ -1608,7 +1608,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         apply: (state: BayState, args: ChangeEditArgs) => editPr(state, args),
       }),
       recut: command({
-        title: "Record a mechanically equivalent PR recut",
+        title: "Record a mechanically equivalent PR re-merge",
         visibility: "public",
         params: ChangeRemergeArgsSchema,
         apply: (state: BayState, args: ChangeRemergeArgs) => remergeChange(state, args, defaultSubmitter),
@@ -1642,7 +1642,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         apply: (state: BayState, args: ChangeRequestChecksArgs) => requestChangeChecks(state, args),
       }),
       recordAdmission: command({
-        title: "Record admission evidence for a PR revision",
+        title: "Record checks-before-queueing evidence for a change revision",
         params: ChangeAdmissionRecordedFactSchema,
         apply: (state: BayState, args: ChangeAdmissionRecordedFact) => recordChangeAdmission(state, args),
       }),
@@ -1956,7 +1956,7 @@ function intakePR(
   const issue = attachedIssue(existing, args.issue, bay?.issue)
   const name = args.name ?? bay?.name ?? existing?.name
   // Omitted receiver fields inherit the recorded payload for idempotence, while
-  // an explicit base/composition delta remains an authored recut and may resume
+  // an explicit base/composition delta remains an authored re-merge and may resume
   // the PR. Display-name drift alone never mints a content revision.
   const replayBaseSha = args.baseSha ?? (existing === undefined ? undefined : changeBaseSha(existing))
   const replayComposition = args.composition ?? (existing === undefined ? undefined : changeComposition(existing))
@@ -2073,7 +2073,7 @@ function submitWork(
     return { events: [] }
   }
   refuseDuplicatePayload(current, args.headSha, base, composition, existing?.id)
-  // D2 — reopen the existing PR identity (next revision) for a non-landed
+  // D2 — reopen the existing PR identity (next revision) for a non-merged
   // terminal branch, not just a rejected one. `rejected` already reopened;
   // `withdrawn`/`canceled` now do too, so resubmitting the branch mints the
   // next revision in place instead of demanding a hand-made delivery branch.
@@ -2447,7 +2447,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       )
     }
   }
-  // Only Queue authority-consumption results make an identical recut an
+  // Only Queue authority-consumption results make an identical re-merge an
   // author reauthorization act. Authored-content failures need new bytes;
   // minting the same bytes would manufacture the same refusal at revision N+1.
   const needsAuthorCode = changeNeedsAuthor(pr)?.receipt.code
@@ -2776,7 +2776,7 @@ function reviewFact(
  * carry that commit — but its OWN branch reopens it in place (D2), which is the
  * whole remedy. Naming it here is the difference between a one-line rebuild and
  * forging a tree-identical commit whose only purpose is to change a hash. A
- * live or landed duplicate has no such door, so it keeps the bare refusal
+ * live or merged duplicate has no such door, so it keeps the bare refusal
  * rather than a remedy its state would refuse. */
 function duplicatePayloadRemedy(duplicate: DeepReadonly<Change>): string {
   const delivery = changeDeliveryState(duplicate)
@@ -3100,7 +3100,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const props = predecessor.props
       const submitter = remerge.submitter ?? predecessor.submitter
       // An admission is a verdict about a tree merged into a base. A rebuild
-      // that lands on the identical head AND the identical certified base has
+      // that merges on the identical head AND the identical certified base has
       // not changed either, so the verdict is still about this revision's
       // content and carries — exactly as an approved review does below.
       //

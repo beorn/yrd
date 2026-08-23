@@ -26,7 +26,7 @@ function submoduleRepository(repo: string, path: string): string {
 
 /**
  * The pins the queue could NOT fetch from their submodule's origin — reachability, the
- * queue-carried question. A composition or recut pin is queue-authored: its commit only
+ * queue-carried question. A composition or re-merge pin is queue-authored: its commit only
  * needs to be somewhere the merge path can fetch it from, because submodule main is
  * promoted AT merge, not before. This is deliberately the old any-branch oracle under an
  * honest name; asking main-ancestry here would deadlock the publication pipeline, since a
@@ -59,8 +59,8 @@ export async function unreachableSubmodulePins(options: {
 }
 
 export type SubmodulePinPublication =
-  | Readonly<{ state: "on-component-main"; pin: UnpublishedSubmodulePin }>
-  | Readonly<{ state: "off-component-main"; pin: UnpublishedSubmodulePin; mainSha: string }>
+  | Readonly<{ state: "on-submodule-main"; pin: UnpublishedSubmodulePin }>
+  | Readonly<{ state: "off-submodule-main"; pin: UnpublishedSubmodulePin; mainSha: string }>
   | Readonly<{ state: "undetermined"; pin: UnpublishedSubmodulePin; reason: string }>
 
 /**
@@ -74,7 +74,7 @@ export type SubmodulePinPublication =
  * the submodule never accepted would compose a candidate against a commit with no home.
  *
  * Three states, not two, and the third is the point: "I could not tell" must never collapse
- * into "not published". They need opposite remedies — one says land your commit on the
+ * into "not published". They need opposite remedies — one says merge your commit on the
  * submodule's main, the other says the check could not reach the submodule's origin at all —
  * and reporting the second as the first sends someone to merge a branch over a network fault.
  */
@@ -113,11 +113,11 @@ export async function submodulePinPublications(options: {
     }
     const reached = await run(pin.repository, ["merge-base", "--is-ancestor", pin.pin, main.sha])
     if (reached.code === 0) {
-      publications.push({ state: "on-component-main", pin })
+      publications.push({ state: "on-submodule-main", pin })
       continue
     }
     if (reached.code === 1) {
-      publications.push({ state: "off-component-main", pin, mainSha: main.sha })
+      publications.push({ state: "off-submodule-main", pin, mainSha: main.sha })
       continue
     }
     publications.push({

@@ -313,7 +313,7 @@ describe("drainSettlements", () => {
     expect(hook.settled.flat().map(({ value }) => value)).toEqual(["two"])
   })
 
-  it("leaves the hook open across passes, because a resident worker drains it many times", async () => {
+  it("leaves the hook open across passes, because a habitant worker drains it many times", async () => {
     const stateDir = temporaryDir("yrd-settlement-drain-close-")
     let closed = 0
     const hook = recordingHook({
@@ -379,7 +379,7 @@ describe("prepareYrdSettlementLaunch", () => {
       gitDir: () => "/repo/.git",
       write: (text) => paths.push(text),
     })
-    expect(launch?.resident).toBe(false)
+    expect(launch?.habitant).toBe(false)
     expect(settlementNoticeDir("/repo/.git", ["host", "records"])).toBe(join("/repo/.git/yrd/host/records/notices"))
     expect(paths).toEqual([])
   })
@@ -391,7 +391,7 @@ describe("prepareYrdSettlementLaunch", () => {
       env: { [YRD_SETTLEMENT_HOOK_ENV]: "/repo/hook.ts" },
       gitDir: () => "/repo/.git",
     })
-    expect(launch?.resident).toBe(true)
+    expect(launch?.habitant).toBe(true)
   })
 
   it("warns instead of throwing when the worker cannot be started at all", () => {
@@ -403,7 +403,7 @@ describe("prepareYrdSettlementLaunch", () => {
       env: {},
       settlementCwd: "/repo",
       noticePath: "/repo/notice.json",
-      resident: false,
+      habitant: false,
       stderr: undefined,
       warn: (text) => warnings.push(text),
     })

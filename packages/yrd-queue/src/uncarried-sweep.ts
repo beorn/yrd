@@ -31,7 +31,7 @@ export type SweepOptions = UncarriedOptions &
     /** Ref namespace to sweep, e.g. "refs/remotes/origin". */
     namespace: string
     /**
-     * Limit the namespace to refs authored as changes. The resident and the
+     * Limit the namespace to refs authored as changes. The habitant and the
      * command's implicit default enable this; an explicit diagnostic
      * namespace leaves it off so the caller sees exactly what they selected.
      */
@@ -83,7 +83,7 @@ export type ExemptedRef = Readonly<{
 }>
 
 /**
- * Ref namespaces whose members are archives, not landing candidates.
+ * Ref namespaces whose members are archives, not merge candidates.
  *
  * A PREFIX, never a list of the refs themselves: a hand-list goes stale the
  * next time a teardown writes preservation branches, and going stale here means
@@ -118,7 +118,7 @@ export function applyHostFindingFilter<T extends { ref: string }>(
 }
 
 /** Which policy exclusion applies to a branch, if any. Archive outranks
- * retired so a ref that is both still lands in exactly one bucket. */
+ * retired so a ref that is both still merges in exactly one bucket. */
 function exemptionOf(branch: string, retiredRefs: ReadonlySet<string>): ExemptionDisposition | undefined {
   if (ARCHIVE_REF_PREFIXES.some((prefix) => branch.startsWith(prefix))) return "archive"
   if (retiredRefs.has(branch)) return "retired"
@@ -143,7 +143,7 @@ export type SweepResult = Readonly<{
   /**
    * Uncarried refs dropped because a strictly higher revision of the same
    * `-rN` series stands in the population. Counted separately from `carried`
-   * and `outsideAgeBound` so every ref lands in exactly one bucket and the
+   * and `outsideAgeBound` so every ref merges in exactly one bucket and the
    * denominators still add up: scanned = carried + exempted.length +
    * superseded + missingUpdateClocks + outsideAgeBound + examined +
    * skipped.length.
@@ -227,7 +227,7 @@ function branchOf(ref: string, namespace: string): string {
 type EnumeratedRef = Readonly<{
   /** Full storage identity used to match exact reflog selectors. */
   fullRef: string
-  /** Stable short identity exposed by findings and matched to carrier branches. */
+  /** Stable short identity exposed by findings and matched to change branches. */
   ref: string
   symbolic: boolean
 }>

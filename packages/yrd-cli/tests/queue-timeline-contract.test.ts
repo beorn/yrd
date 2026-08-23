@@ -101,7 +101,7 @@ describe("queue timeline 21106 contract", () => {
     expect(frame).not.toContain("CODING")
   })
 
-  it("renders resident health in RUNNER with the queue-pause STATUS line folded inside it", async () => {
+  it("renders habitant health in RUNNER with the queue-pause STATUS line folded inside it", async () => {
     const normal = (await renderTimeline(contractProjection(), 120)).join("\n")
     expect(normal).toContain("╭─ RUNNER ")
     expect(normal).not.toContain("╭─ STATUS ")
@@ -269,7 +269,7 @@ describe("queue timeline 21106 contract", () => {
       "Align host navigation keybindings without disturbing internal pane controls",
       "Carry the production split-pane contract into the queue detail surface",
       "Reject broken payload",
-      "Land the durable patch",
+      "Merge the durable patch",
     ])
 
     // Detail and flow metrics stay per-Run even though the list denormalizes.
@@ -359,7 +359,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead?.trim()).toMatch(
       /^17:10:00 ◉ checking\s+#42 ◉\s+pr#42\.1 Align host navigation.*\(2:check\)\s+@agent\/3\s+36:00 20:00$/u,
     )
-    // The convoy PARTNER keeps its own TIME/STATUS (a landed member and a
+    // The convoy PARTNER keeps its own TIME/STATUS (a merged member and a
     // never-attempted PR must never print the same row of dashes —
     // @i/10-merge-queue/22925); the shared run id renders once, the partner
     // carrying the `·` membership continuation (item 38).
@@ -371,7 +371,7 @@ describe("queue timeline 21106 contract", () => {
       /^16:42:00 × failed\s+#5 ×\s+pr#5\.1 Reject broken payload \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
     )
     expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ merged\s+#4 ✓\s+pr#4\.1 Land the durable patch\s+@agent\/7\s+25:00 15:00$/u,
+      /^16:25:00 ✓ merged\s+#4 ✓\s+pr#4\.1 Merge the durable patch\s+@agent\/7\s+25:00 15:00$/u,
     )
 
     // No row carries the removed clock glyph; a not-yet-started run shows the
@@ -883,7 +883,7 @@ describe("queue timeline 21106 contract", () => {
 
       // PR42's own submit timeline lives on the PR tab (tab 0), which is not
       // the default when a step is running. Move left past the running
-      // `check` tab and the `prepare` tab to land on the PR tab and read its
+      // `check` tab and the `prepare` tab to merge on the PR tab and read its
       // submit facts.
       await handle.press("h")
       await handle.waitForLayoutStable()
@@ -921,7 +921,7 @@ describe("queue timeline 21106 contract", () => {
     })
     expect(rendered).not.toContain("RELATED RUNS")
     expect(rendered).not.toContain("No run recorded.")
-    expect(rendered).not.toContain("LANDING -")
+    expect(rendered).not.toContain("MERGE -")
   })
 
   it("renders a failed required check as an actionable revision row, never ready", () => {

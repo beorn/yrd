@@ -19,7 +19,7 @@ export type RuntimePosture =
   | "journal-view-repair"
   | "bracketed-bay-open"
   | "one-shot-queue-run"
-  | "resident-queue-run"
+  | "habitant-queue-run"
 
 export type NormalizedYrdInvocation = Invocation &
   Readonly<{
@@ -236,7 +236,7 @@ function invocationPosture(args: readonly string[], commandIndex: number | undef
   }
   if (command === "doctor" && args.includes("--rebuild-views")) return "journal-view-repair"
   if (command === "queue" && subcommand === "run") {
-    return queueRunMode(args, commandIndex) === "follow" ? "resident-queue-run" : "one-shot-queue-run"
+    return queueRunMode(args, commandIndex) === "follow" ? "habitant-queue-run" : "one-shot-queue-run"
   }
   return "active"
 }

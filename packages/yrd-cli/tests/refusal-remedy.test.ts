@@ -1,7 +1,7 @@
 /**
  * @failure Every refusal remedy is treated as human work, so a refusal whose printed remedy is fully deterministic still waits for an operator to type it — and a refusal that genuinely needs judgment could be executed mechanically.
  * @level l1
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  */
 import { describe, expect, it } from "vitest"
 import { classifyRefusalRemedy } from "../src/refusal-remedy.ts"
@@ -81,7 +81,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
 
   it("leaves an environment refusal to judgment — it names no PR-scoped command", () => {
     const remedy = classifyRefusalRemedy(
-      { code: "queue-base-unresolved", message: "yrd: resident auto-recut could not resolve queue base 'main'" },
+      { code: "queue-base-unresolved", message: "yrd: habitant auto-recut could not resolve queue base 'main'" },
       { branch: "task/22474", delivery: "submitted" },
     )
 

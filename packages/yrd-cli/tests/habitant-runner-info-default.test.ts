@@ -1,7 +1,7 @@
 /**
- * @failure Routine lock/compose settlements leak into the resident runner's INFO stream, or disappear when an operator explicitly enables DEBUG.
+ * @failure Routine lock/compose settlements leak into the habitant runner's INFO stream, or disappear when an operator explicitly enables DEBUG.
  * @level l3
- * @consumer @yrd/cli resident follow-runner operators
+ * @consumer @yrd/cli habitant follow-runner operators
  */
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -12,7 +12,7 @@ import { stripAnsi } from "silvery"
 
 import { createYrdHost, runYrdProcess } from "../src/host.ts"
 import { followQueueRuns } from "../src/run.ts"
-import { formatResidentLogLine } from "../src/runner-timeline.ts"
+import { formatHabitantLogLine } from "../src/runner-timeline.ts"
 import type { YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -32,7 +32,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 async function runnerRepo(
   config = 'base: main\nbatch: 1\nchecks:\n  - {check: {run: "true"}}\n',
 ): Promise<{ repo: string }> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-resident-info-"))
+  const root = await mkdtemp(join(tmpdir(), "yrd-habitant-info-"))
   roots.push(root)
   const repoPath = join(root, "repo")
   await git(root, "init", "-q", "-b", "main", repoPath)
@@ -73,7 +73,7 @@ async function readRecords(file: string): Promise<Record<string, unknown>[]> {
     .map((entry) => JSON.parse(entry) as Record<string, unknown>)
 }
 
-function defaultResidentProcessEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function defaultHabitantProcessEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...process.env }
   delete env.LOG_LEVEL
   delete env.DEBUG
@@ -84,7 +84,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe("resident follow-runner lifecycle levels", () => {
+describe("habitant follow-runner lifecycle levels", () => {
   it("narrates one admission while a waiting runner retries settlement internally", async () => {
     const { repo } = await queuedRunnerRepo(`base: main
 batch: 1
@@ -102,7 +102,7 @@ checks:
     const io = {
       stdout: () => undefined,
       stderr: () => undefined,
-      runner: "test-resident",
+      runner: "test-habitant",
       scope: {
         signal,
         sleep: async () => {
@@ -125,7 +125,7 @@ checks:
     )
     expect(runStarts).toHaveLength(1)
     const admittedRows = runStarts
-      .map((event) => formatResidentLogLine(event, { color: false }))
+      .map((event) => formatHabitantLogLine(event, { color: false }))
       .filter((line): line is string => line?.includes("[main#1] admitted") === true)
     expect(admittedRows).toHaveLength(1)
     expect(stripAnsi(admittedRows[0]!)).toContain(
@@ -182,15 +182,15 @@ checks:
 
   it("keeps routine compose successes at DEBUG with timing", async () => {
     // Run/check/merge settlements remain INFO milestones. A compose cycle is
-    // routine DEBUG plumbing; the default resident JSONL sink retains it even
+    // routine DEBUG plumbing; the default habitant JSONL sink retains it even
     // though the concise human branch drops it.
     const { repo } = await runnerRepo()
-    const logFile = join(repo, "resident.jsonl")
+    const logFile = join(repo, "habitant.jsonl")
     const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: defaultResidentProcessEnv({ LOGGILY_FILE: logFile, NO_COLOR: "1" }),
+      env: defaultHabitantProcessEnv({ LOGGILY_FILE: logFile, NO_COLOR: "1" }),
     })
     const drainStdout = new Response(cli.stdout).text()
     const drainStderr = new Response(cli.stderr).text()
@@ -226,7 +226,7 @@ checks:
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: defaultResidentProcessEnv({ LOGGILY_FILE: logFile, NO_COLOR: "1" }),
+      env: defaultHabitantProcessEnv({ LOGGILY_FILE: logFile, NO_COLOR: "1" }),
     })
     const stdoutText = new Response(cli.stdout).text()
     let stderrText = ""
@@ -241,7 +241,7 @@ checks:
     })()
     try {
       // A configured JSONL sink keeps the complete DEBUG record at the default
-      // resident level while the human branch admits only lifecycle narration.
+      // habitant level while the human branch admits only lifecycle narration.
       await vi.waitFor(
         async () => {
           const records = await readRecords(logFile)

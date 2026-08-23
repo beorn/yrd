@@ -10,7 +10,7 @@ import type {
   QueueCommands,
   QueuesState,
   RepositoryMergeRecordSearchResult,
-  ComponentModelChangeAuthorizer,
+  SubmoduleModelChangeAuthorizer,
 } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
 import type {
@@ -34,7 +34,7 @@ export type JournalRetentionObservation = Readonly<{
   policy: JournalRetentionPolicy
   source: "mutable-journal"
   observedAt: string
-  /** Resident driver epoch that produced this observation. */
+  /** Habitant driver epoch that produced this observation. */
   generation: string
 }>
 
@@ -208,7 +208,7 @@ export type YrdCliServices = Readonly<{
   base?: string
   /** Exact host environment inherited by Bay child processes. */
   environment?: NodeJS.ProcessEnv
-  componentModelChangeAuthorizer?: ComponentModelChangeAuthorizer
+  submoduleModelChangeAuthorizer?: SubmoduleModelChangeAuthorizer
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The
@@ -243,14 +243,14 @@ export type PruneGitFacts = Readonly<{
   mergeTree(baseSha: string, headSha: string): string | undefined | Promise<string | undefined>
   treeOf(sha: string): string | Promise<string>
   /** Selected source-base distance from the pinned authoritative target. The
-   * source-only side must be zero before recut can be classified safely. */
+   * source-only side must be zero before re-merge can be classified safely. */
   pinDistance?(
     sourceBaseSha: string,
     targetBaseSha: string,
   ):
     | Readonly<{ sourceOnly: number; targetOnly: number }>
     | Promise<Readonly<{ sourceOnly: number; targetOnly: number }>>
-  /** Parent SHAs of one commit, in order. The recut preflight gate counts
+  /** Parent SHAs of one commit, in order. The re-merge preflight gate counts
    * them to enforce the linear-root rule at the first evaluation. */
   parents?(sha: string): readonly string[] | Promise<readonly string[]>
   /** Stable patch identity and an equivalent target-side commit when one can
@@ -263,9 +263,9 @@ export type PruneGitFacts = Readonly<{
   ): Readonly<{ patchId?: string; targetSha?: string }> | Promise<Readonly<{ patchId?: string; targetSha?: string }>>
   /** Which of the given commits are present here AND already reachable from the
    * base tip — one batched answer for a whole listing. `pr list` reconciles
-   * every row whose recorded state claims its content never landed, so the
+   * every row whose recorded state claims its content never merged, so the
    * naive one-process-per-row shape would cost seconds on a full projection.
-   * A commit missing from this repository is never reported as landed: absence
+   * A commit missing from this repository is never reported as merged: absence
    * of the object is not evidence about the content. Implementations that omit
    * this fact are still answered exactly, one `resolveCommit` + `isAncestor`
    * pair per head. */
@@ -294,10 +294,10 @@ export type YrdCliIO = {
   /** Composition-declared handle for that repository (`code`, `pm`) — the
    * queue label run names lead with (watch redesign item 36). */
   repositoryLabel?: string
-  /** Probe whether a resident runner holds the drain lease in `cwd`. When it
+  /** Probe whether a habitant runner holds the drain lease in `cwd`. When it
    * reports true, `pr recut --queue` dispatches admission enqueue-only for the
-   * resident to settle instead of becoming a second driver. */
-  residentLeaseHeld?(cwd: string): Promise<boolean>
+   * habitant to settle instead of becoming a second driver. */
+  habitantLeaseHeld?(cwd: string): Promise<boolean>
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
   /** Host-owned durable state directory for artifacts and runtime coordination. */
@@ -305,11 +305,11 @@ export type YrdCliIO = {
   /** Fresh host-owned Bay destroy protections for this invocation. */
   bayProtections?: readonly YrdBayProtection[]
   runner?: string
-  /** Host-minted driver lease identity for a resident queue epoch. */
+  /** Host-minted driver lease identity for a habitant queue epoch. */
   driver?: Readonly<{ queueId: string; epoch: string }>
-  /** Host-owned implementation identity captured before a resident starts serving. */
+  /** Host-owned implementation identity captured before a habitant starts serving. */
   implementationSource?: string
-  /** Exact policy resolved by the mutable journal this resident serves. */
+  /** Exact policy resolved by the mutable journal this habitant serves. */
   journalRetentionPolicy?: JournalRetentionPolicy
   /**
    * The Yrd source checkout {@link implementationSource} was captured from —

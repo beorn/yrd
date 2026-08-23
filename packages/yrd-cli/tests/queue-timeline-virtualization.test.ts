@@ -20,7 +20,7 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
  * pins the MOUNT bound — not the ANSI output (clipped rows never appear in the
  * frame text either way, so a text assertion cannot fail for this defect).
  * Mounted rows are counted through the per-cell `td-time-<rowId>` ids the row
- * component already carries.
+ * submodule already carries.
  */
 describe("queue timeline mounts a bounded row window (@yrd/cli/22258)", () => {
   it("keeps the mounted row count bounded when the projection holds hundreds of rows", async () => {

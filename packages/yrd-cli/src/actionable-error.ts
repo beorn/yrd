@@ -92,8 +92,8 @@ function prId(message: string): string | undefined {
 
 /** `yrd pr recut` refuses a terminal PR outright (`terminal-target`): an
  * integrated/already-landed identity is frozen evidence and a
- * withdrawn/canceled one is reopened by resubmitting its branch, not recut. */
-const RECUT_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
+ * withdrawn/canceled one is reopened by resubmitting its branch, not re-merge. */
+const REMERGE_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
   "integrated",
   "already-landed",
   "withdrawn",
@@ -104,7 +104,7 @@ const RECUT_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDe
  * home for the fact, so a caller that decides whether a printed remedy can be
  * applied mechanically reads the same answer the printer used. */
 export function remergeRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
-  return delivery !== undefined && RECUT_REFUSING_STATES.has(delivery)
+  return delivery !== undefined && REMERGE_REFUSING_STATES.has(delivery)
 }
 
 /** Re-record the branch's corrected head onto the PR.
@@ -115,7 +115,7 @@ export function remergeRefusedByDelivery(delivery: ChangeDeliveryState | undefin
  * where it is preferable because it keeps the PR a draft. `yrd pr submit
  * <branch>` is refused by no delivery state (a pushed draft is submitted, a
  * submitted/needs-author PR records a fresh revision, a rejected one resumes,
- * a withdrawn/canceled one reopens, and a landed branch mints a fresh
+ * a withdrawn/canceled one reopens, and a merged branch mints a fresh
  * delivery), so it is also the safe answer when the state is unknown. */
 function recordCommand(delivery: ChangeDeliveryState | undefined): string {
   return delivery === "pushed" ? "yrd pr create <branch>" : "yrd pr submit <branch>"
@@ -140,16 +140,16 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
         .filter(Boolean)
 }
 
-// A pure pin advance is an ordinary change: fast-forward the component's own
+// A pure pin advance is an ordinary change: fast-forward the submodule's own
 // main to the target commit, then submit the root branch like any other
 // change — the queue fills the shaset in itself. `yrd intent submit`, the
-// mechanical per-component verb this used to print, is retired (23000).
+// mechanical per-submodule verb this used to print, is retired (23000).
 //
 // The fast-forward step is intentionally NOT constructed here as a literal
 // hand-push command: remedy-banned-actions-guard.test.ts bans printing a raw
-// git-push-to-a-component's-branch-ref line anywhere in this tool surface,
+// git-push-to-a-submodule's-branch-ref line anywhere in this tool surface,
 // because that instruction is real advice only for a landing:none vendor
-// component and wrong everywhere else this projection is reused — a
+// submodule and wrong everywhere else this projection is reused — a
 // distinction no static remedy string can carry. `intentSubmissionWorkflow`
 // (yrd-queue/src/command.ts) already says "get commit onto main" as prose in
 // the failure message itself, and `oneLineCause` already preserves that
@@ -159,7 +159,7 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
 // is safe to print as a literal, mechanical command everywhere: submit.
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
   const submodules = authoredGitlinkSubmodules(failure.message)
-  const submoduleModelChange = failure.message.includes("pin intents advance existing components only")
+  const submoduleModelChange = failure.message.includes("a change of min commits advances existing submodules only")
   return Object.freeze({
     code: failure.code,
     cause,
@@ -167,7 +167,7 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
       submoduleModelChange
         ? [
             "Escalate the component-model addition or deletion; a gitlink bump only advances an existing " +
-              "component, never adds or removes one.",
+              "submodule, never adds or removes one.",
           ]
         : submodules.length > 0
           ? ["yrd pr submit <branch>"]
@@ -223,7 +223,7 @@ function remergeGitlinkFailure(
 }
 
 /**
- * A recut whose certified base the authoritative base never descended from is
+ * A re-merge whose certified base the authoritative base never descended from is
  * cured by exactly one thing: a fresh revision recorded at the base the queue
  * actually holds. The generic "retry the same Yrd command" line is a wrong
  * instruction here — the queue already parked the PR precisely because retrying

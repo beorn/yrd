@@ -45,7 +45,7 @@ describe("stage clock", () => {
     expect(report.accountedMs + report.unaccountedMs).toBeCloseTo(report.totalMs, 1)
   })
 
-  test("uninstrumented work lands in unaccountedMs rather than disappearing", () => {
+  test("uninstrumented work merges in unaccountedMs rather than disappearing", () => {
     spin(40) // nobody's stage
     stage("measured", () => spin(10))
     const report = stageReport()

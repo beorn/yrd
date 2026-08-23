@@ -3,7 +3,7 @@ import { createFailure, raiseFailure } from "@yrd/core"
 type YrdProcessExecve = (execPath: string, argv: readonly string[], env: NodeJS.ProcessEnv) => never
 
 /** The exec env variable that carries how many consecutive in-place reloads
- * the lineage of one resident pid has performed. A same-PID `execve` keeps
+ * the lineage of one habitant pid has performed. A same-PID `execve` keeps
  * argv and env, so without this nothing counts and a plan the source can
  * never build — or a tip that keeps moving — would spin the habitant through
  * reload after reload, each one recording the finding and none of them ever
@@ -12,8 +12,8 @@ export const YRD_RUNTIME_RELOADS_ENV = "YRD_RUNTIME_RELOADS"
 
 /** Consecutive in-place reloads a lineage may perform before the gate refuses
  * with `installed-plan-reload-exhausted` instead of reloading again. Three is
- * enough for the ordinary case (one config landing, one reload) with room for
- * a second landing that races the first; a fourth stale gate in a row is a
+ * enough for the ordinary case (one config merge, one reload) with room for
+ * a second merge that races the first; a fourth stale gate in a row is a
  * loop, not a transition. */
 export const MAX_CONSECUTIVE_RUNTIME_RELOADS = 3
 
@@ -54,7 +54,7 @@ export function runtimeReloadLineage(env: NodeJS.ProcessEnv): RuntimeReloadLinea
   return { consecutiveReloads: consecutiveRuntimeReloads(env) }
 }
 
-/** Close every process-owned resource before replacing the resident image.
+/** Close every process-owned resource before replacing the habitant image.
  * Successful execve never returns and preserves the OS pid. */
 export async function execYrdProcessInPlace(
   input: Readonly<{
@@ -77,7 +77,7 @@ export async function execYrdProcessInPlace(
       {
         kind: "infrastructure",
         code: "runtime-reload-exec-failed",
-        message: `yrd: resident runtime reload failed: ${error instanceof Error ? error.message : String(error)}`,
+        message: `yrd: habitant runtime reload failed: ${error instanceof Error ? error.message : String(error)}`,
       },
       error,
     )

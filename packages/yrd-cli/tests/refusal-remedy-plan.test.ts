@@ -1,7 +1,7 @@
 /**
  * @failure The runner prints a deterministic refusal remedy every cycle and waits for a human to type it, so one wedged PR loops for hours; or it retries a failed remedy every cycle instead of once per revision.
  * @level l1
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  */
 import { describe, expect, it } from "vitest"
 import type { Change } from "@yrd/bay"

@@ -196,7 +196,7 @@ describe("warm candidate pool", () => {
     // allowFailure callers are best-effort cleanup (`worktree remove`,
     // `rebase --abort`): a timeout must come back as a FAILED RESULT their
     // existing nonzero-code handling absorbs — a throw here escaped every
-    // refusal path and killed the resident runner (2026-07-23).
+    // refusal path and killed the habitant runner (2026-07-23).
     const timedOut = await git.run("/blackholed-repository", ["worktree", "remove", "--force", "/gone"], true)
     expect(timedOut.code).not.toBe(0)
     expect(timedOut.stderr).toContain("timed out after 120000ms")

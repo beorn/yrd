@@ -38,7 +38,7 @@ import type {
   IntegrationProof,
   ChangeShape,
   ChangeSnapshot,
-  ComponentModelChangeAuthorization,
+  SubmoduleModelChangeAuthorization,
   QueueSubmoduleResolutionEvidence,
   Run,
   SourceRewrite,
@@ -46,13 +46,13 @@ import type {
 import {
   SubmoduleMainOutcomesSchema,
   CandidateChangeSchema,
-  ComponentModelChangeAuthorizationSchema,
+  SubmoduleModelChangeAuthorizationSchema,
   IntegrationProofSchema,
   QueueSubmoduleResolutionEvidenceSchema,
   SourceRewriteSchema,
 } from "./model.ts"
 import { candidateRefFor, sourceCandidateRefFor } from "./candidate-refs.ts"
-import { submoduleMainScratchCleanupFailure } from "./component-main-outcome.ts"
+import { submoduleMainScratchCleanupFailure } from "./submodule-main-outcome.ts"
 import {
   describeScratchReap,
   isStorageExhaustion,
@@ -263,7 +263,7 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   changes: z.array(CandidateChangeSchema).min(1).optional(),
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
   submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
-  componentModelChanges: z.array(ComponentModelChangeAuthorizationSchema).min(1).optional(),
+  componentModelChanges: z.array(SubmoduleModelChangeAuthorizationSchema).min(1).optional(),
   comparison: GitCheckComparisonEvidenceSchema.optional(),
   certificate: GateCertificateSchema.optional(),
   /** Current check attempt; absent only in replay-era Job output. */
@@ -743,7 +743,7 @@ function uniqueComparisonDiagnostics(values: readonly CommandDiagnostic[], cwd: 
  * pins text encoding for tool output; USER/LOGNAME feed git's fallback ident.
  * Everything else — NODE_ENV, DEBUG, provider tokens, harness state — is
  * DROPPED so a check verdict never depends on who or where launched the
- * resident runner. Ambient exceptions must be declared via
+ * habitant runner. Ambient exceptions must be declared via
  * environmentPassthrough; fixed values via environmentOverrides. */
 const COMMAND_ENVIRONMENT_BASE = new Set(["PATH", "HOME", "SHELL", "TMPDIR", "LANG", "USER", "LOGNAME"])
 
@@ -932,7 +932,7 @@ async function writeTerminalArtifacts(
 
 /** See {@link CommandTerminalSchema}. Same attempt-directory addressing as
  * {@link writeTerminalArtifacts} and {@link createArtifactSink}, so the record
- * always lands beside the streams it describes rather than in a parallel store. */
+ * always merges beside the streams it describes rather than in a parallel store. */
 async function writeTerminalRecord(
   root: string,
   input: StepExecution,
@@ -1180,7 +1180,7 @@ type GitResult = Readonly<{
 }>
 type Git = ReturnType<typeof createGit>
 const CERTIFICATE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames"] as const
-// Queue git operations (recut rebases, worktree admin, merges) lock the shared
+// Queue git operations (re-merge rebases, worktree admin, merges) lock the shared
 // repository and scale with checkout size; 30s calibrated for an idle host was
 // killing subprocesses mid-mutation under real fleet load (2026-07-23 incident).
 const GIT_TIMEOUT_MS = 120_000
@@ -1266,8 +1266,8 @@ function createGit(
     if (completed.timedOut && !preserveProcessFailure) {
       // allowFailure callers are best-effort cleanup (`rebase --abort`,
       // `worktree remove`): a timeout must surface as a failed RESULT their
-      // nonzero-code handling absorbs. Throwing here escaped past the recut
-      // refusal paths and killed the resident runner (2026-07-23 incident).
+      // nonzero-code handling absorbs. Throwing here escaped past the re-merge
+      // refusal paths and killed the habitant runner (2026-07-23 incident).
       const message = `yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`
       if (!allowFailure) throw new Error(message)
       return { ...completed, code: completed.code === 0 ? 124 : completed.code, stderr: message }
@@ -1467,11 +1467,11 @@ function mergeRecordBody(run: Run, candidate: Candidate, pins: MergeRecordBody["
           ? { code: "run-canceled", message: run.cancelReason ?? "Merge canceled" }
           : { code: "merge-failed", message: "Merge failed without a more specific reason" }))
   const mergedCommit = run.integration?.commit
-  // A landing whose result IS its own base joined nothing to history. Recording a
+  // A merge whose result IS its own base joined nothing to history. Recording a
   // generated commit for it is not an approximation, it is a false claim: nothing
   // is reachable from a commit that was never created, so the record can never
   // prove itself and poisons every later verification of the estate. Claiming no
-  // commits is the TRUE fact about such a landing, not a fallback — this is the
+  // commits is the TRUE fact about such a merge, not a fallback — this is the
   // shape the shaset model makes a first-class outcome.
   const joinedHistory = !(result === "merged" && mergedCommit !== undefined && mergedCommit === candidate.baseSha)
   return {
@@ -2061,7 +2061,7 @@ export async function repairMergeRecordEstate(
     isolateUnverifiable: true,
   })
   // An estate with no records at all is not a fault; it is a repository that has
-  // never landed anything through the queue.
+  // never merged anything through the queue.
   if (found.status === "not-proven") return { proven: 0, alreadyRetracted: 0, planned: [], applied: [] }
   if (found.status !== "proven") {
     // `isolateUnverifiable` cannot return a whole-estate refusal, so anything else
@@ -2173,7 +2173,7 @@ export async function findRepositoryChangeMerge(
     const changeIds = (separator === -1 ? "" : row.slice(separator + 1)).split(",").filter((value) => value !== "")
     if (!changeIds.includes(identity.changeId)) continue
     if (changeIds.length !== 1) {
-      throw new Error(`yrd: landed commit '${commit}' carries multiple Change-Id trailers`)
+      throw new Error(`yrd: merged commit '${commit}' carries multiple Change-Id trailers`)
     }
     matches.push(commit)
   }
@@ -2330,7 +2330,7 @@ async function remergeChange(git: Git, repo: string, input: ChangeRemergeInput):
           throw createFailure({
             kind: "infrastructure",
             code: "recut-certificate-missing",
-            message: `yrd: recut produced no source certificate for '${source.repo}'`,
+            message: `yrd: re-merge produced no source certificate for '${source.repo}'`,
           })
         }
         return {
@@ -2437,10 +2437,10 @@ function describeGitlinkMismatches(values: readonly GitlinkValueMismatch[]): str
 }
 
 /**
- * Certify that a recut candidate replays the reviewed source payload. An
+ * Certify that a re-merge candidate replays the reviewed source payload. An
  * authored gitlink value is a floor ("advance submodule S at least to X"),
  * not a fixed value pinned for all time, so it is ordinary admissible
- * payload as long as: (2) the recut can neither add nor remove a gitlink
+ * payload as long as: (2) the re-merge can neither add nor remove a gitlink
  * bump relative to the reviewed source, and (3) each bumped value is either
  * the source's authored floor verbatim (a rebase that touched nothing about
  * it) or the target's own recorded value at the candidate's base (a
@@ -2490,7 +2490,7 @@ async function deriveFrozenCodeCarrier(
   // candidate.baseSha differs from the source's own starting value);
   // otherwise "absent" just means the floor was silently dropped, never
   // applied at all. A path present only in the candidate is never admissible
-  // — a recut can neither add nor remove a gitlink bump relative to review.
+  // — a re-merge can neither add nor remove a gitlink bump relative to review.
   const sourceGitlinks = new Map(sourceRaw.gitlinks.map((entry) => [entry.path, entry] as const))
   const candidateGitlinks = new Map(candidateRaw.gitlinks.map((entry) => [entry.path, entry] as const))
   const extraPaths = [...candidateGitlinks.keys()].filter((path) => !sourceGitlinks.has(path)).toSorted()
@@ -2651,7 +2651,7 @@ type SourceOnlyCarrierComposition = Readonly<{
  * internal composition manifest. This is eligibility only: prepareSource and
  * rebaseSource still own restacking and every payload/certificate proof. Mixed,
  * multi-source, overlapping, or unproven carriers fall through so the direct
- * recutter's existing refusal remains authoritative.
+ * remerger's existing refusal remains authoritative.
  */
 async function sourceOnlyCarrierComposition(
   git: Git,
@@ -2691,7 +2691,7 @@ async function sourceOnlyCarrierComposition(
       // silent-fallback-allow: undefined is this function's "cannot certify a
       // source-only composition", and it is the FAIL-SAFE direction — six
       // sibling bail-outs above return it for ordinary non-qualifying inputs,
-      // and the caller then takes the normal, more conservative recut path.
+      // and the caller then takes the normal, more conservative re-merge path.
       // An unresolvable submodule path means we cannot certify, so declining is
       // correct; throwing would turn a non-qualifying candidate into an error.
       return undefined
@@ -2933,7 +2933,7 @@ async function remergeDirectChange(
     input.currentCompositions,
   )
   const absorbedSet = new Set(absorbedGitlinks)
-  // 22373: rebasing onto a base that already landed part of this branch drops
+  // 22373: rebasing onto a base that already merged part of this branch drops
   // those commits as patch-equivalent — the healthy outcome of a moved base,
   // not a loss. The expected payload is therefore recomposed for the new base,
   // one proven path at a time, before it is compared with what materialized.
@@ -3050,8 +3050,8 @@ async function remergeDirectChange(
         code: "recut-conflict",
         message:
           paths.length === 0
-            ? `yrd: PR '${input.id}' could not recut onto '${target.sha}': ${rebased.stderr || rebased.stdout}`
-            : `yrd: PR '${input.id}' could not recut onto '${target.sha}' at [${paths.join(", ")}]`,
+            ? `yrd: PR '${input.id}' could not re-merge onto '${target.sha}': ${rebased.stderr || rebased.stdout}`
+            : `yrd: PR '${input.id}' could not re-merge onto '${target.sha}' at [${paths.join(", ")}]`,
       })
     }
     const headSha = await git.commit(path, "HEAD")
@@ -3060,7 +3060,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-mismatch",
-        message: `yrd: PR '${input.id}' recut paths differ: expected [${effectivePayload.join(", ")}], got [${materialized.join(", ")}]`,
+        message: `yrd: PR '${input.id}' re-merge paths differ: expected [${effectivePayload.join(", ")}], got [${materialized.join(", ")}]`,
       })
     }
     if (
@@ -3070,7 +3070,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-identity",
-        message: `yrd: PR '${input.id}' recut changed blob, mode, status, path, or gitlink identity`,
+        message: `yrd: PR '${input.id}' re-merge changed blob, mode, status, path, or gitlink identity`,
       })
     }
     const materializedPatchId = await git.stablePatchId(path, target.sha, headSha)
@@ -3078,7 +3078,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-certificate",
-        message: `yrd: PR '${input.id}' recut has no stable patch identity`,
+        message: `yrd: PR '${input.id}' re-merge has no stable patch identity`,
       })
     }
     // 21461: git's merge machinery fast-forwards a carrier gitlink WITHOUT a
@@ -3122,7 +3122,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' recut has no stable patch identity`,
+          message: `yrd: PR '${input.id}' re-merge has no stable patch identity`,
         })
       }
       const patchMatches = certifyMaterializedPatchId === certifySourcePatchId
@@ -3132,7 +3132,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' recut changed stable patch identity`,
+          message: `yrd: PR '${input.id}' re-merge changed stable patch identity`,
         })
       }
       if (
@@ -3142,7 +3142,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' recut did not preserve deterministic union identity`,
+          message: `yrd: PR '${input.id}' re-merge did not preserve deterministic union identity`,
         })
       }
       usedUnionMerge = unionMerged
@@ -3154,12 +3154,12 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' recut did not preserve authored submodule pin for '${gitlink}'`,
+          message: `yrd: PR '${input.id}' re-merge did not preserve authored submodule pin for '${gitlink}'`,
         })
       }
     }
     // Absorbed paths (gitlinks by pin ancestry, ordinary paths by already-landed
-    // end state) legitimately have no counterpart in the recut range, so the
+    // end state) legitimately have no counterpart in the re-merge range, so the
     // whole-range range-diff can no longer be the certificate; the ordered
     // patch sequence over the remaining paths owns it instead.
     const hasAbsorbedExceptions = absorbedPaths.length > 0 || ffCarrierGitlinks.size > 0
@@ -3175,7 +3175,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' union-merge recut requires one root commit`,
+          message: `yrd: PR '${input.id}' union-merge re-merge requires one root commit`,
         })
       }
     } else if (!hasAbsorbedExceptions) {
@@ -3184,7 +3184,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' recut is not range-diff equivalent`,
+          message: `yrd: PR '${input.id}' re-merge is not range-diff equivalent`,
         })
       }
     } else {
@@ -3202,7 +3202,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' current-composition recut has no stable commit-sequence identity`,
+          message: `yrd: PR '${input.id}' current-composition re-merge has no stable commit-sequence identity`,
         })
       }
       if (
@@ -3212,7 +3212,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' current-composition recut is not commit-sequence equivalent`,
+          message: `yrd: PR '${input.id}' current-composition re-merge is not commit-sequence equivalent`,
         })
       }
     }
@@ -3226,7 +3226,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "infrastructure",
         code: "recut-publish",
-        message: `yrd: PR '${input.id}' recut ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
+        message: `yrd: PR '${input.id}' re-merge ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
       })
     }
     const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
@@ -3241,7 +3241,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "infrastructure",
           code: "recut-publish",
-          message: `yrd: PR '${input.id}' recut ref could not be published: ${
+          message: `yrd: PR '${input.id}' re-merge ref could not be published: ${
             gitSuperFailureDetail(published)?.message ?? published.state
           }`,
         })
@@ -3394,7 +3394,7 @@ async function liveScratchEntries(git: Git, repo: string, root: string): Promise
 /**
  * Sweep scratch abandoned by an earlier process, once per root per process.
  * Placed at creation rather than at queue-run startup so every entry point —
- * queue run, recut, patch-id, a direct step runner in a test host — pays for the
+ * queue run, re-merge, patch-id, a direct step runner in a test host — pays for the
  * cleanup it might itself leave behind.
  */
 async function reapOnce(git: Git, repo: string, root: string): Promise<void> {
@@ -3486,7 +3486,7 @@ async function classifyScratchFailure(git: Git, repo: string, cause: unknown): P
  * under storage-exhaustion classification, so a consumer cannot forget it.
  * Before this seam existed the 2026-08-14 ENOSPC was classified at four merge-step
  * catches, while `gitCheckStep`, `rebaseSource`, `matchesExpectedUnionMerge` and
- * `withComponentMainPromotions` prepared scratch on the same filesystem and
+ * `withSubmoduleMainPromotions` prepared scratch on the same filesystem and
  * reported the identical error as a content or candidate failure the author was
  * told to go fix.
  *
@@ -3597,7 +3597,7 @@ type CandidatePreparation =
         changes: readonly CandidateChange[]
         sourceRewrites: readonly SourceRewrite[]
         submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
-        componentModelChanges: readonly ComponentModelChangeAuthorization[]
+        componentModelChanges: readonly SubmoduleModelChangeAuthorization[]
       }>
     }>
   | CandidateFailure
@@ -3624,7 +3624,7 @@ async function prepareCandidate(
   artifactRoot: string,
   refuse?: RefusePathsPolicy,
   provisionPinIntent?: PinIntentProvisioner,
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer,
 ): Promise<CandidatePreparation> {
   const guilty: { id?: string } = {}
   const prepared = await prepareCandidateMembers(
@@ -3638,7 +3638,7 @@ async function prepareCandidate(
     artifactRoot,
     refuse,
     provisionPinIntent,
-    authorizeComponentModelChange,
+    authorizeSubmoduleModelChange,
   )
   if (prepared.status !== "failed" || guilty.id === undefined || prepared.error.pr !== undefined) return prepared
   return { ...prepared, error: { ...prepared.error, pr: guilty.id } }
@@ -3655,11 +3655,11 @@ async function prepareCandidateMembers(
   artifactRoot: string,
   refuse?: RefusePathsPolicy,
   provisionPinIntent?: PinIntentProvisioner,
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer,
 ): Promise<CandidatePreparation> {
   const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
-  const componentModelChanges: ComponentModelChangeAuthorization[] = []
+  const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const changes: CandidateChange[] = []
   const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string): void => {
     if (pr.intent !== undefined || pr.changeId === undefined) return
@@ -3730,8 +3730,8 @@ async function prepareCandidateMembers(
         const certified = await verifyRemergeCertificate(git, path, pr)
         if (certified !== undefined) return certified
       }
-      // A post-landing actuator retry carries the same immutable PR snapshot
-      // against a base that already contains it. Re-checking its recut patch
+      // A post-merge actuator retry carries the same immutable PR snapshot
+      // against a base that already contains it. Re-checking its re-merge patch
       // against itself produces an empty patch and a false certificate drift.
       // Source-only compositions are excluded: their root head intentionally
       // equals the base while their submodule payload still needs applying.
@@ -3800,7 +3800,7 @@ async function prepareCandidateMembers(
           path,
           pr,
           inspected.output,
-          authorizeComponentModelChange,
+          authorizeSubmoduleModelChange,
         )
         if (filled.status === "failed") return filled
         authoredFill = filled.output
@@ -3930,10 +3930,10 @@ export type GitCandidatePreparerOptions = Readonly<{
   env?: NodeJS.ProcessEnv
   candidatePool?: CandidatePool
   provisionPinIntent?: PinIntentProvisioner
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
 }>
 
-export type ComponentModelChangeAuthorizationRequest = Readonly<{
+export type SubmoduleModelChangeAuthorizationRequest = Readonly<{
   operation: "add" | "remove"
   path: string
   ruling: string
@@ -3943,13 +3943,13 @@ export type ComponentModelChangeAuthorizationRequest = Readonly<{
   /** Present on Candidate preparation. Optional only for legacy/direct host
    * gates that do not yet mint a Candidate authorization receipt. */
   patchId?: string
-  source?: NonNullable<ComponentModelChangeAuthorization["source"]>
+  source?: NonNullable<SubmoduleModelChangeAuthorization["source"]>
 }>
 
-export type ComponentModelChangeAuthorizer = (request: ComponentModelChangeAuthorizationRequest) => Promise<
+export type SubmoduleModelChangeAuthorizer = (request: SubmoduleModelChangeAuthorizationRequest) => Promise<
   Readonly<{
     authorizer: string
-    source?: NonNullable<ComponentModelChangeAuthorization["source"]>
+    source?: NonNullable<SubmoduleModelChangeAuthorization["source"]>
   }>
 >
 
@@ -3990,7 +3990,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
         undefined,
         options.provisionPinIntent,
-        options.authorizeComponentModelChange,
+        options.authorizeSubmoduleModelChange,
       )
       if (candidate.status === "failed") {
         throw createFailure({
@@ -4012,7 +4012,7 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
       // it. That is what makes compose self-collision structurally impossible
       // instead of merely recoverable: a retry that composes a different tree
       // gets a different SHA and therefore a different ref, and a retry that
-      // composes the SAME tree lands on the same name with the same target,
+      // composes the SAME tree merges on the same name with the same target,
       // where the create below is an idempotent no-op.
       const ref = candidateRefFor(candidate.output.sha)
       const pinned = await git.run(
@@ -4085,11 +4085,11 @@ type RemergeBaseMovement =
   | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
 
 /**
- * Classify how the authoritative candidate base relates to the reviewed recut base
+ * Classify how the authoritative candidate base relates to the reviewed re-merge base
  * for a `pr.recut` snapshot. `repo` is the candidate worktree; its HEAD is the base
  * this candidate is actually built on. `pr.baseSha` is the refreshable check/admission
  * identity; `pr.recut.baseSha` is the immutable base certified by the recut revision.
- * A recut certifies a mechanical rebase of the reviewed revision, so its certified base
+ * A re-merge certifies a mechanical rebase of the reviewed revision, so its certified base
  * must be an *ancestor* of the candidate base:
  * either the same commit (no movement) or a forward advance the reviewed change can be
  * re-anchored onto. A missing or non-ancestor base cannot be mechanically re-anchored
@@ -4113,7 +4113,7 @@ async function remergeBaseMovement(
   if (baseSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut revision ${pr.revision} has no immutable certified base`,
+      `PR '${pr.id}' re-merge revision ${pr.revision} has no immutable certified base`,
     )
   }
   const head = await git.commit(repo, "HEAD")
@@ -4122,7 +4122,7 @@ async function remergeBaseMovement(
     if ((await git.optionalCommit(repo, baseSha)) !== baseSha) {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut base '${baseSha}' is not present in the candidate repository; fetch it and retry`,
+        `PR '${pr.id}' re-merge base '${baseSha}' is not present in the candidate repository; fetch it and retry`,
       )
     }
     return candidateFailure(
@@ -4148,7 +4148,7 @@ async function verifyRemergeCertificate(
   if (pr.recut.certificate !== "frozen-code-carrier-v1" || sourceBaseSha === undefined || sourceHeadSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut revision ${pr.revision} has no complete immutable source range`,
+      `PR '${pr.id}' re-merge revision ${pr.revision} has no complete immutable source range`,
     )
   }
   return verifyFrozenCodeCarrierCertificate(
@@ -4170,7 +4170,7 @@ async function verifyLegacyRemergeCertificate(
   if (treeSha !== pr.recut.treeSha) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut tree certificate does not match revision ${pr.revision}`,
+      `PR '${pr.id}' re-merge tree certificate does not match revision ${pr.revision}`,
     )
   }
   const movement = await remergeBaseMovement(git, repo, pr)
@@ -4181,21 +4181,21 @@ async function verifyLegacyRemergeCertificate(
       ? undefined
       : candidateFailure(
           "recut-certificate",
-          `PR '${pr.id}' recut patch certificate does not match revision ${pr.revision}`,
+          `PR '${pr.id}' re-merge patch certificate does not match revision ${pr.revision}`,
         )
   }
   const rederived = await rederiveRemergePatchId(git, repo, pr.headSha)
   if (rederived === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
+      `PR '${pr.id}' re-merge could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
     )
   }
   return rederived === pr.recut.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut change did not survive the advanced base for revision ${pr.revision}`,
+        `PR '${pr.id}' re-merge change did not survive the advanced base for revision ${pr.revision}`,
       )
 }
 
@@ -4220,7 +4220,7 @@ async function verifyFrozenCodeCarrierCertificate(
   if (candidateBaseSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut revision ${pr.revision} has no immutable candidate base`,
+      `PR '${pr.id}' re-merge revision ${pr.revision} has no immutable candidate base`,
     )
   }
   const proof = await deriveFrozenCodeCarrier(
@@ -4233,7 +4233,7 @@ async function verifyFrozenCodeCarrierCertificate(
     if (proof.kind === "commit-missing") {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut ${String(proof.range)} ${String(proof.endpoint)} '${String(proof.sha)}' is missing for revision ${pr.revision}`,
+        `PR '${pr.id}' re-merge ${String(proof.range)} ${String(proof.endpoint)} '${String(proof.sha)}' is missing for revision ${pr.revision}`,
       )
     }
     if (proof.kind === "lineage") {
@@ -4243,7 +4243,7 @@ async function verifyFrozenCodeCarrierCertificate(
           : { baseSha: candidateBaseSha, headSha: pr.headSha }
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
+        `PR '${pr.id}' re-merge ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
       )
     }
     if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
@@ -4260,31 +4260,31 @@ async function verifyFrozenCodeCarrierCertificate(
     if (proof.kind === "tree") {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut tree certificate does not match candidate revision ${pr.revision}`,
+        `PR '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
       )
     }
     if (proof.kind === "patch-id") {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut patch certificate does not match immutable source revision ${pr.revision}`,
+        `PR '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
       )
     }
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
+      `PR '${pr.id}' re-merge source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
     )
   }
   if (proof.treeSha !== remerge.treeSha) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut tree certificate does not match candidate revision ${pr.revision}`,
+      `PR '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
     )
   }
   return proof.patchId === remerge.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recut patch certificate does not match immutable source revision ${pr.revision}`,
+        `PR '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
       )
 }
 
@@ -4383,7 +4383,7 @@ async function intentSubmissionWorkflow(
   return steps.join("; ")
 }
 
-/** Best-effort `git cherry -v <estate-pin> <component-main>` in the submodule
+/** Best-effort `git cherry -v <estate-pin> <submodule-main>` in the submodule
  * checkout. Unavailable objects, an unmaterialized checkout, or a missing main
  * return undefined so the caller prints the command instead of inventing a list. */
 async function readCherryDragged(
@@ -4406,7 +4406,7 @@ function submoduleIntentWorkflow(): string {
 
 type BaseContainment =
   | Readonly<{ status: "contained" }>
-  | Readonly<{ status: "drops-landed"; commits: string }>
+  | Readonly<{ status: "drops-merged"; commits: string }>
   | Readonly<{ status: "inspection-failed"; detail: string }>
 
 /** A stale carrier may merge cleanly while omitting commits already on the
@@ -4427,7 +4427,7 @@ async function inspectBaseContainment(
     }
   }
 
-  // Post-landing actuator retries intentionally carry a head already contained
+  // Post-merge actuator retries intentionally carry a head already contained
   // by current main. They cannot remove current-base commits and remain safe.
   const alreadyMerged = await git.run(repo, ["merge-base", "--is-ancestor", carrierHead, authoritativeBase], true)
   if (alreadyMerged.code === 0) return { status: "contained" }
@@ -4449,13 +4449,13 @@ async function inspectBaseContainment(
       detail: dropped.stderr || dropped.stdout || "git log found no base-only commits",
     }
   }
-  return { status: "drops-landed", commits: dropped.stdout }
+  return { status: "drops-merged", commits: dropped.stdout }
 }
 
 export function linearRebuildRemedy(
   scope: string,
   base: string,
-  next = "then recut and requeue the root branch",
+  next = "then re-merge and requeue the root branch",
 ): string {
   return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', ${next}`
 }
@@ -4528,7 +4528,7 @@ async function spentGitlinkCarrier(
     }
     // Below this line every failure keeps the existing refusal rather than
     // upgrading the verdict: an unprovable claim of spentness is not a reason to
-    // tell an author their work landed. Only the submodule can answer ancestry
+    // tell an author their work merged. Only the submodule can answer ancestry
     // between two submodule shas.
     const submodule = await submoduleCheckout(git, repo, path)
     if (submodule === undefined) return undefined
@@ -4558,7 +4558,7 @@ async function carrierDropsMergedFailure(
   if (spent !== undefined) {
     return candidateFailure(
       "carrier-pin-already-landed",
-      `change '${pr}' branch '${headSha}' authors submodule pins only, and every one of them already landed: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
+      `change '${pr}' branch '${headSha}' authors submodule pins only, and every one of them already merged: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
     )
   }
   return candidateFailure(
@@ -4569,7 +4569,7 @@ async function carrierDropsMergedFailure(
 
 /** A deletion is the one merge outcome nothing announces. Every guard above this
  * one asks whether the carrier CONTAINS the base; the residual case is a carrier
- * that does contain it and erases a landing anyway, cleanly, with no conflict.
+ * that does contain it and erases a merge anyway, cleanly, with no conflict.
  *
  * It happens when the carrier and the base have MORE THAN ONE merge base — the
  * criss-cross any re-merged or hand-resolved carrier can produce. `ort` then
@@ -4578,8 +4578,8 @@ async function carrierDropsMergedFailure(
  * measures the carrier's authored changes from that single answer, so a deletion
  * resolved against the virtual base appears in no diff the author ever reviewed:
  * ancestry says contained, `merge-tree` says mergeable, `git merge` exits 0, and
- * the landing is gone. Measured on git 2.54 (2026-08-14) with an empty authored
- * deletion set and the landed file missing from the merge result.
+ * the merge is gone. Measured on git 2.54 (2026-08-14) with an empty authored
+ * deletion set and the merged file missing from the merge result.
  *
  * So compare the two sets. Every path the merge removes from the base must be a
  * path the carrier's own authored diff removes too; anything extra is a rebuild
@@ -4600,7 +4600,7 @@ async function unauthoredDeletionFailure(
     return candidateFailure(
       "deletion-inspection",
       `could not measure the deletions change '${pr}' branch '${headSha}' authors against '${before}': ` +
-        `${base.detail}; restore readable history before landing a payload that deletes paths`,
+        `${base.detail}; restore readable history before merging a payload that deletes paths`,
     )
   }
   const authored = new Set(await deletedPaths(git, repo, base.sha, headSha))
@@ -4610,7 +4610,7 @@ async function unauthoredDeletionFailure(
   return candidateFailure(
     "unauthored-path-deletion",
     `merging change '${pr}' branch '${headSha}' deletes [${shown}], which its authored diff against ` +
-      `'${base.sha}' never deletes; the merge resolved away landed work the branch never authored removing\n` +
+      `'${base.sha}' never deletes; the merge resolved away merged work the branch never authored removing\n` +
       `remedy: ${linearRebuildRemedy("the branch", before)}`,
     ".",
     unauthored,
@@ -4625,7 +4625,7 @@ type WitnessLines =
 
 /** One file's content as a SET of its non-blank lines — never diff hunks. A hunk
  * is a claim about position, and a resolution that merely moves a line would
- * read as a loss; membership asks the only question a landing cares about, which
+ * read as a loss; membership asks the only question a merge cares about, which
  * is whether the content is still in the file at all. Being generous about where
  * a line may appear is deliberate: it can only make this guard miss, never make
  * it refuse honest work. */
@@ -4655,7 +4655,7 @@ async function witnessLines(git: Git, repo: string, rev: string, path: string): 
  * unioned. Against a single base this is the plain "both sides touched it" set.
  * Against a criss-cross it must be the union, because the shape this guard
  * exists for is invisible from one of the bases: the carrier that resolved a
- * landed marker away looks unchanged when measured from the base whose branch it
+ * merged marker away looks unchanged when measured from the base whose branch it
  * sits on, and changed only when measured from the other. Picking one base is
  * how the loss stays unseen. */
 async function contestedPaths(
@@ -4678,11 +4678,11 @@ async function contestedPaths(
 type ContributionDrop = Readonly<{ path: string; side: "base" | "carrier"; lines: readonly string[] }>
 
 /** A clean merge can be worse than a conflict. A conflict stops and asks; a
- * resolution that drops one parent's contribution lands with full ancestry and
+ * resolution that drops one parent's contribution merges with full ancestry and
  * no signal at all — which is how `d416a3179e` erased three shipped features.
  *
  * Every guard above this one rules on PATHS: does the carrier contain the base,
- * does the merge delete a landing. None of them reads what the merge result
+ * does the merge delete a merge. None of them reads what the merge result
  * SAYS, so a file that survives with one parent's content resolved out of it
  * passes all of them. The mechanism is the criss-cross its deletion sibling
  * documents: two merge bases, `ort` resolves against a virtual base built from
@@ -4717,7 +4717,7 @@ async function droppedContributionFailure(
     candidateFailure(
       "contribution-inspection",
       `could not read '${path}' while witnessing what merging change '${pr}' branch '${headSha}' kept: ` +
-        `${detail}; restore readable history before landing a merge whose result cannot be compared with its parents`,
+        `${detail}; restore readable history before merging a merge whose result cannot be compared with its parents`,
     )
 
   const found = await git.run(repo, ["merge-base", "--all", before, headSha], true)
@@ -4991,20 +4991,20 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
   return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
 }
 
-const COMPONENT_MODEL_CHANGE_PROP = "component-model-change"
-const COMPONENT_MODEL_CHANGE_VALUE =
+const SUBMODULE_MODEL_CHANGE_PROP = "component-model-change"
+const SUBMODULE_MODEL_CHANGE_VALUE =
   /^(?<operation>add|remove) (?<path>[^;\s][^;]*); ruling (?<ruling>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/u
 
-export function parseComponentModelChangeAuthorizationValue(
+export function parseSubmoduleModelChangeAuthorizationValue(
   pr: string,
   value: string | undefined,
-): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
+): Omit<SubmoduleModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
   if (value === undefined) return undefined
-  const match = COMPONENT_MODEL_CHANGE_VALUE.exec(value.trim())
+  const match = SUBMODULE_MODEL_CHANGE_VALUE.exec(value.trim())
   if (match?.groups === undefined) {
     throw codeCarrierRefusal(
       "component-model-authorization-invalid",
-      `PR '${pr}' has malformed '${COMPONENT_MODEL_CHANGE_PROP}' prop; expected ` +
+      `PR '${pr}' has malformed '${SUBMODULE_MODEL_CHANGE_PROP}' prop; expected ` +
         `'<add|remove> <gitlink-path>; ruling <@cto-verdict-message-id>'`,
     )
   }
@@ -5015,10 +5015,10 @@ export function parseComponentModelChangeAuthorizationValue(
   }
 }
 
-export function parseComponentModelChangeAuthorization(
+export function parseSubmoduleModelChangeAuthorization(
   pr: StepExecution["prs"][number],
-): Omit<ComponentModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
-  return parseComponentModelChangeAuthorizationValue(pr.id, pr.props?.[COMPONENT_MODEL_CHANGE_PROP])
+): Omit<SubmoduleModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
+  return parseSubmoduleModelChangeAuthorizationValue(pr.id, pr.props?.[SUBMODULE_MODEL_CHANGE_PROP])
 }
 
 /** What composing one PR wrote into the candidate: the certified source
@@ -5040,7 +5040,7 @@ type ComposedPR = Readonly<{
  * authored gitlink is a min commit, a floor: the request queues only when
  * that submodule's main CONTAINS it (checked before queueing by the
  * yrd-cli gate; re-derived here), and the queue writes main's newest commit
- * into the shaset, so authored values never land as-is.
+ * into the shaset, so authored values never merge as-is.
  *
  * Only UPDATE deltas fill: the shaset-commit writer is update-only (comma-form
  * `--cacheinfo` cannot add a path), and added or deleted gitlinks keep the
@@ -5054,23 +5054,23 @@ async function fillAuthoredGitlinksFromMain(
   path: string,
   pr: StepExecution["prs"][number],
   gitlinks: readonly string[],
-  authorizeComponentModelChange?: ComponentModelChangeAuthorizer,
+  authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer,
 ): Promise<
   | Readonly<{
       status: "passed"
       output: Readonly<{
         updates: readonly GitlinkUpdate[]
         filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
-        componentModelChanges: readonly ComponentModelChangeAuthorization[]
+        componentModelChanges: readonly SubmoduleModelChangeAuthorization[]
       }>
     }>
   | CandidateFailure
 > {
   const updates: GitlinkUpdate[] = []
   const filledPins: Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[] = []
-  const componentModelChanges: ComponentModelChangeAuthorization[] = []
+  const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const refused: string[] = []
-  const declared = parseComponentModelChangeAuthorization(pr)
+  const declared = parseSubmoduleModelChangeAuthorization(pr)
   for (const gitlink of gitlinks) {
     const authored = await readGitlink(git, path, pr.headSha, gitlink)
     const current = await readGitlink(git, path, "HEAD", gitlink)
@@ -5080,7 +5080,7 @@ async function fillAuthoredGitlinksFromMain(
         refused.push(gitlink)
         continue
       }
-      if (authorizeComponentModelChange === undefined) {
+      if (authorizeSubmoduleModelChange === undefined) {
         return candidateFailure(
           "component-model-authorizer-unavailable",
           `PR '${pr.id}' requests '${operation} ${gitlink}' under ruling '${declared.ruling}', but this Yrd host ` +
@@ -5112,10 +5112,10 @@ async function fillAuthoredGitlinksFromMain(
       )
       let authorization: Readonly<{
         authorizer: string
-        source?: NonNullable<ComponentModelChangeAuthorization["source"]>
+        source?: NonNullable<SubmoduleModelChangeAuthorization["source"]>
       }>
       try {
-        authorization = await authorizeComponentModelChange({
+        authorization = await authorizeSubmoduleModelChange({
           ...declared,
           pr: pr.id,
           revision: pr.revision,
@@ -5133,7 +5133,7 @@ async function fillAuthoredGitlinksFromMain(
         )
       }
       componentModelChanges.push(
-        ComponentModelChangeAuthorizationSchema.parse({
+        SubmoduleModelChangeAuthorizationSchema.parse({
           ...declared,
           authorizer: authorization.authorizer,
           pr: pr.id,
@@ -5178,7 +5178,7 @@ async function fillAuthoredGitlinksFromMain(
       "authored-gitlink",
       `PR '${pr.id}' changes generated-only gitlinks [${refused.join(", ")}]; ${workflow}; ` +
         `for an addition or deletion, ask @cto for an exact ruling and carry ` +
-        `--prop '${COMPONENT_MODEL_CHANGE_PROP}=<add|remove> <path>; ruling <verdict-message-id>' on this revision`,
+        `--prop '${SUBMODULE_MODEL_CHANGE_PROP}=<add|remove> <path>; ruling <verdict-message-id>' on this revision`,
       ".",
       refused,
     )
@@ -5208,7 +5208,7 @@ async function composePR(
     if (currentPin === undefined) {
       return candidateFailure(
         "composition-invalid",
-        `PR '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base; pin intents advance existing components only`,
+        `PR '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base; a change of min commits advances existing submodules only`,
         source.repo,
         [source.repo],
       )
@@ -5568,7 +5568,7 @@ type GitlinkFastForward =
  *  - `refuse` with a loud reason for true divergence, a missing object, or an
  *    uninitialized submodule (never guess a pin), or
  *  - `unresolved` when the conflict is not a plain gitlink modify/modify (a
- *    non-gitlink content conflict must keep failing the recut loudly).
+ *    non-gitlink content conflict must keep failing the re-merge loudly).
  */
 async function resolveGitlinkFastForward(
   git: Git,
@@ -5620,7 +5620,7 @@ async function resolveGitlinkFastForward(
 
 /**
  * Resolve a transient gitlink conflict from the authored range by proving the
- * transition that actually lands: the authoritative target pin must be an
+ * transition that actually merges: the authoritative target pin must be an
  * ancestor of the authored root's final pin. This is the merge-aware sibling
  * of the ordinary pairwise resolver. It deliberately ignores the conflicting
  * intermediate pin only after the local submodule store proves the final pin
@@ -5661,7 +5661,7 @@ async function resolveGitlinkByFinalPin(
  * "carrier" verdict, proved with the same primitive (ancestry in the
  * submodule's local store). A path in `overlap` is classified into `into` only
  * when ALL of:
- *  - the recut materialized exactly the authored end pin (git picked the
+ *  - the re-merge materialized exactly the authored end pin (git picked the
  *    carrier side),
  *  - the base actually advanced the from-side pin (the asymmetry that would
  *    otherwise fail the strict patch-id certificate), and
@@ -5795,7 +5795,7 @@ async function changedPayloadIdentity(
 /**
  * Certify every ordered non-gitlink patch after removing paths whose final pin
  * was independently ancestry-certified. Intermediate gitlink slots are not a
- * delivery fact: a branch may merge two sibling submodule histories and land their
+ * delivery fact: a branch may merge two sibling submodule histories and merge their
  * common descendant, as PR928 did. The caller has already proved exact final
  * pins plus aggregate payload identity, so this sequence owns only the ordered
  * ordinary patches. Merge wrapper commits are skipped; any tree effect unique
@@ -5867,13 +5867,13 @@ async function readTreeEntries(
  *
  * A rebase onto such a base drops those commits as patch-equivalent, which is
  * correct and complete: every byte the author wrote for that path is already
- * on the base. Without this the recut compares a payload recorded against the
+ * on the base. Without this the re-merge compares a payload recorded against the
  * OLD base with what materialized against the NEW one and refuses for the
  * difference it just created by being right (22373, PR1646).
  *
  * The proof is the delivered end state, not the commit shape: the base's tree
  * entry for the path is identical to the authored head's (same mode, same
- * object, or absent on both sides for a delete the base also landed). Callers
+ * object, or absent on both sides for a delete the base also merged). Callers
  * pass only paths already known to be in both the payload and the base's own
  * authority range, so an equal entry means the base moved that path to exactly
  * where the author left it. Anything unprovable stays in the expected payload,
@@ -5897,13 +5897,13 @@ async function absorbedAuthoredPaths(
 }
 
 /**
- * The recut result for a branch whose every authored path the base already
- * landed. There is nothing left to deliver, so the recut head IS the base: the
+ * The re-merge result for a branch whose every authored path the base already
+ * merged. There is nothing left to deliver, so the re-merge head IS the base: the
  * merge step then proves already-landed from candidate/base tree equality and
  * closes the PR, instead of the drain wedging on a `payload-mismatch … got []`
  * that an operator has to withdraw by hand (22373). The recorded identity stays
  * the authored patch id — the patch this revision delivers, which the base now
- * carries — so a repeated recut is idempotent.
+ * carries — so a repeated re-merge is idempotent.
  */
 async function absorbedRemergeResult(
   git: Git,
@@ -6545,7 +6545,7 @@ async function planSubmoduleMainPromotionGroup(
         ),
       }
     }
-    if (containment.status === "drops-landed") {
+    if (containment.status === "drops-merged") {
       const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned submodule target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`submodule work for '${pin.path}'`, targetSha)}`
       return {
         status: "failed",
@@ -6616,7 +6616,7 @@ async function planSubmoduleMainPromotions(
     if (baseSha !== undefined && (await readGitlink(git, repo, baseSha, pin.path)) === pin.sha) continue
     const basePin = basePins.get(pin.path)
     if (baseSha === undefined) {
-      // A landed root tree is the authority for its own submodule registry.
+      // A merged root tree is the authority for its own submodule registry.
       // Reconciliation therefore trusts its standing .gitmodules origins and
       // audits every pin, including gaps left by earlier failed actuators.
     } else if (basePin === undefined) {
@@ -7234,7 +7234,7 @@ export type GitCheckOptions = ProcessDependency &
      * the runner-context path gets the provisioner through prepareCandidate
      * instead. */
     provisionPinIntent?: PinIntentProvisioner
-    authorizeComponentModelChange?: ComponentModelChangeAuthorizer
+    authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
     /** Generate data-only checkpoint migration evidence from the exact target
      * Candidate checkout inside this certified check invocation. */
     checkpointMigration?: (input: {
@@ -7383,7 +7383,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
     candidatePool?: CandidatePool
     refuse?: RefusePathsPolicy
     provisionPinIntent?: PinIntentProvisioner
-    authorizeComponentModelChange?: ComponentModelChangeAuthorizer
+    authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -7407,7 +7407,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
       options.refuse,
       options.provisionPinIntent,
-      options.authorizeComponentModelChange,
+      options.authorizeSubmoduleModelChange,
     )
     if (candidate.status === "failed") return onFailure(candidate)
     await proveCandidateSubmoduleReachability(
@@ -7457,7 +7457,7 @@ async function withStepCandidate<Output extends JsonValue>(
     candidatePool?: CandidatePool
     refuse?: RefusePathsPolicy
     provisionPinIntent?: PinIntentProvisioner
-    authorizeComponentModelChange?: ComponentModelChangeAuthorizer
+    authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
   }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   runWithCandidate: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
@@ -7638,9 +7638,9 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
           artifactRoot: options.artifactRoot,
           ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
           ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
-          ...(options.authorizeComponentModelChange === undefined
+          ...(options.authorizeSubmoduleModelChange === undefined
             ? {}
-            : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
+            : { authorizeSubmoduleModelChange: options.authorizeSubmoduleModelChange }),
         },
         (failure) => failed(failure.error.code, failure.error.message, failure.output),
         withGatePinnedScripts(async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
@@ -8275,13 +8275,13 @@ async function mergeCandidate(
   const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked, checkpointIdentity)
   if ("error" in validated) return { status: "completed", conclusion: "failure", error: validated.error }
   // Last comparison before either merge step publishes: `checked` is the pin
-  // both of them land, and `base.sha` is what they land it onto.
+  // both of them merge, and `base.sha` is what they merge it onto.
   const erased = await mergeDeletionFloor(git, repo, input, base.sha, checked)
   if (erased !== undefined) return { status: "completed", conclusion: "failure", error: erased.error }
   return { status: "completed", conclusion: "success", base, checked }
 }
 
-/** The floor under every route into a landing. `unauthoredDeletionFailure` rules
+/** The floor under every route into a merge. `unauthoredDeletionFailure` rules
  * on ONE carrier at the moment its merge is composed, and four routes reach the
  * merge step past it: a candidate reused from an earlier step, the
  * submodule-composition branch that re-authors its own tree and `continue`s, a
@@ -8290,7 +8290,7 @@ async function mergeCandidate(
  * tree that predates work already sitting on the base branch, and a tree is the
  * one thing a containment check cannot see: ancestry says the candidate holds
  * every submitted head and the base, `merge-tree` says mergeable, the push
- * succeeds, and the landing is gone.
+ * succeeds, and the merge is gone.
  *
  * So ask the question once more, where nothing can route around it: of every
  * path this candidate removes from the base branch, is each one a path some
@@ -8298,7 +8298,7 @@ async function mergeCandidate(
  * away, not decided away.
  *
  * Every such path is named IN FULL, unlike its composition-time sibling: whoever
- * reads this refusal is reconstructing what a landing would have erased, and a
+ * reads this refusal is reconstructing what a merge would have erased, and a
  * truncated list is a search they have to redo by hand. */
 async function mergeDeletionFloor(
   git: Git,
@@ -8316,7 +8316,7 @@ async function mergeDeletionFloor(
       return candidateFailure(
         "carrier-inspection",
         `could not measure the deletions change '${pr.id}' branch '${pr.headSha}' authors against ` +
-          `'${baseSha}': ${base.detail}; a Candidate whose history cannot be read cannot be cleared to land`,
+          `'${baseSha}': ${base.detail}; a Candidate whose history cannot be read cannot be cleared to merge`,
       )
     }
     for (const path of await deletedPaths(git, repo, base.sha, pr.headSha)) authored.add(path)
@@ -8326,8 +8326,8 @@ async function mergeDeletionFloor(
   const branch = primaryPR(input).base
   const submitted = input.prs.map((pr) => `'${pr.id}' branch '${pr.headSha}'`).join(", ")
   return candidateFailure(
-    "landing-unauthored-deletion",
-    `landing Candidate '${checked.candidateSha}' on '${branch}' at '${baseSha}' would delete ${unauthored.length} ` +
+    "merge-unauthored-deletion",
+    `merge Candidate '${checked.candidateSha}' on '${branch}' at '${baseSha}' would delete ${unauthored.length} ` +
       `path(s) that no submitted branch authors deleting: [${unauthored.join(", ")}]\n` +
       `compared every path the Candidate removes from '${baseSha}' against the deletions authored by ${submitted}\n` +
       `cause: the Candidate's tree predates work already on '${branch}', so these removals are an artifact of how ` +
@@ -8358,7 +8358,7 @@ function mergeAuthorityCancellation(context: Pick<JobContext, "signal">): Failed
     conclusion: "failure",
     error: {
       code: "merge-canceled",
-      message: "merge execution authority was canceled or superseded before landing",
+      message: "merge execution authority was canceled or superseded before merging",
     },
   }
 }
@@ -8373,7 +8373,7 @@ async function sourceCandidateRefError(
     // Every sibling that spawns git in a `join(repo, <gitlink>)` path proves the
     // path first: an absent working directory fails inside posix_spawn, which no
     // allowFailure can contain, and a source store that is not materialized can
-    // hold no candidate ref either way. This runs on the landing path, so the
+    // hold no candidate ref either way. This runs on the merge path, so the
     // answer must be this function's own per-candidate error string.
     try {
       await realpath(sourceRepo)
@@ -8566,7 +8566,7 @@ async function mergeError(
     const ancestry = await git.run(repo, ["merge-base", "--is-ancestor", sha, landingSha], true)
     if (ancestry.code === 0) continue
     if (ancestry.code === 1) return sha
-    throw new Error(`yrd: could not verify landing '${landingSha}' contains '${sha}': ${fetchDetail(ancestry)}`)
+    throw new Error(`yrd: could not verify merge '${landingSha}' contains '${sha}': ${fetchDetail(ancestry)}`)
   }
   return undefined
 }
@@ -8683,7 +8683,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
             if (cancellation !== undefined) return cancellation
             await recordMergeAttempt(git, repo, input, context, checked)
             return withSubmoduleMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
-              // Component mains are promoted explicitly around this root push.
+              // Submodule mains are promoted explicitly around this root push.
               // A caller's recursive-push config would replay the root-only SHA refspec inside each submodule.
               const pushed = await pushRefUpdates({
                 root: path,
@@ -8710,9 +8710,9 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
                   }),
                 )
               }
-              // The changed-pin plan above preserves the pre-landing trust
+              // The changed-pin plan above preserves the pre-merge trust
               // boundary for new or changed submodule origins. Once root is
-              // authoritative, audit every pin so this landing also converges
+              // authoritative, audit every pin so this merge also converges
               // gaps left by an earlier actuator.
               return withSubmoduleMainPromotions(
                 git,
@@ -8795,7 +8795,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
         if (merge.sha !== baseSha) {
           return failed(
             "stale-base",
-            `queue '${branch}' moved from '${baseSha}' to '${merge.sha}' before the candidate could land`,
+            `queue '${branch}' moved from '${baseSha}' to '${merge.sha}' before the candidate could merge`,
           )
         }
         if (attempted.status === "completed" && attempted.conclusion === "failure") return attempted
@@ -9089,7 +9089,7 @@ async function recordMergeAttempt(
   if (recorded.code === 0 || (await git.optionalCommit(repo, ref)) === checked.candidateSha) return
   return repositoryResultFailure(
     "repository-corrupt",
-    `yrd: landing attempt ref '${ref}' is already occupied by different evidence`,
+    `yrd: merge attempt ref '${ref}' is already occupied by different evidence`,
   )
 }
 
@@ -9104,7 +9104,7 @@ async function mergeAttemptRefs(
   if (listed.code !== 0) {
     return repositoryResultFailure(
       "repository-incomplete",
-      `yrd: Queue run '${input.run}' landing attempts are unreadable: ${listed.stderr || listed.stdout}`,
+      `yrd: Queue run '${input.run}' merge attempts are unreadable: ${listed.stderr || listed.stdout}`,
     )
   }
   return listed.stdout === ""
@@ -9114,13 +9114,13 @@ async function mergeAttemptRefs(
         if (sha === undefined || ref === undefined || extra !== undefined) {
           return repositoryResultFailure(
             "repository-corrupt",
-            `yrd: Queue run '${input.run}' landing attempt is malformed: ${line}`,
+            `yrd: Queue run '${input.run}' merge attempt is malformed: ${line}`,
           )
         }
         if (sha !== checked.candidateSha) {
           return repositoryResultFailure(
             "repository-corrupt",
-            `yrd: Queue run '${input.run}' landing attempt '${ref}' targets '${sha}', expected '${checked.candidateSha}'`,
+            `yrd: Queue run '${input.run}' merge attempt '${ref}' targets '${sha}', expected '${checked.candidateSha}'`,
           )
         }
         return [ref]
@@ -9138,7 +9138,7 @@ async function clearMergeAttempts(
     if (deleted.code !== 0) {
       return repositoryResultFailure(
         "repository-corrupt",
-        `yrd: confirmed result could not retire landing attempt '${ref}'`,
+        `yrd: confirmed result could not retire merge attempt '${ref}'`,
       )
     }
   }

@@ -9,7 +9,7 @@ import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
-import { formatResidentLogLine } from "../src/runner-timeline.ts"
+import { formatHabitantLogLine } from "../src/runner-timeline.ts"
 import { formatQueueChangeId, QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
 
 /** A pin-advance record's real id shape, per IntentRecordIdSchema. */
@@ -85,7 +85,7 @@ describe("a renderer never asserts a kind the record does not carry", () => {
     expect(frame).not.toContain(`pr#${GITLINK_ID}`)
   })
 
-  it("covers the resident runner-timeline call site", () => {
+  it("covers the habitant runner-timeline call site", () => {
     const event = {
       kind: "log",
       namespace: "yrd:queue:run",
@@ -94,6 +94,6 @@ describe("a renderer never asserts a kind the record does not carry", () => {
       time: "2026-08-17T12:00:00.000Z",
       props: { run: "R1", prs: [{ pr: GITLINK_ID, revision: 1 }] },
     } as unknown as Event
-    expect(formatResidentLogLine(event, { color: false }) ?? "").not.toContain("pr#")
+    expect(formatHabitantLogLine(event, { color: false }) ?? "").not.toContain("pr#")
   })
 })

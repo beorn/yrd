@@ -201,8 +201,8 @@ async function lockfileState(path: string, lockfile: string): Promise<LockfileSt
  * lockfile is genuinely uncurable upstream.
  *
  * A submodule pin advance that changes that submodule's dependency SPECS makes
- * the superproject's lockfile stale the instant the pin lands, and the cure
- * cannot be staged ahead of it: gitlinks land alone, so a lockfile committed
+ * the superproject's lockfile stale the instant the pin merges, and the cure
+ * cannot be staged ahead of it: gitlinks merge alone, so a lockfile committed
  * first is refused against the old pin, and one committed after is refused
  * against the new one. Frozen therefore deadlocks that intent forever. The
  * escape is narrow on purpose — an explicit authorization naming the drifted

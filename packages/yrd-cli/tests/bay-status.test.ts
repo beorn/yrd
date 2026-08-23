@@ -147,7 +147,7 @@ describe("classifyBayStatus", () => {
     )
   })
 
-  it("exit 2 when a failed refresh leaves even landed-looking origin evidence stale", () => {
+  it("exit 2 when a failed refresh leaves even merged-looking origin evidence stale", () => {
     const report = classifyBayStatus({
       ...base,
       ownerPid: 9,

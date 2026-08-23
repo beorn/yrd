@@ -68,7 +68,7 @@ async function commit(repo: string, name: string, content = `${name}\n`): Promis
 
 // The BASE's own .yrd.yml (never a feature branch's) is scope-classification
 // authority — readBaseBlob reads it off 'main' in f.mainRepo specifically, so
-// fixture setup for a classification test must land it there, not on
+// fixture setup for a classification test must merge it there, not on
 // whatever branch is about to be pushed. Switches to main first (fixture()
 // leaves the repo checked out there, but a caller may have moved on since);
 // the caller is responsible for switching back to continue its own setup.
@@ -220,7 +220,7 @@ async function installHookHost(
       '  if (matches(auto.draft)) return "draft"',
       "  return undefined",
       "}",
-      // The branch-fact sink: every projected submit/unsubmit lands as one JSON
+      // The branch-fact sink: every projected submit/unsubmit merges as one JSON
       // line in YRD_TEST_BRANCH_FACTS, so a test can assert WHAT the receiver
       // told the journal, not just what git holds.
       'import { appendFile } from "node:fs/promises"',
@@ -544,7 +544,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   /**
    * The queue's own submission/admission gate for `.yrd.yml` (@yrd/cli's
    * validatePushedYrdConfig, PR1337 2026-08-19): a pushed config the queue's
-   * schema would refuse must be unlandable, refused at the push itself,
+   * schema would refuse must be unmergeable, refused at the push itself,
    * before it can ever reach `pr/pushed` or a base ref config read. This
    * proves the RECEIVER half — it reads the pushed head's OWN `.yrd.yml`
    * (never the base's, never a working-tree file) and refuses before
@@ -770,7 +770,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         oldSha: zero,
         headSha,
         // The issue rides through to intake. A push that carries an issue
-        // reference and lands a PR with no issue has forgotten the only thing
+        // reference and merges a PR with no issue has forgotten the only thing
         // the ref said beyond its commits.
         intake: expect.objectContaining({
           base: "main",
@@ -922,9 +922,9 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   // ── branch-is-change: refs/yrd/submit/* and refs/yrd/archive/* ─────────────
   //
   // bead-branch-is-change phase 1. `refs/yrd/submit/<branch>` is the approval
-  // fact — pushing it names the exact commit its author approves to land —
+  // fact — pushing it names the exact commit its author approves to merge —
   // validated against the two structural facts the model doc names verbatim:
-  // reachable from the branch's own tip, and not already landed on the base
+  // reachable from the branch's own tip, and not already merged on the base
   // ("a dangling sha and an already-landed sha are different refusals").
   // `refs/yrd/archive/*` is the shelf a deleted branch moves to, atomically,
   // so a branch deletion never just erases the change.
@@ -949,7 +949,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect((await push(f, "issue/submit-dangling:refs/heads/issue/submit-dangling", env)).code).toBe(0)
 
     // A commit that never touched issue/submit-dangling's history at all —
-    // "dangling" in the model doc's own word, distinct from "already landed".
+    // "dangling" in the model doc's own word, distinct from "already merged".
     await git(f.mainRepo, "switch", "--orphan", "unrelated-for-submit")
     await run(["git", "-C", f.mainRepo, "rm", "-qrf", "."], f.mainRepo)
     const unrelated = await commit(f.mainRepo, "unrelated-for-submit.txt")
@@ -974,14 +974,14 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   })
 
   it("refuses a submit ref naming a commit already an ancestor of the base branch", async () => {
-    const f = await fixture("submitref-landed")
+    const f = await fixture("submitref-merged")
     // No new commits: the branch sits exactly at the base tip, which is
     // trivially both reachable from itself AND already on 'main'.
-    await git(f.mainRepo, "switch", "-qc", "issue/submit-landed")
-    const env = await installHookHost(f.root, { "issue/submit-landed": target(f.baseSha) })
-    expect((await push(f, "issue/submit-landed:refs/heads/issue/submit-landed", env)).code).toBe(0)
+    await git(f.mainRepo, "switch", "-qc", "issue/submit-merged")
+    const env = await installHookHost(f.root, { "issue/submit-merged": target(f.baseSha) })
+    expect((await push(f, "issue/submit-merged:refs/heads/issue/submit-merged", env)).code).toBe(0)
 
-    const result = await push(f, `${f.baseSha}:refs/yrd/submit/issue/submit-landed`, env)
+    const result = await push(f, `${f.baseSha}:refs/yrd/submit/issue/submit-merged`, env)
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain("already an ancestor of base branch 'main'")
     expect(result.stderr).not.toContain("not reachable")
@@ -1465,7 +1465,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/ignore/issue/live-submit")).toBe("")
   })
 
-  it("accepts ignoring a branch whose only submit already landed on main — merged is not live, contrasted against a still-live submit in the same test", async () => {
+  it("accepts ignoring a branch whose only submit already merged on main — merged is not live, contrasted against a still-live submit in the same test", async () => {
     const f = await fixture("ignore-merged-submit")
     const env = await installHookHost(f.root, {
       "issue/merged-submit": target(f.baseSha),

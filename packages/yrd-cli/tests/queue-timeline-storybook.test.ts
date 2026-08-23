@@ -584,7 +584,7 @@ describe("queue timeline storybook", () => {
     const boundaryStory = queueTimelineStories["detail-below"]
     // The watch pane's own top line (item 12, always present) costs one more
     // row of chrome than this boundary assumed, so the tier flip that used to
-    // land at 32/33 now lands one row later.
+    // merge at 32/33 now merges one row later.
     const fullAtNaturalBoundary = await run(createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot }), {
       writable: { write: () => {} },
       cols: 100,

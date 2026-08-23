@@ -1,6 +1,6 @@
 /**
- * @failure A candidate whose tree predates work already on the base branch lands
- * anyway, and the landing silently DELETES that work. Proven live on 2026-07-23:
+ * @failure A candidate whose tree predates work already on the base branch merges
+ * anyway, and the merge silently DELETES that work. Proven live on 2026-07-23:
  * merge `d52ed8dc6d` carried candidate `445e809b17` (a full-tree recomposition)
  * onto `6427898550` and removed five bead files minted by `076d61f9c3` minutes
  * earlier, with no conflict, no refusal and nothing in the run's evidence.
@@ -63,7 +63,7 @@ async function forkedRepository(
   seed: Readonly<Record<string, string>> = {},
   minted: readonly string[] = ["mint.md"],
 ): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-landing-floor-"))
+  const root = await mkdtemp(join(tmpdir(), "yrd-merge-floor-"))
   roots.push(root)
   const repo = join(root, "repo")
   await Bun.$`git init -q -b main ${repo}`
@@ -81,7 +81,7 @@ async function forkedRepository(
   await git(repo, ["commit", "-qm", "feature"])
   const featureSha = await git(repo, ["rev-parse", "HEAD"])
 
-  // The concurrently-landed work. It lands on main AFTER the carrier forked, so
+  // The concurrently-merged work. It merges on main AFTER the carrier forked, so
   // the carrier's own tree has never contained it.
   await git(repo, ["switch", "-q", "main"])
   for (const path of minted) await writeFile(join(repo, path), "minted\n")
@@ -163,8 +163,8 @@ const checkEvidence = (baseSha: string, candidate: { sha: string; ref: string })
   candidateRef: candidate.ref,
 })
 
-describe("landing floor — a merge may not delete paths no submitted branch authors deleting", () => {
-  it("refuses a candidate whose tree predates landed work, and names every path it would erase", async () => {
+describe("merge floor — a merge may not delete paths no submitted branch authors deleting", () => {
+  it("refuses a candidate whose tree predates merged work, and names every path it would erase", async () => {
     const fixture = await forkedRepository()
     await using process = createProcess()
     const candidate = await recomposedCandidate(fixture)
@@ -177,24 +177,24 @@ describe("landing floor — a merge may not delete paths no submitted branch aut
     expect(outcome).toMatchObject({
       status: "completed",
       conclusion: "failure",
-      error: { code: "landing-unauthored-deletion" },
+      error: { code: "merge-unauthored-deletion" },
     })
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") throw new Error("unreachable")
-    // Naming the path verbatim is the whole point: the 2026-07-23 landing was
+    // Naming the path verbatim is the whole point: the 2026-07-23 merge was
     // found by hand days later precisely because nothing named what it removed.
     expect(outcome.error.message).toContain("mint.md")
     // The refusal must place the fault on the composition, not on the author.
     expect(outcome.error.code).not.toBe("merge-failed")
     expect(outcome.error.message).not.toContain("rebuild the branch")
 
-    // The floor's only real assertion: main still carries the landed work.
+    // The floor's only real assertion: main still carries the merged work.
     expect(await git(fixture.remote, ["rev-parse", "main"])).toBe(fixture.mintSha)
     expect(await present(fixture.remote, "main", "mint.md")).toBe(true)
   })
 
   it("names every erased path, never a truncated sample", async () => {
     // The composition-time sibling stops at eight and appends an ellipsis. Here
-    // the list IS the finding — the 2026-07-23 landing erased five files and the
+    // the list IS the finding — the 2026-07-23 merge erased five files and the
     // count only became knowable by diffing the merge by hand afterwards.
     const minted = Array.from({ length: 12 }, (_, at) => `mint-${String(at).padStart(2, "0")}.md`)
     const fixture = await forkedRepository({}, minted)
@@ -206,14 +206,14 @@ describe("landing floor — a merge may not delete paths no submitted branch aut
       jobContext(),
     )
 
-    expect(outcome).toMatchObject({ conclusion: "failure", error: { code: "landing-unauthored-deletion" } })
+    expect(outcome).toMatchObject({ conclusion: "failure", error: { code: "merge-unauthored-deletion" } })
     if (outcome.status !== "completed" || outcome.conclusion !== "failure") throw new Error("unreachable")
     for (const path of minted) expect(outcome.error.message).toContain(path)
     expect(outcome.error.message).not.toContain("…")
     expect(await git(fixture.remote, ["rev-parse", "main"])).toBe(fixture.mintSha)
   })
 
-  it("lets a carrier's own authored deletion land", async () => {
+  it("lets a carrier's own authored deletion merge", async () => {
     const fixture = await forkedRepository({ "doomed.txt": "doomed\n" })
     await using process = createProcess()
     await git(fixture.repo, ["switch", "-q", "issue/feature"])
@@ -230,7 +230,7 @@ describe("landing floor — a merge may not delete paths no submitted branch aut
     )
 
     expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
-    // The authored deletion landed, and the concurrent landing survived it.
+    // The authored deletion merged, and the concurrent merge survived it.
     expect(await present(fixture.remote, "main", "doomed.txt")).toBe(false)
     expect(await present(fixture.remote, "main", "mint.md")).toBe(true)
   })

@@ -11,7 +11,7 @@ export const MERGE_RECORD_NOTES_NAME = "yrd/merge-records" as const
 /**
  * Retractions live on their OWN notes ref, never by editing the record they
  * retract. A merge record is immutable history: the estate's credibility rests on
- * nobody being able to rewrite what a landing claimed after the fact. So a repair
+ * nobody being able to rewrite what a merge claimed after the fact. So a repair
  * APPENDS a confession beside the record and leaves the original byte-identical,
  * which also makes the repair itself auditable and reversible.
  */
@@ -28,7 +28,7 @@ export const MERGE_RECORD_RETRACTION_NOTES_NAME = "yrd/merge-record-retractions"
 const mergeRecordChangeShape = {
   changeId: ChangeIdSchema.optional(),
   /** A queue member, not necessarily a PR — `mergeRecordBody` fills this from
-   * the member's `id`, so a landed intent records its own id here. */
+   * the member's `id`, so a merged intent records its own id here. */
   pr: QueueMemberIdSchema,
   revision: z.number().int().positive(),
   submittedHead: GitShaSchema,
@@ -120,7 +120,7 @@ const LenientMergeRecordBodySchema = z
   .superRefine(mergeRecordBodyResultInvariant)
 
 /**
- * The contradiction that poisoned the estate: a landing that says it MERGED,
+ * The contradiction that poisoned the estate: a merge that says it MERGED,
  * whose recorded result did not move the base, while still naming generated
  * commits it supposedly put on history. Nothing joined history, so no generated
  * commit can be reachable from the result, and the record can never prove itself.
@@ -142,7 +142,7 @@ const LenientMergeRecordBodySchema = z
  * so a new key would make every record written by a newer tree unreadable to
  * older checkouts — the exact whole-loader failure the tolerant-reader work
  * exists to prevent. Readers that want to SAY "Already up to date." ask this
- * predicate; the writer half (claiming no generated commits for such a landing)
+ * predicate; the writer half (claiming no generated commits for such a merge)
  * is enforced where records are written.
  */
 export function mergeJoinedNothing(record: MergeRecordBody): boolean {
@@ -161,7 +161,7 @@ export function unprovableMergeRecordClaim(record: MergeRecordBody): string | un
   if (claimed.length === 0) return undefined
   return (
     `merge '${record.merge.id}' recorded mergedCommit '${mergedCommit}' equal to its own baseSha, so it ` +
-    `joined nothing to landed history, yet claims generated commit(s) for ` +
+    `joined nothing to merged history, yet claims generated commit(s) for ` +
     claimed.map((change) => `${change.pr} (${String(change.generatedCommit)})`).join(", ")
   )
 }

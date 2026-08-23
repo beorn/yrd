@@ -92,10 +92,10 @@ export function formatRemedyCommand(step: RemedyStep): string {
  *      judgment);
  *   2. made ONLY of Yrd redelivery commands this module can execute; and
  *   3. able to put the PR back in the queue — a drill that cannot end in a
- *      queued recut (a terminal PR, or a refusal that merely says "correct the
+ *      queued re-merge (a terminal PR, or a refusal that merely says "correct the
  *      cause") leaves the wedge exactly where it was.
  *
- * Everything else — recut/payload certificates, environment refusals, divergent
+ * Everything else — re-merge/payload certificates, environment refusals, divergent
  * gitlink composes — is judgment-required and keeps printing its remedy for the
  * human who takes it. A new refusal code needs no entry here: it is mechanical
  * if and only if it prints a mechanical drill.
@@ -119,7 +119,7 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
   if (steps.some((step) => step.verb === "recut") && remergeRefusedByDelivery(context.delivery)) {
     return Object.freeze({
       kind: "judgment",
-      reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be recut`,
+      reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be re-merge`,
     })
   }
   if (!steps.some((step) => step.verb === "recut" && step.queue)) {
@@ -155,10 +155,10 @@ export function refusalRemedyKey(pr: string, revision: number, headSha: string):
 }
 
 /**
- * Consecutive all-candidate-refusal cycles before the resident treats its own
+ * Consecutive all-candidate-refusal cycles before the habitant treats its own
  * process state as the suspect and restarts.
  *
- * 2026-07-27 specimen 3: after a laptop-sleep network partition a resident
+ * 2026-07-27 specimen 3: after a laptop-sleep network partition a habitant
  * refused EVERY candidate with `recut-certificate` 106 consecutive times over
  * 1h44m — zero admissions, main frozen 2.5h — while a by-hand `yrd pr recut
  * --preflight` reported FRESH-NOOP for the same PRs. SIGINT plus a fresh `yrd
@@ -166,12 +166,12 @@ export function refusalRemedyKey(pr: string, revision: number, headSha: string):
  * runner INSTANCE, not the PRs. At the default 15s interval this bounds that
  * class at minutes instead of hours.
  */
-export const RESIDENT_REFUSAL_STALL_CYCLES = 20
+export const HABITANT_REFUSAL_STALL_CYCLES = 20
 
-/** One settled resident cycle, reduced to what a poisoned-observer verdict
+/** One settled habitant cycle, reduced to what a poisoned-observer verdict
  * needs: did anything get in, what is still refusing, and did the refused PRs
  * themselves move. */
-export type ResidentRefusalObservation = Readonly<{
+export type HabitantRefusalObservation = Readonly<{
   /** Runs this cycle produced. Any run at all proves the runner is not blind. */
   runs: number
   refusals: readonly Readonly<{ pr: string; code: string; count: number }>[]
@@ -179,7 +179,7 @@ export type ResidentRefusalObservation = Readonly<{
   heads: Readonly<Record<string, string>>
 }>
 
-export type ResidentRefusalStall = Readonly<{
+export type HabitantRefusalStall = Readonly<{
   /** The refused PR set, their codes, and their heads — the "world" that has
    * not changed across the window. */
   signature: string
@@ -189,7 +189,7 @@ export type ResidentRefusalStall = Readonly<{
   cycles: number
 }>
 
-function stallSignature(observation: ResidentRefusalObservation): string {
+function stallSignature(observation: HabitantRefusalObservation): string {
   return observation.refusals
     .map((refusal) => `${refusal.pr}|${refusal.code}|${observation.heads[refusal.pr] ?? ""}`)
     .toSorted(compareNatural)
@@ -207,9 +207,9 @@ function stallSignature(observation: ResidentRefusalObservation): string {
  * than idling past them).
  */
 export function foldRefusalStall(
-  previous: ResidentRefusalStall | undefined,
-  observation: ResidentRefusalObservation,
-): ResidentRefusalStall | undefined {
+  previous: HabitantRefusalStall | undefined,
+  observation: HabitantRefusalObservation,
+): HabitantRefusalStall | undefined {
   if (observation.runs > 0 || observation.refusals.length === 0) return undefined
   const signature = stallSignature(observation)
   const counts = Object.fromEntries(observation.refusals.map((refusal) => [refusal.pr, refusal.count]))

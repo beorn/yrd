@@ -1,7 +1,7 @@
 import type { YrdCliServices } from "./types.ts"
 
 /**
- * Base-selected landing authority passed from the process host to submit. The
+ * Base-selected merge authority passed from the process host to submit. The
  * symbol stays out of YrdCliServices because this is a private host/CLI fact,
  * not a plugin capability.
  */

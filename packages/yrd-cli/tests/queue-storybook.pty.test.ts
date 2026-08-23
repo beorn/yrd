@@ -1,5 +1,5 @@
 /**
- * @failure The production queue story can pass component-renderer tests while
+ * @failure The production queue story can pass submodule-renderer tests while
  * the real PTY output hides the selected JOB detail or drops the STATS frame's
  * right border at the live split-pane width.
  * @level l3

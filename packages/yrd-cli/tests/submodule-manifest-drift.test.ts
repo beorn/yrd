@@ -132,7 +132,7 @@ async function pinnedSuperproject(): Promise<{
   await git(repo, "rm", "-q", "--cached", "dep")
   await writeFile(join(repo, ".gitmodules"), "")
   await git(repo, "add", ".gitmodules")
-  await git(repo, "commit", "-qm", "delete dep from the component model")
+  await git(repo, "commit", "-qm", "delete dep from the submodule model")
   const deletionSha = await git(repo, "rev-parse", "HEAD")
 
   return { repo, baseSha, specChangeSha, metadataChangeSha, unrelatedChangeSha, deletionSha }
@@ -164,11 +164,11 @@ describe("submoduleManifestDrift", () => {
   //          materialization guard read that as an unreadable pin and refused. The
   //          deletion path was therefore unimplementable: authorized, no-data-loss
   //          proven, and still unable to pass its own checks. Measured on hh-web 2026-08-21.
-  it("passes a component DELETION, whose candidate side has no manifests to compare", async () => {
+  it("passes a submodule DELETION, whose candidate side has no manifests to compare", async () => {
     const { repo, baseSha, deletionSha } = await pinnedSuperproject()
     await using process = createProcess({ cwd: repo })
 
-    // The component is leaving, so its manifests cannot drift against anything.
+    // The submodule is leaving, so its manifests cannot drift against anything.
     expect(
       await submoduleManifestDrift(process, {
         repo,

@@ -1,7 +1,7 @@
 /**
  * @failure Recut refused `payload-mismatch` when the rebase correctly dropped a patch-equivalent commit, and wedged the drain on a fully absorbed branch (22373).
  * @level l2
- * @consumer @yrd/queue Git PR recutter
+ * @consumer @yrd/queue Git PR remerger
  */
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -70,7 +70,7 @@ async function featureRepo(): Promise<{ repo: string; sourceBase: string; headSh
   return { repo, sourceBase, headSha }
 }
 
-/** Land the named feature commits on `main` by another route, exactly as authored. */
+/** Merge the named feature commits on `main` by another route, exactly as authored. */
 async function landOnMain(repo: string, subjects: readonly string[]): Promise<string> {
   for (const subject of subjects) {
     const sha = await git(repo, ["rev-list", "-1", "--fixed-strings", `--grep=${subject}`, "issue/feature"])
@@ -98,7 +98,7 @@ async function remerge(
 }
 
 describe("recut against a base that absorbed part of the payload (22373)", () => {
-  it("succeeds carrying only the paths the base did not already land", async () => {
+  it("succeeds carrying only the paths the base did not already merge", async () => {
     const { repo, sourceBase, headSha } = await featureRepo()
     const target = await landOnMain(repo, ["feat: agents", "feat: claude"])
 

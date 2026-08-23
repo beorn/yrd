@@ -1,15 +1,15 @@
 /**
- * @failure A resident runner that had fallen pins behind its own source checkout
+ * @failure A habitant runner that had fallen pins behind its own source checkout
  *          had no way to act on it: nothing compared its booted commit to the
  *          checkout, nothing recorded a recycle attempt, and a restart that came
  *          back on the SAME stale commit would have restarted forever.
  * @level   l1
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  *
  * Box 1 of @yrd/core/stale-runner-never-recycles — the wiring: real git reads,
  * the durable attempt record that survives the re-exec, and the two log lines an
  * operator reads. The verdict logic itself is proved in
- * resident-source-staleness.test.ts.
+ * habitant-source-staleness.test.ts.
  */
 import { execFileSync } from "node:child_process"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -17,8 +17,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { residentSourceHealth } from "../src/run.ts"
-import { RESIDENT_SOURCE_STALE_OBSERVATIONS, type ResidentSourceStall } from "../src/source-staleness.ts"
+import { habitantSourceHealth } from "../src/run.ts"
+import { HABITANT_SOURCE_STALE_OBSERVATIONS, type HabitantSourceStall } from "../src/source-staleness.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -46,7 +46,7 @@ function commit(repo: string, message: string): string {
 type Warn = Readonly<{ message: string; props: Record<string, unknown> }>
 
 /**
- * The resident's source checkout and the queue repository are DIFFERENT
+ * The habitant's source checkout and the queue repository are DIFFERENT
  * repositories — that separation is the whole point of the fix, so the fixture
  * models both rather than one directory standing in for two.
  */
@@ -76,12 +76,12 @@ function fixture(bootedSha: string, sourceCheckout: string, existingStateDir?: s
     stateDir,
     recyclePath,
     readRecycle: () => JSON.parse(readFileSync(recyclePath, "utf8")) as Record<string, unknown>,
-    /** Drive `count` consecutive resident cycles, carrying the window forward. */
+    /** Drive `count` consecutive habitant cycles, carrying the window forward. */
     observe: async (count: number, threshold = 2) => {
-      let stall: ResidentSourceStall | undefined
+      let stall: HabitantSourceStall | undefined
       let recycle = false
       for (let cycle = 0; cycle < count; cycle += 1) {
-        const health = await residentSourceHealth(app, io, stall, true, threshold)
+        const health = await habitantSourceHealth(app, io, stall, true, threshold)
         stall = health.stall
         recycle = health.recycle
         if (recycle) break
@@ -91,21 +91,21 @@ function fixture(bootedSha: string, sourceCheckout: string, existingStateDir?: s
   }
 }
 
-/** A source checkout that has advanced `ahead` commits past where a resident booted. */
+/** A source checkout that has advanced `ahead` commits past where a habitant booted. */
 function staleSource(ahead: number): Readonly<{ root: string; bootedSha: string; headSha: string }> {
   const root = initRepo("yrd-source-recycle-source-")
-  const bootedSha = commit(root, "the commit the resident booted from")
+  const bootedSha = commit(root, "the commit the habitant booted from")
   let headSha = bootedSha
-  for (let i = 0; i < ahead; i += 1) headSha = commit(root, `landing ${String(i + 1)}`)
+  for (let i = 0; i < ahead; i += 1) headSha = commit(root, `merge ${String(i + 1)}`)
   return { root, bootedSha, headSha }
 }
 
-describe("resident source recycle — noticing the gap", () => {
+describe("habitant source recycle — noticing the gap", () => {
   it("recycles after the required consecutive observations, naming the head it is aiming at", async () => {
     const source = staleSource(3)
     const f = fixture(source.bootedSha, source.root)
 
-    const outcome = await f.observe(RESIDENT_SOURCE_STALE_OBSERVATIONS)
+    const outcome = await f.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)
 
     expect(outcome.recycle).toBe(true)
     expect(f.warnings).toContainEqual(
@@ -115,7 +115,7 @@ describe("resident source recycle — noticing the gap", () => {
           bootedSha: source.bootedSha,
           headSha: source.headSha,
           behind: 3,
-          observations: RESIDENT_SOURCE_STALE_OBSERVATIONS,
+          observations: HABITANT_SOURCE_STALE_OBSERVATIONS,
         }),
       }),
     )
@@ -141,20 +141,20 @@ describe("resident source recycle — noticing the gap", () => {
     expect(f.warnings).toEqual([])
   })
 
-  it("does not recycle one commit behind — that is routinely the landing we just produced", async () => {
+  it("does not recycle one commit behind — that is routinely the merge we just produced", async () => {
     const source = staleSource(1)
     const f = fixture(source.bootedSha, source.root)
 
     expect((await f.observe(10)).recycle).toBe(false)
   })
 
-  it("never recycles a non-resident follow — exiting is only an actuator under a supervisor", async () => {
+  it("never recycles a non-habitant follow — exiting is only an actuator under a supervisor", async () => {
     const source = staleSource(5)
     const f = fixture(source.bootedSha, source.root)
 
-    let stall: ResidentSourceStall | undefined
+    let stall: HabitantSourceStall | undefined
     for (let cycle = 0; cycle < 10; cycle += 1) {
-      const health = await residentSourceHealth(f.app, f.io, stall, false, 2)
+      const health = await habitantSourceHealth(f.app, f.io, stall, false, 2)
       stall = health.stall
       expect(health.recycle).toBe(false)
     }
@@ -170,12 +170,12 @@ describe("resident source recycle — noticing the gap", () => {
   })
 })
 
-describe("resident source recycle — the restart that changes nothing", () => {
+describe("habitant source recycle — the restart that changes nothing", () => {
   it("records the attempt durably BEFORE exiting, so the next process can see it", async () => {
     const source = staleSource(3)
     const f = fixture(source.bootedSha, source.root)
 
-    await f.observe(RESIDENT_SOURCE_STALE_OBSERVATIONS)
+    await f.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)
 
     expect(f.readRecycle()).toMatchObject({
       bootedSha: source.bootedSha,
@@ -187,13 +187,13 @@ describe("resident source recycle — the restart that changes nothing", () => {
   it("refuses to recycle twice for the same gap, and names the checkout as the thing to advance", async () => {
     const source = staleSource(3)
     const first = fixture(source.bootedSha, source.root)
-    expect((await first.observe(RESIDENT_SOURCE_STALE_OBSERVATIONS)).recycle).toBe(true)
+    expect((await first.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)).recycle).toBe(true)
 
     // The re-exec came back on the SAME commit — the checkout the runner boots
     // from is not the one that moved. A second process, same durable state dir.
     const second = fixture(source.bootedSha, source.root, first.stateDir)
 
-    const outcome = await second.observe(RESIDENT_SOURCE_STALE_OBSERVATIONS + 2)
+    const outcome = await second.observe(HABITANT_SOURCE_STALE_OBSERVATIONS + 2)
 
     expect(outcome.recycle).toBe(false)
     const warning = second.warnings.find((w) => w.props.action === "resident-source-stale-checkout-behind")
@@ -215,21 +215,21 @@ describe("resident source recycle — the restart that changes nothing", () => {
   it("recycles again once the source has genuinely moved on past a prior attempt", async () => {
     const source = staleSource(3)
     const f = fixture(source.bootedSha, source.root)
-    await f.observe(RESIDENT_SOURCE_STALE_OBSERVATIONS)
+    await f.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)
     expect(f.readRecycle()).toMatchObject({ headSha: source.headSha })
 
     // Same booted sha, but the checkout advanced further while we were deciding:
     // a different head, so the recorded attempt must not suppress it.
-    commit(source.root, "another landing")
+    commit(source.root, "another merge")
     const advanced = commit(source.root, "and another")
-    const outcome = await f.observe(RESIDENT_SOURCE_STALE_OBSERVATIONS)
+    const outcome = await f.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)
 
     expect(outcome.recycle).toBe(true)
     expect(f.readRecycle()).toMatchObject({ headSha: advanced })
   })
 })
 
-describe("resident source recycle — unmeasurable is never stale", () => {
+describe("habitant source recycle — unmeasurable is never stale", () => {
   it("does not recycle a working-tree build whose source identity is not a commit", async () => {
     const source = staleSource(5)
     const f = fixture(source.bootedSha, source.root)

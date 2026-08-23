@@ -1,5 +1,5 @@
 /**
- * @failure The step plan a Run executes comes from a copy the process cached at startup rather than from the config at the commit it lands onto, so a landed `.yrd.yml` change never takes effect and a Run cannot say which config judged it.
+ * @failure The step plan a Run executes comes from a copy the process cached at startup rather than from the config at the commit it merges onto, so a merged `.yrd.yml` change never takes effect and a Run cannot say which config judged it.
  * @level l2
  * @consumer @yrd/cli host
  */
@@ -50,7 +50,7 @@ const TWO_CHECKS =
   'base: main\nbatch: 1\nchecks:\n  - {typecheck: {run: "true"}}\n  - {affected-tests: {run: "true"}}\n'
 
 describe("the step plan is read from git at the Run's base sha", () => {
-  it("answers per base sha, so a landed config change is in force for the next Run", async () => {
+  it("answers per base sha, so a merged config change is in force for the next Run", async () => {
     const repo = await repository()
     await using process = createProcess({ cwd: repo })
     const before = await commitConfig(repo, ONE_CHECK, "one check")
@@ -62,7 +62,7 @@ describe("the step plan is read from git at the Run's base sha", () => {
     expect(older.steps).toEqual(["typecheck", "merge"])
     // The whole point of 23192: the check the base now declares is IN the plan,
     // with no restart and no --steps, because the plan is read at the sha the
-    // Run lands onto rather than recalled from durable state.
+    // Run merges onto rather than recalled from durable state.
     expect(newer.steps).toEqual(["typecheck", "affected-tests", "merge"])
     expect(newer.configBlobSha).not.toBe(older.configBlobSha)
     expect(newer.configBlobSha).toMatch(/^[0-9a-f]{40}$/u)

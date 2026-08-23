@@ -488,7 +488,7 @@ export type JournalEventVocabulary = Readonly<
 /**
  * Every event's reader version and the minimum reader each of its fields needs.
  * Pin a snapshot of this per package: growing a shipped event's payload then
- * cannot land without declaring which version can read the new field.
+ * cannot merge without declaring which version can read the new field.
  *
  * `grandfathered` appears only where an event actually carries one, so the
  * unmarked default stays the shape it has always been and an audit can count

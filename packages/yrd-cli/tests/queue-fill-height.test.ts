@@ -80,7 +80,7 @@ describe("queue timeline fill height (item 5)", () => {
     // @yrd/core/21096-cli-ux/23130: production watch geometries omitted the
     // calendar box even though the 24-row / 48-col gates looked satisfied —
     // the below-split hands the list ~19–22 rows, under QUEUE_STATS_MIN_PANE_ROWS.
-    // Acceptance is a captured frame, not a component-tree mount.
+    // Acceptance is a captured frame, not a submodule-tree mount.
     const snapshot = manyPendingSnapshot()
     const render = createRenderer({ cols, rows: height })
     const app = render(createElement(QueueWatchFrame, { snapshot }))

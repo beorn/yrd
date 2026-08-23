@@ -140,7 +140,7 @@ describe("yrd idle CPU (installed)", () => {
     }
   }, 110_000)
 
-  it("keeps the resident follow loop below 5% of one core while its queue is idle", async () => {
+  it("keeps the habitant follow loop below 5% of one core while its queue is idle", async () => {
     const root = mkdtempSync(join(tmpdir(), "yrd-follow-idle-cpu-"))
     const pidPath = join(root, "follow.pid")
     const terminal = createTestTerminal({ cols: 100, rows: 30 })

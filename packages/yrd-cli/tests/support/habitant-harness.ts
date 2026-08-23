@@ -1,46 +1,46 @@
 import type { YrdCliApp, YrdCliIO } from "../../src/types.ts"
 
-export type ResidentWarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
+export type HabitantWarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
-type ResidentState = Readonly<{
+type HabitantState = Readonly<{
   bays: Readonly<{ prs: Readonly<Record<string, unknown>> }>
   jobs?: Readonly<{ byId: Readonly<Record<string, unknown>> }>
   queues: Readonly<{ admissionRefusals: Readonly<Record<string, unknown>> }>
 }>
 
-type ResidentRunContext = Readonly<{
+type HabitantRunContext = Readonly<{
   signal: { aborted: boolean }
   call: number
 }>
 
-type ResidentHarnessOptions = Readonly<{
-  run(context: ResidentRunContext): Promise<readonly unknown[]>
-  state?: () => ResidentState
+type HabitantHarnessOptions = Readonly<{
+  run(context: HabitantRunContext): Promise<readonly unknown[]>
+  state?: () => HabitantState
   bays?: Readonly<Record<string, unknown>>
 }>
 
-const emptyState = (): ResidentState => ({
+const emptyState = (): HabitantState => ({
   bays: { prs: {} },
   jobs: { byId: {} },
   queues: { admissionRefusals: {} },
 })
 
-function completeState(state: ResidentState) {
+function completeState(state: HabitantState) {
   return { ...state, jobs: state.jobs ?? { byId: {} } }
 }
 
 /**
- * One structurally complete resident-loop test app.
+ * One structurally complete habitant-loop test app.
  *
  * `refresh()` snapshots the supplied state factory exactly once per durable
  * refresh, so `state()` keeps stable identity between refreshes just like the
- * real Yrd app. Tests that drive a second resident cycle model a new durable
+ * real Yrd app. Tests that drive a second habitant cycle model a new durable
  * observation by returning the next snapshot from that factory.
  */
-export function createResidentHarness(options: ResidentHarnessOptions) {
+export function createHabitantHarness(options: HabitantHarnessOptions) {
   const signal = { aborted: false }
   const drainController = new AbortController()
-  const warnings: ResidentWarnCall[] = []
+  const warnings: HabitantWarnCall[] = []
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
@@ -94,8 +94,8 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
   }
 }
 
-export function createResponseResidentHarness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
-  return createResidentHarness({
+export function createResponseHabitantHarness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
+  return createHabitantHarness({
     run: ({ call }) => {
       const responder = runResponses[call - 1] ?? runResponses.at(-1)
       if (responder === undefined) throw new Error("no run responder configured")

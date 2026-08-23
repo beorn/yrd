@@ -1,12 +1,12 @@
 /**
- * @failure A resident runner whose own process state went stale refuses EVERY candidate forever — 106 consecutive cycles over 1h44m while a by-hand preflight said FRESH-NOOP for the same PRs — and never restarts itself, freezing main until an operator sends SIGINT.
+ * @failure A habitant runner whose own process state went stale refuses EVERY candidate forever — 106 consecutive cycles over 1h44m while a by-hand preflight said FRESH-NOOP for the same PRs — and never restarts itself, freezing main until an operator sends SIGINT.
  * @level l1
- * @consumer @yrd/cli resident runner
+ * @consumer @yrd/cli habitant runner
  */
 import { describe, expect, it } from "vitest"
-import { foldRefusalStall, RESIDENT_REFUSAL_STALL_CYCLES, type ResidentRefusalStall } from "../src/refusal-remedy.ts"
+import { foldRefusalStall, HABITANT_REFUSAL_STALL_CYCLES, type HabitantRefusalStall } from "../src/refusal-remedy.ts"
 import { followQueueRuns } from "../src/run.ts"
-import { createResidentHarness } from "./support/resident-harness.ts"
+import { createHabitantHarness } from "./support/habitant-harness.ts"
 
 const HEAD = "1".repeat(40)
 const OTHER = "2".repeat(40)
@@ -19,13 +19,13 @@ function refusing(count: number, prs: readonly string[] = ["PR1800", "PR1802"]) 
   }
 }
 
-function stallAfter(cycles: number, prs?: readonly string[]): ResidentRefusalStall | undefined {
-  let window: ResidentRefusalStall | undefined
+function stallAfter(cycles: number, prs?: readonly string[]): HabitantRefusalStall | undefined {
+  let window: HabitantRefusalStall | undefined
   for (let cycle = 1; cycle <= cycles; cycle += 1) window = foldRefusalStall(window, refusing(cycle, prs))
   return window
 }
 
-describe("resident refusal stall — an all-candidate refusal loop with an unchanged world is poisoned observer state", () => {
+describe("habitant refusal stall — an all-candidate refusal loop with an unchanged world is poisoned observer state", () => {
   it("counts consecutive cycles in which every candidate is refused and nothing is admitted", () => {
     expect(stallAfter(1)?.cycles).toBe(1)
     expect(stallAfter(2)?.cycles).toBe(2)
@@ -33,8 +33,8 @@ describe("resident refusal stall — an all-candidate refusal loop with an uncha
   })
 
   it("reaches the restart threshold only after the configured run of identical cycles", () => {
-    expect(stallAfter(RESIDENT_REFUSAL_STALL_CYCLES - 1)?.cycles).toBeLessThan(RESIDENT_REFUSAL_STALL_CYCLES)
-    expect(stallAfter(RESIDENT_REFUSAL_STALL_CYCLES)?.cycles).toBe(RESIDENT_REFUSAL_STALL_CYCLES)
+    expect(stallAfter(HABITANT_REFUSAL_STALL_CYCLES - 1)?.cycles).toBeLessThan(HABITANT_REFUSAL_STALL_CYCLES)
+    expect(stallAfter(HABITANT_REFUSAL_STALL_CYCLES)?.cycles).toBe(HABITANT_REFUSAL_STALL_CYCLES)
   })
 
   it("resets the moment a run is produced — a runner that admits anything is not blind", () => {
@@ -85,12 +85,12 @@ describe("resident refusal stall — an all-candidate refusal loop with an uncha
   })
 })
 
-/** A resident whose compose always succeeds structurally (no throw) but never
+/** A habitant whose compose always succeeds structurally (no throw) but never
  * admits anything, against a refusal ledger that keeps advancing — the exact
  * shape of specimen 3. */
-function residentHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY) {
+function habitantHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY) {
   let cycles = 0
-  const harness = createResidentHarness({
+  const harness = createHabitantHarness({
     bays: { pr: (id: string) => ({ id, revs: [{ n: 1, head: HEAD }] }) },
     state: () => ({
       bays: { prs: { PR1800: { id: "PR1800", revs: [{ n: 1, head: HEAD }] } } },
@@ -118,20 +118,20 @@ function residentHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY
   return { ...harness, cycles: () => cycles }
 }
 
-describe("resident refusal stall — the runner restarts itself instead of looping for hours", () => {
+describe("habitant refusal stall — the runner restarts itself instead of looping for hours", () => {
   it("exits UNCLEAN with the evidence once the all-candidate refusal run hits the threshold", async () => {
-    const h = residentHarness(true)
+    const h = habitantHarness(true)
 
     // 3 = the unclean/interrupted exit code; `restart: on-failure` re-execs.
     await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(3)
 
     // Restarts on the threshold cycle itself, not one later.
-    expect(h.cycles()).toBe(RESIDENT_REFUSAL_STALL_CYCLES)
+    expect(h.cycles()).toBe(HABITANT_REFUSAL_STALL_CYCLES)
     expect(h.warnings).toContainEqual(
       expect.objectContaining({
         props: expect.objectContaining({
           action: "resident-refusal-stall-restart",
-          cycles: RESIDENT_REFUSAL_STALL_CYCLES,
+          cycles: HABITANT_REFUSAL_STALL_CYCLES,
           prs: ["PR1800"],
         }),
       }),
@@ -141,11 +141,11 @@ describe("resident refusal stall — the runner restarts itself instead of loopi
   it("never restarts an idle runner — an empty refusal ledger is not a stall", async () => {
     // Spins well past the threshold with nothing refusing, then stops the
     // ordinary way (exit 0), never the poisoned-observer way.
-    const h = residentHarness(false, RESIDENT_REFUSAL_STALL_CYCLES * 3)
+    const h = habitantHarness(false, HABITANT_REFUSAL_STALL_CYCLES * 3)
 
     await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
 
-    expect(h.cycles()).toBeGreaterThan(RESIDENT_REFUSAL_STALL_CYCLES)
+    expect(h.cycles()).toBeGreaterThan(HABITANT_REFUSAL_STALL_CYCLES)
     expect(h.warnings.filter((warning) => warning.props.action === "resident-refusal-stall-restart")).toEqual([])
   })
 })

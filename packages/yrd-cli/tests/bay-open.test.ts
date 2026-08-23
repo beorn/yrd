@@ -415,7 +415,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     expect(humanList.stdout()).toContain("blocked")
   })
 
-  it("accepts a patch-equivalent landing even when commit ancestry differs", async () => {
+  it("accepts a patch-equivalent merge even when commit ancestry differs", async () => {
     const { repo } = await repository()
     const kept = output(repo)
     expect(
@@ -426,27 +426,27 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
         "run",
         "--keep",
         "--bay",
-        "patch-landed",
+        "patch-merged",
         "--",
         "sh",
         "-c",
-        "printf same > landed.txt; git add landed.txt; git commit -qm branch-copy",
+        "printf same > merged.txt; git add merged.txt; git commit -qm branch-copy",
       ),
       kept.stderr(),
     ).toBe(0)
 
     const path = output(repo)
-    expect(await yrd(repo, path.io, "bay", "path", "patch-landed"), path.stderr()).toBe(0)
+    expect(await yrd(repo, path.io, "bay", "path", "patch-merged"), path.stderr()).toBe(0)
     const bayPath = path.stdout().trim()
-    await writeFile(join(repo, "landed.txt"), "same")
-    await git(repo, "add", "landed.txt")
+    await writeFile(join(repo, "merged.txt"), "same")
+    await git(repo, "add", "merged.txt")
     await git(repo, "commit", "-qm", "main-copy")
     await git(repo, "push", "-q", "origin", "main")
     expect(await git(bayPath, "cherry", "origin/main", "HEAD")).toMatch(/^- /u)
 
     const status = output(repo)
     expect(
-      await yrd(repo, status.io, "bay", "status", "patch-landed", "--json"),
+      await yrd(repo, status.io, "bay", "status", "patch-merged", "--json"),
       `${status.stdout()}${status.stderr()}`,
     ).toBe(0)
     const payload = JSON.parse(status.stdout()) as {

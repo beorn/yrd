@@ -56,7 +56,7 @@ const FlowPinSchema = z
 const ChangeSnapshotRemergeProofSchema = ChangeRemergeProofSchema.extend({
   /** Current exact carrier certificate. Absence is accepted only for replaying legacy queue records. */
   certificate: ChangeRemergeCertificateSchema.optional(),
-  /** Immutable base certified by this recut revision. Optional only for replaying legacy queue records. */
+  /** Immutable base certified by this re-merge revision. Optional only for replaying legacy queue records. */
   baseSha: GitShaSchema.optional(),
   /** Immutable approved-source endpoints. Both are absent only for legacy queue records. */
   sourceBaseSha: GitShaSchema.optional(),
@@ -183,7 +183,7 @@ export const ChangeSnapshotSchema = z
       remergeIssue([], "immutable source endpoints require a frozen code-carrier certificate")
     }
     if (rootSources.length > 1) {
-      remergeIssue(["sources"], "a recut snapshot may carry at most one root source mapping")
+      remergeIssue(["sources"], "a re-merge snapshot may carry at most one root source mapping")
     }
     if (frozen && rootSources.length !== 1) {
       remergeIssue(["sources"], "a frozen code-carrier certificate requires exactly one root source mapping")
@@ -225,7 +225,7 @@ export type CandidateRev = Readonly<{
 export const CandidateChangeSchema = z
   .object({
     changeId: ChangeIdSchema,
-    /** A queue member, not necessarily a PR: an intent that lands carries its
+    /** A queue member, not necessarily a PR: an intent that merges carries its
      * own id here (`command.ts` fills this from the member's `id`). */
     pr: QueueMemberIdSchema,
     revision: z.number().int().positive(),
@@ -235,7 +235,7 @@ export const CandidateChangeSchema = z
   .strict()
 export type CandidateChange = Readonly<z.infer<typeof CandidateChangeSchema>>
 
-export const ComponentModelChangeAuthorizationSchema = z
+export const SubmoduleModelChangeAuthorizationSchema = z
   .object({
     operation: z.enum(["add", "remove"]),
     path: z.string().trim().min(1),
@@ -248,22 +248,22 @@ export const ComponentModelChangeAuthorizationSchema = z
      * replaying Candidates written before patch-bound authorization receipts. */
     patchId: GitShaSchema.optional(),
     /** Mechanical proof that a later revision is the same code change at a
-     * different commit. Present only when authorization crossed a recut. */
+     * different commit. Present only when authorization crossed a re-merge. */
     source: ChangeRemergeSourceSchema.optional(),
   })
   .strict()
   .superRefine(({ headSha, patchId, source }, context) => {
     if (source === undefined) return
     if (patchId === undefined) {
-      context.addIssue({ code: "custom", message: "recut source requires patchId", path: ["patchId"] })
+      context.addIssue({ code: "custom", message: "re-merge source requires patchId", path: ["patchId"] })
     } else if (source.patchId !== patchId) {
-      context.addIssue({ code: "custom", message: "recut source patchId must match receipt patchId", path: ["source"] })
+      context.addIssue({ code: "custom", message: "re-merge source patchId must match receipt patchId", path: ["source"] })
     }
     if (source.toHeadSha !== headSha) {
-      context.addIssue({ code: "custom", message: "recut source must end at receipt headSha", path: ["source"] })
+      context.addIssue({ code: "custom", message: "re-merge source must end at receipt headSha", path: ["source"] })
     }
   })
-export type ComponentModelChangeAuthorization = Readonly<z.infer<typeof ComponentModelChangeAuthorizationSchema>>
+export type SubmoduleModelChangeAuthorization = Readonly<z.infer<typeof SubmoduleModelChangeAuthorizationSchema>>
 
 /** Immutable attempted integration. Its content identity is derived from the
  * queue/base plus ordered revision heads and their immutable compositions. */
@@ -278,7 +278,7 @@ export type Candidate = Readonly<{
   changes?: readonly CandidateChange[]
   sourceRewrites?: readonly SourceRewrite[]
   submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
-  componentModelChanges?: readonly ComponentModelChangeAuthorization[]
+  componentModelChanges?: readonly SubmoduleModelChangeAuthorization[]
   /** answers: Did preparation find this immutable Candidate mergeable? tense: historical. */
   mergeability: "unknown" | "mergeable" | "conflicting"
   createdAt: string
@@ -367,7 +367,7 @@ export const CandidateSchema = z
     changes: z.array(CandidateChangeSchema).min(1).optional(),
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
     submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
-    componentModelChanges: z.array(ComponentModelChangeAuthorizationSchema).min(1).optional(),
+    componentModelChanges: z.array(SubmoduleModelChangeAuthorizationSchema).min(1).optional(),
     mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
     createdAt: z.iso.datetime({ offset: true }),
   })
@@ -576,7 +576,7 @@ export type RunAuthority = Readonly<{
       | "component-main-promotion-failed"
       | "component-main-inspection-failed"
       | "carrier-inspection"
-      | "landing-unauthored-deletion"
+      | "merge-unauthored-deletion"
       | "source-publish"
       | "scratch-cleanup-failed"
       | "wrapper-generation"
@@ -647,7 +647,7 @@ export type QueueRecord = Readonly<{
   parent?: RunId
   isolationPart?: 0 | 1
   failure?: QueueFailure
-  // Run-level cancellation (the `queue cancel` surface): a run aborted before it lands,
+  // Run-level cancellation (the `queue cancel` surface): a run aborted before it merges,
   // but — unlike a failure — its member PRs are NOT rejected/canceled; they stay
   // submitted so a future drain re-queues them. Projection-only; no started run
   // carries these, so QueueRecordSchema stays unchanged.
@@ -672,7 +672,7 @@ export type RunConclusion = "success" | "failure" | "cancelled" | "skipped" | "t
 export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "steps" | "failure"> &
   Readonly<{
     cursor: number
-    /** answers: Did this Run produce a proven landing commit? tense: historical. */
+    /** answers: Did this Run produce a proven merge commit? tense: historical. */
     integration?: IntegrationProof
     /** answers: Which execution phase is this Run in now? tense: current. */
     status: RunStatus
@@ -711,7 +711,7 @@ export const QueuePauseSchema = z
  * it WITHOUT producing a queue run. A refusal at admission never mints a run
  * record, so this ledger is the only durable trace of a head-of-line wedge (the
  * matching `compose-candidate-skip` warns are loggily-only and die with the
- * process). Reset when the PR is admitted, pushed, or recut.
+ * process). Reset when the PR is admitted, pushed, or re-merge.
  */
 export type QueueAdmissionRefusal = Readonly<{
   pr: PRId
@@ -725,7 +725,7 @@ export type QueueAdmissionRefusal = Readonly<{
   kind?: string
   /** The refusal message of the most recent skip. */
   reason: string
-  /** Consecutive refusals since the last admission / push / recut. */
+  /** Consecutive refusals since the last admission / push / re-merge. */
   count: number
   /** Consecutive refusals carrying the current exact `code`. Unlike `count`,
    * this resets when the typed cause changes. */
@@ -736,7 +736,7 @@ export type QueueAdmissionRefusal = Readonly<{
   sameCodeFirstAt?: string
   /** Journal timestamp of the most recent refusal in this streak. */
   lastAt: string
-  /** Durable terminal disposition for this exact revision. A new push/recut
+  /** Durable terminal disposition for this exact revision. A new push/re-merge
    * clears the whole refusal entry and therefore re-arms admission. */
   settlement?: Readonly<{
     disposition: "needs-person"
@@ -1000,7 +1000,7 @@ export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[numbe
 
 /** @deprecated Transition alias for the pre-rename name — /hh and /hh/ag mirrors
  * still import it. Remove once both mirrors read YRD_QUEUE_AUDIT_FINDING_CODES
- * (tracked in the I10 landing checklist; the swap gives ag's 5-code PAGED set
+ * (tracked in the I10 merge checklist; the swap gives ag's 5-code PAGED set
  * the PAGE name). */
 export const YRD_QUEUE_AUDIT_PAGE_FINDING_CODES = YRD_QUEUE_AUDIT_FINDING_CODES
 

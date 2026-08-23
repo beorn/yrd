@@ -9,7 +9,7 @@
  * CHARACTERIZATION, not specification. The first describe block below is what step (a) left
  * standing deliberately ("the backstop survives untouched, per the coupling: its deletion
  * ships with the provisioner lift or not at all" — shaset-model.md). Step (d) is that
- * shipment: the provisioner lift landed in step (b), so a published, on-main, single-update
+ * shipment: the provisioner lift merged in step (b), so a published, on-main, single-update
  * authored gitlink is now ADMITTED here — this file's edit IS the record of that change, per
  * its own prior instruction not to "fix" these expectations without changing the model.
  */
@@ -168,15 +168,15 @@ async function admissionOutcome(
   headSha: string,
   options: Readonly<{
     props?: Readonly<Record<string, string>>
-    authorizeComponentModelChange?: NonNullable<GateArgs[1]["componentModelChangeAuthorizer"]>
+    authorizeSubmoduleModelChange?: NonNullable<GateArgs[1]["submoduleModelChangeAuthorizer"]>
   }> = {},
 ): Promise<{ outcome: "admitted" } | { outcome: "refused"; kind: string; code: string; message: string }> {
   await using process = createProcess()
   const services = {
     process,
-    ...(options.authorizeComponentModelChange === undefined
+    ...(options.authorizeSubmoduleModelChange === undefined
       ? {}
-      : { componentModelChangeAuthorizer: options.authorizeComponentModelChange }),
+      : { submoduleModelChangeAuthorizer: options.authorizeSubmoduleModelChange }),
   } as unknown as GateArgs[1]
   const io = { cwd: root } as unknown as GateArgs[2]
   try {
@@ -256,7 +256,7 @@ describe("pre-admission gate for hand-written gitlinks — step (d)'s admission 
     await expect(
       admissionOutcome(root, headSha, {
         props: { "component-model-change": `add dep; ruling ${ruling}` },
-        authorizeComponentModelChange: async (request) => {
+        authorizeSubmoduleModelChange: async (request) => {
           requests.push(request)
           return { authorizer: "@cto" }
         },

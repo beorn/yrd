@@ -21,7 +21,7 @@ describe("POSIX writer lock", () => {
     try {
       await expect(
         createExclusive(root, { timeoutMs: 0 }).run(() => Promise.resolve(), {
-          holder: "queue PR7 landing remove",
+          holder: "queue PR7 merge remove",
         }),
       ).rejects.toThrow(/holder=deployment D1 worktree add/iu)
     } finally {

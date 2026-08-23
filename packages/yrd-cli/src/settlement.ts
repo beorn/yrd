@@ -45,8 +45,8 @@ const TERMINAL_EVENT_NAMES: ReadonlySet<string> = new Set([
   "pr/withdrawn",
   "pr/canceled",
 ])
-const RESIDENT_ACTIVATION_MS = 1_000
-const RESIDENT_TICK_MS = 15_000
+const HABITANT_ACTIVATION_MS = 1_000
+const HABITANT_TICK_MS = 15_000
 const BUSY_RETRIES = 50
 const NOTICE_SCAN_CAP = 100
 
@@ -453,9 +453,9 @@ export type SettlementWorkerIO = Readonly<{ stderr: (text: string) => void }>
 
 /**
  * The detached worker: one drain for an ordinary command, a supervised loop for
- * a resident runner.
+ * a habitant runner.
  *
- * The resident's lifetime is the PARENT's, observed through an inherited pipe
+ * The habitant's lifetime is the PARENT's, observed through an inherited pipe
  * on fd 3 rather than by polling a pid — a pid can be reused, an inherited pipe
  * cannot. A parent that exits before the worker is even useful (the activation
  * window) means the command was over before settlement mattered, so the worker
@@ -469,7 +469,7 @@ export async function runYrdSettlementWorker(
   const repositoryName = env[YRD_SETTLEMENT_REPOSITORY_NAME_ENV]?.trim()
   delete env[YRD_SETTLEMENT_REPOSITORY_NAME_ENV]
   const parentPid = Number(takeRequiredEnv(env, YRD_SETTLEMENT_PARENT_PID_ENV))
-  const resident = (env[YRD_SETTLEMENT_RESIDENT_ENV] ?? "0") === "1"
+  const habitant = (env[YRD_SETTLEMENT_RESIDENT_ENV] ?? "0") === "1"
   delete env[YRD_SETTLEMENT_RESIDENT_ENV]
   const noticePath = takeRequiredEnv(env, YRD_SETTLEMENT_NOTICE_PATH_ENV)
   const specifier = takeRequiredEnv(env, YRD_SETTLEMENT_HOOK_ENV)
@@ -526,7 +526,7 @@ export async function runYrdSettlementWorker(
         retries,
         journal,
       })
-    if (!resident) {
+    if (!habitant) {
       await report(await drain(BUSY_RETRIES), settler.owner)
       return
     }
@@ -543,11 +543,11 @@ export async function runYrdSettlementWorker(
     })
     const exitedBeforeActivation = await Promise.race([
       parentExited.then(() => true),
-      sleep(RESIDENT_ACTIVATION_MS).then(() => false),
+      sleep(HABITANT_ACTIVATION_MS).then(() => false),
     ])
     while (!exitedBeforeActivation && !parentIsExited) {
       await report(await drain(0), settler.owner)
-      const exited = await Promise.race([parentExited.then(() => true), sleep(RESIDENT_TICK_MS).then(() => false)])
+      const exited = await Promise.race([parentExited.then(() => true), sleep(HABITANT_TICK_MS).then(() => false)])
       if (exited) break
     }
     await report(await drain(BUSY_RETRIES), settler.owner)
@@ -572,7 +572,7 @@ export type SettlementWorkerLaunch = Readonly<{
   settlementCwd: string
   noticePath: string
   repositoryName?: string
-  resident: boolean
+  habitant: boolean
   stderr: NodeJS.WriteStream | undefined
   warn: (text: string) => void
 }>
@@ -603,7 +603,7 @@ export function spawnYrdSettlementWorker(launch: SettlementWorkerLaunch): void {
         [YRD_SETTLEMENT_REPOSITORY_NAME_ENV]: launch.repositoryName ?? "",
         [YRD_SETTLEMENT_NOTICE_PATH_ENV]: launch.noticePath,
         [YRD_SETTLEMENT_PARENT_PID_ENV]: String(process.pid),
-        [YRD_SETTLEMENT_RESIDENT_ENV]: launch.resident ? "1" : "0",
+        [YRD_SETTLEMENT_RESIDENT_ENV]: launch.habitant ? "1" : "0",
       } as NodeJS.ProcessEnv,
     })
     child.once("error", failed)
@@ -724,9 +724,9 @@ export function isQueueRunInvocation(args: readonly string[]): boolean {
 
 export type YrdSettlementLaunch = Readonly<{
   /** True when the command this rides on is a queue runner. */
-  resident: boolean
+  habitant: boolean
   drainNotices(): void
-  spawn(resident: boolean): void
+  spawn(habitant: boolean): void
 }>
 
 export type YrdSettlementLaunchOptions = Readonly<{
@@ -760,9 +760,9 @@ export function prepareYrdSettlementLaunch(options: YrdSettlementLaunchOptions):
   const noticePath = settlementNoticePath(noticeDir)
   const settlementCwd = options.operationRepository ?? options.env["YRD_REPO"]?.trim() ?? options.cwd
   return Object.freeze({
-    resident: isQueueRunInvocation(options.args),
+    habitant: isQueueRunInvocation(options.args),
     drainNotices: () => drainYrdSettlementNotices(noticeDir, options.write),
-    spawn: (resident: boolean) =>
+    spawn: (habitant: boolean) =>
       spawnYrdSettlementWorker({
         execPath: options.execPath,
         scriptPath: options.scriptPath,
@@ -771,7 +771,7 @@ export function prepareYrdSettlementLaunch(options: YrdSettlementLaunchOptions):
         settlementCwd,
         noticePath,
         ...(options.repositoryName === undefined ? {} : { repositoryName: options.repositoryName }),
-        resident,
+        habitant,
         stderr: options.stderr,
         warn: options.write,
       }),

@@ -1,5 +1,5 @@
 /**
- * @failure Queue scratch lands on the system temp dir, so an unrelated process
+ * @failure Queue scratch merges on the system temp dir, so an unrelated process
  * exhausting a tmpfs `/tmp` fails every merge fleet-wide, and the ENOSPC is
  * reported as `merge-failed` — indistinguishable from a content conflict the
  * author must resolve.
@@ -57,7 +57,7 @@ async function initRepo(prefix: string): Promise<string> {
 }
 
 /**
- * The exact stderr git produced during the 2026-08-14 landing outage (R2233),
+ * The exact stderr git produced during the 2026-08-14 merge outage (R2233),
  * where a merge worktree could not be prepared because the tmpfs holding it had
  * no inodes left. Captured verbatim so the classifier is proven against the
  * real text, not a paraphrase of it.

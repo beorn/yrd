@@ -363,7 +363,7 @@ describe("queue watch user round 6", () => {
       expect(headerY, "the member box carries its own identity header").toBeGreaterThan(tabY)
       expect(app.text).not.toMatch(/[▸•]\s+PRS\b/u)
       expect(app.text).not.toContain("TIMELINE")
-      expect(app.text).not.toContain("LANDING")
+      expect(app.text).not.toContain("MERGE")
       // ISSUE now legitimately renders as a KEY/value fact (operator spec item
       // 4.a moved it off the identity row) — see the ISSUE assertions below,
       // which pin its new uppercase KEY/value form for both batch members.

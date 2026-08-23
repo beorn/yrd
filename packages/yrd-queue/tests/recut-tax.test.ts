@@ -1,11 +1,11 @@
 /**
  * @failure Every per-candidate assertion in this suite can pass while the queue
- * rebuilds each candidate many times to land it once. The rebuild ("recut") tax
+ * rebuilds each candidate many times to merge it once. The rebuild ("recut") tax
  * is a property of the DRAIN, not of any single candidate, so a fully green
  * suite measured none of it and a ~20%-of-runs stale rate stayed invisible for
  * weeks.
- * @why Correctness tests ask "did it land"; this one asks "how many builds did
- * landing it cost". Payloads here are DISJOINT — no two candidates touch the
+ * @why Correctness tests ask "did it merge"; this one asks "how many builds did
+ * merge it cost". Payloads here are DISJOINT — no two candidates touch the
  * same file — so no rebuild is resolving a conflict. Every rebuild is waste.
  * @level l2
  * @consumer @yrd/queue
@@ -14,7 +14,7 @@
  *
  * `createBaseResolutionCycle` (src/queue.ts) resolves the base ONCE per drain
  * cycle. Every candidate composed in that cycle is therefore pinned to the same
- * base sha — but only the first can land, because landing advances the real
+ * base sha — but only the first can merge, because merge advances the real
  * base tip. Each remaining candidate then reaches its merge step pinned to a
  * superseded base and is refused `stale-base` (production does exactly this
  * comparison at src/command.ts:7151 — the checked-out HEAD versus the run's
@@ -151,7 +151,7 @@ async function drainDrill(
           error: { code: "stale-base", message: `base moved from ${pinned} to ${head}` },
         }
       }
-      const commit = sha(`landing:${merges}:${members.join(",")}`)
+      const commit = sha(`merge:${merges}:${members.join(",")}`)
       head = commit
       merges += 1
       return { status: "completed", conclusion: "success", output: { commit, baseSha: commit } }
@@ -239,12 +239,12 @@ type Point = Readonly<{
  *
  * Exact and reproducible. `merges` equals the number of batch-groups
  * G = ceil(candidates / batch); `builds` equals G(G+1)/2, so the drain rebuilds
- * every not-yet-landed group once per cycle and pays
+ * every not-yet-merged group once per cycle and pays
  *
- *     builds per landing = (G + 1) / 2
+ *     builds per merge = (G + 1) / 2
  *
  * The tax is not a constant overhead — it grows in direct proportion to queue
- * depth. Ten unbatched disjoint candidates cost 55 builds and 55 checks to land
+ * depth. Ten unbatched disjoint candidates cost 55 builds and 55 checks to merge
  * 10 times.
  */
 const MEASURED: readonly Point[] = [
@@ -260,7 +260,7 @@ const MEASURED: readonly Point[] = [
 const HEADLINE = MEASURED[1]!
 
 /**
- * A landing may cost at most 1.2 builds — the ~20% rebuild tax the hardening
+ * A merge may cost at most 1.2 builds — the ~20% rebuild tax the hardening
  * program's economic claim is written against. Disjoint payloads make anything
  * above 1.0 pure waste; 1.2 leaves room for a single unavoidable base race.
  */
@@ -272,7 +272,7 @@ const RECUT_TAX_BUDGET = 1.2
 // expected failure and quietly hide a broken fixture.
 const DRILL_TIMEOUT_MS = 120_000
 
-describe("queue drain throughput — rebuilds per landing", () => {
+describe("queue drain throughput — rebuilds per merge", () => {
   // Green today and green after the fix, and the canary for the test below:
   // it drives the same drill, so any fixture break, timeout or environmental
   // fault turns this file red HERE, loudly and attributably. The expected-fail
@@ -287,8 +287,8 @@ describe("queue drain throughput — rebuilds per landing", () => {
         expect(drill.integrated, `all ${point.candidates} candidates must integrate`).toBe(drill.submitted)
         expect(drill.builds).toBeGreaterThanOrEqual(drill.merges)
         const groups = Math.ceil(point.candidates / (point.batch === false ? 1 : point.batch))
-        expect(drill.merges, "one landing per batch-group").toBe(groups)
-        expect(drill.builds, "G(G+1)/2 — every unlanded group rebuilt once per cycle").toBe((groups * (groups + 1)) / 2)
+        expect(drill.merges, "one merge per batch-group").toBe(groups)
+        expect(drill.builds, "G(G+1)/2 — every unmerged group rebuilt once per cycle").toBe((groups * (groups + 1)) / 2)
         observed.push({
           candidates: point.candidates,
           batch: point.batch,
@@ -304,17 +304,17 @@ describe("queue drain throughput — rebuilds per landing", () => {
     DRILL_TIMEOUT_MS,
   )
 
-  // EXPECTED TO FAIL until check-transplant lands. When it does, this test
-  // starts passing, `it.fails` turns red, and whoever landed the fix re-records
+  // EXPECTED TO FAIL until check-transplant merges. When it does, this test
+  // starts passing, `it.fails` turns red, and whoever merged the fix re-records
   // MEASURED above and drops this marker — locking the win in.
   it.fails(
-    "keeps rebuilds per landing within the recut-tax budget",
+    "keeps rebuilds per merge within the recut-tax budget",
     async () => {
       const drill = await drainDrill({ candidates: HEADLINE.candidates, batch: HEADLINE.batch })
       const buildsPerMerge = drill.builds / drill.merges
       expect(
         buildsPerMerge,
-        `${drill.builds} builds and ${drill.checks} checks to land ${drill.merges} disjoint candidates ` +
+        `${drill.builds} builds and ${drill.checks} checks to merge ${drill.merges} disjoint candidates ` +
           `(${drill.staleRefusals} stale-base refusals over ${drill.cycles} cycles)`,
       ).toBeLessThanOrEqual(RECUT_TAX_BUDGET)
     },

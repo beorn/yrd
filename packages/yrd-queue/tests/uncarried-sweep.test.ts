@@ -214,7 +214,7 @@ describe("sweepUncarriedRefs", () => {
     expect(finding?.uniqueCommits).toBe(1)
     expect(finding?.equivalentCommits).toBe(1)
     // The split is reported rather than collapsed to a verdict: a ref that is
-    // partly landed must not tell its author "unfinished" about work already
+    // partly merged must not tell its author "unfinished" about work already
     // on trunk.
     expect(finding?.message).toContain("already applied")
   })
@@ -359,7 +359,7 @@ describe("sweepUncarriedRefs", () => {
     // THE noise case, measured 2026-08-14 on the live fleet: 129 findings, of
     // which 62 were earlier `-rN` revisions of a series whose newer revision
     // was flagged too. Every one of these three revisions is uncarried, past
-    // the TTL, inside the age bound and holds unlanded commits — so without the
+    // the TTL, inside the age bound and holds unmerged commits — so without the
     // collapse this sweep reports all three, and an operator pages three times
     // on one piece of work whose only live revision is `-r3`.
     const git = fakeGit({
@@ -385,7 +385,7 @@ describe("sweepUncarriedRefs", () => {
     expect(finding?.message).toContain("supersedes 2 earlier revisions of the same series")
     expect(result.superseded).toBe(2)
     // Collapsed BEFORE the gatherer, so the dead revisions cost no diff, no
-    // cherry and no rev-parse — and each ref still lands in exactly one bucket.
+    // cherry and no rev-parse — and each ref still merges in exactly one bucket.
     expect(result.examined).toBe(1)
     expect(result.scanned).toBe(
       result.carried + result.superseded + result.missingUpdateClocks + result.outsideAgeBound + result.examined,
@@ -532,7 +532,7 @@ describe("a ref with no shared ancestry is one unenumerable ROW, not a dead swee
       expect(result.examined).toBe(1)
       expect(result.measurable).toBe(result.outsideAgeBound + 1)
 
-      // Derived a second way: every ref lands in exactly one bucket.
+      // Derived a second way: every ref merges in exactly one bucket.
       expect(result.scanned).toBe(
         result.carried +
           result.exempted.length +
@@ -657,7 +657,7 @@ describe("policy exemptions", () => {
     expect(result.exempted).toMatchObject([{ ref: "origin/task/bead-bodies-ci-r1", disposition: "retired" }])
   })
 
-  it("counts a carried archive ref as carried, so no ref lands in two buckets", async () => {
+  it("counts a carried archive ref as carried, so no ref merges in two buckets", async () => {
     const git = fakeGit({ "for-each-ref": refLine("origin/rescue/kernel-docs", 3 * HOUR) })
 
     const result = await sweepUncarriedRefs(git, {

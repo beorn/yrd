@@ -38,7 +38,7 @@ type EvaluationRow = Readonly<{
 }>
 
 // formatDuration is the pure watch-timeline duration format, shared with the
-// headless resident runner via runner-timeline.ts (which imports no silvery).
+// headless habitant runner via runner-timeline.ts (which imports no silvery).
 // Re-exported so existing `./status-view.tsx` consumers are unaffected.
 export { formatDuration }
 
@@ -403,10 +403,10 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
         RUNS {delivery.runs.join(",") || "-"}
       </Text>
       <Text wrap="wrap">HEAD {delivery.headSha}</Text>
-      {delivery.landingSha === undefined ? null : <Text wrap="wrap">LANDING {delivery.landingSha}</Text>}
+      {delivery.landingSha === undefined ? null : <Text wrap="wrap">MERGE {delivery.landingSha}</Text>}
       {delivery.candidateSha === undefined ? null : (
         <Text wrap="wrap">
-          ALREADY LANDED {delivery.candidateSha} TREE {delivery.candidateTreeSha} = BASE {delivery.baseSha} TREE{" "}
+          ALREADY MERGED {delivery.candidateSha} TREE {delivery.candidateTreeSha} = BASE {delivery.baseSha} TREE{" "}
           {delivery.baseTreeSha}
         </Text>
       )}
@@ -439,13 +439,13 @@ function IssueRegressionView({ regression }: { regression: ChangeRegression }) {
         {regression.recordedAt}
       </Text>
       <Text wrap="wrap">
-        ORIGINAL {regression.issueRef} {regression.pr} {regression.run} LANDING {regression.landingSha}
+        ORIGINAL {regression.issueRef} {regression.pr} {regression.run} MERGE {regression.landingSha}
       </Text>
       <Text wrap="wrap">EVIDENCE {regression.evidence}</Text>
       <Text wrap="wrap">IMPLEMENTATION {regression.implementationRunRef}</Text>
       <Text wrap="wrap">REVIEW {regression.reviewRef}</Text>
       <Text wrap="wrap">
-        REPAIR {regression.repairIssueRef} {regression.repairPr} {regression.repairRun} LANDING{" "}
+        REPAIR {regression.repairIssueRef} {regression.repairPr} {regression.repairRun} MERGE{" "}
         {regression.repairLandingSha}
       </Text>
     </Box>

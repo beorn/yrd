@@ -30,7 +30,7 @@ const STICKY_NEEDS_AUTHOR = {
   at: AT,
   run: "run-1",
   step: "typecheck",
-  receipt: { code: "candidate-drops-landed", message: "carrier drops landed work" },
+  receipt: { code: "candidate-drops-merged", message: "carrier drops merged work" },
 } as const
 
 function pr(overrides: Partial<Change>): Change {

@@ -1,12 +1,12 @@
 /**
- * @failure A scratch cleanup failure erases the per-pin component-main results produced by a successful actuator.
+ * @failure A scratch cleanup failure erases the per-pin submodule-main results produced by a successful actuator.
  * @level l2
- * @consumer @yrd/queue component-main settlement
+ * @consumer @yrd/queue submodule-main settlement
  */
 import { expect, it } from "vitest"
 import type { JobResult } from "@yrd/job"
 import type { IntegrationProof } from "../src/model.ts"
-import { submoduleMainScratchCleanupFailure } from "../src/component-main-outcome.ts"
+import { submoduleMainScratchCleanupFailure } from "../src/submodule-main-outcome.ts"
 
 const sha = (digit: string): string => digit.repeat(40)
 

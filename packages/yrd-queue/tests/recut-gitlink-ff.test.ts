@@ -1,7 +1,7 @@
 /**
  * @failure Recut refuses or mis-composes a submodule gitlink conflict that is fast-forward resolvable.
  * @level l2
- * @consumer @yrd/queue Git PR recutter
+ * @consumer @yrd/queue Git PR remerger
  */
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -160,7 +160,7 @@ async function mixedCommitCarrier(repo: string, sourceBase: string, carrierPin: 
   return git(repo, ["rev-parse", "HEAD"])
 }
 
-/** Author a mixed carrier whose merge shape the direct recutter cannot retain. */
+/** Author a mixed carrier whose merge shape the direct remerger cannot retain. */
 async function mergeCarrier(repo: string, sourceBase: string, carrierPin: string): Promise<string> {
   await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
   await git(repo, ["update-index", "--cacheinfo", `160000,${carrierPin},dep`])
@@ -211,7 +211,7 @@ describe("recut fast-forward gitlink resolution", () => {
 
     expect(result.unchanged).toBe(false)
     expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
-    // Lands the carrier's descendant pin (B), not the base pin (C).
+    // Merges the carrier's descendant pin (B), not the base pin (C).
     expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
     expect((await git(repo, ["diff", "--name-only", target, result.headSha])).split("\n").toSorted()).toEqual([
       "dep",
@@ -496,7 +496,7 @@ describe("recut fast-forward gitlink resolution", () => {
     await git(repo, ["commit", "-qm", "carrier: bump dep to b"])
     const headSha = await git(repo, ["rev-parse", "HEAD"])
 
-    // Land carrier B independently before refreshing carrier A. The refreshed
+    // Merge carrier B independently before refreshing carrier A. The refreshed
     // branch has no residual payload: its exact gitlink pin is already main.
     await git(repo, ["switch", "-q", "main"])
     await git(repo, ["cherry-pick", headSha])

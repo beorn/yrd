@@ -2,7 +2,7 @@
  * @failure The RUNNER box's "N behind pin" figure counted the OBSERVER'S OWN
  *          Yrd checkout (`runnerSha..HEAD` in `yrdSourceCheckout()`), so the
  *          number tracked whoever was looking, not the queue's recorded pin:
- *          an observer two commits ahead rendered a pin-exact resident as
+ *          an observer two commits ahead rendered a pin-exact habitant as
  *          "28 behind pin", and moving the recorded pin did not move the
  *          display.
  * @level   l2
@@ -62,7 +62,7 @@ type QueueFixture = Readonly<{ queueRoot: string; sourceRepo: string; submoduleR
 
 /** A queue repository whose `origin/main` records `sourceRepo` as a submodule
  * pin at `vendor/yrd`, with the submodule working tree materialized the way
- * the resident's own deployment is. `origin/main` is a genuine remote ref
+ * the habitant's own deployment is. `origin/main` is a genuine remote ref
  * (`refs/remotes/origin/main`), advanced by `recordPin`, so the helper reads
  * exactly the surface production reads. */
 function initQueueRepo(sourceRepo: string, pinSha: string): QueueFixture {
@@ -98,7 +98,7 @@ function recordPin(fixture: QueueFixture, pinSha: string): void {
 }
 
 describe("runnerPinBehind (@i/10-merge-queue/23041-staleness-measures-the-observer)", () => {
-  it("answers at-pin for a resident booted exactly at the recorded pin", () => {
+  it("answers at-pin for a habitant booted exactly at the recorded pin", () => {
     const source = initYrdShapedSource()
     const pin = commit(source, "pinned")
     const fixture = initQueueRepo(source, pin)
@@ -109,7 +109,7 @@ describe("runnerPinBehind (@i/10-merge-queue/23041-staleness-measures-the-observ
     // The live specimen's first two table rows: the runner never moved, the
     // observer's checkout gained commits, and the display counted the observer.
     // Here the upstream source (any checkout that is not the recorded pin)
-    // advances twice; the recorded pin and the resident stay put, so the
+    // advances twice; the recorded pin and the habitant stay put, so the
     // answer must not move.
     const source = initYrdShapedSource()
     const pin = commit(source, "pinned")
@@ -137,7 +137,7 @@ describe("runnerPinBehind (@i/10-merge-queue/23041-staleness-measures-the-observ
     })
   })
 
-  it("answers a LOUD unknown naming AHEAD when the resident descends from the recorded pin", () => {
+  it("answers a LOUD unknown naming AHEAD when the habitant descends from the recorded pin", () => {
     // The counter-caution in the bead: a runtime NEWER than the recorded pin
     // is the direction that crashed settlement drain, and it must neither
     // read as behind nor as silently current.

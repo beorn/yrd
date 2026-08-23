@@ -179,9 +179,9 @@ async function staleRemoteBranchRepository(): Promise<{
 async function staleBaseCandidateRepository(): Promise<{ repo: string; featureSha: string; baseSha: string }> {
   const { repo, featureSha } = await repository()
   await git(repo, "switch", "-q", "main")
-  await writeFile(join(repo, "landed-after-branch.txt"), "landed on main after the branch diverged\n")
-  await git(repo, "add", "landed-after-branch.txt")
-  await git(repo, "commit", "-qm", "land unrelated work on main")
+  await writeFile(join(repo, "merged-after-branch.txt"), "merged on main after the branch diverged\n")
+  await git(repo, "add", "merged-after-branch.txt")
+  await git(repo, "commit", "-qm", "merge unrelated work on main")
   const baseSha = await git(repo, "rev-parse", "HEAD")
   return { repo, featureSha, baseSha }
 }
@@ -414,7 +414,7 @@ checks: [{check: {run: "true"}}]
   await git(repo, "switch", "-q", "main")
 
   // Main moves on under the branch: an unrelated submodule pin advances and
-  // lands, with no involvement from the branch.
+  // merges, with no involvement from the branch.
   await writeFile(join(module, "README.md"), "submodule advanced\n")
   await git(module, "add", "README.md")
   await git(module, "commit", "-qm", "advance the submodule")
@@ -576,7 +576,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
     // The interim identity the live journal then ADVANCED TO, measured from its
     // own refusal 288eb203→ae0d2084. A predecessor is whatever the deployment
-    // stores, not whatever landed on main.
+    // stores, not whatever merged on main.
     expect(first.manifest.edges).toContainEqual({
       from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
       to: first.manifest.targetIdentity,
@@ -607,10 +607,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // The queue suite owns revision→cache-miss behavior; this host seam owns
     // the preceding fingerprint→revision identity edge.
     //
-    // This assertion used to read "every toolchain fingerprint component",
+    // This assertion used to read "every toolchain fingerprint submodule",
     // which made 22374 a passing test rather than a caught bug: `bun` and
     // `node` name whichever binary invoked yrd, so one host with two bun
-    // installs minted two permanent revision families and the resident and its
+    // installs minted two permanent revision families and the habitant and its
     // operators overwrote each other's baseline on every drain. Identity
     // follows what a step would actually RUN.
     for (const changed of [
@@ -1096,7 +1096,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       batch: 1,
       steps: ["typecheck"],
       requires: [],
-      definitions: { typecheck: { run: "test -f feature.txt && test -f landed-after-branch.txt", runner: "local" } },
+      definitions: { typecheck: { run: "test -f feature.txt && test -f merged-after-branch.txt", runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
     }
     await using process = createProcess({ cwd: repo })
@@ -1105,7 +1105,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
 
     // No ref: the managed pre-submit hook, and `pr submit` while sitting on the
-    // branch, both land here with the operator's own checkout as cwd.
+    // branch, both merge here with the operator's own checkout as cwd.
     const result = await checks.run("typecheck", repo)
 
     expect(result.exitCode).toBe(0)
@@ -1607,7 +1607,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    // Boot migrates the retained checkpoint and the fold lands each legacy
+    // Boot migrates the retained checkpoint and the fold merges each legacy
     // pair as a one-entry props map — visible to everything that reads props.
     expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
     const migrated = z
@@ -1701,7 +1701,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
     expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
     expect(restored.state().bays.submits).toEqual({})
-    // And the new fact lands on the migrated state like on any other.
+    // And the new fact merges on the migrated state like on any other.
     await restored.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: featureSha, base: "main" })
     expect(restored.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: featureSha, base: "main" })
   })
@@ -2416,7 +2416,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     }
   })
 
-  it("caches viewer queue targets but re-resolves them for a resident runner", async () => {
+  it("caches viewer queue targets but re-resolves them for a habitant runner", async () => {
     const mutableResolver = () => {
       let reads = 0
       return {
@@ -2430,10 +2430,10 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect([(await viewer("main", "/repo")).sha, (await viewer("main", "/repo")).sha]).toEqual(["first", "first"])
     expect(viewerBacking.reads()).toBe(1)
 
-    const residentBacking = mutableResolver()
-    const resident = createPostureQueueTargetResolver("resident-queue-run", residentBacking.resolve)
-    expect([(await resident("main", "/repo")).sha, (await resident("main", "/repo")).sha]).toEqual(["first", "second"])
-    expect(residentBacking.reads()).toBe(2)
+    const habitantBacking = mutableResolver()
+    const habitant = createPostureQueueTargetResolver("habitant-queue-run", habitantBacking.resolve)
+    expect([(await habitant("main", "/repo")).sha, (await habitant("main", "/repo")).sha]).toEqual(["first", "second"])
+    expect(habitantBacking.reads()).toBe(2)
   })
 
   it("uses an explicit default submitter while generic Yrd stays operator-owned", async () => {
@@ -2468,7 +2468,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const staleLocalMain = await git(repo, "rev-parse", "main")
 
     await git(repo, "switch", "-qc", "remote-config")
-    await commitYrdConfig(repo, "landing: none\n")
+    await commitYrdConfig(repo, "merge: none\n")
     const authoritativeMain = await git(repo, "rev-parse", "HEAD")
     await git(repo, "push", "-q", "origin", "HEAD:main")
     await git(repo, "fetch", "-q", "origin", "main:refs/remotes/origin/main")
@@ -3957,7 +3957,7 @@ checks: [{check: {run: "true"}}]
       prs: [{ branch, checkRequests: [] }],
     })
 
-    // Once the pin lands on the submodule's own MAIN, the backstop this test used to hit here
+    // Once the pin merges on the submodule's own MAIN, the backstop this test used to hit here
     // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
     // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
     // covers that admission directly; composition-fill-in.test.ts in @yrd/queue covers the
@@ -4169,7 +4169,7 @@ checks: [{check: {run: "true"}}]
       prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
     })
 
-    // Once the pin lands on the submodule's own MAIN, the backstop this test used to hit here
+    // Once the pin merges on the submodule's own MAIN, the backstop this test used to hit here
     // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
     // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
     // covers that admission directly). This test stays scoped to the still-refusing case.
@@ -4297,7 +4297,7 @@ checks: [{check: {run: "true"}}]
       publication: {
         status: "publication-required",
         continuation: "queue",
-        detail: "waiting for the one-shot or resident queue runner",
+        detail: "waiting for the one-shot or habitant queue runner",
       },
     })
     const publicationJob = firstPublication.publication.job
@@ -4356,7 +4356,7 @@ checks: [{check: {run: "true"}}]
       stderr,
     ).toBe(0)
     expect(stderr).toContain("PR1 publication-required")
-    expect(stderr).toContain("waiting for the one-shot or resident queue runner")
+    expect(stderr).toContain("waiting for the one-shot or habitant queue runner")
     expect(stderr).toContain("(Job ")
 
     stdout = ""
@@ -4753,11 +4753,11 @@ checks: [{check: {run: "true"}}]
     expect(releases).toBe(1)
   })
 
-  it("keeps repeated resident signals idempotent while hard escalation reaps the active process tree", async () => {
+  it("keeps repeated habitant signals idempotent while hard escalation reaps the active process tree", async () => {
     const { repo, featureSha } = await repository()
-    const childPidPath = join(repo, "resident-hard-stop.pid")
-    const grandchildPidPath = join(repo, "resident-hard-stop-grandchild.pid")
-    const hardStopPath = join(repo, "resident-hard-stop.started")
+    const childPidPath = join(repo, "habitant-hard-stop.pid")
+    const grandchildPidPath = join(repo, "habitant-hard-stop-grandchild.pid")
+    const hardStopPath = join(repo, "habitant-hard-stop.started")
     const command = [
       `trap 'touch ${JSON.stringify(hardStopPath)}' TERM`,
       `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
@@ -4819,10 +4819,10 @@ checks: [{check: {run: "true"}}]
     if (cleanupError !== undefined) throw cleanupError
   }, 30_000)
 
-  it("refuses a second resident follow-runner with the active runner identity", async () => {
+  it("refuses a second habitant follow-runner with the active runner identity", async () => {
     const { repo, featureSha } = await repository()
-    const startedPath = join(repo, "..", "resident-check.started")
-    const executionsPath = join(repo, "..", "resident-check.executions")
+    const startedPath = join(repo, "..", "habitant-check.started")
+    const executionsPath = join(repo, "..", "habitant-check.executions")
     const command = [
       `printf 'run\\n' >> ${JSON.stringify(executionsPath)}`,
       `touch ${JSON.stringify(startedPath)}`,
@@ -4835,9 +4835,9 @@ checks: [{check: {run: "true"}}]
     await git(repo, "commit", "-qm", "second")
     const secondSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
-    // #62: the resident runner is now `queue run` in its follow-by-default form
+    // #62: the habitant runner is now `queue run` in its follow-by-default form
     // (no selector, no --once). Follow drains the WHOLE default queue, so to keep
-    // each resident bound to exactly one PR, PR1 is submitted first and PR2 only
+    // each habitant bound to exactly one PR, PR1 is submitted first and PR2 only
     // after the first runner releases the lease.
     {
       await using submitter = await createYrdHost({ cwd: repo })
@@ -4845,7 +4845,7 @@ checks: [{check: {run: "true"}}]
       await submitter.close()
     }
     const spawnFollow = (pane: string) => {
-      const logPath = join(repo, "..", `resident-${pane.replace(/[^a-z0-9]+/giu, "-")}.log`)
+      const logPath = join(repo, "..", `habitant-${pane.replace(/[^a-z0-9]+/giu, "-")}.log`)
       const child = Bun.spawn(
         [
           process.execPath,
@@ -4877,7 +4877,7 @@ checks: [{check: {run: "true"}}]
       await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), {
         timeout: 5_000,
       })
-      // A second resident follow-runner is refused while the first holds the lease.
+      // A second habitant follow-runner is refused while the first holds the lease.
       second = spawnFollow("w1:p2")
 
       const outcome = await Promise.race([
@@ -4910,7 +4910,7 @@ checks: [{check: {run: "true"}}]
         )
       } catch (cause) {
         const replacementLog = await readFile(replacement.logPath, "utf8").catch(() => "<missing replacement log>")
-        throw new Error(`replacement resident did not execute PR2\n${replacementLog}`, { cause })
+        throw new Error(`replacement habitant did not execute PR2\n${replacementLog}`, { cause })
       }
       replacement.child.kill("SIGTERM")
       await expect(replacement.child.exited).resolves.toBe(0)
@@ -4949,7 +4949,7 @@ checks: [{check: {run: "true"}}]
     }
   }, 60_000)
 
-  it("records a process-host attestation as the resident's loaded implementation", async () => {
+  it("records a process-host attestation as the habitant's loaded implementation", async () => {
     const { repo } = await repository()
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     const implementationSource = `git:${await git(repo, "rev-parse", "HEAD")}`
@@ -5028,7 +5028,7 @@ checks: [{check: {run: "true"}}]
     }
   }, 30_000)
 
-  it("keys the resident driver epoch to the configured queue base", async () => {
+  it("keys the habitant driver epoch to the configured queue base", async () => {
     const { repo } = await repository()
     await git(repo, "branch", "release/2.0", "HEAD")
     await writeFile(join(repo, ".yrd.yml"), 'base: release/2.0\nchecks: [{check: {run: "true"}}]\n')
@@ -5084,7 +5084,7 @@ checks: [{check: {run: "true"}}]
     }
   }, 30_000)
 
-  it("replaces a dead resident owner after the OS releases its lease", async () => {
+  it("replaces a dead habitant owner after the OS releases its lease", async () => {
     const { repo } = await repository()
     const argv = [
       process.execPath,
@@ -5303,7 +5303,7 @@ checks: [{check: {run: "true"}}]
     expect(managedCwd.startsWith(wrong.repo + sep)).toBe(false)
   })
 
-  it("submits and lands one composed source packet through the public CLI", async () => {
+  it("submits and merges one composed source packet through the public CLI", async () => {
     const { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await compositionRepository()
     const manifest = join(repo, "..", "composition.json")
     await writeFile(
@@ -5519,7 +5519,7 @@ checks: [{check: {run: "true"}}]
     expect(stdout).toContain("OPEN 1")
     expect(stdout).toContain("REJECTED 0")
     expect(stdout).not.toContain(featureSha.slice(0, 12))
-    expect(stderr).toBe("yrd: dead-man: the queue has work but no resident runner owns the drain lease\n")
+    expect(stderr).toBe("yrd: dead-man: the queue has work but no habitant runner owns the drain lease\n")
 
     stdout = ""
     stderr = ""
@@ -5624,7 +5624,7 @@ checks: [{check: {run: "true"}}]
     ])
 
     expect(exitCode, stderr).toBe(0)
-    expect(stderr).toBe("yrd: dead-man: the queue has work but no resident runner owns the drain lease\n")
+    expect(stderr).toBe("yrd: dead-man: the queue has work but no habitant runner owns the drain lease\n")
     expect(stdout).toContain("Recent failures")
     expect(stdout.match(/pr#1/giu)).toHaveLength(3)
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
@@ -6069,7 +6069,7 @@ describe("targetImplementationEntrypoint", () => {
   })
 
   it("keeps a bay-installed implementation fixed instead of composing a phantom Candidate path", async () => {
-    // 2026-08-17: the resident runner executed Yrd from its own bay under the
+    // 2026-08-17: the habitant runner executed Yrd from its own bay under the
     // repository's bays root. Mapping that root into the Candidate composed
     // <warm-bay>/.bays/<runner-bay>/vendor/yrd/bin/yrd.ts — a path no
     // Candidate tree can contain (bays are untracked) — and substrate-pair
@@ -6082,7 +6082,7 @@ describe("targetImplementationEntrypoint", () => {
   })
 
   it("maps a linked-worktree implementation by its own working tree, never the assembly root", async () => {
-    // 2026-08-18: the resident runner executed Yrd from a linked git worktree
+    // 2026-08-18: the habitant runner executed Yrd from a linked git worktree
     // of the repository. Stripping the assembly root left the worktrees
     // directory prefixed onto the Candidate path —
     // <bay>/worktree/.worktrees/<runner-worktree>/…/bin/yrd.ts, a path no

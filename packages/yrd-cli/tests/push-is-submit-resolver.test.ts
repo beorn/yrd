@@ -3,7 +3,7 @@
  *           push-is-submit push predates its bay by construction, so it can
  *           never satisfy that rule and the whole `refs/for/` namespace stays
  *           unreachable — admitted by the receiver, then refused by the one
- *           resolver that decides what a pushed ref lands on.
+ *           resolver that decides what a pushed ref merges on.
  * @level    l2 (a real git repository; the base tip is a real rev-parse)
  * @consumer @yrd/core/22716-yrd-hardening-program/p2-push-is-submit
  */

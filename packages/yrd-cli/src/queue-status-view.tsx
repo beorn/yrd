@@ -142,7 +142,7 @@ function changeIdValue(pr: string): string {
  *
  * Note (submission/draft model, @yrd/core/21679): `.N` is the submission number
  * and is shown from `.1` — a bare `pr#324` is reserved to mean DRAFT (zero
- * submissions) once the draft state lands. Do NOT omit `.1`.
+ * submissions) once the draft state merges. Do NOT omit `.1`.
  */
 function retrySuffix(times: number | undefined): string {
   return times !== undefined && times > 1 ? `×${times}` : ""
@@ -329,9 +329,9 @@ export type QueueTimelineProjectedRow = Readonly<{
   activeMs: number | null
   waitMs: number | null
   queueWaitMs: number | null
-  /** Diagnostic landing class for display/JSON (21801) — not a success verdict. */
+  /** Diagnostic merge class for display/JSON (21801) — not a success verdict. */
   mergeVerdict?: MergeVerdict
-  /** Step names in run order — scripts must not infer landing from glyph alone. */
+  /** Step names in run order — scripts must not infer merge from glyph alone. */
   stepNames?: readonly string[]
 }>
 
@@ -387,7 +387,7 @@ export function timelineRetainedRows(
 }
 
 /** One canonical queue audit observation. Its time is independent from the
- * resident heartbeat: ticking and measuring outcome progress are different facts. */
+ * habitant heartbeat: ticking and measuring outcome progress are different facts. */
 export type QueueRunnerProgress = Readonly<{ observedAt: string }> &
   (Readonly<{ state: "healthy" }> | Readonly<{ state: "stalled"; findings: readonly QueueAuditFinding[] }>)
 
@@ -402,10 +402,10 @@ export const QueueRunnerProgress = Object.freeze({
 export type QueueDriverEpoch = Readonly<{
   /** Repository-scoped queue identity; a service name is never a driver identity. */
   queueId: string
-  /** One resident lifetime. A same-PID exec reload mints a successor epoch. */
+  /** One habitant lifetime. A same-PID exec reload mints a successor epoch. */
   epoch: string
   /** Latest proven queue merge, or null before this queue has merged anything.
-   * Optional for status written by older residents (pre-2026-08-18 they wrote
+   * Optional for status written by older habitants (pre-2026-08-18 they wrote
    * this field as `lastLanded`); absence is unknown, never "nothing merged". */
   lastMerged?: Readonly<{ commit: string; at: string }> | null
 }>
@@ -413,18 +413,18 @@ export type QueueDriverEpoch = Readonly<{
 /** One uncarried sweep: what it found AND when it looked. The two travel
  * together because either alone is misleading. */
 export type UncarriedObservation = Readonly<{
-  /** Stranded refs the sweep confirmed — already past the landedness filter. */
+  /** Stranded refs the sweep confirmed — already past the mergedness filter. */
   count: number
   /** Refs enumerated, so a zero is readable rather than merely small. */
   scanned: number
   /** Legacy refs whose reflog clock was not retained. Optional for status
-   * written by older residents; absence is unknown coverage, never zero. */
+   * written by older habitants; absence is unknown coverage, never zero. */
   missingUpdateClocks?: number
   /**
    * Uncarried refs whose update clock WAS retained, so the sweep could judge
    * them. With `missingUpdateClocks` this gives the coverage fraction, which
    * `scanned` alone cannot: `scanned` counts carried and superseded refs the
-   * rail never had to measure. Optional for status written by older residents;
+   * rail never had to measure. Optional for status written by older habitants;
    * absence is unknown coverage, never full coverage.
    */
   measurable?: number
@@ -434,7 +434,7 @@ export type UncarriedObservation = Readonly<{
    * that no consumer can serialize this record without them.
    *
    * Five machine surfaces emit this object (`queue.uncarried --json`,
-   * `queue.list`, the watch stream, `RunnerHealthFacts`, the resident
+   * `queue.list`, the watch stream, `RunnerHealthFacts`, the habitant
    * heartbeat's `status.json`), and every one of them used to ship a bare
    * `count` while the coverage stayed behind at the one call site that
    * remembered to compute it. Making the derived half part of the record turns
@@ -447,7 +447,7 @@ export type UncarriedObservation = Readonly<{
 
 /**
  * Mint an observation with its coverage attached. The ONLY constructor — both
- * the resident's sweeper and the tolerant reader of an older `status.json` go
+ * the habitant's sweeper and the tolerant reader of an older `status.json` go
  * through here, so a record that reaches a renderer always knows how much of
  * its own population it managed to measure.
  */
@@ -506,7 +506,7 @@ export function uncarriedCoverageFloor(
   unenumerable = 0,
 ): string {
   // An absent clock count is unknown coverage, never full coverage — the
-  // distinction an older resident's status cannot make for itself.
+  // distinction an older habitant's status cannot make for itself.
   if (missingUpdateClocks === undefined) return "push-clock coverage unknown, so a floor"
   // Two independent gaps, phrased separately. A ref with no merge base was not
   // missing a clock, and folding it into that count would attribute the gap to
@@ -538,7 +538,7 @@ export function uncarriedCoverageFloor(
  * half a reader acts on: "33 uncarried" is a work item, "≥33 of a population
  * 15% of which we could measure" is an unknown, and the two were being phrased
  * differently on the two surfaces (@i/10-merge-queue/22925-watch-shows-every-pr).
- * Unknown coverage counts as partial: an older resident that cannot report its
+ * Unknown coverage counts as partial: an older habitant that cannot report its
  * clock gap has not proven it had none.
  */
 export function uncarriedFloorCount(count: number, missingUpdateClocks: number | undefined, unenumerable = 0): string {
@@ -636,16 +636,16 @@ export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
   lastTickAt: string
-  /** Queue-outcome progress captured by the resident from the canonical audit.
+  /** Queue-outcome progress captured by the habitant from the canonical audit.
    * Absent only for status records written before progress-aware heartbeats. */
   queueProgress?: QueueRunnerProgress
-  /** The resident runner's launch command; absent for status records written before it was captured. */
+  /** The habitant runner's launch command; absent for status records written before it was captured. */
   command?: string
-  /** Exact Yrd source captured by the resident heartbeat at startup. */
+  /** Exact Yrd source captured by the habitant heartbeat at startup. */
   implementationSource?: string
-  /** Compiled-in journal versions this resident can read. */
+  /** Compiled-in journal versions this habitant can read. */
   journalVersions?: readonly number[]
-  /** Exact writer policy observed from the mutable journal this resident serves. */
+  /** Exact writer policy observed from the mutable journal this habitant serves. */
   retention?: JournalRetentionObservation
   /** Content of the driver lease. Probes assert this, never a process/service suffix. */
   driver?: QueueDriverEpoch
@@ -664,7 +664,7 @@ export type QueueTimelineRunner = Readonly<{
    * stranded refs and a queue nobody has swept are different facts.
    */
   uncarried?: UncarriedObservation
-  /** ISO time the resident wrote its exit marker on shutdown. The status file is
+  /** ISO time the habitant wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
   exitedAt?: string
@@ -672,7 +672,7 @@ export type QueueTimelineRunner = Readonly<{
    * crash exit. Absent while the runner is live. */
   clean?: boolean
   /**
-   * How the resident's booted `implementationSource` relates to the queue
+   * How the habitant's booted `implementationSource` relates to the queue
    * repository's RECORDED Yrd pin, computed at observation time (never per
    * render — see `runnerPinBehind` in run.ts). The base is the pin and only
    * the pin (@i/10-merge-queue/23041-staleness-measures-the-observer): a
@@ -686,7 +686,7 @@ export type QueueTimelineRunner = Readonly<{
   sourcePin?: RunnerSourcePin
   /**
    * `draft-stranded` findings (@yrd/queue `auditQueues`) old enough to page —
-   * projected by the resident from the canonical audit exactly like
+   * projected by the habitant from the canonical audit exactly like
    * {@link QueueRunnerProgress}, so the probe never re-derives draft state
    * itself (the fast, journal-free health path cannot afford to). Age-gated by
    * `.yrd.yml` `drafts.pageAfterHours` at the point this is computed, so
@@ -696,7 +696,7 @@ export type QueueTimelineRunner = Readonly<{
    *
    * Absent means NOT MEASURED (a status record written before this field
    * existed) or measured-and-empty; both render as "no stale drafts" today,
-   * matching every other resident-observed fact on this type.
+   * matching every other habitant-observed fact on this type.
    */
   staleDrafts?: readonly QueueAuditFinding[]
   /**
@@ -705,7 +705,7 @@ export type QueueTimelineRunner = Readonly<{
    * being retried, so the one finding that used to mark them
    * (`admission-refusal-loop`) went silent the instant they most needed a
    * human (@i/10-merge-queue/22918-needs-person-unowned). Projected by the
-   * resident from the canonical audit exactly like {@link staleDrafts},
+   * habitant from the canonical audit exactly like {@link staleDrafts},
    * immediately — no age threshold, since a settlement already only happens
    * after the queue exhausted its own retries or mechanical remedy. Each
    * finding names its `owner` — the repository's `.yrd.yml`
@@ -714,7 +714,7 @@ export type QueueTimelineRunner = Readonly<{
    *
    * Absent means NOT MEASURED (a status record written before this field
    * existed) or measured-and-empty; both render as "nothing needs a person"
-   * today, matching every other resident-observed fact on this type.
+   * today, matching every other habitant-observed fact on this type.
    */
   needsPerson?: readonly QueueAuditFinding[]
   /**
@@ -727,11 +727,11 @@ export type QueueTimelineRunner = Readonly<{
    * Absent means NOT PUBLISHED (a status record written by a resident older
    * than this field), and the probe says so rather than comparing nothing.
    */
-  installedPlan?: ResidentInstalledPlan
+  installedPlan?: HabitantInstalledPlan
 }>
 
 /** What a resident publishes about the plan it can execute. */
-export type ResidentInstalledPlan = Readonly<{
+export type HabitantInstalledPlan = Readonly<{
   batchSize: number
   steps: readonly InstalledStep[]
 }>
@@ -747,7 +747,7 @@ export type QueueRunnerRefusal = Readonly<{
  * Why no runner is draining this queue, for the surfaces that must say so.
  *
  * Display collapses a departed runner to `runner: null` (run.ts
- * `activeResidentRunner`), and that collapse threw away the one fact the
+ * `activeHabitantRunner`), and that collapse threw away the one fact the
  * operator needs: whether the runner that was here is GONE, or whether none was
  * ever here. Both printed "NO RUNNER - no drained run in window" — cli.test.ts
  * asserted the identical string for a dead-pid runner and a missing status file
@@ -796,7 +796,7 @@ export type QueueTimelineProjection = Readonly<{
    */
   queues: readonly QueueTimelineQueue[]
   siblingBases: readonly string[]
-  /** Resident-runner heartbeat status; null renders loudly — nothing drains this queue. */
+  /** Habitant-runner heartbeat status; null renders loudly — nothing drains this queue. */
   runner: QueueTimelineRunner | null
   /** Why `runner` is null. Present only when it is; the banner needs it to name a remedy. */
   runnerAbsence?: QueueRunnerAbsence
@@ -878,7 +878,7 @@ export type QueueFlowMetrics = Readonly<{
   outcomes: Readonly<{
     integrated: number
     alreadyMerged: number
-    /** Completed without merge proof — not a landing (21801/22323). */
+    /** Completed without merge proof — not a merge (21801/22323). */
     passed: number
     rejected: number
     environmentRefused: number
@@ -893,9 +893,9 @@ export type QueueFlowMetrics = Readonly<{
     decisions: number
     rate: number | null
   }>
-  // Landed count over the window projected to a per-24h rate. per24h is null
+  // Merged count over the window projected to a per-24h rate. per24h is null
   // only for a zero-width window.
-  throughput: Readonly<{ landed: number; per24h: number | null }>
+  throughput: Readonly<{ merged: number; per24h: number | null }>
   // Oldest OPEN queue age at snapshot time — a live-queue fact the caller
   // supplies (it is not derivable from terminal facts). null when nothing is
   // queued. Folded in so the aggregate is one self-contained JSON key.
@@ -951,7 +951,7 @@ export type QueueLogRow = Readonly<{
   locations: readonly QueueLogLocationEntry[]
   integration?: IntegrationProof
   props?: ChangeProps
-  landing: string
+  merge: string
 }>
 
 export type QueueLogAttempt = Readonly<{
@@ -1175,7 +1175,7 @@ type QueueShowRow = Readonly<{
   evidence: string | Record<string, unknown>
   gate?: GateEvidence
   checkpoint: string
-  landing: string
+  merge: string
   location?: QueueLogLocation
   locations: readonly QueueLogLocationEntry[]
 }>
@@ -1185,7 +1185,7 @@ type GateEvidence = Readonly<{
   residualCount: number
 }>
 
-/** Perfect-detector landing class for scripts (21801 / 22323). */
+/** Perfect-detector merge class for scripts (21801 / 22323). */
 export type MergeVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
 
 export type QueueShowData = Readonly<{
@@ -1200,9 +1200,9 @@ export type QueueShowData = Readonly<{
   taskStatus: TaskStatus
   glyph: StatusGlyph
   outcome: string
-  /** Perfect detector: landed only when merge/integration proof exists. */
+  /** Perfect detector: merged only when merge/integration proof exists. */
   mergeVerdict: MergeVerdict
-  /** Step names in run order — scripts must not infer landing from glyph alone. */
+  /** Step names in run order — scripts must not infer merge from glyph alone. */
   stepNames: readonly string[]
   started: string
   finished: string
@@ -1215,7 +1215,7 @@ export type QueueShowData = Readonly<{
   waitDuration: string
   waitDurationMs?: number
   retries: number
-  landing: string
+  merge: string
   integration?: IntegrationProof
   parent: string
   isolationPart: "0" | "1" | "-"
@@ -1444,7 +1444,7 @@ export function queueFlowMetrics(
       decisions,
       rate: decisions === 0 ? null : rejected / decisions,
     },
-    throughput: { landed: integrated, per24h: windowMs === 0 ? null : (integrated * FLOW_DAY_MS) / windowMs },
+    throughput: { merged: integrated, per24h: windowMs === 0 ? null : (integrated * FLOW_DAY_MS) / windowMs },
     oldestOpenMs: options.oldestOpenMs ?? null,
     activeRun: {
       allTerminal: durationDistribution(activeAll),
@@ -2029,7 +2029,7 @@ export function queueDisplayState(
   const kind = queueMemberKind(pr.id)
   const native = changeDeliveryState(pr)
   // `needs-author` is an OPEN-only value, and `PR.needsAuthor` is cleared by
-  // recut, submitted, admission-recorded and already-landed but never by
+  // re-merge, submitted, admission-recorded and already-landed but never by
   // withdrawn, integrated or canceled — so a stored refusal outlives every
   // closing path. Terminality is therefore read first, everywhere, by everyone.
   //
@@ -2288,7 +2288,7 @@ const RECENT_ROW_LIMIT = 3
 // failure cross, muted minus, and completion check. Each lifecycle class stays
 // distinguishable before color; color is foreground-only.
 // The status → glyph map lives in runner-timeline.ts (pure, no silvery) so the
-// headless resident runner shares this exact vocabulary.
+// headless habitant runner shares this exact vocabulary.
 const statusGlyph = timelineStatusGlyph
 
 function failureFact(run: Run | undefined, step: QueueStep | undefined): { code: string; message: string } | undefined {
@@ -2359,7 +2359,7 @@ function terminalProjection(run: Run): QueueTerminalProjection {
   }
   if (run.conclusion === "success") {
     // Perfect detector (21801 / 22323 audit): only a recorded integration proof
-    // is a landing. `queueIntegration(run)?.alreadyMerged === undefined` used to
+    // is a merge. `queueIntegration(run)?.alreadyMerged === undefined` used to
     // treat missing proof as integrated because `undefined?.x === undefined`.
     const integration = queueIntegration(run)
     if (integration === undefined) {
@@ -3613,7 +3613,7 @@ export function changeListRows(
       throw new Error(`yrd: PR '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
     }
     const projected = projectPR(undefined, summary, pr, now, undefined, undefined, eligibility)
-    // A proven landing outranks the recorded state: `withdrawn` is a claim
+    // A proven merge outranks the recorded state: `withdrawn` is a claim
     // about content, and a head already reachable from the base contradicts it.
     // Showing the later write as the whole truth sends the author back to
     // re-cut a branch that is already on the base branch (22376).
@@ -3686,7 +3686,7 @@ export function ChangeListView({
     rows.reduce((width, row) => Math.max(width, row.stateLabel.length + 2), 15),
   )
   // WHY holds typed reason codes. It keeps its historical 18 unless a row
-  // carries a longer code — a reconciled landing does — and never exceeds 25.
+  // carries a longer code — a reconciled merge does — and never exceeds 25.
   const whyWidth = Math.min(
     25,
     rows.reduce((width, row) => Math.max(width, row.why.length + 2), 18),
@@ -3903,7 +3903,7 @@ function diagnosticBlocker(pr: Change, run: Run | undefined, step: QueueStep | u
  * Collapse a run of rebuilds that changed nothing into the fact the run already
  * encodes (@i/10-merge-queue/a-counter-that-means-two-things).
  *
- * A recut whose source fingerprint is unchanged did no work. PR537 printed
+ * A re-merge whose source fingerprint is unchanged did no work. PR537 printed
  * `0d7566e4e3ae→0d7566e4e3ae` about forty times before changing once, and two
  * readers watched that carrier climb during an 89-minute stall and both called
  * it futile churn — while the revision named in the counter was merging. The
@@ -3912,7 +3912,7 @@ function diagnosticBlocker(pr: Change, run: Run | undefined, step: QueueStep | u
  *
  * So this adds no field and drops no data. It states the run instead of
  * repeating its members, and it is self-limiting: a healthy carrier whose
- * content changes every recut has no run to collapse and renders as before
+ * content changes every re-merge has no run to collapse and renders as before
  * (PR645 and PR673, measured).
  */
 export function collapseRecomposedSources(
@@ -4019,7 +4019,7 @@ export function ChangeDetailView({
           </Text>
           {liveSource.head === revision.head ? null : (
             <Text wrap="wrap">
-              <Text bold>BRANCH MOVED</Text> — live branch differs from frozen rev {revision.n}; recut before review
+              <Text bold>BRANCH MOVED</Text> — live branch differs from frozen rev {revision.n}; re-merge before review
             </Text>
           )}
         </>
@@ -4071,7 +4071,7 @@ export function ChangeDetailView({
       )}
       {detail.run === undefined && merge !== undefined ? (
         <Text>
-          <Text bold>LANDING</Text> {merge.commit === merge.baseSha ? merge.commit : `${merge.commit}@${merge.baseSha}`}
+          <Text bold>MERGE</Text> {merge.commit === merge.baseSha ? merge.commit : `${merge.commit}@${merge.baseSha}`}
         </Text>
       ) : null}
     </Box>
@@ -4104,7 +4104,7 @@ function SummaryQueue({ projection, repositoryRoot }: { projection: HumanQueuePr
         {projection.alreadyMerged === 0 ? null : (
           <>
             {" "}
-            <Text bold>ALREADY-LANDED</Text> {projection.alreadyMerged}
+            <Text bold>ALREADY-MERGED</Text> {projection.alreadyMerged}
           </>
         )}
         {projection.needsAuthor === 0 ? null : (
@@ -4621,7 +4621,7 @@ function noticeState(
 ): StatusNoticeState | undefined {
   if (data !== undefined) {
     if (data.status === "completed" && data.conclusion === "success") {
-      // Non-landing success is "passed", never "done" (21801).
+      // Non-merge success is "passed", never "done" (21801).
       return data.integration === undefined ? "passed" : "integrated"
     }
     if (data.status === "completed" && data.conclusion === "failure") return failureState ?? "failed"
@@ -4742,7 +4742,7 @@ function noticeExplanation(
     return `${step === undefined ? "Run" : `Step ${step}`} is running (${timing.join("; ")}).`
   }
   if (state === "integrated") {
-    const merge = presentFact(data?.landing)
+    const merge = presentFact(data?.merge)
     const completed = presentFact(data?.finished)
     return `Integrated${merge === undefined ? "" : ` as ${queueMergeLabel(merge)}`}${
       completed === undefined ? "" : ` at ${detailClock(completed)}`
@@ -4755,7 +4755,7 @@ function noticeExplanation(
   if (state === "stale") {
     const prefix = failureSummary === undefined ? "" : `${failureSummary}. `
     if (failure?.code === "stale-base") {
-      return `${prefix}The base advanced after this revision requested required checks. Automatically recut and requeued on the next queue pass.`
+      return `${prefix}The base advanced after this revision requested required checks. Automatically re-merge and requeued on the next queue pass.`
     }
     if (failure?.code === "stale-check") {
       return `${prefix}The checked candidate changed after its required checks. Automatically requeued for fresh checks on the next queue pass.`
@@ -4806,7 +4806,7 @@ export function queueStatusNotice(
   const presentation = statusPresentation(state)
   const automation = disposition?.automation
   const auto =
-    automation === "auto-recut"
+    automation === "auto-re-merge"
       ? ({ kind: "recut", when: "on the next queue pass" } as const)
       : automation === "auto-requeue"
         ? ({ kind: "requeue", when: "on the next queue pass" } as const)
@@ -5034,7 +5034,7 @@ const TIMELINE_STATUS_WORDS = {
   running: "checking",
   integrated: "merged",
   "already-landed": "merged",
-  // Non-landing success — never the word "merged" (21801 / 22323).
+  // Non-merge success — never the word "merged" (21801 / 22323).
   passed: "passed",
   rejected: "failed",
   "environment-refused": "env",
@@ -5305,13 +5305,13 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
 
 /**
  * EVERY row renders its own TIME, STATUS and RUN, including the second and
- * third member of a convoy that landed together.
+ * third member of a convoy that merged together.
  *
  * Until 2026-08-17 an adjacent member sharing the leader's base+run rendered
  * those three cells as `-` (the "Round 8 continuation placeholder"). That made
- * a landed PR and a never-attempted one print the SAME row of dashes, so the
- * one question a human asks this list — did my work land — had no answer for
- * two thirds of a convoy: R2649 landed PR1151/1152/1153 and only PR1151 showed
+ * a merged PR and a never-attempted one print the SAME row of dashes, so the
+ * one question a human asks this list — did my work merge — had no answer for
+ * two thirds of a convoy: R2649 merged PR1151/1152/1153 and only PR1151 showed
  * a status. Operator directive, superseding Round 8: "make sure all PRs show in
  * the watch/list - i always assumed that they would show"
  * (@i/10-merge-queue/22925-watch-shows-every-pr). De-duplicating the run label
@@ -5834,8 +5834,8 @@ export function queueNoRunnerBanner(
     // A clean exit is a decision someone made; a missing exit marker is a death
     // nobody recorded, and only the second is a reason to look at why.
     return absence.clean
-      ? `NO RUNNER - resident runner [${absence.pid}] stopped ${ago} ago; restart it: ${start}`
-      : `NO RUNNER - resident runner [${absence.pid}] died ${ago} ago, no exit marker; restart it: ${start}`
+      ? `NO RUNNER - habitant runner [${absence.pid}] stopped ${ago} ago; restart it: ${start}`
+      : `NO RUNNER - habitant runner [${absence.pid}] died ${ago} ago, no exit marker; restart it: ${start}`
   }
   // Nothing has ever drained HERE, and something may be waiting on it — the two
   // facts a reader needs before deciding this queue is merely quiet.
@@ -5843,7 +5843,7 @@ export function queueNoRunnerBanner(
     const waiting = projection.oldestOpenMs === null ? "" : `, oldest open ${mediaDuration(projection.oldestOpenMs)}`
     return `NO RUNNER - no runner has ever drained this queue${waiting}; start one: ${start}`
   }
-  return `NO RUNNER - queue last drained ${mediaDuration(nowMs - drainedMs)} ago, none resident since; start one: ${start}`
+  return `NO RUNNER - queue last drained ${mediaDuration(nowMs - drainedMs)} ago, none habitant since; start one: ${start}`
 }
 
 /**
@@ -5856,7 +5856,7 @@ export function queueNoRunnerBanner(
  * events, not the runner's own ~5s heartbeat oscillating.
  *
  * Anchored to `serverNowMs` (re-anchoring the instant it changes, so a fresh
- * poll is authoritative the moment it lands) and advanced by real elapsed
+ * poll is authoritative the moment it merges) and advanced by real elapsed
  * wall-clock time since, so it never drifts against `setInterval` jitter.
  * Inert when `!live` (the one-shot print path has no app scope and a static
  * print cannot tick) — returns `serverNowMs` unchanged, matching the file's
@@ -5880,7 +5880,7 @@ function useCoarseNow(serverNowMs: number, live: boolean, tickMs = 1000): number
 }
 
 /**
- * Resident runner status is always visible in its own RUNNER frame. The
+ * Habitant runner status is always visible in its own RUNNER frame. The
  * queue-pause STATUS line lives INSIDE this frame (user directive 2026-07-21,
  * supersedes the separate STATUS box), the uptime/downtime timer rides the
  * top border right-aligned opposite the RUNNER title, and the health marker
@@ -5950,7 +5950,7 @@ function TimelineRunnerBox({
   const commandRows =
     runner === null
       ? []
-      : boundedHangingLines(`${runner.command ?? "resident runner"} [${runner.pid}]`, commandWidth, 3)
+      : boundedHangingLines(`${runner.command ?? "habitant runner"} [${runner.pid}]`, commandWidth, 3)
   return (
     <TitledBox
       title="RUNNER"
@@ -6434,7 +6434,7 @@ function ProjectedQueueTimeline({
   )
   const layout = timelineCellLayout(rows, includeDate, columns, runCells)
   // The one-shot print's queue surfaces (pills + address rows) fall back to
-  // the component-level repositoryRoot for queues whose projection predates
+  // the submodule-level repositoryRoot for queues whose projection predates
   // the loader threading it.
   const printQueues = projection.queues.map((queue) =>
     queue.path === undefined && repositoryRoot !== undefined
@@ -6798,7 +6798,7 @@ export function queueLogRows(
           attempts: attemptSummaries,
           activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputQueueageIndex(finished, run, pr.revision, pr.id))),
-          landing: queueMerge(run),
+          merge: queueMerge(run),
           integration:
             (outcome === "integrated" || outcome === "already-landed") &&
             run.status === "completed" &&
@@ -6871,7 +6871,7 @@ export function queueLogRows(
         attempts: [],
         activeSteps: [],
         retries: "0",
-        landing: "-",
+        merge: "-",
         parent: "-",
         isolationPart: "-",
         result: "-",
@@ -6944,7 +6944,7 @@ function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliverySt
     evidence: stepEvidence(step, gate),
     ...(gate === undefined ? {} : { gate }),
     checkpoint: stepCheckpointText(step),
-    landing: queueMerge(run),
+    merge: queueMerge(run),
     locations,
     ...(location === undefined ? {} : { location }),
   }
@@ -7011,7 +7011,7 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: ChangeD
           : { gate: gateEvidenceLabel(gate) },
     ...(gate === undefined ? {} : { gate }),
     checkpoint: "-",
-    landing: queueMerge(run),
+    merge: queueMerge(run),
     locations,
     ...(firstLocation === undefined ? {} : { location: firstLocation }),
   }
@@ -7091,7 +7091,7 @@ export function queueShowData(
     waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
     ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
     retries: queueShowRetries(finished, run),
-    landing: queueMerge(run),
+    merge: queueMerge(run),
     integration: run.status === "completed" && run.conclusion === "success" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
@@ -7181,7 +7181,7 @@ export function QueueLogView({
 }
 
 function queueShowNextAction(data: QueueShowData): string {
-  if (data.outcome === "integrated") return "none — landing proof is recorded"
+  if (data.outcome === "integrated") return "none — merge proof is recorded"
   if (data.outcome === "already-landed") return "none — equivalence proof is recorded; no merge was needed"
   if (["queued", "in_progress", "waiting"].includes(data.status)) {
     return "follow live output or wait for the current step"
@@ -7278,7 +7278,7 @@ function queueGateSummary(data: QueueShowData): string | undefined {
   return gates.map(gateEvidenceLabel).join(", ")
 }
 
-/** Dedupe `X@X` landings (commit == landing sha) to one SHA. */
+/** Dedupe `X@X` landings (commit == merge sha) to one SHA. */
 export function queueMergeLabel(merge: string): string {
   const [commit, base, ...rest] = merge.split("@")
   if (rest.length === 0 && commit !== undefined && base !== undefined && commit === base) return commit
@@ -7323,9 +7323,9 @@ function QueueProofView({ data }: { data: QueueShowData }) {
           )
         })
       )}
-      {presentFact(data.landing) === undefined ? null : (
+      {presentFact(data.merge) === undefined ? null : (
         <Text>
-          LANDING <Text color="$fg-muted">{queueMergeLabel(data.landing)}</Text>
+          LANDING <Text color="$fg-muted">{queueMergeLabel(data.merge)}</Text>
         </Text>
       )}
     </Box>
@@ -7341,7 +7341,7 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
   )
 }
 
-// Integration proof beyond the landed SHA (item J, 2026-07-16): the count of
+// Integration proof beyond the merged SHA (item J, 2026-07-16): the count of
 // source rewrites + submodule resolutions the queue carried into the merge.
 function integrationProofDetail(integration: IntegrationProof): string | undefined {
   const parts: string[] = []
@@ -7354,7 +7354,7 @@ function integrationProofDetail(integration: IntegrationProof): string | undefin
   return parts.length === 0 ? undefined : parts.join(" ")
 }
 
-/** Merge-owned landing facts shared by one-shot detail and the watch merge tab. */
+/** Merge-owned merge facts shared by one-shot detail and the watch merge tab. */
 export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
   if (data.integration === undefined) return null
   const proofDetail = integrationProofDetail(data.integration)
@@ -7611,7 +7611,7 @@ function changeMetadataGroups(
   ]
   const revisionCount = pr?.revs.filter((candidate) => candidate.n <= member.revision).length ?? 1
   const dates: ChangeMetadataFact[] = [
-    // CREATED and UPDATED join this group when the pr-dates retrofit lands
+    // CREATED and UPDATED join this group when the pr-dates retrofit merges
     // them on the record; fabricating them from other clocks would be the
     // silent-fallback bug this file bans.
     { key: "commits", value: `${revisionCount} ${revisionCount === 1 ? "revision" : "revisions"}` },
@@ -7891,7 +7891,7 @@ export function QueueDetailChangeFacts({ prs }: { prs: readonly Change[] }) {
 /**
  * The one compact round-6 timing sentence:
  * `Started HH:MM:SS, ended HH:MM:SS (total M:SS, wait N)`.
- * The landing sentence owns the integration proof on its separate row, so the SHA is never
+ * The merge sentence owns the integration proof on its separate row, so the SHA is never
  * duplicated here.
  */
 function queueRunTimingRow(data: QueueShowData): string | undefined {
@@ -7982,7 +7982,7 @@ function CompactQueueShowView({
   showMembers?: boolean
   /** False when the surrounding inline output list owns locations/artifact names. */
   showLogArtifacts?: boolean
-  /** False when a workflow tab owns landing facts (Round-6 Revision B). */
+  /** False when a workflow tab owns merge facts (Round-6 Revision B). */
   showIntegration?: boolean
   /** False when the persistent RUN header already owns timing. */
   showTiming?: boolean
@@ -8150,7 +8150,7 @@ export function QueueShowView({
   showMembers?: boolean
   /** Compact-only: hide log locations/artifact names owned by the inline output list. */
   showLogArtifacts?: boolean
-  /** Compact-only: keep landing facts out of the run header when a merge tab owns them. */
+  /** Compact-only: keep merging facts out of the run header when a merge tab owns them. */
   showIntegration?: boolean
   /** Compact-only: hide timing when the persistent RUN header owns it. */
   showTiming?: boolean
@@ -8217,7 +8217,7 @@ export function QueueShowView({
             align: "right",
             render: (row) => (row.isolationPart === "-" ? "-" : row.isolationPart),
           },
-          { header: "INTEGRATION", key: "landing", grow: true },
+          { header: "INTEGRATION", key: "merge", grow: true },
         ]}
         padding={1}
       />

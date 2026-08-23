@@ -42,7 +42,7 @@ function failureText(error: unknown): string {
   return error instanceof Error && error.message.trim() !== "" ? error.message.trim() : String(error)
 }
 
-/** Prove, for every PR whose recorded state claims its content never landed,
+/** Prove, for every PR whose recorded state claims its content never merged,
  * whether that revision's head is already reachable from its base tip.
  *
  * The live specimen (22376): an author withdrawal arrived on top of a completed

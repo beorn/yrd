@@ -117,7 +117,7 @@ describe("gatherPushedRefFact", () => {
     expect(fact.pinDirection).not.toBe("aligned")
   })
 
-  it("takes the WORST direction across several components", async () => {
+  it("takes the WORST direction across several submodules", async () => {
     const git = scriptedGit({
       ...BASELINE,
       [`${REPO} diff --name-only ${BASE}...task/x`]: "vendor/yrd\nkm",

@@ -288,7 +288,7 @@ describe("queue timeline non-integrated rows", () => {
     expect(wip.oldestOpenMs).toBeNull()
     expect(wip.metrics.terminalAttempts).toBe(0)
     expect(wip.metrics.outcomes.integrated).toBe(0)
-    expect(wip.metrics.throughput.landed).toBe(0)
+    expect(wip.metrics.throughput.merged).toBe(0)
 
     // A submitted PR is open-queue work (it drives the DRAIN gauge) but still
     // contributes no terminal FLOW fact.

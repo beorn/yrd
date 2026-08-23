@@ -33,7 +33,7 @@ async function git(repo: string, args: readonly string[]): Promise<string> {
 
 /**
  * A repo on `main` with an `issue/feature` branch and a bare `origin`, which is
- * what drives the merge step down its remote-landing path — the one that
+ * what drives the merge step down its remote-merge path — the one that
  * prepares a scratch worktree, and the path that died on 2026-08-14.
  */
 async function remoteRepository(): Promise<{ repo: string; remote: string; featureSha: string }> {
@@ -120,7 +120,7 @@ describe("merge scratch lives on the repository filesystem, not the temp dir", (
     )
 
     expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
-    // The queue composes its own landing commit, so assert the PAYLOAD landed
+    // The queue composes its own merge commit, so assert the PAYLOAD merged
     // rather than pinning the candidate sha.
     expect(await git(remote, ["show", "main:feature.txt"])).toBe("feature")
 
@@ -128,7 +128,7 @@ describe("merge scratch lives on the repository filesystem, not the temp dir", (
     expect(added.length).toBeGreaterThan(0)
     for (const path of added) {
       // The invariant: scratch follows the REPOSITORY. On a host whose /tmp is
-      // a tmpfs, that is the whole difference between a landing and an outage.
+      // a tmpfs, that is the whole difference between a merge and an outage.
       expect(path.startsWith(join(repo, ".git", "yrd", "scratch"))).toBe(true)
       // The pre-fix shape was `mkdtemp(join(tmpdir(), "yrd-queue-"))`, i.e. a
       // scratch directory sitting directly in the system temp root.

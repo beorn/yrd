@@ -1,7 +1,7 @@
 /**
- * @failure The graceful-drain notice wraps a multi-row prose paragraph to bare stderr instead of one structured loggily record, colliding with the resident runner's log stream.
+ * @failure The graceful-drain notice wraps a multi-row prose paragraph to bare stderr instead of one structured loggily record, colliding with the habitant runner's log stream.
  * @level l2
- * @consumer @yrd/cli resident follow-runner operators
+ * @consumer @yrd/cli habitant follow-runner operators
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event } from "loggily"
@@ -14,7 +14,7 @@ describe("graceful-drain notice", () => {
     const root = createLogger("yrd", [
       { level: "trace" },
       {
-        // A stderr sink modelling the resident's log stream: reportGracefulShutdown
+        // A stderr sink modelling the habitant's log stream: reportGracefulShutdown
         // must NOT write a bare paragraph to it — only the structured warn record.
         write: (text: string) => stderr.push(text),
         objectMode: false,
@@ -26,7 +26,7 @@ describe("graceful-drain notice", () => {
     reportGracefulShutdown(log, "SIGINT", "/srv/code repo")
     log.end()
 
-    // No bare wrapped paragraph — the resident's stdout/stderr IS a log stream;
+    // No bare wrapped paragraph — the habitant's stdout/stderr IS a log stream;
     // exactly one formatted warn record reaches it.
     expect(stderr.join("").split("\n").filter(Boolean)).toHaveLength(1)
     expect(stderr.join("")).toContain("WARN yrd:runner")

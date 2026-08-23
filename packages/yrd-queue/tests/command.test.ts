@@ -168,7 +168,7 @@ async function hookedSubmoduleRepository(options: {
    * together. `"pin-only"` and `"code-only"` exist so a gate that reads BOTH
    * halves can be shown to REFUSE when either is missing — the "where either
    * half alone is red" arm of @i/10-merge-queue/coupled-pin-and-code, which no
-   * test expressed before. Landing green is not the claim; landing green under
+   * test expressed before. Merge green is not the claim; merge green under
    * a gate that could have failed is. */
   carry?: "both" | "pin-only" | "code-only"
 }): Promise<{ repo: string; remote: string; baseSha: string; featureSha: string; moduleSha: string }> {
@@ -870,7 +870,7 @@ type CarrierSubmission = Readonly<{
 }>
 
 /** Exercise the supported authored-root intake path used by tests whose real
- * subject is downstream candidate checking, reachability, or landing. */
+ * subject is downstream candidate checking, reachability, or merge. */
 async function submitCertifiedCarrier(
   app: CarrierSubmissionApp,
   repo: string,
@@ -1581,7 +1581,7 @@ describe("Queue command adapters", () => {
           code: "authored-gitlink",
           message: expect.stringMatching(
             new RegExp(
-              `${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary change.*(?:git cherry <estate-pin> <component-main>|FF is a no-op|dragged set)`,
+              `${fixture.gitlinkModify.sha}.*get commit '[0-9a-f]{40}' onto .*'s own main, then submit an ordinary change.*(?:git cherry <estate-pin> <submodule-main>|FF is a no-op|dragged set)`,
               "su",
             ),
           ),
@@ -1614,7 +1614,7 @@ describe("Queue command adapters", () => {
     repo: string
     initialSha: string
     sourceBaseSha: string
-    floorPin: string
+    minCommitPin: string
     advancedPin: string
     unrelatedPin: string
   }> {
@@ -1636,7 +1636,7 @@ describe("Queue command adapters", () => {
       repo,
       initialSha,
       sourceBaseSha,
-      floorPin: await pin("floor"),
+      minCommitPin: await pin("min-commit"),
       advancedPin: await pin("advanced"),
       unrelatedPin: await pin("unrelated"),
     }
@@ -1645,7 +1645,7 @@ describe("Queue command adapters", () => {
   it("certifies a recut that preserves an authored gitlink floor verbatim", async () => {
     const fixture = await gitlinkCertificateRepository()
     await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
@@ -1655,7 +1655,7 @@ describe("Queue command adapters", () => {
     // An independently-produced recut with the identical tree: a real rebase
     // always mints a new commit sha even when nothing about the content moved.
     await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "recut: bump dep to floor + code"])
@@ -1683,14 +1683,14 @@ describe("Queue command adapters", () => {
   it("certifies a recut that adopts the target's advanced value at the candidate base", async () => {
     const fixture = await gitlinkCertificateRepository()
     await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
     const sourceHeadSha = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["switch", "-q", "main"])
 
-    // main independently advances dep past the floor before the recut lands.
+    // main independently advances dep past the floor before the recut merges.
     await writeFile(join(fixture.repo, "upstream.txt"), "upstream\n")
     await git(fixture.repo, ["add", "upstream.txt"])
     await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.advancedPin},dep`])
@@ -1730,7 +1730,7 @@ describe("Queue command adapters", () => {
   it("refuses a recut that changes a gitlink to an unrelated value, naming both", async () => {
     const fixture = await gitlinkCertificateRepository()
     await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
@@ -1766,7 +1766,7 @@ describe("Queue command adapters", () => {
         kind: "refusal",
         code: "authored-gitlink",
         message: expect.stringMatching(
-          new RegExp(`'dep' expected '${fixture.floorPin}', actual '${fixture.unrelatedPin}'`),
+          new RegExp(`'dep' expected '${fixture.minCommitPin}', actual '${fixture.unrelatedPin}'`),
         ),
       },
     })
@@ -1784,7 +1784,7 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["switch", "-qc", "issue/candidate", fixture.sourceBaseSha])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await git(fixture.repo, ["commit", "-qm", "recut: code + an unreviewed dep bump"])
     const candidateSha = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["switch", "-q", "main"])
@@ -1807,7 +1807,7 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "authored-gitlink",
-        message: expect.stringMatching(new RegExp(`'dep' expected 'absent', actual '${fixture.floorPin}'`)),
+        message: expect.stringMatching(new RegExp(`'dep' expected 'absent', actual '${fixture.minCommitPin}'`)),
       },
     })
   })
@@ -1815,7 +1815,7 @@ describe("Queue command adapters", () => {
   it("refuses a recut that drops a gitlink bump the source authored", async () => {
     const fixture = await gitlinkCertificateRepository()
     await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
@@ -1850,7 +1850,7 @@ describe("Queue command adapters", () => {
         kind: "refusal",
         code: "authored-gitlink",
         message: expect.stringMatching(
-          new RegExp(`'dep' expected '${fixture.floorPin}', actual '${fixture.initialSha}'`),
+          new RegExp(`'dep' expected '${fixture.minCommitPin}', actual '${fixture.initialSha}'`),
         ),
       },
     })
@@ -1897,7 +1897,7 @@ describe("Queue command adapters", () => {
   it("keeps the certified patch id stable across differing but admissible gitlink values", async () => {
     const fixture = await gitlinkCertificateRepository()
     await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "bump dep to floor + code"])
@@ -1915,7 +1915,7 @@ describe("Queue command adapters", () => {
 
     // Candidate a: dep stays exactly the reviewed floor.
     await git(fixture.repo, ["switch", "-qc", "issue/candidate-verbatim", fixture.sourceBaseSha])
-    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.floorPin},dep`])
+    await git(fixture.repo, ["update-index", "--cacheinfo", `160000,${fixture.minCommitPin},dep`])
     await writeFile(join(fixture.repo, "code.txt"), "code a\n")
     await git(fixture.repo, ["add", "code.txt"])
     await git(fixture.repo, ["commit", "-qm", "recut a: verbatim floor"])
@@ -2143,7 +2143,7 @@ describe("Queue command adapters", () => {
     },
   )
 
-  it("refuses altered or missing frozen code-carrier endpoints without landing them", async () => {
+  it("refuses altered or missing frozen code-carrier endpoints without merging them", async () => {
     const fixture = await codeCarrierProposalRepository()
     await using process = createProcess()
     const remerge = await remergeProposedCodeCarrier(
@@ -2849,13 +2849,13 @@ describe("Queue command adapters", () => {
   })
 
   // @i/10-merge-queue/coupled-pin-and-code box 4: "a regression proves the unit
-  // lands green WHERE EITHER HALF ALONE IS RED."
+  // merges green WHERE EITHER HALF ALONE IS RED."
   //
-  // The coupled landing test directly above gates its run with ["true"] — a
+  // The coupled merge test directly above gates its run with ["true"] — a
   // check that cannot fail — and then asserts only `ls-tree dep`. So it proves
   // the gitlink survived a gate incapable of judging it, and says nothing about
-  // the root half at all. Landing green is not the claim the bead makes;
-  // landing green under a gate that COULD have failed is.
+  // the root half at all. Merge green is not the claim the bead makes;
+  // merge green under a gate that COULD have failed is.
   //
   // These three share one coupling-sensitive gate that reads the submodule's
   // content AND a root file. The green below is only worth anything because the
@@ -2867,7 +2867,7 @@ describe("Queue command adapters", () => {
       "test -f feature.txt",
   )
 
-  it("lands a coupled gitlink and root change as one unit under a gate that reads both halves", async () => {
+  it("merges a coupled gitlink and root change as one unit under a gate that reads both halves", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -3194,7 +3194,7 @@ describe("Queue command adapters", () => {
       code: "carrier-drops-landed",
       message: expect.stringContaining("advance base conflicting"),
     })
-    // The conflicting change never landed.
+    // The conflicting change never merged.
     expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
   })
 
@@ -3298,7 +3298,7 @@ describe("Queue command adapters", () => {
 
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion).toBe("success")
-    // The advanced root file and the composed dep pin both landed.
+    // The advanced root file and the composed dep pin both merged.
     expect(await git(repo, ["show", "main:unrelated-root.txt"])).toContain("advanced")
   })
 
@@ -3491,7 +3491,7 @@ describe("Queue command adapters", () => {
     }
   })
 
-  it("rolls back a remote root landing when an immutable source Candidate ref disappears", async () => {
+  it("rolls back a remote root merge when an immutable source Candidate ref disappears", async () => {
     const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     const remote = join(repo, "..", "root-origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -3858,7 +3858,7 @@ describe("Queue command adapters", () => {
     )
   }, 30_000)
 
-  it("refuses an already-resolved stale merge tip that would cleanly drop landed commits", async () => {
+  it("refuses an already-resolved stale merge tip that would cleanly drop merged commits", async () => {
     const { repo } = await repository()
     const originalBase = await git(repo, ["rev-parse", "main"])
     await git(repo, ["switch", "-qc", "issue/stale-carrier", originalBase])
@@ -3866,21 +3866,21 @@ describe("Queue command adapters", () => {
     await git(repo, ["add", "carrier.txt"])
     await git(repo, ["commit", "-qm", "carrier payload"])
     await git(repo, ["switch", "-q", "main"])
-    await writeFile(join(repo, "earlier-landing.txt"), "already resolved\n")
-    await git(repo, ["add", "earlier-landing.txt"])
-    await git(repo, ["commit", "-qm", "landing already resolved into carrier"])
+    await writeFile(join(repo, "earlier-merge.txt"), "already resolved\n")
+    await git(repo, ["add", "earlier-merge.txt"])
+    await git(repo, ["commit", "-qm", "merge already resolved into carrier"])
     const resolvedBase = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-q", "issue/stale-carrier"])
     await git(repo, ["merge", "-q", "--no-ff", "main", "-m", "resolve carrier against older main"])
     const carrierHead = await git(repo, ["rev-parse", "HEAD"])
     const carrierTree = await git(repo, ["rev-parse", "HEAD^{tree}"])
     await git(repo, ["switch", "-q", "main"])
-    await writeFile(join(repo, "protected-landing.txt"), "must survive\n")
-    await git(repo, ["add", "protected-landing.txt"])
-    await git(repo, ["commit", "-qm", "protected landing after carrier resolution"])
-    await writeFile(join(repo, "second-protected-landing.txt"), "must also survive\n")
-    await git(repo, ["add", "second-protected-landing.txt"])
-    await git(repo, ["commit", "-qm", "second protected landing after carrier resolution"])
+    await writeFile(join(repo, "protected-merge.txt"), "must survive\n")
+    await git(repo, ["add", "protected-merge.txt"])
+    await git(repo, ["commit", "-qm", "protected merge after carrier resolution"])
+    await writeFile(join(repo, "second-protected-merge.txt"), "must also survive\n")
+    await git(repo, ["add", "second-protected-merge.txt"])
+    await git(repo, ["commit", "-qm", "second protected merge after carrier resolution"])
     const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
     const dropped = await git(repo, ["log", "--oneline", `${carrierHead}..${queueBaseHead}`])
 
@@ -3917,18 +3917,18 @@ describe("Queue command adapters", () => {
         kind: "refusal",
         code: "carrier-drops-landed",
         message: expect.stringMatching(
-          /second protected landing after carrier resolution.*protected landing after carrier resolution.*linear.*current base/isu,
+          /second protected merge after carrier resolution.*protected merge after carrier resolution.*linear.*current base/isu,
         ),
       },
     })
-    expect(dropped).toContain("protected landing after carrier resolution")
-    expect(dropped).toContain("second protected landing after carrier resolution")
+    expect(dropped).toContain("protected merge after carrier resolution")
+    expect(dropped).toContain("second protected merge after carrier resolution")
   })
 
   /**
    * REGRESSION PIN, not a red-then-green: the guard this asserts already works.
    * `inspectBaseContainment` tests containment in BOTH directions — base ⊆ head
-   * (up to date) and head ⊆ base (already landed, command.ts:2783-2786) — so a
+   * (up to date) and head ⊆ base (already merged, command.ts:2783-2786) — so a
    * SPENT carrier is not refused today. That second direction had no direct test,
    * which is what this closes.
    *
@@ -3949,11 +3949,11 @@ describe("Queue command adapters", () => {
     const carrierHead = await git(repo, ["rev-parse", "HEAD"])
     const carrierTree = await git(repo, ["rev-parse", "HEAD^{tree}"])
     await git(repo, ["switch", "-q", "main"])
-    // The carrier's own head lands on main by another route, then main moves on.
-    await git(repo, ["merge", "-q", "--no-ff", carrierHead, "-m", "land the carrier payload"])
+    // The carrier's own head merges on main by another route, then main moves on.
+    await git(repo, ["merge", "-q", "--no-ff", carrierHead, "-m", "merge the carrier payload"])
     await writeFile(join(repo, "later.txt"), "later work\n")
     await git(repo, ["add", "later.txt"])
-    await git(repo, ["commit", "-qm", "later landing"])
+    await git(repo, ["commit", "-qm", "later merge"])
     const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
 
     // The two facts that together define SPENT. `git()` throws on a non-zero
@@ -4002,37 +4002,37 @@ describe("Queue command adapters", () => {
   /**
    * The residual case ancestry cannot reach. Every guard above this one asks
    * whether the carrier CONTAINS the base; this carrier does, and still erases a
-   * landing. A criss-cross gives the carrier and the base two merge bases, `ort`
+   * merge. A criss-cross gives the carrier and the base two merge bases, `ort`
    * resolves against a virtual base built from both, and the deletion it resolves
    * appears in neither the conflict output nor the carrier's authored diff.
    */
-  it("refuses a clean merge that deletes a landed path the carrier never authored deleting", async () => {
+  it("refuses a clean merge that deletes a merged path the carrier never authored deleting", async () => {
     const { repo } = await repository()
     const originalBase = await git(repo, ["rev-parse", "main"])
 
-    // Two concurrent lines off the same base: one lands a file, one does not.
+    // Two concurrent lines off the same base: one merges a file, one does not.
     await git(repo, ["switch", "-qc", "issue/sibling", originalBase])
     await writeFile(join(repo, "sibling.txt"), "sibling\n")
     await git(repo, ["add", "sibling.txt"])
     await git(repo, ["commit", "-qm", "sibling work"])
     const siblingSha = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-qc", "issue/mint", originalBase])
-    await writeFile(join(repo, "landed-mint.md"), "mint\n")
-    await git(repo, ["add", "landed-mint.md"])
-    await git(repo, ["commit", "-qm", "land the mint"])
+    await writeFile(join(repo, "merged-mint.md"), "mint\n")
+    await git(repo, ["add", "merged-mint.md"])
+    await git(repo, ["commit", "-qm", "merge the mint"])
     const mintSha = await git(repo, ["rev-parse", "HEAD"])
 
-    // The queue base absorbs both, so the mint is landed work.
+    // The queue base absorbs both, so the mint is merged work.
     await git(repo, ["switch", "-q", "main"])
-    await git(repo, ["merge", "-q", "--no-ff", siblingSha, "-m", "land sibling work"])
-    await git(repo, ["merge", "-q", "--no-ff", mintSha, "-m", "land the mint"])
+    await git(repo, ["merge", "-q", "--no-ff", siblingSha, "-m", "merge sibling work"])
+    await git(repo, ["merge", "-q", "--no-ff", mintSha, "-m", "merge the mint"])
     const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
 
     // The carrier absorbs the same two lines in the other order and resolves by
     // dropping the mint, then continues linearly so its tip is not a merge tip.
     await git(repo, ["switch", "-q", "issue/mint"])
     await git(repo, ["merge", "--no-ff", "--no-commit", siblingSha])
-    await git(repo, ["rm", "-q", "landed-mint.md"])
+    await git(repo, ["rm", "-q", "merged-mint.md"])
     await git(repo, ["commit", "-qm", "recomposed tree drops the mint"])
     await writeFile(join(repo, "carrier.txt"), "carrier payload\n")
     await git(repo, ["add", "carrier.txt"])
@@ -4071,12 +4071,12 @@ describe("Queue command adapters", () => {
       failure: {
         kind: "refusal",
         code: "unauthored-path-deletion",
-        message: expect.stringMatching(/landed-mint\.md.*authored diff.*linear/isu),
+        message: expect.stringMatching(/merged-mint\.md.*authored diff.*linear/isu),
       },
     })
   })
 
-  it("lands a carrier that authors its own deletion", async () => {
+  it("merges a carrier that authors its own deletion", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "doomed.txt"), "doomed\n")
     await git(repo, ["add", "doomed.txt"])
@@ -4116,12 +4116,12 @@ describe("Queue command adapters", () => {
     expect(tree).not.toContain("doomed.txt")
   })
 
-  it("refuses one candidate when its source store vanishes mid-landing, never spawning git there", async () => {
-    // The landing-path sibling of the reference-borrow defect: proving a source
+  it("refuses one candidate when its source store vanishes mid-merge, never spawning git there", async () => {
+    // The merge-path sibling of the reference-borrow defect: proving a source
     // candidate ref spawns git in join(repo, <gitlink>). A source store that
     // disappears after preparation makes that an absent working directory, which
     // fails inside posix_spawn — an untyped ENOENT no allowFailure can contain,
-    // and the death that took the resident runner down mid-admission. It is one
+    // and the death that took the habitant runner down mid-admission. It is one
     // candidate's condition, so it belongs in this function's per-candidate
     // refusal, with the root branch left untouched.
     const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
@@ -4189,7 +4189,7 @@ describe("Queue command adapters", () => {
    * distinct feature marker in the SAME file, the carrier's own resolution keeps
    * only its own marker, and the criss-cross makes the merge apply that
    * resolution against the virtual base. No path is deleted, so the deletion
-   * guard cannot see it; nothing conflicts, so nobody is asked; a landed feature
+   * guard cannot see it; nothing conflicts, so nobody is asked; a merged feature
    * is simply gone from a merge with full ancestry.
    */
   const NEUTRAL_LINES = Array.from({ length: 40 }, (_, index) => `export const line${index + 1} = ${index + 1}`)
@@ -4206,27 +4206,27 @@ describe("Queue command adapters", () => {
       ...(markers.beta === true ? [FEATURE_BETA] : []),
     ].join("\n") + "\n"
 
-  it("refuses a clean merge whose result drops a landed feature marker neither parent authored removing", async () => {
+  it("refuses a clean merge whose result drops a merged feature marker neither parent authored removing", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "features.ts"), featuresFile({}))
     await git(repo, ["add", "features.ts"])
-    await git(repo, ["commit", "-qm", "the file both features land in"])
+    await git(repo, ["commit", "-qm", "the file both features merge in"])
     const originalBase = await git(repo, ["rev-parse", "HEAD"])
 
-    // Two concurrent lines off the same base, each landing its own marker.
+    // Two concurrent lines off the same base, each merge its own marker.
     await git(repo, ["switch", "-qc", "issue/alpha", originalBase])
     await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true }))
-    await git(repo, ["commit", "-qam", "land the alpha feature"])
+    await git(repo, ["commit", "-qam", "merge the alpha feature"])
     const alphaSha = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-qc", "issue/beta", originalBase])
     await writeFile(join(repo, "features.ts"), featuresFile({ beta: true }))
-    await git(repo, ["commit", "-qam", "land the beta feature"])
+    await git(repo, ["commit", "-qam", "merge the beta feature"])
     const betaSha = await git(repo, ["rev-parse", "HEAD"])
 
-    // The queue base absorbs both, so BOTH markers are landed work.
+    // The queue base absorbs both, so BOTH markers are merged work.
     await git(repo, ["switch", "-q", "main"])
-    await git(repo, ["merge", "-q", "--no-ff", alphaSha, "-m", "land alpha"])
-    await git(repo, ["merge", "-q", "--no-ff", betaSha, "-m", "land beta"])
+    await git(repo, ["merge", "-q", "--no-ff", alphaSha, "-m", "merge alpha"])
+    await git(repo, ["merge", "-q", "--no-ff", betaSha, "-m", "merge beta"])
     const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
 
     // The carrier absorbs the same two lines in the other order and resolves by
@@ -4243,7 +4243,7 @@ describe("Queue command adapters", () => {
 
     // The facts that make this the residual case rather than any guard above it.
     // `git()` throws on a non-zero exit, so the ancestry call is itself the
-    // assertion that the carrier contains the landed alpha commit.
+    // assertion that the carrier contains the merged alpha commit.
     await git(repo, ["merge-base", "--is-ancestor", alphaSha, carrierHead])
     expect(await git(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
     expect(await git(repo, ["show", `${queueBaseHead}:features.ts`])).toContain(FEATURE_ALPHA)
@@ -4292,25 +4292,25 @@ describe("Queue command adapters", () => {
    * removed on its own branch, against every merge base. Authorship, not
    * criss-cross-ness, is what the witness rules on.
    */
-  it("lands a criss-cross merge whose removal the carrier itself authored, with both features intact", async () => {
+  it("merges a criss-cross merge whose removal the carrier itself authored, with both features intact", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "features.ts"), featuresFile({ doomed: true }))
     await git(repo, ["add", "features.ts"])
-    await git(repo, ["commit", "-qm", "the file both features land in"])
+    await git(repo, ["commit", "-qm", "the file both features merge in"])
     const originalBase = await git(repo, ["rev-parse", "HEAD"])
 
     await git(repo, ["switch", "-qc", "issue/alpha", originalBase])
     await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true, doomed: true }))
-    await git(repo, ["commit", "-qam", "land the alpha feature"])
+    await git(repo, ["commit", "-qam", "merge the alpha feature"])
     const alphaSha = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-qc", "issue/beta", originalBase])
     await writeFile(join(repo, "features.ts"), featuresFile({ beta: true, doomed: true }))
-    await git(repo, ["commit", "-qam", "land the beta feature"])
+    await git(repo, ["commit", "-qam", "merge the beta feature"])
     const betaSha = await git(repo, ["rev-parse", "HEAD"])
 
     await git(repo, ["switch", "-q", "main"])
-    await git(repo, ["merge", "-q", "--no-ff", alphaSha, "-m", "land alpha"])
-    await git(repo, ["merge", "-q", "--no-ff", betaSha, "-m", "land beta"])
+    await git(repo, ["merge", "-q", "--no-ff", alphaSha, "-m", "merge alpha"])
+    await git(repo, ["merge", "-q", "--no-ff", betaSha, "-m", "merge beta"])
     const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
 
     // Same criss-cross; the resolution keeps both markers, and a separate,
@@ -4349,23 +4349,23 @@ describe("Queue command adapters", () => {
     expect(mergedFeatures).not.toContain("DOOMED")
   })
 
-  it("lands an ordinary merge that carries both parents' markers into the same file", async () => {
+  it("merges an ordinary merge that carries both parents' markers into the same file", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "features.ts"), featuresFile({}))
     await git(repo, ["add", "features.ts"])
-    await git(repo, ["commit", "-qm", "the file both features land in"])
+    await git(repo, ["commit", "-qm", "the file both features merge in"])
     const originalBase = await git(repo, ["rev-parse", "HEAD"])
 
     await git(repo, ["switch", "-qc", "issue/alpha", originalBase])
     await writeFile(join(repo, "features.ts"), featuresFile({ alpha: true }))
-    await git(repo, ["commit", "-qam", "land the alpha feature"])
+    await git(repo, ["commit", "-qam", "merge the alpha feature"])
     await git(repo, ["switch", "-q", "main"])
-    await git(repo, ["merge", "-q", "--no-ff", "issue/alpha", "-m", "land alpha"])
+    await git(repo, ["merge", "-q", "--no-ff", "issue/alpha", "-m", "merge alpha"])
     const queueBaseHead = await git(repo, ["rev-parse", "HEAD"])
 
     await git(repo, ["switch", "-qc", "issue/beta", originalBase])
     await writeFile(join(repo, "features.ts"), featuresFile({ beta: true }))
-    await git(repo, ["commit", "-qam", "land the beta feature"])
+    await git(repo, ["commit", "-qam", "merge the beta feature"])
     const carrierHead = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-q", "main"])
 
@@ -4596,7 +4596,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("lands a disjoint source delete with exact payload identity", async () => {
+  it("merges a disjoint source delete with exact payload identity", async () => {
     const { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
       sourcePath: "src/delete.ts",
       sourceDelete: true,
@@ -4810,7 +4810,7 @@ describe("Queue command adapters", () => {
     await Bun.sleep(30)
     const recovered = await stalled.app.queue.recover({
       // Advance the operator's recovery cutoff beyond the still-live lease;
-      // the resident heartbeat has not yet sampled, so external recovery owns
+      // the habitant heartbeat has not yet sampled, so external recovery owns
       // this transition deterministically instead of racing self-settlement.
       recoveryTime: new Date(Date.now() + 1_000).toISOString(),
     })
@@ -6577,7 +6577,7 @@ describe("Queue command adapters", () => {
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
-  it("lands the exact audited candidate and its durable artifacts", async () => {
+  it("merges the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     await using app = await checkedQueue(
@@ -6691,7 +6691,7 @@ describe("Queue command adapters", () => {
     expect(eventNames).not.toContain("pr/needs-author")
   })
 
-  it("lands from origin when the base has no local branch without moving detached HEAD", async () => {
+  it("merges from origin when the base has no local branch without moving detached HEAD", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
     await git(repo, ["update-ref", "refs/remotes/origin/main", baseSha])
@@ -7451,7 +7451,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("checks and lands one combined candidate for a passing batch", async () => {
+  it("checks and merges one combined candidate for a passing batch", async () => {
     const { repo, one: firstSha, two: secondSha } = await repository("one", "two")
     await using process = createProcess()
     await using app = await checkedQueue(
@@ -7478,7 +7478,7 @@ describe("Queue command adapters", () => {
     await expectMerged(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
-  it("proves a regenerated code landing by Change-Id when the submitted SHA is absent from base ancestry", async () => {
+  it("proves a regenerated code merge by Change-Id when the submitted SHA is absent from base ancestry", async () => {
     const { repo } = await repository()
     const changeId = `I${"1".repeat(40)}`
     const otherChangeId = `I${"2".repeat(40)}`
@@ -7518,7 +7518,7 @@ describe("Queue command adapters", () => {
     ).resolves.toEqual({ status: "not-proven", reason: "change-id-not-on-base" })
   })
 
-  it("checks and lands the exact Change-Id-stamped Candidate", async () => {
+  it("checks and merges the exact Change-Id-stamped Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
@@ -7690,7 +7690,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("lands the checked candidate through origin without touching a dirty local base checkout", async () => {
+  it("merges the checked candidate through origin without touching a dirty local base checkout", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -8330,7 +8330,7 @@ describe("Queue command adapters", () => {
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
-  it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
+  it("merges the final gitlink after composing the same submodule twice in one batch", async () => {
     const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await git(module, ["switch", "-qc", "issue/source-two", oldPinSha])
     await mkdir(join(module, "src"), { recursive: true })
@@ -8457,10 +8457,10 @@ describe("Queue command adapters", () => {
   })
 
   it.each(["native", "configured"] as const)(
-    "advances submodule main when a root gitlink lands (%s)",
+    "advances submodule main when a root gitlink merges (%s)",
     async (mode) => {
       // The task branch advances again after publishing the pin, matching the
-      // production sequence that made the post-landing actuator necessary.
+      // production sequence that made the post-merge actuator necessary.
       const fixture = await submoduleMainMergeRepository({ pushSuccessor: true })
       expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.submoduleBaseSha)
 
@@ -8622,11 +8622,11 @@ describe("Queue command adapters", () => {
   }, 20_000)
 
   it.each(["native", "configured"] as const)(
-    "converges a component-main gap left by an earlier root-only landing while landing a later PR (%s)",
+    "converges a submodule-main gap left by an earlier root-only merging while merging a later PR (%s)",
     async (mode) => {
       const fixture = await submoduleMainMergeRepository()
 
-      // Preserve the production R2715 residue: the root pin landed, but its
+      // Preserve the production R2715 residue: the root pin merged, but its
       // submodule main never advanced. The next carrier does not touch the
       // gitlink, so changed-pin-only planning cannot see the standing gap.
       await git(fixture.repo, ["push", "-q", "origin", `${fixture.featureSha}:refs/heads/main`])
@@ -8668,7 +8668,7 @@ describe("Queue command adapters", () => {
       const fixture = await multiSubmoduleMainMergeRepository()
       const [divergentSubmodule, safeSubmodule] = fixture.submodules
       if (divergentSubmodule === undefined || safeSubmodule === undefined) {
-        throw new Error("missing multi-component fixture")
+        throw new Error("missing multi-submodule fixture")
       }
 
       const divergentWorktree = join(fixture.repo, "..", "divergent-component-main")
@@ -8681,7 +8681,7 @@ describe("Queue command adapters", () => {
       const divergentMainSha = await git(divergentWorktree, ["rev-parse", "HEAD"])
       await git(divergentWorktree, ["push", "-q", "origin", "main"])
 
-      // Preserve a root-only landing with two standing submodule gaps. The
+      // Preserve a root-only merge with two standing submodule gaps. The
       // first origin now needs a compose; the second remains a plain FF.
       await git(fixture.repo, ["push", "-q", "origin", `${fixture.featureSha}:refs/heads/main`])
       await git(fixture.repo, ["switch", "-q", "issue/feature"])
@@ -8779,7 +8779,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
   }, 20_000)
 
-  it("refuses a non-ancestral submodule main without landing or force-pushing", async () => {
+  it("refuses a non-ancestral submodule main without merging or force-pushing", async () => {
     const fixture = await submoduleMainMergeRepository()
     await git(fixture.submodule, ["switch", "-q", "main"])
     await writeFile(join(fixture.submodule, "divergent.txt"), "divergent main\n")
@@ -8862,7 +8862,7 @@ describe("Queue command adapters", () => {
   it("does not roll the submodule back for a clean-headed carrier that moves the gitlink backward", async () => {
     const fixture = await submoduleMainMergeRepository()
 
-    // Component main absorbs the pinned work, and the root advances its gitlink
+    // Submodule main absorbs the pinned work, and the root advances its gitlink
     // to match, so the carrier below branches from a base that is fully current.
     await git(fixture.submodule, ["switch", "-q", "main"])
     await git(fixture.submodule, ["merge", "-q", "--ff-only", fixture.pinSha])
@@ -8924,12 +8924,12 @@ describe("Queue command adapters", () => {
   it("does not tell a spent submodule pin to rebuild when submodule main already contains it", async () => {
     const fixture = await submoduleMainMergeRepository()
 
-    // The submodule lands the pinned work and moves on.
+    // The submodule merges the pinned work and moves on.
     await git(fixture.submodule, ["switch", "-q", "main"])
-    await git(fixture.submodule, ["merge", "-q", "--no-ff", fixture.pinSha, "-m", "land the pinned submodule work"])
+    await git(fixture.submodule, ["merge", "-q", "--no-ff", fixture.pinSha, "-m", "merge the pinned submodule work"])
     await writeFile(join(fixture.submodule, "later.txt"), "later\n")
     await git(fixture.submodule, ["add", "later.txt"])
-    await git(fixture.submodule, ["commit", "-qm", "later submodule landing"])
+    await git(fixture.submodule, ["commit", "-qm", "later submodule merge"])
     const submoduleMain = await git(fixture.submodule, ["rev-parse", "HEAD"])
     await git(fixture.submodule, ["push", "-q", "origin", "main"])
 
@@ -8993,7 +8993,7 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["add", "dep"])
     await writeFile(join(fixture.repo, "unrelated.txt"), "root moved on\n")
     await git(fixture.repo, ["add", "unrelated.txt"])
-    await git(fixture.repo, ["commit", "-qm", "promote dependency and land unrelated work"])
+    await git(fixture.repo, ["commit", "-qm", "promote dependency and merge unrelated work"])
     const movedBase = await git(fixture.repo, ["rev-parse", "HEAD"])
     await git(fixture.repo, ["push", "-q", "origin", "main"])
 
@@ -9022,7 +9022,7 @@ describe("Queue command adapters", () => {
   it("keeps the rebuild remedy when submodule main has the work but the base's pin does not", async () => {
     const fixture = await submoduleMainMergeRepository()
 
-    // The submodule lands the pinned work, but nothing promotes root's gitlink —
+    // The submodule merges the pinned work, but nothing promotes root's gitlink —
     // so this carrier is still the one that would deliver it.
     await git(fixture.submodule, ["switch", "-q", "main"])
     await git(fixture.submodule, ["merge", "-q", "--ff-only", fixture.pinSha])
@@ -9039,7 +9039,7 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["switch", "-q", "main"])
     await writeFile(join(fixture.repo, "unrelated.txt"), "root moved on\n")
     await git(fixture.repo, ["add", "unrelated.txt"])
-    await git(fixture.repo, ["commit", "-qm", "unrelated root landing"])
+    await git(fixture.repo, ["commit", "-qm", "unrelated root merge"])
     await git(fixture.repo, ["push", "-q", "origin", "main"])
 
     // The base's gitlink is still behind the carrier's pin: there is real work in
@@ -9061,9 +9061,9 @@ describe("Queue command adapters", () => {
   it("refuses a stale resolved submodule pin and enumerates the submodule commits it would drop", async () => {
     const fixture = await submoduleMainMergeRepository()
     await git(fixture.submodule, ["switch", "-q", "main"])
-    await writeFile(join(fixture.submodule, "earlier-landing.txt"), "already resolved\n")
-    await git(fixture.submodule, ["add", "earlier-landing.txt"])
-    await git(fixture.submodule, ["commit", "-qm", "submodule landing already resolved"])
+    await writeFile(join(fixture.submodule, "earlier-merge.txt"), "already resolved\n")
+    await git(fixture.submodule, ["add", "earlier-merge.txt"])
+    await git(fixture.submodule, ["commit", "-qm", "submodule merge already resolved"])
     await git(fixture.submodule, ["switch", "-q", "task/submodule"])
     await git(fixture.submodule, ["merge", "-q", "--no-ff", "main", "-m", "resolve submodule carrier"])
     const resolvedPin = await git(fixture.submodule, ["rev-parse", "HEAD"])
@@ -9080,9 +9080,9 @@ describe("Queue command adapters", () => {
     await git(fixture.repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
 
     await git(fixture.submodule, ["switch", "-q", "main"])
-    await writeFile(join(fixture.submodule, "protected-component-landing.txt"), "must survive\n")
-    await git(fixture.submodule, ["add", "protected-component-landing.txt"])
-    await git(fixture.submodule, ["commit", "-qm", "protected submodule landing after resolution"])
+    await writeFile(join(fixture.submodule, "protected-component-merge.txt"), "must survive\n")
+    await git(fixture.submodule, ["add", "protected-component-merge.txt"])
+    await git(fixture.submodule, ["commit", "-qm", "protected submodule merge after resolution"])
     const submoduleMain = await git(fixture.submodule, ["rev-parse", "HEAD"])
     await git(fixture.submodule, ["push", "-q", "origin", "main"])
     expect(await git(fixture.submodule, ["merge-tree", "--write-tree", submoduleMain, resolvedPin])).toMatch(
@@ -9104,14 +9104,14 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "carrier-drops-landed",
-        message: expect.stringMatching(/protected submodule landing after resolution.*linear.*current base/isu),
+        message: expect.stringMatching(/protected submodule merge after resolution.*linear.*current base/isu),
       },
     })
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(submoduleMain)
   }, 20_000)
 
-  it("leaves the root landed and converges submodule main when a transient promotion failure is retried", async () => {
+  it("leaves the root merged and converges submodule main when a transient promotion failure is retried", async () => {
     const fixture = await submoduleMainMergeRepository()
     await using process = createProcess()
     let failedPromotion = false
@@ -9187,7 +9187,7 @@ describe("Queue command adapters", () => {
     const fixture = await multiSubmoduleMainMergeRepository()
     const [firstSubmodule, secondSubmodule] = fixture.submodules
     if (firstSubmodule === undefined || secondSubmodule === undefined) {
-      throw new Error("missing multi-component fixture")
+      throw new Error("missing multi-submodule fixture")
     }
     await using process = createProcess()
     let failedSecondPromotion = false
@@ -9373,7 +9373,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["rev-parse", checked.candidateRef])).toBe(checked.candidateSha)
   })
 
-  it("preserves remote evidence and lands its pinned candidate", async () => {
+  it("preserves remote evidence and merges its pinned candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     await using app = await checkedQueue(
@@ -9541,7 +9541,7 @@ describe("Queue command adapters", () => {
     },
   )
 
-  it("preserves canceled authority when another actor lands the same native candidate", async () => {
+  it("preserves canceled authority when another actor merges the same native candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -9593,7 +9593,7 @@ describe("Queue command adapters", () => {
     expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "merge-canceled" } })
   })
 
-  it("reconciles a native root push that landed despite its process reporting failure", async () => {
+  it("reconciles a native root push that merged despite its process reporting failure", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -9624,7 +9624,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {
+  it("reconciles the authoritative merge after a delegated merge reports a post-push failure", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -9678,7 +9678,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("reports a broken post-merge ancestry probe instead of claiming the candidate did not land", async () => {
+  it("reports a broken post-merge ancestry probe instead of claiming the candidate did not merge", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     let commandRuns = 0
@@ -9698,7 +9698,7 @@ describe("Queue command adapters", () => {
             exitCode: 128,
             signal: null,
             stdout: "",
-            stderr: "fatal: corrupt commit graph during landing verification",
+            stderr: "fatal: corrupt commit graph during merge verification",
             durationMs: 1,
             timedOut: false,
           })
@@ -9718,7 +9718,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "merge-failed",
-        message: expect.stringContaining("fatal: corrupt commit graph during landing verification"),
+        message: expect.stringContaining("fatal: corrupt commit graph during merge verification"),
       },
     })
     expect(run.error?.message).not.toContain("does not contain")
@@ -9823,7 +9823,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("rolls back a configured root landing when its source Candidate ref disappears", async () => {
+  it("rolls back a configured root merge when its source Candidate ref disappears", async () => {
     const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     const remote = join(repo, "..", "root-origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -9883,7 +9883,7 @@ describe("Queue command adapters", () => {
     expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
   })
 
-  it("fails a delegated merge command that exits zero without landing the PR", async () => {
+  it("fails a delegated merge command that exits zero without merging the PR", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     const bayJobs = createBayJobDefs(unusedWorkspace)
