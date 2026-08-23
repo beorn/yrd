@@ -3,7 +3,7 @@
  *          checkout advanced four times underneath it. The driver-stale page
  *          fired and nothing acted on it: no mechanism existed to notice the gap
  *          and recycle, so the queue kept applying yesterday's gates to today's
- *          landings until an operator restarted the runner by hand.
+ *          merges until an operator restarted the runner by hand.
  * @level   l1
  * @consumer @yrd/cli habitant runner
  *

@@ -743,7 +743,7 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       // names which commits this repository actually has; `rev-list --no-walk`
       // then lists the ones that are NOT reachable from the base tip. Merged is
       // the difference — never the absence of an object, which would let a
-      // shallow or unfetched checkout invent landings.
+      // shallow or unfetched checkout invent merges.
       const presence = git(["cat-file", "--batch-check=%(objectname) %(objecttype)"], [], `${unique.join("\n")}\n`)
       const resolved = new Map<string, string>()
       for (const [index, line] of presence.stdout.trim().split("\n").entries()) {

@@ -4755,7 +4755,7 @@ function noticeExplanation(
   if (state === "stale") {
     const prefix = failureSummary === undefined ? "" : `${failureSummary}. `
     if (failure?.code === "stale-base") {
-      return `${prefix}The base advanced after this revision requested required checks. Automatically re-merge and requeued on the next queue pass.`
+      return `${prefix}The base advanced after this revision requested required checks. Automatically re-merged and requeued on the next queue pass.`
     }
     if (failure?.code === "stale-check") {
       return `${prefix}The checked candidate changed after its required checks. Automatically requeued for fresh checks on the next queue pass.`
@@ -7278,7 +7278,7 @@ function queueGateSummary(data: QueueShowData): string | undefined {
   return gates.map(gateEvidenceLabel).join(", ")
 }
 
-/** Dedupe `X@X` landings (commit == merge sha) to one SHA. */
+/** Dedupe `X@X` merges (commit == merge sha) to one SHA. */
 export function queueMergeLabel(merge: string): string {
   const [commit, base, ...rest] = merge.split("@")
   if (rest.length === 0 && commit !== undefined && base !== undefined && commit === base) return commit
@@ -7325,7 +7325,7 @@ function QueueProofView({ data }: { data: QueueShowData }) {
       )}
       {presentFact(data.merge) === undefined ? null : (
         <Text>
-          LANDING <Text color="$fg-muted">{queueMergeLabel(data.merge)}</Text>
+          MERGE <Text color="$fg-muted">{queueMergeLabel(data.merge)}</Text>
         </Text>
       )}
     </Box>
@@ -7940,7 +7940,7 @@ function QueueStepInternals({ row, issue }: { row: QueueShowRow; issue?: string 
 // The watch detail pane's vertical facts layout (user respec 2026-07-15):
 // stacked label/value rows that always fit the pane width — never a
 // horizontally sprawling table. Only present facts render; timestamps share
-// the timeline's local clock convention; `X@X` landings dedupe to one SHA.
+// the timeline's local clock convention; `X@X` merges dedupe to one SHA.
 /**
  * The compact run/step detail. `section` splits it for the workflow-step tabs
  * (user directive 2026-07-16, item H): `"run"` renders the run-level facts (+

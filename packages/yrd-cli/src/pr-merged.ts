@@ -47,7 +47,7 @@ function failureText(error: unknown): string {
  *
  * The live specimen (22376): an author withdrawal arrived on top of a completed
  * merge, and `pr list` printed only the later write. An author who trusts
- * `withdrawn` re-cuts a branch already on main, and duplicate landings of the
+ * `withdrawn` re-cuts a branch already on main, and duplicate merges of the
  * same content are exactly what the ancestry model cannot clean up afterwards.
  *
  * Git is consulted only when there is such a claim to check, and at most twice

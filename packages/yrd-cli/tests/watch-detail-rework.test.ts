@@ -298,7 +298,7 @@ describe("watch detail composite header + status notice", () => {
       "stale",
       "recut",
       "The base advanced after this revision requested required checks",
-      "Automatically recut and requeued",
+      "Automatically re-merged and requeued",
       "installed step configuration",
     ],
     [
@@ -308,7 +308,7 @@ describe("watch detail composite header + status notice", () => {
       "requeue",
       "The checked candidate changed after its required checks",
       "Automatically requeued",
-      "Automatically recut",
+      "Automatically re-merged",
     ],
     [
       "stale-steps",
@@ -335,7 +335,7 @@ describe("watch detail composite header + status notice", () => {
       "none",
       "The change revision changed after this run was pinned",
       "This historical run will not retry",
-      "Automatically recut",
+      "Automatically re-merged",
     ],
   ] as const)(
     "renders truthful %s ownership and next-action copy",

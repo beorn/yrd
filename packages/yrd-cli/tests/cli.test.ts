@@ -7188,7 +7188,7 @@ describe("runYrd", () => {
     })
     // The 24h metrics window counts only the recent merge.
     expect(projection.metrics.terminalAttempts).toBe(1)
-    // timeStatsFacts span the FULL retained horizon — both landings — so the
+    // timeStatsFacts span the FULL retained horizon — both merges — so the
     // calendar panel never inherits the 24h aggregate window.
     expect(projection.timeStatsFacts.map((f) => f.run).toSorted()).toEqual(["R1", "R2"])
     const buckets = queueStats(projection.timeStatsFacts, now, projection.earliestFactMs, 0)
@@ -14777,7 +14777,7 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(frozen).toContain(HEAD_SHA)
     expect(frozen).not.toContain(liveHead)
     expect(rows.join("\n")).toContain("BRANCH MOVED")
-    expect(rows.join("\n")).toContain("recut before review")
+    expect(rows.join("\n")).toContain("re-merge before review")
     expect(requests.map((request) => request.argv)).toContainEqual([
       "git",
       "-C",
@@ -16192,7 +16192,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         output.stderr(),
       ).toBe(0)
       expect(output.stdout()).toContain("scanned 0 merge records under refs/notes/yrd/merge-records")
-      expect(output.stdout()).toContain("0 changes collapse to 0 distinct landings — rebuilt 0, skipped 0")
+      expect(output.stdout()).toContain("0 changes collapse to 0 distinct merges — rebuilt 0, skipped 0")
     })
 
     it("names the change it cannot rebuild and refuses to call the run clean", async () => {

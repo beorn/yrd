@@ -401,7 +401,7 @@ describe("habitant runner settlement summary", () => {
       prs: [{ pr: "PR411", revision: 2 }],
     })
     expect(visible(formatHabitantLogLine(runSettled, { color: false }))).toBe(
-      "[main#324] settled status=failed class=stale next=auto-recut pr=PR411.2",
+      "[main#324] settled status=failed class=stale next=auto-re-merge pr=PR411.2",
     )
   })
 

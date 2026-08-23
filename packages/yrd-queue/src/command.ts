@@ -3175,7 +3175,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: change '${input.id}' union-merge re-merge requires one root commit`,
+          message: `yrd: change '${input.id}' union-merge recut requires one root commit`,
         })
       }
     } else if (!hasAbsorbedExceptions) {

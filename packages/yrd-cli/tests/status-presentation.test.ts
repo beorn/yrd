@@ -40,7 +40,7 @@ describe("shared queue status presentation", () => {
     ["scratch-cleanup-failed", "env", "auto-requeue", "queue"],
     ["queue-environment-refused", "env", "auto-requeue", "queue"],
     ["job-lost", "timeout", "auto-requeue", "queue"],
-    ["stale-base", "stale", "auto-recut", "queue"],
+    ["stale-base", "stale", "auto-re-merge", "queue"],
     ["stale-check", "stale", "auto-requeue", "queue"],
     ["stale-steps", "stale", "auto-requeue", "queue"],
     ["stale-plan", "stale", "auto-requeue", "queue"],

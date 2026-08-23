@@ -258,7 +258,7 @@ describe("pr list merge reconciliation (22376)", () => {
    * `git merge-base --is-ancestor 5ac4f5a219dc origin/main` said MERGED — the
    * habitant runner had merged rev5 an hour earlier and the author's withdrawal
    * arrived on top of the completed merge. An author who trusts `withdrawn`
-   * re-cuts a branch already on main, and duplicate landings of the same
+   * re-cuts a branch already on main, and duplicate merges of the same
    * content are exactly what the ancestry model cannot clean up afterwards.
    */
   it("reports the merge when a withdrawal arrives on top of it", async () => {

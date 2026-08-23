@@ -547,7 +547,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual({
       code: "queue-never-started",
       message:
-        `Queue 'main' has 1 submitted PR that never started required checks for 30m00s ` +
+        `Queue 'main' has 1 submitted change that never started required checks for 30m00s ` +
         `(since 2026-01-01T00:00:00.000Z); head is '${pr.id}'.`,
       resolution: [
         `Start or restart the habitant queue runner, then verify it requests required checks for '${pr.id}'.`,
@@ -560,7 +560,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
   })
 
-  it("does not let unrelated landings reset one never-started carrier's readiness clock", async () => {
+  it("does not let unrelated merges reset one never-started carrier's readiness clock", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read)
     await app.bays.submit({

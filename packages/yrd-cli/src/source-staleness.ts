@@ -5,7 +5,7 @@
  * A habitant boots once and serves for hours. Its code is whatever the source
  * checkout held at startup; the checkout keeps moving underneath it. On
  * 2026-08-14 a habitant served three pins-old code for ~3h while the pin
- * advanced four times, silently applying yesterday's gates to today's landings.
+ * advanced four times, silently applying yesterday's gates to today's merges.
  * The `resident-runner-driver-stale` page fired and nothing acted on it, so the
  * runner is made to act on itself: notice the gap, finish the in-flight run,
  * exit unclean, and let the supervisor re-exec a process that reads the new
