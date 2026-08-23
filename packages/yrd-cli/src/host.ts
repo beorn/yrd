@@ -293,6 +293,14 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // above); the harness composition now hashes to the same identity anyway,
   // because a config change no longer moves it.
   "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
+  // The identity the live journal ADVANCED TO while this work was in flight:
+  // running the branch build against the deployment migrated its checkpoint
+  // onto the interim step-plan identity before the durable plan was deleted.
+  // Measured from that journal's own refusal on 2026-08-23 (288eb203→ae0d2084,
+  // history evicted through cursor 27609). It is retained because the
+  // deployment really is sitting on it — a predecessor is whatever the journal
+  // stores, not whatever landed on main.
+  "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.

@@ -574,6 +574,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
       to: first.manifest.targetIdentity,
     })
+    // The interim identity the live journal then ADVANCED TO, measured from its
+    // own refusal 288eb203→ae0d2084. A predecessor is whatever the deployment
+    // stores, not whatever landed on main.
+    expect(first.manifest.edges).toContainEqual({
+      from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
+      to: first.manifest.targetIdentity,
+    })
     // 23192: a queue-CONFIG change must NOT move the projection identity.
     // While the declared step list sat in `initialState` it did, and an
     // ordinary `.yrd.yml` checks edit then demanded a checkpoint migration
@@ -2970,6 +2977,12 @@ checks: [{check: {run: "true"}}]
       {
         // The production composition's correlation-era identity (props cut).
         from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        // The interim step-plan identity the live journal advanced to while
+        // this work was in flight, measured from its own refusal.
+        from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
         to: attestation.manifest.targetIdentity,
       },
       {
