@@ -27,7 +27,9 @@ import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
 import { runYrd, type ChangeStateGitFacts, type YrdCliIO } from "@yrd/cli"
+import type { ProcessRequest } from "@yrd/process"
 import { createLogger } from "loggily"
+import { createChangeStateGitFacts } from "../src/change-state.ts"
 
 const BASE_SHA = "a".repeat(40)
 const MERGED_SHA = "b".repeat(40)
@@ -67,9 +69,7 @@ async function createCliApp() {
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
-    async (
-      _input: StepExecution<ChangeShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
+    async (_input: StepExecution<ChangeShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
       status: "completed",
       conclusion: "success",
       output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
@@ -154,6 +154,46 @@ beforeAll(async () => {
   app = (await createCliApp()) as CliApp
 })
 
+describe("branch state verbs — default transport", () => {
+  it("runs every Git operation through the injected shared process adapter", async () => {
+    const calls: ProcessRequest[] = []
+    const process = {
+      async run(request: ProcessRequest) {
+        calls.push(request)
+        const args = request.argv.slice(3)
+        const stdout =
+          args[0] === "for-each-ref"
+            ? "main\ntask/alpha\n"
+            : args[0] === "ls-remote"
+              ? `${BASE_SHA}\trefs/yrd/submit/task/alpha\n`
+              : ""
+        return {
+          exitCode: 0,
+          signal: null,
+          stdout,
+          stderr: "",
+          durationMs: 1,
+          timedOut: false as const,
+        }
+      },
+    }
+    const facts = createChangeStateGitFacts("/repo", process)
+
+    expect(await facts.branches()).toEqual(["main", "task/alpha"])
+    expect(await facts.remoteRef("refs/yrd/submit/task/alpha")).toBe(BASE_SHA)
+    expect(await facts.push(["push", "--atomic", "origin", "task/alpha:refs/yrd/submit/task/alpha"])).toEqual({
+      ok: true,
+      output: "",
+    })
+    expect(calls.map(({ argv }) => argv)).toEqual([
+      ["git", "-C", "/repo", "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+      ["git", "-C", "/repo", "ls-remote", "origin", "refs/yrd/submit/task/alpha"],
+      ["git", "-C", "/repo", "push", "--atomic", "origin", "task/alpha:refs/yrd/submit/task/alpha"],
+    ])
+    expect(calls.every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
+  })
+})
+
 describe("branch state verbs — selection", () => {
   it("resolves a bare invocation to the current branch and prints what it will push", async () => {
     const { facts, pushes } = stateGit(BRANCHES)
@@ -165,9 +205,7 @@ describe("branch state verbs — selection", () => {
     // a bare invocation or a glob expanded to.
     expect(human.stdout()).toContain("task/alpha")
     expect(human.stdout()).toContain("git push")
-    expect(pushes.calls).toEqual([
-      ["push", "--atomic", "origin", "task/alpha:refs/yrd/draft/task/alpha"],
-    ])
+    expect(pushes.calls).toEqual([["push", "--atomic", "origin", "task/alpha:refs/yrd/draft/task/alpha"]])
   })
 
   it("expands a quoted glob against real branches and leaves non-matches alone", async () => {
@@ -177,13 +215,7 @@ describe("branch state verbs — selection", () => {
     expect(await runYrd(app, yrd("branch", "submit", "task/*"), human.io), human.stderr()).toBe(0)
 
     expect(pushes.calls).toEqual([
-      [
-        "push",
-        "--atomic",
-        "origin",
-        "task/alpha:refs/yrd/submit/task/alpha",
-        "task/beta:refs/yrd/submit/task/beta",
-      ],
+      ["push", "--atomic", "origin", "task/alpha:refs/yrd/submit/task/alpha", "task/beta:refs/yrd/submit/task/beta"],
     ])
     expect(human.stdout()).not.toContain("topic/gamma")
   })
@@ -240,9 +272,7 @@ describe("branch state verbs — transport", () => {
 
     // receiver.ts refuses every direct push to `refs/yrd/archive/`; archival
     // is the receiver translating a `refs/heads/` deletion.
-    expect(pushes.calls).toEqual([
-      ["push", "--atomic", "origin", ":refs/heads/task/alpha", ":refs/heads/task/beta"],
-    ])
+    expect(pushes.calls).toEqual([["push", "--atomic", "origin", ":refs/heads/task/alpha", ":refs/heads/task/beta"]])
   })
 
   it("unsubmits as part of drafting when a submit ref stands, and only then", async () => {

@@ -14,11 +14,11 @@
  * server's. So: expand the selectors, say exactly what they resolved to, push,
  * and hand back the receiver's own words unaltered.
  */
-import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { Glob } from "bun"
 import { raiseFailure } from "@yrd/core"
-import { cleanGitEnvironment } from "./git-environment.ts"
+import { adaptProcessGit, type Process } from "@yrd/process"
+import type { GitProcessResult } from "git-super/process"
 import type { ChangeStateGitFacts, YrdCliExitCode, YrdCliIO } from "./types.ts"
 
 const GIT_TIMEOUT_MS = 30_000
@@ -236,39 +236,38 @@ export async function applyChangeState(
   return 0
 }
 
-function git(cwd: string, args: readonly string[]): Readonly<{ ok: boolean; stdout: string; stderr: string }> {
-  const result = spawnSync("git", ["-C", cwd, ...args], {
-    encoding: "utf8",
-    env: cleanGitEnvironment(process.env),
-    timeout: GIT_TIMEOUT_MS,
-  })
-  if (result.error !== undefined) {
-    throw new Error(`yrd: git ${args.join(" ")} failed to run`, { cause: result.error })
-  }
-  return { ok: result.status === 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" }
+function gitFailure(result: GitProcessResult): string {
+  if (result.timedOut === true) return `timed out after ${String(GIT_TIMEOUT_MS)}ms`
+  return result.failure ?? (result.stderr.trim() || result.stdout.trim() || `exit ${String(result.code)}`)
+}
+
+function transportFailed(result: GitProcessResult): boolean {
+  return result.timedOut === true || result.failure !== undefined
 }
 
 /** Real Git plumbing for the branch-state verbs. */
-export function createChangeStateGitFacts(cwd: string): ChangeStateGitFacts {
+export function createChangeStateGitFacts(cwd: string, process: Pick<Process, "run">): ChangeStateGitFacts {
+  const git = adaptProcessGit(process, { timeoutMs: GIT_TIMEOUT_MS })
+  const run = (args: readonly string[]) => git.run({ repo: cwd, args })
   return {
-    branches: () => {
-      const listed = git(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
-      if (!listed.ok) {
+    branches: async () => {
+      const listed = await run(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+      if (listed.code !== 0 || transportFailed(listed)) {
         raiseFailure(
           "infrastructure",
           "change-state-branches-unreadable",
-          `yrd: could not list branches in '${cwd}': ${listed.stderr.trim()}`,
+          `yrd: could not list branches in '${cwd}': ${gitFailure(listed)}`,
         )
       }
       return listed.stdout.split("\n").filter((line) => line !== "")
     },
-    remoteRef: (ref) => {
-      const listed = git(cwd, ["ls-remote", "origin", ref])
-      if (!listed.ok) {
+    remoteRef: async (ref) => {
+      const listed = await run(["ls-remote", "origin", ref])
+      if (listed.code !== 0 || transportFailed(listed)) {
         raiseFailure(
           "infrastructure",
           "change-state-remote-unreadable",
-          `yrd: could not read '${ref}' from origin: ${listed.stderr.trim()}`,
+          `yrd: could not read '${ref}' from origin: ${gitFailure(listed)}`,
         )
       }
       const sha = listed.stdout.split("\t")[0]?.trim()
@@ -276,18 +275,41 @@ export function createChangeStateGitFacts(cwd: string): ChangeStateGitFacts {
     },
     // A rejected push is the receiver speaking, not a broken tool: its words
     // are the result, and the caller prints them unaltered.
-    push: (args) => {
-      const pushed = git(cwd, args)
-      return { ok: pushed.ok, output: `${pushed.stderr}${pushed.stdout}` }
+    push: async (args) => {
+      const pushed = await run(args)
+      if (transportFailed(pushed)) {
+        raiseFailure(
+          "infrastructure",
+          "change-state-push-unavailable",
+          `yrd: could not run the branch-state push in '${cwd}': ${gitFailure(pushed)}`,
+        )
+      }
+      return { ok: pushed.code === 0, output: `${pushed.stderr}${pushed.stdout}` }
     },
   }
 }
 
 /** The dependencies a verb runs against, defaulting to real Git in `cwd`. */
-export function changeStateDeps(io: YrdCliIO, currentBranch: () => string | undefined): ChangeStateDeps {
-  const cwd = io.cwd ?? process.cwd()
+export function changeStateDeps(
+  io: YrdCliIO,
+  currentBranch: () => string | undefined,
+  gitProcess?: Pick<Process, "run">,
+): ChangeStateDeps {
+  const cwd = io.cwd ?? globalThis.process.cwd()
+  let git = io.changeStateGit?.(cwd)
+  if (git === undefined) {
+    if (gitProcess === undefined) {
+      raiseFailure(
+        "configuration",
+        "change-state-process-missing",
+        "yrd: branch-state transport requires the shared process runtime",
+      )
+      throw new Error("raiseFailure returned without throwing")
+    }
+    git = createChangeStateGitFacts(cwd, gitProcess)
+  }
   return {
-    git: io.changeStateGit?.(cwd) ?? createChangeStateGitFacts(cwd),
+    git,
     readFile: (path) => readFileSync(path, "utf8"),
     currentBranch,
   }

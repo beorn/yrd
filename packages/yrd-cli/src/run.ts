@@ -11578,7 +11578,7 @@ function buildProgram(
           selectors,
           { dryRun: options.dryRun, message: options.message, messageFile: options.file },
           io,
-          changeStateDeps(io, () => currentGitBranch(io.cwd ?? process.cwd(), io)),
+          changeStateDeps(io, () => currentGitBranch(io.cwd ?? process.cwd(), io), installedServices().process),
         ),
       ),
     )
