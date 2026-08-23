@@ -256,8 +256,8 @@ describe("leg b — the tip against the latest recorded Run, informational", () 
   it("accounts a merge-only Run's checks to the admission stage — never 'did not run' (item 0)", () => {
     expect(tipSinceLatestRun("main", FOUR_CHECK_TIP, MERGE_ONLY_RUN, ADMISSION_AT_TIP_BASE)).toBe(
       `latest run R3404 (base ${SHA_B.slice(0, 8)}, blob ${BLOB_2.slice(0, 8)}) was judged by the plan the tip ` +
-        `declares: merge ran in the Run; typecheck, manifest-co-change, substrate-pair, affected-tests ran at ` +
-        `admission for base ${SHA_B.slice(0, 8)}, the Run's base.`,
+        `declares: merge ran in the Run; typecheck, manifest-co-change, substrate-pair, affected-tests ran as ` +
+        `checks before queueing for base ${SHA_B.slice(0, 8)}, the Run's base.`,
     )
   })
 
@@ -627,7 +627,7 @@ describe("the derived plan audit against a real repository", () => {
       const sinceLatest = audit?.comparison.runs?.sinceLatest
       expect(sinceLatest).toContain("was judged by the plan the tip declares")
       expect(sinceLatest).toContain("merge ran in the Run")
-      expect(sinceLatest).toContain("check ran at admission for base")
+      expect(sinceLatest).toContain("check ran as checks before queueing for base")
       expect(sinceLatest).toContain("the Run's base")
       expect(sinceLatest).not.toContain("config changed")
       expect(sinceLatest).not.toContain("did not run")

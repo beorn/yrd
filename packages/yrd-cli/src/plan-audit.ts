@@ -105,7 +105,7 @@ export function accountRunSteps(recorded: RecordedRunPlan, admissionFor?: Admiss
   })
 }
 
-/** "merge ran in the Run; typecheck, affected-tests ran at admission for base
+/** "merge ran in the Run; typecheck, affected-tests ran as checks before queueing for base
  * 6a3cbce6, the Run's base" — the sentence a healthy accounting reads as. */
 export function describeStepExecution(places: readonly StepExecutionPlace[], baseSha: string | undefined): string {
   const at = (where: StepExecutionPlace["where"]): string[] =>
@@ -115,7 +115,7 @@ export function describeStepExecution(places: readonly StepExecutionPlace[], bas
   if (ran.length > 0) parts.push(`${ran.join(", ")} ran in the Run`)
   const admitted = at("admission")
   if (admitted.length > 0) {
-    parts.push(`${admitted.join(", ")} ran at admission for base ${shortSha(baseSha)}, the Run's base`)
+    parts.push(`${admitted.join(", ")} ran as checks before queueing for base ${shortSha(baseSha)}, the Run's base`)
   }
   const missing = at("missing")
   if (missing.length > 0) parts.push(`${missing.join(", ")} executed in NEITHER stage`)
