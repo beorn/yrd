@@ -41,7 +41,7 @@ function project(results: readonly QueueStatusResult[]): QueueTimelineProjection
   })
 }
 
-/** The fixture ships one completed Run per PR revision, which makes every retry
+/** The fixture ships one completed Run per change revision, which makes every retry
  * ordinal 1 and hides ordering bugs. Fan its completed Run out into `peers`
  * retry peers carrying the same PR revision.
  *

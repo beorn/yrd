@@ -457,7 +457,7 @@ describe("withBays", () => {
     expect(() => resolveBase(["Main", "main"], "MAIN")).toThrow("yrd: base selector 'MAIN' is ambiguous: Main, main")
   })
 
-  it("journals an exact revision-bound issue join when a PR is withdrawn", async () => {
+  it("journals an exact revision-bound issue join when a change is withdrawn", async () => {
     await using app = (await createHarness()).app
     const issueRef = "@km/all/21063-steering-laser"
     const props = { request: "21091-withdrawn" }
@@ -478,7 +478,7 @@ describe("withBays", () => {
     )
   })
 
-  it("attaches one issue to a live PR and refuses to rehome its materialized join", async () => {
+  it("attaches one issue to a live change and refuses to rehome its materialized join", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "topic/attach-once", headSha: HEAD_1 })
 
@@ -660,14 +660,14 @@ describe("withBays", () => {
       current: { head: HEAD_2, n: 1 },
     })
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "integrated", current: { head: HEAD_1 } })
-    // The branch selector now resolves to the live delivery, not the frozen PR.
+    // The branch selector now resolves to the live delivery, not the frozen change.
     expect(changeFacts(app.bays.pr("topic/merged"))).toMatchObject({ id: "PR2", delivery: "submitted" })
   })
 
   it("refuses a terminal result that does not transition the current PR revision", async () => {
     const journal = createMemoryJournal()
     const staleWithdraw = command({
-      title: "Emit a stale PR withdrawal",
+      title: "Emit a stale change withdrawal",
       apply: () => ({
         events: [event("pr/withdrawn", { pr: "PR1", revision: 1, headSha: HEAD_1 })],
       }),
@@ -1284,7 +1284,7 @@ describe("withBays", () => {
     })
   })
 
-  it("keeps the exact historical revision submitter after the PR is recut", async () => {
+  it("keeps the exact historical revision submitter after the change is recut", async () => {
     const harness = createWorkspaceHarness()
     await using app = await createApp(harness.adapter, undefined, "@dev/3")
     const opened = await app.bays.open({ name: "recut-lifecycle", by: "yrd:4242" })
@@ -1522,7 +1522,7 @@ describe("withBays", () => {
       current: { head: HEAD_2 },
     })
     await expect(app.bays.submit({ branch: "release/fix", headSha: HEAD_2 })).rejects.toThrow(
-      "branch 'release/fix' already has live PR 'PR1'",
+      "branch 'release/fix' already has live change 'PR1'",
     )
     expect(workspace.calls).toEqual([])
     await app.close()
@@ -2459,13 +2459,13 @@ describe("withBays", () => {
     expect(app.bays.pr("PR2")?.revs[2]?.props).toBeUndefined()
   })
 
-  it("refuses to append check requests to terminal PR history", async () => {
+  it("refuses to append check requests to terminal change history", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "issue/terminal-checks", headSha: HEAD_1 })
     await app.bays.closePr({ pr: "PR1" })
 
     await expect(app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).rejects.toThrow(
-      "PR 'PR1' is withdrawn, not checkable",
+      "change 'PR1' is withdrawn, not checkable",
     )
   })
 
@@ -2588,7 +2588,7 @@ describe("withBays", () => {
     // Closed and unmerged is exactly the GitHub shape Queue selection excludes.
     expect(changeFacts(closed)).toMatchObject({ id: "PR1", state: "closed", merged: false, delivery: "withdrawn" })
     expect(closed?.withdrawnAt).toBe("2026-01-01T00:00:00.000Z")
-    // History remains: the PR still resolves and keeps its revision trail.
+    // History remains: the change still resolves and keeps its revision trail.
     expect(closed?.revs).toHaveLength(1)
     // A pure state transition — no bay/workspace job runs.
     expect(workspace.calls).toEqual([])
@@ -2603,9 +2603,9 @@ describe("withBays", () => {
     await app.bays.submit({ branch: "issue/superseded", headSha: HEAD_1 })
     await app.bays.closePr({ pr: "PR1" })
     // Already withdrawn (terminal) — refuse loudly, never a silent no-op.
-    await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow("PR 'PR1' is withdrawn")
+    await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow("change 'PR1' is withdrawn")
     // Unknown selector — refuse.
-    await expect(app.bays.closePr({ pr: "PR404" })).rejects.toThrow("no PR 'PR404'")
+    await expect(app.bays.closePr({ pr: "PR404" })).rejects.toThrow("no change 'PR404'")
 
     // The same verb resolves a bay-backed PR by its branch spelling.
     await app.bays.submit({ branch: "issue/other", headSha: HEAD_2 })
@@ -2650,7 +2650,7 @@ describe("withBays", () => {
     await app.close()
   })
 
-  it("reuses one live PR when another branch spelling resolves to the same payload", async () => {
+  it("reuses one live change when another branch spelling resolves to the same payload", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const { app } = await createHarness(log)
@@ -2687,18 +2687,18 @@ describe("withBays", () => {
     void invalid
   })
 
-  it("sets and mutably re-edits a PR title and description via editPr", async () => {
+  it("sets and mutably re-edits a change title and description via editPr", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "topic/metadata", headSha: HEAD_1 })
 
     await app.bays.editPr({
       pr: "PR1",
       title: "feat(bay): add pr metadata",
-      description: "Adds a durable title and description to the PR record.",
+      description: "Adds a durable title and description to the change record.",
     })
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       title: "feat(bay): add pr metadata",
-      description: "Adds a durable title and description to the PR record.",
+      description: "Adds a durable title and description to the change record.",
       delivery: "submitted",
     })
 
@@ -2706,7 +2706,7 @@ describe("withBays", () => {
     await app.bays.editPr({ pr: "PR1", title: "feat(bay): pr title + description" })
     expect(app.bays.pr("PR1")).toMatchObject({
       title: "feat(bay): pr title + description",
-      description: "Adds a durable title and description to the PR record.",
+      description: "Adds a durable title and description to the change record.",
     })
 
     // A no-op edit (unchanged values) emits nothing.
@@ -2873,7 +2873,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     await using app = await createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
 
     const before = await Array.fromAsync(app.events())
-    // Same merged head → returns the frozen integrated PR (with its merge SHA),
+    // Same merged head → returns the frozen integrated change (with its merge SHA),
     // no throw, no new PR, no new revision, no journal event.
     const already = await app.bays.submitSelection("topic/merged", directOptions(HEAD_1))
     expect(changeFacts(already)).toMatchObject({
@@ -2932,7 +2932,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
         .then(() => undefined)
         .catch((error: unknown) => (error as Error).message)
 
-      expect(refused).toContain("payload already recorded as PR 'PR1'")
+      expect(refused).toContain("payload already recorded as change 'PR1'")
       // …and, unlike the bare refusal, says WHY the door is shut and where the
       // open one is: the state, its timestamp, and the branch to resubmit.
       expect(refused).toContain("withdrawn")
@@ -2940,7 +2940,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
       expect(refused).toContain("yrd pr submit topic/burned")
     })
 
-    it("the named remedy is real: resubmitting the withdrawn branch at the SAME head reopens the PR", async () => {
+    it("the named remedy is real: resubmitting the withdrawn branch at the SAME head reopens the change", async () => {
       await using app = (await createHarness()).app
       await app.bays.submitSelection("topic/burned", directOptions(HEAD_1))
       await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
@@ -2966,15 +2966,15 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
 
       // The direct `submit` command, not `submitSelection`: a LIVE payload
       // offered on another branch is short-circuited by submitSelection into an
-      // idempotent return of the live PR, so the dedupe refusal is only
+      // idempotent return of the live change, so the dedupe refusal is only
       // reachable here.
       const refused = await app.bays
         .submit({ branch: "topic/other", headSha: HEAD_1, base: "main", baseSha: BASE })
         .then(() => undefined)
         .catch((error: unknown) => (error as Error).message)
 
-      expect(refused).toContain("payload already recorded as PR 'PR1'")
-      // A live PR is not reopenable; printing a reopen command here would be a
+      expect(refused).toContain("payload already recorded as change 'PR1'")
+      // A live change is not reopenable; printing a reopen command here would be a
       // wrong instruction, so the refusal carries none.
       expect(refused).not.toContain("yrd pr submit")
       expect(refused).not.toContain("withdrawn")

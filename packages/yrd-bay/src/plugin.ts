@@ -238,8 +238,8 @@ export type SubmitSelectionOptions = Readonly<{
   title?: string
   description?: string
   /** Opt in to habitant "merge into latest" and every later manual implicit
-   * re-merge of this PR (see `PR.track`). Only a live PR records it: tracking
-   * governs future revisions, which a terminal PR no longer has. */
+   * re-merge of this change (see `PR.track`). Only a live change records it: tracking
+   * governs future revisions, which a terminal change no longer has. */
   track?: boolean
   draft?: boolean
   props?: ChangeProps
@@ -965,7 +965,7 @@ export function createBays(
       if (args.flow !== undefined || args.props !== undefined || options.selectFlow === undefined) {
         return actions.submit(args)
       }
-      const pr = required(resolveChange(state(), args.pr), "PR", args.pr)
+      const pr = required(resolveChange(state(), args.pr), "change", args.pr)
       const selected = options.selectFlow({
         base: pr.base,
         branch: pr.branch,
@@ -982,7 +982,7 @@ export function createBays(
         log?.warn?.(
           pr.flow.name === selected.name && pr.flow.rev === selected.rev
             ? `yrd: flow '${pr.flow.name}' changed structure without bumping revision ${pr.flow.rev}`
-            : `yrd: PR '${pr.id}' remains pinned to flow ${pr.flow.name}@${pr.flow.rev}; base config selects ${selected.name}@${selected.rev}`,
+            : `yrd: change '${pr.id}' remains pinned to flow ${pr.flow.name}@${pr.flow.rev}; base config selects ${selected.name}@${selected.rev}`,
           {
             code:
               pr.flow.name === selected.name && pr.flow.rev === selected.rev
@@ -1033,7 +1033,7 @@ export function createBays(
     await submitOperation({ pr: pr.id, props })
     const bound = resolveChange(state(), pr.id)
     if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after props bind`)
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after props bind`)
     }
     return bound
   }
@@ -1043,7 +1043,7 @@ export function createBays(
       raiseFailure(
         "refusal",
         "issue-conflict",
-        `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
+        `yrd: change '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
       )
     }
     const delivery = changeDeliveryState(pr)
@@ -1051,13 +1051,13 @@ export function createBays(
       raiseFailure(
         "refusal",
         "issue-too-late",
-        `yrd: PR '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
+        `yrd: change '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
       )
     }
     await actions.editPr({ pr: pr.id, issue })
     const bound = resolveChange(state(), pr.id)
     if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after issue bind`)
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after issue bind`)
     }
     return bound
   }
@@ -1068,7 +1068,7 @@ export function createBays(
     const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
     const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
     // Tracking only governs FUTURE habitant preparation or a manual implicit
-    // re-merge, which a terminal PR (an integrated/already-landed same-head
+    // re-merge, which a terminal change (an integrated/already-landed same-head
     // resubmit reaches this seam at exit 0) no longer has. Recording it there
     // would refuse the whole submit, so state loudly that the flag was not
     // recorded instead of pretending it was.
@@ -1076,7 +1076,7 @@ export function createBays(
     const trackChanged = metadata.track !== undefined && metadata.track !== (pr.track ?? false)
     if (trackChanged && !trackable) {
       const warning =
-        `PR '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
+        `change '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
         "Tracking governs future rebuilds, and this change has none."
       metadata.warnings?.push(warning)
       log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
@@ -1091,7 +1091,7 @@ export function createBays(
     })
     const bound = resolveChange(state(), pr.id)
     if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after metadata bind`)
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after metadata bind`)
     }
     return bound
   }
@@ -1122,12 +1122,12 @@ export function createBays(
       : (selectedBay ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay)))
     // D2 — a branch whose PR reached a non-merged terminal status
     // (withdrawn/canceled) mints its next revision automatically down the
-    // direct-branch resubmit path below (the reopen preserves the PR identity,
+    // direct-branch resubmit path below (the reopen preserves the change identity,
     // so branch→PR stays 1:1). The author no longer hand-makes a delivery branch.
     //
     // Q1 — an integrated/already-landed branch identity is FROZEN evidence, never reopened:
     //  - addressed by its branch, resubmitting the SAME merged head is an
-    //    informational "already merged" no-op (returns the integrated PR, exit
+    //    informational "already merged" no-op (returns the integrated change, exit
     //    0 — delivered work is not a dark queue), while a NEW head mints a fresh
     //    delivery PR (revision 1) via the direct-branch path below, so no
     //    hand-made `<branch>-delivery-<nonce>` branch is needed;
@@ -1136,7 +1136,7 @@ export function createBays(
       pr !== undefined &&
       (changeDeliveryState(pr) === "integrated" || changeDeliveryState(pr) === "already-landed")
     ) {
-      // Addressed by its canonical id, an integrated PR is frozen evidence:
+      // Addressed by its canonical id, an integrated change is frozen evidence:
       // idempotent. Addressed by a moving alias (its branch), a new head mints a
       // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
       if (resolved?.matchedBy === "canonical") return bindSubmission(pr, options)
@@ -1167,7 +1167,7 @@ export function createBays(
         // submission. The warning rides the result envelope (options.warnings)
         // AND the log stream — loud by construction, never a silent fallback.
         const warning =
-          `Bay '${bay.id}' has uncommitted work; the PR includes only committed changes. ` +
+          `Bay '${bay.id}' has uncommitted work; the change includes only committed changes. ` +
           "The uncommitted changes remain in the Bay."
         options.warnings?.push(warning)
         log?.warn?.(warning, { action: "submit-dirty-worktree", bay: bay.id })
@@ -1206,11 +1206,11 @@ export function createBays(
       }
     }
 
-    // Re-submitting a PR that has no LIVE workspace must re-resolve the branch's current tip
+    // Re-submitting a change that has no LIVE workspace must re-resolve the branch's current tip
     // rather than reuse the recorded revision's head: a pushed (e.g. draft) or submitted PR
     // whose branch has since moved would otherwise re-register the stale head. Only an ACTIVE
     // bay asks for the managed workspace's committed HEAD (handled above); every other shape — bay-less
-    // direct branch, and a PR whose bay is closing/closed/failed (reachable by PR id or by the
+    // direct branch, and a change whose bay is closing/closed/failed (reachable by PR id or by the
     // retired bay's id, where the closedBranchAlias escape above does not apply) — resolves the
     // branch tip here. Without this, an idempotent retry re-presented the recorded head at
     // exit 0 and an automated driver concluded the carrier matched its branch when it did not.
@@ -1248,17 +1248,17 @@ export function createBays(
             raiseFailure(
               "infrastructure",
               "pr-state-invalid",
-              `yrd: PR '${selector}' disappeared after revision intake`,
+              `yrd: change '${selector}' disappeared after revision intake`,
             )
           }
         }
       }
     }
 
-    // Only a live PR binds an issue in place. A terminal PR resolved here is a
+    // Only a live change binds an issue in place. A terminal change resolved here is a
     // withdrawn/canceled branch about to be reopened by the direct-branch
     // resubmit below (D2); its issue rides along when that mint records the
-    // fresh revision, so binding here (which refuses on a terminal PR) is skipped.
+    // fresh revision, so binding here (which refuses on a terminal change) is skipped.
     if (pr !== undefined && isLiveChange(pr)) pr = await bindIssue(pr, options.issue)
     if (
       pr !== undefined &&
@@ -1274,7 +1274,7 @@ export function createBays(
       await submitOperation({ pr: pr.id })
       const submitted = resolveChange(state(), pr.id)
       if (submitted === undefined) {
-        raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
+        raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after submit`)
       }
       return submitted
     }
@@ -1304,7 +1304,7 @@ export function createBays(
         await submitOperation({ pr: correlated.id })
         const submitted = resolveChange(state(), live.id)
         if (submitted === undefined) {
-          raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${live.id}' disappeared after submit`)
+          raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${live.id}' disappeared after submit`)
         }
         return submitted
       }
@@ -1322,7 +1322,7 @@ export function createBays(
         raiseFailure(
           "infrastructure",
           "pr-state-invalid",
-          `yrd: direct branch submit '${selector}' did not create a PR`,
+          `yrd: direct branch submit '${selector}' did not create a change`,
         )
       }
       return submitted
@@ -1332,9 +1332,9 @@ export function createBays(
       raiseFailure("refusal", "bay-not-active", `yrd: bay '${bay.id}' is ${bay.status}, not active`)
     }
     if (pr === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: bay '${bay.id}' intake did not create a PR`)
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: bay '${bay.id}' intake did not create a change`)
     }
-    raiseFailure("refusal", "pr-not-pushed", `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
+    raiseFailure("refusal", "pr-not-pushed", `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
   }
 
   const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change>> => {
@@ -1346,7 +1346,7 @@ export function createBays(
         attributes: { selector },
         resultAttributes: changeIdentity,
       },
-      // Bind the resolved title/description in one seam AFTER the PR is
+      // Bind the resolved title/description in one seam AFTER the change is
       // materialized, so every submit path (bay, direct branch, resubmit,
       // draft, integrated) records the same metadata without threading it
       // through each early return.
@@ -1361,9 +1361,9 @@ export function createBays(
     branchLifecycles: () => Object.freeze(projectBranchLifecycles(state())),
     pr: (selector) => resolveChange(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
-    reviewState: (selector) => reviewState(required(resolveChange(state(), selector), "PR", selector)),
-    needsReview: (selector, reviewer) => needsReview(required(resolveChange(state(), selector), "PR", selector), reviewer),
-    checksRequested: (selector) => checksRequested(required(resolveChange(state(), selector), "PR", selector)),
+    reviewState: (selector) => reviewState(required(resolveChange(state(), selector), "change", selector)),
+    needsReview: (selector, reviewer) => needsReview(required(resolveChange(state(), selector), "change", selector), reviewer),
+    checksRequested: (selector) => checksRequested(required(resolveChange(state(), selector), "change", selector)),
     submitSelection,
     effectiveBase: async (selector, requestedBase) => {
       const snapshot = state()
@@ -1596,13 +1596,13 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
     },
     pr: {
       close: command({
-        title: "Close a PR",
+        title: "Close a change",
         visibility: "public",
         params: ChangeCloseArgsSchema,
         apply: (state: BayState, args: ChangeCloseArgs) => closePr(state, args),
       }),
       edit: command({
-        title: "Edit a PR",
+        title: "Edit a change",
         visibility: "public",
         params: ChangeEditArgsSchema,
         apply: (state: BayState, args: ChangeEditArgs) => editPr(state, args),
@@ -1619,25 +1619,25 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         apply: (state: BayState, args: ChangeSettleSupersededArgs) => settleSupersededPr(state, args),
       }),
       ready: command({
-        title: "Mark a PR ready",
+        title: "Mark a change ready",
         visibility: "public",
         params: ChangeReadyArgsSchema,
         apply: (state: BayState, args: ChangeReadyArgs) => readyPr(state, args, defaultSubmitter),
       }),
       review: command({
-        title: "Review a PR revision",
+        title: "Review a change revision",
         visibility: "public",
         params: ChangeReviewArgsSchema,
         apply: (state: BayState, args: ChangeReviewArgs) => reviewPr(state, args),
       }),
       comment: command({
-        title: "Comment on a PR revision",
+        title: "Comment on a change revision",
         visibility: "public",
         params: ChangeCommentArgsSchema,
         apply: (state: BayState, args: ChangeCommentArgs) => commentPr(state, args),
       }),
       requestChecks: command({
-        title: "Request checks for a PR revision",
+        title: "Request checks for a change revision",
         params: ChangeRequestChecksArgsSchema,
         apply: (state: BayState, args: ChangeRequestChecksArgs) => requestChangeChecks(state, args),
       }),
@@ -1647,7 +1647,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         apply: (state: BayState, args: ChangeAdmissionRecordedFact) => recordChangeAdmission(state, args),
       }),
       requestReview: command({
-        title: "Replace the requested reviewers for a PR",
+        title: "Replace the requested reviewers for a change",
         visibility: "public",
         params: ChangeRequestReviewArgsSchema,
         apply: (state: BayState, args: ChangeRequestReviewArgs) => requestChangeReview(state, args, defaultSubmitter),
@@ -1694,16 +1694,16 @@ function requestChangePublication(
   args: ChangePublicationInput,
   publication: BayJobDefs["pr.publish"],
 ) {
-  const pr = required(resolveChange(state.bays, args.pr), "PR", args.pr)
+  const pr = required(resolveChange(state.bays, args.pr), "change", args.pr)
   const revision = currentChangeRev(pr)
   if (changeDeliveryState(pr) !== "pushed") {
-    raiseFailure("refusal", "publication-pr-not-draft", `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
+    raiseFailure("refusal", "publication-pr-not-draft", `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
   }
   if (revision.n !== args.revision || revision.head !== args.headSha || pr.branch !== args.branch) {
     raiseFailure(
       "refusal",
       "publication-revision-moved",
-      `yrd: PR '${pr.id}' is revision ${revision.n} head '${revision.head}' on '${pr.branch}', not requested ` +
+      `yrd: change '${pr.id}' is revision ${revision.n} head '${revision.head}' on '${pr.branch}', not requested ` +
         `revision ${args.revision} head '${args.headSha}' on '${args.branch}'`,
     )
   }
@@ -1711,7 +1711,7 @@ function requestChangePublication(
     raiseFailure(
       "refusal",
       "publication-base-moved",
-      `yrd: PR '${pr.id}' base is '${changeBaseSha(pr) ?? "missing"}', not requested '${args.baseSha}'`,
+      `yrd: change '${pr.id}' base is '${changeBaseSha(pr) ?? "missing"}', not requested '${args.baseSha}'`,
     )
   }
   return { events: [publication.request(args, { key: changePublicationJobKey(args) })] }
@@ -1875,7 +1875,7 @@ function requireExpectedChangeCurrent(
   raiseFailure(
     "refusal",
     `${operation}-current-changed`,
-    `yrd: PR '${expected.pr}' changed from revision ${expected.revision}@${expected.headSha}` +
+    `yrd: change '${expected.pr}' changed from revision ${expected.revision}@${expected.headSha}` +
       `${expectedTracking} to ${actual} before ${operation}`,
   )
 }
@@ -1892,7 +1892,7 @@ function requireExpectedChangeTargetCurrent(
   raiseFailure(
     "refusal",
     `${operation}-current-changed`,
-    `yrd: expected PR '${pr.id}' does not match ${operation} target '${target}'`,
+    `yrd: expected change '${pr.id}' does not match ${operation} target '${target}'`,
   )
 }
 
@@ -1903,7 +1903,7 @@ function changeIdForRevision(existing: DeepReadonly<Change> | undefined, command
   raiseFailure(
     "refusal",
     "legacy-change-id-missing",
-    `yrd: PR '${existing.id}' predates stable Change-Id identity; migrate it before rebuilding`,
+    `yrd: change '${existing.id}' predates stable Change-Id identity; migrate it before rebuilding`,
   )
 }
 
@@ -1927,7 +1927,7 @@ function intakePR(
     raiseFailure(
       "refusal",
       "intake-current-changed",
-      `yrd: expected PR '${expected.id}' branch '${expected.branch}' does not match intake branch '${branch}'`,
+      `yrd: expected change '${expected.id}' branch '${expected.branch}' does not match intake branch '${branch}'`,
     )
   }
   const associated = bay === undefined ? undefined : changeForBay(current, bay.id)
@@ -1951,13 +1951,13 @@ function intakePR(
     }
   }
   if (existing !== undefined && !isLiveChange(existing)) {
-    throw new Error(`yrd: PR '${existing.id}' is ${changeDeliveryState(existing)}; start a new bay`)
+    throw new Error(`yrd: change '${existing.id}' is ${changeDeliveryState(existing)}; start a new bay`)
   }
   const issue = attachedIssue(existing, args.issue, bay?.issue)
   const name = args.name ?? bay?.name ?? existing?.name
   // Omitted receiver fields inherit the recorded payload for idempotence, while
   // an explicit base/composition delta remains an authored re-merge and may resume
-  // the PR. Display-name drift alone never mints a content revision.
+  // the change. Display-name drift alone never mints a content revision.
   const replayBaseSha = args.baseSha ?? (existing === undefined ? undefined : changeBaseSha(existing))
   const replayComposition = args.composition ?? (existing === undefined ? undefined : changeComposition(existing))
   refuseDuplicatePayload(current, args.headSha, base, replayComposition, existing?.id)
@@ -2022,7 +2022,7 @@ function submitWork(
   const current = state.bays
   if ("pr" in args) {
     // Submit-by-id routes through the same live guard as the other 9 mutating
-    // verbs (no resolve exemption): an id-addressed terminal PR passes through
+    // verbs (no resolve exemption): an id-addressed terminal change passes through
     // (matchedBy canonical) to the state check below; a live-less branch
     // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
     // semantics live entirely in the {branch} path and submitSelectionOperation,
@@ -2033,7 +2033,7 @@ function submitWork(
         : requireExpectedChangeTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
     if (args.props !== undefined) return bindChangeProps(pr, args.props)
     if (changeDeliveryState(pr) !== "pushed") {
-      throw new Error(`yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
+      throw new Error(`yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
     }
     return {
       events: [
@@ -2059,7 +2059,7 @@ function submitWork(
       changeDeliveryState(existing) === "submitted" ||
       changeDeliveryState(existing) === "ready")
   ) {
-    throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
+    throw new Error(`yrd: branch '${args.branch}' already has live change '${existing.id}'`)
   }
   const baseSha = args.baseSha ?? (resumesSubmission ? changeBaseSha(existing) : undefined)
   const composition = args.composition ?? (resumesSubmission ? changeComposition(existing) : undefined)
@@ -2169,7 +2169,7 @@ function bindChangeProps(pr: DeepReadonly<Change>, props: ChangeProps) {
     raiseFailure(
       "refusal",
       "prop-conflict",
-      `yrd: PR '${pr.id}' already carries prop '${conflict}=${currentProps?.[conflict]}'; a prop is a fact, set once`,
+      `yrd: change '${pr.id}' already carries prop '${conflict}=${currentProps?.[conflict]}'; a prop is a fact, set once`,
     )
   }
   const delivery = changeDeliveryState(pr)
@@ -2177,7 +2177,7 @@ function bindChangeProps(pr: DeepReadonly<Change>, props: ChangeProps) {
     raiseFailure(
       "refusal",
       "prop-too-late",
-      `yrd: PR '${pr.id}' is ${delivery}; props can only be set while pushed, submitted, or needs-author`,
+      `yrd: change '${pr.id}' is ${delivery}; props can only be set while pushed, submitted, or needs-author`,
     )
   }
   return {
@@ -2222,7 +2222,7 @@ function attachedIssue(
     raiseFailure(
       "refusal",
       "issue-conflict",
-      `yrd: PR '${existing.id}' is already linked to issue '${existing.issue}'; close it before linking another issue`,
+      `yrd: change '${existing.id}' is already linked to issue '${existing.issue}'; close it before linking another issue`,
     )
   }
   return requested ?? existing?.issue ?? fallback
@@ -2249,14 +2249,14 @@ function assertTerminalApplies(
     (terminal.headSha !== undefined && terminal.headSha !== changeHead(pr))
   ) {
     throw new Error(
-      `yrd: stale terminal '${eventName}' for PR '${pr.id}' targets ${terminal.revision ?? "unknown"}@${terminal.headSha ?? "unknown"}; current is ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
+      `yrd: stale terminal '${eventName}' for change '${pr.id}' targets ${terminal.revision ?? "unknown"}@${terminal.headSha ?? "unknown"}; current is ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
     )
   }
   if (terminal.issueRef !== undefined && terminal.issueRef !== pr.issue) {
-    throw new Error(`yrd: terminal issue '${terminal.issueRef}' does not match PR '${pr.id}'`)
+    throw new Error(`yrd: terminal issue '${terminal.issueRef}' does not match change '${pr.id}'`)
   }
   if (terminal.props !== undefined && (currentProps === undefined || !propsEqual(currentProps, terminal.props))) {
-    throw new Error(`yrd: terminal props does not match PR '${pr.id}'`)
+    throw new Error(`yrd: terminal props does not match change '${pr.id}'`)
   }
 }
 
@@ -2271,25 +2271,25 @@ function associateRejectedTerminalRun(
     found = true
     if (revision.terminal?.kind !== "rejected") {
       throw new Error(
-        `yrd: PR '${pr.id}' revision ${identity.revision}@${identity.headSha} has no rejected terminal to associate`,
+        `yrd: change '${pr.id}' revision ${identity.revision}@${identity.headSha} has no rejected terminal to associate`,
       )
     }
     if (revision.terminal.run !== undefined && revision.terminal.run !== run) {
       throw new Error(
-        `yrd: PR '${pr.id}' revision ${identity.revision}@${identity.headSha} is already associated with '${revision.terminal.run}'`,
+        `yrd: change '${pr.id}' revision ${identity.revision}@${identity.headSha} is already associated with '${revision.terminal.run}'`,
       )
     }
     return { ...revision, terminal: { ...revision.terminal, run } }
   })
   if (!found) {
-    throw new Error(`yrd: PR '${pr.id}' has no revision ${identity.revision}@${identity.headSha} to associate`)
+    throw new Error(`yrd: change '${pr.id}' has no revision ${identity.revision}@${identity.headSha} to associate`)
   }
   const current = changeRevisionNumber(pr) === identity.revision && changeHead(pr) === identity.headSha
   if (current && changeDeliveryState(pr) !== "rejected") {
-    throw new Error(`yrd: current PR '${pr.id}' is ${changeDeliveryState(pr)}, not rejected`)
+    throw new Error(`yrd: current change '${pr.id}' is ${changeDeliveryState(pr)}, not rejected`)
   }
   if (current && pr.terminalRun !== undefined && pr.terminalRun !== run) {
-    throw new Error(`yrd: current PR '${pr.id}' is already associated with '${pr.terminalRun}'`)
+    throw new Error(`yrd: current change '${pr.id}' is already associated with '${pr.terminalRun}'`)
   }
   return { ...pr, revs: revisions, ...(current ? { terminalRun: run } : {}) }
 }
@@ -2310,7 +2310,7 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSup
     raiseFailure(
       "refusal",
       "recut-current-changed",
-      `yrd: PR '${pr.id}' current revision changed from ${args.revision}@${args.headSha} ` +
+      `yrd: change '${pr.id}' current revision changed from ${args.revision}@${args.headSha} ` +
         `to ${current.n}@${current.head} while the refresh proof was computed`,
     )
   }
@@ -2319,14 +2319,14 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSup
     raiseFailure(
       "refusal",
       "recut-transition-not-admitted",
-      `yrd: PR '${pr.id}' revision ${current.n} is not the accepted revision selected for refresh`,
+      `yrd: change '${pr.id}' revision ${current.n} is not the accepted revision selected for refresh`,
     )
   }
   if (current.recut !== undefined && current.recut.patchId !== args.patchId) {
     raiseFailure(
       "refusal",
       "recut-patch-drift",
-      `yrd: PR '${pr.id}' automatic refresh changed patch identity from ${current.recut.patchId} to ${args.patchId}`,
+      `yrd: change '${pr.id}' automatic refresh changed patch identity from ${current.recut.patchId} to ${args.patchId}`,
     )
   }
   return {
@@ -2358,12 +2358,12 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "terminal-target",
-      `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; a finished change cannot be rebuilt`,
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; a finished change cannot be rebuilt`,
     )
   }
   const predecessor = pr.revs.find((revision) => revision.n === args.fromRevision)
   if (predecessor === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${args.fromRevision}`)
+    raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${args.fromRevision}`)
   }
   if (args.certificate !== undefined) {
     const expectedReview = args.expectedCurrent?.effectiveReview
@@ -2381,7 +2381,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       raiseFailure(
         "refusal",
         "recut-certificate-invalid",
-        `yrd: PR '${pr.id}' certified rebuild requires an approved expected-current review and exactly one matching root source`,
+        `yrd: change '${pr.id}' certified rebuild requires an approved expected-current review and exactly one matching root source`,
       )
     }
   }
@@ -2404,7 +2404,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "recut-current-changed",
-      `yrd: PR '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
+      `yrd: change '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
         `to ${String(pr.track ?? false)} while the rebuild was being computed`,
     )
   }
@@ -2416,7 +2416,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "recut-current-changed",
-      `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
+      `yrd: change '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
         ` to ${changeRevisionNumber(pr)}@${changeHead(pr)} while the rebuild was being computed`,
     )
   }
@@ -2427,7 +2427,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "recut-review-changed",
-      `yrd: PR '${pr.id}' effective review changed while the rebuild was being computed`,
+      `yrd: change '${pr.id}' effective review changed while the rebuild was being computed`,
     )
   }
   if (args.expectedCurrent?.checksPassed !== undefined) {
@@ -2437,13 +2437,13 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
         raiseFailure(
           "refusal",
           "recut-would-discard-green",
-          `yrd: PR '${pr.id}' checks passed while the rebuild was being computed; re-run with --force to replace green evidence`,
+          `yrd: change '${pr.id}' checks passed while the rebuild was being computed; re-run with --force to replace green evidence`,
         )
       }
       raiseFailure(
         "refusal",
         "recut-current-changed",
-        `yrd: PR '${pr.id}' check status changed while the rebuild was being computed`,
+        `yrd: change '${pr.id}' check status changed while the rebuild was being computed`,
       )
     }
   }
@@ -2462,7 +2462,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       raiseFailure(
         "refusal",
         "recut-transition-current-required",
-        `yrd: PR '${pr.id}' Queue freshness transition requires an expected current revision`,
+        `yrd: change '${pr.id}' Queue freshness transition requires an expected current revision`,
       )
     }
     if (
@@ -2473,14 +2473,14 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       raiseFailure(
         "refusal",
         "recut-transition-not-admitted",
-        `yrd: PR '${pr.id}' revision ${changeRevisionNumber(pr)} is not the accepted revision selected for refresh`,
+        `yrd: change '${pr.id}' revision ${changeRevisionNumber(pr)} is not the accepted revision selected for refresh`,
       )
     }
     if (predecessor.recut !== undefined && predecessor.recut.patchId !== args.patchId) {
       raiseFailure(
         "refusal",
         "recut-patch-drift",
-        `yrd: PR '${pr.id}' automatic refresh changed patch identity from ${predecessor.recut.patchId} to ${args.patchId}`,
+        `yrd: change '${pr.id}' automatic refresh changed patch identity from ${predecessor.recut.patchId} to ${args.patchId}`,
       )
     }
   }
@@ -2493,7 +2493,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "review-carry-invalid",
-      `yrd: PR '${pr.id}' revision ${predecessor.n} has no approval to carry`,
+      `yrd: change '${pr.id}' revision ${predecessor.n} has no approval to carry`,
     )
   }
   const successor = { revision: changeRevisionNumber(pr) + 1, headSha: args.headSha, baseSha: args.baseSha }
@@ -2502,7 +2502,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     raiseFailure(
       "refusal",
       "legacy-change-id-missing",
-      `yrd: PR '${pr.id}' predates stable Change-Id identity; migrate it before rebuilding`,
+      `yrd: change '${pr.id}' predates stable Change-Id identity; migrate it before rebuilding`,
     )
   }
   const successorSubmitter = predecessor.submitter ?? defaultSubmitter
@@ -2556,7 +2556,7 @@ function requestChangeReview(state: DeepReadonly<BayState>, args: ChangeRequestR
     raiseFailure(
       "refusal",
       "terminal-target",
-      `yrd: PR '${pr.id}' is ${delivery}; terminal PRs cannot change requested reviewers`,
+      `yrd: change '${pr.id}' is ${delivery}; terminal PRs cannot change requested reviewers`,
     )
   }
   const requested = pr.requestedReviewers ?? []
@@ -2635,7 +2635,7 @@ function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmiss
     raiseFailure(
       "refusal",
       "stale-pr",
-      `yrd: entry checks target stale revision ${args.revision} (${args.headSha}) of PR '${pr.id}'`,
+      `yrd: entry checks target stale revision ${args.revision} (${args.headSha}) of change '${pr.id}'`,
     )
   }
   const delivery = changeDeliveryState(pr)
@@ -2655,16 +2655,16 @@ function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmiss
 function recordChangeRegression(state: DeepReadonly<BayState>, args: ChangeRegressionArgs) {
   const original: LiveChange = requireLiveChange(state.bays, args.pr)
   const repair = resolveChange(state.bays, args.repairPr)
-  if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
+  if (repair === undefined) throw new Error(`yrd: no repair change '${args.repairPr}'`)
   if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
   if (!original.merged || original.integration === undefined) {
-    throw new Error(`yrd: original PR '${original.id}' is ${changeDeliveryState(original)}, not integrated`)
+    throw new Error(`yrd: original change '${original.id}' is ${changeDeliveryState(original)}, not integrated`)
   }
   if (!repair.merged || repair.integration === undefined) {
-    throw new Error(`yrd: repair PR '${repair.id}' is ${changeDeliveryState(repair)}, not integrated`)
+    throw new Error(`yrd: repair change '${repair.id}' is ${changeDeliveryState(repair)}, not integrated`)
   }
-  if (original.issue === undefined) throw new Error(`yrd: original PR '${original.id}' has no issue reference`)
-  if (repair.issue === undefined) throw new Error(`yrd: repair PR '${repair.id}' has no issue reference`)
+  if (original.issue === undefined) throw new Error(`yrd: original change '${original.id}' has no issue reference`)
+  if (repair.issue === undefined) throw new Error(`yrd: repair change '${repair.id}' has no issue reference`)
   if (original.integratedAt === undefined || repair.integratedAt === undefined) {
     throw new Error("yrd: integrated regression tuple is missing its journal timestamp")
   }
@@ -2677,7 +2677,7 @@ function recordChangeRegression(state: DeepReadonly<BayState>, args: ChangeRegre
     raiseFailure(
       "refusal",
       "regression-run-mismatch",
-      `yrd: queue run '${args.run}' does not prove integrated revision ${changeRevisionNumber(original)} of PR '${original.id}'`,
+      `yrd: queue run '${args.run}' does not prove integrated revision ${changeRevisionNumber(original)} of change '${original.id}'`,
     )
   }
   const repairRun = resolveSelector(
@@ -2689,7 +2689,7 @@ function recordChangeRegression(state: DeepReadonly<BayState>, args: ChangeRegre
     raiseFailure(
       "refusal",
       "regression-repair-run-mismatch",
-      `yrd: queue run '${args.repairRun}' does not prove integrated revision ${changeRevisionNumber(repair)} of repair PR '${repair.id}'`,
+      `yrd: queue run '${args.repairRun}' does not prove integrated revision ${changeRevisionNumber(repair)} of repair change '${repair.id}'`,
     )
   }
 
@@ -2806,7 +2806,7 @@ function refuseDuplicatePayload(
   )
   if (duplicate !== undefined) {
     throw new Error(
-      `yrd: payload already recorded as PR '${duplicate.id}' on queue '${identity}'` +
+      `yrd: payload already recorded as change '${duplicate.id}' on queue '${identity}'` +
         duplicatePayloadRemedy(duplicate),
     )
   }
@@ -2822,7 +2822,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   const pr = changeForBay(current, bay.id) ?? resolveChange(current, bay.branch)
   if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLiveChange(pr) && args.withdraw !== true) {
     throw new Error(
-      `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
     )
   }
   return {
@@ -2844,7 +2844,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
 function closePr(state: DeepReadonly<BayState>, args: ChangeCloseArgs) {
   const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   if (!isLiveChange(pr)) {
-    throw new Error(`yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; only a live PR can be closed`)
+    throw new Error(`yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; only a live change can be closed`)
   }
   return {
     events: [
@@ -2864,7 +2864,7 @@ function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
     raiseFailure(
       "refusal",
       "issue-conflict",
-      `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
+      `yrd: change '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
     )
   }
   const delivery = changeDeliveryState(pr)
@@ -2872,7 +2872,7 @@ function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
     raiseFailure(
       "refusal",
       "issue-too-late",
-      `yrd: PR '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
+      `yrd: change '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
     )
   }
   // Title, description and tracking are mutable delivery metadata (unlike the
@@ -2917,7 +2917,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     })
     if (!found) {
       throw new Error(
-        `yrd: PR '${pr.id}' has no clock for current revision ${currentRevision.n}@${currentRevision.head}`,
+        `yrd: change '${pr.id}' has no clock for current revision ${currentRevision.n}@${currentRevision.head}`,
       )
     }
     return revisions
@@ -3133,7 +3133,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
       const approval = effectiveReview?.decision === "approve" ? effectiveReview : undefined
       if (remerge.reviewCarried && approval === undefined) {
-        throw new Error(`yrd: PR '${pr.id}' rebuild carries a missing approval`)
+        throw new Error(`yrd: change '${pr.id}' rebuild carries a missing approval`)
       }
       const carriedReview: ChangeReview | undefined =
         remerge.reviewCarried && approval !== undefined
@@ -3177,12 +3177,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
       if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
-        throw new Error(`yrd: stale PR event for '${pr.id}'`)
+        throw new Error(`yrd: stale change event for '${pr.id}'`)
       }
       const currentProps = changeProps(pr)
       const submittedConflict = changed.props === undefined ? undefined : propsConflictKey(currentProps, changed.props)
       if (submittedConflict !== undefined) {
-        throw new Error(`yrd: submitted prop '${submittedConflict}' does not match PR '${pr.id}'`)
+        throw new Error(`yrd: submitted prop '${submittedConflict}' does not match change '${pr.id}'`)
       }
       const props = changed.props === undefined ? currentProps : { ...currentProps, ...changed.props }
       if (
@@ -3192,7 +3192,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           pr.flow.rev !== changedFlow.rev ||
           pr.flow.fingerprint !== changedFlow.fingerprint)
       ) {
-        throw new Error(`yrd: submitted flow does not match PR '${pr.id}'`)
+        throw new Error(`yrd: submitted flow does not match change '${pr.id}'`)
       }
       const revisions = patchRevisionClock(pr, { submittedAt: applied.ts, terminal: undefined }).map((revision) => {
         if (revision.n !== changeRevisionNumber(pr) || revision.head !== changeHead(pr)) return revision
@@ -3227,16 +3227,16 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
       if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
-        throw new Error(`yrd: stale props for PR '${pr.id}'`)
+        throw new Error(`yrd: stale props for change '${pr.id}'`)
       }
       const delivery = changeDeliveryState(pr)
       if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-        throw new Error(`yrd: PR '${pr.id}' is ${delivery}; props cannot be set`)
+        throw new Error(`yrd: change '${pr.id}' is ${delivery}; props cannot be set`)
       }
       const currentProps = changeProps(pr)
       const conflict = propsConflictKey(currentProps, changed.props)
       if (conflict !== undefined) {
-        throw new Error(`yrd: prop '${conflict}' conflicts with PR '${pr.id}'`)
+        throw new Error(`yrd: prop '${conflict}' conflicts with change '${pr.id}'`)
       }
       return patchPR(pr, propsPatch(pr, { ...currentProps, ...changed.props }))
     }
@@ -3246,7 +3246,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ? parsed.data
         : LegacyChangeWithdrawnSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         state: "closed",
@@ -3259,11 +3259,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/needs-author": {
       const changed = ChangeNeedsAuthorFactSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing PR '${changed.pr}'`)
+      if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
       const delivery = changeDeliveryState(pr)
       if (delivery !== "submitted" && delivery !== "ready") {
-        throw new Error(`yrd: PR '${pr.id}' is ${delivery}; '${applied.name}' requires a submitted revision`)
+        throw new Error(`yrd: change '${pr.id}' is ${delivery}; '${applied.name}' requires a submitted revision`)
       }
       return patchPR(pr, {
         needsAuthor: {
@@ -3282,7 +3282,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/rejected": {
       const changed = ChangeReplayRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
       const rejected: Change = {
         ...pr,
@@ -3300,7 +3300,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/terminal-associated": {
       const associated = ChangeTerminalAssociationSchema.parse(data)
       const pr = current.prs[associated.pr]
-      if (pr === undefined) throw new Error(`yrd: no PR '${associated.pr}' for terminal association`)
+      if (pr === undefined) throw new Error(`yrd: no change '${associated.pr}' for terminal association`)
       return patchPR(pr, associateRejectedTerminalRun(pr, associated, associated.run))
     }
     case "pr/integrated": {
@@ -3312,7 +3312,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           ? v1.data
           : LegacyChangeIntegratedSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
       const run = parsed.success ? parsed.data.run : v1?.success === true ? v1.data.run : undefined
       return patchPR(pr, {
@@ -3335,7 +3335,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/already-landed": {
       const changed = ChangeAlreadyMergedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         state: "closed",
@@ -3368,7 +3368,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         : LegacyChangeCanceledSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
       const run = parsed.success ? parsed.data.run : undefined
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         state: "closed",
@@ -3401,7 +3401,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         repair.integration?.commit !== fact.repairLandingSha
       ) {
         throw new Error(
-          `yrd: regression tuple does not match current integrated PR '${fact.pr}' and repair '${fact.repairPr}'`,
+          `yrd: regression tuple does not match current integrated change '${fact.pr}' and repair '${fact.repairPr}'`,
         )
       }
       if (pr.integratedAt === undefined || repair.integratedAt === undefined) {
@@ -3613,7 +3613,7 @@ function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: Jo
   })
 }
 
-function required<Value>(value: Value | undefined, kind: "bay" | "PR", selector: string): Value {
+function required<Value>(value: Value | undefined, kind: "bay" | "change", selector: string): Value {
   if (value === undefined) throw new Error(`yrd: no ${kind} '${selector}'`)
   return value
 }

@@ -153,7 +153,7 @@ export type QueueWatchSnapshot = Readonly<{
    * The frame remains usable on named partial or last-complete data. */
   readFailure?: QueueReadFailure
   outputs?: readonly QueueArtifactOutput[]
-  /** Revision-bound source deltas shown in the PR-scoped detail header. */
+  /** Revision-bound source deltas shown in the change-scoped detail header. */
   diffs?: readonly QueueChangeDiff[]
   /** Resolved project commands for the live step headers. */
   commands?: Readonly<Record<string, string>>
@@ -699,10 +699,10 @@ function QueueChangeDiffView({ diff }: { diff: QueueChangeDiff | undefined }) {
 /**
  * The Changes-tab / pre-run body (user directive 2026-07-21; expanded by
  * operator spec item 4 from "the selected member only" to every member of
- * the run): each batched PR gets its own box via QueueDetailRunChangeBlocks,
+ * the run): each batched change gets its own box via QueueDetailRunChangeBlocks,
  * complete with its own diff. Only the member matching the pane's own title
  * row skips its identity line — every other member still needs one, since
- * the title above shows just the one PR the cursor is on.
+ * the title above shows just the one change the cursor is on.
  */
 function QueueDetailChangeSection({
   data,
@@ -779,7 +779,7 @@ export function QueueWorkflowStepTabs({
   runLabel?: string
 }) {
   const names = useMemo(() => (data === undefined ? [] : queueStepNames(data)), [data])
-  // The PR/submission overview remains tab 0, ahead of the real step tabs.
+  // The change/submission overview remains tab 0, ahead of the real step tabs.
   // Default selection follows the failing/live step, then the newest recorded
   // output or terminal step. Operator selection overrides it; the parent
   // remounts on run change, resetting that override.
@@ -1622,7 +1622,7 @@ export function QueueWatchFrame({
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
   // Revision A makes DETAIL run-scoped: resolve every immutable run member for
-  // the PR blocks, while pending rows retain the same one-template shape.
+  // the change blocks, while pending rows retain the same one-template shape.
   const allFullPrs = snapshot.results.flatMap((result) => result.prs)
   // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity and the
   // status-parameterized template need the full projected row at this index.

@@ -1,5 +1,5 @@
 /**
- * @failure A queue run with no Job at its cursor step projects as `running` forever — `advance` no-ops without a Job and `jobs.recover()` has no Job to reclaim — so a finished PR keeps a phantom `● run` row whose clock ticks up indefinitely (live incident R1582: 45h over an already-integrated PR).
+ * @failure A queue run with no Job at its cursor step projects as `running` forever — `advance` no-ops without a Job and `jobs.recover()` has no Job to reclaim — so a finished PR keeps a phantom `● run` row whose clock ticks up indefinitely (live incident R1582: 45h over an already-integrated change).
  * @level l2
  * @consumer @yrd/queue
  */
@@ -255,7 +255,7 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
       ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
     })
     const pr = Object.values(app.state().bays.prs).find((item) => item.branch === "issue/stranded-draft")
-    if (pr === undefined) throw new Error("intake did not record the PR")
+    if (pr === undefined) throw new Error("intake did not record the change")
     expect(app.state().bays.prs[pr.id]?.revs.at(-1)?.submittedAt, "the fixture must be a true draft").toBeUndefined()
     return { app, pr }
   }
@@ -281,9 +281,9 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
 
   /**
    * The age alone says a draft stranded; it never says WHO it stranded against
-   * or HOW FAR it got. Both live on the PR already — the submitter recorded on
+   * or HOW FAR it got. Both live on the change already — the submitter recorded on
    * the revision, and the review verdicts — so a consumer that has the finding
-   * must not have to re-open the PR (or guess an owner from the branch name) to
+   * must not have to re-open the change (or guess an owner from the branch name) to
    * route it.
    */
   describe("routing facts — the finding carries who it stranded against and how far it got", () => {

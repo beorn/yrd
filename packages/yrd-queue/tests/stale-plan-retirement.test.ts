@@ -44,7 +44,7 @@ function workspace(): BayWorkspace {
 }
 
 /** A single check-only step (caller-tunable revision), batch size 2. The check
- * FAILS for a >1-PR batch — forcing a bisection — and passes a lone PR. */
+ * FAILS for a >1-PR batch — forcing a bisection — and passes a lone change. */
 function checkBatchPlugin(checkRevision: string) {
   const check = withStep(
     "check",

@@ -1,5 +1,5 @@
 /**
- * @failure A terminal PR (withdrawn/canceled/integrated) keeps reporting
+ * @failure A terminal change (withdrawn/canceled/integrated) keeps reporting
  * `checks.status: "queued"` because the checks projection is derived from the
  * append-only check-request history without consulting delivery state — so a
  * reader sees work in flight that the admission queue can never run.
@@ -106,7 +106,7 @@ describe("terminal PRs never project a live check status", () => {
     expect(eligibility.checks.queuedAt).toBe("2026-01-01T00:00:00.000Z")
   })
 
-  it("keeps an immutable revision verdict on a terminal PR", async () => {
+  it("keeps an immutable revision verdict on a terminal change", async () => {
     // Gating must not erase facts. The revision verdict is history, not a claim
     // about a live queue slot, so it survives withdrawal without a Queue Run.
     await using app = await createQueueApp()

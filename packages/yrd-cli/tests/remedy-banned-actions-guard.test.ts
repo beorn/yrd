@@ -57,7 +57,7 @@ const ALLOWLIST: readonly Allowed[] = [
   {
     file: "yrd-bay/src/git.ts",
     reason:
-      "Bay workspace checkpoint pushes a PR's own branch (HEAD:refs/heads/<branch>) as part of provisioning — " +
+      "Bay workspace checkpoint pushes a change's own branch (HEAD:refs/heads/<branch>) as part of provisioning — " +
       "pipeline actuation, not printed advice.",
   },
   {

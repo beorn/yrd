@@ -154,7 +154,7 @@ describe("native needs-author lifecycle", () => {
     await using app = await createQueueApp(() => ({
       status: "completed",
       conclusion: "failure",
-      error: { code: "composition-invalid", message: "PR 'PR1' composition head contains root changes" },
+      error: { code: "composition-invalid", message: "change 'PR1' composition head contains root changes" },
     }))
     const pr = await submitWithChecks(app, "topic/authored-root")
 
@@ -169,7 +169,7 @@ describe("native needs-author lifecycle", () => {
       step: "check",
       receipt: {
         code: "composition-invalid",
-        message: "PR 'PR1' composition head contains root changes",
+        message: "change 'PR1' composition head contains root changes",
       },
     })
 
@@ -182,7 +182,7 @@ describe("native needs-author lifecycle", () => {
       step: "check",
       receipt: {
         code: "composition-invalid",
-        message: "PR 'PR1' composition head contains root changes",
+        message: "change 'PR1' composition head contains root changes",
       },
     })
     expect(changeFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
@@ -221,7 +221,7 @@ describe("native needs-author lifecycle", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     // Receiver/refresh replay of the unchanged rejected head is idempotent:
-    // only new authored content may reopen and resume this PR.
+    // only new authored content may reopen and resume this change.
     const beforeReplay = await Array.fromAsync(app.events())
     const replay = await app.bays.intake({
       branch: "topic/authored-root",
@@ -373,7 +373,7 @@ describe("native needs-author lifecycle", () => {
     await using app = await createIntegratingApp(() => ({
       status: "completed",
       conclusion: "failure",
-      error: { code: "wrapper-mismatch", message: "PR 'PR1' generated wrapper paths differ" },
+      error: { code: "wrapper-mismatch", message: "change 'PR1' generated wrapper paths differ" },
     }))
     const pr = await submitWithChecks(app, "topic/merge-refusal")
 
@@ -412,7 +412,7 @@ describe("native needs-author lifecycle", () => {
     await using app = await createQueueApp()
     const pr = await submitWithChecks(app, "topic/late-drain")
 
-    // No run has happened yet: the PR is waiting in the admission queue.
+    // No run has happened yet: the change is waiting in the admission queue.
     const queued = app.queue.eligibility(pr)
     expect(queued.checks.status).toBe("queued")
 

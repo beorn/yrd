@@ -2,13 +2,13 @@
  * Watch DETAIL pane — run/revision association (user-reported 2026-07-16).
  *
  * Selecting a PENDING queue row whose CURRENT revision has no run yet must not
- * present the PR's newest HISTORICAL run (which ran against a now-superseded
+ * present the change's newest HISTORICAL run (which ran against a now-superseded
  * revision) as the current state. The reported screenshot showed a rev-2
  * pending PR whose detail read "RUN R520 STATUS failed OUTCOME rejected …
  * BLOCKER check-failed" — R520 ran against rev 1. The run block must be labeled
  * as history (the run header carries the revision it ran + "superseded"), the
  * current revision's real state ("no run yet") must be stated above it, and the
- * BLOCKER must be scoped to the historical revision, never rendered as the PR's
+ * BLOCKER must be scoped to the historical revision, never rendered as the change's
  * current blocker.
  */
 
@@ -23,7 +23,7 @@ const BASE_SHA = "a".repeat(40)
 const REV1_HEAD = "bc1ce38b0824".padEnd(40, "0")
 const REV2_HEAD = "970294c68f1a".padEnd(40, "0")
 
-// A PR at revision 2 sitting PENDING (submitted, no run yet), whose revision 1
+// A change at revision 2 sitting PENDING (submitted, no run yet), whose revision 1
 // was already rejected by run R520 — exactly the reported shape.
 function supersededPr() {
   return fixturePr("PR380", "submitted", "2026-07-13T11:05:00.000Z", "Repair the watch detail run association", {
@@ -87,7 +87,7 @@ describe("watch detail — pending row whose latest run ran a superseded revisio
       expect(app.text).toContain("CURRENT rev 2")
       expect(app.text).toContain("no run yet")
       // (c) The blocker is scoped to the historical revision, not presented as
-      //     the PR's current blocker.
+      //     the change's current blocker.
       expect(app.text).toContain("BLOCKER (rev 1)")
       expect(app.text).toContain("BLOCKER (rev 1) err=check-failed — check command exited 1")
     } finally {

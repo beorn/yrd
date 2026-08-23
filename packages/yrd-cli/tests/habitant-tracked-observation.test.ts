@@ -1,5 +1,5 @@
 /**
- * @failure One tracked PR whose branch cannot be observed — deleted on origin after merging, or a fetch that times out — throws out of the habitant's tracking pass and stops revision preparation for EVERY other tracked PR until an operator restarts the runner.
+ * @failure One tracked change whose branch cannot be observed — deleted on origin after merging, or a fetch that times out — throws out of the habitant's tracking pass and stops revision preparation for EVERY other tracked change until an operator restarts the runner.
  * @level l2
  * @consumer @yrd/cli habitant runner
  *
@@ -43,8 +43,8 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
 
 /**
  * A real repository whose `origin` carries `main` and HEALTHY but NOT DELETED —
- * the routine post-merge state that makes one tracked PR unobservable while
- * every other tracked PR is perfectly fine.
+ * the routine post-merge state that makes one tracked change unobservable while
+ * every other tracked change is perfectly fine.
  */
 async function repository() {
   const root = await mkdtemp(join(tmpdir(), "yrd-tracked-observation-"))
@@ -65,11 +65,11 @@ async function repository() {
   await git(repo, ["remote", "add", "origin", origin])
   await git(repo, ["push", "-q", "origin", "main"])
 
-  // The tracked PR whose branch still exists LOCALLY but was deleted on origin.
+  // The tracked change whose branch still exists LOCALLY but was deleted on origin.
   await git(repo, ["checkout", "-q", "-b", DELETED])
   const deletedHead = await commit("deleted.txt", "deleted-branch work")
 
-  // The healthy tracked PR: recorded at one head, then MOVED on origin, so the
+  // The healthy tracked change: recorded at one head, then MOVED on origin, so the
   // pass must record the drift and prepare the fresh revision.
   await git(repo, ["checkout", "-q", "-b", HEALTHY, "main"])
   const healthyRecorded = await commit("healthy-recorded.txt", "healthy recorded")
@@ -162,7 +162,7 @@ function liveIO(repo: string): YrdCliIO {
 }
 
 describe("habitant tracking pass — one unobservable branch never stops the others", () => {
-  it("defers the PR whose branch is gone from origin and still prepares the healthy tracked PR", async () => {
+  it("defers the change whose branch is gone from origin and still prepares the healthy tracked change", async () => {
     const fixture = await repository()
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
@@ -224,7 +224,7 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
     // The drift is durable: the observed live head became an immutable revision,
     // and the prepared recut sits on top of it.
     const healthy = submitted().find((pr) => pr.branch === HEALTHY)
-    if (healthy === undefined) throw new Error("expected the healthy tracked PR")
+    if (healthy === undefined) throw new Error("expected the healthy tracked change")
     // Tip semantics: the live head does not become a revision head of its own —
     // it flows into the remerger as proposedHeadSha and the recut PRODUCT is the
     // successor revision. Assert the observation reached the remerger, and that
@@ -276,7 +276,7 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
 
   it("still fails loud when the PROCESS has no Git observer at all", async () => {
     // The containment is scoped to per-branch observation facts. A missing Git
-    // observer is identical for every candidate — a misbuilt CLI, not one PR's
+    // observer is identical for every candidate — a misbuilt CLI, not one change's
     // condition — so deferring it would silently park the whole tracked set.
     const fixture = await repository()
     const log = createLogger("yrd", [{ level: "silent" }])

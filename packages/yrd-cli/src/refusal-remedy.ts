@@ -11,7 +11,7 @@ import { actionableFailure, remergeRefusedByDelivery, type FailureLike } from ".
  * the log records what a human would have typed.
  */
 export type RemedyStep =
-  /** Re-record the branch's corrected head onto the PR. `create` keeps a draft a
+  /** Re-record the branch's corrected head onto the change. `create` keeps a draft a
    * draft; `submit` is the state-agnostic spelling. */
   | Readonly<{ verb: "submit" | "create"; branch: string }>
   | Readonly<{ verb: "recut"; pr: string; preflight: boolean; apply: boolean; queue: boolean; force: boolean }>
@@ -21,7 +21,7 @@ export type RefusalRemedy =
   | Readonly<{ kind: "judgment"; reason: string }>
 
 export type RefusalRemedyContext = Readonly<{
-  /** The PR's branch, substituted for the `<branch>` placeholder the printed
+  /** The change's branch, substituted for the `<branch>` placeholder the printed
    * remedy carries — the one token a human had to fill in by hand. */
   branch: string
   delivery?: ChangeDeliveryState
@@ -91,8 +91,8 @@ export function formatRemedyCommand(step: RemedyStep): string {
  *      by construction (its recipe can conflict, and resolving a conflict is
  *      judgment);
  *   2. made ONLY of Yrd redelivery commands this module can execute; and
- *   3. able to put the PR back in the queue — a drill that cannot end in a
- *      queued re-merge (a terminal PR, or a refusal that merely says "correct the
+ *   3. able to put the change back in the queue — a drill that cannot end in a
+ *      queued re-merge (a terminal change, or a refusal that merely says "correct the
  *      cause") leaves the wedge exactly where it was.
  *
  * Everything else — re-merge/payload certificates, environment refusals, divergent
@@ -142,7 +142,7 @@ export type RefusalRemedyPlan = Readonly<{
   /** The refusal streak's latest code and message — the failure being remedied. */
   failure: FailureLike
   count: number
-  /** Identity of the PR REVISION this plan is for. A remedy is attempted at most
+  /** Identity of the change REVISION this plan is for. A remedy is attempted at most
    * once per revision; a successful one produces a new revision (and clears the
    * streak), so progress never depends on retrying the same one. */
   key: string

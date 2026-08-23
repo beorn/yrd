@@ -17,7 +17,7 @@ type Call = Readonly<{ op: string; detail?: string }>
 type LogCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
 function mechanicalRemergeReason(pr: string): string {
-  return `yrd: PR '${pr}' needs a certified refresh; run 'yrd pr recut ${pr} --preflight --queue --apply'`
+  return `yrd: change '${pr}' needs a certified refresh; run 'yrd pr recut ${pr} --preflight --queue --apply'`
 }
 
 function harness(
@@ -158,10 +158,10 @@ function harness(
 }
 
 describe("habitant refusal remedies — only PR-local drills are self-applied", () => {
-  it("settles authored-gitlink as needs-person without mutating the PR", async () => {
+  it("settles authored-gitlink as needs-person without mutating the change", async () => {
     const h = harness({
       code: "authored-gitlink",
-      reason: "yrd: PR 'PR1791' changes generated-only gitlinks [km]",
+      reason: "yrd: change 'PR1791' changes generated-only gitlinks [km]",
     })
 
     const outcomes = await applyRefusalRemedies(h.app, h.services, h.io, new Set())
@@ -221,8 +221,8 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     expect(h.ops()).not.toContain("services.recut")
   })
 
-  it("applies a PR's remedy at most once per revision — including the revision it just minted", async () => {
-    // The drill re-records the branch, so the PR ends the cycle on a NEW
+  it("applies a change's remedy at most once per revision — including the revision it just minted", async () => {
+    // The drill re-records the branch, so the change ends the cycle on a NEW
     // revision. Without bounding that one too, "once per revision" would be
     // satisfied by a loop that mints a fresh revision every cycle forever.
     const h = harness()
@@ -266,7 +266,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
   it("escalates a judgment-required refusal with its printed remedy and touches nothing", async () => {
     const h = harness({
       code: "recut-certificate",
-      reason: "yrd: PR 'PR1791' recut tree certificate does not match revision 1",
+      reason: "yrd: change 'PR1791' recut tree certificate does not match revision 1",
     })
 
     const outcomes = await applyRefusalRemedies(h.app, h.services, h.io, new Set())

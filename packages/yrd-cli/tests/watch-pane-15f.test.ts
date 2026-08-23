@@ -54,7 +54,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await waitFor(() => app.text.includes("125 tests collected"))
 
       // j/k move the QUEUE cursor (not the tabs); the detail follows the
-      // cursor. run#7 has no running step, so its detail opens on the PR tab
+      // cursor. run#7 has no running step, so its detail opens on the change tab
       // (no RUN header there) — anchor on the title row instead, which names
       // the selected PR regardless of which tab is active.
       // Row 0 is the watch pane's own top line (item 12, always present); the

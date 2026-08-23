@@ -343,7 +343,7 @@ describe("candidate refs", () => {
     })
 
     it("retains a direct-recut source-tip ref through revs[].head, with no sourceRewrites record", async () => {
-      // remergeDirectChange publishes this ref straight from a PR's certified head — no
+      // remergeDirectChange publishes this ref straight from a change's certified head — no
       // per-source record exists for it, only the Candidate's own composed revs.
       const head = sha("16")
       const ref = sourceCandidateRefFor(head)

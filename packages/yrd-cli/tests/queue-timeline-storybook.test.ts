@@ -104,10 +104,10 @@ describe("queue timeline storybook", () => {
       expect(rows[commandRowIndex]).not.toContain("COMMAND")
       expect(frame).toContain("125 tests collected")
 
-      // The PR/submission overview is restored as tab 0 (user directive
+      // The change/submission overview is restored as tab 0 (user directive
       // 2026-07-21), ahead of the real step tabs; the diff lives there, not on
       // the default running-step tab. Navigate left from `check` (tab 2) past
-      // `prepare` (tab 1) to reach the PR tab (tab 0).
+      // `prepare` (tab 1) to reach the change tab (tab 0).
       await act(async () => {
         await handle.press("h")
         await handle.press("h")
@@ -512,7 +512,7 @@ describe("queue timeline storybook", () => {
           expect(term.screen.getText(), name).toContain("RUN main#4")
           expect(term.screen.getText(), name).toContain("passed, merged")
           // The integration proof (COMMIT/PARENTS) lives in the merge-step tab
-          // panel now. At the 24-row full tier the PR-scoped header + run region
+          // panel now. At the 24-row full tier the change-scoped header + run region
           // fill the pane, leaving one content row in the tab panel, so the
           // merge-tab STRIP is the visible proof that the integrated run's merge
           // step is reached — the COMMIT body itself needs a taller viewport
@@ -549,7 +549,7 @@ describe("queue timeline storybook", () => {
       await handle.press("j")
       // R7 is canceled (no running step), so its detail opens on the restored
       // PR tab (user directive 2026-07-21) rather than a `RUN main#7` step
-      // tab; the PR identity title is the stable readiness marker instead.
+      // tab; the change identity title is the stable readiness marker instead.
       await waitFor(() => term.screen.getText().includes("pr#7.1"))
       expect(findGlyphColumn(term, "│", 1)).toBe(draggedDivider)
     } finally {

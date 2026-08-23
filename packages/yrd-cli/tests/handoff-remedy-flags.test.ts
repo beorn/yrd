@@ -26,7 +26,7 @@ function liveBayOpenHelp(): string {
 
 function prescribedFlags(remedy: string): string[] {
   // Flags on the remedy's command lines (indented "  yrd …" lines), so prose
-  // mentions like "--pr takes the PR selector" don't need to re-match — but
+  // mentions like "--pr takes the change selector" don't need to re-match — but
   // include them anyway: every flag the remedy NAMES must exist.
   return [...remedy.matchAll(/--[a-z][\w-]*/gu)].map((match) => match[0])
 }

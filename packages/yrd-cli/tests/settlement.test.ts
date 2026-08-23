@@ -1,7 +1,7 @@
 /**
  * @failure Background settlement of terminal delivery facts advances its cursor before the settler acknowledged them, drops a failure that only ever reached a detached process's stderr, or resumes from a cursor written by a different owner.
  * @level l2
- * @consumer @yrd/cli composition hosts that close their own out-of-band records when Yrd commits a terminal PR fact
+ * @consumer @yrd/cli composition hosts that close their own out-of-band records when Yrd commits a terminal change fact
  */
 import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"

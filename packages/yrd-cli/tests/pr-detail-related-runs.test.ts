@@ -1,4 +1,4 @@
-// @failure A PR's detail pane lists queue runs the PR never rode in as RELATED RUNS
+// @failure A change's detail pane lists queue runs the change never rode in as RELATED RUNS
 // @level l1
 // @consumer @yrd/cli
 
@@ -66,7 +66,7 @@ describe("ChangeDetailData related runs", () => {
   const pr1LatestRun = fixtureRun("R3", [pr1], "in_progress", "2026-07-13T11:00:00.000Z")
   const runs = [pr1RetryRun, pr2Run, pr1LatestRun]
 
-  test("includes only runs the PR is a member of, keeping order", () => {
+  test("includes only runs the change is a member of, keeping order", () => {
     const detail = ChangeDetailData(pr1, runs)
 
     expect(detail.runs.map((run) => run.run)).toEqual(["R1", "R3"])

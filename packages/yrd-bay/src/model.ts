@@ -17,13 +17,13 @@ export const BayIdSchema = z.string().trim().min(1)
  * The shape the mint actually writes: `nextId("PR", state.prs)` produces `PR`
  * plus a decimal counter, and all 43,202 PR-id occurrences in the live journal
  * carry it. Pinning the schema to that shape is what lets `QueueMemberIdSchema`
- * discriminate — an intent id (`I148`, `yrdpin#164`) no longer parses as a PR
+ * discriminate — an intent id (`I148`, `yrdpin#164`) no longer parses as a change
  * id, so a mis-kinded member fails here instead of much later or never.
  *
  * Display forms (`pr#182.1`) and the operator's bare-number selector are NOT
  * ids and are deliberately refused; {@link parseChangeSelector} is their grammar.
  */
-export const PRIdSchema = z.string().regex(/^PR\d+$/u, "expected a PR id, e.g. PR182")
+export const PRIdSchema = z.string().regex(/^PR\d+$/u, "expected a change id, e.g. PR182")
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 export const ChangeTerminalAssociationSchema = z
@@ -122,7 +122,7 @@ const ChangeRejectedFactObjectSchema = z
 export const ChangeRejectedFactSchema = z.preprocess(normalizeLegacyChangeKeys, ChangeRejectedFactObjectSchema)
 export type ChangeRejectedFact = Readonly<z.infer<typeof ChangeRejectedFactSchema>>
 
-/** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the PR in the
+/** Author-owned refusal fact. Unlike `pr/rejected`, this keeps the change in the
  * submitted queue lifecycle and carries the exact typed result needed to fix
  * the branch in place. */
 export const ChangeNeedsAuthorFactSchema = z.preprocess(
@@ -362,7 +362,7 @@ const NON_CHECKABLE_CHANGE_STATES: ReadonlySet<ChangeDeliveryState> = new Set<Ch
   "canceled",
 ])
 
-/** A PR can accept new check requests in every non-terminal delivery state.
+/** A change can accept new check requests in every non-terminal delivery state.
  * Once it reaches integrated/already-landed/withdrawn/canceled, it is no
  * longer checkable. */
 export function isNonCheckableChangeState(state: ChangeDeliveryState): boolean {
@@ -370,10 +370,10 @@ export function isNonCheckableChangeState(state: ChangeDeliveryState): boolean {
 }
 
 /**
- * A check request was refused because the PR's current status does not permit
+ * A check request was refused because the change's current status does not permit
  * it. Always thrown, never returned, so a genuine caller error still fails
  * loud. The carried `prId`/`status` let a habitant, multi-tenant runner tell a
- * losable concurrent-terminal race (a peer withdrew/canceled/integrated/already-landed the PR
+ * losable concurrent-terminal race (a peer withdrew/canceled/integrated/already-landed the change
  * between the runner's compose snapshot and its check request — see
  * isConcurrentCheckabilityConflict) apart from a real caller error, without
  * matching on the message text.
@@ -383,7 +383,7 @@ export class ChangeCheckabilityConflict extends Error {
   readonly status: ChangeDeliveryState
 
   constructor(prId: string, status: ChangeDeliveryState) {
-    super(`yrd: PR '${prId}' is ${status}, not checkable`)
+    super(`yrd: change '${prId}' is ${status}, not checkable`)
     this.name = "ChangeCheckabilityConflict"
     this.prId = prId
     this.status = status
@@ -669,9 +669,9 @@ export type Change = Readonly<{
   description?: string
   branch: string
   base: string
-  /** answers: Is the PR record open or closed? tense: current. */
+  /** answers: Is the change record open or closed? tense: current. */
   state: "open" | "closed"
-  /** answers: Has the rebuildable index recorded this PR as merged? tense: historical. */
+  /** answers: Has the rebuildable index recorded this change as merged? tense: historical. */
   merged: boolean
   /** Opt-in "merge into latest": when true, the habitant observes the live
    * branch before each Queue cycle. A moved head is recorded as a revision,
@@ -691,7 +691,7 @@ export type Change = Readonly<{
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
   regressions?: readonly ChangeRegression[]
-  /** answers: Has this PR ever recorded author-owned refusal evidence? tense: historical.
+  /** answers: Has this change ever recorded author-owned refusal evidence? tense: historical.
    * Legacy pre-revision-admission projection. New refusal evidence lives on
    * `currentChangeRev(pr).admission`; retained so old indexes remain readable. */
   needsAuthor?: Readonly<{
@@ -753,7 +753,7 @@ export function parseChangeSelector(selector: string): ParsedChangeSelector | un
  * discrimination exists only at runtime, and this is the one place that asks.
  * Without the ask, `yrdpin#357` printed as `pr#yrdpin#357`: a false kind that
  * also stutters, on all three renderer call sites at once
- * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). A record that is not a PR
+ * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). A record that is not a change
  * renders under its own id, which is what its kind rename will then change.
  */
 export function formatChangeRevisionSelector(pr: PRId, revision: number | Pick<ChangeRev, "n">): string {
@@ -793,7 +793,7 @@ export function isChangeRevisionSelector(pr: string): boolean {
  * in exactly the case nobody can check. The number is reported; the reader
  * judges it.
  *
- * The `no PR '<selector>'` prefix is preserved so any matcher on the old text
+ * The `no change '<selector>'` prefix is preserved so any matcher on the old text
  * keeps matching. The noun is `pr list`'s own ("list changes").
  *
  * Exported because this message had ELEVEN hand-rolled spellings beside this
@@ -810,19 +810,19 @@ export function isChangeRevisionSelector(pr: string): boolean {
 export function changeNotFoundMessage(state: BaysState, selector: string): string {
   const searched = `searched ${Object.keys(state.prs).length} change(s)`
   if (parseChangeSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
-    return `yrd: no PR '${selector}' — ${searched}`
+    return `yrd: no change '${selector}' — ${searched}`
   }
   const copiedId = /^(?:pr#?)?([a-z0-9_-]+)/iu.exec(selector.trim())?.[1]
   const copiedPr = copiedId === undefined ? undefined : state.prs[`PR${copiedId}`]
   const examplePr = copiedPr ?? Object.values(state.prs).toSorted((left, right) => compareNatural(left.id, right.id))[0]
   const example =
     examplePr === undefined ? "pr#1.1" : formatChangeRevisionSelector(examplePr.id, currentChangeRev(examplePr))
-  return `yrd: no PR '${selector}'; accepted form: ${example} — ${searched}`
+  return `yrd: no change '${selector}'; accepted form: ${example} — ${searched}`
 }
 
 export function currentChangeRev(pr: Pick<Change, "id" | "revs">): ChangeRev {
   const revision = pr.revs.at(-1)
-  if (revision === undefined) throw new Error(`yrd: PR '${pr.id}' has no revision`)
+  if (revision === undefined) throw new Error(`yrd: change '${pr.id}' has no revision`)
   return revision
 }
 
@@ -898,12 +898,12 @@ export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr
   const byRevision = new Map(pr.revs.map((candidate) => [candidate.n, candidate]))
   let current = byRevision.get(revision)
   if (current === undefined) {
-    throw new Error(`yrd: PR '${pr.id}' has no retained revision ${revision}`)
+    throw new Error(`yrd: change '${pr.id}' has no retained revision ${revision}`)
   }
   const lineage: ChangeRev[] = []
   const seen = new Set<number>()
   while (current !== undefined) {
-    if (seen.has(current.n)) throw new Error(`yrd: PR '${pr.id}' has a cyclic rebuild history`)
+    if (seen.has(current.n)) throw new Error(`yrd: change '${pr.id}' has a cyclic rebuild history`)
     seen.add(current.n)
     lineage.unshift(current)
     const predecessor = current.recut?.fromRevision
@@ -911,7 +911,7 @@ export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr
     current = byRevision.get(predecessor)
     if (current === undefined) {
       throw new Error(
-        `yrd: PR '${pr.id}' rebuilt revision ${lineage[0]?.n ?? revision} lost its predecessor ${predecessor}`,
+        `yrd: change '${pr.id}' rebuilt revision ${lineage[0]?.n ?? revision} lost its predecessor ${predecessor}`,
       )
     }
   }
@@ -922,7 +922,7 @@ export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr
  * to its first immutable source-ready (`pushed`) clock before admission. */
 export function changeSourceReadyAt(pr: Change, revision = currentChangeRev(pr).n): string {
   const source = changeRevisionLineage(pr, revision)[0]
-  if (source === undefined) throw new Error(`yrd: PR '${pr.id}' has no source-ready revision`)
+  if (source === undefined) throw new Error(`yrd: change '${pr.id}' has no source-ready revision`)
   return source.submittedAt ?? source.pushedAt
 }
 
@@ -1247,10 +1247,10 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
   )
 }
 
-/** Resolve a PR selector, reporting whether the operator named the PR's
+/** Resolve a change selector, reporting whether the operator named the change's
  * canonical id or reached it through an alias (branch/name/bay). A branch
  * selector means "the live delivery of this branch": when a branch has both a
- * terminal PR and a live one, the live PR wins. Candidates are ordered
+ * terminal change and a live one, the live change wins. Candidates are ordered
  * most-recent-first (highest id) so the read-biased fallback resolves the most
  * recent terminal when a branch has ONLY terminal PRs. An exact canonical id
  * always addresses that specific PR, terminal or not, ahead of this preference.
@@ -1274,7 +1274,7 @@ export function resolveChangeMatch(state: BaysState, selector: string): ChangeSe
         value: pr,
       }
     })
-  const resolve = (input: string) => resolveSelectorMatch(input, candidates, { kind: "PR", prefer: isLiveChange })
+  const resolve = (input: string) => resolveSelectorMatch(input, candidates, { kind: "change", prefer: isLiveChange })
   const matched = parsed === undefined ? resolve(selector) : (resolve(parsed.pr) ?? resolve(selector))
   if (matched === undefined) return undefined
   if (parsed?.revision === undefined) return matched
@@ -1306,15 +1306,15 @@ export function resolveChange(state: BaysState, selector: string): Change | unde
 
 declare const liveBrand: unique symbol
 
-/** A PR that has passed through {@link requireLiveChange} — the shared mutation
+/** A change that has passed through {@link requireLiveChange} — the shared mutation
  * boundary guard. Mutating reducers annotate their resolved PR as `LivePR`, so
  * `tsc` rejects any swap back to a raw `resolvePR` / `required(...)` (which
  * yields an unbranded {@link Change}) — the type system, not a source-grep test,
- * enforces that every PR-selector mutation routes through the live guard. */
+ * enforces that every change-selector mutation routes through the live guard. */
 export type LiveChange = Change & { readonly [liveBrand]: true }
 
-/** Resolve a PR for a MUTATING verb: a branch/name selector must name the live
- * delivery of that branch. Returns the live PR; a terminal PR is returned only
+/** Resolve a change for a MUTATING verb: a branch/name selector must name the live
+ * delivery of that branch. Returns the live change; a terminal change is returned only
  * when the operator addressed it by its exact canonical id (the verb's own
  * state guard then decides what a terminal target permits). A branch/alias
  * selector whose PRs are all terminal refuses loudly here at the mutation
@@ -1332,13 +1332,13 @@ export function requireLiveChange(state: BaysState, selector: string): LiveChang
       raiseFailure(
         "refusal",
         "historical-pr-revision",
-        `yrd: PR '${pr.id}' selector targets historical revision ${resolution.revision.n}; current revision is ${current.n}`,
+        `yrd: change '${pr.id}' selector targets historical revision ${resolution.revision.n}; current revision is ${current.n}`,
       )
     }
   }
-  // A canonical-id match ('pr1' folds to PR1) passes a terminal PR through to
+  // A canonical-id match ('pr1' folds to PR1) passes a terminal change through to
   // the verb's own state guard; an alias (branch/name) match must name a live
   // delivery. The fold that decides this lives in resolveSelectorMatch, not here.
   if (isLiveChange(pr) || resolution.matchedBy === "canonical") return pr as LiveChange
-  raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
+  raiseFailure("refusal", "no-live-pr", `yrd: no live change for branch '${selector}'; use PR id`)
 }

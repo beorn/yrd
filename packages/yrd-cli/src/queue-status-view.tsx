@@ -136,7 +136,7 @@ function changeIdValue(pr: string): string {
 
 /**
  * Retry — the SAME submission re-run N times by the queue (base moved, transient
- * fail) — rides the PR identity as `×N`, distinct from the `.N` submission mark.
+ * fail) — rides the change identity as `×N`, distinct from the `.N` submission mark.
  * A single run (first try) is bare. Mirrors the timeline's storm `×N`
  * vocabulary; each retry is its own run id (see runOutputQueueageIndex).
  *
@@ -235,7 +235,7 @@ export function queuePauseWarnings(state: BaysState, results: readonly QueueStat
     const health = queuePauseHealth(state, result.pause)
     if (!health.blocksAll) return []
     return [
-      `[pause-blocks-all] queue '${result.base}' pause blocks every PR: all allowed PRs are terminal (${queuePauseAllowedText(result.pause, health)})`,
+      `[pause-blocks-all] queue '${result.base}' pause blocks every change: all allowed PRs are terminal (${queuePauseAllowedText(result.pause, health)})`,
     ]
   })
 }
@@ -313,7 +313,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   revision: number
   headSha: string
   branch: string
-  /** Canonical issue path for this PR revision; presentation may replace the branch with this stronger identity. */
+  /** Canonical issue path for this change revision; presentation may replace the branch with this stronger identity. */
   issue?: string
   subject: string
   /** The identity that submitted this exact PR revision; absent only for older journals. */
@@ -1000,10 +1000,10 @@ export function queueRunRevisionClocks(prs: Iterable<Change>, runs: Iterable<Run
       const pr = byId.get(revision.id)
       if (pr === undefined) {
         // A carrier-free pin intent's member id is an intent id: the snapshot
-        // is the whole record and no revision clock exists. A PR member with
+        // is the whole record and no revision clock exists. A change member with
         // no retained PR is journal corruption and stays loud.
         if (revision.intent !== undefined) continue
-        throw new Error(`yrd: run '${run.id}' has no retained PR '${revision.id}'`)
+        throw new Error(`yrd: run '${run.id}' has no retained change '${revision.id}'`)
       }
       clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
     }
@@ -1290,7 +1290,7 @@ export function latestRunForCurrentRevision(pr: Change, summary: QueueSummary): 
       (run) =>
         currentSubmission === undefined ||
         timestamp(run.startedAt, `run '${run.id}' start`) >=
-          timestamp(currentSubmission, `PR '${pr.id}' current revision submit time`),
+          timestamp(currentSubmission, `change '${pr.id}' current revision submit time`),
     )
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
@@ -1341,7 +1341,7 @@ function currentTerminalFact(pr: Change): ChangeRevTerminal | undefined {
   }
   if (at === undefined) {
     throw new Error(
-      `yrd: PR '${pr.id}' current revision ${changeRevisionNumber(pr)}@${changeHead(pr)} has no ${delivery} timestamp`,
+      `yrd: change '${pr.id}' current revision ${changeRevisionNumber(pr)}@${changeHead(pr)} has no ${delivery} timestamp`,
     )
   }
   return { kind: delivery, at }
@@ -1494,18 +1494,18 @@ function validateRevisionClock(pr: Change, clock: ChangeRevisionHistoryClock): C
   const pushed = Date.parse(clock.pushedAt)
   if (!Number.isFinite(pushed)) {
     throw new Error(
-      `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid pushed clock '${clock.pushedAt}'`,
+      `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid pushed clock '${clock.pushedAt}'`,
     )
   }
   if (clock.submittedAt !== undefined) {
     const submitted = elapsedMs(
       clock.pushedAt,
       clock.submittedAt,
-      `PR '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-submitted age`,
+      `change '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-submitted age`,
     )
     if (submitted === undefined) {
       throw new Error(
-        `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid submitted clock '${clock.submittedAt}'`,
+        `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid submitted clock '${clock.submittedAt}'`,
       )
     }
   }
@@ -1513,11 +1513,11 @@ function validateRevisionClock(pr: Change, clock: ChangeRevisionHistoryClock): C
     const terminal = elapsedMs(
       clock.submittedAt ?? clock.pushedAt,
       clock.terminal.at,
-      `PR '${pr.id}' revision ${clock.revision}@${clock.headSha} submitted-to-terminal age`,
+      `change '${pr.id}' revision ${clock.revision}@${clock.headSha} submitted-to-terminal age`,
     )
     if (terminal === undefined) {
       throw new Error(
-        `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid terminal clock '${clock.terminal.at}'`,
+        `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid terminal clock '${clock.terminal.at}'`,
       )
     }
   }
@@ -1527,19 +1527,19 @@ function validateRevisionClock(pr: Change, clock: ChangeRevisionHistoryClock): C
   if (expected === undefined) {
     if (clock.terminal !== undefined) {
       throw new Error(
-        `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.kind} terminal clock`,
+        `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.kind} terminal clock`,
       )
     }
     return clock
   }
   if (clock.terminal === undefined) {
     throw new Error(
-      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.kind} terminal clock`,
+      `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.kind} terminal clock`,
     )
   }
   if (clock.terminal.kind !== expected.kind || clock.terminal.at !== expected.at) {
     throw new Error(
-      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.kind} terminal clock contradicts current PR state`,
+      `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.kind} terminal clock contradicts current PR state`,
     )
   }
   return clock
@@ -1560,7 +1560,7 @@ export function changeRevisionClocks(pr: Change): readonly ChangeRevisionHistory
   const clocks = pr.revs.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
   if (!clocks.some((clock) => clock.revision === changeRevisionNumber(pr) && clock.headSha === changeHead(pr))) {
     throw new Error(
-      `yrd: PR '${pr.id}' has no clock for current revision ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
+      `yrd: change '${pr.id}' has no clock for current revision ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
     )
   }
   return clocks
@@ -1573,11 +1573,11 @@ function revisionCheckRequests(pr: Change, clock: ChangeRevisionHistoryClock): r
       const elapsed = elapsedMs(
         clock.pushedAt,
         request.at,
-        `PR '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-check-request age`,
+        `change '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-check-request age`,
       )
       if (elapsed === undefined) {
         throw new Error(
-          `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid check-request clock '${request.at}'`,
+          `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid check-request clock '${request.at}'`,
         )
       }
       return request
@@ -1592,30 +1592,30 @@ function timestamp(value: string, subject: string): number {
 
 export function runRevisionClock(pr: Change, run: Run): ChangeRunRevisionClock {
   const pinned = run.prs.find((member) => member.id === pr.id)
-  if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain PR '${pr.id}'`)
+  if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain change '${pr.id}'`)
   const revision = pr.revs.find((revision) => revision.n === pinned.revision && revision.head === pinned.headSha)
   if (revision === undefined) {
     throw new Error(
-      `yrd: run '${run.id}' has no retained revision clock for PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
+      `yrd: run '${run.id}' has no retained revision clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
     )
   }
   const historyClock = revisionHistoryClock(pr, revision)
   const startedAt = timestamp(run.startedAt, `run '${run.id}' start`)
   if (
     revision.submittedAt !== undefined &&
-    timestamp(revision.submittedAt, `PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha} submit time`) <=
+    timestamp(revision.submittedAt, `change '${pr.id}' revision ${pinned.revision}@${pinned.headSha} submit time`) <=
       startedAt
   ) {
     const clock = validateRevisionClock(pr, historyClock)
     return { ...clock, admittedBy: "submission", submittedAt: revision.submittedAt }
   }
   const checkRequest = revisionCheckRequests(pr, historyClock)
-    .filter((request) => timestamp(request.at, `PR '${pr.id}' check request`) <= startedAt)
+    .filter((request) => timestamp(request.at, `change '${pr.id}' check request`) <= startedAt)
     .toSorted((left, right) => left.at.localeCompare(right.at))
     .at(-1)
   if (checkRequest === undefined) {
     throw new Error(
-      `yrd: run '${run.id}' has no causal submit/check-request clock for PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
+      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
     )
   }
   const clock = validateRevisionClock(pr, historyClock)
@@ -2058,7 +2058,7 @@ export function queueDisplayState(
  * `rev` is a draft carrying failed-submission history — the user's "a failed
  * submission returns the change to an editable state" — and stores no new status record.
  * A `rejected` PR resurfaces as `rev` IMMEDIATELY (21707: rejection is a
- * submission fact, not a PR resting state), scope-limited to PRs whose failed
+ * submission fact, not a change resting state), scope-limited to PRs whose failed
  * run the result still retains, so the pre-cutover backlog of ancient rejected
  * PRs cannot flood the band; once the run ages out, the corpse stays hidden.
  *
@@ -2236,7 +2236,7 @@ function IssueValue({ issue, flex = false }: { issue: string; flex?: boolean }) 
 }
 
 /**
- * A PR description rendered as Markdown. Authored hard-wraps reflow to the pane
+ * A change description rendered as Markdown. Authored hard-wraps reflow to the pane
  * width (a commit body wrapped at 72 columns no longer shows mangled mid-word
  * breaks in a narrow detail pane), and bold / lists / inline code / headings
  * render styled instead of raw. Shared by the watch detail pane and `pr view`
@@ -2480,7 +2480,7 @@ function timelineQueueWaits(run: Run, submissionTimes: ReadonlyMap<string, strin
     const submittedAt = submissionTimes.has(runKey)
       ? (submissionTimes.get(runKey) ?? undefined)
       : (submissionTimes.get(queueRevisionKey(member)) ?? undefined)
-    return elapsedMs(submittedAt, run.startedAt, `PR '${member.id}' queue wait`) ?? null
+    return elapsedMs(submittedAt, run.startedAt, `change '${member.id}' queue wait`) ?? null
   })
 }
 
@@ -2531,10 +2531,10 @@ function timelineRunMemberRows(
   return run.prs.map((member, index) => {
     const current = result.prs.find((candidate) => candidate.id === member.id)
     // An intent member's snapshot is its complete record: render from it and
-    // skip the PR-only enrichments (lineage history, admission clock,
-    // submitter). A PR member with no retained PR stays loud.
+    // skip the change-only enrichments (lineage history, admission clock,
+    // submitter). A change member with no retained PR stays loud.
     if (current === undefined && member.intent === undefined) {
-      throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+      throw new Error(`yrd: run '${run.id}' has no retained change '${member.id}'`)
     }
     const lineage =
       current === undefined
@@ -2567,7 +2567,7 @@ function timelineRunMemberRows(
       candidateId: run.candidateId,
       run: run.id,
       pr: member.id,
-      // A run member is a PR *or* a pin intent — this is the row where a
+      // A run member is a change *or* a pin intent — this is the row where a
       // gitlink id actually reaches the renderer.
       ...(queueMemberKind(member.id) === undefined ? {} : { kind: queueMemberKind(member.id) }),
       revision: member.revision,
@@ -2581,7 +2581,7 @@ function timelineRunMemberRows(
       ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
       revisionLineage: [lineage],
       ...(failure === undefined ? {} : { failure }),
-      ageMs: elapsedMs(sourceReadyAt, ageEndIso, `PR '${member.id}' source-ready age`) ?? null,
+      ageMs: elapsedMs(sourceReadyAt, ageEndIso, `change '${member.id}' source-ready age`) ?? null,
       totalMs,
       activeMs,
       waitMs,
@@ -2592,7 +2592,7 @@ function timelineRunMemberRows(
   })
 }
 
-/** The most recent failed submission (a `rejected` terminal) a PR's revision
+/** The most recent failed submission (a `rejected` terminal) a change's revision
  * history records, or undefined when it has never failed a submission. This is
  * the derived signal — never a stored status — that turns a `draft` into a
  * `rev` row. `canceled`/`withdrawn` terminals are supersessions, not
@@ -2611,7 +2611,7 @@ function revisionDetail(pr: Change, runs: readonly Run[]): string {
 }
 
 /**
- * One row per non-integrated PR that is not currently a run member, each carrying
+ * One row per non-integrated change that is not currently a run member, each carrying
  * a derived, display-only status (`queueDisplayState().preRun`): `draft`/`rev` for
  * a registered-but-unsubmitted PR (bay status `pushed`) and `ready` for one
  * awaiting its run. These never distort queue mechanics — the `draft` group
@@ -2641,7 +2641,7 @@ function timelineNonIntegratedRows(
     if (status === undefined) return []
     if (status === "ready" && activeRevisions.has(revisionKey)) return []
     const timestamp = submissionTimes.get(revisionKey) ?? revision.submittedAt ?? pr.submittedAt ?? null
-    const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submit time`)
+    const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `change '${pr.id}' submit time`)
     const position = positions.get(pr.id)
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
     const revisionLineage = [timelineRevisionLineage(pr)]
@@ -2679,11 +2679,11 @@ function timelineNonIntegratedRows(
           ...(position === undefined ? {} : { position }),
           ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
           revisionLineage,
-          ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
+          ageMs: timelineAge(sourceReadyAt, nowIso, `change '${pr.id}' source-ready age`),
           totalMs: null,
           activeMs: null,
-          waitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
-          queueWaitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
+          waitMs: timelineAge(timestamp ?? undefined, nowIso, `change '${pr.id}' queue wait`),
+          queueWaitMs: timelineAge(timestamp ?? undefined, nowIso, `change '${pr.id}' queue wait`),
         },
       ]
     }
@@ -2699,7 +2699,7 @@ function timelineNonIntegratedRows(
         status,
         glyph: statusGlyph(status),
         timestamp: registeredAt,
-        timestampMs: parsedTimelineTimestamp(registeredAt, `PR '${pr.id}' registration`),
+        timestampMs: parsedTimelineTimestamp(registeredAt, `change '${pr.id}' registration`),
         ...(candidate === undefined ? {} : { candidateId: candidate.id }),
         pr: pr.id,
         ...(display.kind === undefined ? {} : { kind: display.kind }),
@@ -2715,7 +2715,7 @@ function timelineNonIntegratedRows(
         ...(blockingReason === undefined
           ? {}
           : { failure: { code: blockingReason.code, message: blockingReason.message } }),
-        ageMs: timelineAge(registeredAt, nowIso, `PR '${pr.id}' source-ready age`),
+        ageMs: timelineAge(registeredAt, nowIso, `change '${pr.id}' source-ready age`),
         totalMs: null,
         activeMs: null,
         waitMs: null,
@@ -2797,7 +2797,7 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
             submissionTimes.set(queueRunRevisionKey(run, member), null)
             continue
           }
-          throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+          throw new Error(`yrd: run '${run.id}' has no retained change '${member.id}'`)
         }
         const runKey = queueRunRevisionKey(run, member)
         if (pr.revs.length > 0) {
@@ -2809,7 +2809,7 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
         submissionTimes.set(
           runKey,
           submittedAt !== undefined &&
-            timestamp(submittedAt, `PR '${pr.id}' submit time`) <= timestamp(run.startedAt, `run '${run.id}' start`)
+            timestamp(submittedAt, `change '${pr.id}' submit time`) <= timestamp(run.startedAt, `run '${run.id}' start`)
             ? submittedAt
             : null,
         )
@@ -2843,7 +2843,7 @@ function terminalMemberFact(
   const lineage = row.revisionLineage.find((candidate) => candidate.pr === row.pr)
   const totalStart = lineage?.registeredAt ?? lineage?.sourceReadyAt
   const totalMs =
-    totalStart === undefined ? null : (elapsedMs(totalStart, terminalAt, `PR '${row.pr}' total duration`) ?? null)
+    totalStart === undefined ? null : (elapsedMs(totalStart, terminalAt, `change '${row.pr}' total duration`) ?? null)
   return {
     pr: row.pr,
     revision: row.revision,
@@ -2892,7 +2892,7 @@ function foldTerminalFacts(
       throw new Error(`yrd: Run '${row.run}' member rows disagree on terminal outcome`)
     }
     if (fact.members.some((candidate) => candidate.pr === member.pr)) {
-      throw new Error(`yrd: Run '${row.run}' repeats terminal PR member '${member.pr}'`)
+      throw new Error(`yrd: Run '${row.run}' repeats terminal change member '${member.pr}'`)
     }
     byRun.set(key, {
       ...fact,
@@ -2940,7 +2940,7 @@ function queueRunsByKey(runs: readonly Run[]): ReadonlyMap<string, Run> {
   return byKey
 }
 
-/** Group completed Runs by the PR revision they carried, keyed `prId\0revision`.
+/** Group completed Runs by the change revision they carried, keyed `prId\0revision`.
  *
  * `queueShowData` uses the Run list it is handed for exactly one thing: the
  * retry ordinal, via `queueShowRetries` -> `runOutputQueueageIndex`, which keeps
@@ -3174,7 +3174,7 @@ export function createQueueTimelineProjectionClock(
 
 function reclockTimelineRow(row: QueueTimelineProjectedRow, nowIso: string): QueueTimelineProjectedRow {
   if (row.group === "completed") return row
-  const ageMs = timelineAge(row.sourceReadyAt, nowIso, `PR '${row.pr}' source-ready age`)
+  const ageMs = timelineAge(row.sourceReadyAt, nowIso, `change '${row.pr}' source-ready age`)
   if (row.group === "running") {
     return {
       ...row,
@@ -3183,7 +3183,7 @@ function reclockTimelineRow(row: QueueTimelineProjectedRow, nowIso: string): Que
     }
   }
   if (row.group === "pending") {
-    const queueWaitMs = timelineAge(row.timestamp ?? undefined, nowIso, `PR '${row.pr}' queue wait`)
+    const queueWaitMs = timelineAge(row.timestamp ?? undefined, nowIso, `change '${row.pr}' queue wait`)
     return { ...row, ageMs, waitMs: queueWaitMs, queueWaitMs }
   }
   return { ...row, ageMs }
@@ -3367,8 +3367,8 @@ function projectPR(
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
     revisionLineage,
     target: pr.base,
-    age: age(sourceReadyAt ?? submittedAt ?? revision?.pushedAt, ageAt, `PR '${pr.id}' source-ready age`),
-    touched: age(touchedAt, now, `PR '${pr.id}' touched age`),
+    age: age(sourceReadyAt ?? submittedAt ?? revision?.pushedAt, ageAt, `change '${pr.id}' source-ready age`),
+    touched: age(touchedAt, now, `change '${pr.id}' touched age`),
     ...(touchedAt === undefined ? {} : { touchedAt }),
     run: runDuration,
     step: step?.name ?? "-",
@@ -3409,7 +3409,7 @@ function byTouchedNewest(left: HumanChangeProjection, right: HumanChangeProjecti
 
 function requiredQueuePosition(positions: ReadonlyMap<string, number>, pr: string): number {
   const position = positions.get(pr)
-  if (position === undefined) throw new Error(`yrd: submitted PR '${pr}' is missing its queue position`)
+  if (position === undefined) throw new Error(`yrd: submitted change '${pr}' is missing its queue position`)
   return position
 }
 
@@ -3606,11 +3606,11 @@ export function changeListRows(
     const revision = changeRevisionNumber(pr)
     if (eligibility.pr !== pr.id || eligibility.revision !== revision) {
       throw new Error(
-        `yrd: PR '${pr.id}' revision ${revision} has mismatched eligibility for '${eligibility.pr}' revision ${eligibility.revision}`,
+        `yrd: change '${pr.id}' revision ${revision} has mismatched eligibility for '${eligibility.pr}' revision ${eligibility.revision}`,
       )
     }
     if (!eligibility.runnable && eligibility.reason === undefined) {
-      throw new Error(`yrd: PR '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
+      throw new Error(`yrd: change '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
     }
     const projected = projectPR(undefined, summary, pr, now, undefined, undefined, eligibility)
     // A proven merge outranks the recorded state: `withdrawn` is a claim
@@ -3654,7 +3654,7 @@ function ChangeStateValue({ row }: { row: ChangeListRow }) {
   )
 }
 
-/** The one place that decides how much of the PR list an operator is shown.
+/** The one place that decides how much of the change list an operator is shown.
  * `hidden` is not decoration: a listing that withheld rows must say so and say
  * how many, because an inventory that reads complete and is not is worse than
  * an error (22376). */
@@ -3964,9 +3964,9 @@ export function ChangeDetailView({
 }) {
   const run = latestChangeRun(pr, runs)
   const runMember = run?.prs.find((member) => member.id === pr.id)
-  // The newest run for this PR may have executed against a now-superseded
+  // The newest run for this change may have executed against a now-superseded
   // revision (e.g. rev 1 was rejected while rev 2 sits pending with no run of
-  // its own). Presenting that historical run as the PR's current state reads as
+  // its own). Presenting that historical run as the change's current state reads as
   // "this pending item already failed", so it is scoped to a history block and
   // the current revision's real state is stated above it (user-reported
   // 2026-07-16). A superseded run implies the current revision has no run yet:
@@ -4404,7 +4404,7 @@ export function QueueWatchView({
         })),
       )
       .find(({ pr: candidate }) => candidate.id === pr)
-    if (selected === undefined) return <Text color="$fg-muted">No PR '{pr}' recorded.</Text>
+    if (selected === undefined) return <Text color="$fg-muted">No change '{pr}' recorded.</Text>
     const runs = [
       ...new Map(
         results
@@ -4446,10 +4446,10 @@ function queueLogSubmissionTime(
   const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
   if (clock === undefined) {
     // Intent members never mint a revision clock (no submission precedes the
-    // run); every PR member must have one.
+    // run); every change member must have one.
     if (pr.intent !== undefined) return undefined
     throw new Error(
-      `yrd: run '${run.id}' has no causal submit/check-request clock for PR '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
+      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
     )
   }
   return clock.admittedBy === "submission" ? clock.submittedAt : undefined
@@ -4767,7 +4767,7 @@ function noticeExplanation(
       return `${prefix}The recorded run plan changed after this batch began required checks. Automatically requeued under the installed plan on the next queue pass.`
     }
     if (failure?.code === "stale-pr") {
-      return `${prefix}The PR revision changed after this run was pinned. This historical run will not retry; follow the current revision's queue state.`
+      return `${prefix}The change revision changed after this run was pinned. This historical run will not retry; follow the current revision's queue state.`
     }
     return `${prefix}This run is stale, but the journal does not name an automatic recovery. Follow the current PR revision's queue state.`
   }
@@ -5049,7 +5049,7 @@ const TIMELINE_STATUS_WORDS = {
 // and the RUN cell, while 15d supplies its semantic foreground colors.
 // Vocabulary (user respec 2026-07-15; rejected renders `fail`, integrated
 // renders `done`). The pre-run PRs now carry their own fine STATUS words —
-// `draft`/`rev`/`ready` — so a non-integrated PR is always visible with
+// `draft`/`rev`/`ready` — so a non-integrated change is always visible with
 // an explicit label (user directive 2026-07-22, generalizing the 2026-07-21
 // pending→`todo` rule); the coarse filter pills stay todo/running/failed/done.
 //
@@ -6766,7 +6766,7 @@ export function queueLogRows(
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
         const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr)
-        const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
+        const ageMs = elapsedMs(submittedAt, finishedAt, `change '${pr.id}' submitted-to-terminal age`)
         const showLocation = changeStatus?.get(pr.id) === "withdrawn" ? undefined : location
         const taskStatus = runTaskStatusOf(run)
         rows.push({
@@ -7187,18 +7187,18 @@ function queueShowNextAction(data: QueueShowData): string {
     return "follow live output or wait for the current step"
   }
   if (data.outcome === "canceled" || data.failure?.code === "run-canceled") {
-    return "no resubmission — the PR remains submitted and re-queues automatically"
+    return "no resubmission — the change remains submitted and re-queues automatically"
   }
   const errorCode = presentFact(data.steps.findLast((step) => presentFact(step.errorCode) !== undefined)?.errorCode)
   const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
   if (actionable !== undefined) return actionable.resolution.join("; then ")
   if (errorCode === "queue-environment-refused") {
-    return "repair the queue environment, then rerun the PR"
+    return "repair the queue environment, then rerun the change"
   }
   if (["stale-pr", "stale-check", "stale-base"].includes(errorCode ?? "")) {
     return "refresh the current PR revision against queue authority, then rerun it"
   }
-  if (errorCode === "job-lost") return "recover the lost run, then rerun the PR"
+  if (errorCode === "job-lost") return "recover the lost run, then rerun the change"
   if (["canceled", "cancelled", "queue-canceled", "queue-cancelled"].includes(errorCode ?? "")) {
     return "inspect the newer PR revision; resubmit only if delivery is still required"
   }
@@ -7402,7 +7402,7 @@ function changeTerminalLineageEntries(
     .flatMap((clock) => {
       if (clock.terminal === undefined) return []
       const submittedAt = clock.submittedAt ?? clock.pushedAt
-      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
+      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `change '${pr.id}' revision ${clock.revision} terminal age`)
       const reason =
         clock.terminal.kind === "rejected"
           ? (runDetails.find((detail) => detail.run === clock.terminal?.run)?.failure?.summary ?? "reason not recorded")
@@ -7972,7 +7972,7 @@ function CompactQueueShowView({
   /**
    * When set, this run executed against a now-superseded PR revision: the RUN
    * header is dimmed and annotated `(rev N · superseded)` so a historical run
-   * is never read as the PR's current state (user-reported 2026-07-16).
+   * is never read as the change's current state (user-reported 2026-07-16).
    */
   historyRevision?: number
   /** When true, the Candidate + Run identity and STATUS/OUTCOME live in a title

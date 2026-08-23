@@ -12,7 +12,7 @@ import { formatDuration } from "./runner-timeline.ts"
 /**
  * Background settlement of terminal delivery facts.
  *
- * Yrd commits terminal PR facts and carries opaque props; it has no idea what
+ * Yrd commits terminal change facts and carries opaque props; it has no idea what
  * a prop MEANS to the host that stamped it. This module owns the half that is
  * Yrd's: read the journal forward from a durable cursor, find the terminal
  * facts that carry a prop, hand them to whoever asked to be

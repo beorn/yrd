@@ -764,7 +764,7 @@ describe("createGitWorkspace", () => {
   })
 
   it("provisions a bay from a commit SHA while another worktree still holds the branch (22358)", async () => {
-    // Specimen: yrd pr checkout used the PR branch name; git refuses a second checkout of a
+    // Specimen: yrd pr checkout used the change branch name; git refuses a second checkout of a
     // branch another worktree holds. Gate bays must materialize the recorded head in detached HEAD.
     const { root, repo, intake } = await repository()
     await git(repo, ["checkout", "-qb", "topic/held-by-author"])

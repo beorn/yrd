@@ -1,9 +1,9 @@
 /**
- * @failure `yrd pr list` silently drops rows it selected, hides its own window with no count of what it withheld, or labels a PR whose head is already on the base branch as if its content never merged (22376).
+ * @failure `yrd pr list` silently drops rows it selected, hides its own window with no count of what it withheld, or labels a change whose head is already on the base branch as if its content never merged (22376).
  * @level l2
  * @consumer @yrd/cli pr list
  *
- * Two live specimens from 2026-07-25, both on the PR-state surface, both
+ * Two live specimens from 2026-07-25, both on the change-state surface, both
  * answering "what is outstanding?" with something false in opposite
  * directions: the first hid live work, the second hid merged work.
  */
@@ -338,7 +338,7 @@ describe("pr list merge reconciliation (22376)", () => {
     }
   })
 
-  it("never probes git for a PR whose recorded state already claims a merge", async () => {
+  it("never probes git for a change whose recorded state already claims a merge", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/live", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
 
@@ -346,10 +346,10 @@ describe("pr list merge reconciliation (22376)", () => {
       pruneGit: () => ({
         ...mergeGit(),
         resolveCommit: () => {
-          throw new Error("a live PR needs no ancestry proof")
+          throw new Error("a live change needs no ancestry proof")
         },
         isAncestor: () => {
-          throw new Error("a live PR needs no ancestry proof")
+          throw new Error("a live change needs no ancestry proof")
         },
       }),
     })

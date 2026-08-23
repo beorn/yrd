@@ -2,7 +2,7 @@ import { currentChangeRev, changeDeliveryState, type Change, type ChangeDelivery
 import { createPruneGitFacts } from "./pr-withdraw.ts"
 import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 
-/** Delivery states whose label asserts something about CONTENT: that this PR's
+/** Delivery states whose label asserts something about CONTENT: that this change's
  * revision never reached the base branch. That is a checkable claim, so the
  * surface checks it before printing it. Every other state is a claim about
  * PROCESS (queued, checking, awaiting an author) and needs no ancestry proof. */
@@ -42,7 +42,7 @@ function failureText(error: unknown): string {
   return error instanceof Error && error.message.trim() !== "" ? error.message.trim() : String(error)
 }
 
-/** Prove, for every PR whose recorded state claims its content never merged,
+/** Prove, for every change whose recorded state claims its content never merged,
  * whether that revision's head is already reachable from its base tip.
  *
  * The live specimen (22376): an author withdrawal arrived on top of a completed

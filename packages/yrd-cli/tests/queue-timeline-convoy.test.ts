@@ -34,7 +34,7 @@ function convoySnapshot(): ReturnType<typeof fixtureSnapshot> {
   return fixtureSnapshot(fixtureResult(prs, [run]))
 }
 
-/** A PR withdrawn AFTER a refusal was recorded against it. `PR.needsAuthor` has
+/** A change withdrawn AFTER a refusal was recorded against it. `PR.needsAuthor` has
  * no clearing path through withdrawn/integrated/canceled, so the refusal
  * outlives the close — the pr#1073 specimen. */
 function withdrawnAfterRefusal(): Change {

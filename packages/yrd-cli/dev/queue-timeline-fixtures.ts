@@ -350,7 +350,7 @@ export function fixtureRun(
     prs: prs.map((pr) => {
       const revision = options.memberRevisions?.[pr.id] ?? currentChangeRev(pr).n
       const clock = pr.revs.find((candidate) => candidate.n === revision)
-      if (clock === undefined) throw new Error(`fixture PR '${pr.id}' is missing revision ${revision}`)
+      if (clock === undefined) throw new Error(`fixture change '${pr.id}' is missing revision ${revision}`)
       return {
         id: pr.id,
         name: pr.name,
@@ -468,7 +468,7 @@ export function fixtureMultiQueueSnapshot(
 
 /**
  * Re-home a queue's PRs and Runs onto another base. Fixture PRs and Runs are
- * born on `main`, and a projected row takes its base from the PR/Run rather
+ * born on `main`, and a projected row takes its base from the change/Run rather
  * than from the enclosing summary, so rebasing the summary alone would leave
  * every row claiming `main`.
  */

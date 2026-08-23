@@ -372,11 +372,11 @@ function createContestCommands(
       }
       const pr = state.bays.prs[args.pr]
       if (pr === undefined || !exactPR(pr, promotion.pin, record.base)) {
-        throw new Error(`yrd: PR '${args.pr}' does not contain the selected contest commit`)
+        throw new Error(`yrd: change '${args.pr}' does not contain the selected contest commit`)
       }
       const delivery = changeDeliveryState(pr)
       if (delivery !== "submitted" && delivery !== "ready" && delivery !== "integrated") {
-        throw new Error(`yrd: PR '${pr.id}' is ${delivery}, not submitted`)
+        throw new Error(`yrd: change '${pr.id}' is ${delivery}, not submitted`)
       }
       return {
         events: [

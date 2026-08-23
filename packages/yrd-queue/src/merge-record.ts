@@ -27,7 +27,7 @@ export const MERGE_RECORD_RETRACTION_NOTES_NAME = "yrd/merge-record-retractions"
  */
 const mergeRecordChangeShape = {
   changeId: ChangeIdSchema.optional(),
-  /** A queue member, not necessarily a PR — `mergeRecordBody` fills this from
+  /** A queue member, not necessarily a change — `mergeRecordBody` fills this from
    * the member's `id`, so a merged intent records its own id here. */
   pr: QueueMemberIdSchema,
   revision: z.number().int().positive(),

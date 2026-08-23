@@ -167,7 +167,7 @@ describe("push-is-submit carrier materialization", () => {
   it("creates the carrier the submit push named, at the head it pushed", async () => {
     const { repo, mainSha } = await repository()
     // The whole point: this ref does not exist, and nothing else would create
-    // it. Without it the PR is admitted and then refused forever by the
+    // it. Without it the change is admitted and then refused forever by the
     // pre-submit gate with `required-check candidate '<branch>' is missing`.
     await expect(git(repo, "rev-parse", "--verify", "refs/heads/issue/my-change")).rejects.toThrow()
 

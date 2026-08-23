@@ -93,7 +93,7 @@ describe("queueStats calendar buckets", () => {
     expect(fall.map(({ dayBoundary }) => dayBoundary)).toEqual([false, false, false, true])
   })
 
-  it("counts settled Runs but counts integrated PR members", () => {
+  it("counts settled Runs but counts integrated change members", () => {
     const now = new Date(2026, 6, 16, 13, 30).getTime()
     const facts: QueueTerminalFact[] = [
       fact({
@@ -310,8 +310,8 @@ describe("queueStats calendar buckets", () => {
     expect(() => queueStats([valid, valid], now, 0, 1)).toThrow("duplicate terminal STATS fact")
     expect(() => queueStats([{ ...valid, terminalAtMs: Number.NaN }], now, 0, 1)).toThrow("Run 'R1' terminal time")
     expect(() => queueStats([{ ...valid, members: [member({ totalMs: -1 })] }], now, 0, 1)).toThrow(
-      "PR 'PR1' total duration",
+      "change 'PR1' total duration",
     )
-    expect(() => queueStats([{ ...valid, members: [member({ retries: 0.5 })] }], now, 0, 1)).toThrow("PR 'PR1' retries")
+    expect(() => queueStats([{ ...valid, members: [member({ retries: 0.5 })] }], now, 0, 1)).toThrow("change 'PR1' retries")
   })
 })

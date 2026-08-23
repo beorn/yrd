@@ -254,7 +254,7 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
     })
     expect(derived.record).toBeUndefined()
     expect(derived.eligibility).toBeUndefined()
-    // The record-keyed list does not invent a PR for it.
+    // The record-keyed list does not invent a change for it.
     expect(app.queue.eligibilities()).toEqual([])
 
     // Run path: the considered rows carry the same branch-keyed verdict — not

@@ -50,7 +50,7 @@ function workspace(): BayWorkspace {
 }
 
 /** check (admission phase) + merge (integrates). The admission phase is the one
- * that drains one PR per turn, so the refused candidate has to be refused there. */
+ * that drains one change per turn, so the refused candidate has to be refused there. */
 function checkMergePlugin(prepareCandidate: CandidatePreparer) {
   const check = withStep(
     "check",
@@ -93,7 +93,7 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
   await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
-  // `yrd pr submit` requests the checks; without them the PR is never admission
+  // `yrd pr submit` requests the checks; without them the change is never admission
   // work and the drain this test exercises is skipped entirely.
   await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
   return pr
@@ -112,7 +112,7 @@ function refuseAuthoredGitlink(
         kind: "refusal",
         code,
         message:
-          `yrd: PR '${poisoned.id}' changes generated-only gitlinks [km]; authored root branches use ` +
+          `yrd: change '${poisoned.id}' changes generated-only gitlinks [km]; authored root branches use ` +
           `'yrd pr submit <branch>', then 'yrd pr recut ${poisoned.id} --preflight --queue --apply'`,
       })
     }
@@ -148,7 +148,7 @@ describe("admission head-of-line release — a refused PR never blocks the ready
     expect(state.bays.prs[head.id]?.integration).toBeUndefined()
     expect(state.queues.admissionRefusals[head.id]).toMatchObject({ code: "recut-gitlink-conflict", count: 1 })
     for (const pr of trailing) {
-      expect(state.bays.prs[pr.id]?.integration, `expected PR '${pr.id}' to integrate behind the refused head`).toEqual(
+      expect(state.bays.prs[pr.id]?.integration, `expected change '${pr.id}' to integrate behind the refused head`).toEqual(
         expect.objectContaining({ commit: MERGED }),
       )
     }

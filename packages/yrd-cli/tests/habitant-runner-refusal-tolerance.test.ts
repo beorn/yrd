@@ -1,5 +1,5 @@
 /**
- * @failure A habitant queue runner dies when a peer holds the queue or withdraws a PR mid-compose, idling the whole merge queue; and its recovery echoes a bare non-loggily stderr message instead of loggily-only output.
+ * @failure A habitant queue runner dies when a peer holds the queue or withdraws a change mid-compose, idling the whole merge queue; and its recovery echoes a bare non-loggily stderr message instead of loggily-only output.
  * @level l2
  * @consumer @yrd/cli habitant runner
  */
@@ -128,10 +128,10 @@ describe("habitant runner — a busy journal never kills the watch loop", () => 
   })
 })
 
-describe("habitant runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {
+describe("habitant runner — a change withdrawn mid-compose never kills the watch loop (Defect 2)", () => {
   it("skips with a loud loggily warn and processes the NEXT cycle with the remaining PRs", async () => {
     const h = harness([
-      // Cycle 1: a peer withdrew a candidate PR between this runner's compose
+      // Cycle 1: a peer withdrew a candidate change between this runner's compose
       // snapshot and its check request — the throw that exited the habitant.
       () => Promise.reject(new ChangeCheckabilityConflict("PR364", "withdrawn")),
       // Cycle 2: the withdrawn PR is gone from the submitted set; the remaining
@@ -155,12 +155,12 @@ describe("habitant runner — a PR withdrawn mid-compose never kills the watch l
   it("still dies on a not-checkable refusal for a one-shot targeted run", async () => {
     const h = harness([() => Promise.reject(new ChangeCheckabilityConflict("PR364", "withdrawn"))])
     await expect(followQueueRuns(h.app, ["PR364"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
-      "PR 'PR364' is withdrawn, not checkable",
+      "change 'PR364' is withdrawn, not checkable",
     )
     expect(h.warnings).toEqual([])
   })
 
-  it("skips when a PR is already integrated mid-compose (22306 #3)", async () => {
+  it("skips when a change is already integrated mid-compose (22306 #3)", async () => {
     // Multi-driver / same-runner race: PR merges between snapshot and the next
     // admit/run; "integrated, not admissible" must not kill the habitant.
     const h = harness([
@@ -180,7 +180,7 @@ describe("habitant runner — a PR withdrawn mid-compose never kills the watch l
   })
 
   it.each(["authored-gitlink", "merge-tip-carrier"] as const)(
-    "skips the PR-scoped refusal %s without dying (22306 class)",
+    "skips the change-scoped refusal %s without dying (22306 class)",
     async (code) => {
       // @ci 2026-07-25: a single PR's authored-gitlink killed the whole habitant.
       // Architectural acceptance: any PR-scoped refusal is a cycle skip, not exit 1.
@@ -191,7 +191,7 @@ describe("habitant runner — a PR withdrawn mid-compose never kills the watch l
             createFailure({
               kind: "refusal",
               code,
-              message: "yrd: PR 'PR1579' changes generated-only gitlinks [km]",
+              message: "yrd: change 'PR1579' changes generated-only gitlinks [km]",
             }),
           ),
         () => {

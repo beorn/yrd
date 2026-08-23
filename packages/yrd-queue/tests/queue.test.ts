@@ -995,7 +995,7 @@ describe("Queue", () => {
     })
     expect(app.queue.eligibility(pr.id)).toMatchObject({
       runnable: false,
-      reason: { code: "candidate-conflicting", message: "PR 'PR1' revision 1 conflicts in Candidate 'C1'" },
+      reason: { code: "candidate-conflicting", message: "change 'PR1' revision 1 conflicts in Candidate 'C1'" },
     })
     await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
       "conflicts in Candidate 'C1'",
@@ -1169,7 +1169,7 @@ describe("Queue", () => {
     expect(peakMerges).toBe(1)
   })
 
-  it("pins the enrolled Flow on the PR revision snapshot and every Run", async () => {
+  it("pins the enrolled Flow on the change revision snapshot and every Run", async () => {
     const config = defineConfig(
       yrd.flow({
         name: "docs",
@@ -2852,7 +2852,7 @@ describe("Queue", () => {
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
     await expect(replayed.queue.run({ prs: ["PR1"], steps: ["merge"] }, runtime)).rejects.toThrow(
-      "PR 'PR1' is already in active queue run 'R1'",
+      "change 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
@@ -2898,7 +2898,7 @@ describe("Queue", () => {
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
     await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).rejects.toThrow(
-      "PR 'PR1' is already in active queue run 'R1'",
+      "change 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
@@ -2990,7 +2990,7 @@ describe("Queue", () => {
     await using replayed = await createQueueApp(options, journal, undefined, id)
     await expect(
       replayed.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge", "deploy"] }, runtime),
-    ).rejects.toThrow("PR 'PR1' is already in active queue run 'R1'")
+    ).rejects.toThrow("change 'PR1' is already in active queue run 'R1'")
     expect(checkCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "queued",
@@ -3023,7 +3023,7 @@ describe("Queue", () => {
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
     await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)).rejects.toThrow(
-      "PR 'PR1' is already in active queue run 'R1'",
+      "change 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
@@ -3123,7 +3123,7 @@ describe("Queue", () => {
     },
   )
 
-  it("resumes one waiting deploy-only run for an already integrated PR without admitting a duplicate", async () => {
+  it("resumes one waiting deploy-only run for an already integrated change without admitting a duplicate", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     let deployCalls = 0
@@ -3497,7 +3497,7 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(1)
   })
 
-  it("cooperatively aborts a claimed Job when a closed PR terminalizes its Queue Run", async () => {
+  it("cooperatively aborts a claimed Job when a closed change terminalizes its Queue Run", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()
     const log = createLogger("yrd", [{ level: "trace" }, { write: () => {} }])
@@ -3944,20 +3944,20 @@ describe("Queue", () => {
     expect(app.queue.eligibility("PR1")).toMatchObject({
       pr: "PR1",
       runnable: false,
-      reason: { code: "draft", message: "PR 'PR1' is pushed, not ready" },
+      reason: { code: "draft", message: "change 'PR1' is pushed, not ready" },
       review: { required: true, approved: false },
     })
     await app.bays.ready({ pr: "PR1" })
     await app.bays.comment({ pr: "PR1", by: "@cto", ref: "question-1", note: "Why this shape?" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "review-required", message: "PR 'PR1' needs approval for revision 1" },
+      reason: { code: "review-required", message: "change 'PR1' needs approval for revision 1" },
       review: { required: true, approved: false },
     })
     await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "verdict-red" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
-      reason: { code: "review-rejected", message: "PR 'PR1' was rejected by @cto for revision 1" },
+      reason: { code: "review-rejected", message: "change 'PR1' was rejected by @cto for revision 1" },
       review: { required: true, approved: false, decision: "reject", by: "@cto", ref: "verdict-red" },
     })
     await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "verdict-1" })
@@ -3987,7 +3987,7 @@ describe("Queue", () => {
       reason: { code: "review-required" },
       review: { required: true, approved: false, stale: true },
     })
-    await expect(app.queue.run({ prs: ["PR2"] }, runtime)).rejects.toThrow("PR 'PR2' needs approval for revision 2")
+    await expect(app.queue.run({ prs: ["PR2"] }, runtime)).rejects.toThrow("change 'PR2' needs approval for revision 2")
 
     await app.bays.submit({
       branch: "issue/rejection-stales",
@@ -4066,7 +4066,7 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
-  it("names the fully reused admission prefix when a PR emits no run events", async () => {
+  it("names the fully reused admission prefix when a change emits no run events", async () => {
     await using app = await createQueueApp({ defaultSteps: ["check"] })
     const pr = await submitBranch(app, "issue/covered-pr")
     await app.bays.requestChecks({ pr: pr.id })
@@ -4111,7 +4111,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: (input) => {
         const pr = input.prs[0]
-        if (pr === undefined) throw new Error("expected one PR per admission check")
+        if (pr === undefined) throw new Error("expected one change per admission check")
         checkedPRs.push(pr.id)
         return { status: "completed", conclusion: "success", output: { checked: true } }
       },
@@ -4167,7 +4167,7 @@ describe("Queue", () => {
       {
         check: (input) => {
           const pr = input.prs[0]
-          if (pr === undefined) throw new Error("expected one PR per admission check")
+          if (pr === undefined) throw new Error("expected one change per admission check")
           checkedPRs.push(pr.id)
           return { status: "completed", conclusion: "success", output: { checked: true } }
         },
@@ -4207,7 +4207,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: (input) => {
         const pr = input.prs[0]
-        if (pr === undefined) throw new Error("expected one PR per admission check")
+        if (pr === undefined) throw new Error("expected one change per admission check")
         checkedPRs.push(pr.id)
         return { status: "completed", conclusion: "success", output: { checked: true } }
       },
@@ -4246,7 +4246,7 @@ describe("Queue", () => {
     // Identity of a byte-identical rebuild: same head, same tree, same patch.
     const rebuilt = { headSha: pr.headSha, baseSha: BASE, treeSha: "c".repeat(40), patchId: "d".repeat(40) }
 
-    // First mechanical rebuild. This one legitimately mints a revision — the PR
+    // First mechanical rebuild. This one legitimately mints a revision — the change
     // had no recut proof before it — and is only here so the SECOND rebuild is
     // a true repeat rather than a first.
     await app.bays.recut({ pr: pr.id, fromRevision: pr.revision, ...rebuilt, reviewCarried: false })
@@ -4712,7 +4712,7 @@ describe("Queue", () => {
     expect(app.queue.get("R1")?.prs).toMatchObject([{ baseSha: UPDATED }])
   })
 
-  it("resolves each queue base once per cycle instead of once per PR", async () => {
+  it("resolves each queue base once per cycle instead of once per change", async () => {
     const resolvedBases: string[] = []
     await using app = await createQueueApp({
       batch: 4,
@@ -5182,7 +5182,7 @@ describe("Queue", () => {
         prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
       },
     ])
-    // A base race is environmental, not a PR-content fault: the PR must stay
+    // A base race is environmental, not a change-content fault: the change must stay
     // submitted (re-admissible), NOT be terminally rejected like merge-conflict.
     expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "submitted",
@@ -5565,7 +5565,7 @@ describe("Queue", () => {
       reason: { code: "draft" },
       checks: { status: "failed" },
     })
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("PR 'PR1' is pushed, not ready")
+    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("change 'PR1' is pushed, not ready")
 
     fail = false
     const reauthorization = await app.bays.requestChecks({ pr: "PR1" })
@@ -5760,13 +5760,13 @@ describe("Queue", () => {
         {
           code: "queue-paused",
           pr: first.id,
-          reason: "queue 'main' is paused: operator freeze; PR 'PR1' is not in the allowed set",
+          reason: "queue 'main' is paused: operator freeze; change 'PR1' is not in the allowed set",
           revision: 1,
         },
         {
           code: "queue-paused",
           pr: second.id,
-          reason: "queue 'main' is paused: operator freeze; PR 'PR2' is not in the allowed set",
+          reason: "queue 'main' is paused: operator freeze; change 'PR2' is not in the allowed set",
           revision: 1,
         },
       ],
@@ -5787,13 +5787,13 @@ describe("Queue", () => {
             {
               code: "queue-paused",
               pr: first.id,
-              reason: "queue 'main' is paused: operator freeze; PR 'PR1' is not in the allowed set",
+              reason: "queue 'main' is paused: operator freeze; change 'PR1' is not in the allowed set",
               revision: 1,
             },
             {
               code: "queue-paused",
               pr: second.id,
-              reason: "queue 'main' is paused: operator freeze; PR 'PR2' is not in the allowed set",
+              reason: "queue 'main' is paused: operator freeze; change 'PR2' is not in the allowed set",
               revision: 1,
             },
           ],
@@ -6474,7 +6474,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
     await executing.promise
 
     // A peer runtime over the same journal (a separate process in production)
-    // cancels the PR while this runtime's step executes. This runtime's
+    // cancels the change while this runtime's step executes. This runtime's
     // projection stays stale until its settlement commit re-folds the journal,
     // where the finish transition meets the already-canceled Job.
     await using peer = await createQueueApp({}, journal, undefined, ids(1000))

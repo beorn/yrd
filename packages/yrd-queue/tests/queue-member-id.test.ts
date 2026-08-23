@@ -1,5 +1,5 @@
 /**
- * @failure `PRIdSchema` was `z.string().trim().min(1)`, so `QueueMemberIdSchema`'s union of PR ids and intent ids decided nothing: every intent id parsed as a PR id, the intent arm was dead code as a parser, and a mis-kinded member id failed later — or never — instead of at the schema.
+ * @failure `PRIdSchema` was `z.string().trim().min(1)`, so `QueueMemberIdSchema`'s union of PR ids and intent ids decided nothing: every intent id parsed as a change id, the intent arm was dead code as a parser, and a mis-kinded member id failed later — or never — instead of at the schema.
  * @level l1
  * @consumer @yrd/queue
  */
@@ -38,7 +38,7 @@ const SELECTORS_AND_DISPLAY_FORMS = [
 ] as const
 
 describe("queue member ids discriminate", () => {
-  it("accepts every PR id shape the mint writes", () => {
+  it("accepts every change id shape the mint writes", () => {
     for (const id of REAL_PR_IDS) {
       expect(PRIdSchema.safeParse(id).success, `PR arm must accept the real id ${id}`).toBe(true)
       expect(QueueMemberIdSchema.safeParse(id).success, `the union must accept the real id ${id}`).toBe(true)
@@ -52,8 +52,8 @@ describe("queue member ids discriminate", () => {
     }
   })
 
-  it("refuses an intent id at the PR arm, which is what makes the union decide anything", () => {
-    // The defect: under `min(1)` every one of these parsed as a PR id, so the
+  it("refuses an intent id at the change arm, which is what makes the union decide anything", () => {
+    // The defect: under `min(1)` every one of these parsed as a change id, so the
     // right arm never ran and a mis-kinded member reached the rest of the system
     // wearing the wrong kind.
     for (const id of REAL_INTENT_IDS) {

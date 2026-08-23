@@ -4474,7 +4474,7 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "composition-invalid",
-        message: expect.stringMatching(/root code must be submitted separately from submodule pin intents/iu),
+        message: expect.stringMatching(/root code must be submitted separately from changes of submodule min commits/iu),
       },
     })
     expect(run.error?.message).not.toContain("yrd pr recut")
@@ -6804,7 +6804,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("retries authoritative refresh at most three times without changing the PR payload", async () => {
+  it("retries authoritative refresh at most three times without changing the change payload", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -6854,7 +6854,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("retries thrown authoritative refresh timeouts without rejecting the PR", async () => {
+  it("retries thrown authoritative refresh timeouts without rejecting the change", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -6891,7 +6891,7 @@ describe("Queue command adapters", () => {
     })
   })
 
-  it("records exhausted thrown authority timeouts as environment refusal without rejecting the PR", async () => {
+  it("records exhausted thrown authority timeouts as environment refusal without rejecting the change", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -8848,7 +8848,7 @@ describe("Queue command adapters", () => {
    * The rollback edge the backward-pin lore actually guards: a carrier whose HEAD
    * is clean — it contains the current base, so nothing about it looks stale —
    * but whose TREE moves the gitlink to an OLDER submodule sha. Nothing in the
-   * promotion loop sees this, because that loop reads merged pin intents rather
+   * promotion loop sees this, because that loop reads merged min-commit changes rather
    * than a branch carrier's authored tree, so if this merged it would silently
    * revert the submodule.
    *
@@ -9883,7 +9883,7 @@ describe("Queue command adapters", () => {
     expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
   })
 
-  it("fails a delegated merge command that exits zero without merging the PR", async () => {
+  it("fails a delegated merge command that exits zero without merging the change", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     const bayJobs = createBayJobDefs(unusedWorkspace)

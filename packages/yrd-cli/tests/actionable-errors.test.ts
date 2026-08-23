@@ -27,13 +27,13 @@ const AUTHORED_PIN = "d".repeat(40)
 
 const AUTHORED_GITLINK = {
   code: "authored-gitlink",
-  message: "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+  message: "yrd: change 'PR42' changes generated-only gitlinks [vendor/yrd]",
 } as const
 
 const RECUT_CONFLICT = {
   code: "recut-gitlink-conflict",
   message:
-    `yrd: PR 'PR77' could not recut: target root '${BASE_ROOT}' pins submodule 'vendor/yrd' to '${BASE_PIN}'; ` +
+    `yrd: change 'PR77' could not recut: target root '${BASE_ROOT}' pins submodule 'vendor/yrd' to '${BASE_PIN}'; ` +
     `replayed authored root '${AUTHORED_ROOT}' pins it to '${AUTHORED_PIN}'; ancestry walk failed because neither ` +
     "submodule commit is an ancestor of the other",
 } as const
@@ -41,7 +41,7 @@ const RECUT_CONFLICT = {
 const DIVERGED_RECUT_BASE = {
   code: "recut-base-diverged",
   message:
-    `PR 'PR1986' revision 34 certifies base '${BASE_PIN}', but the authoritative candidate base is '${BASE_ROOT}', ` +
+    `change 'PR1986' revision 34 certifies base '${BASE_PIN}', but the authoritative candidate base is '${BASE_ROOT}', ` +
     "which never descended from it; the certificate cannot become valid without a fresh revision",
 } as const
 
@@ -66,7 +66,7 @@ const RECUT_REFUSING: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryS
 /** Mirrors the CLI's own state guards, so the regression fails when the
  * projection drifts from them: `yrd pr create` is accepted only for a draft
  * (pushed) PR — applyPrSelectionVerb refuses every other state twice — and
- * `yrd pr recut` refuses a terminal PR outright (executeRecutPr
+ * `yrd pr recut` refuses a terminal change outright (executeRecutPr
  * `terminal-target`). `yrd pr submit <branch>` is refused by no state. */
 function refusedBy(delivery: ChangeDeliveryState, command: string): boolean {
   if (command.startsWith("yrd pr create")) return delivery !== "pushed"
@@ -78,7 +78,7 @@ describe("actionable failure projection", () => {
   it("turns authored-gitlink into a submit remedy, independent of PR delivery state", () => {
     expect(actionableFailure(AUTHORED_GITLINK, { delivery: "pushed" })).toEqual({
       code: "authored-gitlink",
-      cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+      cause: "change 'PR42' changes generated-only gitlinks [vendor/yrd]",
       resolution: ["yrd pr submit <branch>"],
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
@@ -95,12 +95,12 @@ describe("actionable failure projection", () => {
     const failure = actionableFailure({
       code: "authored-gitlink",
       message:
-        "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
+        "yrd: change 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
         "own main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
     })
 
     expect(failure.cause).toBe(
-      "PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s own " +
+      "change 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s own " +
         "main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
     )
     expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
@@ -110,7 +110,7 @@ describe("actionable failure projection", () => {
     const failure = actionableFailure({
       code: "authored-gitlink",
       message:
-        "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
+        "yrd: change 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s " +
         "own main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1); " +
         "before fast-forwarding, print what the FF would drag in with 'git cherry <estate-pin> <submodule-main>' " +
         "(empty unique list = no-op; non-empty is the dragged set)",
@@ -126,7 +126,7 @@ describe("actionable failure projection", () => {
       const projected = actionableFailure({
         code: "authored-gitlink",
         message:
-          `yrd: PR 'PR42' changes generated-only gitlinks [vendor/example]; ${change}; ` +
+          `yrd: change 'PR42' changes generated-only gitlinks [vendor/example]; ${change}; ` +
           "a change of min commits advances existing submodules only; a gitlink bump cannot express this component-model change",
       })
       expect(projected.resolution).toEqual([
@@ -226,12 +226,12 @@ describe("actionable failure projection", () => {
 
 /**
  * 22396 — `resolution[]` is the ONLY machine-readable remedy channel, so a step
- * the PR's current delivery state refuses is a wrong instruction, not a hint.
+ * the change's current delivery state refuses is a wrong instruction, not a hint.
  * The authored-gitlink projection used to print `yrd pr create <branch>`
  * unconditionally; on a submitted PR both printed steps refuse.
  */
 describe("22396 — state-aware remedies", () => {
-  it("emits no command the PR's delivery state refuses, in every state", () => {
+  it("emits no command the change's delivery state refuses, in every state", () => {
     for (const delivery of ALL_DELIVERY_STATES) {
       const failure = actionableFailure(AUTHORED_GITLINK, { delivery })
       const refused = failure.resolution.filter((step) => refusedBy(delivery, step))
@@ -246,7 +246,7 @@ describe("22396 — state-aware remedies", () => {
     expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })
 
-  it("keeps the submit remedy available for a terminal PR", () => {
+  it("keeps the submit remedy available for a terminal change", () => {
     for (const delivery of ["integrated", "already-landed", "withdrawn", "canceled"] as const) {
       expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual(["yrd pr submit <branch>"])
     }
@@ -293,7 +293,7 @@ describe("22396 — state-aware remedies", () => {
     expect(structured).toContain("manual: git -C vendor/yrd push -u origin HEAD")
   })
 
-  it("threads the PR's delivery state through the pr view and run detail projections", () => {
+  it("threads the change's delivery state through the pr view and run detail projections", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-18T18:00:00.000Z")
     const run = fixtureRun("R42", [pr], "failed", "2026-07-18T18:01:00.000Z", {
       finishedAt: "2026-07-18T18:02:00.000Z",
@@ -323,14 +323,14 @@ describe("actionable failure output", () => {
       createFailure({
         kind: "refusal",
         code: "authored-gitlink",
-        message: "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+        message: "yrd: change 'PR42' changes generated-only gitlinks [vendor/yrd]",
       }),
     )
 
     // A bare CLI diagnostic still points at the carrier-free submit remedy.
     expect(stderr).toBe(
       [
-        "error: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+        "error: change 'PR42' changes generated-only gitlinks [vendor/yrd]",
         "resolve: yrd pr submit <branch>",
         "reference: README.md#pr-eligibility-and-checks",
         "",
@@ -347,10 +347,10 @@ describe("actionable failure output", () => {
           stderr += text
         },
       },
-      createFailure({ kind: "refusal", code: "pr-missing", message: "yrd: no PR 'PR404'" }),
+      createFailure({ kind: "refusal", code: "pr-missing", message: "yrd: no change 'PR404'" }),
     )
 
-    expect(stderr).toBe("error: no PR 'PR404'\n")
+    expect(stderr).toBe("error: no change 'PR404'\n")
   })
 
   it("keeps only executable remedies in the human projection", () => {
@@ -393,7 +393,7 @@ describe("actionable failure output", () => {
           fixtureJob("J42", "failed", {
             error: {
               code: "authored-gitlink",
-              message: "yrd: PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+              message: "yrd: change 'PR42' changes generated-only gitlinks [vendor/yrd]",
             },
           }),
         ),
@@ -403,7 +403,7 @@ describe("actionable failure output", () => {
 
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
-      cause: "PR 'PR42' changes generated-only gitlinks [vendor/yrd]",
+      cause: "change 'PR42' changes generated-only gitlinks [vendor/yrd]",
       resolution: ["yrd pr submit <branch>"],
     })
     expect(data.steps[0]?.failure).toEqual(data.failure)
@@ -416,7 +416,7 @@ describe("actionable failure output", () => {
       })
       expect(output).toContain("err=authored-gitlink")
       expect(output).toContain("CAUSE")
-      expect(output).toContain("PR 'PR42' changes generated-only gitlinks [vendor/yrd]")
+      expect(output).toContain("change 'PR42' changes generated-only gitlinks [vendor/yrd]")
       expect(output).toContain("RESOLVE")
       expect(output).toContain("yrd pr submit <branch>")
       expect(output).toContain("REFERENCE README.md#pr-eligibility-and-checks")

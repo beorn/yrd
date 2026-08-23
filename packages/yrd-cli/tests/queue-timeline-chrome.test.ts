@@ -244,7 +244,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("renders the column header white+bold, the PR id always bold, and no blank row above the header", async () => {
+  it("renders the column header white+bold, the change id always bold, and no blank row above the header", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -263,9 +263,9 @@ describe("queue timeline chrome 21106", () => {
       // Round 6: only the value segment is bold; noun and revision stay plain.
       const doneRow = rowAt(text, mutedRowY)
       const changeX = doneRow.indexOf("pr#4.1")
-      expect(app.cell(changeX, mutedRowY).bold, "integrated PR noun is plain").not.toBe(true)
-      expect(app.cell(changeX + 3, mutedRowY).bold, "integrated PR value is bold").toBe(true)
-      expect(app.cell(changeX + 4, mutedRowY).bold, "integrated PR revision is plain").not.toBe(true)
+      expect(app.cell(changeX, mutedRowY).bold, "integrated change noun is plain").not.toBe(true)
+      expect(app.cell(changeX + 3, mutedRowY).bold, "integrated change value is bold").toBe(true)
+      expect(app.cell(changeX + 4, mutedRowY).bold, "integrated change revision is plain").not.toBe(true)
       // Item 5: the table header sits flush — the row directly above the TIME
       // header is not a blank spacer (it is the QUEUE metadata row).
       expect(rowAt(text, headerY - 1).trim(), "no blank row above the header").not.toBe("")

@@ -298,8 +298,8 @@ describe("queue timeline non-integrated rows", () => {
   })
 
   it("resurfaces a rejected PR as `rev` immediately, alongside its retained failed run row (21707)", () => {
-    // Rejection is a submission fact, not a PR resting state: no re-push has
-    // happened yet, but the PR re-enters the editable band carrying its blocker.
+    // Rejection is a submission fact, not a change resting state: no re-push has
+    // happened yet, but the change re-enters the editable band carrying its blocker.
     const projection = project([rejectedPr()], [rejectedRun()])
     const revRow = projection.rows.find((row) => row.pr === "PR5" && row.status === "rev")
 

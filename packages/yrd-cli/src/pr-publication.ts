@@ -96,7 +96,7 @@ export function createChangePublicationService(options: {
         const actualPins = actual.map(({ path, pin }) => `${path}\0${pin}`).toSorted()
         if (JSON.stringify(actualPins) !== JSON.stringify(expectedPins)) {
           throw new Error(
-            `publication request for PR '${input.pr}' does not match revision ${input.revision} ` +
+            `publication request for change '${input.pr}' does not match revision ${input.revision} ` +
               `gitlinks at '${input.headSha}'`,
           )
         }

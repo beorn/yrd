@@ -95,7 +95,7 @@ describe("intent-integrated runs in the queue read views", () => {
       id: "R9999",
       prs: [{ ...intentMember(), id: "PR777", intent: undefined } as Member],
     }
-    expect(() => queueRunRevisionClocks(first.prs, [orphanPR])).toThrow(/has no retained PR 'PR777'/)
+    expect(() => queueRunRevisionClocks(first.prs, [orphanPR])).toThrow(/has no retained change 'PR777'/)
   })
 
   it("the timeline projection renders a row for the intent run instead of crashing", () => {

@@ -1,5 +1,5 @@
 /**
- * @failure A branch selector resolves to a frozen terminal PR instead of the
+ * @failure A branch selector resolves to a frozen terminal change instead of the
  * live delivery (or a mutating verb targets a merged PR), or a new mutating
  * verb forgets the shared live-PR guard and silently mutates by a stale branch.
  * @level l2
@@ -50,7 +50,7 @@ function changeFacts(pr: Change | undefined) {
   return { ...pr, delivery: changeDeliveryState(pr), current: currentChangeRev(pr) }
 }
 
-/** Seed a journal with one integrated PR per entry (all on the given branch, so
+/** Seed a journal with one integrated change per entry (all on the given branch, so
  * the branch collides), then boot an app on it. */
 async function appWithIntegrated(
   branch: string,
@@ -96,7 +96,7 @@ async function appWithIntegrated(
 const mint = (tip: string) => ({ base: "main", resolveRevision: async () => tip, run: runtime })
 
 describe("resolvePR live-preference + requireLivePR mutation guard", () => {
-  it("resolves a branch with one terminal + one live PR to the live one, for reads and mutating verbs", async () => {
+  it("resolves a branch with one terminal + one live change to the live one, for reads and mutating verbs", async () => {
     await using app = await appWithIntegrated("topic/b", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
     // Q1 mints a fresh live delivery (PR2) on the merged branch.
     await app.bays.submitSelection("topic/b", mint(HEAD_2))
@@ -109,7 +109,7 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "integrated" })
   })
 
-  it("resolves a branch with multiple terminal PRs + one live PR to the live one", async () => {
+  it("resolves a branch with multiple terminal PRs + one live change to the live one", async () => {
     await using app = await appWithIntegrated("topic/c", [
       { pr: "PR1", headSha: HEAD_1, commit: BASE },
       { pr: "PR2", headSha: HEAD_2, commit: "b".repeat(40) },
@@ -133,24 +133,24 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
     await expect(app.bays.closePr({ pr: "topic/d" })).rejects.toMatchObject({
       failure: { kind: "refusal", code: "no-live-pr" },
     })
-    await expect(app.bays.closePr({ pr: "topic/d" })).rejects.toThrow("no live PR for branch 'topic/d'; use PR id")
+    await expect(app.bays.closePr({ pr: "topic/d" })).rejects.toThrow("no live change for branch 'topic/d'; use PR id")
   })
 
-  it("passes an id-addressed terminal PR through to the verb's own state guard, not the branch refusal", async () => {
+  it("passes an id-addressed terminal change through to the verb's own state guard, not the branch refusal", async () => {
     await using app = await appWithIntegrated("topic/e", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
-    // Addressed by its exact id, a terminal PR is NOT branch-refused; the verb's
-    // own precondition decides (closePr: only a live PR can be closed).
-    await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow(/only a live PR|run it through the queue/i)
-    await expect(app.bays.closePr({ pr: "PR1" })).rejects.not.toThrow("no live PR for branch")
+    // Addressed by its exact id, a terminal change is NOT branch-refused; the verb's
+    // own precondition decides (closePr: only a live change can be closed).
+    await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow(/only a live change|run it through the queue/i)
+    await expect(app.bays.closePr({ pr: "PR1" })).rejects.not.toThrow("no live change for branch")
   })
 
-  it("folds case on an id-addressed terminal PR: 'pr1' addresses canonical PR1, same as resolveSelector", async () => {
+  it("folds case on an id-addressed terminal change: 'pr1' addresses canonical PR1, same as resolveSelector", async () => {
     await using app = await appWithIntegrated("topic/f", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
     // resolveSelector folds case ('pr1' → PR1); the guard's exact-id arm must
     // fold identically, or a lowercase exact id is misclassified as a live-less
     // BRANCH and refused with no-live-pr.
-    await expect(app.bays.closePr({ pr: "pr1" })).rejects.toThrow(/only a live PR|run it through the queue/i)
-    await expect(app.bays.closePr({ pr: "pr1" })).rejects.not.toThrow("no live PR for branch")
+    await expect(app.bays.closePr({ pr: "pr1" })).rejects.toThrow(/only a live change|run it through the queue/i)
+    await expect(app.bays.closePr({ pr: "pr1" })).rejects.not.toThrow("no live change for branch")
   })
 
   it("routes submit through the same live guard: a live-less branch selector refuses no-live-pr", async () => {

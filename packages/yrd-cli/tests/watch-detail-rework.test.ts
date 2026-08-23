@@ -333,7 +333,7 @@ describe("watch detail composite header + status notice", () => {
       "PR changed after the run was pinned",
       "stale",
       "none",
-      "The PR revision changed after this run was pinned",
+      "The change revision changed after this run was pinned",
       "This historical run will not retry",
       "Automatically recut",
     ],

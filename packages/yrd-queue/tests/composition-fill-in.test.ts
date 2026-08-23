@@ -339,7 +339,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
       inject: { process },
       repo,
       // The step passes only when the sha it is handed IS the tree it stands in,
-      // and the PR-identity variable stays the author head — two different facts,
+      // and the change-identity variable stays the author head — two different facts,
       // never conflated: YRD_SHA names the revision, YRD_CANDIDATE_SHA/YRD_TARGET
       // name the judged tree.
       command: shellCommand(

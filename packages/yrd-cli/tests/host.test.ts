@@ -357,7 +357,7 @@ checks: [{check: {run: "true"}}]
 }
 
 /** A branch whose own delta touches no gitlink, submitted after main bumped an
- * unrelated submodule pin. The PR's recorded base is current main, so a two-dot
+ * unrelated submodule pin. The change's recorded base is current main, so a two-dot
  * diff from it reports main's pin move as this branch reverting the pin — while
  * the branch's authored delta, measured from where it actually diverged, has no
  * gitlink in it at all. */
@@ -2013,7 +2013,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(changeBaseSha(submittedPR)).toBe(baseSha)
     await expect(
       app.bays.submit({ branch: "origin/issue/feature", headSha: featureSha, base: "main" }),
-    ).rejects.toThrow("payload already recorded as PR 'PR1'")
+    ).rejects.toThrow("payload already recorded as change 'PR1'")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
@@ -2129,7 +2129,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await git(repo, "rev-parse", "refs/remotes/origin/issue/recoverable")).toBe(recoverableSha)
   })
 
-  it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
+  it("adds one queue-authority fetch per same-base cycle instead of one per change", async () => {
     const { repo, featureSha } = await repository()
     const addFeature = async (branch: string, file: string): Promise<string> => {
       await git(repo, "switch", "-qc", branch)
@@ -2827,7 +2827,7 @@ checks: [{check: {run: "true"}}]
       "cancel",
       // The branch-state quartet: `yrd branch <state>` is the complete set,
       // and every state is also a bare verb. Root `submit` is one of them
-      // (@cto 2026-08-19, cliverbs ruling-a) — it used to alias the PR path,
+      // (@cto 2026-08-19, cliverbs ruling-a) — it used to alias the change path,
       // which keeps its own spelling as `yrd pr submit`.
       "branch",
       "draft",
@@ -3689,7 +3689,7 @@ checks: [{check: {run: "true"}}]
     })
   })
 
-  it("runs the managed required check before pr submit mutates the PR journal", async () => {
+  it("runs the managed required check before pr submit mutates the change journal", async () => {
     const { repo } = await repository()
     await writeFile(
       join(repo, ".yrd.yml"),
@@ -3983,7 +3983,7 @@ checks: [{check: {run: "true"}}]
       },
     )
 
-    // Measured from the PR's recorded base, main's own pin move reads as this
+    // Measured from the change's recorded base, main's own pin move reads as this
     // branch reverting 'dep'. Measured from where the branch actually diverged,
     // its authored delta is one script file and no gitlink at all.
     expect(stderr).not.toContain("authored-gitlink")
@@ -4437,7 +4437,7 @@ checks: [{check: {run: "true"}}]
     expect(existsSync(submoduleHookMarker)).toBe(false)
   })
 
-  it("keeps a failed publication visible on the PR after queue run --once exits red", async () => {
+  it("keeps a failed publication visible on the change after queue run --once exits red", async () => {
     const { repo, moduleRemote, branch } = await unpublishedSubmodulePinRepository()
     const offlineRemote = `${moduleRemote}.offline`
     let stdout = ""
@@ -4837,7 +4837,7 @@ checks: [{check: {run: "true"}}]
     await git(repo, "switch", "-q", "main")
     // #62: the habitant runner is now `queue run` in its follow-by-default form
     // (no selector, no --once). Follow drains the WHOLE default queue, so to keep
-    // each habitant bound to exactly one PR, PR1 is submitted first and PR2 only
+    // each habitant bound to exactly one change, PR1 is submitted first and PR2 only
     // after the first runner releases the lease.
     {
       await using submitter = await createYrdHost({ cwd: repo })
@@ -5663,7 +5663,7 @@ checks: [{check: {run: "true"}}]
       })
       expect(host.app.queue.eligibility("PR1")).toMatchObject({
         runnable: false,
-        reason: { code: "candidate-conflicting", message: "PR 'PR1' revision 1 conflicts in Candidate 'C1'" },
+        reason: { code: "candidate-conflicting", message: "change 'PR1' revision 1 conflicts in Candidate 'C1'" },
       })
     } finally {
       await host.close()

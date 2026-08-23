@@ -118,7 +118,7 @@ describe("queue watch user round 6", () => {
     }
   })
 
-  it("renders the final v4 run header, primary PR block, and full chronological activity", async () => {
+  it("renders the final v4 run header, primary change block, and full chronological activity", async () => {
     const commit = "b".repeat(40)
     const baseSha = "a".repeat(40)
     const leadHead1 = "7".repeat(40)
@@ -328,7 +328,7 @@ describe("queue watch user round 6", () => {
     )
     try {
       expect(olderActivity.text).toContain("r2 run main#58")
-      expect(olderActivity.text, "an older-run selection still shows the PR's later activity").toContain(
+      expect(olderActivity.text, "an older-run selection still shows the change's later activity").toContain(
         "r4 run main#60",
       )
     } finally {
@@ -464,7 +464,7 @@ describe("queue watch user round 6", () => {
       expect(blank(collapsedRows[diff[1] + 1]), "blank row below the diff summary").toBe("")
       expect(
         collapsedRows.slice(diff[1] + 1, diff[1] + 4).some((row) => row.slice(detailX).includes("─")),
-        "a horizontal divider terminates the PR diff section",
+        "a horizontal divider terminates the change diff section",
       ).toBe(true)
       await app.click(diff[0], diff[1])
       await app.waitForLayoutStable()
@@ -886,7 +886,7 @@ describe("queue watch user round 6", () => {
         },
       ],
     }
-    // Round 6 moves the diff out of the scrollable submit tab into the PR header
+    // Round 6 moves the diff out of the scrollable submit tab into the change header
     // section, where an expanded diff renders its full patch inline (no per-diff
     // scroll). A viewport tall enough to hold the whole diff shows the complete
     // patch, tail included; a collapsed diff shows only its summary.

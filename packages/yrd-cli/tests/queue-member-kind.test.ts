@@ -30,7 +30,7 @@ function gitlinkProjection(): QueueTimelineProjection {
 }
 
 describe("queueMemberKind — the one discrimination, from the schemas the mints write through", () => {
-  it("tells a PR from a pin-advance record", () => {
+  it("tells a change from a pin-advance record", () => {
     expect(queueMemberKind(PR_ID)).toBe("pr")
     expect(queueMemberKind(GITLINK_ID)).toBe("gitlink")
     expect(queueMemberKind(INTENT_ID)).toBe("gitlink")
@@ -58,7 +58,7 @@ describe("a renderer never asserts a kind the record does not carry", () => {
   })
 
   it("still renders a real PR with its canonical copy-pasteable identity", () => {
-    // The discrimination must not cost the PR path its selector round-trip.
+    // The discrimination must not cost the change path its selector round-trip.
     expect(formatChangeRevisionSelector(PR_ID, 1)).toBe("pr#182.1")
     expect(formatChangeRevisionSelector("182", 3)).toBe("pr#182.3")
   })

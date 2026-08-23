@@ -194,7 +194,7 @@ async function hostSpelling(
 async function fixture() {
   const app = await createCliApp()
   // Distinct head SHAs: the bay refuses a duplicate payload, so three branches
-  // sharing one SHA would submit as one PR and shrink the comparison set.
+  // sharing one SHA would submit as one change and shrink the comparison set.
   for (const [index, branch] of ["topic/one", "topic/two", "topic/three"].entries()) {
     await app.bays.submit({ branch, headSha: `${index + 1}`.repeat(40), base: "main", baseSha: BASE_SHA })
   }

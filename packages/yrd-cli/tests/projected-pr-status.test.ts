@@ -1,5 +1,5 @@
 /**
- * @failure A closed PR reports `needs-author` — a value its own delivery model
+ * @failure A closed change reports `needs-author` — a value its own delivery model
  * says is impossible once the record is closed — because the projection reads a
  * never-cleared stored fact before it looks at live state.
  * @level l1
@@ -8,7 +8,7 @@
  * Specimen, 2026-08-10: PR715, PR717 and PR720 were closed as spent carriers and
  * still read `state=closed, status=needs-author` in `pr list` and in `--json`.
  * Two functions produce the same declared vocabulary and disagree on live data:
- * `changeDeliveryState` checks `pr.state` first, so a closed PR maps to exactly
+ * `changeDeliveryState` checks `pr.state` first, so a closed change maps to exactly
  * integrated / already-landed / canceled / withdrawn. `projectedPrStatus` — the
  * one that actually feeds the STATE column — consulted `changeNeedsAuthor` first.
  *
@@ -50,7 +50,7 @@ function pr(overrides: Partial<Change>): Change {
   }
 }
 
-/** Every way a PR reaches `state: "closed"`, with the sticky fact still on it. */
+/** Every way a change reaches `state: "closed"`, with the sticky fact still on it. */
 const CLOSED_CASES = [
   ["withdrawn", pr({ state: "closed" }), "withdrawn"],
   ["integrated", pr({ state: "closed", merged: true }), "integrated"],
@@ -70,14 +70,14 @@ describe("projectedPrStatus", () => {
   })
 
   // The regression guard in the other direction. needs-author is a real and
-  // useful answer while the PR is open, and this fix must not cost us that.
-  it("still reports needs-author while the PR is open", () => {
+  // useful answer while the change is open, and this fix must not cost us that.
+  it("still reports needs-author while the change is open", () => {
     expect(projectedChangeStatus(pr({}))).toBe("needs-author")
   })
 
   // The general invariant, and the one worth keeping if the cases above ever
   // get rewritten: the two producers of this vocabulary may not contradict each
-  // other about a closed record. Whatever changeDeliveryState says a closed PR is,
+  // other about a closed record. Whatever changeDeliveryState says a closed change is,
   // the projection says the same.
   it.each(CLOSED_CASES)("agrees with changeDeliveryState on a %s PR", (_label, closed) => {
     expect(projectedChangeStatus(closed)).toBe(changeDeliveryState(closed))

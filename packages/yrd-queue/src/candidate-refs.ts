@@ -26,7 +26,7 @@
  * rule — one retention window, one command, not two sweepers to keep in sync. A
  * source-tip ref is claimed through `Candidate.sourceRewrites` (the submodule-
  * wrapper case) or `Candidate.revs[].head` (the direct-re-merge case: `remergeDirectChange`
- * publishes the ref straight from a PR's certified head, with no per-source
+ * publishes the ref straight from a change's certified head, with no per-source
  * record). KNOWN GAP: refs `publishSourceCandidate` pushes into a SUBMODULE's own
  * origin (`source.repo !== "."`, e.g. `vendor/silvery`) live in that submodule's
  * remote, not this one's, and are out of reach of a sweep scoped to a single

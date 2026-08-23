@@ -20,10 +20,10 @@ export type ActionableFailure = Readonly<{
   escalation?: Readonly<{ reason: string; steps: readonly string[] }>
 }>
 
-/** What the projection knows about the PR the failure belongs to. `resolution`
- * is the only machine-readable remedy channel, so a step the PR's current
+/** What the projection knows about the change the failure belongs to. `resolution`
+ * is the only machine-readable remedy channel, so a step the change's current
  * delivery state refuses is a wrong instruction, not a hint (22396). Callers
- * that hold the PR thread its state; callers that do not get the remedy no
+ * that hold the change thread its state; callers that do not get the remedy no
  * state refuses. */
 export type ActionableFailureContext = Readonly<{ delivery?: ChangeDeliveryState }>
 
@@ -87,10 +87,10 @@ function quotedValue(message: string, pattern: RegExp): string | undefined {
 }
 
 function prId(message: string): string | undefined {
-  return quotedValue(message, /\bPR\s+'([^']+)'/iu)
+  return quotedValue(message, /\b(?:PR|change)\s+'([^']+)'/iu)
 }
 
-/** `yrd pr recut` refuses a terminal PR outright (`terminal-target`): an
+/** `yrd pr recut` refuses a terminal change outright (`terminal-target`): an
  * integrated/already-landed identity is frozen evidence and a
  * withdrawn/canceled one is reopened by resubmitting its branch, not re-merge. */
 const REMERGE_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
@@ -107,12 +107,12 @@ export function remergeRefusedByDelivery(delivery: ChangeDeliveryState | undefin
   return delivery !== undefined && REMERGE_REFUSING_STATES.has(delivery)
 }
 
-/** Re-record the branch's corrected head onto the PR.
+/** Re-record the branch's corrected head onto the change.
  *
  * `yrd pr create <branch>` is accepted only for a draft (pushed) PR — the
  * create path guards the delivery state twice and refuses every other one — so
- * it is emitted only when the projection positively knows the PR is a draft,
- * where it is preferable because it keeps the PR a draft. `yrd pr submit
+ * it is emitted only when the projection positively knows the change is a draft,
+ * where it is preferable because it keeps the change a draft. `yrd pr submit
  * <branch>` is refused by no delivery state (a pushed draft is submitted, a
  * submitted/needs-author PR records a fresh revision, a rejected one resumes,
  * a withdrawn/canceled one reopens, and a merged branch mints a fresh
@@ -140,7 +140,7 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
         .filter(Boolean)
 }
 
-// A pure pin advance is an ordinary change: fast-forward the submodule's own
+// Advancing a submodule min commit is an ordinary change: fast-forward the submodule's own
 // main to the target commit, then submit the root branch like any other
 // change — the queue fills the shaset in itself. `yrd intent submit`, the
 // mechanical per-submodule verb this used to print, is retired (23000).
@@ -226,7 +226,7 @@ function remergeGitlinkFailure(
  * A re-merge whose certified base the authoritative base never descended from is
  * cured by exactly one thing: a fresh revision recorded at the base the queue
  * actually holds. The generic "retry the same Yrd command" line is a wrong
- * instruction here — the queue already parked the PR precisely because retrying
+ * instruction here — the queue already parked the change precisely because retrying
  * re-derives the same stale certificate — so this prints the redelivery pair
  * every delivery state accepts instead. No merge judgment is involved, so the
  * remedy stays machine-readable rather than an escalation.

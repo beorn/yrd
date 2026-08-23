@@ -115,7 +115,7 @@ describe("queue-native submodule composition planner", () => {
       status: "refused",
       code: "candidate-conflict",
       paths: ["README.md"],
-      message: "content conflict in README.md; the PR must be rebased or merged against the current base, then retry",
+      message: "content conflict in README.md; the change must be rebased or merged against the current base, then retry",
     })
   })
 
@@ -131,7 +131,7 @@ describe("queue-native submodule composition planner", () => {
       paths: [".agents/skills/tent/scripts/yrd-cutover.test.ts", ".claude/skills/tent/scripts/yrd-cutover.test.ts"],
       message:
         "content conflict in .agents/skills/tent/scripts/yrd-cutover.test.ts, .claude/skills/tent/scripts/yrd-cutover.test.ts; " +
-        "the PR must be rebased or merged against the current base, then retry",
+        "the change must be rebased or merged against the current base, then retry",
     })
     if (planned.status !== "refused") throw new Error("expected a refusal")
     expect(planned.message).not.toMatch(/gitlink|submodule/u)

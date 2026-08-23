@@ -50,7 +50,7 @@ export type SubmoduleMainResolution =
  * This exists because asking the question two ways produced two answers. Merge fetched
  * exactly `refs/heads/main` and tested ancestry against it; admission asked git-super
  * whether the pin sat under any `refs/heads/` tip, so a pin pushed to a side branch
- * passed admission and was only caught later, after the PR had a carrier. The fix is not
+ * passed admission and was only caught later, after the change had a carrier. The fix is not
  * a tighter prefix — `refPrefixes` matches with `startsWith`, so `refs/heads/main` would
  * silently also accept `refs/heads/maintenance` and widen the check inside a change meant
  * to narrow it. Exactness is only expressible by fetching one ref and naming its sha.
@@ -241,7 +241,7 @@ function queueRefusal(
     clauses.push(
       "content conflict in " +
         contentPaths.join(", ") +
-        "; the PR must be rebased or merged against the current base, then retry",
+        "; the change must be rebased or merged against the current base, then retry",
     )
   }
   if (gitlinkPaths.length > 0) {

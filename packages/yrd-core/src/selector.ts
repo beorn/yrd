@@ -10,7 +10,7 @@ export type SelectorOptions<Value = unknown> = Readonly<{
   kind: string
   /** Read-bias for a colliding folded selector: when several aliases resolve to
    * the same input, a single candidate satisfying `prefer` wins (e.g. "the one
-   * live PR on this branch"). When none qualify, the first candidate is returned
+   * live change on this branch"). When none qualify, the first candidate is returned
    * — callers pass their candidates most-relevant-first (e.g. most recent). More
    * than one preferred candidate, or no preference at all, stays a loud
    * ambiguity. Opt-in: without `prefer`, collisions refuse exactly as before. */

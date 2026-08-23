@@ -229,8 +229,8 @@ function livePRLine(prs: readonly string[]): BayStatusLine {
     verdict: prs.length === 0 ? "PASS" : "BLOCK",
     evidence:
       prs.length === 0
-        ? "no live PR references this Bay"
-        : `live PR(s) ${prs.join(", ")} still references this Bay; submit/repair requires its workspace carrier`,
+        ? "no live change references this Bay"
+        : `live change(s) ${prs.join(", ")} still references this Bay; submit/repair requires its workspace carrier`,
   }
 }
 

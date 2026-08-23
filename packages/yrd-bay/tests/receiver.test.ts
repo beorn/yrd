@@ -1,5 +1,5 @@
 /**
- * @failure The PR receiver can accept unsafe refs, lose hook results, or duplicate intake after recovery.
+ * @failure The change receiver can accept unsafe refs, lose hook results, or duplicate intake after recovery.
  * @level l3
  * @consumer @yrd/bay Git push receiver
  */
@@ -770,7 +770,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
         oldSha: zero,
         headSha,
         // The issue rides through to intake. A push that carries an issue
-        // reference and merges a PR with no issue has forgotten the only thing
+        // reference and merges a change with no issue has forgotten the only thing
         // the ref said beyond its commits.
         intake: expect.objectContaining({
           base: "main",

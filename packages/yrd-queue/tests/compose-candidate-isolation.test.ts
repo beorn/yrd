@@ -314,7 +314,7 @@ describe("compose member isolation — one refusing member never zeroes its whol
         throw createFailure({
           kind: "refusal",
           code: "recut-certificate",
-          message: `PR '${guilty.id}' recomposed change did not survive the advanced base`,
+          message: `change '${guilty.id}' recomposed change did not survive the advanced base`,
           pr: guilty.id,
         })
       }
@@ -473,7 +473,7 @@ describe("compose member isolation — one refusing member never zeroes its whol
       throw createFailure({
         kind: "refusal",
         code: "recut-certificate",
-        message: "PR 'PR999' recomposed change did not survive the advanced base",
+        message: "change 'PR999' recomposed change did not survive the advanced base",
         pr: "PR999",
       })
     }

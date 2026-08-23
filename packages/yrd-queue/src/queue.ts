@@ -236,7 +236,7 @@ const QueueRunReuseCoveredSchema = z
   .strict()
 type QueueRunReuseCovered = Readonly<z.infer<typeof QueueRunReuseCoveredSchema>>
 
-/** A considered carrier with a record: the PR and the revision the verdict is about. */
+/** A considered carrier with a record: the change and the revision the verdict is about. */
 const ConsideredRecordRowSchema = z
   .object({
     pr: z.string().trim().min(1),
@@ -313,7 +313,7 @@ function queueRunNoRunnablePRs(
 ): QueueRunNoRunnablePRs {
   const considered = decisions.map(({ pr, eligibility }) => {
     if (eligibility.runnable || eligibility.reason === undefined) {
-      throw new Error(`yrd: PR '${pr.id}' was reported as rejected without an eligibility reason`)
+      throw new Error(`yrd: change '${pr.id}' was reported as rejected without an eligibility reason`)
     }
     return {
       pr: pr.id,
@@ -438,7 +438,7 @@ const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const ExpireQueuePauseArgsSchema = z
   .object({ base: GitRefSchema, expiresAt: z.iso.datetime({ offset: true }) })
   .strict()
-/** One compose/admission cycle that skipped a PR without producing a queue run.
+/** One compose/admission cycle that skipped a change without producing a queue run.
  * The `compose-candidate-skip` warns that accompany it are loggily-only, so this
  * is the fact that makes a head-of-line refusal loop survive the process. */
 const AdmissionRefusedSchema = z
@@ -471,7 +471,7 @@ const SettleAdmissionRefusalSchema = z
   })
   .strict()
 export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmissionRefusalSchema>>
-/** Consecutive refusals before `queue audit` calls a PR wedged. One skip is a
+/** Consecutive refusals before `queue audit` calls a change wedged. One skip is a
  * normal losable race in a selectorless drain; a third identical cycle is not.
  *
  * Exported because the runner's self-applied-remedy pass (22474) acts on
@@ -1215,7 +1215,7 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         return refusedTerminalAssociation(
           terminal,
           "terminal-pr-missing",
-          `yrd: legacy terminal '${terminal.event}' names missing PR '${terminal.pr}'`,
+          `yrd: legacy terminal '${terminal.event}' names missing change '${terminal.pr}'`,
         )
       }
       const revisions = pr.revs.filter(
@@ -1226,14 +1226,14 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
         return refusedTerminalAssociation(
           terminal,
           "terminal-revision-missing",
-          `yrd: legacy terminal '${terminal.event}' has no PR '${terminal.pr}' revision ${terminal.revision}`,
+          `yrd: legacy terminal '${terminal.event}' has no change '${terminal.pr}' revision ${terminal.revision}`,
         )
       }
       if (revisions.length !== 1) {
         return refusedTerminalAssociation(
           terminal,
           "terminal-revision-ambiguous",
-          `yrd: legacy terminal '${terminal.event}' matches ${revisions.length} revisions of PR '${terminal.pr}'`,
+          `yrd: legacy terminal '${terminal.event}' matches ${revisions.length} revisions of change '${terminal.pr}'`,
         )
       }
       const revision = revisions[0]
@@ -1538,7 +1538,7 @@ function createQueue<Shape extends ChangeShape>(
     let selected = record === undefined ? undefined : materializeRun(record, snapshot.jobs)
     if (selected === undefined) {
       if (pr === undefined) {
-        raiseFailure("refusal", "queue-selection-missing", `yrd: no queue run or PR '${selector}'`)
+        raiseFailure("refusal", "queue-selection-missing", `yrd: no queue run or change '${selector}'`)
       }
       const summary = queueSummary(snapshot.queues, snapshot.jobs, pr.base)
       selected = [...summary.waiting, ...summary.running]
@@ -1554,7 +1554,7 @@ function createQueue<Shape extends ChangeShape>(
         raiseFailure(
           "refusal",
           "queue-step-not-waiting",
-          `yrd: PR '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`,
+          `yrd: change '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`,
         )
       }
     }
@@ -1752,7 +1752,7 @@ function createQueue<Shape extends ChangeShape>(
     resolveCycleBase: CycleBaseResolver | undefined,
   ): Promise<string> => {
     const first = prs[0]
-    if (first === undefined) throw new Error("yrd: a Candidate requires at least one PR")
+    if (first === undefined) throw new Error("yrd: a Candidate requires at least one change")
     const base = baseIdentity(first.base)
     if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
       throw new Error("yrd: one Candidate cannot span base branches")
@@ -1787,7 +1787,7 @@ function createQueue<Shape extends ChangeShape>(
     }
     if (prepareCandidate === undefined) return undefined
     const first = pinned[0]
-    if (first === undefined) throw new Error("yrd: a Candidate requires at least one PR")
+    if (first === undefined) throw new Error("yrd: a Candidate requires at least one change")
     const queueId = queueIdentity(first)
     const revs = pinned.map((member) => ({ pr: member.id, n: member.revision, head: member.headSha }))
     const id = allocateCandidateId()
@@ -1939,7 +1939,7 @@ function createQueue<Shape extends ChangeShape>(
       return { processed: false }
     }
     const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
-    if (snapshot === undefined) throw new Error(`yrd: required-check run lost PR '${pr.id}'`)
+    if (snapshot === undefined) throw new Error(`yrd: required-check run lost change '${pr.id}'`)
     let prepared: z.infer<typeof CandidateCreatedSchema> | undefined
     try {
       prepared = await candidateFactsForSnapshots([snapshot], baseSha)
@@ -2082,7 +2082,7 @@ function createQueue<Shape extends ChangeShape>(
     const pr = resolveChange(runtime().bays, args.pr)
     if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, args.pr))
     if (!pr.revs.some((revision) => revision.n === args.revision)) {
-      raiseFailure("refusal", "pr-revision-not-found", `yrd: PR '${pr.id}' has no revision ${args.revision}`)
+      raiseFailure("refusal", "pr-revision-not-found", `yrd: change '${pr.id}' has no revision ${args.revision}`)
     }
     const prefix = admissionRevisionKeyPrefix(pr.id, args.revision)
     const selected = Object.values(runtime().jobs.byId)
@@ -2122,7 +2122,7 @@ function createQueue<Shape extends ChangeShape>(
 
   /**
    * Journal the per-PR refusal behind every `compose-candidate-skip` warn below.
-   * The warns are loggily-only — they die with the process, and a PR refused at
+   * The warns are loggily-only — they die with the process, and a change refused at
    * ADMISSION never becomes a run record — so without this the whole class of
    * head-of-line wedge is invisible to `queue audit` (22395).
    */
@@ -2302,7 +2302,7 @@ function createQueue<Shape extends ChangeShape>(
       const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined).filter(
         (pr) => !released.has(pr.id),
       )
-      // A habitant (`continueAdmissions` installed) admits one PR per turn so a
+      // A habitant (`continueAdmissions` installed) admits one change per turn so a
       // drain signal can interrupt between admissions; a one-shot dispatches the
       // whole queue in a single turn and needs no release.
       const turn = options.continueAdmissions === undefined ? queued : queued.slice(0, 1)
@@ -2432,7 +2432,7 @@ function createQueue<Shape extends ChangeShape>(
         raiseFailure(
           "refusal",
           "admission-step-not-waiting",
-          `yrd: PR '${selector}' has no waiting required check${completion.step === undefined ? "" : ` '${completion.step}'`}`,
+          `yrd: change '${selector}' has no waiting required check${completion.step === undefined ? "" : ` '${completion.step}'`}`,
         )
       }
       if (waiting.step.job.id !== completion.job) {
@@ -2450,12 +2450,12 @@ function createQueue<Shape extends ChangeShape>(
       })
       const pr = resolveChange(runtime().bays, waiting.pr)
       if (pr === undefined || changeRevisionNumber(pr) !== waiting.revision) {
-        raiseFailure("refusal", "stale-pr", `yrd: PR '${waiting.pr}' changed while a required check was waiting`)
+        raiseFailure("refusal", "stale-pr", `yrd: change '${waiting.pr}' changed while a required check was waiting`)
       }
       const request = checkRequest(pr)
       const baseSha = request?.baseSha ?? changeBaseSha(pr)
       if (baseSha === undefined) {
-        raiseFailure("infrastructure", "base-sha-missing", `yrd: PR '${pr.id}' required checks have no resolved base`)
+        raiseFailure("infrastructure", "base-sha-missing", `yrd: change '${pr.id}' required checks have no resolved base`)
       }
       const outcome = await admitChangeRevision(pr, baseSha, options)
       if (outcome.refusal !== undefined) await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
@@ -2501,7 +2501,7 @@ function createQueue<Shape extends ChangeShape>(
               // Not ledgered: this skip is run-scoped, and a run record already
               // exists — the record walk in `auditQueues` can see it. The ledger
               // covers only the skips that never mint a record.
-              log.warn?.("Skipped a PR that changed while its batch was being prepared.", {
+              log.warn?.("Skipped a change that changed while its batch was being prepared.", {
                 action: "compose-candidate-skip",
                 run: candidateId,
                 code: fact.code,
@@ -2559,7 +2559,7 @@ function createQueue<Shape extends ChangeShape>(
                   ...(args.steps === undefined ? {} : { steps: args.steps }),
                 })
                 if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
-                  throw new Error(`yrd: consumed authority for PR '${gap.pr}' produced no needs-author result`)
+                  throw new Error(`yrd: consumed authority for change '${gap.pr}' produced no needs-author result`)
                 }
               }
               const gapReason =
@@ -3078,7 +3078,7 @@ function createQueue<Shape extends ChangeShape>(
           // Settle every run whose cursor step has had no Job past the orphan
           // grace: nothing else can. `jobs.recover()` above walks Jobs, and
           // `advance` no-ops without one, so a jobless run is projected `running`
-          // forever (R1582 ticked for 45h over an already-integrated PR). Loud
+          // forever (R1582 ticked for 45h over an already-integrated change). Loud
           // structured result naming every settled run and the step it stalled on.
           const orphanedRuns = orphanedJoblessRuns(runtime(), recoverOptions.recoveryTime, reader)
           for (const orphan of orphanedRuns) {
@@ -3160,7 +3160,7 @@ function createQueue<Shape extends ChangeShape>(
     },
     audit: (options = {}) => auditQueues(runtime(), steps, progress, needsPersonOwner, options),
     eligibility(selector, projected) {
-      // Called once per PR by the queue views, and the single largest stage of a
+      // Called once per change by the queue views, and the single largest stage of a
       // cold `queue ls` — resolveChange plus checkEligibility together dominate it.
       return stage("eligibility", () => {
         const snapshot = projected ?? runtime()
@@ -3315,7 +3315,7 @@ function stepObservation(input: StepExecution): JobObservation {
     attributes: {
       index: input.index,
       // The run's base, carried so the habitant timeline can name a step row
-      // `[<base>#<run> <index>:<step>]`; every PR in a run shares its base.
+      // `[<base>#<run> <index>:<step>]`; every change in a run shares its base.
       ...(input.prs[0]?.base === undefined ? {} : { base: input.prs[0].base }),
       prs: input.prs.map(deliveryIdentity),
       ...(input.targetSha === undefined ? {} : { targetSha: input.targetSha }),
@@ -3543,7 +3543,7 @@ function createQueueCommands(
         raiseFailure(
           "refusal",
           "stale-pr",
-          `yrd: required checks target stale revision ${args.pr.revision} (${args.pr.headSha}) of PR '${args.pr.id}'`,
+          `yrd: required checks target stale revision ${args.pr.revision} (${args.pr.headSha}) of change '${args.pr.id}'`,
         )
       }
       const selected = admissionSteps(steps)
@@ -3558,7 +3558,7 @@ function createQueueCommands(
         args.candidate.revs[0]?.n !== args.pr.revision ||
         args.candidate.revs[0]?.head !== args.pr.headSha
       ) {
-        throw new Error(`yrd: required-check Candidate '${args.candidate.id}' does not match PR '${args.pr.id}'`)
+        throw new Error(`yrd: required-check Candidate '${args.candidate.id}' does not match change '${args.pr.id}'`)
       }
       const key = admissionJobKey(args.pr, args.candidate.baseSha, args.index, step.revision)
       if (state.jobs.byKey[key] !== undefined) return { events: [] }
@@ -3667,7 +3667,7 @@ function createQueueCommands(
       }
       for (const pr of prs) assertCurrentFlow(pr.flow, flows)
       const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
-      if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
+      if (base === undefined) throw new Error("yrd: a queue run requires at least one change")
       if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
         throw new Error("yrd: one queue candidate cannot span base branches")
       }
@@ -3690,7 +3690,7 @@ function createQueueCommands(
       // deepest layer of the 2026-07-22 merge-starvation livelock. Integrating
       // runs still conflict with each other, a new non-integrating run still
       // waits for whatever is active, and same-PR overlap stays impossible via
-      // the claims layer (a PR inside a started admission is not runnable).
+      // the claims layer (a change inside a started admission is not runnable).
       const plansIntegration = (plan: readonly { kind: StepKind }[]): boolean =>
         plan.some((step) => step.kind !== "check")
       const checkOnlyActive = active !== undefined && !plansIntegration(active.steps) && plansIntegration(selected)
@@ -4013,7 +4013,7 @@ function createQueueCommands(
   })
 
   const admissionRefused = command({
-    title: "Record a compose cycle that skipped a PR without admitting it",
+    title: "Record a compose cycle that skipped a change without admitting it",
     params: AdmissionRefusedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
@@ -4111,7 +4111,7 @@ function createQueueCommands(
         raiseFailure(
           "refusal",
           "index-not-reconcilable",
-          `yrd: repository merge record names PR '${args.pr}' while its journal state is ${changeDeliveryState(pr)}`,
+          `yrd: repository merge record names change '${args.pr}' while its journal state is ${changeDeliveryState(pr)}`,
         )
       }
       if (revision.n !== args.revision || revision.head !== args.headSha || revision.changeId !== args.changeId) {
@@ -4176,7 +4176,7 @@ function queueAuthorityNeedsAuthorEvent(
 ): EventDraft | undefined {
   if (gap.reason !== "consumed") return undefined
   if (gap.consumedBy === undefined) {
-    throw new Error(`yrd: consumed ${gap.kind} authority for PR '${gap.pr}' has no consuming queue run`)
+    throw new Error(`yrd: consumed ${gap.kind} authority for change '${gap.pr}' has no consuming queue run`)
   }
   const pr = state.bays.prs[gap.pr]
   if (pr === undefined || (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready")) {
@@ -4187,7 +4187,7 @@ function queueAuthorityNeedsAuthorEvent(
   const code = `queue-${gap.kind}-authority-consumed`
   const remedy = `yrd pr recut ${gap.pr} --preflight --queue --apply`
   const message =
-    `yrd: PR '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ` +
+    `yrd: change '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ` +
     `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'\nresolve: ${remedy}`
   const step = steps.find((candidate) => candidate.kind === "merge")?.name ?? steps[0]?.name ?? "queue"
   return event("pr/needs-author", {
@@ -4208,9 +4208,9 @@ function queueAuthorityReleaseReason(
   error: DeepReadonly<JobError> | undefined,
 ): QueueAuthorityRelease["reason"] | undefined {
   // A base race (the base branch or checked candidate ref moved out from under a
-  // pinned Run) is environmental, not a PR-content fault: release the Run's queue
+  // pinned Run) is environmental, not a change-content fault: release the Run's queue
   // authority so the still-submitted PR re-admits against the fresh base, instead
-  // of terminally rejecting a PR that would merge cleanly once the base settles.
+  // of terminally rejecting a change that would merge cleanly once the base settles.
   // `stale-steps` is the same shape one level up: a pending run's not-yet-started
   // step revision drifted out from under it when the installed config moved; the
   // PR is blameless and re-admits fresh under the installed plan. `stale-plan` is
@@ -4316,7 +4316,7 @@ function requireQueueAuthority(
   raiseFailure(
     "refusal",
     `queue-${gap.kind}-authority-${gap.reason}`,
-    `yrd: PR '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ${detail}`,
+    `yrd: change '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ${detail}`,
   )
 }
 
@@ -4464,7 +4464,7 @@ function terminalAuthorityMatches(
   const current = authority.current[terminal.pr]
   if (current === undefined) {
     if (requireCurrent) {
-      throw new Error(`yrd: terminal '${eventName}' for PR '${terminal.pr}' has no current queue authority`)
+      throw new Error(`yrd: terminal '${eventName}' for change '${terminal.pr}' has no current queue authority`)
     }
     return false
   }
@@ -4473,7 +4473,7 @@ function terminalAuthorityMatches(
     (terminal.headSha !== undefined && current.headSha !== terminal.headSha)
   ) {
     throw new Error(
-      `yrd: stale terminal '${eventName}' for PR '${terminal.pr}' targets ${terminal.revision}@${terminal.headSha ?? "unknown"}; queue authority is ${current.revision}@${current.headSha}`,
+      `yrd: stale terminal '${eventName}' for change '${terminal.pr}' targets ${terminal.revision}@${terminal.headSha ?? "unknown"}; queue authority is ${current.revision}@${current.headSha}`,
     )
   }
   return true
@@ -4538,7 +4538,7 @@ function compactQueueProjection(
     }
     terminalOrder[record.id] = order
   }
-  // A refusal streak only describes a PR that is still trying to get in. Drop
+  // A refusal streak only describes a change that is still trying to get in. Drop
   // the entries for PRs that left the bay or reached a terminal delivery state
   // so the ledger cannot grow without bound (or outlive the wedge it names).
   const admissionRefusals = Object.fromEntries(
@@ -4701,7 +4701,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       state.queues.authority.statuses[needsAuthor.pr] !== "ready"
     ) {
       throw new Error(
-        `yrd: queue authority for PR '${needsAuthor.pr}' is ${state.queues.authority.statuses[needsAuthor.pr] ?? "missing"}; '${applied.name}' requires submitted`,
+        `yrd: queue authority for change '${needsAuthor.pr}' is ${state.queues.authority.statuses[needsAuthor.pr] ?? "missing"}; '${applied.name}' requires submitted`,
       )
     }
     return {
@@ -4869,7 +4869,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     if (Queues.get(state.queues, started.id) !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
     const candidateId = started.candidateId ?? Queues.nextCandidateId(state.queues)
     const queueId = baseIdentity(started.queueId ?? started.base)
-    // Pre-Candidate batch Runs carried each PR's last check base independently,
+    // Pre-Candidate batch Runs carried each change's last check base independently,
     // so one immutable Run could contain several base SHAs. Target-model replay
     // gives that synthetic Candidate the first ordered result as its stable
     // compatibility anchor and pins the projected snapshots to the same SHA.
@@ -4998,7 +4998,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
             ...(refusal.kind === undefined ? {} : { kind: refusal.kind }),
             reason: refusal.reason,
             // The streak counts cycles, not codes: a wedge that flaps between
-            // refusal codes is still one PR that never got in. The latest code
+            // refusal codes is still one change that never got in. The latest code
             // is what an operator needs to act on.
             count: (prior?.count ?? 0) + 1,
             sameCodeCount: sameCode ? (prior?.sameCodeCount ?? prior?.count ?? 0) + 1 : 1,
@@ -5199,7 +5199,7 @@ function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: bool
   let integrated = alreadyIntegrated
   for (const step of steps) {
     if (step.kind !== "merge") continue
-    if (integrated) throw new Error("yrd: merge step cannot run after the PR is already integrated")
+    if (integrated) throw new Error("yrd: merge step cannot run after the change is already integrated")
     integrated = true
   }
 }
@@ -5218,7 +5218,7 @@ function startRun(
   reuse?: Readonly<{ run?: RunId; results: Readonly<Record<string, JsonValue>> }>,
 ): Readonly<{ run: QueueStart; events: readonly EventDraft[] }> {
   const pr = prs[0]
-  if (pr === undefined) throw new Error("yrd: a queue run requires at least one PR")
+  if (pr === undefined) throw new Error("yrd: a queue run requires at least one change")
   requiredCandidateBaseSha(prs)
   const flow = candidateFlow(prs)
   const queueId = queueIdentity(pr)
@@ -6306,7 +6306,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
   return mismatches
 }
 
-/** How far a stranded draft got through review, from the PR's own review facts.
+/** How far a stranded draft got through review, from the change's own review facts.
  *
  * `reviewState` already decides which verdict is CURRENT (same revision, same
  * head) and carries a rebuild's approval forward, so this reads that projection
@@ -6393,7 +6393,7 @@ function auditQueues(
         // the human cause line as well as the structured facts consumed by the
         // coordination watcher.
         message:
-          `PR '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt}` +
+          `change '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt}` +
           `${revision.submitter === undefined ? "" : ` by ${revision.submitter}`}, review: ${certification}, ` +
           `and nothing has submitted it; it is invisible to the queue until someone does`,
         pr: pr.id,
@@ -6402,7 +6402,7 @@ function auditQueues(
         blockedMs: Math.max(0, auditNowMs - pushedAtMs),
         // Who and how-far, so the finding routes itself: a stranded draft ages
         // against SOMEONE, and an approved draft is a different emergency from
-        // one nobody has looked at. Both come from facts already on the PR — the
+        // one nobody has looked at. Both come from facts already on the change — the
         // recorded revision submitter and the review verdicts — never from a
         // seat guess or a live git read the audit cannot make.
         ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
@@ -6433,7 +6433,7 @@ function auditQueues(
       if (pr.intent !== undefined || state.bays.prs[pr.id] !== undefined) continue
       findings.push({
         code: "missing-pr",
-        message: `queue run '${record.id}' references missing PR '${pr.id}'`,
+        message: `queue run '${record.id}' references missing change '${pr.id}'`,
         run: record.id,
         pr: pr.id,
       })
@@ -6445,7 +6445,7 @@ function auditQueues(
         if (intentMembers.has(pr)) continue
         findings.push({
           code: "run-without-submit-ancestry",
-          message: `queue run '${record.id}' started PR '${pr}' without an unconsumed matching submit fact`,
+          message: `queue run '${record.id}' started change '${pr}' without an unconsumed matching submit fact`,
           run: record.id,
           pr,
         })
@@ -6454,7 +6454,7 @@ function auditQueues(
         if (intentMembers.has(pr)) continue
         findings.push({
           code: "run-without-check-ancestry",
-          message: `queue run '${record.id}' started pushed PR '${pr}' without an unconsumed matching checks fact`,
+          message: `queue run '${record.id}' started pushed change '${pr}' without an unconsumed matching checks fact`,
           run: record.id,
           pr,
         })
@@ -6528,7 +6528,7 @@ function auditQueues(
     findings.push({
       code: "candidate-revision-mismatch",
       message:
-        `Candidate '${mismatch.candidate}' from queue run '${mismatch.run}' records PR '${mismatch.pr}' ` +
+        `Candidate '${mismatch.candidate}' from queue run '${mismatch.run}' records change '${mismatch.pr}' ` +
         `revision ${mismatch.recordedRevision}@${mismatch.recordedHead}, but the content-equivalent current result is ` +
         `revision ${mismatch.currentRevision}@${mismatch.currentHead}; no exact current-revision Candidate exists`,
       run: mismatch.run,
@@ -6567,7 +6567,7 @@ function auditQueues(
       run: unreadable.run,
     })
   }
-  // Every code above walks RUN RECORDS. A PR refused during required checks
+  // Every code above walks RUN RECORDS. A change refused during required checks
   // never becomes one, so a head-of-line refusal loop was structurally invisible
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
@@ -6674,7 +6674,7 @@ function queueProgressAuditFindings(
           code: "queue-never-started",
           message:
             `Queue '${base}' has ${neverStarted.length} submitted ` +
-            `${neverStarted.length === 1 ? "PR" : "PRs"} that never started required checks for ` +
+            `${neverStarted.length === 1 ? "change" : "changes"} that never started required checks for ` +
             `${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
           resolution: [
             `Start or restart the habitant queue runner, then verify it requests required checks for '${first.id}'.`,
@@ -6716,7 +6716,7 @@ function queueProgressAuditFindings(
     findings.push({
       code: "queue-progress-stalled",
       message:
-        `Queue '${base}' has ${started.length} required-check ${started.length === 1 ? "PR" : "PRs"} queued and ` +
+        `Queue '${base}' has ${started.length} required-check ${started.length === 1 ? "change" : "changes"} queued and ` +
         `no merge for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${admissionChecks} pre-queue ` +
         `${admissionChecks === 1 ? "check" : "checks"}; head is '${first.id}'.`,
       pr: first.id,
@@ -6820,7 +6820,7 @@ function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change
   const ids = new Set<string>()
   for (const pr of prs) {
     if (ids.has(pr.id)) {
-      raiseFailure("usage", "duplicate-pr", `yrd: queue.run: duplicate PR '${pr.id}'`)
+      raiseFailure("usage", "duplicate-pr", `yrd: queue.run: duplicate change '${pr.id}'`)
     }
     ids.add(pr.id)
   }
@@ -6882,7 +6882,7 @@ function requestedPRs(
       delivery !== "integrated" &&
       delivery !== "already-landed"
     ) {
-      raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${delivery}, not ready for the queue`)
+      raiseFailure("refusal", "pr-not-ready", `yrd: change '${pr.id}' is ${delivery}, not ready for the queue`)
     }
   }
   return prs
@@ -7076,7 +7076,7 @@ function admissionQueue(
 /** Work that has entered the queue but has not produced a delivery outcome yet.
  *
  * This is deliberately broader than `admissionQueue`: a successful admission
- * removes a PR from the next admission pass, but it remains outstanding until a
+ * removes a change from the next admission pass, but it remains outstanding until a
  * Queue run merges (or otherwise changes its delivery state). Progress auditing
  * must span that gap or the exact "admission passes, nothing merges" failure is
  * invisible.
@@ -7112,11 +7112,11 @@ function queueProgressTime(pr: DeepReadonly<Change>): string {
 /**
  * The one published queue order, and the only thing `position` may be derived
  * from. It ranks by check-request time exactly as `admissionQueue` does, so the
- * number a PR reads predicts the order admission actually runs in rather than
+ * number a change reads predicts the order admission actually runs in rather than
  * restating submit order, which admission has not followed since check requests
  * became the thing it consumes.
  *
- * Membership stays broader than `admissionQueue`: every PR the queue holds gets
+ * Membership stays broader than `admissionQueue`: every change the queue holds gets
  * a position, including the ones a pause or a settled admission currently keeps
  * out of the next pass. A position is where you stand in the queue, not a claim
  * that the next pass will take you.
@@ -7144,7 +7144,7 @@ function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] 
 }
 
 /**
- * The PR ahead of `pr` that legitimately holds the admission line, or
+ * The change ahead of `pr` that legitimately holds the admission line, or
  * `undefined` when nothing does and `pr` may be admitted now.
  *
  * Admission is FIFO, and it used to be strict: only `admissionQueue[0]` could
@@ -7152,12 +7152,12 @@ function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] 
  * every ready PR behind it, because a refused PR keeps its head position — the
  * 22474 wedge (PR1791 held the line through 44 consecutive refusal cycles,
  * PR1787 through 30, with seven ready PRs stacked behind them, each cleared by
- * hand). A PR carrying a live admission-refusal streak has demonstrably NOT
+ * hand). A change carrying a live admission-refusal streak has demonstrably NOT
  * gotten in, so it stops holding the line while keeping its queue position: it
  * is still retried on its own turn, and its streak clears the moment it is
  * admitted, pushed, or re-merge ({@link QueueAdmissionRefusal}).
  *
- * Only PRs strictly AHEAD of `pr` are considered, so a PR with a stale streak
+ * Only PRs strictly AHEAD of `pr` are considered, so a change with a stale streak
  * of its own is never blocked by the very PRs it outranks.
  */
 function admissionLineHolder(
@@ -7223,7 +7223,7 @@ type RevisionCheckRequestTally =
   | Readonly<{ status: "unresolved"; unreadable: number }>
 
 /**
- * How many check authorities this PR's CURRENT TREE holds against `baseSha`.
+ * How many check authorities this change's CURRENT TREE holds against `baseSha`.
  *
  * Identity is the head, matching {@link checkRequest}, and deliberately NOT the
  * revision ordinal. `303e7845` removed the ordinal from `checkRequest` because a
@@ -7308,7 +7308,7 @@ function checkEligibility(
   if (request === undefined) return { status: "not-requested" }
   // Only an open delivery can hold a live admission slot — the same predicate
   // `admissionQueue` filters on. Check requests are append-only history, so a
-  // withdrawn/canceled/integrated PR keeps its `queuedAt` fact while its status
+  // withdrawn/canceled/integrated change keeps its `queuedAt` fact while its status
   // stops claiming a slot the queue can never run. `admissionQueue` already
   // excludes it, but that exclusion only ever reached `position`, never
   // `status`. Runs that actually executed are settled above and survive: they
@@ -7664,7 +7664,7 @@ function runnableChangeSelection(
       return []
     }
     const reason = eligibility.reason
-    raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `PR '${pr.id}' is not ready`}`)
+    raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `change '${pr.id}' is not ready`}`)
   })
   return { prs, decisions }
 }
@@ -7792,7 +7792,7 @@ function needsAuthorJobResult(job: DeepReadonly<Job> | undefined): JobError | un
 }
 
 /** Recover the immutable author-attribution result from an exact Queue run.
- * This remains valid after the PR advances to a later revision, unlike a
+ * This remains valid after the change advances to a later revision, unlike a
  * lookup through current PR eligibility. */
 export function authorAttributionResult(
   run: DeepReadonly<Run> | undefined,
@@ -7818,7 +7818,7 @@ export function authorAttributionResult(
 /** Recover the attributed result for a legacy rejected journal. Scans EVERY
  * step across both the admission/check run and terminal integration run,
  * including integrating steps hidden from ordinary check projections. Native
- * needs-author reads the result directly from the PR fact. */
+ * needs-author reads the result directly from the change fact. */
 function needsAuthorResult(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<Change>,
@@ -7844,7 +7844,7 @@ function needsAuthorResult(
 
 function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
   const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
-  if (!attributed.success) return `PR '${pr.id}' cannot be composed as submitted: ${result.message}`
+  if (!attributed.success) return `change '${pr.id}' cannot be composed as submitted: ${result.message}`
   const failures = attributed.data.failures
     .map(
       (failure) =>
@@ -7853,7 +7853,7 @@ function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string 
     .join("; ")
   const unchanged = attributed.data.unchangedBaselineCount
   const footer = unchanged === undefined ? "" : `; ${unchanged} baseline error${unchanged === 1 ? "" : "s"} unchanged`
-  return `PR '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`
+  return `change '${pr.id}' introduced ${attributed.data.failures.length} check failure(s): ${failures}${footer}`
 }
 
 /** The action line of an admission-refused eligibility message. A settled
@@ -7926,7 +7926,7 @@ function ChangeEligibility(
     options.resumeIntegrated === true && (delivery === "integrated" || delivery === "already-landed")
   if (!resumingIntegration) {
     if (delivery === "pushed") {
-      return verdict({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
+      return verdict({ code: "draft", message: `change '${pr.id}' is pushed, not ready` })
     }
     if (delivery === "needs-author") {
       const admission = changeAdmission(pr)
@@ -7940,7 +7940,7 @@ function ChangeEligibility(
       }
       const result = changeNeedsAuthor(pr)?.receipt
       if (result === undefined) {
-        throw new Error(`yrd: PR '${pr.id}' is needs-author without an attribution result`)
+        throw new Error(`yrd: change '${pr.id}' is needs-author without an attribution result`)
       }
       return verdict({
         code: "needs-author",
@@ -7950,7 +7950,7 @@ function ChangeEligibility(
     }
     // A composition refusal is deterministic: the queue could not build the
     // candidate from what the author submitted, so re-running the same payload
-    // cannot pass — whether the failed compose left the PR `submitted` or drove
+    // cannot pass — whether the failed compose left the change `submitted` or drove
     // an automatic `rejected`. Project it as `needs-author` with the refusal
     // result attached, ahead of the generic `rejected`/`required-check-failed` verdicts.
     // This is a derived projection over the failed check's recorded refusal
@@ -7969,10 +7969,10 @@ function ChangeEligibility(
       }
     }
     if (delivery === "rejected") {
-      return verdict({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
+      return verdict({ code: "rejected", message: `change '${pr.id}' is rejected; submit it again before queueing` })
     }
     if (delivery !== "submitted" && delivery !== "ready") {
-      return verdict({ code: "terminal", message: `PR '${pr.id}' is ${delivery}, not queueable` })
+      return verdict({ code: "terminal", message: `change '${pr.id}' is ${delivery}, not queueable` })
     }
     const revision = currentChangeRev(pr)
     const conflictingCandidate = Object.values(state.queues.candidates)
@@ -7989,7 +7989,7 @@ function ChangeEligibility(
     if (conflictingCandidate !== undefined) {
       return verdict({
         code: "candidate-conflicting",
-        message: `PR '${pr.id}' revision ${revision.n} conflicts in Candidate '${conflictingCandidate.id}'`,
+        message: `change '${pr.id}' revision ${revision.n} conflicts in Candidate '${conflictingCandidate.id}'`,
       })
     }
     const admissionRefusal = state.queues.admissionRefusals[pr.id]
@@ -8008,11 +8008,11 @@ function ChangeEligibility(
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
       const position = checks.position === undefined ? "" : ` at position ${checks.position}`
-      return verdict({ code: "checks-pending", message: `PR '${pr.id}' checks are queued${position}` })
+      return verdict({ code: "checks-pending", message: `change '${pr.id}' checks are queued${position}` })
     }
     if (options.ignoreChecks !== true && checks.status === "checking") {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
-      return verdict({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
+      return verdict({ code: "checking", message: `change '${pr.id}' checks are running${run}` })
     }
     if (
       options.ignoreChecks !== true &&
@@ -8024,19 +8024,19 @@ function ChangeEligibility(
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return verdict({
         code: "required-check-failed",
-        message: `PR '${pr.id}' required check failed${run}; fix the branch and push, or request fresh checks`,
+        message: `change '${pr.id}' required check failed${run}; fix the branch and push, or request fresh checks`,
       })
     }
     if (required && !reviewed.approved) {
       if (reviewed.current?.decision === "reject") {
         return verdict({
           code: "review-rejected",
-          message: `PR '${pr.id}' was rejected by ${reviewed.current.by} for revision ${changeRevisionNumber(pr)}`,
+          message: `change '${pr.id}' was rejected by ${reviewed.current.by} for revision ${changeRevisionNumber(pr)}`,
         })
       }
       return verdict({
         code: "review-required",
-        message: `PR '${pr.id}' needs approval for revision ${changeRevisionNumber(pr)}`,
+        message: `change '${pr.id}' needs approval for revision ${changeRevisionNumber(pr)}`,
       })
     }
   }
@@ -8045,7 +8045,7 @@ function ChangeEligibility(
   if (pause !== undefined) {
     return verdict({
       code: "queue-paused",
-      message: `queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
+      message: `queue '${base}' is paused: ${pause.reason}; change '${pr.id}' is not in the allowed set`,
     })
   }
   const claimed = activeQueueRuns(state.queues, state.jobs).find(
@@ -8057,7 +8057,7 @@ function ChangeEligibility(
   return claimed !== undefined
     ? verdict({
         code: "claimed",
-        message: `PR '${pr.id}' is already in active queue run '${claimed.id}'`,
+        message: `change '${pr.id}' is already in active queue run '${claimed.id}'`,
       })
     : verdict()
 }
@@ -8080,7 +8080,7 @@ function partitionCandidates(prs: readonly Change[], batchSize: number): Change[
 }
 
 function ChangeShape(prs: readonly ChangeSnapshot[]): ChangeShape {
-  if (prs.length === 0) throw new Error("yrd: a queue run requires at least one PR")
+  if (prs.length === 0) throw new Error("yrd: a queue run requires at least one change")
   return { results: {} }
 }
 
@@ -8103,7 +8103,7 @@ function integratedChangeShape(prs: readonly Change[]): IntegratedShape | undefi
             pr.alreadyLanded.baseTreeSha !== alreadyMerged.baseTreeSha)),
     )
   ) {
-    throw new Error("yrd: every PR in a queue candidate must share one integration proof")
+    throw new Error("yrd: every change in a queue candidate must share one integration proof")
   }
   const { changeId: _changeId, ...queueProof } = proof
   const integration = IntegrationProofSchema.parse(queueProof)
@@ -8151,7 +8151,7 @@ function pinnedChangeError(
     ) {
       return {
         code: "stale-pr",
-        message: `PR '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
+        message: `change '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
       }
     }
   }

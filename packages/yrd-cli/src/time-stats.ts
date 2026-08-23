@@ -226,11 +226,11 @@ function validateFacts(facts: readonly QueueTerminalFact[]): void {
     if (fact.activeMs !== null) finiteNonnegative(fact.activeMs, `Run '${fact.run}' active duration`)
     for (const wait of fact.queueWaitMs) finiteNonnegative(wait, `Run '${fact.run}' queue wait`)
     for (const member of fact.members) {
-      if (member.totalMs !== null) finiteNonnegative(member.totalMs, `PR '${member.pr}' total duration`)
-      if (member.codingMs !== null) finiteNonnegative(member.codingMs, `PR '${member.pr}' coding duration`)
-      if (member.jobRunMs !== null) finiteNonnegative(member.jobRunMs, `PR '${member.pr}' job duration`)
+      if (member.totalMs !== null) finiteNonnegative(member.totalMs, `change '${member.pr}' total duration`)
+      if (member.codingMs !== null) finiteNonnegative(member.codingMs, `change '${member.pr}' coding duration`)
+      if (member.jobRunMs !== null) finiteNonnegative(member.jobRunMs, `change '${member.pr}' job duration`)
       if (!Number.isInteger(member.retries) || member.retries < 0) {
-        throw new TypeError(`yrd: PR '${member.pr}' retries must be a non-negative integer`)
+        throw new TypeError(`yrd: change '${member.pr}' retries must be a non-negative integer`)
       }
     }
   }

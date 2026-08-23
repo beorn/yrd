@@ -2,7 +2,7 @@
  * @failure `pr withdraw` silently no-ops instead of refusing loud on unknown or
  * terminal selectors, drops the recorded reason from the pr/withdrawn event, or
  * `pr prune` withdraws live content / keeps superseded content / emits events
- * during --dry-run, or hides what it checked per PR.
+ * during --dry-run, or hides what it checked per change.
  * @level l2
  * @consumer @yrd/cli
  *
@@ -433,7 +433,7 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
 }
 
 describe("pr withdraw", () => {
-  it("withdraws a live PR, records the reason, and terminalizes its Queue work", async () => {
+  it("withdraws a live change, records the reason, and terminalizes its Queue work", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/stale", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
@@ -510,17 +510,17 @@ describe("pr withdraw", () => {
     expect(await runYrd(app, yrd("pr", "withdraw", "nope"), unknown.io)).toBe(1)
     // Two PRs exist here, so `searched 2` proves the index was populated and
     // still did not match — the discrimination an empty answer cannot make.
-    expect(unknown.stderr()).toBe("error: no PR 'nope' — searched 2 change(s)\n")
+    expect(unknown.stderr()).toBe("error: no change 'nope' — searched 2 change(s)\n")
 
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
     const terminal = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), terminal.io)).toBe(1)
-    expect(terminal.stderr()).toBe("error: PR 'PR2' is withdrawn; a terminal PR cannot be withdrawn\n")
+    expect(terminal.stderr()).toBe("error: change 'PR2' is withdrawn; a terminal change cannot be withdrawn\n")
 
     // A mixed batch refuses whole before the first event: PR1 stays live.
     const mixed = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "PR2"), mixed.io)).toBe(1)
-    expect(mixed.stderr()).toContain("PR 'PR2' is withdrawn")
+    expect(mixed.stderr()).toContain("change 'PR2' is withdrawn")
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
   })
@@ -767,7 +767,7 @@ describe("pr recut --preflight", () => {
     expect(JSON.parse(output.stderr())).toMatchObject({
       failure: {
         cause:
-          `PR 'PR1' preflight verdict SUBSUMED-WITHDRAW is an operator decision; ` +
+          `change 'PR1' preflight verdict SUBSUMED-WITHDRAW is an operator decision; ` +
           `run: yrd pr withdraw PR1 --burn-payload --reason "superseded: content already in ${TARGET_BASE_SHA}"`,
       },
     })
@@ -1039,17 +1039,17 @@ describe("pr recut --preflight", () => {
     {
       review: "absent",
       expectedCode: "review-required",
-      expectedMessage: "PR 'PR1' needs approval for revision 1",
+      expectedMessage: "change 'PR1' needs approval for revision 1",
     },
     {
       review: "older revision/head",
       expectedCode: "review-required",
-      expectedMessage: "PR 'PR1' needs approval for revision 2",
+      expectedMessage: "change 'PR1' needs approval for revision 2",
     },
     {
       review: "current approve then reject",
       expectedCode: "review-rejected",
-      expectedMessage: "PR 'PR1' was rejected by @reviewer for revision 1",
+      expectedMessage: "change 'PR1' was rejected by @reviewer for revision 1",
     },
   ] as const)(
     "refuses candidate mode before the remerger when effective exact-current approval is $review",
@@ -2213,7 +2213,7 @@ describe("pr prune", () => {
     }
   })
 
-  it("records one PR error and continues judging every later PR", async () => {
+  it("records one change error and continues judging every later PR", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.submit({ branch: "topic/broken", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
@@ -2242,7 +2242,7 @@ describe("pr prune", () => {
         {
           pr: "PR2",
           verdict: "error",
-          error: "PR 'PR2' could not be judged: simulated merge-base transport failure",
+          error: "change 'PR2' could not be judged: simulated merge-base transport failure",
         },
         { pr: "PR3", verdict: "would-withdraw" },
       ],
@@ -2254,8 +2254,8 @@ describe("pr prune", () => {
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
     const humanText = human.stdout().replace(/\s+/g, " ")
     expect(humanText).toContain("[error] PR2 topic/broken r1")
-    expect(humanText).toContain("PR 'PR2' could not be judged: simulated merge-base transport failure")
-    expect(humanText).toContain("checked 3 live PRs — 1 would be withdrawn, 1 kept, 1 error")
+    expect(humanText).toContain("change 'PR2' could not be judged: simulated merge-base transport failure")
+    expect(humanText).toContain("checked 3 live changes — 1 would be withdrawn, 1 kept, 1 error")
   })
 
   it("keeps the exact revision owned by an active merge run", async () => {
@@ -2411,7 +2411,7 @@ describe("pr prune", () => {
     })
   })
 
-  it("withdraws a PR whose head is already an ancestor of the base tip", async () => {
+  it("withdraws a change whose head is already an ancestor of the base tip", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
 
@@ -2455,7 +2455,7 @@ describe("pr prune", () => {
     ])
   })
 
-  it("withdraws a PR whose merge with the base reproduces the base tree exactly", async () => {
+  it("withdraws a change whose merge with the base reproduces the base tree exactly", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/absorbed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
 
@@ -2515,7 +2515,7 @@ describe("pr prune", () => {
     expect(human.stdout()).toContain("merge-tree=conflicts")
     expect(human.stdout()).toContain("[keep] PR3 topic/unfetched r1")
     expect(human.stdout()).toContain("head commit is not present in this repository")
-    expect(human.stdout()).toContain("checked 3 live PRs — 0 withdrawn, 3 kept")
+    expect(human.stdout()).toContain("checked 3 live changes — 0 withdrawn, 3 kept")
   })
 
   it("emits nothing under --dry-run while naming what it would withdraw", async () => {

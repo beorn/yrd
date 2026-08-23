@@ -228,9 +228,9 @@ describe("root yrd submit", () => {
    * the draft→ready step must never hide behind `yrd pr submit`. What the
    * verb DOES changed (@cto 2026-08-19, cliverbs ruling-a) — root `submit` is
    * now the branch-state verb, approving a branch by pushing
-   * `refs/yrd/submit/<branch>` rather than aliasing the PR path. The two are
+   * `refs/yrd/submit/<branch>` rather than aliasing the change path. The two are
    * the same intent at two phases: the receiver already dual-writes that ref
-   * on carrier push. `yrd pr submit` is untouched and still drives the PR
+   * on carrier push. `yrd pr submit` is untouched and still drives the change
    * path, with all of its options.
    */
   it("exists at the top level and approves the current branch", async () => {

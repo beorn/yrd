@@ -73,7 +73,7 @@ function draftItem(value: number): FixtureItem {
 }
 
 function finishItem(item: FixtureItem, finishedMinute: number): FixtureItem {
-  if (item.run === undefined) throw new Error(`cannot finish queued PR '${item.pr.id}' without a run`)
+  if (item.run === undefined) throw new Error(`cannot finish queued change '${item.pr.id}' without a run`)
   const finishedAt = clock(finishedMinute)
   const submittedAt = item.pr.submittedAt ?? clock(finishedMinute - 2)
   const runId = item.run.id

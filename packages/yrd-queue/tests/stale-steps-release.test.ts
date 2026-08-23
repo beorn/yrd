@@ -88,7 +88,7 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
 }
 
 describe("stale-steps release — a drifted next step frees the run instead of killing compose", () => {
-  it("releases a pending run whose not-yet-started next step revision drifted, keeping the PR submitted", async () => {
+  it("releases a pending run whose not-yet-started next step revision drifted, keeping the change submitted", async () => {
     const journal = createMemoryJournal()
     const id = ids()
 
@@ -115,7 +115,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       conclusion: "failure",
       error: expect.objectContaining({ code: "stale-steps" }),
     })
-    // Authority released and the PR stays submitted, so it re-admits fresh.
+    // Authority released and the change stays submitted, so it re-admits fresh.
     expect(replayed.state().queues.authority.runs).toBeDefined()
     expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
   })

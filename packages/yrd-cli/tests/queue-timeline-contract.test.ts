@@ -380,7 +380,7 @@ describe("queue timeline 21106 contract", () => {
     expect(pending).not.toContain("#1 ")
   })
 
-  it("places the change title directly after the PR identity, branch and issue omitted", async () => {
+  it("places the change title directly after the change identity, branch and issue omitted", async () => {
     // Item 28: the CHANGES cell is id then TITLE — the branch lives only in
     // the detail pane's per-change box header, and the issue in its metadata.
     const rows = (await renderTimeline(contractProjection(), 160)).map((row) => row.trimEnd())
@@ -852,7 +852,7 @@ describe("queue timeline 21106 contract", () => {
 
   it("drops the footer and scopes batched-run detail to the selected PR while listing its run members", async () => {
     const story = queueTimelineStories["contract-overview"]
-    // Side-by-side (220 ≥ 213) so the PR-tab submit lines fit in the detail
+    // Side-by-side (220 ≥ 213) so the change-tab submit lines fit in the detail
     // pane. A 200-col below-split clips them under STATS + the list share.
     const render = createRenderer({ cols: 220, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
@@ -881,9 +881,9 @@ describe("queue timeline 21106 contract", () => {
       expect(handle.text, "the RUN region lists the batch partner").toContain("· pr#43.1")
       expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
 
-      // PR42's own submit timeline lives on the PR tab (tab 0), which is not
+      // PR42's own submit timeline lives on the change tab (tab 0), which is not
       // the default when a step is running. Move left past the running
-      // `check` tab and the `prepare` tab to merge on the PR tab and read its
+      // `check` tab and the `prepare` tab to merge on the change tab and read its
       // submit facts.
       await handle.press("h")
       await handle.waitForLayoutStable()
@@ -897,9 +897,9 @@ describe("queue timeline 21106 contract", () => {
       expect(handle.text, "the partner PR's own submit timeline now shows too").toContain(
         "16:56 r1 submitted by @agent/5",
       )
-      // The composite RUN/status context persists while the PR activity tab is
+      // The composite RUN/status context persists while the change activity tab is
       // selected, so identity and timing never disappear during diagnosis.
-      expect(handle.text, "the PR tab preserves the RUN region").toContain("RUN main#42")
+      expect(handle.text, "the change tab preserves the RUN region").toContain("RUN main#42")
     } finally {
       handle.unmount()
     }

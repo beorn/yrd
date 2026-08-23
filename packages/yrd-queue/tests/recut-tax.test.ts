@@ -19,7 +19,7 @@
  * superseded base and is refused `stale-base` (production does exactly this
  * comparison at src/command.ts:7151 — the checked-out HEAD versus the run's
  * pinned `baseSha`). `queueAuthorityReleaseReason` (src/queue.ts) treats
- * `stale-base` as environmental and releases queue authority, so the PR
+ * `stale-base` as environmental and releases queue authority, so the change
  * re-admits next cycle and its candidate — and its checks — are built again.
  *
  * ## Maintaining the baseline

@@ -28,7 +28,7 @@ function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): Qu
     pr: id,
     code: "authored-gitlink",
     kind: "refusal",
-    reason: `yrd: PR '${id}' changes generated-only gitlinks [km]`,
+    reason: `yrd: change '${id}' changes generated-only gitlinks [km]`,
     count: 3,
     firstAt: "2026-07-27T15:00:00.000Z",
     lastAt: "2026-07-27T15:51:00.000Z",
@@ -82,7 +82,7 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
     expect(planRefusalRemedies(refusals, prs, attempted)).toEqual([])
   })
 
-  it("plans again once the PR reaches a NEW revision — a fresh revision is fresh evidence", () => {
+  it("plans again once the change reaches a NEW revision — a fresh revision is fresh evidence", () => {
     const refusals = { PR1: refusal("PR1", { count: 5 }) }
     const attempted = new Set([refusalRemedyKey("PR1", 1, HEAD)])
     const next = "2".repeat(40)
@@ -104,7 +104,7 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
       {
         PR9: refusal("PR9", {
           code: "recut-certificate",
-          reason: "yrd: PR 'PR9' recut tree certificate does not match revision 1",
+          reason: "yrd: change 'PR9' recut tree certificate does not match revision 1",
         }),
       },
       { PR9: pr("PR9") },

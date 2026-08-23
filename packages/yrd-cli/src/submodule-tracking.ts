@@ -4,7 +4,7 @@ import { join } from "node:path"
 /**
  * Submodule tracking: `.gitmodules` `submodule.<name>.branch` is the switch
  * between a TRACKED submodule (upstream changes refresh the superproject's PRs)
- * and a PINNED one (the gitlink only moves when a PR moves it). This module
+ * and a PINNED one (the gitlink only moves when a change moves it). This module
  * reads that state and helps `yrd admin submodule init` set a branch for every
  * submodule that has not opted in. Config chooses WHICH ref counts as latest;
  * it never chooses WHETHER latest applies.

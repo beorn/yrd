@@ -1,7 +1,7 @@
 /**
- * @failure A tracked PR (`yrd pr submit --track`) still refuses an implicit recut
+ * @failure A tracked change (`yrd pr submit --track`) still refuses an implicit recut
  * when its branch moved instead of re-recording the live head, or tracking leaks
- * into an untracked PR and silently replays a moved branch as if it were the
+ * into an untracked change and silently replays a moved branch as if it were the
  * recorded source.
  * @level l2
  * @consumer @yrd/cli
@@ -236,7 +236,7 @@ function failureMessage(stderr: string): string {
  * Tracking is opt-in; this text is the contract for everyone who did not opt in. */
 function staleHeadRefusal(revision: number, recordedHead: string): string {
   return (
-    `yrd: PR 'PR1' recorded revision ${String(revision)} head '${recordedHead}', but live branch ` +
+    `yrd: change 'PR1' recorded revision ${String(revision)} head '${recordedHead}', but live branch ` +
     `'${BRANCH}' is '${LIVE_HEAD}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
     "commits between: supplied observer did not enumerate the range\n" +
     `inspect: git log --oneline ${recordedHead}..${LIVE_HEAD}\n` +
@@ -260,7 +260,7 @@ async function submitBranch(app: CliApp, head: () => string, ...flags: string[])
 }
 
 describe("pr submit --track", () => {
-  it("records tracking on the PR and exposes it in the delivery envelope", async () => {
+  it("records tracking on the change and exposes it in the delivery envelope", async () => {
     const app = await createCliApp()
     const output = outputIO(() => RECORDED_HEAD)
 
@@ -961,7 +961,7 @@ describe("habitant merge-into-latest", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
   })
 
-  it("observes the next push for a tracked PR whose prior checks failed", async () => {
+  it("observes the next push for a tracked change whose prior checks failed", async () => {
     const behavior = { failingCheck: true }
     const app = await createCliApp(behavior)
     let head = RECORDED_HEAD

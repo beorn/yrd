@@ -259,7 +259,7 @@ describe("classifyBayStatus", () => {
     })
   })
 
-  it("blocks removal while a live PR still references the Bay", () => {
+  it("blocks removal while a live change still references the Bay", () => {
     const report = classifyBayStatus({
       ...base,
       ownerPid: 1,

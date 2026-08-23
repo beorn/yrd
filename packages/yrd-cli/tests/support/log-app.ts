@@ -159,7 +159,7 @@ export function yrd(...args: string[]): string[] {
 export async function appendHistory(app: CliApp, prefix: string, count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     const branch = `${prefix}/${String(index)}`
-    // A distinct head per PR: identical payloads are refused as duplicates.
+    // A distinct head per change: identical payloads are refused as duplicates.
     const headSha = Bun.SHA1.hash(branch, "hex")
     await app.bays.submit({ branch, headSha, base: "main", baseSha: BASE_SHA })
   }

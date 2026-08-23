@@ -89,7 +89,7 @@ function publishedPosition(app: QueueApp, pr: string): number | undefined {
 }
 
 describe("queue position is derived once", () => {
-  it("reports one position per PR when submit order and check-request order disagree", async () => {
+  it("reports one position per change when submit order and check-request order disagree", async () => {
     let now = "2026-01-01T00:00:00.000Z"
     await using app = await createQueueApp(() => now)
 

@@ -180,7 +180,7 @@ function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
 
-/** Submit one PR whose canonical identity (PR1 / main) never matches the
+/** Submit one change whose canonical identity (PR1 / main) never matches the
  * lowercase or uppercase selectors the operator will type. */
 async function submitOnePR(app: CliApp): Promise<void> {
   await app.bays.submit({ branch: "Topic/One", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
@@ -314,7 +314,7 @@ describe("case-insensitive CLI selector surfaces", () => {
 
     const missing = outputIO()
     expect(await runYrd(app, yrd("log", "--pr", "missing", "--json"), missing.io)).toBe(1)
-    expect(missing.stderr()).toContain("no PR 'missing'")
+    expect(missing.stderr()).toContain("no change 'missing'")
   })
 
   /**
@@ -342,7 +342,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     const output = outputIO()
 
     expect(await runYrd(app, yrd(...args), output.io)).toBe(1)
-    expect(output.stderr()).toContain("no PR 'nope'")
+    expect(output.stderr()).toContain("no change 'nope'")
     expect(output.stderr()).toContain("searched 1 change(s)")
   })
 
@@ -395,7 +395,7 @@ describe("case-insensitive CLI selector surfaces", () => {
     // resolved to the canonical identity on the retry path.
     const refused = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
-    expect(refused.stderr()).toContain("PR 'PR1' required check failed in R1")
+    expect(refused.stderr()).toContain("change 'PR1' required check failed in R1")
 
     // The sanctioned retry: recut the folded selector back into the queue.
     const requeued = remergeOutputIO()

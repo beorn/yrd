@@ -53,7 +53,7 @@ describe("habitant refusal stall — an all-candidate refusal loop with an uncha
     expect(window?.cycles).toBe(1)
   })
 
-  it("resets when a refused PR moves to a new head — the PR changed, so the refusal is fresh evidence", () => {
+  it("resets when a refused PR moves to a new head — the change changed, so the refusal is fresh evidence", () => {
     const window = foldRefusalStall(stallAfter(40), {
       ...refusing(41),
       heads: { PR1800: HEAD, PR1802: OTHER },
@@ -100,7 +100,7 @@ function habitantHarness(refusing: boolean, stopAfter = Number.POSITIVE_INFINITY
               PR1800: {
                 pr: "PR1800",
                 code: "recut-certificate",
-                reason: "yrd: PR 'PR1800' recut tree certificate does not match revision 1",
+                reason: "yrd: change 'PR1800' recut tree certificate does not match revision 1",
                 count: cycles,
                 firstAt: "2026-07-27T00:00:00.000Z",
                 lastAt: "2026-07-27T00:00:00.000Z",

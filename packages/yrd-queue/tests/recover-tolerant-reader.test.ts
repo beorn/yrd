@@ -304,9 +304,9 @@ describe("valid state reads exactly as it did before", () => {
  * The PR1128 shape itself (2026-08-17, @i/10-merge-queue): `bay submit` queued a
  * carrier and the authored-gitlink refusal was ledgered against it BEFORE any
  * check request existed. `admission-refusal-oracle.test.ts` pins that the AUDIT
- * survives that PR — the throwing comparator is deleted and the ordering is
+ * survives that change — the throwing comparator is deleted and the ordering is
  * total. What is pinned here is the other end of the incident: `queue recover`,
- * the tool the fleet needed and could not run, executing over that PR while an
+ * the tool the fleet needed and could not run, executing over that change while an
  * unreadable run record stands beside it, and the remedy settlement merge
  * afterwards.
  */
@@ -323,7 +323,7 @@ describe("recover reaches the PR1128 shape with an unreadable record in the same
         pr: pr.id,
         code: "authored-gitlink",
         kind: "refusal",
-        reason: `PR '${pr.id}' changes generated-only gitlinks [ag]`,
+        reason: `change '${pr.id}' changes generated-only gitlinks [ag]`,
       })
     })
     await using app = await createApp(journal, ids(100))

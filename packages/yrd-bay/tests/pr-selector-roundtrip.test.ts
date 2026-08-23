@@ -48,7 +48,7 @@ describe("displayed PR selector round trip", () => {
     expect(parseChangeSelector(selector)).toEqual(expected)
   })
 
-  it("keeps a bare non-numeric token out of the PR grammar (branch/name aliases stay reachable)", () => {
+  it("keeps a bare non-numeric token out of the change grammar (branch/name aliases stay reachable)", () => {
     expect(parseChangeSelector("topic/round-trip")).toBeUndefined()
     expect(parseChangeSelector("fix-thing")).toBeUndefined()
   })
@@ -79,14 +79,14 @@ describe("displayed PR selector round trip", () => {
     expect(resolveChangeMatch(state, "pr#1410.99")).toBeUndefined()
   })
 
-  it("shows a copy-pasteable accepted form when a PR-shaped selector is malformed", () => {
+  it("shows a copy-pasteable accepted form when a change-shaped selector is malformed", () => {
     expect(() => requireLiveChange(state, "pr#1410.bad")).toThrow("accepted form: pr#1410.16")
   })
 
   it("allows the current qualified revision but refuses historical mutation", () => {
     expect(requireLiveChange(state, "pr#1410.16")).toBe(pr)
     expect(() => requireLiveChange(state, "pr#1410.1")).toThrow(
-      "PR 'PR1410' selector targets historical revision 1; current revision is 16",
+      "change 'PR1410' selector targets historical revision 1; current revision is 16",
     )
   })
 })

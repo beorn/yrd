@@ -82,7 +82,7 @@ const IntentIdSchema = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u, "expected a lowercase UUID")
 
-/** A queue member is a PR or a pin intent, and this union decides which: both
+/** A queue member is a change or a pin intent, and this union decides which: both
  * arms are pinned to the shape their mint writes (`PR182` vs `I148` /
  * `yrdpin#164`), so a mis-kinded id fails at the schema rather than much later.
  * Positions that hold members of either kind must use THIS schema — a bare
@@ -143,7 +143,7 @@ export type QueueIntentSnapshot = Readonly<z.infer<typeof QueueIntentSnapshotSch
 export const ChangeSnapshotSchema = z
   .object({
     id: QueueMemberIdSchema,
-    /** Missing only while replaying pre-identity Queue records and for pin intents. */
+    /** Missing only while replaying pre-identity Queue records and for min-commit changes. */
     changeId: ChangeIdSchema.optional(),
     bay: z.string().trim().min(1).optional(),
     name: z.string().trim().min(1).optional(),
@@ -163,7 +163,7 @@ export const ChangeSnapshotSchema = z
   .strict()
   .superRefine((snapshot, context) => {
     if (snapshot.intent === undefined && !PRIdSchema.safeParse(snapshot.id).success) {
-      context.addIssue({ code: "custom", path: ["id"], message: "a PR snapshot requires a PR id" })
+      context.addIssue({ code: "custom", path: ["id"], message: "a change snapshot requires a change id" })
     }
     if (snapshot.intent !== undefined && snapshot.id !== snapshot.intent.id) {
       context.addIssue({ code: "custom", path: ["intent", "id"], message: "intent member id must match snapshot id" })
@@ -225,7 +225,7 @@ export type CandidateRev = Readonly<{
 export const CandidateChangeSchema = z
   .object({
     changeId: ChangeIdSchema,
-    /** A queue member, not necessarily a PR: an intent that merges carries its
+    /** A queue member, not necessarily a change: an intent that merges carries its
      * own id here (`command.ts` fills this from the member's `id`). */
     pr: QueueMemberIdSchema,
     revision: z.number().int().positive(),
@@ -711,7 +711,7 @@ export const QueuePauseSchema = z
  * it WITHOUT producing a queue run. A refusal at admission never mints a run
  * record, so this ledger is the only durable trace of a head-of-line wedge (the
  * matching `compose-candidate-skip` warns are loggily-only and die with the
- * process). Reset when the PR is admitted, pushed, or re-merge.
+ * process). Reset when the change is admitted, pushed, or re-merge.
  */
 export type QueueAdmissionRefusal = Readonly<{
   pr: PRId
@@ -826,7 +826,7 @@ export type UnrecordedSubmit = Readonly<{
 
 /**
  * One branch, both sources, one answer. `record` (and its `eligibility`) is
- * present when a PR record exists for the branch; `submit` is the projected
+ * present when a change record exists for the branch; `submit` is the projected
  * live submit ref when one stands; `unrecorded` is the row rendered for a
  * submit with no record. Never both `eligibility` and `unrecorded`.
  */
@@ -930,7 +930,7 @@ export type QueueAuditFinding = Readonly<{
  *   staleness would mean inventing a comparison.
  * - `unrecoverable` would need `rejectedAt` / `terminalRun`. Both are cleared
  *   by EVERY revision-appending reduction (`pr/pushed` and `pr/recut` both
- *   patch them to `undefined`), so a PR in the `pushed` delivery state that
+ *   patch them to `undefined`), so a change in the `pushed` delivery state that
  *   this finding fires on can never carry either. The field would be a
  *   constant, not a discriminator. */
 export const YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS = [

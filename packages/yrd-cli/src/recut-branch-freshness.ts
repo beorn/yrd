@@ -33,7 +33,7 @@ function requireObservedBranch(observed: LiveBranchObservation, pr: Change, reme
     raiseFailure(
       "configuration",
       "recut-branch-observer-missing",
-      `yrd: cannot refresh live branch '${pr.branch}' before re-merging PR '${pr.id}'; ${observed.detail}`,
+      `yrd: cannot refresh live branch '${pr.branch}' before re-merging change '${pr.id}'; ${observed.detail}`,
     )
   }
   if (!observed.ok && observed.phase === "fetch") {
@@ -48,7 +48,7 @@ function requireObservedBranch(observed: LiveBranchObservation, pr: Change, reme
       "configuration",
       "recut-branch-head-missing",
       injected
-        ? `yrd: cannot verify PR '${pr.id}' because ${observed.detail}`
+        ? `yrd: cannot verify change '${pr.id}' because ${observed.detail}`
         : `yrd: refreshed live branch '${pr.branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
     )
   }
@@ -150,7 +150,7 @@ async function commitTree(services: Pick<YrdCliServices, "process">, io: YrdCliI
   return tree
 }
 
-/** Either the re-merge may proceed on its recorded source, or the PR opted into
+/** Either the re-merge may proceed on its recorded source, or the change opted into
  * tracking and its branch moved, so the caller must re-record the live head
  * before continuing. Every other drift already refused inside the check. */
 export type RemergeBranchFreshness =
@@ -178,7 +178,7 @@ export async function requireImplicitRemergeBranchFreshness(
   if (options.transition !== undefined) return { status: "fresh" }
   const recorded = changeRevisionLineage(pr, selected.n)[0]
   if (recorded === undefined) {
-    throw new Error(`yrd: PR '${pr.id}' revision ${selected.n} has no recorded source lineage`)
+    throw new Error(`yrd: change '${pr.id}' revision ${selected.n} has no recorded source lineage`)
   }
   const liveHead = await liveBranchHead(pr, recorded, options, services, io)
   if (liveHead === recorded.head) return { status: "fresh" }
@@ -191,7 +191,7 @@ export async function requireImplicitRemergeBranchFreshness(
     raiseFailure(
       "refusal",
       "recut-recorded-tree-mismatch",
-      `yrd: PR '${pr.id}' recorded revision ${recorded.n} tree '${recordedTree}' differs from live branch ` +
+      `yrd: change '${pr.id}' recorded revision ${recorded.n} tree '${recordedTree}' differs from live branch ` +
         `'${pr.branch}' tree '${liveTree}'; --revision cannot replay different content`,
     )
   }
@@ -202,7 +202,7 @@ export async function requireImplicitRemergeBranchFreshness(
   raiseFailure(
     "refusal",
     "recut-branch-moved",
-    `yrd: PR '${pr.id}' recorded revision ${recorded.n} head '${recorded.head}', but live branch ` +
+    `yrd: change '${pr.id}' recorded revision ${recorded.n} head '${recorded.head}', but live branch ` +
       `'${pr.branch}' is '${liveHead}'. Re-merge-by-PR is reproducible and will not silently replay stale work.\n` +
       `${await commitRangeEvidence(services, io, recorded.head, liveHead)}\n` +
       `To record the live head and finish the requested recut:\n  yrd pr ${recordVerb} ${pr.branch}\n` +

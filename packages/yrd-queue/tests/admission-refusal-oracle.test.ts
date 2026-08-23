@@ -1,5 +1,5 @@
 /**
- * @failure A PR refused at ADMISSION never becomes a run record, so `auditQueues` (which walks run records only) is structurally blind to a head-of-line refusal loop — `queue audit` returned `findings: []` through a 5h46m block while every compose cycle logged a loggily-only `compose-candidate-skip`.
+ * @failure A change refused at ADMISSION never becomes a run record, so `auditQueues` (which walks run records only) is structurally blind to a head-of-line refusal loop — `queue audit` returned `findings: []` through a 5h46m block while every compose cycle logged a loggily-only `compose-candidate-skip`.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -209,7 +209,7 @@ async function withoutPushedIdentity(journal: Journal<unknown>): Promise<Journal
   return createMemoryJournal(kept)
 }
 
-/** A Candidate preparer that refuses for one PR forever — the shape of every
+/** A Candidate preparer that refuses for one change forever — the shape of every
  * real head-of-line admission wedge (authored gitlink, stale recut certificate,
  * unresolvable base): typed `refusal`, so the selectorless drain survives it and
  * retries the identical PR on the next cycle, forever. */
@@ -217,7 +217,7 @@ function refuseForever(
   blocked: () => string,
   failure: Readonly<{ code: string; message: (pr: string) => string }> = {
     code: "authored-gitlink",
-    message: (pr) => `yrd: PR '${pr}' authors a gitlink bump`,
+    message: (pr) => `yrd: change '${pr}' authors a gitlink bump`,
   },
 ): CandidatePreparer {
   return (input) => {
@@ -230,7 +230,7 @@ function refuseForever(
 }
 
 /** The habitant's own drain shape: `continueAdmissions` is how a drain signal
- * interrupts the loop, and it is also what makes admissions one PR per turn —
+ * interrupts the loop, and it is also what makes admissions one change per turn —
  * the only shape in which a refused head can hold the line. */
 const HABITANT = { ...runtime, continueAdmissions: () => true }
 
@@ -400,7 +400,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).not.toContain("undefined")
   })
 
-  it("parks a deterministically stale recut base on its FIRST refusal and drains the PR behind it", async () => {
+  it("parks a deterministically stale recut base on its FIRST refusal and drains the change behind it", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const blocked = { id: "" }
     const DIVERGED = "d".repeat(40)
@@ -408,7 +408,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       refuseForever(() => blocked.id, {
         code: "recut-base-diverged",
         message: (pr) =>
-          `yrd: PR '${pr}' certifies base '${DIVERGED}', but the authoritative candidate base is '${BASE}'`,
+          `yrd: change '${pr}' certifies base '${DIVERGED}', but the authoritative candidate base is '${BASE}'`,
       }),
       clock.read,
     )
@@ -429,7 +429,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(refusal?.settlement?.reason).toContain(DIVERGED)
     expect(refusal?.settlement?.reason).toContain(BASE)
     expect(app.queue.eligibility(head.id).reason).toMatchObject({ code: "admission-refused" })
-    // Parked at admission, not wedged: it no longer blocks the PR behind it —
+    // Parked at admission, not wedged: it no longer blocks the change behind it —
     // but it is still visible and owned, never silently dropped
     // (@i/10-merge-queue/22918-needs-person-unowned).
     expect(app.queue.audit().findings).toContainEqual(
@@ -810,7 +810,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
   })
 
-  it("counts consecutive admission refusals and names the PR, code, count, and block span", async () => {
+  it("counts consecutive admission refusals and names the change, code, count, and block span", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
     const events: LogEvent[] = []
@@ -847,7 +847,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     expect(app.queue.audit().findings).toContainEqual({
       code: "admission-refusal-loop",
-      message: expect.stringContaining(`PR '${pr.id}'`),
+      message: expect.stringContaining(`change '${pr.id}'`),
       pr: pr.id,
       specimen: `pr:${pr.id}:refusal:authored-gitlink`,
       refusal: "authored-gitlink",
@@ -859,7 +859,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).toBe(
       `change '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
-        `yrd: PR '${pr.id}' authors a gitlink bump`,
+        `yrd: change '${pr.id}' authors a gitlink bump`,
     )
     log.end()
   })
@@ -913,7 +913,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     )
   })
 
-  it("clears the streak when the PR is finally admitted", async () => {
+  it("clears the streak when the change is finally admitted", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
     await using app = await createApp(
@@ -1064,13 +1064,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
     // recut-base-diverged is structurally permanent (auto-settles needs-person
-    // on the first refusal) and is NOT a needs-author code, so the PR stays
+    // on the first refusal) and is NOT a needs-author code, so the change stays
     // `submitted` — the exact shape the habitant's settleNeedsPerson leaves
     // behind, reaching the settled admission-refusal verdict directly.
     await using app = await createApp(
       refuseForever(() => blocked, {
         code: "recut-base-diverged",
-        message: (pr) => `PR '${pr}' revision 1 certifies a base the authoritative candidate base never descended from`,
+        message: (pr) => `change '${pr}' revision 1 certifies a base the authoritative candidate base never descended from`,
       }),
       clock.read,
     )
@@ -1121,7 +1121,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 describe("a submitted PR with no check request and a ledgered refusal never wedges queue reads", () => {
   // The PR1128 incident (2026-08-17, @i/10-merge-queue): `bay submit` queued a
   // carrier, then the authored-gitlink refusal was ledgered against it BEFORE
-  // any check request existed. The audit's head-of-line sort compared that PR
+  // any check request existed. The audit's head-of-line sort compared that change
   // with a comparator that THREW on a missing current check request, so every
   // surface that computes audit findings died — pr list, queue audit, bay
   // status, the habitant runner's own progress probe (which crashlooped it into
@@ -1155,13 +1155,13 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
       pr: pr.id,
       code: "authored-gitlink",
       kind: "refusal",
-      reason: `PR '${pr.id}' changes generated-only gitlinks [ag]`,
+      reason: `change '${pr.id}' changes generated-only gitlinks [ag]`,
     })
     expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink" })
 
-    // Pre-fix both of these threw "queued PR '<id>' has no current check
+    // Pre-fix both of these threw "queued change '<id>' has no current check
     // request" out of the head sort. Post-fix the state is a finding: the
-    // never-started window names the PR the moment it exceeds the policy.
+    // never-started window names the change the moment it exceeds the policy.
     expect(app.queue.audit().findings).toEqual([])
     expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({ code: "queue-never-started", pr: pr.id }),

@@ -120,7 +120,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     expect(issueHelp.stdout()).toContain("ensure [options] <issue>")
   })
 
-  it("ensures one issue-owned Bay and one tracked draft PR idempotently", async () => {
+  it("ensures one issue-owned Bay and one tracked draft change idempotently", async () => {
     const { repo } = await repository()
     const first = output(repo)
     expect(await yrd(repo, first.io, "issue", "ensure", CLAIM, "--json"), first.stderr()).toBe(0)
@@ -170,7 +170,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     const retry = output(repo)
     expect(await yrd(repo, retry.io, "issue", "ensure", CLAIM)).toBe(1)
     expect(retry.stderr()).toContain("holds uncommitted changes")
-    expect(retry.stderr()).toContain("checkpoint them before ensuring its draft PR")
+    expect(retry.stderr()).toContain("checkpoint them before ensuring its draft change")
     expect(retry.stderr()).toContain("yrd in B1")
   })
 
@@ -814,7 +814,7 @@ printf '%s' "$$" > cwd-guest.pid
     }
   })
 
-  it("makes manual bay run plus ag converge on integrated PR state", async () => {
+  it("makes manual bay run plus ag converge on integrated change state", async () => {
     const tools = await mkdtemp(join(tmpdir(), "yrd-do-submit-tools-"))
     roots.push(tools)
     await writeFile(
@@ -966,7 +966,7 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     }
   })
 
-  it("keeps a branch carrier without creating a PR, runs exact argv, and closes synchronously", async () => {
+  it("keeps a branch carrier without creating a change, runs exact argv, and closes synchronously", async () => {
     const { repo } = await repository()
     const run = output(repo)
 
@@ -1112,7 +1112,7 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await expect(git(repo, "rev-parse", "--verify", "refs/yrd/closed/B1")).rejects.toThrow()
   })
 
-  it("reopens a closed claim without implicitly creating or updating a PR", async () => {
+  it("reopens a closed claim without implicitly creating or updating a change", async () => {
     const { repo } = await repository()
     const clean = output(repo)
     expect(await yrd(repo, clean.io, "bay", "run", CLAIM, "--", "true"), clean.stderr()).toBe(0)

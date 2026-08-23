@@ -34,8 +34,8 @@ function short(sha: string): string {
   return sha.length > 12 ? sha.slice(0, 12) : sha
 }
 
-/** Resolve one live PR or raise the typed refusal that names why it cannot be
- * withdrawn. An unknown selector and a terminal PR are both loud failures —
+/** Resolve one live change or raise the typed refusal that names why it cannot be
+ * withdrawn. An unknown selector and a terminal change are both loud failures —
  * never a silent no-op. */
 function requiredLivePr(app: YrdCliApp, selector: string): Change {
   const pr = app.bays.pr(selector)
@@ -44,17 +44,17 @@ function requiredLivePr(app: YrdCliApp, selector: string): Change {
   }
   const delivery = changeDeliveryState(pr)
   if (!isLiveChange(pr)) {
-    raiseFailure("refusal", "pr-terminal", `yrd: PR '${pr.id}' is ${delivery}; a terminal PR cannot be withdrawn`)
+    raiseFailure("refusal", "pr-terminal", `yrd: change '${pr.id}' is ${delivery}; a terminal change cannot be withdrawn`)
   }
   return pr as Change
 }
 
-/** Withdraw the selected live PR revision: emit pr/withdrawn with the recorded
+/** Withdraw the selected live change revision: emit pr/withdrawn with the recorded
  * reason and terminalize any Queue work still holding that authority. */
 async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefined, io: YrdCliIO): Promise<Change> {
   await app.bays.closePr({ pr: id, ...(reason === undefined ? {} : { reason }) })
   const withdrawn = app.bays.pr(id)
-  if (withdrawn === undefined) throw new Error(`yrd: PR '${id}' disappeared after withdraw`)
+  if (withdrawn === undefined) throw new Error(`yrd: change '${id}' disappeared after withdraw`)
   await app.queue.cancel({ prs: [id], by: io.runner ?? "operator", reason: reason ?? DEFAULT_WITHDRAW_REASON })
   return withdrawn as Change
 }
@@ -116,7 +116,7 @@ export async function withdrawPrs(
   command: "pr.close" | "pr.withdraw" = "pr.withdraw",
 ): Promise<void> {
   const verb = command === "pr.close" ? "change close" : "change withdraw"
-  if (selectors.length === 0) usage(`${verb} requires at least one PR selector`)
+  if (selectors.length === 0) usage(`${verb} requires at least one change selector`)
   const reason = options.reason?.trim()
   if (options.reason !== undefined && (reason === undefined || reason === "")) {
     usage("--reason requires non-empty text")
@@ -125,7 +125,7 @@ export async function withdrawPrs(
   const seen = new Set<string>()
   for (const selector of selectors) {
     const pr = requiredLivePr(app, selector)
-    if (seen.has(pr.id)) usage(`${verb} selectors resolve to PR '${pr.id}' more than once`)
+    if (seen.has(pr.id)) usage(`${verb} selectors resolve to change '${pr.id}' more than once`)
     seen.add(pr.id)
     targets.push(pr)
   }
@@ -177,7 +177,7 @@ type PruneRow = Readonly<{
   detail: string
 }>
 
-export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RE-MERGE" | "RE-MERGE-FORCE" | "FRESH-NOOP"
+export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
 
 export type RemergePreflightResult = Readonly<{
   command: "pr.recut.preflight"
@@ -210,7 +210,7 @@ function pruneLine(row: PruneRow): string {
 
 function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: unknown): string {
   const cause = error instanceof Error && error.message.trim() !== "" ? error.message : String(error)
-  return `PR '${pr}' could not be ${action}: ${cause}`
+  return `change '${pr}' could not be ${action}: ${cause}`
 }
 
 function pruneError(pr: Change, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
@@ -294,7 +294,7 @@ async function contentChecks(headSha: string, baseSha: string, git: PruneGitFact
   return { headPresent: true, ancestorOfBase: ancestor, mergeTree }
 }
 
-/** Prove one PR's superseded verdict against its resolved base tip. Every
+/** Prove one change's superseded verdict against its resolved base tip. Every
  * check that ran (and every check that was skipped, with why) is named in the
  * returned row so the operator sees exactly what was verified. */
 async function pruneVerdict(pr: Change, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
@@ -345,7 +345,7 @@ export type RemergePreflightOptions = JsonOption &
  * creating refs, appending journal events, or calling the remerger. Exact
  * ancestry/tree equivalence authorizes withdrawal; patch-id is attribution
  * evidence only because stable patch IDs intentionally ignore whitespace. */
-/** Classify a PR against its live base and print the verdict plus the ONE exact
+/** Classify a change against its live base and print the verdict plus the ONE exact
  * command that follows from it. The result is returned as well as printed, so a
  * mechanical caller (the habitant's self-applied-remedy pass, 22474) runs the
  * same `next` a human would have read off the terminal — one decision function,
@@ -363,20 +363,20 @@ export async function preflightRemerge(
   const revision = options.revision ?? currentChangeRev(pr).n
   const source = pr.revs.find((candidate) => candidate.n === revision)
   if (source === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${revision}`)
+    raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${revision}`)
   }
   if (source.composition !== undefined) {
     raiseFailure(
       "refusal",
       "recut-preflight-composition",
-      `yrd: PR '${pr.id}' revision ${source.n} has composed source payloads; root-tree preflight cannot prove every source yet`,
+      `yrd: change '${pr.id}' revision ${source.n} has composed source payloads; root-tree preflight cannot prove every source yet`,
     )
   }
   if (source.baseSha === undefined) {
     raiseFailure(
       "configuration",
       "recut-preflight-source-base-missing",
-      `yrd: PR '${pr.id}' revision ${source.n} has no immutable source base; preflight cannot classify its pin distance`,
+      `yrd: change '${pr.id}' revision ${source.n} has no immutable source base; preflight cannot classify its pin distance`,
     )
   }
 
@@ -387,7 +387,7 @@ export async function preflightRemerge(
     raiseFailure(
       "configuration",
       "recut-preflight-target-missing",
-      `yrd: PR '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
+      `yrd: change '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
     )
   }
   const candidateHeadSha = options.proposedHeadSha ?? source.head
@@ -396,7 +396,7 @@ export async function preflightRemerge(
     raiseFailure(
       "configuration",
       "recut-preflight-head-missing",
-      `yrd: PR '${pr.id}' proposed head '${candidateHeadSha}' is not present in this repository`,
+      `yrd: change '${pr.id}' proposed head '${candidateHeadSha}' is not present in this repository`,
     )
   }
   if (checks.ancestorOfBase === undefined || checks.mergeTree === undefined) {
@@ -421,7 +421,7 @@ export async function preflightRemerge(
     raiseFailure(
       "refusal",
       "recut-preflight-base-diverged",
-      `yrd: PR '${pr.id}' revision ${source.n} base ${short(source.baseSha)} diverged from target ${short(targetBaseSha)} ` +
+      `yrd: change '${pr.id}' revision ${source.n} base ${short(source.baseSha)} diverged from target ${short(targetBaseSha)} ` +
         `(source-only=${distance.sourceOnly}, target-only=${distance.targetOnly})`,
     )
   }
@@ -442,7 +442,7 @@ export async function preflightRemerge(
         "yrd: installed PR Git facts do not provide commit-parent evidence",
       )
     requireLinearRootTip(
-      `PR '${pr.id}' revision ${source.n} head '${candidateHeadSha}'`,
+      `change '${pr.id}' revision ${source.n} head '${candidateHeadSha}'`,
       pr.branch,
       await parents(candidateHeadSha),
     )
@@ -462,7 +462,7 @@ export async function preflightRemerge(
     raiseFailure(
       "refusal",
       "recut-needs-authored-change",
-      `yrd: PR '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
+      `yrd: change '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
         "an unchanged re-merge cannot resolve it — push new authored content, then retry the printed remedy",
     )
   }
@@ -472,13 +472,13 @@ export async function preflightRemerge(
     ? "SUBSUMED-WITHDRAW"
     : reauthorizing
       ? requiresForce
-        ? "RE-MERGE-FORCE"
-        : "RE-MERGE"
+        ? "RECUT-FORCE"
+        : "RECUT"
       : certifiedCurrentBase
         ? "FRESH-NOOP"
         : requiresForce
-          ? "RE-MERGE-FORCE"
-          : "RE-MERGE"
+          ? "RECUT-FORCE"
+          : "RECUT"
   const revisionFlag =
     options.revision === undefined || options.proposedHeadSha !== undefined ? "" : ` --revision ${source.n}`
   const queueFlag = options.queue === true ? " --queue" : ""
@@ -491,9 +491,9 @@ export async function preflightRemerge(
         // already merged has nothing left to resubmit. Printed WITH the flag so the
         // command runs as written rather than refusing whoever pastes it.
         `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
-      : verdict === "RE-MERGE-FORCE"
+      : verdict === "RECUT-FORCE"
         ? `${remergeCommand} --force`
-        : verdict === "RE-MERGE"
+        : verdict === "RECUT"
           ? remergeCommand
           : options.queue === true
             ? `yrd pr ready ${pr.id}`
@@ -537,10 +537,10 @@ export async function preflightRemerge(
   return result
 }
 
-/** `yrd admin pr prune [--dry-run]` — scan every live PR against its base tip and
+/** `yrd admin pr prune [--dry-run]` — scan every live change against its base tip and
  * withdraw the ones whose content already merged (head is an ancestor of the
  * base, or merging head into the base reproduces the base tree exactly).
- * Prints one explicit verdict per PR; --dry-run emits no events. */
+ * Prints one explicit verdict per change; --dry-run emits no events. */
 export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: YrdCliIO): Promise<void> {
   const dryRun = options.dryRun === true
   const cwd = io.cwd ?? process.cwd()
@@ -609,7 +609,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   const summary =
     rows.length === 0
       ? "pr prune: no live PRs to check"
-      : `pr prune: checked ${rows.length} live PR${rows.length === 1 ? "" : "s"} — ${
+      : `pr prune: checked ${rows.length} live change${rows.length === 1 ? "" : "s"} — ${
           dryRun ? `${wouldWithdraw} would be withdrawn` : `${withdrawn.length} withdrawn`
         }, ${kept} kept${errors === 0 ? "" : `, ${errors} error${errors === 1 ? "" : "s"}`}${
           dryRun ? " (dry run: no events emitted)" : ""

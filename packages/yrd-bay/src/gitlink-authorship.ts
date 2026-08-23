@@ -4,7 +4,7 @@
  *
  * A branch's authored delta is measured from where it actually diverged —
  * `git merge-base <base> <head>`, computed live at check time — never from a
- * base recorded on the PR. A recorded base moves on its own: it is set at
+ * base recorded on the change. A recorded base moves on its own: it is set at
  * `pr create`, re-set at re-merge, and chased forward to track current main while
  * the author's head stays exactly where they left it. Diffing that field
  * against the head therefore reports every pin that moved on main as if this

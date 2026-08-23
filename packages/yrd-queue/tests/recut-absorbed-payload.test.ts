@@ -124,7 +124,7 @@ describe("recut against a base that absorbed part of the payload (22373)", () =>
     const result = await remerge(repo, sourceBase, headSha)
 
     // Nothing is left to deliver: the recut head IS the base, so the merge
-    // step's tree-equality proof closes the PR as already-landed instead of
+    // step's tree-equality proof closes the change as already-landed instead of
     // wedging the drain on a payload refusal.
     expect(result.headSha).toBe(target)
     expect(result.baseSha).toBe(target)

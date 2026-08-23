@@ -2266,7 +2266,7 @@ async function remergeChange(git: Git, repo: string, input: ChangeRemergeInput):
     if (target.diverged) {
       throw codeCarrierRefusal(
         "queue-environment-refused",
-        `local '${target.branchRef}' and authoritative 'refs/remotes/origin/${target.branch}' differ; refresh or reconcile the target before certifying PR '${input.id}'`,
+        `local '${target.branchRef}' and authoritative 'refs/remotes/origin/${target.branch}' differ; refresh or reconcile the target before certifying change '${input.id}'`,
       )
     }
     return certifyProposedCodeCarrier(certificateGit, repo, target, input, input.proposedHeadSha)
@@ -2568,7 +2568,7 @@ async function certifyProposedCodeCarrier(
   if (sourceBaseSha === undefined) {
     throw codeCarrierRefusal(
       "recut-base-missing",
-      `PR '${input.id}' revision ${input.revision} has no immutable source base SHA`,
+      `change '${input.id}' revision ${input.revision} has no immutable source base SHA`,
     )
   }
   const proof = await deriveFrozenCodeCarrier(
@@ -2583,23 +2583,23 @@ async function certifyProposedCodeCarrier(
       if (proof.range === "candidate") {
         throw codeCarrierRefusal(
           "proposed-commit-missing",
-          `PR '${input.id}' proposed commit '${proposedHeadSha}' is missing`,
+          `change '${input.id}' proposed commit '${proposedHeadSha}' is missing`,
         )
       }
       throw codeCarrierRefusal(
         "recut-source-missing",
-        `PR '${input.id}' source ${String(proof.endpoint)} '${String(proof.sha)}' is missing`,
+        `change '${input.id}' source ${String(proof.endpoint)} '${String(proof.sha)}' is missing`,
       )
     }
     if (proof.kind === "lineage") {
       throw proof.range === "candidate"
         ? codeCarrierRefusal(
             "carrier-drops-landed",
-            `PR '${input.id}' proposed commit '${proposedHeadSha}' does not contain authoritative target '${target.sha}'`,
+            `change '${input.id}' proposed commit '${proposedHeadSha}' does not contain authoritative target '${target.sha}'`,
           )
         : codeCarrierRefusal(
             "recut-lineage",
-            `PR '${input.id}' source base '${sourceBaseSha}' is not an ancestor of source head '${input.headSha}'`,
+            `change '${input.id}' source base '${sourceBaseSha}' is not an ancestor of source head '${input.headSha}'`,
           )
     }
     if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
@@ -2607,25 +2607,25 @@ async function certifyProposedCodeCarrier(
       const detail = describeGitlinkMismatches(proof.values ?? [])
       throw codeCarrierRefusal(
         "authored-gitlink",
-        `PR '${input.id}' proposed commit '${proposedHeadSha}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
+        `change '${input.id}' proposed commit '${proposedHeadSha}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
       )
     }
     if (proof.kind === "drop" || proof.kind === "extra") {
       throw codeCarrierRefusal(
         `recut-certification-${proof.kind}`,
-        `PR '${input.id}' proposed commit '${proposedHeadSha}' ${proof.kind === "drop" ? "drops approved" : "adds unapproved"} paths [${paths.join(", ")}]`,
+        `change '${input.id}' proposed commit '${proposedHeadSha}' ${proof.kind === "drop" ? "drops approved" : "adds unapproved"} paths [${paths.join(", ")}]`,
       )
     }
     if (proof.kind === "identity") {
       throw codeCarrierRefusal(
         "recut-certification-corrupt",
-        `PR '${input.id}' proposed commit '${proposedHeadSha}' changes approved path, mode, blob, or status identity`,
+        `change '${input.id}' proposed commit '${proposedHeadSha}' changes approved path, mode, blob, or status identity`,
       )
     }
     if (proof.kind === "patch-id") {
       throw codeCarrierRefusal(
         "payload-certificate",
-        `PR '${input.id}' revision ${input.revision} has no stable patch identity`,
+        `change '${input.id}' revision ${input.revision} has no stable patch identity`,
       )
     }
     throw new Error(`yrd: proposed commit '${proposedHeadSha}' has no readable tree`)
@@ -2744,7 +2744,7 @@ async function assertCurrentRemergeCertificate(
     throw createFailure({
       kind: "refusal",
       code: "recut-certificate",
-      message: `yrd: PR '${input.id}' current revision ${current.revision} has no patch/tree certificate`,
+      message: `yrd: change '${input.id}' current revision ${current.revision} has no patch/tree certificate`,
     })
   }
   const composition = current.composition ?? input.composition
@@ -2757,7 +2757,7 @@ async function assertCurrentRemergeCertificate(
       throw createFailure({
         kind: "refusal",
         code: "recut-certificate",
-        message: `yrd: PR '${input.id}' current patch/tree certificate does not match revision ${current.revision}`,
+        message: `yrd: change '${input.id}' current patch/tree certificate does not match revision ${current.revision}`,
       })
     }
     return
@@ -2767,14 +2767,14 @@ async function assertCurrentRemergeCertificate(
     throw createFailure({
       kind: "refusal",
       code: "recut-certificate",
-      message: `yrd: PR '${input.id}' current composed head does not match the authoritative base`,
+      message: `yrd: change '${input.id}' current composed head does not match the authoritative base`,
     })
   }
   const currentCompositionFailure = (message: string) =>
     createFailure({
       kind: "refusal",
       code: "recut-certificate",
-      message: `yrd: PR '${input.id}' current composed certificate could not replay: ${message}`,
+      message: `yrd: change '${input.id}' current composed certificate could not replay: ${message}`,
     })
   const outcome = await withScratch<Readonly<{ treeSha: string; patchId: string }>>(
     git,
@@ -2849,7 +2849,7 @@ async function assertCurrentRemergeCertificate(
     throw createFailure({
       kind: "refusal",
       code: "recut-certificate",
-      message: `yrd: PR '${input.id}' current composed patch/tree certificate does not match revision ${current.revision}`,
+      message: `yrd: change '${input.id}' current composed patch/tree certificate does not match revision ${current.revision}`,
     })
   }
 }
@@ -2865,7 +2865,7 @@ async function remergeDirectChange(
     throw createFailure({
       kind: "refusal",
       code: "recut-base-missing",
-      message: `yrd: PR '${input.id}' revision ${input.revision} has no immutable base SHA`,
+      message: `yrd: change '${input.id}' revision ${input.revision} has no immutable base SHA`,
     })
   }
   for (const [label, sha] of [
@@ -2876,7 +2876,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "recut-source-missing",
-        message: `yrd: PR '${input.id}' ${label} '${sha}' is missing`,
+        message: `yrd: change '${input.id}' ${label} '${sha}' is missing`,
       })
     }
   }
@@ -2892,7 +2892,7 @@ async function remergeDirectChange(
     throw createFailure({
       kind: "refusal",
       code: "recut-lineage",
-      message: `yrd: PR '${input.id}' recorded base '${oldBase}' is not an ancestor of '${target.sha}'`,
+      message: `yrd: change '${input.id}' recorded base '${oldBase}' is not an ancestor of '${target.sha}'`,
     })
   }
   const sourceBase = await directRemergeSourceBase(git, repo, oldBase, input.headSha)
@@ -2900,7 +2900,7 @@ async function remergeDirectChange(
     throw createFailure({
       kind: "refusal",
       code: "recut-lineage",
-      message: `yrd: PR '${input.id}' recorded base '${oldBase}' does not prove one source merge base for revision ${input.revision}`,
+      message: `yrd: change '${input.id}' recorded base '${oldBase}' does not prove one source merge base for revision ${input.revision}`,
     })
   }
   const payload = await changedPaths(git, repo, sourceBase, input.headSha)
@@ -2910,7 +2910,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-certificate",
-        message: `yrd: PR '${input.id}' revision ${input.revision} has no stable patch identity`,
+        message: `yrd: change '${input.id}' revision ${input.revision} has no stable patch identity`,
       })
     }
     return {
@@ -2948,7 +2948,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-certificate",
-        message: `yrd: PR '${input.id}' revision ${input.revision} changes nothing against its recorded base`,
+        message: `yrd: change '${input.id}' revision ${input.revision} changes nothing against its recorded base`,
       })
     }
     return absorbedRemergeResult(git, repo, target, input, sourceBase)
@@ -2965,7 +2965,7 @@ async function remergeDirectChange(
     throw createFailure({
       kind: "refusal",
       code: "payload-certificate",
-      message: `yrd: PR '${input.id}' revision ${input.revision} has no current-composition patch identity`,
+      message: `yrd: change '${input.id}' revision ${input.revision} has no current-composition patch identity`,
     })
   }
   const outcome = await withScratch<ChangeRemergeResult>(git, repo, input.headSha, undefined, async (path) => {
@@ -3004,7 +3004,7 @@ async function remergeDirectChange(
             throw createFailure({
               kind: "refusal",
               code: "recut-gitlink-write-failed",
-              message: `yrd: PR '${input.id}' could not stage absorbed gitlink '${conflict}': ${queueGitlinkWriteFailure(staged)}`,
+              message: `yrd: change '${input.id}' could not stage absorbed gitlink '${conflict}': ${queueGitlinkWriteFailure(staged)}`,
             })
           }
           continue
@@ -3022,7 +3022,7 @@ async function remergeDirectChange(
             kind: "refusal",
             code: resolution.code,
             message:
-              `yrd: PR '${input.id}' could not recut: target root '${target.sha}' pins submodule ` +
+              `yrd: change '${input.id}' could not recut: target root '${target.sha}' pins submodule ` +
               `'${resolution.path}' to '${resolution.basePin}'; replayed authored root '${replayedRoot}' pins it to ` +
               `'${resolution.authoredPin}'; ancestry walk failed because ${resolution.message}`,
           })
@@ -3033,7 +3033,7 @@ async function remergeDirectChange(
           throw createFailure({
             kind: "refusal",
             code: "recut-gitlink-write-failed",
-            message: `yrd: PR '${input.id}' could not stage resolved gitlink '${conflict}': ${queueGitlinkWriteFailure(staged)}`,
+            message: `yrd: change '${input.id}' could not stage resolved gitlink '${conflict}': ${queueGitlinkWriteFailure(staged)}`,
           })
         }
         if (resolution.side === "carrier") ffCarrierGitlinks.add(conflict)
@@ -3050,8 +3050,8 @@ async function remergeDirectChange(
         code: "recut-conflict",
         message:
           paths.length === 0
-            ? `yrd: PR '${input.id}' could not re-merge onto '${target.sha}': ${rebased.stderr || rebased.stdout}`
-            : `yrd: PR '${input.id}' could not re-merge onto '${target.sha}' at [${paths.join(", ")}]`,
+            ? `yrd: change '${input.id}' could not re-merge onto '${target.sha}': ${rebased.stderr || rebased.stdout}`
+            : `yrd: change '${input.id}' could not re-merge onto '${target.sha}' at [${paths.join(", ")}]`,
       })
     }
     const headSha = await git.commit(path, "HEAD")
@@ -3060,7 +3060,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-mismatch",
-        message: `yrd: PR '${input.id}' re-merge paths differ: expected [${effectivePayload.join(", ")}], got [${materialized.join(", ")}]`,
+        message: `yrd: change '${input.id}' re-merge paths differ: expected [${effectivePayload.join(", ")}], got [${materialized.join(", ")}]`,
       })
     }
     if (
@@ -3070,7 +3070,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-identity",
-        message: `yrd: PR '${input.id}' re-merge changed blob, mode, status, path, or gitlink identity`,
+        message: `yrd: change '${input.id}' re-merge changed blob, mode, status, path, or gitlink identity`,
       })
     }
     const materializedPatchId = await git.stablePatchId(path, target.sha, headSha)
@@ -3078,7 +3078,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "refusal",
         code: "payload-certificate",
-        message: `yrd: PR '${input.id}' re-merge has no stable patch identity`,
+        message: `yrd: change '${input.id}' re-merge has no stable patch identity`,
       })
     }
     // 21461: git's merge machinery fast-forwards a carrier gitlink WITHOUT a
@@ -3122,7 +3122,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' re-merge has no stable patch identity`,
+          message: `yrd: change '${input.id}' re-merge has no stable patch identity`,
         })
       }
       const patchMatches = certifyMaterializedPatchId === certifySourcePatchId
@@ -3132,7 +3132,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' re-merge changed stable patch identity`,
+          message: `yrd: change '${input.id}' re-merge changed stable patch identity`,
         })
       }
       if (
@@ -3142,7 +3142,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' re-merge did not preserve deterministic union identity`,
+          message: `yrd: change '${input.id}' re-merge did not preserve deterministic union identity`,
         })
       }
       usedUnionMerge = unionMerged
@@ -3154,7 +3154,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' re-merge did not preserve authored submodule pin for '${gitlink}'`,
+          message: `yrd: change '${input.id}' re-merge did not preserve authored submodule pin for '${gitlink}'`,
         })
       }
     }
@@ -3175,7 +3175,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' union-merge re-merge requires one root commit`,
+          message: `yrd: change '${input.id}' union-merge re-merge requires one root commit`,
         })
       }
     } else if (!hasAbsorbedExceptions) {
@@ -3184,7 +3184,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' re-merge is not range-diff equivalent`,
+          message: `yrd: change '${input.id}' re-merge is not range-diff equivalent`,
         })
       }
     } else {
@@ -3202,7 +3202,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' current-composition re-merge has no stable commit-sequence identity`,
+          message: `yrd: change '${input.id}' current-composition re-merge has no stable commit-sequence identity`,
         })
       }
       if (
@@ -3212,7 +3212,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' current-composition re-merge is not commit-sequence equivalent`,
+          message: `yrd: change '${input.id}' current-composition re-merge is not commit-sequence equivalent`,
         })
       }
     }
@@ -3226,7 +3226,7 @@ async function remergeDirectChange(
       throw createFailure({
         kind: "infrastructure",
         code: "recut-publish",
-        message: `yrd: PR '${input.id}' re-merge ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
+        message: `yrd: change '${input.id}' re-merge ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
       })
     }
     const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
@@ -3241,7 +3241,7 @@ async function remergeDirectChange(
         throw createFailure({
           kind: "infrastructure",
           code: "recut-publish",
-          message: `yrd: PR '${input.id}' re-merge ref could not be published: ${
+          message: `yrd: change '${input.id}' re-merge ref could not be published: ${
             gitSuperFailureDetail(published)?.message ?? published.state
           }`,
         })
@@ -3678,7 +3678,7 @@ async function prepareCandidateMembers(
     guilty.id = pr.id
     if (pr.intent !== undefined) {
       if (input.prs.length !== 1) {
-        return candidateFailure("intent-batch-refused", "yrd: pin intents are serial Queue members, never a batch")
+        return candidateFailure("intent-batch-refused", "yrd: changes of min commits are serial Queue members, never a batch")
       }
       if (pr.headSha !== authoritativeBase) {
         return candidateFailure(
@@ -3747,7 +3747,7 @@ async function prepareCandidateMembers(
         const shown = inspected.output.slice(0, 8).join(", ") + (inspected.output.length > 8 ? ", …" : "")
         return candidateFailure(
           "refused-path",
-          `PR '${pr.id}' touches refused path(s) [${shown}]${refuse.reason === undefined ? "" : `; ${refuse.reason}`}`,
+          `change '${pr.id}' touches refused path(s) [${shown}]${refuse.reason === undefined ? "" : `; ${refuse.reason}`}`,
           ".",
           inspected.output,
         )
@@ -3823,7 +3823,7 @@ async function prepareCandidateMembers(
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
       await git.run(path, ["merge", "--abort"], true)
       const terminalDetail = [merged.stdout.trim(), merged.stderr.trim()].filter((part) => part !== "").join("\n")
-      const detail = `PR '${pr.id}' could not be applied: ${resolved.message}\n${terminalDetail || fetchDetail(merged)}`
+      const detail = `change '${pr.id}' could not be applied: ${resolved.message}\n${terminalDetail || fetchDetail(merged)}`
       return {
         status: "failed",
         error: {
@@ -4101,7 +4101,7 @@ type RemergeBaseMovement =
  * it — so it keeps the retryable `recut-certificate` code. A base that is
  * present and still not an ancestor is a lineage the authoritative base never
  * took: no retry can make it ancestral, only a fresh revision can, so it gets
- * its own `recut-base-diverged` code that parks the PR on the first refusal
+ * its own `recut-base-diverged` code that parks the change on the first refusal
  * instead of storming the queue head.
  */
 async function remergeBaseMovement(
@@ -4113,7 +4113,7 @@ async function remergeBaseMovement(
   if (baseSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge revision ${pr.revision} has no immutable certified base`,
+      `change '${pr.id}' re-merge revision ${pr.revision} has no immutable certified base`,
     )
   }
   const head = await git.commit(repo, "HEAD")
@@ -4122,12 +4122,12 @@ async function remergeBaseMovement(
     if ((await git.optionalCommit(repo, baseSha)) !== baseSha) {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge base '${baseSha}' is not present in the candidate repository; fetch it and retry`,
+        `change '${pr.id}' re-merge base '${baseSha}' is not present in the candidate repository; fetch it and retry`,
       )
     }
     return candidateFailure(
       "recut-base-diverged",
-      `PR '${pr.id}' revision ${pr.revision} certifies base '${baseSha}', but the authoritative candidate base is ` +
+      `change '${pr.id}' revision ${pr.revision} certifies base '${baseSha}', but the authoritative candidate base is ` +
         `'${head}', which never descended from it; the certificate cannot become valid without a fresh revision`,
     )
   }
@@ -4148,7 +4148,7 @@ async function verifyRemergeCertificate(
   if (pr.recut.certificate !== "frozen-code-carrier-v1" || sourceBaseSha === undefined || sourceHeadSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge revision ${pr.revision} has no complete immutable source range`,
+      `change '${pr.id}' re-merge revision ${pr.revision} has no complete immutable source range`,
     )
   }
   return verifyFrozenCodeCarrierCertificate(
@@ -4170,7 +4170,7 @@ async function verifyLegacyRemergeCertificate(
   if (treeSha !== pr.recut.treeSha) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge tree certificate does not match revision ${pr.revision}`,
+      `change '${pr.id}' re-merge tree certificate does not match revision ${pr.revision}`,
     )
   }
   const movement = await remergeBaseMovement(git, repo, pr)
@@ -4181,21 +4181,21 @@ async function verifyLegacyRemergeCertificate(
       ? undefined
       : candidateFailure(
           "recut-certificate",
-          `PR '${pr.id}' re-merge patch certificate does not match revision ${pr.revision}`,
+          `change '${pr.id}' re-merge patch certificate does not match revision ${pr.revision}`,
         )
   }
   const rederived = await rederiveRemergePatchId(git, repo, pr.headSha)
   if (rederived === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
+      `change '${pr.id}' re-merge could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
     )
   }
   return rederived === pr.recut.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge change did not survive the advanced base for revision ${pr.revision}`,
+        `change '${pr.id}' re-merge change did not survive the advanced base for revision ${pr.revision}`,
       )
 }
 
@@ -4220,7 +4220,7 @@ async function verifyFrozenCodeCarrierCertificate(
   if (candidateBaseSha === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge revision ${pr.revision} has no immutable candidate base`,
+      `change '${pr.id}' re-merge revision ${pr.revision} has no immutable candidate base`,
     )
   }
   const proof = await deriveFrozenCodeCarrier(
@@ -4233,7 +4233,7 @@ async function verifyFrozenCodeCarrierCertificate(
     if (proof.kind === "commit-missing") {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge ${String(proof.range)} ${String(proof.endpoint)} '${String(proof.sha)}' is missing for revision ${pr.revision}`,
+        `change '${pr.id}' re-merge ${String(proof.range)} ${String(proof.endpoint)} '${String(proof.sha)}' is missing for revision ${pr.revision}`,
       )
     }
     if (proof.kind === "lineage") {
@@ -4243,7 +4243,7 @@ async function verifyFrozenCodeCarrierCertificate(
           : { baseSha: candidateBaseSha, headSha: pr.headSha }
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
+        `change '${pr.id}' re-merge ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
       )
     }
     if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
@@ -4252,7 +4252,7 @@ async function verifyFrozenCodeCarrierCertificate(
       const detail = describeGitlinkMismatches(proof.values ?? [])
       return candidateFailure(
         "authored-gitlink",
-        `PR '${pr.id}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
+        `change '${pr.id}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
         ".",
         paths,
       )
@@ -4260,31 +4260,31 @@ async function verifyFrozenCodeCarrierCertificate(
     if (proof.kind === "tree") {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
+        `change '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
       )
     }
     if (proof.kind === "patch-id") {
       return candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
+        `change '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
       )
     }
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
+      `change '${pr.id}' re-merge source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
     )
   }
   if (proof.treeSha !== remerge.treeSha) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
+      `change '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
     )
   }
   return proof.patchId === remerge.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
+        `change '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
       )
 }
 
@@ -4306,7 +4306,7 @@ async function verifyComposedRemergeCertificate(
       ? undefined
       : candidateFailure(
           "recut-certificate",
-          `PR '${pr.id}' recomposed patch/tree certificate does not match revision ${pr.revision}`,
+          `change '${pr.id}' recomposed patch/tree certificate does not match revision ${pr.revision}`,
         )
   }
   // Base advanced, or the queue filled in the shaset (a regenerated bun.lock, or a
@@ -4318,7 +4318,7 @@ async function verifyComposedRemergeCertificate(
     ? undefined
     : candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recomposed change did not survive the advanced base for revision ${pr.revision}`,
+        `change '${pr.id}' recomposed change did not survive the advanced base for revision ${pr.revision}`,
       )
 }
 
@@ -4875,7 +4875,7 @@ type GitlinkUpdate = Readonly<{ path: string; sha: string }>
 type SynthesizedGitlinkWrapper = Readonly<{ commit: string; treeSha: string; generatedPaths: readonly string[] }>
 
 /**
- * The ONE shaset-commit writer shared by composed PRs, pin intents, and the
+ * The ONE shaset-commit writer shared by composed changes, min-commit changes, and the
  * materialize escape hatch. It stages only gitlink entries and writes a
  * byte-stable commit through Git.commitTree's pinned identity and timestamp.
  *
@@ -5004,7 +5004,7 @@ export function parseSubmoduleModelChangeAuthorizationValue(
   if (match?.groups === undefined) {
     throw codeCarrierRefusal(
       "component-model-authorization-invalid",
-      `PR '${pr}' has malformed '${SUBMODULE_MODEL_CHANGE_PROP}' prop; expected ` +
+      `change '${pr}' has malformed '${SUBMODULE_MODEL_CHANGE_PROP}' prop; expected ` +
         `'<add|remove> <gitlink-path>; ruling <@cto-verdict-message-id>'`,
     )
   }
@@ -5021,7 +5021,7 @@ export function parseSubmoduleModelChangeAuthorization(
   return parseSubmoduleModelChangeAuthorizationValue(pr.id, pr.props?.[SUBMODULE_MODEL_CHANGE_PROP])
 }
 
-/** What composing one PR wrote into the candidate: the certified source
+/** What composing one change wrote into the candidate: the certified source
  * rewrites, plus the paths the shaset provisioner regenerated (today exactly
  * `bun.lock`, or nothing) in the same shaset commit. Queue-composed submodule
  * commits ride VERBATIM: they live on queue-authored refs and are by
@@ -5083,7 +5083,7 @@ async function fillAuthoredGitlinksFromMain(
       if (authorizeSubmoduleModelChange === undefined) {
         return candidateFailure(
           "component-model-authorizer-unavailable",
-          `PR '${pr.id}' requests '${operation} ${gitlink}' under ruling '${declared.ruling}', but this Yrd host ` +
+          `change '${pr.id}' requests '${operation} ${gitlink}' under ruling '${declared.ruling}', but this Yrd host ` +
             `has no verdict-message resolver; ask @cto for the ruling and run through the hh Yrd host`,
           ".",
           [gitlink],
@@ -5092,7 +5092,7 @@ async function fillAuthoredGitlinksFromMain(
       if (pr.baseSha === undefined) {
         return candidateFailure(
           "component-model-identity-unavailable",
-          `PR '${pr.id}' requests '${operation} ${gitlink}' but its immutable base SHA is unavailable; ` +
+          `change '${pr.id}' requests '${operation} ${gitlink}' but its immutable base SHA is unavailable; ` +
             "the host cannot compute a patch-bound authorization receipt",
           ".",
           [gitlink],
@@ -5102,7 +5102,7 @@ async function fillAuthoredGitlinksFromMain(
       if (patchId === undefined) {
         return candidateFailure(
           "component-model-identity-unavailable",
-          `PR '${pr.id}' requests '${operation} ${gitlink}' but its base-to-head diff has no stable patch identity`,
+          `change '${pr.id}' requests '${operation} ${gitlink}' but its base-to-head diff has no stable patch identity`,
           ".",
           [gitlink],
         )
@@ -5126,7 +5126,7 @@ async function fillAuthoredGitlinksFromMain(
       } catch (cause) {
         return candidateFailure(
           "component-model-authorization-refused",
-          `PR '${pr.id}' component-model ruling '${declared.ruling}' did not authorize '${operation} ${gitlink}': ` +
+          `change '${pr.id}' component-model ruling '${declared.ruling}' did not authorize '${operation} ${gitlink}': ` +
             `${cause instanceof Error ? cause.message : String(cause)}`,
           ".",
           [gitlink],
@@ -5154,7 +5154,7 @@ async function fillAuthoredGitlinksFromMain(
     if (main.status === "unavailable") {
       return candidateFailure(
         "component-main-inspection-failed",
-        `PR '${pr.id}' could not read submodule '${gitlink}' main to fill in the shaset: ${main.message}`,
+        `change '${pr.id}' could not read submodule '${gitlink}' main to fill in the shaset: ${main.message}`,
         gitlink,
         [gitlink],
       )
@@ -5176,7 +5176,7 @@ async function fillAuthoredGitlinksFromMain(
     const workflow = await intentSubmissionWorkflow(git, path, "HEAD", pr.headSha, refused, pr.issue)
     return candidateFailure(
       "authored-gitlink",
-      `PR '${pr.id}' changes generated-only gitlinks [${refused.join(", ")}]; ${workflow}; ` +
+      `change '${pr.id}' changes generated-only gitlinks [${refused.join(", ")}]; ${workflow}; ` +
         `for an addition or deletion, ask @cto for an exact ruling and carry ` +
         `--prop '${SUBMODULE_MODEL_CHANGE_PROP}=<add|remove> <path>; ruling <verdict-message-id>' on this revision`,
       ".",
@@ -5197,7 +5197,7 @@ async function composePR(
   if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
     return candidateFailure(
       "composition-invalid",
-      `PR '${pr.id}' composition head '${pr.headSha}' contains root changes; root code must be submitted separately from submodule pin intents`,
+      `change '${pr.id}' composition head '${pr.headSha}' contains root changes; root code must be submitted separately from changes of submodule min commits`,
     )
   }
 
@@ -5208,7 +5208,7 @@ async function composePR(
     if (currentPin === undefined) {
       return candidateFailure(
         "composition-invalid",
-        `PR '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base; a change of min commits advances existing submodules only`,
+        `change '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base; a change of min commits advances existing submodules only`,
         source.repo,
         [source.repo],
       )
@@ -5234,7 +5234,7 @@ async function composePR(
     if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {
       return candidateFailure(
         "wrapper-mismatch",
-        `PR '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${rewrite.newTipSha}'`,
+        `change '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${rewrite.newTipSha}'`,
         rewrite.repo,
         [rewrite.repo],
       )
@@ -5900,7 +5900,7 @@ async function absorbedAuthoredPaths(
  * The re-merge result for a branch whose every authored path the base already
  * merged. There is nothing left to deliver, so the re-merge head IS the base: the
  * merge step then proves already-landed from candidate/base tree equality and
- * closes the PR, instead of the drain wedging on a `payload-mismatch … got []`
+ * closes the change, instead of the drain wedging on a `payload-mismatch … got []`
  * that an operator has to withdraw by hand (22373). The recorded identity stays
  * the authored patch id — the patch this revision delivers, which the base now
  * carries — so a repeated re-merge is idempotent.
@@ -5917,7 +5917,7 @@ async function absorbedRemergeResult(
     throw createFailure({
       kind: "refusal",
       code: "payload-certificate",
-      message: `yrd: PR '${input.id}' revision ${input.revision} has no stable patch identity`,
+      message: `yrd: change '${input.id}' revision ${input.revision} has no stable patch identity`,
     })
   }
   return {
@@ -6165,7 +6165,7 @@ async function authoredGitlinkPaths(
     return candidateFailure(
       "gitlink-inspection",
       `could not inspect authored gitlinks for '${headSha}': ${base.detail}; ` +
-        "restore readable history before declaring submodule pin intents",
+        "restore readable history before declaring submodule min commits",
     )
   }
   const paths = await changedPaths(git, repo, base.sha, headSha)

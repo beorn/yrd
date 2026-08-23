@@ -5,7 +5,7 @@
  * / comments / check-requests / revision history, the integration proof detail
  * beyond the merged SHA (REWRITES/SUBMODULES), and the per-step artifacts label
  * + checkpoint. Every timestamp uses the local detail clock (never a raw ISO
- * string); the PR facts set `bgConflict="ignore"` on author-authored strings.
+ * string); the change facts set `bgConflict="ignore"` on author-authored strings.
  */
 
 import { createElement } from "react"
@@ -145,7 +145,7 @@ describe("watch detail completeness — step artifacts + checkpoint (item J)", (
   })
 })
 
-describe("watch detail completeness — primary PR activity projection", () => {
+describe("watch detail completeness — primary change activity projection", () => {
   it("renders subject, linked issue, reviews, comments, check requests, and revisions with local clocks", () => {
     const head = "9".repeat(40)
     const pr = fixturePr("PR9", "submitted", "2026-07-13T11:10:00.000Z", "Wire the queue detail surface", {

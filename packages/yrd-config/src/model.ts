@@ -14,7 +14,7 @@ export type SourceComposition = Readonly<{
   }>[]
 }>
 
-/** Immutable facts available before a PR exists. Flow predicates must never
+/** Immutable facts available before a change exists. Flow predicates must never
  * inspect mutable PR or Candidate state. */
 export type Submission = Readonly<{
   base: string

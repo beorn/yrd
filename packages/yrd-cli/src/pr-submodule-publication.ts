@@ -133,12 +133,12 @@ export async function submodulePinPublications(options: {
 }
 
 /**
- * The commit a PR's own changes are measured from in a client checkout: the
+ * The commit a change's own changes are measured from in a client checkout: the
  * live merge base of its base branch and its head, resolved through the same
  * `origin/<base>` then `<base>` order every other client-side base lookup uses.
  *
  * Returns undefined when no ref for the base resolves locally. The caller must
- * refuse on that rather than fall back to the PR's recorded base — measuring
+ * refuse on that rather than fall back to the change's recorded base — measuring
  * from a stored, independently-advancing field is exactly the misattribution
  * this replaces.
  */

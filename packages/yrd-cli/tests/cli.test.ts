@@ -152,7 +152,7 @@ const retiredRoleNoun = ["act", "or"].join("")
 
 function remergeGitlinkConflictReason(pr: string, targetRoot: string): string {
   return (
-    `yrd: PR '${pr}' could not recut: target root '${targetRoot}' pins submodule 'km' to '${"c".repeat(40)}'; ` +
+    `yrd: change '${pr}' could not recut: target root '${targetRoot}' pins submodule 'km' to '${"c".repeat(40)}'; ` +
     `replayed authored root '${"e".repeat(40)}' pins it to '${"d".repeat(40)}'; ancestry walk failed because ` +
     "neither submodule commit is an ancestor of the other"
   )
@@ -1417,7 +1417,7 @@ describe("runYrd", () => {
   })
 
   it("22358: pr checkout provisions from the recorded head SHA, not the branch name", async () => {
-    // Acceptance: bay a PR while the author still holds the branch. Branch-name checkout refuses;
+    // Acceptance: bay a change while the author still holds the branch. Branch-name checkout refuses;
     // detached HEAD at the revision head is the immutable candidate @ci needs to gate.
     const mismatched = await createApp({ provisionedHead: "f".repeat(40) })
     await mismatched.bays.submit({
@@ -1429,7 +1429,7 @@ describe("runYrd", () => {
     const refused = outputIO()
     expect(await runYrd(mismatched, yrd("pr", "checkout", "PR1", "--json"), refused.io)).toBe(1)
     expect(refused.stdout()).toBe("")
-    expect(refused.stderr()).toContain(`does not match PR 'PR1' revision head ${HEAD_SHA}`)
+    expect(refused.stderr()).toContain(`does not match change 'PR1' revision head ${HEAD_SHA}`)
     expect(refused.stderr()).toContain("yrd bay close pr-pr1")
     expect(refused.stderr()).toContain("yrd pr checkout PR1 --bay pr-pr1")
 
@@ -1472,7 +1472,7 @@ describe("runYrd", () => {
       warnings?: readonly string[]
     }>
     expect(mergedOut).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", status: "integrated" }] })
-    expect((mergedOut.warnings ?? []).join("\n")).toContain("already merged as PR 'PR1'")
+    expect((mergedOut.warnings ?? []).join("\n")).toContain("already merged as change 'PR1'")
     expect(await Array.fromAsync(app.events())).toEqual(before)
 
     // New head → mints a fresh delivery PR (revision 1), exit 0, no hand-made delivery branch.
@@ -3327,7 +3327,7 @@ describe("runYrd", () => {
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
 
-  it("re-proves the baseline when freshness mutates the PR before refusing it", async () => {
+  it("re-proves the baseline when freshness mutates the change before refusing it", async () => {
     const nextBase = "b".repeat(40)
     const nextHead = "3".repeat(40)
     const unpublishedPin = "4".repeat(40)
@@ -3860,7 +3860,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("refuses to recut a PR whose current head already holds a passing check unless forced", async () => {
+  it("refuses to recut a change whose current head already holds a passing check unless forced", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     if (!app.bays.checksRequested("PR1")) await app.bays.requestChecks({ pr: "PR1" })
@@ -5066,12 +5066,12 @@ describe("runYrd", () => {
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
 
     // The B94 shape (2026-08-19): the bay still binds its finished PR, and a
-    // bare `pr create` refused by naming that PR — a record the caller never
+    // bare `pr create` refused by naming that change — a record the caller never
     // mentioned, on a branch it never named — without saying the bay binding
     // caused the resolution or that a branch selector is the fix.
     const create = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "create"), create.io)).toBe(1)
-    expect(create.stderr()).toContain("bay 'B1' is bound to PR 'PR1' (integrated)")
+    expect(create.stderr()).toContain("bay 'B1' is bound to change 'PR1' (integrated)")
     expect(create.stderr()).toContain("pass a branch — yrd pr create <branch>")
   })
 
@@ -5094,7 +5094,7 @@ describe("runYrd", () => {
     const bare = outputIO({ cwd: "/repo/.bays/B1", currentBranch: () => "topic/replacement" })
 
     expect(await runYrd(app, yrd("pr", "submit"), bare.io, { checks })).toBe(1)
-    expect(bare.stderr()).toContain("bay 'B1' is bound to PR 'PR1' (withdrawn)")
+    expect(bare.stderr()).toContain("bay 'B1' is bound to change 'PR1' (withdrawn)")
     expect(bare.stderr()).toContain("yrd pr submit PR2")
     expect(localChecks).toEqual([])
 
@@ -5573,7 +5573,7 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("release/2.0")
   })
 
-  it("drives create, review, ready, needs-review, and cached checks through the PR surface", async () => {
+  it("drives create, review, ready, needs-review, and cached checks through the change surface", async () => {
     const checkRuns: string[] = []
     const app = await createApp({ requires: ["review"], checkRuns })
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
@@ -5762,7 +5762,7 @@ describe("runYrd", () => {
 
     const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
-    expect(create.stderr()).toContain("create is only for a draft PR")
+    expect(create.stderr()).toContain("create is only for a draft change")
     expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
   })
 
@@ -6225,10 +6225,10 @@ describe("runYrd", () => {
       ],
     })
 
-    // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
+    // A terminal change refuses re-close with a nonzero exit — never a silent no-op.
     const again = outputIO()
     expect(await runYrd(app, yrd("pr", "close", "PR1", "--burn-payload"), again.io)).not.toBe(0)
-    expect(again.stderr()).toContain("is withdrawn; a terminal PR cannot be withdrawn")
+    expect(again.stderr()).toContain("is withdrawn; a terminal change cannot be withdrawn")
   })
 
   it("terminalizes unclaimed Queue work when `bay close --withdraw` closes its PR", async () => {
@@ -6456,7 +6456,7 @@ describe("runYrd", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message:
-            "yrd: PR 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
+            "yrd: change 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
             "ordinary change whose diff is the gitlink bump",
         })
       },
@@ -6579,7 +6579,7 @@ describe("runYrd", () => {
           kind: "refusal",
           code: "authored-gitlink",
           message:
-            "yrd: PR 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
+            "yrd: change 'PR1' authors a gitlink bump; get the commit onto vendor/yrd's own main, then submit an " +
             "ordinary change whose diff is the gitlink bump",
         })
       },
@@ -6796,7 +6796,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("--json"), status.io)).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({
       warnings: [
-        "[pause-blocks-all] queue 'main' pause blocks every PR: all allowed PRs are terminal (PR2 integrated, PR3 integrated)",
+        "[pause-blocks-all] queue 'main' pause blocks every change: all allowed PRs are terminal (PR2 integrated, PR3 integrated)",
       ],
       results: [{ base: "main", pause: { reason: "operator freeze", allowedPRs: ["PR2", "PR3"] } }],
     })
@@ -6824,7 +6824,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("queue", "ls", "--json"), queueListJson.io), queueListJson.stderr()).toBe(0)
     expect(JSON.parse(queueListJson.stdout())).toMatchObject({
       warnings: [
-        "[pause-blocks-all] queue 'main' pause blocks every PR: all allowed PRs are terminal (PR2 integrated, PR3 integrated)",
+        "[pause-blocks-all] queue 'main' pause blocks every change: all allowed PRs are terminal (PR2 integrated, PR3 integrated)",
       ],
     })
 
@@ -7441,7 +7441,7 @@ describe("runYrd", () => {
     ])
   })
 
-  it("renders every batched PR revision as its own settled queue row", async () => {
+  it("renders every batched change revision as its own settled queue row", async () => {
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const submittedAt = "2026-07-13T11:30:00.000Z"
     const finishedAt = "2026-07-13T11:50:00.000Z"
@@ -8103,7 +8103,7 @@ describe("runYrd", () => {
       code: "admission-refusal-loop",
       message:
         "change 'PR1' failed its entry checks 160 consecutive times; latest failure " +
-        "'recut-gitlink-conflict': yrd: PR 'PR1' could not recut: target root " +
+        "'recut-gitlink-conflict': yrd: change 'PR1' could not recut: target root " +
         "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' pins submodule 'dep' to " +
         "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; replayed authored root " +
         "'cccccccccccccccccccccccccccccccccccccccc' pins it to " +
@@ -8319,7 +8319,7 @@ describe("runYrd", () => {
         submitter: "@dev/11",
       })
       const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/stranded-draft")
-      if (pr === undefined) throw new Error("intake did not record the PR")
+      if (pr === undefined) throw new Error("intake did not record the change")
       expect(pr.revs.at(-1)?.submittedAt, "the fixture must be a true draft, never submitted").toBeUndefined()
 
       // One hour on: a real draft-stranded finding exists (past queue audit's
@@ -8467,7 +8467,7 @@ describe("runYrd", () => {
     const finding = {
       code: "draft-stranded",
       message:
-        "PR 'PR1' (issue/stranded) was pushed at 2026-07-09T12:00:00.000Z by @dev/7, review: unreviewed, and " +
+        "change 'PR1' (issue/stranded) was pushed at 2026-07-09T12:00:00.000Z by @dev/7, review: unreviewed, and " +
         "nothing has submitted it; it is invisible to the queue until someone does",
       pr: "PR1",
       specimen: "pr:PR1",
@@ -8598,7 +8598,7 @@ describe("runYrd", () => {
         submit: true,
       })
       const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/permanent-refusal")
-      if (pr === undefined) throw new Error("intake did not record the PR")
+      if (pr === undefined) throw new Error("intake did not record the change")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
       // Structurally permanent: settles to needs-person on its FIRST refusal,
       // same as the yrd-queue unit coverage (admission-refusal-oracle.test.ts).
@@ -8731,7 +8731,7 @@ describe("runYrd", () => {
       const pr = Object.values(app.state().bays.prs).find(
         (candidate) => candidate.branch === "issue/needs-person-in-watch",
       )
-      if (pr === undefined) throw new Error("intake did not record the PR")
+      if (pr === undefined) throw new Error("intake did not record the change")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
       await app.queue.recordAdmissionRefusal({
         pr: pr.id,
@@ -8908,7 +8908,7 @@ describe("runYrd", () => {
     ].map((entry, index) => ({ ...entry, headSha: String(index + 1).repeat(40) }))
     const submittedAt = "2026-07-13T11:00:00.000Z"
     // Released runs leave their PR submitted for the next queue pass; a true
-    // decision rejection owns the PR's terminal revision clock.
+    // decision rejection owns the change's terminal revision clock.
     const prs: Change[] = cases.map((entry) => {
       const rejected = ["check-failed", "novel-failure-code"].includes(entry.code)
       return {
@@ -9516,7 +9516,7 @@ describe("runYrd", () => {
       finished: [],
     } as unknown as QueueStatusResult
     const now = Date.parse("2026-07-09T12:02:00.000Z")
-    // The PR-scoped detail reads projected rows (user directive 2026-07-21), so
+    // The change-scoped detail reads projected rows (user directive 2026-07-21), so
     // the watch snapshot carries the projection production always computes; the
     // PR facts (reviews/comments/checkRequests) are present too. At the right
     // tier the detail is docked open from mount, so it follows the cursor with
@@ -10235,7 +10235,7 @@ describe("runYrd", () => {
     expect(watchFrame).not.toContain("not-selected")
   })
 
-  it("orders queue timeline rows status-major and collapses to the latest row per PR", () => {
+  it("orders queue timeline rows status-major and collapses to the latest row per change", () => {
     const result = {
       base: "main",
       headSha: BASE_SHA,
@@ -10514,7 +10514,7 @@ describe("runYrd", () => {
     const temp = mkdtempSync(join(tmpdir(), "yrd-output-polish-"))
     const artifact = join(temp, "failure.log")
     const failure = [
-      "PR 'PR1' could not be applied: hint: Recursive merging with submodules currently only supports trivial cases.",
+      "change 'PR1' could not be applied: hint: Recursive merging with submodules currently only supports trivial cases.",
       "hint: Please manually handle the merging of each conflicted submodule.",
       "hint: This can be accomplished with the following steps:",
       "hint:   git add vendor/yrd",
@@ -10567,7 +10567,7 @@ describe("runYrd", () => {
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
       expect.soft(status.stdout()).toContain("⧗")
-      expect.soft(status.stdout()).toContain("err=apply-conflict — PR 'PR1' could not be applied")
+      expect.soft(status.stdout()).toContain("err=apply-conflict — change 'PR1' could not be applied")
       expect.soft(status.stdout()).toContain("evidence:")
       expect.soft(status.stdout()).not.toContain("next:")
       expect.soft(status.stdout()).not.toContain("hint:")
@@ -10594,7 +10594,7 @@ describe("runYrd", () => {
       expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
       expect.soft(frame).toContain("OPEN 2")
       expect.soft(frame).toContain("feat(cli): keep runnable work visible")
-      expect.soft(frame).toContain("err=apply-conflict — PR 'PR1' could not be applied")
+      expect.soft(frame).toContain("err=apply-conflict — change 'PR1' could not be applied")
       expect.soft(frame).toContain("evidence:")
       expect.soft(frame).not.toContain("next:")
       expect.soft(frame).not.toContain("released maintenance")
@@ -10813,7 +10813,7 @@ describe("runYrd", () => {
     }
 
     expect(() => runRevisionClock(pr, run)).toThrow(
-      "run 'R-clock' has no causal submit/check-request clock for PR 'PR-clock' revision 1@1111111111111111111111111111111111111111",
+      "run 'R-clock' has no causal submit/check-request clock for change 'PR-clock' revision 1@1111111111111111111111111111111111111111",
     )
     const environmentRefused = runRevisionClock(
       {
@@ -10843,7 +10843,7 @@ describe("runYrd", () => {
         run,
       ),
     ).toThrow(
-      "PR 'PR-clock' current revision 1@1111111111111111111111111111111111111111 rejected terminal clock contradicts current PR state",
+      "change 'PR-clock' current revision 1@1111111111111111111111111111111111111111 rejected terminal clock contradicts current PR state",
     )
 
     expect(() =>
@@ -10857,7 +10857,7 @@ describe("runYrd", () => {
         new Map(),
       ),
     ).toThrow(
-      "run 'R-clock' has no causal submit/check-request clock for PR 'PR-clock' revision 1@1111111111111111111111111111111111111111",
+      "run 'R-clock' has no causal submit/check-request clock for change 'PR-clock' revision 1@1111111111111111111111111111111111111111",
     )
   })
 
@@ -12618,7 +12618,7 @@ describe("runYrd", () => {
     // "no such PR" from "the index returned nothing". This app has no PRs, so
     // `searched 0` here is HONEST ABSENCE — which is why the message reports
     // the count and does not assert a verdict at zero.
-    expect(optionValue.stderr()).toBe("error: no PR 'PR404' — searched 0 change(s)\n")
+    expect(optionValue.stderr()).toBe("error: no change 'PR404' — searched 0 change(s)\n")
 
     const afterTerminator = outputIO()
     expect(await runYrd(app, yrd("pr", "crate", "--", "--json"), afterTerminator.io)).toBe(2)
@@ -12645,7 +12645,7 @@ describe("runYrd", () => {
     // package, none of which could reach the bay model's builder while it was
     // private. Exporting it collapsed eleven hand-rolled spellings onto one
     // sentence. `searched 0` is honest here — this app has no PRs.
-    expect(missingPR.stderr()).toBe("error: no PR 'PR404' — searched 0 change(s)\n")
+    expect(missingPR.stderr()).toBe("error: no change 'PR404' — searched 0 change(s)\n")
 
     const missingChangeJson = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404", "--json"), missingChangeJson.io)).toBe(1)
@@ -12653,8 +12653,8 @@ describe("runYrd", () => {
       failure: {
         kind: "refusal",
         code: "pr-not-found",
-        message: "yrd: no PR 'PR404' — searched 0 change(s)",
-        cause: "no PR 'PR404' — searched 0 change(s)",
+        message: "yrd: no change 'PR404' — searched 0 change(s)",
+        cause: "no change 'PR404' — searched 0 change(s)",
         resolution: ["Correct the cause above, then retry the same Yrd command."],
       },
     })
@@ -12680,7 +12680,7 @@ describe("runYrd", () => {
         missingWaitingRun.io,
       ),
     ).toBe(1)
-    expect(missingWaitingRun.stderr()).toBe("error: no queue run or PR 'PR404'\n")
+    expect(missingWaitingRun.stderr()).toBe("error: no queue run or change 'PR404'\n")
 
     const unsupported = outputIO()
     expect(await runYrd(app, yrd("admin", "journal", "bump", "2"), unsupported.io)).toBe(2)
@@ -12834,7 +12834,7 @@ describe("runYrd", () => {
     }
 
     try {
-      // A PR selector is a one-shot pass: it drains, prints the interactive run
+      // A change selector is a one-shot pass: it drains, prints the interactive run
       // table, and never announces the habitant follow-runner.
       const selectedHuman = outputIO({ cwd: repo, runner })
       expect(await runYrd(await readyApp(), yrd("queue", "run", "PR1"), selectedHuman.io), selectedHuman.stderr()).toBe(
@@ -13215,7 +13215,7 @@ describe("runYrd", () => {
 
 describe("queue run — follow-by-default mode selection (#62)", () => {
   // `queue run` with no selector and no --once IS the habitant follow-runner;
-  // a single pass is explicit via a PR selector or --once. The retired
+  // a single pass is explicit via a change selector or --once. The retired
   // --follow/--watch flags are rejected. The loop calls scope.sleep after each
   // cycle; a one-shot pass never sleeps — the observable mode discriminator.
   const trackedScope = () => {
@@ -13287,7 +13287,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
   })
 
-  it("a PR selector is a single pass, not a follow loop", async () => {
+  it("a change selector is a single pass, not a follow loop", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     const tracked = trackedScope()
@@ -13410,7 +13410,7 @@ describe("prop projections", () => {
           plain: true,
         })
         expect.soft(human).toContain("NEXT")
-        expect.soft(human).toContain("the PR remains submitted and re-queues automatically")
+        expect.soft(human).toContain("the change remains submitted and re-queues automatically")
         expect.soft(human).not.toContain("retry the same Yrd command")
       }
     }
@@ -13457,7 +13457,7 @@ describe("prop projections", () => {
 })
 
 describe("explicit queue step authority", () => {
-  it("runs one PR with only the explicitly selected merge step", async () => {
+  it("runs one change with only the explicitly selected merge step", async () => {
     const checkRuns: string[] = []
     const mergeRuns: string[] = []
     const app = await createApp({ checkRuns, mergeRuns })
@@ -14051,7 +14051,7 @@ describe("typed issue merge bridge", () => {
 
     expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io)).toBe(1)
     expect(output.stdout()).toBe("")
-    expect(output.stderr()).toContain("cannot project rejected PR 'PR1' without a typed Queue bounce run")
+    expect(output.stderr()).toContain("cannot project rejected change 'PR1' without a typed Queue bounce run")
   })
 
   it("dry-runs a unique failed Queue run association for a legacy rejection without writing", async () => {
@@ -14381,8 +14381,8 @@ describe("typed issue merge bridge", () => {
       failure: {
         kind: "refusal",
         code: "request-refused",
-        message: "journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
-        cause: "journal changed while reading PR 'PR1' runs",
+        message: "journal changed while reading change 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
+        cause: "journal changed while reading change 'PR1' runs",
         resolution: ["yrd pr runs PR1 --json"],
       },
     })
@@ -14626,15 +14626,15 @@ describe("PR metadata — title, description, and issue link", () => {
     })
   }
 
-  it("defaults the PR title and description from the head commit subject and body at submit", async () => {
+  it("defaults the change title and description from the head commit subject and body at submit", async () => {
     const app = await createApp()
-    const submit = commitMetaIO("feat(bay): pr metadata", "Adds a durable title and description to the PR record.")
+    const submit = commitMetaIO("feat(bay): pr metadata", "Adds a durable title and description to the change record.")
     expect(await runYrd(app, yrd("pr", "submit", "topic/defaults", "--base", "main"), submit.io), submit.stderr()).toBe(
       0,
     )
     expect(app.bays.pr("topic/defaults")).toMatchObject({
       title: "feat(bay): pr metadata",
-      description: "Adds a durable title and description to the PR record.",
+      description: "Adds a durable title and description to the change record.",
     })
   })
 
@@ -14683,7 +14683,7 @@ describe("PR metadata — title, description, and issue link", () => {
     })
   })
 
-  it("edits the title and description of a live PR via pr edit", async () => {
+  it("edits the title and description of a live change via pr edit", async () => {
     const app = await createApp()
     const submit = commitMetaIO("feat: original subject", "Original body.")
     expect(await runYrd(app, yrd("pr", "submit", "topic/edit", "--base", "main"), submit.io), submit.stderr()).toBe(0)
@@ -14699,7 +14699,7 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(app.bays.pr("topic/edit")).toMatchObject({ title: "feat: renamed subject", description: "New body." })
   })
 
-  it("prefers the PR title over the branch in the pr list SUBJECT column and JSON", async () => {
+  it("prefers the change title over the branch in the pr list SUBJECT column and JSON", async () => {
     const app = await createApp()
     // Short enough to survive the SUBJECT column budget so the branch never wins.
     const submit = commitMetaIO("add pr metadata")
@@ -14822,7 +14822,7 @@ describe("PR metadata — title, description, and issue link", () => {
     }
   }
 
-  it("renders title, an OSC 8 issue hyperlink, and the description in the PR detail view", async () => {
+  it("renders title, an OSC 8 issue hyperlink, and the description in the change detail view", async () => {
     const rendered = await renderString(
       createElement(ChangeDetailView, { pr: metadataPr(), runs: [], now: Date.parse("2026-07-09T12:10:00.000Z") }),
       { width: 120, height: 40 },
@@ -15322,7 +15322,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
       const outputPath = join(artifactRoot, "R1", "0-check", "attempt-1", "output.log")
       mkdirSync(join(outputPath, ".."), { recursive: true })
-      writeFileSync(outputPath, "must stay unread for a PR-only row\n")
+      writeFileSync(outputPath, "must stay unread for a change-only row\n")
 
       const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ artifactRoot }).io, {
         includeOutputs: true,
@@ -15336,7 +15336,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
-  it("scopes a PR-focused watch snapshot before projecting older terminal runs", async () => {
+  it("scopes a change-focused watch snapshot before projecting older terminal runs", async () => {
     const app = await createApp({ batch: 2 })
     try {
       await openAndSubmit(app)
@@ -16195,7 +16195,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(output.stdout()).toContain("0 changes collapse to 0 distinct landings — rebuilt 0, skipped 0")
     })
 
-    it("names the PR it cannot rebuild and refuses to call the run clean", async () => {
+    it("names the change it cannot rebuild and refuses to call the run clean", async () => {
       await using app = await createApp()
       const record = mergedRecord(`I${"e".repeat(40)}`)
       const output = outputIO()
@@ -16205,7 +16205,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         output.stderr(),
       ).toBe(1)
       expect(output.stdout()).toContain("SKIPPED PR1 revision 1 pr-unknown")
-      expect(output.stdout()).toContain("a merge record proves a merge, not a PR's existence")
+      expect(output.stdout()).toContain("a merge record proves a merge, not a change's existence")
     })
 
     // Contract 4 / doctor-rebuild-hardening: a wiped journal reads as N identical
@@ -16356,7 +16356,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       pins: [{ path: SUBMODULE, before: CURRENT_PIN, after: TARGET_SHA }],
     })
 
-    it("buckets a merged intent carrier as a healthy skip, never a PR gap", async () => {
+    it("buckets a merged intent carrier as a healthy skip, never a change gap", async () => {
       // The intent rail itself is retired (this carrier's own commit): there is
       // no more `app.intents` to submit through or consult, so doctor can no
       // longer distinguish "a known intent record" from "an id merely shaped
@@ -16389,7 +16389,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       if (revision.changeId === undefined || poisonedRevision.changeId === undefined) {
         throw new Error("expected current PR Change-Ids")
       }
-      // A merged record with no merged commit: repository truth that contradicts itself, for a PR
+      // A merged record with no merged commit: repository truth that contradicts itself, for a change
       // the journal knows, so the scan reaches the contradiction rather than an earlier skip. It
       // comes FIRST so a scan that aborts on it never reaches the merge it could still rebuild.
       const contradictory = {
@@ -16476,7 +16476,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     const runner = await createApp({ journal })
     const viewer = await createApp({ journal })
     try {
-      // The runner submits a PR AFTER the viewer app has already mounted.
+      // The runner submits a change AFTER the viewer app has already mounted.
       await openAndSubmit(runner)
       expect(Object.keys(runner.state().bays.prs)).toEqual(["PR1"])
 
