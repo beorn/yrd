@@ -1230,7 +1230,7 @@ const runnerPinBehindCache = new Map<string, RunnerPinBehindEntry>()
  * also runs once per focus/cursor change (see `queueGitDir`'s doc comment on why
  * an uncached git fork there is a bug, not a feature) — this TTL keeps the
  * pin-resolution forks off that per-keystroke path while still catching a
- * pin advance within one poll tick. The habitant's own self-check deliberately
+ * min-commit advance within one poll tick. The habitant's own self-check deliberately
  * does NOT come through here: it needs consecutive observations to be genuinely
  * consecutive reads, which a cache at the poll cadence would quietly collapse. */
 const RUNNER_PIN_BEHIND_TTL_MS = 15_000
