@@ -28,6 +28,25 @@ const EnvironmentNameSchema = TextSchema.regex(/^[A-Za-z_][A-Za-z0-9_]*$/u).refi
   (name) => !name.startsWith("YRD_") && !name.startsWith("GIT_"),
   { message: "uses a reserved prefix" },
 )
+/** A repo-relative gate-script path (file or directory). Absolute paths and
+ * `..` segments would let a declaration reach outside the repository the base
+ * ref governs, so both refuse at parse time. */
+const GateScriptPathSchema = TextSchema.refine(
+  (path) =>
+    !path.startsWith("/") &&
+    !path.startsWith("\\") &&
+    !/^[A-Za-z]:/u.test(path) &&
+    path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
+  { message: "must be a repo-relative path without '.' or '..' segments" },
+)
+const GateScriptsSchema = z
+  .array(GateScriptPathSchema)
+  .min(1)
+  .superRefine((paths, context) => {
+    if (new Set(paths).size !== paths.length) {
+      context.addIssue({ code: "custom", message: "contains duplicate script paths" })
+    }
+  })
 const StepObjectSchema = z
   .object({
     kind: z.enum(["check", "action", "merge"]).optional(),
@@ -45,6 +64,15 @@ const StepObjectSchema = z
      * candidate and never invokes a base comparator. */
     mode: GateModeSchema.optional(),
     environment: TextSchema.optional(),
+    /** Gate scripts this check executes, as repo-relative paths (files or
+     * directories). Declared paths run at the BASE ref's version, like the
+     * config itself (23183): before the command starts, every declared path
+     * that differs is materialized from the base into the execution checkout
+     * and restored afterwards, so a change that edits its own gate script is
+     * judged by the pre-edit script. The paths' object shas at the base are
+     * folded into the step's derived revision, so a script edit is a revision
+     * change the plan audit sees. */
+    scripts: GateScriptsSchema.optional(),
     /** Declared child values applied over the deterministic base allowlist (merge-queue R42). */
     env: z.record(EnvironmentNameSchema, z.string()).optional(),
     /** Ambient names copied into the check child beyond the base allowlist — explicit, never implicit. */
@@ -70,6 +98,15 @@ const StepObjectSchema = z
         code: "custom",
         path: ["comparisonReady"],
         message: "requires comparison: diagnostics",
+      })
+    }
+    if (step.scripts !== undefined && step.runner !== "local") {
+      // A waiting step's child outlives the invocation, and a base-pinned
+      // overlay restored on return would flip the scripts under it mid-run.
+      context.addIssue({
+        code: "custom",
+        path: ["scripts"],
+        message: "is only supported by the local runner",
       })
     }
     if (step.comparison === undefined) return

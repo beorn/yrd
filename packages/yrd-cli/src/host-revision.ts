@@ -19,6 +19,14 @@ export type QueueStepRevisionInput = Readonly<{
   toolchain: ToolchainFingerprint
   checkoutParent?: string
   resolvedCommand?: readonly string[]
+  /** Object shas (blob or tree) of the step's declared gate scripts at the ref
+   * the derivation reads its config from (23183). Folding them in makes a
+   * gate-script edit a REVISION change: the run record carries which script
+   * version judged it, the plan audit's revision comparison surfaces the edit,
+   * and a moved-base re-derivation picks the new script up like any other
+   * config change. Absent (no `scripts:` declared) keeps the prior identity —
+   * JSON.stringify drops undefined keys. */
+  scripts?: Readonly<Record<string, string>>
 }>
 
 /**
@@ -89,6 +97,7 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
         timeoutMs: input.timeoutMs,
         noProgressMs: input.noProgressMs,
         toolchain: stableToolchain(input.toolchain),
+        scripts: input.scripts,
       }),
     )
     .digest("hex")

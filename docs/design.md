@@ -363,6 +363,15 @@ reordering is an operator action, not config.
 branch)` lock. Two Queues (two Flows) landing on the same base share that lock;
 checks never take it.
 
+**C5a (23183). Gate scripts share the config's authority.** A check's declared
+`scripts` paths execute at the BASE ref's version: the execution checkout
+overlays any differing declared path from the candidate's base sha before the
+command runs (and restores the candidate afterwards), the paths' base object
+shas are folded into the step's derived revision, and a change that edits its
+own gate script is judged by the pre-edit script — the edit takes effect for
+the next change, never the one carrying it. Same rule every surveyed queue
+applies to its config; here it extends to the scripts the config names.
+
 **C5. Config authority is the base branch.** Flows and steps for evaluating a
 Candidate come from the yard's own config (the base checkout / pinned flow
 rev) — never from `.yrd.yml` content inside the submitted revisions. A PR that

@@ -7221,6 +7221,12 @@ export type GitCheckOptions = ProcessDependency &
     environmentPassthrough?: readonly string[]
     timeoutMs?: number
     noProgressTimeoutMs?: number
+    /** Repo-relative gate-script paths that execute at the BASE ref's version
+     * (23183): before the candidate command runs, every declared path that
+     * differs is materialized from the candidate's base sha into the execution
+     * checkout and restored afterwards, so a change editing its own gate
+     * script is judged by the pre-edit script. Local runner only. */
+    scripts?: readonly string[]
     refuse?: RefusePathsPolicy
     /** The shaset provisioner for candidates this step RECONSTRUCTS itself
      * (no runner context). Without it a reconstructed candidate would compose
@@ -7508,10 +7514,116 @@ async function withStepCandidate<Output extends JsonValue>(
   )
 }
 
+/** What one gate-script overlay did to the execution checkout, and how to
+ * undo it. `differing` empty means the change touched no declared path and
+ * NOTHING was mutated — the common case, and the reason this costs one `git
+ * diff` per gated check. */
+export type GateScriptOverlay = Readonly<{
+  differing: readonly string[]
+  restore(): Promise<void>
+}>
+
+/** The one git capability the overlay needs, so the CLI's pre-submit runner
+ * (a different process adapter) can reuse it. */
+export type GateScriptGit = Readonly<{
+  run(
+    cwd: string,
+    args: readonly string[],
+    allowFailure?: boolean,
+  ): Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
+}>
+
+/** Make the declared gate-script paths in `checkout` read as the BASE ref's
+ * version for the duration of a check (23183): every file under the declared
+ * paths that differs between the candidate and its base is replaced with the
+ * base's content (a file the base does not hold is removed), and `restore()`
+ * puts the candidate's own content back so the checkout stays a pure
+ * candidate materialization for whatever runs next. Fails loud — a gate whose
+ * script cannot be pinned to the base must not run at all. */
+export async function overlayGateScripts(
+  git: GateScriptGit,
+  checkout: string,
+  baseSha: string,
+  candidateSha: string,
+  paths: readonly string[],
+): Promise<GateScriptOverlay> {
+  for (const path of paths) {
+    const held = await git.run(checkout, ["cat-file", "-e", `${baseSha}:${path}`], true)
+    if (held.code !== 0) {
+      throw createFailure({
+        kind: "refusal",
+        code: "gate-script-missing-at-base",
+        message:
+          `yrd: gate script '${path}' does not exist at base ${baseSha.slice(0, 8)}. Gate scripts execute at the ` +
+          "base ref's version, so a script must be ON the base before a check may run it; a change adding both " +
+          "lands the script first (it takes effect for the NEXT change).",
+      })
+    }
+  }
+  const diff = await git.run(checkout, ["diff", "--name-only", baseSha, candidateSha, "--", ...paths], true)
+  if (diff.code !== 0) {
+    throw createFailure({
+      kind: "infrastructure",
+      code: "gate-script-diff-failed",
+      message: `yrd: could not compare gate scripts between ${baseSha.slice(0, 8)} and ${candidateSha.slice(0, 8)}: ${diff.stderr.trim() || `git diff exited ${String(diff.code)}`}`,
+    })
+  }
+  const differing = diff.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+  if (differing.length === 0) return { differing, restore: async () => undefined }
+
+  const materialize = async (sourceSha: string, side: string): Promise<void> => {
+    const present: string[] = []
+    for (const file of differing) {
+      const held = await git.run(checkout, ["cat-file", "-e", `${sourceSha}:${file}`], true)
+      if (held.code === 0) present.push(file)
+      else await rm(join(checkout, file), { force: true })
+    }
+    if (present.length === 0) return
+    const restored = await git.run(checkout, ["checkout", sourceSha, "--", ...present], true)
+    if (restored.code !== 0) {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "gate-script-overlay-failed",
+        message:
+          `yrd: could not materialize the ${side} version of gate scripts ${present.join(", ")} at ` +
+          `${sourceSha.slice(0, 8)}: ${restored.stderr.trim() || `git checkout exited ${String(restored.code)}`}`,
+      })
+    }
+  }
+  await materialize(baseSha, "base")
+  return {
+    differing,
+    restore: () => materialize(candidateSha, "candidate"),
+  }
+}
+
 export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   const mode = options.mode ?? "delta"
+  // 23183: declared gate scripts execute at the BASE ref's version. The pin
+  // covers the whole candidate execution — the parent comparison runs in its
+  // own base-sha scratch checkout, where the scripts already ARE the base's —
+  // and the restore in `finally` returns the checkout to a pure candidate
+  // materialization for whatever runs next (a restore failure is loud: a
+  // poisoned worktree must never pass silently). Waiting-runner steps refuse
+  // `scripts` at config validation; the pin cannot outlive this call.
+  const withGatePinnedScripts =
+    (body: (path: string, candidate: PinnedCandidate) => Promise<JobResult<GitCheckResultEvidence>>) =>
+    async (path: string, candidate: PinnedCandidate): Promise<JobResult<GitCheckResultEvidence>> => {
+      const overlay =
+        options.scripts === undefined || options.scripts.length === 0
+          ? undefined
+          : await overlayGateScripts(git, path, candidate.baseSha, candidate.candidateSha, options.scripts)
+      try {
+        return await body(path, candidate)
+      } finally {
+        await overlay?.restore()
+      }
+    }
   const check = async (input: StepExecution, context: JobContext): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
@@ -7531,7 +7643,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
             : { authorizeComponentModelChange: options.authorizeComponentModelChange }),
         },
         (failure) => failed(failure.error.code, failure.error.message, failure.output),
-        async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
+        withGatePinnedScripts(async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
           const artifactRoot = options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")
           const configured = (
             cwd: string,
@@ -7874,7 +7986,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
             return { status: "completed", conclusion: "success", output: evidence }
           }
           return { status: "completed", conclusion: "failure", error: outcome.error, output: evidence }
-        },
+        }),
       )
     } catch (cause) {
       const classified = await stepInfrastructureFailure(git, repo, cause)

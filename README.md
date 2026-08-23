@@ -1278,6 +1278,23 @@ may define a one-line command inline:
 checks: [{ lint: { run: bun run lint, mode: strict } }]
 ```
 
+A check may pin the scripts its command executes to the base ref:
+
+```yaml
+checks: [{ lint: { run: bash tools/lint.sh, scripts: [tools/lint.sh] } }]
+```
+
+Declared `scripts` paths (files or directories, repo-relative, local runner
+only) execute at the BASE ref's version, exactly like this config file: before
+the command starts, every declared path that differs is materialized from the
+candidate's base sha into the execution checkout and restored afterwards, so a
+change that edits its own gate script is judged by the pre-edit script — the
+edit takes effect for the NEXT change. The paths' object shas at the base are
+folded into the step's derived revision, so the run record names the script
+version that judged it and `yrd queue audit` sees a landed script edit as a
+plan change. A declared path the base does not hold refuses loudly, at startup
+and again at execution.
+
 Merge is not a configurable check. It is Yrd's built-in landing transition, and
 post-landing effects belong to subscribers. The managed pre-submit hook and
 `pr submit`/`pr ready` run the same configured list for fast local feedback.

@@ -72,6 +72,7 @@ import {
   linearRebuildRemedy,
   repairMergeRecordEstate,
   inspectGitQueueTarget,
+  overlayGateScripts,
   resolveGitQueueTarget,
   worktreeContexts,
   withQueue,
@@ -533,7 +534,12 @@ export function configuredChecks(
     // YRD_CANDIDATE_SHA has always named a commit, never the working tree, so
     // the composed checkout is the honest materialization of what was declared.
     const composes = !(await isAncestorCommit(process, repo, baseSha, candidateSha))
-    if (ref === undefined && !composes) return run(cwd, candidateSha)
+    // A check with base-pinned gate scripts (23183) never runs in the invoking
+    // tree: pinning would mean OVERWRITING files in the author's own checkout.
+    // It always executes in a materialized checkout, where the declared paths
+    // are overlaid with the base's version before the command starts.
+    const pinnedScripts = definition.scripts ?? []
+    if (ref === undefined && !composes && pinnedScripts.length === 0) return run(cwd, candidateSha)
 
     const checkoutSha = composes ? baseSha : candidateSha
     const parent = join(stateDir, "pre-submit-worktrees")
@@ -665,6 +671,23 @@ export function configuredChecks(
           raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
         },
       })
+      if (pinnedScripts.length > 0) {
+        // 23183: the declared gate scripts read as the base's version for this
+        // check. No restore — the checkout is destroyed after the run, and a
+        // retained failure workspace honestly shows the scripts that judged it.
+        await overlayGateScripts(
+          {
+            run: async (cwd, args) => {
+              const outcome = await process.run({ argv: ["git", "-C", cwd, ...args], cwd, env: inherited })
+              return { code: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr }
+            },
+          },
+          checkout,
+          baseSha,
+          candidate,
+          pinnedScripts,
+        )
+      }
       const result = await run(checkout, candidate)
       failed = result.exitCode !== 0 || result.timedOut
       if (!failed || !keepOnFailure) return result
@@ -1146,6 +1169,7 @@ function candidateStep(
         runner: config.runner,
         mode: stepGateMode(config),
         classification: config.classification ?? "carrier",
+        ...(config.scripts === undefined ? {} : { scripts: config.scripts }),
         ...(config.comparison === undefined ? {} : { comparison: config.comparison }),
         ...(config.comparisonReady === undefined ? {} : { comparisonReady: config.comparisonReady }),
         timeoutMs: stepTimeoutMs(config),
@@ -1176,10 +1200,40 @@ function candidateStep(
  * through this same function, so drift detection always proves the CURRENT
  * on-disk config rather than a startup snapshot.
  */
+/** Object shas of every declared gate script, at ONE exact ref, sorted so the
+ * revision digest is stable. Absent when this config declares none. */
+export type GateScriptShas = Readonly<Record<string, string>>
+
+/** The per-step slice of the resolved gate-script shas, in sorted-path order.
+ * A declared path the resolution did not cover is a programming error — the
+ * resolver and this projection read the same config — and refuses loudly
+ * rather than deriving a revision that silently omits the script identity. */
+function stepGateScriptShas(
+  name: string,
+  stepConfig: YrdStepConfig,
+  resolved: GateScriptShas | undefined,
+): Readonly<Record<string, string>> | undefined {
+  if (stepConfig.scripts === undefined) return undefined
+  const entries = [...stepConfig.scripts].toSorted().map((path) => {
+    const sha = resolved?.[path]
+    if (sha === undefined) {
+      raiseFailure(
+        "configuration",
+        "gate-script-unresolved",
+        `yrd: step '${name}' declares gate script '${path}' but no object sha was resolved for it; ` +
+          "the descriptor derivation and the script resolution read the same config, so this is a defect, not drift",
+      )
+    }
+    return [path, sha] as const
+  })
+  return Object.fromEntries(entries)
+}
+
 function configuredStepDescriptors(
   fixed: Readonly<{ repo: string; stateDir: string; baysRoot: string }>,
   config: ResolvedYrdProjectConfig,
   mergeCommand: readonly string[] | undefined,
+  gateScriptShas?: GateScriptShas,
 ): readonly InstalledStep[] {
   const toolchain = hostToolchainFingerprint()
   const mergeIndex = config.steps.indexOf("merge")
@@ -1189,6 +1243,7 @@ function configuredStepDescriptors(
       stepConfig.kind ?? (name === "merge" ? "merge" : mergeIndex >= 0 && index > mergeIndex ? "action" : "check")
     const timeoutMs = stepTimeoutMs(stepConfig)
     const noProgressMs = stepNoProgressMs(stepConfig)
+    const scripts = stepGateScriptShas(name, stepConfig, gateScriptShas)
     if (kind === "merge") {
       return {
         name,
@@ -1202,6 +1257,7 @@ function configuredStepDescriptors(
           noProgressMs,
           toolchain,
           resolvedCommand: mergeCommand,
+          ...(scripts === undefined ? {} : { scripts }),
         }),
         kind,
       }
@@ -1219,6 +1275,7 @@ function configuredStepDescriptors(
           noProgressMs,
           toolchain,
           checkoutParent: fixed.baysRoot,
+          ...(scripts === undefined ? {} : { scripts }),
         }),
         kind,
         classification: stepConfig.classification ?? "carrier",
@@ -1235,10 +1292,47 @@ function configuredStepDescriptors(
         timeoutMs,
         noProgressMs,
         toolchain,
+        ...(scripts === undefined ? {} : { scripts }),
       }),
       kind,
     }
   })
+}
+
+/** Resolve every declared gate script's object sha (blob or tree) at ONE
+ * exact commit — the ref whose config declared them. Undefined when the
+ * config declares none, so the feature costs nothing where unused. A declared
+ * path the commit does not hold refuses: the config comes from that very
+ * commit, so a script it names but does not carry cannot gate anything, and a
+ * script ADDED by a change takes effect for the NEXT change (23183). */
+async function resolveGateScriptShas(
+  process: Pick<Process, "run">,
+  repo: string,
+  config: ResolvedYrdProjectConfig,
+  sha: string,
+): Promise<GateScriptShas | undefined> {
+  const paths = [...new Set(Object.values(config.definitions).flatMap((definition) => definition.scripts ?? []))]
+  if (paths.length === 0) return undefined
+  const env = cleanGitEnvironment(globalThis.process.env)
+  const entries: [string, string][] = []
+  for (const path of paths.toSorted()) {
+    const resolved = await process.run({
+      argv: ["git", "-C", repo, "rev-parse", `${sha}:${path}`],
+      cwd: repo,
+      env,
+    })
+    if (resolved.exitCode !== 0) {
+      raiseFailure(
+        "configuration",
+        "gate-script-missing-at-base",
+        `yrd: gate script '${path}' does not exist at ${sha.slice(0, 8)}, the commit whose config declares it. ` +
+          "Gate scripts execute at the base ref's version, so a script must be ON the base before a check may " +
+          "declare it; a change adding both lands the script first (it takes effect for the NEXT change).",
+      )
+    }
+    entries.push([path, resolved.stdout.trim()])
+  }
+  return Object.fromEntries(entries)
 }
 
 /** The plan git declares at ONE EXACT commit, as full step descriptors.
@@ -1303,6 +1397,10 @@ async function declaredPlanAt(
   validateConfig(loaded.config)
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
+  // Gate scripts resolve at THIS sha, exactly like the config: a script edit
+  // landing on the base changes the derived revision from that commit on,
+  // which is how the record names the script version that judged each run.
+  const gateScriptShas = await resolveGateScriptShas(process, repository.repo, loaded.config, sha)
   return {
     sha,
     ...(configBlobSha === undefined ? {} : { configBlobSha }),
@@ -1311,6 +1409,7 @@ async function declaredPlanAt(
       { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
       loaded.config,
       mergeCommand,
+      gateScriptShas,
     ),
   }
 }
@@ -1352,11 +1451,13 @@ function integratedRunner(
 function configuredQueueSteps(
   options: DefaultYrdDefinitionOptions,
   mergeCommand: readonly string[] | undefined,
+  gateScriptShas: GateScriptShas | undefined,
 ): readonly RuntimeStep[] {
   const descriptors = configuredStepDescriptors(
     { repo: options.repo, stateDir: options.stateDir, baysRoot: options.baysRoot },
     options.config,
     mergeCommand,
+    gateScriptShas,
   )
   const mergeIndex = descriptors.findIndex((descriptor) => descriptor.kind === "merge")
   const certificationIndex = descriptors.findLastIndex(
@@ -1814,8 +1915,26 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     release: async (input) => (await deploymentStore()).release(input),
   }
   const deploymentJobs = createDeploymentJobDefs(lazyDeploymentStore)
+  // The gate scripts' identity, resolved once at the same base authority the
+  // config itself was read from (23183). None declared → no git reads at all.
+  const gateScriptShas = Object.values(options.config.definitions).every(
+    (definition) => definition.scripts === undefined,
+  )
+    ? undefined
+    : await resolveGateScriptShas(
+        options.process,
+        options.repo,
+        options.config,
+        (
+          await inspectGitQueueTarget({
+            inject: { process: options.process },
+            repo: options.repo,
+            branch: baseIdentity(options.config.base),
+          })
+        ).sha,
+      )
   const queue = withQueue({
-    steps: configuredQueueSteps(options, mergeCommand),
+    steps: configuredQueueSteps(options, mergeCommand, gateScriptShas),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
     defaultBase: options.config.base,
