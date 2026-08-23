@@ -255,7 +255,7 @@ describe("real Git helpers against a fixture", () => {
   it("reads the origin remote and writes a branch without committing", async () => {
     const root = await superproject(TWO_SUBMODULES, "https://github.com/owner/super.git")
     expect(superprojectOrigin(root)).toBe("https://github.com/owner/super.git")
-    setSubmoduleBranch(root, "vendor/foo", "main")
+    await setSubmoduleBranch(root, "vendor/foo", "main")
     expect(await git(root, "config", "--file", ".gitmodules", "--get", "submodule.vendor/foo.branch")).toBe("main")
     // The edit is left uncommitted for the operator to review.
     expect(await git(root, "status", "--porcelain")).toContain(".gitmodules")

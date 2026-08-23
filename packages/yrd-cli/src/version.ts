@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { adaptProcessGit } from "@yrd/process"
 import { accessSync, constants, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import distribution from "../../../package.json" with { type: "json" }
@@ -29,8 +29,6 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
   // Those describe the operated-on repository, not the Yrd code that is
   // running. Scrub the whole Git environment and anchor both cwd and -C to the
   // loaded Yrd checkout so the reported identity cannot cross repositories.
-  const env = { ...process.env }
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key]
   const root = yrdSourceRoot()
   if (root === undefined) return { status: 1, stdout: "" }
   try {
@@ -40,19 +38,17 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
     // inherit the consumer's HEAD as Yrd's runtime identity.
     return { status: 1, stdout: "" }
   }
-  const result = spawnSync("git", ["-C", root, ...args], {
-    cwd: root,
-    encoding: "utf8",
-    env,
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: GIT_TIMEOUT_MS,
+  const [verb, ...rest] = args
+  if (verb !== "rev-parse" && verb !== "status") throw new Error(`yrd: unsupported source Git read '${verb ?? ""}'`)
+  const result = adaptProcessGit(undefined, { timeoutMs: GIT_TIMEOUT_MS }).readSync({
+    repo: root,
+    command: { verb, args: rest },
   })
-  if (result.error !== undefined) {
-    const timedOut = "code" in result.error && result.error.code === "ETIMEDOUT"
-    const detail = timedOut ? `timed out after ${GIT_TIMEOUT_MS}ms` : result.error.message
-    throw new Error(`yrd: git ${args.join(" ")} ${detail}`, { cause: result.error })
+  if (result.failure !== undefined) {
+    const detail = result.timedOut === true ? `timed out after ${GIT_TIMEOUT_MS}ms` : result.failure
+    throw new Error(`yrd: git ${args.join(" ")} ${detail}`)
   }
-  return { status: result.status ?? 1, stdout: result.stdout ?? "" }
+  return { status: result.code, stdout: result.stdout }
 }
 
 /** Runtime identity for every Yrd CLI projection, anchored to Yrd source. */

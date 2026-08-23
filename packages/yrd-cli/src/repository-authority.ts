@@ -1,7 +1,6 @@
-import { execFileSync } from "node:child_process"
+import { adaptProcessGit, type GitSyncReadCommand } from "@yrd/process"
 import { existsSync, lstatSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { cleanGitEnvironment } from "./git-environment.ts"
 
 /**
  * One repository selector resolved to the two paths every Yrd rail needs: the
@@ -19,11 +18,14 @@ function detail(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function git(repositoryRoot: string, args: readonly string[]): string {
-  return execFileSync("git", ["-C", repositoryRoot, ...args], {
-    encoding: "utf8",
-    env: cleanGitEnvironment(process.env),
-  })
+const gitReader = adaptProcessGit(undefined)
+
+function git(repositoryRoot: string, command: GitSyncReadCommand): string {
+  const result = gitReader.readSync({ repo: repositoryRoot, command })
+  if (result.code !== 0 || result.failure !== undefined) {
+    throw new Error(result.stderr.trim() || result.failure || `git ${command.verb} exited ${result.code}`)
+  }
+  return result.stdout
 }
 
 /**
@@ -40,7 +42,7 @@ export function repositoryAuthority(selectedRoot: string): string {
   if (lstatSync(dotGit).isDirectory()) return realpathSync(repositoryRoot)
   let output
   try {
-    output = git(repositoryRoot, ["worktree", "list", "--porcelain", "-z"])
+    output = git(repositoryRoot, { verb: "worktree-list" })
   } catch (error) {
     throw new Error(`yrd: cannot resolve repository authority for ${repositoryRoot}: ${detail(error)}`)
   }
@@ -63,7 +65,7 @@ export function gitDirAt(repositoryRoot: string): string | undefined {
   try {
     return resolve(
       repositoryRoot,
-      git(repositoryRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim(),
+      git(repositoryRoot, { verb: "rev-parse", args: ["--path-format=absolute", "--git-common-dir"] }).trim(),
     )
   } catch (error) {
     throw new Error(`yrd: cannot resolve common Git directory for ${repositoryRoot}: ${detail(error)}`)

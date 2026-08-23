@@ -2029,7 +2029,7 @@ describe("pr recut --preflight", () => {
     expect(output.stdout()).toContain("tree-proof: ancestor=no, merge-tree=identical")
   })
 
-  it("derives pin distance and a matching landing commit with real Git plumbing", () => {
+  it("derives pin distance and a matching landing commit with real Git plumbing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-recut-preflight-"))
     const git = (...args: string[]) =>
       execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
@@ -2060,7 +2060,7 @@ describe("pr recut --preflight", () => {
         patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
         targetSha: targetBaseSha,
       })
-      expect(facts.mergeTree(targetBaseSha, headSha)).toBe(facts.treeOf(targetBaseSha))
+      expect(await facts.mergeTree(targetBaseSha, headSha)).toBe(facts.treeOf(targetBaseSha))
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

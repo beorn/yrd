@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
@@ -59,7 +58,14 @@ import {
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
-import { createProcess, pathReapFailure, type Process, type ProcessResult } from "@yrd/process"
+import {
+  adaptProcessGit,
+  createProcess,
+  pathReapFailure,
+  type GitSyncReadCommand,
+  type Process,
+  type ProcessResult,
+} from "@yrd/process"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import {
   type MergeRecordEstateRepair,
@@ -272,20 +278,57 @@ function isGitTimeoutError(error: unknown): error is Error & { code: typeof GIT_
   return typeof error === "object" && error !== null && "code" in error && error.code === GIT_TIMEOUT_CODE
 }
 
-function gitSync(cwd: string, args: readonly string[]): string {
-  try {
-    return execFileSync("git", ["-C", cwd, ...args], {
-      encoding: "utf8",
-      env: cleanGitEnvironment(process.env),
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: GIT_TIMEOUT_MS,
-    })
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ETIMEDOUT") {
-      throw gitTimeoutError(args, error)
+const syncGitReader = adaptProcessGit(undefined, { timeoutMs: GIT_TIMEOUT_MS })
+
+function localReadCommand(args: readonly string[]): GitSyncReadCommand {
+  const [verb, ...rest] = args
+  switch (verb) {
+    case "rev-parse":
+    case "for-each-ref":
+    case "status":
+    case "rev-list":
+    case "merge-base":
+    case "show":
+    case "show-ref":
+    case "cherry":
+    case "diff":
+    case "cat-file":
+      return { verb, args: rest }
+    case "stash":
+      if (rest.length === 1 && rest[0] === "list") return { verb: "stash-list" }
+      break
+    case "branch":
+      if (rest.length === 1 && rest[0] === "--show-current") return { verb: "branch-show-current" }
+      break
+    case "config": {
+      const fileIndex = rest.indexOf("--file")
+      const file = fileIndex < 0 ? undefined : rest[fileIndex + 1]
+      const regexpIndex = rest.indexOf("--get-regexp")
+      const pattern = regexpIndex < 0 ? undefined : rest[regexpIndex + 1]
+      if (pattern !== undefined) {
+        return {
+          verb: "config-get-regexp",
+          ...(file === undefined ? {} : { file }),
+          pattern,
+        }
+      }
+      break
     }
-    throw error
   }
+  throw new Error(`yrd: Git command is not a typed local read: ${args.join(" ")}`)
+}
+
+function gitSync(cwd: string, args: readonly string[]): string {
+  const result = syncGitReader.readSync({ repo: cwd, command: localReadCommand(args) })
+  if (result.timedOut === true) throw gitTimeoutError(args)
+  if (result.code !== 0 || result.failure !== undefined) {
+    throw Object.assign(new Error(result.stderr.trim() || result.failure || `git exited ${result.code}`), {
+      status: result.code,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    })
+  }
+  return result.stdout
 }
 
 type QueueGitRunner = (cwd: string, args: readonly string[]) => Promise<string>
@@ -3741,7 +3784,7 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, cwd, "close")
   const closed: Bay[] = []
   const refused: BayStatusReport[] = []
-  const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   for (const bay of bays) {
     const report = classifyBayStatus(
@@ -3842,9 +3885,9 @@ async function closeBays(
  * survive as a stale local tracking ref and authorize destructive cleanup.
  * This is the same fetch-before-git-cherry boundary used by branch-triage.
  */
-function refreshBayStatusOrigin(repoRoot: string): boolean {
+async function refreshBayStatusOrigin(repoRoot: string): Promise<boolean> {
   try {
-    gitSync(repoRoot, ["fetch", "--no-recurse-submodules", "--prune", "--quiet", "origin"])
+    await gitAsync(repoRoot, ["fetch", "--no-recurse-submodules", "--prune", "--quiet", "origin"])
     return true
   } catch {
     return false
@@ -4064,7 +4107,7 @@ async function bayStatusCommand(
       : selectedBays(stateOf(app).bays, selectors, cwd, "status")
   if (bays.length === 0) usage("bay status requires at least one open bay (or a selector)")
 
-  const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   const reports: BayStatusReport[] = await Promise.all(
     bays.map(async (bay) => {
@@ -4099,7 +4142,7 @@ async function bayPruneCommand(
 ): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
-  const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+  const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   const reports = open.map((bay) =>
     classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
@@ -5712,7 +5755,7 @@ async function listBays(
   const cwd = io.cwd ?? process.cwd()
   let reports: BayStatusReport[] | undefined
   if (options.check === true) {
-    const remoteTrackingFresh = refreshBayStatusOrigin(cwd)
+    const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
     const protections = activeBayProtections(io)
     reports = open.map((bay) =>
       classifyBayStatus(
@@ -7672,7 +7715,7 @@ async function resolveInitRow(
   if (resolution.status === "unreachable") {
     return { ...base, source: "unreachable", action: "unreachable", detail: resolution.detail }
   }
-  if (!dryRun) setSubmoduleBranch(root, submodule.name, resolution.branch)
+  if (!dryRun) await setSubmoduleBranch(root, submodule.name, resolution.branch)
   return {
     ...base,
     branch: resolution.branch,

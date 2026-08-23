@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, join, resolve, sep } from "node:path"
@@ -421,10 +420,13 @@ const RETIRED_PLACEHOLDERS = new Map([
  * path is inside the working tree and freezes a fast-forward-only shared-main
  * projection. Fail loud when cwd is not a git work tree: a silent cwd fallback
  * would reintroduce the freeze. */
-function defaultCommandArtifactRoot(cwd: string): string {
-  const probe = spawnSync("git", ["-C", cwd, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" })
+function defaultCommandArtifactRoot(cwd: string, process: Pick<Process, "run">): string {
+  const probe = adaptProcessGit(process).readSync({
+    repo: cwd,
+    command: { verb: "rev-parse", args: ["--absolute-git-dir"] },
+  })
   const gitDir = probe.stdout.trim()
-  if (probe.status !== 0 || gitDir.length === 0) {
+  if (probe.code !== 0 || gitDir.length === 0) {
     throw createFailure({
       kind: "refusal",
       code: "artifact-root-unresolved",
@@ -484,7 +486,7 @@ function configuredCommand<Shape extends ChangeShape>(
       YRD_TARGET: input.targetSha ?? primary.headSha,
       ...options.variables?.(input),
     }
-    const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd))
+    const artifactRoot = resolve(options.artifactRoot ?? defaultCommandArtifactRoot(cwd, process))
     const artifactSink = await createArtifactSink(artifactRoot, input, context.attempt)
     const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
     let result: Awaited<ReturnType<Process["run"]>>

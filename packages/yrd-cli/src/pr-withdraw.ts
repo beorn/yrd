@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process"
+import { adaptProcessGit, createProcess, type GitSyncReadCommand } from "@yrd/process"
+import type { GitProcessResult } from "git-super/process"
 import { createElement } from "react"
 import {
   currentChangeRev,
@@ -10,7 +11,6 @@ import {
 } from "@yrd/bay"
 import { raiseFailure, requireLinearRootTip } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
-import { cleanGitEnvironment } from "./git-environment.ts"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
@@ -21,7 +21,6 @@ type JsonOption = Readonly<{ json?: boolean }>
 
 const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
 const GIT_TIMEOUT_MS = 30_000
-const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
 /** Commits per `rev-list` invocation, so a listing with thousands of candidate
  * heads cannot overflow the argument vector. */
 const REV_LIST_BATCH = 400
@@ -630,63 +629,57 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
 }
 
 type GitCapture = Readonly<{ code: number; stdout: string }>
-type GitFailure = Readonly<{ code?: unknown; status?: unknown; stdout?: unknown; stderr?: unknown }>
-type AcceptedGitFailure = GitFailure & Readonly<{ status: number }>
 
 /** Real Git plumbing shared by `pr prune` and `pr recut --preflight`:
  * reachability, exact merge-result tree identity, graph distance, and
  * attribution-only stable patch matching. Only documented exit codes are
  * tolerated; anything else fails loud. */
 export function createPruneGitFacts(cwd: string): PruneGitFacts {
-  const acceptedFailure = (
+  const acceptedResult = (
     args: readonly string[],
     allowedExits: readonly number[],
-    error: unknown,
-  ): AcceptedGitFailure => {
-    const failed = error as GitFailure
-    if (failed.code === "ETIMEDOUT") {
-      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: error })
+    result: GitProcessResult,
+  ): GitCapture => {
+    if (result.timedOut === true) {
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
     }
-    if (typeof failed.status === "number" && allowedExits.includes(failed.status)) {
-      return { ...failed, status: failed.status }
+    if (result.code !== 0 && !allowedExits.includes(result.code)) {
+      const detail = result.stderr.trim() || result.failure?.trim() || ""
+      throw new Error(`yrd: git ${args.join(" ")} failed in '${cwd}'${detail === "" ? "" : `: ${detail}`}`)
     }
-    const stderr = typeof failed.stderr === "string" ? failed.stderr.trim() : ""
-    const cause = stderr !== "" ? stderr : error instanceof Error ? error.message.trim() : ""
-    throw new Error(`yrd: git ${args.join(" ")} failed in '${cwd}'${cause === "" ? "" : `: ${cause}`}`)
+    if (result.failure !== undefined && result.code === 0) {
+      throw new Error(`yrd: git ${args.join(" ")} failed in '${cwd}': ${result.failure}`)
+    }
+    return { code: result.code, stdout: result.stdout }
   }
-  // `input` (stdin) is the submit-and-stay lineage's signature — patchMatch pipes
-  // diff/target-log bodies into `git patch-id --stable`. Retained alongside
-  // 22228's extracted acceptedFailure error-isolation helper.
-  const git = (args: readonly string[], allowedExits: readonly number[], input?: string): GitCapture => {
-    try {
-      return {
-        code: 0,
-        stdout: execFileSync("git", ["-C", cwd, ...args], {
-          encoding: "utf8",
-          env: cleanGitEnvironment(process.env),
-          ...(input === undefined ? {} : { input }),
-          maxBuffer: GIT_OUTPUT_MAX_BYTES,
-          stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-          timeout: GIT_TIMEOUT_MS,
-        }),
-      }
-    } catch (error) {
-      const failed = acceptedFailure(args, allowedExits, error)
-      return { code: failed.status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" }
+  const localRead = (args: readonly string[]): GitSyncReadCommand => {
+    const [verb, ...rest] = args
+    switch (verb) {
+      case "rev-parse":
+      case "merge-base":
+      case "rev-list":
+      case "cat-file":
+      case "diff":
+      case "patch-id":
+      case "log":
+        return { verb, args: rest }
     }
+    throw new Error(`yrd: Git command is not a typed local read: ${args.join(" ")}`)
   }
-  const gitExit = (args: readonly string[], allowedExits: readonly number[]): number => {
-    try {
-      execFileSync("git", ["-C", cwd, ...args], {
-        encoding: "utf8",
-        env: cleanGitEnvironment(process.env),
-        stdio: ["ignore", "ignore", "pipe"],
-        timeout: GIT_TIMEOUT_MS,
-      })
-      return 0
-    } catch (error) {
-      return acceptedFailure(args, allowedExits, error).status
-    }
+  const reader = adaptProcessGit(undefined, { timeoutMs: GIT_TIMEOUT_MS })
+  const git = (args: readonly string[], allowedExits: readonly number[], input?: string): GitCapture =>
+    acceptedResult(
+      args,
+      allowedExits,
+      reader.readSync({ repo: cwd, command: localRead(args), ...(input === undefined ? {} : { stdin: input }) }),
+    )
+  const mutateGit = async (args: readonly string[], allowedExits: readonly number[]): Promise<GitCapture> => {
+    await using process = createProcess()
+    const result = await adaptProcessGit(process, { timeoutMs: GIT_TIMEOUT_MS }).run({
+      repo: cwd,
+      args,
+    })
+    return acceptedResult(args, allowedExits, result)
   }
   return Object.freeze({
     resolveCommit(ref: string): string | undefined {
@@ -701,17 +694,19 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
       const raw = git(["rev-list", "--parents", "-n", "1", sha], []).stdout.trim().toLowerCase()
       const [commit, ...parents] = raw.split(/\s+/u)
       if (commit !== sha.toLowerCase()) {
-        throw new Error(`yrd: git rev-list --parents of ${short(sha)} returned '${commit ?? "no commit"}', expected the commit itself`)
+        throw new Error(
+          `yrd: git rev-list --parents of ${short(sha)} returned '${commit ?? "no commit"}', expected the commit itself`,
+        )
       }
       return parents
     },
-    mergeTree(baseSha: string, headSha: string): string | undefined {
+    async mergeTree(baseSha: string, headSha: string): Promise<string | undefined> {
       const args = ["merge-tree", "--write-tree", baseSha, headSha] as const
       // `--quiet` can report success for a real conflict when a sibling
       // directory entry also merges cleanly. Run the normal command and
       // discard stdout so conflict bodies never enter this process.
-      if (gitExit(args, [1]) !== 0) return undefined
-      const result = git(args, [])
+      const result = await mutateGit(args, [1])
+      if (result.code !== 0) return undefined
       const tree = result.stdout.trim().split("\n", 1)[0]?.trim()
       if (tree === undefined || tree === "") {
         throw new Error(`yrd: git merge-tree of ${short(baseSha)} + ${short(headSha)} returned no tree OID`)

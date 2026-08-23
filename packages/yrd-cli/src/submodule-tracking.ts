@@ -1,6 +1,5 @@
-import { execFileSync } from "node:child_process"
+import { adaptProcessGit, createProcess, type GitSyncReadCommand } from "@yrd/process"
 import { join } from "node:path"
-import { cleanGitEnvironment } from "./git-environment.ts"
 
 /**
  * Submodule tracking: `.gitmodules` `submodule.<name>.branch` is the switch
@@ -38,25 +37,21 @@ type GitCapture = Readonly<{ code: number; stdout: string; stderr: string }>
 
 /** Run one Git command, capturing its output without throwing on a nonzero
  * exit. Git routing variables are scrubbed so ambient hook state cannot change
- * the repository under inspection. A spawn failure (no `git`, missing cwd) is a
- * real environment fault and is left to throw. */
-function runGit(cwd: string, args: readonly string[]): GitCapture {
-  try {
-    const stdout = execFileSync("git", ["-C", cwd, ...args], {
-      encoding: "utf8",
-      env: cleanGitEnvironment(process.env),
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    return { code: 0, stdout, stderr: "" }
-  } catch (error) {
-    const failed = error as Readonly<{ status?: unknown; stdout?: unknown; stderr?: unknown }>
-    if (typeof failed.status !== "number") throw error
-    return {
-      code: failed.status,
-      stdout: typeof failed.stdout === "string" ? failed.stdout : "",
-      stderr: typeof failed.stderr === "string" ? failed.stderr : "",
-    }
-  }
+ * the repository under inspection. A missing executable is an environment
+ * fault; a missing/non-repository target remains Git's ordinary nonzero result. */
+const gitReader = adaptProcessGit(undefined)
+
+function readGit(cwd: string, command: GitSyncReadCommand): GitCapture {
+  const result = gitReader.readSync({ repo: cwd, command })
+  if (result.failure !== undefined) throw new Error(result.failure)
+  return { code: result.code, stdout: result.stdout, stderr: result.stderr }
+}
+
+async function runGit(cwd: string, args: readonly string[]): Promise<GitCapture> {
+  await using process = createProcess()
+  const result = await adaptProcessGit(process).run({ repo: cwd, args })
+  if (result.failure !== undefined) throw new Error(result.failure)
+  return { code: result.code, stdout: result.stdout, stderr: result.stderr }
 }
 
 const SUBMODULE_KEY = /^submodule\.(.+)\.(path|url|branch)$/u
@@ -96,7 +91,8 @@ export function parseGitmodules(nulOutput: string): readonly SubmoduleEntry[] {
     entry[property] = value
   }
   return order.map((name) => {
-    const entry = byName.get(name)!
+    const entry = byName.get(name)
+    if (entry === undefined) throw new Error(`yrd: parsed submodule '${name}' disappeared before projection`)
     return {
       name: entry.name,
       path: entry.path ?? entry.name,
@@ -133,7 +129,7 @@ export function formatSubmoduleTrackingWarning(unbranched: readonly SubmoduleEnt
 /** The superproject worktree root for `cwd`, or `undefined` when `cwd` is not
  * inside a Git worktree (so a non-repo directory produces no warning). */
 export function superprojectRoot(cwd: string): string | undefined {
-  const result = runGit(cwd, ["rev-parse", "--show-toplevel"])
+  const result = readGit(cwd, { verb: "rev-parse", args: ["--show-toplevel"] })
   if (result.code !== 0) return undefined
   const root = result.stdout.trim()
   return root === "" ? undefined : root
@@ -147,14 +143,12 @@ type GitmodulesRead =
  * no file — Git config exit 1) from a genuine read failure (a malformed file —
  * exit 128). The Git diagnostic is collapsed to one row for both consumers. */
 function readGitmodules(root: string): GitmodulesRead {
-  const result = runGit(root, [
-    "config",
-    "--null",
-    "--file",
-    join(root, ".gitmodules"),
-    "--get-regexp",
-    "^submodule\\.",
-  ])
+  const result = readGit(root, {
+    verb: "config-get-regexp",
+    file: join(root, ".gitmodules"),
+    pattern: "^submodule\\.",
+    nul: true,
+  })
   if (result.code === 1) return { ok: true, entries: [] }
   if (result.code !== 0) {
     return {
@@ -200,9 +194,9 @@ export function submoduleTrackingWarnings(cwd: string): readonly string[] {
  * uncommitted for the operator to review and commit. Fails loud on a Git error
  * rather than reporting a false success.
  */
-export function setSubmoduleBranch(root: string, name: string, branch: string): void {
+export async function setSubmoduleBranch(root: string, name: string, branch: string): Promise<void> {
   const file = join(root, ".gitmodules")
-  const result = runGit(root, ["config", "--file", file, `submodule.${name}.branch`, branch])
+  const result = await runGit(root, ["config", "--file", file, `submodule.${name}.branch`, branch])
   if (result.code !== 0) {
     const detail = result.stderr.trim() || result.stdout.trim() || `git config exited ${result.code}`
     throw new Error(`yrd: could not set submodule.${name}.branch in ${file}: ${detail}`)
@@ -212,7 +206,7 @@ export function setSubmoduleBranch(root: string, name: string, branch: string): 
 /** Read the superproject's `origin` remote URL, used to resolve relative
  * submodule URLs. `undefined` when no such remote is configured. */
 export function superprojectOrigin(root: string): string | undefined {
-  const result = runGit(root, ["remote", "get-url", "origin"])
+  const result = readGit(root, { verb: "remote-get-url", remote: "origin" })
   if (result.code !== 0) return undefined
   const url = result.stdout.trim()
   return url === "" ? undefined : url
@@ -227,8 +221,8 @@ export function superprojectOrigin(root: string): string | undefined {
  * the network.
  */
 export function createSubmoduleBranchResolver(cwd: string): SubmoduleBranchResolver {
-  return (url: string): SubmoduleBranchResolution => {
-    const result = runGit(cwd, ["ls-remote", "--symref", url, "HEAD"])
+  return async (url: string): Promise<SubmoduleBranchResolution> => {
+    const result = await runGit(cwd, ["ls-remote", "--symref", url, "HEAD"])
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || `git ls-remote exited ${result.code}`
       return { status: "unreachable", detail }
