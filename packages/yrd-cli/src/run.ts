@@ -8733,7 +8733,7 @@ async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): P
     // one hides every merge behind it, and the estate it runs on is damaged by definition.
     try {
       if (IntentRecordIdSchema.safeParse(prId).success) {
-        skip("intent-carrier", `queue member is pin intent '${prId}'; a pin merge carries no pr/integrated row`)
+        skip("intent-carrier", `queue member is a min-commit change '${prId}'; its merge carries no pr/integrated row`)
         continue
       }
       const pr = app.bays.pr(prId)
@@ -10334,7 +10334,7 @@ async function applyPreflightVerdict(
       expectedCurrent: remergeExpectedCurrent,
       queue: true,
       admit: false,
-      ...(preflight.verdict === "RE-MERGE-FORCE" ? { force: true } : {}),
+      ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}),
     },
     io,
   )
@@ -12050,7 +12050,7 @@ function buildProgram(
     .action(async (options) => recoverQueue(installed(), installedServices(), options, io))
   queue
     .command("run [selector...]")
-    .description("drain the queue — habitant follow by default; --once or PR selectors for a single pass")
+    .description("drain the queue — habitant follow by default; --once or change selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
     .option("--once", "drain the default queue exactly once, then exit")
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
@@ -12273,7 +12273,7 @@ function buildProgram(
   // Off the help surface (I23: "re-merge disappears — resubmitting is submit
   // again"); the verb keeps working for the flows that learned it.
   const remerge = pr
-    .command("re-merge <selector>", { hidden: true })
+    .command("recut <selector>", { hidden: true })
     .description("re-merge a change revision onto the current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--ref <ref>", "certify an independently authored candidate commit")
@@ -12502,7 +12502,7 @@ function buildProgram(
     .action(async (contestId, options) => selectContest(installed(), contestId, options, io))
   contest
     .command("promote <contest>")
-    .description("submit the selected Git pin")
+    .description("submit the selected submodule commit")
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
@@ -12648,7 +12648,7 @@ async function executeYrd(
         kind: "usage",
         code: "retired-command",
         message:
-          "yrd intent is retired; a pure pin advance is an ordinary change — fast-forward the component's " +
+          "yrd intent is retired; advancing a submodule min commit is an ordinary change — fast-forward the submodule's " +
           "own main to the target, then run 'yrd pr submit <branch>'",
       }),
       { json: invocation.args.includes("--json") },
