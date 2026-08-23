@@ -1114,6 +1114,12 @@ describe("pr recut --preflight", () => {
         expect.soft(exit, output.stderr()).toBe(1)
         expect.soft(output.stderr()).toContain(expectedCode)
         expect.soft(output.stderr()).toContain(expectedMessage)
+        if (review === "current approve then reject") {
+          expect.soft(output.stderr()).toContain("yrd pr review PR1 --approve --by @reviewer")
+          expect.soft(output.stderr()).toContain("yrd pr submit issue/approved")
+          expect.soft(output.stderr()).not.toContain("--force")
+          expect.soft(output.stderr()).not.toContain("--burn-payload")
+        }
         expect.soft(remergeInputs).toEqual([])
         expect.soft(await Array.fromAsync(app.events())).toEqual(beforeEvents)
         expect.soft(app.state().bays.prs.PR1?.revs).toEqual(beforeRevisions)

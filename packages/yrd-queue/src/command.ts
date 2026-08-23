@@ -4452,8 +4452,12 @@ async function inspectBaseContainment(
   return { status: "drops-landed", commits: dropped.stdout }
 }
 
-function linearRebuildRemedy(scope: string, base: string): string {
-  return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', then recut and requeue the root branch`
+export function linearRebuildRemedy(
+  scope: string,
+  base: string,
+  next = "then recut and requeue the root branch",
+): string {
+  return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', ${next}`
 }
 
 /** Resolve the submodule checkout that can answer ancestry for a gitlink path.

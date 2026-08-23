@@ -4373,6 +4373,39 @@ describe("runYrd", () => {
     expect(Queues.values(app.state().queues)).toHaveLength(1)
   })
 
+  it("gates an explicit Bay selector through its durable branch ref instead of bay.path", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "bay-free-gates" })
+    const branch = app.bays.get("B1")?.branch
+    expect(branch).toBeDefined()
+    const guardContexts: Array<Readonly<{ cwd?: string; ref?: string }> | undefined> = []
+    const checkContexts: Array<Readonly<{ cwd: string; ref?: string }>> = []
+    const output = outputIO({ cwd: "/repo", currentBranch: () => "main" })
+
+    expect(
+      await runYrd(app, yrd("pr", "submit", "B1"), output.io, {
+        guards: {
+          names: ["identity"],
+          run: async (name, context) => {
+            guardContexts.push(context)
+            return { name, status: "passed", candidateSha: HEAD_SHA }
+          },
+        },
+        checks: {
+          names: ["typecheck"],
+          run: async (_name, cwd, context) => {
+            checkContexts.push({ cwd, ...(context?.ref === undefined ? {} : { ref: context.ref }) })
+            return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
+          },
+          install: async () => "/repo/.git/yrd/hooks/pre-submit",
+        },
+      }),
+      output.stderr(),
+    ).toBe(0)
+    expect(guardContexts).toEqual([{ cwd: "/repo", ref: branch }])
+    expect(checkContexts).toEqual([{ cwd: "/repo", ref: branch }])
+  })
+
   it("leaves a direct submission predecessor for the Queue driver and queues the fresh revision", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ checkedRevisions })
@@ -4975,6 +5008,34 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "create"), create.io)).toBe(1)
     expect(create.stderr()).toContain("bay 'B1' is bound to PR 'PR1' (integrated)")
     expect(create.stderr()).toContain("pass a branch — yrd pr create <branch>")
+  })
+
+  it("refuses a stale implicit Bay binding before gates and names the explicit submit escape", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "withdrawn-binding" })
+    await submitBayFixture(app, "B1")
+    await app.bays.closePr({ pr: "PR1" })
+    await app.bays.submit({ branch: "topic/replacement", headSha: MERGED_SHA, base: "main", draft: true })
+
+    const localChecks: string[] = []
+    const checks: YrdCliServices["checks"] = {
+      names: ["typecheck"],
+      run: async (name) => {
+        localChecks.push(name)
+        return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
+      },
+      install: async () => "/repo/.git/yrd/hooks/pre-submit",
+    }
+    const bare = outputIO({ cwd: "/repo/.bays/B1", currentBranch: () => "topic/replacement" })
+
+    expect(await runYrd(app, yrd("pr", "submit"), bare.io, { checks })).toBe(1)
+    expect(bare.stderr()).toContain("bay 'B1' is bound to PR 'PR1' (withdrawn)")
+    expect(bare.stderr()).toContain("yrd pr submit PR2")
+    expect(localChecks).toEqual([])
+
+    const explicit = outputIO({ cwd: "/repo/.bays/B1", currentBranch: () => "topic/replacement" })
+    expect(await runYrd(app, yrd("pr", "submit", "PR2"), explicit.io, { checks }), explicit.stderr()).toBe(0)
+    expect(localChecks).toEqual(["typecheck"])
   })
 
   it("refuses an active-bay submit whose checked-out head is a merge commit", async () => {

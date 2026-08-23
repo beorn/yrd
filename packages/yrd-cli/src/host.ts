@@ -69,6 +69,7 @@ import {
   gitMergeStep,
   gitMergeRecorder,
   findRepositoryMergeRecords,
+  linearRebuildRemedy,
   repairMergeRecordEstate,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
@@ -567,7 +568,12 @@ export function configuredChecks(
           "refusal",
           "required-check-composition-conflict",
           `yrd: required-check candidate '${candidateSha}' conflicts with base '${baseSha}': ${detail}; ` +
-            `merge '${config.base}' into the branch and resolve the conflict, then re-run${retained}`,
+            linearRebuildRemedy(
+              "the change on a fresh branch",
+              config.base,
+              "then push that fresh branch and run 'yrd pr submit <new-branch>'",
+            ) +
+            retained,
         )
       }
       const composed = await resolveCommit(process, checkout, "HEAD")

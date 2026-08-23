@@ -4789,7 +4789,11 @@ async function executeRemergePr(
       raiseFailure(
         "refusal",
         "review-rejected",
-        `yrd: PR '${pr.id}' was rejected by ${currentReview.by} for revision ${currentRevision.n}`,
+        `yrd: PR '${pr.id}' was rejected by ${currentReview.by} for revision ${currentRevision.n}; ` +
+          `to replace that revision-bound verdict, ask ${currentReview.by} to run ` +
+          `'yrd pr review ${pr.id} --approve --by ${currentReview.by}'. ` +
+          `To answer with new content instead, push the corrected head to '${pr.branch}', then run ` +
+          `'yrd pr submit ${pr.branch}'.`,
       )
     }
     if (approvedCurrentReview === undefined) {
@@ -5252,6 +5256,18 @@ type ChangeSelectionOptions = {
   json?: boolean
 }
 
+/** One Bay-binding explanation across create and submit. The command-specific
+ * caller supplies the executable escape, while this formatter keeps the
+ * binding identity and terminal state from drifting between surfaces. */
+function bayBindingRefusal(
+  bay: Readonly<{ id: string }>,
+  pr: Readonly<{ id: string }>,
+  delivery: string,
+  remedy: string,
+): never {
+  refusal(`bay '${bay.id}' is bound to PR '${pr.id}' (${delivery}); ${remedy}`)
+}
+
 /** `pr create` past-draft refusal. When the PR was reached through a Bay
  * binding — a bare `pr create` resolving the cwd Bay, or a Bay selector — the
  * caller never named the PR, so the refusal must say which binding produced it
@@ -5263,7 +5279,7 @@ function createOnlyRefusal(
   delivery: string,
 ): never {
   if (bay !== undefined) {
-    refusal(`bay '${bay.id}' is bound to PR '${pr.id}' (${delivery}); pass a branch — yrd pr create <branch>`)
+    bayBindingRefusal(bay, pr, delivery, "pass a branch — yrd pr create <branch>")
   }
   refusal(`PR '${pr.id}' is already ${delivery}; create is only for a draft PR`)
 }
@@ -5423,7 +5439,6 @@ function submitRequiredCheckContexts(
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentBranch)
   return inferred.map((selector) => {
     const bay = app.bays.get(selector)
-    if (bay?.path !== undefined) return { cwd: bay.path }
     const branch = app.bays.pr(selector)?.branch ?? bay?.branch ?? selector
     if (branch !== currentBranch) return { cwd, ref: branch }
     // Standing on the branch: the checks below will read this WORKING TREE, so
@@ -5438,6 +5453,34 @@ function submitRequiredCheckContexts(
     if (divergence !== undefined) refusal(divergence)
     return { cwd }
   })
+}
+
+/** A terminal Bay binding is historical identity, not the current submit
+ * target. Preserve that history in Bays, but refuse an implicit/Bay submit
+ * before guards spend work on the stale branch expectation. Explicit PR and
+ * branch selectors deliberately bypass this preflight. */
+function refuseTerminalBaySubmitBinding(app: YrdCliApp, selectors: readonly string[], io: YrdCliIO): void {
+  const cwd = io.cwd ?? process.cwd()
+  const local = currentBay(stateOf(app).bays, cwd)
+  const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
+  for (const selector of inferred) {
+    const bay = app.bays.get(selector)
+    if (bay === undefined) continue
+    const bound = app.bays.pr(bay.id)
+    if (bound === undefined || isLivePR(bound)) continue
+    const delivery = changeDeliveryState(bound)
+    if (delivery !== "withdrawn" && delivery !== "canceled") continue
+    const branch = currentGitBranch(bay.path ?? cwd, io)
+    if (branch === undefined || branch === bay.branch) continue
+    const branchPr = app.bays.pr(branch)
+    const target = branchPr !== undefined && isLivePR(branchPr) ? branchPr.id : branch
+    bayBindingRefusal(
+      bay,
+      bound,
+      delivery,
+      `its workspace is on branch '${branch}'; pass the intended change explicitly — yrd pr submit ${target}`,
+    )
+  }
 }
 
 /**
@@ -5493,6 +5536,7 @@ async function applyChangeSelectionVerb(
   if (command === "pr.submit") {
     const unlandable = await refuseSubmitWithoutMergeAuthority(options, io, services)
     if (unlandable !== undefined) return unlandable
+    refuseTerminalBaySubmitBinding(app, selectors, io)
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
       // Guards first, and in the same loop, so the cheap verdict on THIS
       // carrier lands before its expensive one starts.

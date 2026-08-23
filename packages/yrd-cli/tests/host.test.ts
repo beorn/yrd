@@ -1083,6 +1083,46 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("issue/feature")
   })
 
+  it("prints a linear rebuild instead of a merge-tip-producing conflict remedy", async () => {
+    const { repo } = await repository()
+    await git(repo, "switch", "-q", "issue/feature")
+    await writeFile(join(repo, "README.md"), "feature conflict\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "feature conflict")
+    await git(repo, "switch", "-q", "main")
+    await writeFile(join(repo, "README.md"), "main conflict\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "main conflict")
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["typecheck"],
+      requires: [],
+      definitions: { typecheck: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["typecheck"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+      PATH: globalThis.process.env.PATH,
+    })
+
+    let failure: unknown
+    try {
+      await checks.run("typecheck", repo, { ref: "issue/feature" })
+    } catch (cause) {
+      failure = cause
+    }
+    expect(classifyFailure(failure)).toMatchObject({
+      exitCode: 1,
+      failure: { kind: "refusal", code: "required-check-composition-conflict" },
+    })
+    const message = failure instanceof Error ? failure.message : String(failure)
+    expect(message).toContain("linear rebuild required")
+    expect(message).toContain("yrd pr submit")
+    expect(message).not.toContain("merge 'main' into the branch")
+  })
+
   it.each(["checkout", "submodule"] as const)(
     "retains and names the candidate workspace when %s materialization fails",
     async (phase) => {

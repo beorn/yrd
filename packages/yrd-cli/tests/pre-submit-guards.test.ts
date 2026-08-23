@@ -200,11 +200,11 @@ describe("a pre-submit guard refuses in-lane, naming what the author must fix", 
 })
 
 describe("what a guard is told, and what it refuses to guess", () => {
-  it("judges the Bay worktree's own head, not the main repository's", async () => {
-    // `pr submit` hands a Bay's worktree with NO ref — that tree's HEAD is the
-    // candidate. Resolving HEAD in the main repository instead would guard a
-    // different commit than the one being submitted, and would do it silently:
-    // both resolve, both look like an answer.
+  it("judges an explicit candidate ref without depending on the Bay path", async () => {
+    // `pr submit` now hands the durable Bay branch as a ref from the invoking
+    // repository. Resolving ambient HEAD instead would guard a different commit
+    // than the one being submitted, and would do it silently: both resolve,
+    // both look like an answer.
     const { repo, stateDir } = await beadRepository()
     const bay = join(repo, "..", "bay")
     await git(repo, "worktree", "add", "-q", "-b", "issue/in-a-bay", bay)
@@ -219,9 +219,9 @@ describe("what a guard is told, and what it refuses to guess", () => {
       PATH: globalThis.process.env.PATH,
     })
 
-    // Without the Bay's cwd the guard sees main's head, which changed no bead
-    // and would skip — a false pass on a candidate that must refuse.
-    await expect(guards.run("bead-hygiene", { cwd: bay })).rejects.toThrow(HYGIENE_REFUSAL)
+    // The Bay path is deliberately not required: the branch ref is the durable
+    // carrier identity and remains resolvable after the workspace is retired.
+    await expect(guards.run("bead-hygiene", { cwd: repo, ref: "issue/in-a-bay" })).rejects.toThrow(HYGIENE_REFUSAL)
     await expect(guards.run("bead-hygiene")).resolves.toMatchObject({ status: "skipped" })
   })
 
