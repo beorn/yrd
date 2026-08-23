@@ -17,7 +17,7 @@ import {
   changeDeliveryState,
   withBays,
   type BayWorkspace,
-  type PR,
+  type Change,
 } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
@@ -80,7 +80,7 @@ function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): 
   }
 }
 
-function changeFacts(pr: PR | undefined) {
+function changeFacts(pr: Change | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   const revision = currentChangeRev(pr)
   return {
@@ -875,7 +875,7 @@ async function submitCertifiedCarrier(
   app: CarrierSubmissionApp,
   repo: string,
   submission: CarrierSubmission,
-): Promise<PR> {
+): Promise<Change> {
   const base = submission.base ?? "main"
   await app.bays.submit({ ...submission, base, draft: true })
   const pr = Object.values(app.state().bays.prs).find(({ branch }) => branch === submission.branch)

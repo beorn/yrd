@@ -10,7 +10,7 @@ import { createLogger } from "loggily"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
-import { currentChangeRev, changeDeliveryState, type PR } from "../src/model.ts"
+import { currentChangeRev, changeDeliveryState, type Change } from "../src/model.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -45,7 +45,7 @@ function workspaceAdapter(): BayWorkspace {
   }
 }
 
-function changeFacts(pr: PR | undefined) {
+function changeFacts(pr: Change | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   return { ...pr, delivery: changeDeliveryState(pr), current: currentChangeRev(pr) }
 }

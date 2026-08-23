@@ -8,15 +8,15 @@
  * Specimen, 2026-08-10: PR715, PR717 and PR720 were closed as spent carriers and
  * still read `state=closed, status=needs-author` in `pr list` and in `--json`.
  * Two functions produce the same declared vocabulary and disagree on live data:
- * `prDeliveryState` checks `pr.state` first, so a closed PR maps to exactly
+ * `changeDeliveryState` checks `pr.state` first, so a closed PR maps to exactly
  * integrated / already-landed / canceled / withdrawn. `projectedPrStatus` — the
- * one that actually feeds the STATE column — consulted `prNeedsAuthor` first.
+ * one that actually feeds the STATE column — consulted `changeNeedsAuthor` first.
  *
  * `PR.needsAuthor` is cleared by recut, submitted, admission-recorded and
  * already-landed, and NEVER by withdrawn, integrated or canceled. So the stored
  * fact outlives every closing path and wins over the observation.
  */
-import { changeDeliveryState, type PR } from "@yrd/bay"
+import { changeDeliveryState, type Change } from "@yrd/bay"
 import type { ChangeEligibility } from "@yrd/queue"
 import { describe, expect, it } from "vitest"
 import { projectedChangeStatus } from "../src/queue-status-view.tsx"
@@ -33,7 +33,7 @@ const STICKY_NEEDS_AUTHOR = {
   receipt: { code: "candidate-drops-landed", message: "carrier drops landed work" },
 } as const
 
-function pr(overrides: Partial<PR>): PR {
+function pr(overrides: Partial<Change>): Change {
   return {
     id: "PR715",
     name: "Spent carrier",
@@ -77,9 +77,9 @@ describe("projectedPrStatus", () => {
 
   // The general invariant, and the one worth keeping if the cases above ever
   // get rewritten: the two producers of this vocabulary may not contradict each
-  // other about a closed record. Whatever prDeliveryState says a closed PR is,
+  // other about a closed record. Whatever changeDeliveryState says a closed PR is,
   // the projection says the same.
-  it.each(CLOSED_CASES)("agrees with prDeliveryState on a %s PR", (_label, closed) => {
+  it.each(CLOSED_CASES)("agrees with changeDeliveryState on a %s PR", (_label, closed) => {
     expect(projectedChangeStatus(closed)).toBe(changeDeliveryState(closed))
   })
 })

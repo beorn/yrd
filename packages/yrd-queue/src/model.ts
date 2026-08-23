@@ -20,7 +20,7 @@ import {
   changeHead,
   changeRemerge,
   changeRevisionNumber,
-  type PR,
+  type Change,
   type PRId,
 } from "@yrd/bay"
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
@@ -600,7 +600,7 @@ export type QueueTerminalAssociations = Readonly<{
 }>
 
 export type QueueAuthorityState = Readonly<{
-  // Same nine values as PRDeliveryState (@yrd/bay); imported rather than
+  // Same nine values as ChangeDeliveryState (@yrd/bay); imported rather than
   // re-spelled so the two authorities cannot drift apart silently.
   statuses: Readonly<Record<string, ChangeDeliveryState>>
   current: Readonly<Record<string, QueueAuthorityToken>>
@@ -832,7 +832,7 @@ export type UnrecordedSubmit = Readonly<{
  */
 export type DerivedChange = Readonly<{
   branch: string
-  record?: PR
+  record?: Change
   eligibility?: ChangeEligibility
   submit?: Readonly<{ sha: string; base: string; at: string }>
   unrecorded?: UnrecordedSubmit
@@ -1305,7 +1305,7 @@ export const Queues = Object.freeze({
     return `C${Math.max(0, ...values) + 1}`
   },
 
-  snapshot(pr: PR): ChangeSnapshot {
+  snapshot(pr: Change): ChangeSnapshot {
     const revision = currentChangeRev(pr)
     const baseSha = checkRequest(pr)?.baseSha ?? changeBaseSha(pr)
     const remerge = changeRemerge(pr)

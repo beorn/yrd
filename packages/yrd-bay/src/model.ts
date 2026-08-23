@@ -343,7 +343,7 @@ export type BranchLifecycle =
       }
     >
 
-/** W2-facing delivery label derived from canonical PR/PRRev facts. Never stored. */
+/** W2-facing delivery label derived from canonical PR/ChangeRev facts. Never stored. */
 export type ChangeDeliveryState =
   | "pushed"
   | "submitted"
@@ -355,7 +355,7 @@ export type ChangeDeliveryState =
   | "withdrawn"
   | "canceled"
 
-const NON_CHECKABLE_PR_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
+const NON_CHECKABLE_CHANGE_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
   "integrated",
   "already-landed",
   "withdrawn",
@@ -366,7 +366,7 @@ const NON_CHECKABLE_PR_STATES: ReadonlySet<ChangeDeliveryState> = new Set<Change
  * Once it reaches integrated/already-landed/withdrawn/canceled, it is no
  * longer checkable. */
 export function isNonCheckableChangeState(state: ChangeDeliveryState): boolean {
-  return NON_CHECKABLE_PR_STATES.has(state)
+  return NON_CHECKABLE_CHANGE_STATES.has(state)
 }
 
 /**
@@ -391,7 +391,7 @@ export class ChangeCheckabilityConflict extends Error {
 }
 
 /**
- * True when an error is a PrCheckabilityConflict whose PR had already reached a
+ * True when an error is a ChangeCheckabilityConflict whose PR had already reached a
  * terminal status — i.e. a concurrent writer withdrew/canceled/integrated/already-landed the
  * PR between a runtime's compose snapshot and its check request. This is a
  * normal, losable race for a long-lived resident runner: skip this cycle and
@@ -657,7 +657,7 @@ export type ChangeRegression = Readonly<{
   recordedAt: string
 }>
 
-export type PR = Readonly<{
+export type Change = Readonly<{
   id: PRId
   bay?: BayId
   name?: string
@@ -693,7 +693,7 @@ export type PR = Readonly<{
   regressions?: readonly ChangeRegression[]
   /** answers: Has this PR ever recorded author-owned refusal evidence? tense: historical.
    * Legacy pre-revision-admission projection. New refusal evidence lives on
-   * `currentPRRev(pr).admission`; retained so old indexes remain readable. */
+   * `currentChangeRev(pr).admission`; retained so old indexes remain readable. */
   needsAuthor?: Readonly<{
     at: string
     run: string
@@ -820,16 +820,16 @@ export function changeNotFoundMessage(state: BaysState, selector: string): strin
   return `yrd: no PR '${selector}'; accepted form: ${example} — ${searched}`
 }
 
-export function currentChangeRev(pr: Pick<PR, "id" | "revs">): ChangeRev {
+export function currentChangeRev(pr: Pick<Change, "id" | "revs">): ChangeRev {
   const revision = pr.revs.at(-1)
   if (revision === undefined) throw new Error(`yrd: PR '${pr.id}' has no revision`)
   return revision
 }
 
-export const changeAdmission = (pr: Pick<PR, "id" | "revs">): ChangeAdmission | undefined =>
+export const changeAdmission = (pr: Pick<Change, "id" | "revs">): ChangeAdmission | undefined =>
   currentChangeRev(pr).admission
 
-export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
+export function changeNeedsAuthor(pr: Change): Change["needsAuthor"] | undefined {
   if (pr.needsAuthor !== undefined) return pr.needsAuthor
   const admission = changeAdmission(pr)
   if (admission?.status !== "refused" || admission.kind !== "refusal") return undefined
@@ -843,15 +843,15 @@ export function changeNeedsAuthor(pr: PR): PR["needsAuthor"] | undefined {
   }
 }
 
-export const changeRevisionNumber = (pr: PR): number => currentChangeRev(pr).n
-export const changeHead = (pr: PR): string => currentChangeRev(pr).head
-export const changeBaseSha = (pr: PR): string | undefined => currentChangeRev(pr).baseSha
-export const changeProps = (pr: PR): ChangeProps | undefined => currentChangeRev(pr).props
-export const changeComposition = (pr: PR): CompositionV1 | undefined => currentChangeRev(pr).composition
-export const changeRemerge = (pr: PR): ChangeRemergeProof | undefined => currentChangeRev(pr).recut
+export const changeRevisionNumber = (pr: Change): number => currentChangeRev(pr).n
+export const changeHead = (pr: Change): string => currentChangeRev(pr).head
+export const changeBaseSha = (pr: Change): string | undefined => currentChangeRev(pr).baseSha
+export const changeProps = (pr: Change): ChangeProps | undefined => currentChangeRev(pr).props
+export const changeComposition = (pr: Change): CompositionV1 | undefined => currentChangeRev(pr).composition
+export const changeRemerge = (pr: Change): ChangeRemergeProof | undefined => currentChangeRev(pr).recut
 
 /** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
-export function changeDeliveryState(pr: PR): ChangeDeliveryState {
+export function changeDeliveryState(pr: Change): ChangeDeliveryState {
   if (pr.state === "closed") {
     if (pr.merged) return pr.alreadyLanded === undefined ? "integrated" : "already-landed"
     if (pr.canceledAt !== undefined) return "canceled"
@@ -864,7 +864,7 @@ export function changeDeliveryState(pr: PR): ChangeDeliveryState {
   return revision.admission?.status === "passed" ? "ready" : "submitted"
 }
 
-export function reviewState(pr: PR): ChangeReviewState {
+export function reviewState(pr: Change): ChangeReviewState {
   const revision = currentChangeRev(pr)
   const current = pr.reviews.findLast((review) => review.revision === revision.n && review.headSha === revision.head)
   return {
@@ -879,7 +879,7 @@ export function reviewState(pr: PR): ChangeReviewState {
  * given reviewer (or, with no reviewer argument, from any requested reviewer).
  * Verdicts are revision-bound while requests are not, so a recut without a
  * carried review naturally reopens this projection. */
-export function needsReview(pr: PR, reviewer?: string): boolean {
+export function needsReview(pr: Change, reviewer?: string): boolean {
   const delivery = changeDeliveryState(pr)
   if (delivery !== "submitted" && delivery !== "ready") return false
   const revision = currentChangeRev(pr)
@@ -894,7 +894,7 @@ export function needsReview(pr: PR, reviewer?: string): boolean {
 /** Mechanically certified revision ancestry for one logical PR payload.
  * Ordinary authored revisions start a new lineage; recuts retain the source
  * revision through their persisted `fromRevision` proof. */
-export function changeRevisionLineage(pr: PR, revision = currentChangeRev(pr).n): readonly ChangeRev[] {
+export function changeRevisionLineage(pr: Change, revision = currentChangeRev(pr).n): readonly ChangeRev[] {
   const byRevision = new Map(pr.revs.map((candidate) => [candidate.n, candidate]))
   let current = byRevision.get(revision)
   if (current === undefined) {
@@ -920,13 +920,13 @@ export function changeRevisionLineage(pr: PR, revision = currentChangeRev(pr).n)
 
 /** First submitted clock for a mechanically identical payload, falling back
  * to its first immutable source-ready (`pushed`) clock before admission. */
-export function changeSourceReadyAt(pr: PR, revision = currentChangeRev(pr).n): string {
+export function changeSourceReadyAt(pr: Change, revision = currentChangeRev(pr).n): string {
   const source = changeRevisionLineage(pr, revision)[0]
   if (source === undefined) throw new Error(`yrd: PR '${pr.id}' has no source-ready revision`)
   return source.submittedAt ?? source.pushedAt
 }
 
-export function checksRequested(pr: PR): boolean {
+export function checksRequested(pr: Change): boolean {
   return checkRequest(pr) !== undefined
 }
 
@@ -951,7 +951,7 @@ export function checksRequested(pr: PR): boolean {
  * against a base that is no longer main. `findLast` therefore returns the
  * newest request for this tree, which is the one whose base is current.
  */
-export function checkRequest(pr: PR): ChangeCheckRequest | undefined {
+export function checkRequest(pr: Change): ChangeCheckRequest | undefined {
   const revision = currentChangeRev(pr)
   return pr.checkRequests.findLast((request) => request.headSha === revision.head)
 }
@@ -995,7 +995,7 @@ export type ProjectedBranchSubmit = Readonly<{
 
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
-  prs: Readonly<Record<PRId, PR>>
+  prs: Readonly<Record<PRId, Change>>
   receipts: Readonly<
     Record<
       string,
@@ -1225,11 +1225,11 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
     .toSorted((left, right) => left.openedAt.localeCompare(right.openedAt) || left.bay.localeCompare(right.bay))
 }
 
-export function isLivePR(pr: PR): boolean {
+export function isLiveChange(pr: Change): boolean {
   return pr.state === "open"
 }
 
-export function changeForBay(state: BaysState, bay: BayId): PR | undefined {
+export function changeForBay(state: BaysState, bay: BayId): Change | undefined {
   return Object.values(state.prs).find((pr) => pr.bay === bay)
 }
 
@@ -1256,7 +1256,7 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
  * always addresses that specific PR, terminal or not, ahead of this preference.
  * Mutating verbs enforce the live requirement themselves via requireLivePR —
  * this primitive stays verb-agnostic and read-biased. */
-export type ChangeSelectorMatch = SelectorMatch<PR> & Readonly<{ revision?: ChangeRev }>
+export type ChangeSelectorMatch = SelectorMatch<Change> & Readonly<{ revision?: ChangeRev }>
 
 export function resolveChangeMatch(state: BaysState, selector: string): ChangeSelectorMatch | undefined {
   const parsed = parseChangeSelector(selector)
@@ -1274,7 +1274,7 @@ export function resolveChangeMatch(state: BaysState, selector: string): ChangeSe
         value: pr,
       }
     })
-  const resolve = (input: string) => resolveSelectorMatch(input, candidates, { kind: "PR", prefer: isLivePR })
+  const resolve = (input: string) => resolveSelectorMatch(input, candidates, { kind: "PR", prefer: isLiveChange })
   const matched = parsed === undefined ? resolve(selector) : (resolve(parsed.pr) ?? resolve(selector))
   if (matched === undefined) return undefined
   if (parsed?.revision === undefined) return matched
@@ -1282,7 +1282,7 @@ export function resolveChangeMatch(state: BaysState, selector: string): ChangeSe
   return revision === undefined ? undefined : { ...matched, revision }
 }
 
-function projectChangeRevision(pr: PR, revision: ChangeRev): PR {
+function projectChangeRevision(pr: Change, revision: ChangeRev): Change {
   if (revision === currentChangeRev(pr)) return pr
   const index = pr.revs.indexOf(revision)
   if (index < 0) return pr
@@ -1298,7 +1298,7 @@ function projectChangeRevision(pr: PR, revision: ChangeRev): PR {
   }
 }
 
-export function resolvePR(state: BaysState, selector: string): PR | undefined {
+export function resolveChange(state: BaysState, selector: string): Change | undefined {
   const matched = resolveChangeMatch(state, selector)
   if (matched === undefined) return undefined
   return matched.revision === undefined ? matched.value : projectChangeRevision(matched.value, matched.revision)
@@ -1306,12 +1306,12 @@ export function resolvePR(state: BaysState, selector: string): PR | undefined {
 
 declare const liveBrand: unique symbol
 
-/** A PR that has passed through {@link requireLivePR} — the shared mutation
+/** A PR that has passed through {@link requireLiveChange} — the shared mutation
  * boundary guard. Mutating reducers annotate their resolved PR as `LivePR`, so
  * `tsc` rejects any swap back to a raw `resolvePR` / `required(...)` (which
- * yields an unbranded {@link PR}) — the type system, not a source-grep test,
+ * yields an unbranded {@link Change}) — the type system, not a source-grep test,
  * enforces that every PR-selector mutation routes through the live guard. */
-export type LivePR = PR & { readonly [liveBrand]: true }
+export type LiveChange = Change & { readonly [liveBrand]: true }
 
 /** Resolve a PR for a MUTATING verb: a branch/name selector must name the live
  * delivery of that branch. Returns the live PR; a terminal PR is returned only
@@ -1320,7 +1320,7 @@ export type LivePR = PR & { readonly [liveBrand]: true }
  * selector whose PRs are all terminal refuses loudly here at the mutation
  * boundary — resolvePR stays verb-agnostic and read-biased, so this is the one
  * shared guard every mutating verb routes through instead of hand-rolling it. */
-export function requireLivePR(state: BaysState, selector: string): LivePR {
+export function requireLiveChange(state: BaysState, selector: string): LiveChange {
   const resolution = resolveChangeMatch(state, selector)
   if (resolution === undefined) {
     raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
@@ -1339,6 +1339,6 @@ export function requireLivePR(state: BaysState, selector: string): LivePR {
   // A canonical-id match ('pr1' folds to PR1) passes a terminal PR through to
   // the verb's own state guard; an alias (branch/name) match must name a live
   // delivery. The fold that decides this lives in resolveSelectorMatch, not here.
-  if (isLivePR(pr) || resolution.matchedBy === "canonical") return pr as LivePR
+  if (isLiveChange(pr) || resolution.matchedBy === "canonical") return pr as LiveChange
   raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
 }

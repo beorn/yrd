@@ -1,4 +1,4 @@
-import { BayIdSchema, GitRefSchema, GitShaSchema, PRIdSchema, type Bay, type BaysState, type PR } from "@yrd/bay"
+import { BayIdSchema, GitRefSchema, GitShaSchema, PRIdSchema, type Bay, type BaysState, type Change } from "@yrd/bay"
 import { JsonSchema, type CommandHandler, type CommandResult, type DeepReadonly, type JsonValue } from "@yrd/core"
 import type { Job, JobContext, JobResult, JobsState, RunJobOptions } from "@yrd/job"
 import { IssueSchema } from "@yrd/issue"
@@ -243,7 +243,7 @@ export type ContestPromotion = Readonly<{
   commit: string
   ref: string
   job?: Job
-  pr?: PR
+  pr?: Change
 }>
 
 export type ContestStatus = "running" | "ready" | "failed" | "selected" | "promoting" | "promoted" | "promotion-failed"

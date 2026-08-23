@@ -7,7 +7,7 @@ import {
   changeNeedsAuthor,
   changeRevisionNumber,
   type Bay,
-  type PR,
+  type Change,
   type ChangeDeliveryState,
   type ChangeRegression,
 } from "@yrd/bay"
@@ -282,7 +282,7 @@ export function BayStatusView({
   )
 }
 
-export function ChangeStatusView({ prs, eligibilities }: { prs: readonly PR[]; eligibilities?: readonly ChangeEligibility[] }) {
+export function ChangeStatusView({ prs, eligibilities }: { prs: readonly Change[]; eligibilities?: readonly ChangeEligibility[] }) {
   const rows = prs.map((pr) => {
     const revision = changeRevisionNumber(pr)
     const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)

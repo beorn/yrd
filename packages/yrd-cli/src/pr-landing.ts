@@ -1,4 +1,4 @@
-import { currentChangeRev, changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import { createPruneGitFacts } from "./pr-withdraw.ts"
 import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 
@@ -52,13 +52,13 @@ function failureText(error: unknown): string {
  *
  * Git is consulted only when there is such a claim to check, and at most twice
  * per distinct base regardless of how many rows the projection carries. */
-export async function reconcileChangeMerges(prs: readonly PR[], io: YrdCliIO): Promise<ChangeMergeReconciliation> {
+export async function reconcileChangeMerges(prs: readonly Change[], io: YrdCliIO): Promise<ChangeMergeReconciliation> {
   const candidates = prs.filter((pr) => NOT_MERGED_CLAIMS.has(changeDeliveryState(pr)))
   if (candidates.length === 0) return EMPTY
 
   const cwd = io.cwd ?? process.cwd()
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
-  const byBase = new Map<string, PR[]>()
+  const byBase = new Map<string, Change[]>()
   for (const pr of candidates) {
     const grouped = byBase.get(pr.base)
     if (grouped === undefined) byBase.set(pr.base, [pr])

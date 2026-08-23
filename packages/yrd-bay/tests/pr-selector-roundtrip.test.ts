@@ -9,10 +9,10 @@ import { describe, expect, it } from "vitest"
 import {
   formatChangeRevisionSelector,
   parseChangeSelector,
-  requireLivePR,
+  requireLiveChange,
   resolveChangeMatch,
   type BaysState,
-  type PR,
+  type Change,
 } from "../src/model.ts"
 
 const revisions = [
@@ -20,7 +20,7 @@ const revisions = [
   { n: 16, head: "f".repeat(40), base: "main", pushedAt: "2026-08-06T00:00:00.000Z" },
 ] as const
 
-const pr: PR = {
+const pr: Change = {
   id: "PR1410",
   branch: "topic/round-trip",
   base: "main",
@@ -56,11 +56,11 @@ describe("displayed PR selector round trip", () => {
   it("accepts the bare numeric id every operator types after reading pr#1410.16 (I23 selector uniformity)", () => {
     expect(resolveChangeMatch(state, "1410")?.value).toBe(pr)
     expect(resolveChangeMatch(state, "1410.16")?.revision).toBe(revisions[1])
-    expect(requireLivePR(state, "1410")).toBe(pr)
+    expect(requireLiveChange(state, "1410")).toBe(pr)
   })
 
   it("falls back to branch/name aliases when a bare numeric names no PR", () => {
-    const branchNumeric: PR = { ...pr, id: "PR7", branch: "9999" }
+    const branchNumeric: Change = { ...pr, id: "PR7", branch: "9999" }
     const numericState: BaysState = { byId: {}, prs: { [branchNumeric.id]: branchNumeric }, receipts: {}, submits: {} }
     expect(resolveChangeMatch(numericState, "9999")?.value).toBe(branchNumeric)
   })
@@ -80,12 +80,12 @@ describe("displayed PR selector round trip", () => {
   })
 
   it("shows a copy-pasteable accepted form when a PR-shaped selector is malformed", () => {
-    expect(() => requireLivePR(state, "pr#1410.bad")).toThrow("accepted form: pr#1410.16")
+    expect(() => requireLiveChange(state, "pr#1410.bad")).toThrow("accepted form: pr#1410.16")
   })
 
   it("allows the current qualified revision but refuses historical mutation", () => {
-    expect(requireLivePR(state, "pr#1410.16")).toBe(pr)
-    expect(() => requireLivePR(state, "pr#1410.1")).toThrow(
+    expect(requireLiveChange(state, "pr#1410.16")).toBe(pr)
+    expect(() => requireLiveChange(state, "pr#1410.1")).toThrow(
       "PR 'PR1410' selector targets historical revision 1; current revision is 16",
     )
   })

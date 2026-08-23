@@ -1,4 +1,4 @@
-import { currentChangeRev, changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import { compareNatural } from "@yrd/core"
 import { ADMISSION_REFUSAL_LOOP_THRESHOLD, type QueueAdmissionRefusal } from "@yrd/queue"
 import { actionableFailure, remergeRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
@@ -231,7 +231,7 @@ export function foldRefusalStall(
  */
 export function planRefusalRemedies(
   refusals: Readonly<Record<string, QueueAdmissionRefusal>>,
-  prs: Readonly<Record<string, PR>>,
+  prs: Readonly<Record<string, Change>>,
   attempted: ReadonlySet<string>,
 ): readonly RefusalRemedyPlan[] {
   const plans: RefusalRemedyPlan[] = []

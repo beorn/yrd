@@ -4,13 +4,13 @@
  * @consumer @yrd/cli resident runner
  */
 import { describe, expect, it } from "vitest"
-import type { PR } from "@yrd/bay"
+import type { Change } from "@yrd/bay"
 import type { QueueAdmissionRefusal } from "@yrd/queue"
 import { planRefusalRemedies, refusalRemedyKey } from "../src/refusal-remedy.ts"
 
 const HEAD = "1".repeat(40)
 
-function pr(id: string, overrides: Partial<PR> = {}): PR {
+function pr(id: string, overrides: Partial<Change> = {}): Change {
   return {
     id,
     branch: `task/${id.toLowerCase()}`,
@@ -20,7 +20,7 @@ function pr(id: string, overrides: Partial<PR> = {}): PR {
     checkRequests: [{ revision: 1, headSha: HEAD, at: "2026-07-27T00:00:00.000Z" }],
     submittedAt: "2026-07-27T00:00:00.000Z",
     ...overrides,
-  } as unknown as PR
+  } as unknown as Change
 }
 
 function refusal(id: string, overrides: Partial<QueueAdmissionRefusal> = {}): QueueAdmissionRefusal {
@@ -91,7 +91,7 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
         { n: 1, head: HEAD, at: "2026-07-27T00:00:00.000Z" },
         { n: 2, head: next, at: "2026-07-27T16:00:00.000Z" },
       ],
-    } as unknown as Partial<PR>)
+    } as unknown as Partial<Change>)
 
     const plans = planRefusalRemedies(refusals, { PR1: advanced }, attempted)
 

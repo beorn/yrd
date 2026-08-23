@@ -31,7 +31,7 @@ function contractResults(): readonly QueueStatusResult[] {
 }
 
 /** A carrier-free pin-intent member, shaped like the Queue's materialized
- * PRSnapshot for a landed intent (the real R1480/I2 shape). Its id is an
+ * ChangeSnapshot for a landed intent (the real R1480/I2 shape). Its id is an
  * intent id, so it can never resolve against the retained PR list. */
 function intentMember(id: string = "I2"): Member {
   return {

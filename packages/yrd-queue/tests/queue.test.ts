@@ -13,7 +13,7 @@ import {
   changeDeliveryState,
   withBays,
   type BayWorkspace,
-  type PR,
+  type Change,
 } from "@yrd/bay"
 import {
   Command,
@@ -187,7 +187,7 @@ type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 type MergedShape = ReviewedShape & IntegratedShape
 type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 
-function changeFacts(pr: PR | undefined) {
+function changeFacts(pr: Change | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   const revision = currentChangeRev(pr)
   return {
@@ -203,7 +203,7 @@ function changeFacts(pr: PR | undefined) {
   }
 }
 
-function deliveryOf(pr: PR | undefined): string | undefined {
+function deliveryOf(pr: Change | undefined): string | undefined {
   return pr === undefined ? undefined : changeDeliveryState(pr)
 }
 
@@ -4189,9 +4189,9 @@ describe("Queue", () => {
     })
     expect(Queues.values(app.state().queues).flatMap((run) => run.prs.map((pr) => pr.id))).not.toContain(queued.id)
 
-    const admittedPRs: string[] = []
+    const admittedChanges: string[] = []
     for await (const batch of journal.read()) {
-      admittedPRs.push(
+      admittedChanges.push(
         ...batch.values
           .map((value) => parseJournalFrame(value))
           .flatMap(({ events }) => events)
@@ -4199,7 +4199,7 @@ describe("Queue", () => {
           .map(({ data }) => (data as { pr: string }).pr),
       )
     }
-    expect(admittedPRs).toEqual([selected.id])
+    expect(admittedChanges).toEqual([selected.id])
   })
 
   it("scopes an explicit Queue.admit drain after resolving a branch selector", async () => {
@@ -4915,9 +4915,9 @@ describe("Queue", () => {
     expect(await app.queue.admit({}, runtime)).toEqual([first.id, second.id])
     expect(checked).toEqual([first.id, second.id])
 
-    const admittedPRs: string[] = []
+    const admittedChanges: string[] = []
     for await (const batch of journal.read()) {
-      admittedPRs.push(
+      admittedChanges.push(
         ...batch.values
           .map((value) => parseJournalFrame(value))
           .flatMap(({ events }) => events)
@@ -4925,7 +4925,7 @@ describe("Queue", () => {
           .map(({ data }) => (data as { pr: string }).pr),
       )
     }
-    expect(admittedPRs).toStrictEqual([first.id, second.id])
+    expect(admittedChanges).toStrictEqual([first.id, second.id])
   })
 
   it("orders admission age and position from the check request fact, not the earlier push", async () => {

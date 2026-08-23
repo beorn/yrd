@@ -21,7 +21,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import { formatChangeRevisionSelector, changeRevisionNumber, type BaysState, type PR } from "@yrd/bay"
+import { formatChangeRevisionSelector, changeRevisionNumber, type BaysState, type Change } from "@yrd/bay"
 import { DEFAULT_NEEDS_PERSON_OWNER, type QueueAuditFinding } from "@yrd/queue"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
@@ -187,7 +187,7 @@ function sameQueueWatchFocus(left: QueueWatchFocus | undefined, right: QueueWatc
 function selectedQueueWatchFocus(
   row: Readonly<{ pr: string; run?: string }> | undefined,
   projectedRow: QueueTimelineProjectedRow | undefined,
-  prs: readonly PR[],
+  prs: readonly Change[],
 ): QueueWatchFocus | undefined {
   if (row === undefined) return undefined
   const pr = prs.find((candidate) => candidate.id === row.pr)
@@ -392,8 +392,8 @@ const COMMAND_OUTPUT_TAIL_LINES = 10
  * "Changes" (operator spec item 3, renamed from "PR"); the id below is
  * unaffected — nothing outside this file's tab plumbing reads the label text.
  */
-const PR_TAB_ID = "\u0000pr"
-const PR_TAB_LABEL = "Changes"
+const CHANGE_TAB_ID = "\u0000pr"
+const CHANGE_TAB_LABEL = "Changes"
 
 function queueDefaultStepTab(data: QueueShowData, outputs: readonly QueueArtifactOutput[]): string {
   const names = queueStepNames(data)
@@ -407,7 +407,7 @@ function queueDefaultStepTab(data: QueueShowData, outputs: readonly QueueArtifac
     .toReversed()
     .find((output) => names.includes(output.step) && usableStepOutput(output.text) !== undefined)?.step
   if (newestOutput !== undefined) return newestOutput
-  return data.steps.findLast((step) => step.status !== "requested" && step.status !== "queued")?.step ?? PR_TAB_ID
+  return data.steps.findLast((step) => step.status !== "requested" && step.status !== "queued")?.step ?? CHANGE_TAB_ID
 }
 
 function QueueArtifactOutputRow({ row }: { row: QueueArtifactOutputLine }) {
@@ -699,7 +699,7 @@ function QueueChangeDiffView({ diff }: { diff: QueueChangeDiff | undefined }) {
 /**
  * The Changes-tab / pre-run body (user directive 2026-07-21; expanded by
  * operator spec item 4 from "the selected member only" to every member of
- * the run): each batched PR gets its own box via QueueDetailRunPrBlocks,
+ * the run): each batched PR gets its own box via QueueDetailRunChangeBlocks,
  * complete with its own diff. Only the member matching the pane's own title
  * row skips its identity line — every other member still needs one, since
  * the title above shows just the one PR the cursor is on.
@@ -717,7 +717,7 @@ function QueueDetailChangeSection({
   data?: QueueShowData
   row?: QueueTimelineProjectedRow
   rows: readonly QueueTimelineProjectedRow[]
-  prs: readonly PR[]
+  prs: readonly Change[]
   runDetails: readonly QueueShowData[]
   diffs: readonly QueueChangeDiff[]
   showFacts?: boolean
@@ -771,7 +771,7 @@ export function QueueWorkflowStepTabs({
   compact: boolean
   active: boolean
   highlightPr?: string
-  prs: readonly PR[]
+  prs: readonly Change[]
   runRows?: readonly QueueTimelineProjectedRow[]
   runDetails?: readonly QueueShowData[]
   diffs?: readonly QueueChangeDiff[]
@@ -783,7 +783,7 @@ export function QueueWorkflowStepTabs({
   // Default selection follows the failing/live step, then the newest recorded
   // output or terminal step. Operator selection overrides it; the parent
   // remounts on run change, resetting that override.
-  const tabNames = useMemo(() => (data === undefined ? [] : [PR_TAB_ID, ...names]), [data, names])
+  const tabNames = useMemo(() => (data === undefined ? [] : [CHANGE_TAB_ID, ...names]), [data, names])
   const liveStep = data === undefined ? undefined : queueDefaultStepTab(data, outputs)
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
   const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
@@ -801,7 +801,7 @@ export function QueueWorkflowStepTabs({
       ? 0
       : Math.max(
           1,
-          PR_TAB_LABEL.length,
+          CHANGE_TAB_LABEL.length,
           ...names.map((name) => {
             const fact = stepFactByName.get(name)
             const duration = fact?.duration ?? ""
@@ -812,10 +812,10 @@ export function QueueWorkflowStepTabs({
           }),
         )
   const stepTabLabel = (name: string, selected: boolean) => {
-    if (name === PR_TAB_ID) {
+    if (name === CHANGE_TAB_ID) {
       return (
         <Text color={selected ? "$fg-on-selected" : undefined}>
-          {PR_TAB_LABEL.padEnd(stepTabWidth)}
+          {CHANGE_TAB_LABEL.padEnd(stepTabWidth)}
           {"\n"}
           {" ".repeat(stepTabWidth)}
         </Text>
@@ -897,7 +897,7 @@ export function QueueWorkflowStepTabs({
               ))}
             </TabList>
             <Box height={1} flexShrink={0} />
-            <TabPanel value={PR_TAB_ID}>
+            <TabPanel value={CHANGE_TAB_ID}>
               <QueueTabScrollArea>
                 <QueueDetailChangeSection
                   data={data}

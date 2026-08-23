@@ -2,7 +2,7 @@
 // @level l1
 // @consumer @yrd/cli pr view + watch detail
 
-import type { PR } from "@yrd/bay"
+import type { Change } from "@yrd/bay"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, test } from "vitest"
@@ -12,7 +12,7 @@ import { composeDescription } from "../src/run.ts"
 const BASE_SHA = "a".repeat(40)
 const AT = "2026-07-20T09:00:00.000Z"
 
-function fixturePr(description: string, extra: Partial<PR> = {}): PR {
+function fixturePr(description: string, extra: Partial<Change> = {}): Change {
   const headSha = "b".repeat(40)
   return {
     id: "PR7",
@@ -31,7 +31,7 @@ function fixturePr(description: string, extra: Partial<PR> = {}): PR {
   }
 }
 
-async function renderDetail(pr: PR, width = 80): Promise<string> {
+async function renderDetail(pr: Change, width = 80): Promise<string> {
   return renderString(createElement(ChangeDetailView, { pr, runs: [], now: Date.parse("2026-07-20T10:00:00.000Z") }), {
     width,
     plain: true,
@@ -48,7 +48,7 @@ const DESCRIPTION = [
   "- Reflow paragraphs to the pane width",
 ].join("\n")
 
-describe("PR description renders as Markdown (watch detail + pr view via PRDetailView)", () => {
+describe("PR description renders as Markdown (watch detail + pr view via ChangeDetailView)", () => {
   test("reflows authored hard-wraps to the pane width", async () => {
     const out = await renderDetail(fixturePr(DESCRIPTION), 80)
     // The authored line break between "submissions" and "and check-requests" is

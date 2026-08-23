@@ -1,4 +1,4 @@
-import { currentChangeRev, changeDeliveryState, type PR } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type Change } from "@yrd/bay"
 import type { JsonValue } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { Run } from "@yrd/queue"
@@ -27,9 +27,9 @@ type FixtureChangeOptions = Readonly<{
   headSha?: string
   submitter?: string
   revisions?: readonly FixtureRevision[]
-  reviews?: PR["reviews"]
-  comments?: PR["comments"]
-  checkRequests?: PR["checkRequests"]
+  reviews?: Change["reviews"]
+  comments?: Change["comments"]
+  checkRequests?: Change["checkRequests"]
   issue?: string
   note?: string
   detail?: string
@@ -41,7 +41,7 @@ type FixtureChangeOptions = Readonly<{
   canceledAt?: string
   canceledBy?: string
   cancelReason?: string
-  integration?: NonNullable<PR["integration"]>
+  integration?: NonNullable<Change["integration"]>
 }>
 
 type FixtureDeliveryState = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
@@ -51,9 +51,9 @@ type LegacyFixtureRevision = Readonly<{
   base: string
   baseSha?: string
   submitter?: string
-  props?: PR["revs"][number]["props"]
-  composition?: PR["revs"][number]["composition"]
-  recut?: PR["revs"][number]["recut"]
+  props?: Change["revs"][number]["props"]
+  composition?: Change["revs"][number]["composition"]
+  recut?: Change["revs"][number]["recut"]
   pushedAt: string
   submittedAt?: string
   terminal?: Readonly<{
@@ -62,9 +62,9 @@ type LegacyFixtureRevision = Readonly<{
     run?: string
   }>
 }>
-type FixtureRevision = PR["revs"][number] | LegacyFixtureRevision
+type FixtureRevision = Change["revs"][number] | LegacyFixtureRevision
 
-function fixtureRevision(revision: FixtureRevision): PR["revs"][number] {
+function fixtureRevision(revision: FixtureRevision): Change["revs"][number] {
   if ("n" in revision) return revision
   return {
     n: revision.revision,
@@ -95,7 +95,7 @@ export function fixturePr(
   submittedAt: string,
   name = `Fixture ${id}`,
   options: FixtureChangeOptions = {},
-): PR {
+): Change {
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
   const revision = options.revision ?? 1
   const headSha = options.headSha ?? digit.repeat(40)
@@ -171,7 +171,7 @@ function terminalFixturePr(
   run: string,
   name: string,
   options: Omit<FixtureChangeOptions, "headSha" | "revisions" | "terminalRun"> = {},
-): PR {
+): Change {
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
   const headSha = digit.repeat(40)
   return fixturePr(id, status, submittedAt, name, {
@@ -326,7 +326,7 @@ export function fixtureStep(
 
 export function fixtureRun(
   id: string,
-  prs: readonly PR[],
+  prs: readonly Change[],
   status: FixtureRunStatus,
   startedAt: string,
   options: Readonly<{
@@ -379,7 +379,7 @@ export function fixtureRun(
 type FixtureRunStatus = "running" | "waiting" | "passed" | "failed"
 
 export function fixtureResult(
-  prs: readonly PR[],
+  prs: readonly Change[],
   runs: readonly Run[],
   pause?: QueueStatusResult["pause"],
 ): QueueStatusResult {
@@ -473,7 +473,7 @@ export function fixtureMultiQueueSnapshot(
  * every row claiming `main`.
  */
 export function fixtureRebase(base: string, result: QueueStatusResult): QueueStatusResult {
-  const rebasePr = (pr: PR): PR => ({ ...pr, base })
+  const rebasePr = (pr: Change): Change => ({ ...pr, base })
   const rebaseRun = (run: Run): Run => ({ ...run, base })
   return {
     ...result,

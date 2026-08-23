@@ -6,9 +6,9 @@
 import { describe, expect, it } from "vitest"
 import { classifyRefusalRemedy } from "../src/refusal-remedy.ts"
 
-const PR = "PR1791"
+const Change = "PR1791"
 
-function authoredGitlink(pr = PR): { code: string; message: string } {
+function authoredGitlink(pr = Change): { code: string; message: string } {
   return {
     code: "authored-gitlink",
     message: `yrd: PR '${pr}' changes generated-only gitlinks [km, ag]`,
@@ -35,7 +35,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
 
   it("does not mechanise a composition-invalid carrier lacking a mechanical remedy", () => {
     const remedy = classifyRefusalRemedy(
-      { code: "composition-invalid", message: `yrd: PR '${PR}' composition manifest names no source` },
+      { code: "composition-invalid", message: `yrd: PR '${Change}' composition manifest names no source` },
       { branch: "task/22474", delivery: "submitted" },
     )
 
@@ -47,7 +47,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
       {
         code: "recut-gitlink-conflict",
         message:
-          `yrd: PR '${PR}' target root '${"c".repeat(40)}' pins submodule 'km' to '${"a".repeat(40)}' but the ` +
+          `yrd: PR '${Change}' target root '${"c".repeat(40)}' pins submodule 'km' to '${"a".repeat(40)}' but the ` +
           `replayed authored root '${"d".repeat(40)}' pins it to '${"b".repeat(40)}'`,
       },
       { branch: "task/22474", delivery: "submitted" },
@@ -60,7 +60,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
 
   it("leaves a recut certificate refusal to judgment — it prints no command to run", () => {
     const remedy = classifyRefusalRemedy(
-      { code: "recut-certificate", message: `yrd: PR '${PR}' recut tree certificate does not match revision 3` },
+      { code: "recut-certificate", message: `yrd: PR '${Change}' recut tree certificate does not match revision 3` },
       { branch: "task/22474", delivery: "submitted" },
     )
 
@@ -71,7 +71,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     const remedy = classifyRefusalRemedy(
       {
         code: "payload-certificate",
-        message: `yrd: PR '${PR}' declared payload range-diff does not match the recorded source rewrite`,
+        message: `yrd: PR '${Change}' declared payload range-diff does not match the recorded source rewrite`,
       },
       { branch: "task/22474", delivery: "submitted" },
     )
@@ -100,7 +100,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     const remedy = classifyRefusalRemedy(
       {
         code: "source-lineage",
-        message: `yrd: PR '${PR}' source lineage broke; run 'git -C km fetch --all --prune' then resubmit`,
+        message: `yrd: PR '${Change}' source lineage broke; run 'git -C km fetch --all --prune' then resubmit`,
       },
       { branch: "task/22474", delivery: "submitted" },
     )
@@ -110,7 +110,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
 
   it("never mechanises a remedy that names an unknown yrd verb", () => {
     const remedy = classifyRefusalRemedy(
-      { code: "queue-drift", message: `yrd: PR '${PR}' is stale; run 'yrd queue deinit main' first` },
+      { code: "queue-drift", message: `yrd: PR '${Change}' is stale; run 'yrd queue deinit main' first` },
       { branch: "task/22474", delivery: "submitted" },
     )
 

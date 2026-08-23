@@ -16,7 +16,7 @@ import {
   changeNeedsAuthor,
   withBays,
   type BayWorkspace,
-  type PR,
+  type Change,
 } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -43,7 +43,7 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-function changeFacts(pr: PR | undefined) {
+function changeFacts(pr: Change | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   const revision = currentChangeRev(pr)
   return {

@@ -2,7 +2,7 @@
 // @level l2
 // @consumer @yrd/cli
 
-import { changeDeliveryState, type PR } from "@yrd/bay"
+import { changeDeliveryState, type Change } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
@@ -28,7 +28,7 @@ const NOW = Date.parse("2026-07-13T12:00:00.000Z")
 const REGISTERED_AT = "2026-07-13T10:00:00.000Z"
 
 /** A registered-but-unsubmitted PR: bay status `pushed`, no failure history. */
-function draftPr(): PR {
+function draftPr(): Change {
   const headSha = "7".repeat(40)
   return {
     id: "PR7",
@@ -55,7 +55,7 @@ function draftPr(): PR {
 
 /** A re-pushed PR whose prior submission was rejected: bay status `pushed` with a
  * failed submission in its revision history → derived display status `rev`. */
-function revisionPr(): PR {
+function revisionPr(): Change {
   const headSha = "5".repeat(40)
   const priorHeadSha = "4".repeat(40)
   return {
@@ -92,7 +92,7 @@ function revisionPr(): PR {
 }
 
 /** A submitted PR awaiting its run: bay status `submitted`. */
-function submittedPr(): PR {
+function submittedPr(): Change {
   const headSha = "3".repeat(40)
   return {
     id: "PR3",
@@ -119,7 +119,7 @@ function submittedPr(): PR {
   }
 }
 
-function result(prs: readonly PR[], finished: readonly Run[] = []): QueueStatusResult {
+function result(prs: readonly Change[], finished: readonly Run[] = []): QueueStatusResult {
   return {
     base: "main",
     running: [],
@@ -135,7 +135,7 @@ function result(prs: readonly PR[], finished: readonly Run[] = []): QueueStatusR
   }
 }
 
-function project(prs: readonly PR[], finished: readonly Run[] = []) {
+function project(prs: readonly Change[], finished: readonly Run[] = []) {
   const results = [result(prs, finished)]
   const options: QueueTimelineProjectionOptions = {
     now: NOW,
@@ -320,7 +320,7 @@ describe("queue timeline non-integrated rows", () => {
 
 /** A rejected PR that has NOT been re-pushed: bay status `rejected`, latest
  * revision's terminal run R9. Resurfaces as `rev` only while R9 is retained. */
-function rejectedPr(): PR {
+function rejectedPr(): Change {
   const headSha = "4".repeat(40)
   return {
     id: "PR5",

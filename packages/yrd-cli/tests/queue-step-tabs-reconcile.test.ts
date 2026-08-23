@@ -13,7 +13,7 @@ import type { QueueArtifactOutput } from "../src/watch-pane.tsx"
 
 // One PR / one run; the reconciliation contract (21106) is entirely about the
 // run's step statuses moving underneath a still-mounted detail pane.
-const STEP_PR = fixturePr("PR100", "submitted", "2026-07-13T11:30:00.000Z", "Reconcile the live step")
+const STEP_CHANGE = fixturePr("PR100", "submitted", "2026-07-13T11:30:00.000Z", "Reconcile the live step")
 
 type StepState = Readonly<{
   name: string
@@ -25,7 +25,7 @@ type StepState = Readonly<{
 }>
 
 function stepTabsData(steps: readonly StepState[]): QueueShowData {
-  const run = fixtureRun("R100", [STEP_PR], "running", "2026-07-13T11:40:00.000Z", {
+  const run = fixtureRun("R100", [STEP_CHANGE], "running", "2026-07-13T11:40:00.000Z", {
     steps: steps.map((step) =>
       fixtureStep(
         step.name,
@@ -68,7 +68,7 @@ function SameRunAdvance({ first, second }: { first: readonly StepState[]; second
     outputs: stepOutputs(steps),
     compact: true,
     active: false,
-    prs: [STEP_PR],
+    prs: [STEP_CHANGE],
   })
 }
 
@@ -83,7 +83,7 @@ async function renderOnce(steps: readonly StepState[]): Promise<string> {
       outputs: stepOutputs(steps),
       compact: true,
       active: false,
-      prs: [STEP_PR],
+      prs: [STEP_CHANGE],
     }),
     { width: 100, height: 40, plain: true },
   )
@@ -96,7 +96,7 @@ async function renderSelected(steps: readonly StepState[], name: string): Promis
       outputs: stepOutputs(steps),
       compact: true,
       active: true,
-      prs: [STEP_PR],
+      prs: [STEP_CHANGE],
     }),
   )
   try {
@@ -169,7 +169,7 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
       }),
     )
     const successor = fixtureStep("integrate", fixtureJob("J101-integrate", "requested"))
-    const run = fixtureRun("R101", [STEP_PR], "failed", "2026-07-13T11:40:00.000Z", {
+    const run = fixtureRun("R101", [STEP_CHANGE], "failed", "2026-07-13T11:40:00.000Z", {
       finishedAt: "2026-07-13T11:42:00.000Z",
       error: { code: "check-failed", message: "focused tests failed" },
       steps: [failed, successor],
@@ -190,7 +190,7 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
         outputs,
         compact: true,
         active: false,
-        prs: [STEP_PR],
+        prs: [STEP_CHANGE],
       }),
       { width: 110, height: 40, plain: true },
     )
@@ -217,7 +217,7 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
         outputs: stepOutputs(steps),
         compact: true,
         active: true,
-        prs: [STEP_PR],
+        prs: [STEP_CHANGE],
       }),
     )
     try {
@@ -247,7 +247,7 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
         commands: { check: "bun test:stale-config" },
         compact: true,
         active: true,
-        prs: [STEP_PR],
+        prs: [STEP_CHANGE],
       }),
     )
     await app.waitForLayoutStable()

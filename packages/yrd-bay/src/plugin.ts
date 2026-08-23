@@ -62,7 +62,7 @@ import {
   checksRequested,
   currentChangeRev,
   emptyBaysState,
-  isLivePR,
+  isLiveChange,
   needsReview,
   normalizeV2By,
   normalizeLegacyChangeKeys,
@@ -72,7 +72,7 @@ import {
   changeProps,
   changeDeliveryState,
   changeForBay,
-  requireLivePR,
+  requireLiveChange,
   changeHead,
   changeNeedsAuthor,
   changeRemerge,
@@ -81,7 +81,7 @@ import {
   projectBranchLifecycles,
   reviewState,
   resolveBay,
-  resolvePR,
+  resolveChange,
   resolveChangeMatch,
   type Bay,
   type BranchLifecycle,
@@ -92,8 +92,8 @@ import {
   type ChangeProps,
   type DeprovisionBayInput,
   type DeprovisionedBay,
-  type LivePR,
-  type PR,
+  type LiveChange,
+  type Change,
   type ChangeAdmissionRecordedFact,
   type ChangeComment,
   type ChangeRegression,
@@ -780,8 +780,8 @@ export type Bays = Readonly<{
   get(selector: string): DeepReadonly<Bay> | undefined
   list(): readonly DeepReadonly<Bay>[]
   branchLifecycles(): readonly DeepReadonly<BranchLifecycle>[]
-  pr(selector: string): DeepReadonly<PR> | undefined
-  prs(): readonly DeepReadonly<PR>[]
+  pr(selector: string): DeepReadonly<Change> | undefined
+  prs(): readonly DeepReadonly<Change>[]
   reviewState(selector: string): DeepReadonly<ChangeReviewState>
   needsReview(selector: string, reviewer?: string): boolean
   checksRequested(selector: string): boolean
@@ -792,7 +792,7 @@ export type Bays = Readonly<{
   certifyHandoff(args: CertifyHandoffArgs): Promise<CommandResult>
   intake(args: IntakeChangeArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
-  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
+  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change>>
   /** Live queue SHA `pr create` will consume for this bay — not the historical pin. */
   effectiveBase(selector: string, requestedBase?: string): Promise<BayBaseTarget>
   close(args: CloseBayArgs): Promise<CommandResult>
@@ -856,7 +856,7 @@ function hasBranchReuseProvenance(
   branch: string,
 ): boolean {
   return (
-    Object.values(state.prs).some((pr) => pr.branch === branch && pr.issue === identity.issue && isLivePR(pr)) ||
+    Object.values(state.prs).some((pr) => pr.branch === branch && pr.issue === identity.issue && isLiveChange(pr)) ||
     Object.values(state.byId).some(
       (bay) =>
         bay.status === "closed" && bay.branch === branch && bay.name === identity.name && bay.issue === identity.issue,
@@ -927,13 +927,13 @@ export function createBays(
     return actions.open({ ...args, ...resolved })
   }
   const intake = async (args: IntakeChangeArgs): Promise<CommandResult> => {
-    const selectedPR = (): DeepReadonly<PR> | undefined => {
+    const selectedPR = (): DeepReadonly<Change> | undefined => {
       const snapshot = state()
       const bay = args.bay === undefined ? undefined : resolveBay(snapshot, args.bay)
       return bay === undefined
         ? args.branch === undefined
           ? undefined
-          : resolvePR(snapshot, args.branch)
+          : resolveChange(snapshot, args.branch)
         : changeForBay(snapshot, bay.id)
     }
     const before = selectedPR()
@@ -965,7 +965,7 @@ export function createBays(
       if (args.flow !== undefined || args.props !== undefined || options.selectFlow === undefined) {
         return actions.submit(args)
       }
-      const pr = required(resolvePR(state(), args.pr), "PR", args.pr)
+      const pr = required(resolveChange(state(), args.pr), "PR", args.pr)
       const selected = options.selectFlow({
         base: pr.base,
         branch: pr.branch,
@@ -1014,30 +1014,30 @@ export function createBays(
   }
   const submit = (args: SubmitArgs): Promise<CommandResult> => {
     const selector = "pr" in args ? args.pr : args.branch
-    const before = resolvePR(state(), selector)
+    const before = resolveChange(state(), selector)
     return observe(
       {
         lifecycle: "submit",
         identity: before === undefined ? undefined : changeIdentity(before),
         attributes: { selector },
         resultAttributes: () => {
-          const selected = resolvePR(state(), selector)
+          const selected = resolveChange(state(), selector)
           return selected === undefined ? {} : changeIdentity(selected)
         },
       },
       () => submitOperation(args),
     )
   }
-  const bindProps = async (pr: DeepReadonly<PR>, props: ChangeProps | undefined): Promise<DeepReadonly<PR>> => {
+  const bindProps = async (pr: DeepReadonly<Change>, props: ChangeProps | undefined): Promise<DeepReadonly<Change>> => {
     if (props === undefined) return pr
     await submitOperation({ pr: pr.id, props })
-    const bound = resolvePR(state(), pr.id)
+    const bound = resolveChange(state(), pr.id)
     if (bound === undefined) {
       raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after props bind`)
     }
     return bound
   }
-  const bindIssue = async (pr: DeepReadonly<PR>, issue: string | undefined): Promise<DeepReadonly<PR>> => {
+  const bindIssue = async (pr: DeepReadonly<Change>, issue: string | undefined): Promise<DeepReadonly<Change>> => {
     if (issue === undefined || pr.issue === issue) return pr
     if (pr.issue !== undefined) {
       raiseFailure(
@@ -1055,16 +1055,16 @@ export function createBays(
       )
     }
     await actions.editPr({ pr: pr.id, issue })
-    const bound = resolvePR(state(), pr.id)
+    const bound = resolveChange(state(), pr.id)
     if (bound === undefined) {
       raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after issue bind`)
     }
     return bound
   }
   const bindMetadata = async (
-    pr: DeepReadonly<PR>,
+    pr: DeepReadonly<Change>,
     metadata: Pick<SubmitSelectionOptions, "title" | "description" | "track" | "warnings">,
-  ): Promise<DeepReadonly<PR>> => {
+  ): Promise<DeepReadonly<Change>> => {
     const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
     const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
     // Tracking only governs FUTURE resident preparation or a manual implicit
@@ -1072,7 +1072,7 @@ export function createBays(
     // resubmit reaches this seam at exit 0) no longer has. Recording it there
     // would refuse the whole submit, so state loudly that the flag was not
     // recorded instead of pretending it was.
-    const trackable = isLivePR(pr)
+    const trackable = isLiveChange(pr)
     const trackChanged = metadata.track !== undefined && metadata.track !== (pr.track ?? false)
     if (trackChanged && !trackable) {
       const warning =
@@ -1089,28 +1089,28 @@ export function createBays(
       ...(descriptionChanged ? { description: metadata.description } : {}),
       ...(recordTrack ? { track: metadata.track } : {}),
     })
-    const bound = resolvePR(state(), pr.id)
+    const bound = resolveChange(state(), pr.id)
     if (bound === undefined) {
       raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after metadata bind`)
     }
     return bound
   }
   const bindSubmission = async (
-    pr: DeepReadonly<PR>,
+    pr: DeepReadonly<Change>,
     submission: Pick<SubmitSelectionOptions, "issue" | "props">,
-  ): Promise<DeepReadonly<PR>> => bindProps(await bindIssue(pr, submission.issue), submission.props)
+  ): Promise<DeepReadonly<Change>> => bindProps(await bindIssue(pr, submission.issue), submission.props)
 
   const submitSelectionOperation = async (
     selector: string,
     options: SubmitSelectionOptions,
-  ): Promise<DeepReadonly<PR>> => {
+  ): Promise<DeepReadonly<Change>> => {
     const requestedComposition =
       options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
     const resolved = resolveChangeMatch(snapshot, selector)
-    if (resolved?.revision !== undefined) requireLivePR(snapshot, selector)
+    if (resolved?.revision !== undefined) requireLiveChange(snapshot, selector)
     const selectedBay = resolveBay(snapshot, selector)
-    let pr = resolved?.value ?? (selectedBay === undefined ? undefined : resolvePR(snapshot, selectedBay.branch))
+    let pr = resolved?.value ?? (selectedBay === undefined ? undefined : resolveChange(snapshot, selectedBay.branch))
     // A closed Bay is archive evidence, not permanent ownership of its branch
     // alias. Addressing that branch again must use the direct-branch delivery
     // path; canonical Bay id/name selectors still resolve the closed Bay and
@@ -1192,7 +1192,7 @@ export function createBays(
         bay.branch,
         await options.resolveParents(bay.headSha),
       )
-      pr = changeForBay(snapshot, bay.id) ?? resolvePR(snapshot, bay.branch)
+      pr = changeForBay(snapshot, bay.id) ?? resolveChange(snapshot, bay.branch)
       const composition = requestedComposition ?? (pr === undefined ? undefined : changeComposition(pr))
       if (pr === undefined || changeHead(pr) !== bay.headSha || !sameComposition(composition, changeComposition(pr))) {
         await intake({
@@ -1202,7 +1202,7 @@ export function createBays(
           ...(options.issue === undefined ? {} : { issue: options.issue }),
           ...(composition === undefined ? {} : { composition }),
         })
-        pr = changeForBay(state(), bay.id) ?? resolvePR(state(), bay.branch)
+        pr = changeForBay(state(), bay.id) ?? resolveChange(state(), bay.branch)
       }
     }
 
@@ -1243,7 +1243,7 @@ export function createBays(
             ...(options.issue === undefined ? {} : { issue: options.issue }),
             ...(composition === undefined ? {} : { composition }),
           })
-          pr = resolvePR(state(), pr.id)
+          pr = resolveChange(state(), pr.id)
           if (pr === undefined) {
             raiseFailure(
               "infrastructure",
@@ -1259,7 +1259,7 @@ export function createBays(
     // withdrawn/canceled branch about to be reopened by the direct-branch
     // resubmit below (D2); its issue rides along when that mint records the
     // fresh revision, so binding here (which refuses on a terminal PR) is skipped.
-    if (pr !== undefined && isLivePR(pr)) pr = await bindIssue(pr, options.issue)
+    if (pr !== undefined && isLiveChange(pr)) pr = await bindIssue(pr, options.issue)
     if (
       pr !== undefined &&
       (changeDeliveryState(pr) === "submitted" ||
@@ -1272,7 +1272,7 @@ export function createBays(
       pr = await bindProps(pr, options.props)
       if (options.draft === true) return pr
       await submitOperation({ pr: pr.id })
-      const submitted = resolvePR(state(), pr.id)
+      const submitted = resolveChange(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
       }
@@ -1302,7 +1302,7 @@ export function createBays(
         }
         if (options.draft === true) return correlated
         await submitOperation({ pr: correlated.id })
-        const submitted = resolvePR(state(), live.id)
+        const submitted = resolveChange(state(), live.id)
         if (submitted === undefined) {
           raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${live.id}' disappeared after submit`)
         }
@@ -1317,7 +1317,7 @@ export function createBays(
         ...(options.props === undefined ? {} : { props: options.props }),
         ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
       })
-      const submitted = resolvePR(state(), selector)
+      const submitted = resolveChange(state(), selector)
       if (submitted === undefined) {
         raiseFailure(
           "infrastructure",
@@ -1337,8 +1337,8 @@ export function createBays(
     raiseFailure("refusal", "pr-not-pushed", `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
   }
 
-  const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
-    const before = resolvePR(state(), selector)
+  const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change>> => {
+    const before = resolveChange(state(), selector)
     return observe(
       {
         lifecycle: "submit",
@@ -1359,11 +1359,11 @@ export function createBays(
     get: (selector) => resolveBay(state(), selector),
     list: () => Object.freeze(Object.values(state().byId)),
     branchLifecycles: () => Object.freeze(projectBranchLifecycles(state())),
-    pr: (selector) => resolvePR(state(), selector),
+    pr: (selector) => resolveChange(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
-    reviewState: (selector) => reviewState(required(resolvePR(state(), selector), "PR", selector)),
-    needsReview: (selector, reviewer) => needsReview(required(resolvePR(state(), selector), "PR", selector), reviewer),
-    checksRequested: (selector) => checksRequested(required(resolvePR(state(), selector), "PR", selector)),
+    reviewState: (selector) => reviewState(required(resolveChange(state(), selector), "PR", selector)),
+    needsReview: (selector, reviewer) => needsReview(required(resolveChange(state(), selector), "PR", selector), reviewer),
+    checksRequested: (selector) => checksRequested(required(resolveChange(state(), selector), "PR", selector)),
     submitSelection,
     effectiveBase: async (selector, requestedBase) => {
       const snapshot = state()
@@ -1526,7 +1526,7 @@ export function withBays(options: WithBaysOptions) {
     })
 }
 
-function changeIdentity(pr: DeepReadonly<PR>): YrdDeliveryIdentity {
+function changeIdentity(pr: DeepReadonly<Change>): YrdDeliveryIdentity {
   return {
     pr: pr.id,
     revision: changeRevisionNumber(pr),
@@ -1611,7 +1611,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         title: "Record a mechanically equivalent PR recut",
         visibility: "public",
         params: ChangeRemergeArgsSchema,
-        apply: (state: BayState, args: ChangeRemergeArgs) => remergePr(state, args, defaultSubmitter),
+        apply: (state: BayState, args: ChangeRemergeArgs) => remergeChange(state, args, defaultSubmitter),
       }),
       settleSuperseded: command({
         title: "Settle a queued PR whose payload current main already contains",
@@ -1694,7 +1694,7 @@ function requestChangePublication(
   args: ChangePublicationInput,
   publication: BayJobDefs["pr.publish"],
 ) {
-  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const pr = required(resolveChange(state.bays, args.pr), "PR", args.pr)
   const revision = currentChangeRev(pr)
   if (changeDeliveryState(pr) !== "pushed") {
     raiseFailure("refusal", "publication-pr-not-draft", `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
@@ -1858,15 +1858,15 @@ function requireExpectedChangeCurrent(
   state: DeepReadonly<BaysState>,
   expected: ChangeExpectedCurrent,
   operation: "intake" | "submit" | "ready" | "request-checks" | "comment",
-): LivePR {
-  const pr = resolvePR(state, expected.pr)
+): LiveChange {
+  const pr = resolveChange(state, expected.pr)
   const matches =
     pr !== undefined &&
-    isLivePR(pr) &&
+    isLiveChange(pr) &&
     changeRevisionNumber(pr) === expected.revision &&
     changeHead(pr) === expected.headSha &&
     (expected.track === undefined || (pr.track ?? false) === expected.track)
-  if (matches) return pr as LivePR
+  if (matches) return pr as LiveChange
   const actual =
     pr === undefined
       ? "missing"
@@ -1885,9 +1885,9 @@ function requireExpectedChangeTargetCurrent(
   target: string,
   expected: ChangeExpectedCurrent,
   operation: "submit" | "ready" | "request-checks" | "comment",
-): LivePR {
+): LiveChange {
   const pr = requireExpectedChangeCurrent(state, expected, operation)
-  const targetPr = resolvePR(state, target)
+  const targetPr = resolveChange(state, target)
   if (targetPr?.id === pr.id) return pr
   raiseFailure(
     "refusal",
@@ -1896,7 +1896,7 @@ function requireExpectedChangeTargetCurrent(
   )
 }
 
-function changeIdForRevision(existing: DeepReadonly<PR> | undefined, commandId: string): ChangeId {
+function changeIdForRevision(existing: DeepReadonly<Change> | undefined, commandId: string): ChangeId {
   if (existing === undefined) return changeIdForCommand(commandId)
   const changeId = currentChangeRev(existing).changeId
   if (changeId !== undefined) return changeId
@@ -1931,8 +1931,8 @@ function intakePR(
     )
   }
   const associated = bay === undefined ? undefined : changeForBay(current, bay.id)
-  const branchPR = resolvePR(current, branch)
-  const existing = associated ?? (branchPR !== undefined && isLivePR(branchPR) ? branchPR : undefined)
+  const branchPR = resolveChange(current, branch)
+  const existing = associated ?? (branchPR !== undefined && isLiveChange(branchPR) ? branchPR : undefined)
   // An omitted receiver base belongs to the recorded PR before the process
   // default. Otherwise replaying an unchanged needs-author PR against a
   // non-default base silently looks like a new authored revision.
@@ -1950,7 +1950,7 @@ function intakePR(
       return { events: [] }
     }
   }
-  if (existing !== undefined && !isLivePR(existing)) {
+  if (existing !== undefined && !isLiveChange(existing)) {
     throw new Error(`yrd: PR '${existing.id}' is ${changeDeliveryState(existing)}; start a new bay`)
   }
   const issue = attachedIssue(existing, args.issue, bay?.issue)
@@ -2027,9 +2027,9 @@ function submitWork(
     // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
     // semantics live entirely in the {branch} path and submitSelectionOperation,
     // never this {pr} path, so no pre-guard resolution is needed here.
-    const pr: LivePR =
+    const pr: LiveChange =
       args.expectedCurrent === undefined
-        ? requireLivePR(current, args.pr)
+        ? requireLiveChange(current, args.pr)
         : requireExpectedChangeTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
     if (args.props !== undefined) return bindChangeProps(pr, args.props)
     if (changeDeliveryState(pr) !== "pushed") {
@@ -2047,7 +2047,7 @@ function submitWork(
     }
   }
 
-  const existing = resolvePR(current, args.branch)
+  const existing = resolveChange(current, args.branch)
   const resumesSubmission =
     existing !== undefined &&
     (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
@@ -2161,7 +2161,7 @@ function propsLabel(props: DeepReadonly<ChangeProps>): string {
     .join(" ")
 }
 
-function bindChangeProps(pr: DeepReadonly<PR>, props: ChangeProps) {
+function bindChangeProps(pr: DeepReadonly<Change>, props: ChangeProps) {
   const currentProps = changeProps(pr)
   if (propsCovered(currentProps, props)) return { events: [] }
   const conflict = propsConflictKey(currentProps, props)
@@ -2192,7 +2192,7 @@ function bindChangeProps(pr: DeepReadonly<PR>, props: ChangeProps) {
   }
 }
 
-function revisionIdentity(pr: DeepReadonly<PR>) {
+function revisionIdentity(pr: DeepReadonly<Change>) {
   return {
     revision: changeRevisionNumber(pr),
     headSha: changeHead(pr),
@@ -2200,11 +2200,11 @@ function revisionIdentity(pr: DeepReadonly<PR>) {
   }
 }
 
-function currentRevisionSubmitter(pr: DeepReadonly<PR>): string | undefined {
+function currentRevisionSubmitter(pr: DeepReadonly<Change>): string | undefined {
   return currentChangeRev(pr).submitter
 }
 
-function terminalIdentity(pr: DeepReadonly<PR>) {
+function terminalIdentity(pr: DeepReadonly<Change>) {
   const submitter = currentRevisionSubmitter(pr)
   return {
     ...revisionIdentity(pr),
@@ -2214,7 +2214,7 @@ function terminalIdentity(pr: DeepReadonly<PR>) {
 }
 
 function attachedIssue(
-  existing: DeepReadonly<PR> | undefined,
+  existing: DeepReadonly<Change> | undefined,
   requested: string | undefined,
   fallback?: string,
 ): string | undefined {
@@ -2228,7 +2228,7 @@ function attachedIssue(
   return requested ?? existing?.issue ?? fallback
 }
 
-function propsPatch(pr: DeepReadonly<PR>, props: DeepReadonly<ChangeProps>) {
+function propsPatch(pr: DeepReadonly<Change>, props: DeepReadonly<ChangeProps>) {
   return {
     revs: pr.revs.map((revision) =>
       revision.n === changeRevisionNumber(pr) && revision.head === changeHead(pr)
@@ -2239,7 +2239,7 @@ function propsPatch(pr: DeepReadonly<PR>, props: DeepReadonly<ChangeProps>) {
 }
 
 function assertTerminalApplies(
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; props?: ChangeProps }>,
   eventName: string,
 ): void {
@@ -2261,10 +2261,10 @@ function assertTerminalApplies(
 }
 
 function associateRejectedTerminalRun(
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   identity: Readonly<{ revision: number; headSha: string }>,
   run: string,
-): PR {
+): Change {
   let found = false
   const revisions = pr.revs.map((revision) => {
     if (revision.n !== identity.revision || revision.head !== identity.headSha) return revision
@@ -2295,16 +2295,16 @@ function associateRejectedTerminalRun(
 }
 
 function readyPr(state: DeepReadonly<BayState>, args: ChangeReadyArgs, defaultSubmitter: string) {
-  const pr: LivePR =
+  const pr: LiveChange =
     args.expectedCurrent === undefined
-      ? requireLivePR(state.bays, args.pr)
+      ? requireLiveChange(state.bays, args.pr)
       : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "ready")
   if (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready") return { events: [] }
   return submitWork(state, args, "main", defaultSubmitter)
 }
 
 function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSupersededArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   const current = currentChangeRev(pr)
   if (current.n !== args.revision || current.head !== args.headSha) {
     raiseFailure(
@@ -2352,9 +2352,9 @@ function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSup
   }
 }
 
-function remergePr(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defaultSubmitter: string) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
-  if (!isLivePR(pr)) {
+function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defaultSubmitter: string) {
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
+  if (!isLiveChange(pr)) {
     raiseFailure(
       "refusal",
       "terminal-target",
@@ -2550,7 +2550,7 @@ function remergePr(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defau
 }
 
 function requestChangeReview(state: DeepReadonly<BayState>, args: ChangeRequestReviewArgs, defaultSubmitter: string) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   const delivery = changeDeliveryState(pr)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
     raiseFailure(
@@ -2572,7 +2572,7 @@ function requestChangeReview(state: DeepReadonly<BayState>, args: ChangeRequestR
 }
 
 function reviewPr(state: DeepReadonly<BayState>, args: ChangeReviewArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   const fact = ChangeReviewFactSchema.parse({
     pr: pr.id,
     revision: changeRevisionNumber(pr),
@@ -2586,9 +2586,9 @@ function reviewPr(state: DeepReadonly<BayState>, args: ChangeReviewArgs) {
 }
 
 function commentPr(state: DeepReadonly<BayState>, args: ChangeCommentArgs) {
-  const pr: LivePR =
+  const pr: LiveChange =
     args.expectedCurrent === undefined
-      ? requireLivePR(state.bays, args.pr)
+      ? requireLiveChange(state.bays, args.pr)
       : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "comment")
   const fact = ChangeCommentFactSchema.parse({
     pr: pr.id,
@@ -2602,9 +2602,9 @@ function commentPr(state: DeepReadonly<BayState>, args: ChangeCommentArgs) {
 }
 
 function requestChangeChecks(state: DeepReadonly<BayState>, args: ChangeRequestChecksArgs) {
-  const pr: LivePR =
+  const pr: LiveChange =
     args.expectedCurrent === undefined
-      ? requireLivePR(state.bays, args.pr)
+      ? requireLiveChange(state.bays, args.pr)
       : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "request-checks")
   const delivery = changeDeliveryState(pr)
   if (
@@ -2630,7 +2630,7 @@ function requestChangeChecks(state: DeepReadonly<BayState>, args: ChangeRequestC
 }
 
 function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmissionRecordedFact) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   if (changeRevisionNumber(pr) !== args.revision || changeHead(pr) !== args.headSha) {
     raiseFailure(
       "refusal",
@@ -2653,8 +2653,8 @@ function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmiss
 }
 
 function recordChangeRegression(state: DeepReadonly<BayState>, args: ChangeRegressionArgs) {
-  const original: LivePR = requireLivePR(state.bays, args.pr)
-  const repair = resolvePR(state.bays, args.repairPr)
+  const original: LiveChange = requireLiveChange(state.bays, args.pr)
+  const repair = resolveChange(state.bays, args.repairPr)
   if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
   if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
   if (!original.merged || original.integration === undefined) {
@@ -2750,7 +2750,7 @@ function regressionKey(fact: ChangeRegressionFact | ChangeRegression): string {
 }
 
 function reviewFact(
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   fact: z.infer<typeof ChangeReviewFactSchema> | z.infer<typeof ChangeCommentFactSchema>,
   kind: "review" | "comment",
 ) {
@@ -2778,7 +2778,7 @@ function reviewFact(
  * forging a tree-identical commit whose only purpose is to change a hash. A
  * live or landed duplicate has no such door, so it keeps the bare refusal
  * rather than a remedy its state would refuse. */
-function duplicatePayloadRemedy(duplicate: DeepReadonly<PR>): string {
+function duplicatePayloadRemedy(duplicate: DeepReadonly<Change>): string {
   const delivery = changeDeliveryState(duplicate)
   if (delivery !== "withdrawn" && delivery !== "canceled") return ""
   const at = delivery === "withdrawn" ? duplicate.withdrawnAt : duplicate.canceledAt
@@ -2819,15 +2819,15 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
     throw new Error(`yrd: bay '${bay.id}' is ${bay.status}; wait for its workspace job`)
   }
   if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
-  const pr = changeForBay(current, bay.id) ?? resolvePR(current, bay.branch)
-  if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLivePR(pr) && args.withdraw !== true) {
+  const pr = changeForBay(current, bay.id) ?? resolveChange(current, bay.branch)
+  if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLiveChange(pr) && args.withdraw !== true) {
     throw new Error(
       `yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
     )
   }
   return {
     events: [
-      ...(args.withdraw === true && pr !== undefined && isLivePR(pr)
+      ...(args.withdraw === true && pr !== undefined && isLiveChange(pr)
         ? [event("pr/withdrawn", { pr: pr.id, ...terminalIdentity(pr) })]
         : []),
       event("bay/closing", { bay: bay.id }),
@@ -2842,8 +2842,8 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
 }
 
 function closePr(state: DeepReadonly<BayState>, args: ChangeCloseArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
-  if (!isLivePR(pr)) {
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
+  if (!isLiveChange(pr)) {
     throw new Error(`yrd: PR '${pr.id}' is ${changeDeliveryState(pr)}; only a live PR can be closed`)
   }
   return {
@@ -2858,7 +2858,7 @@ function closePr(state: DeepReadonly<BayState>, args: ChangeCloseArgs) {
 }
 
 function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
-  const pr: LivePR = requireLivePR(state.bays, args.pr)
+  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
   const issueChanged = args.issue !== undefined && args.issue !== pr.issue
   if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
     raiseFailure(
@@ -2905,9 +2905,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   const current = state.bays
   const saveBay = (bay: Bay): BayState => bayState({ ...current, byId: { ...current.byId, [bay.id]: bay } })
   const patchBay = (bay: Bay, patch: Partial<Bay>): BayState => saveBay({ ...bay, ...patch })
-  const patchPR = (pr: PR, patch: Partial<PR>): BayState =>
+  const patchPR = (pr: Change, patch: Partial<Change>): BayState =>
     bayState({ ...current, prs: { ...current.prs, [pr.id]: { ...pr, ...patch } } })
-  const patchRevisionClock = (pr: PR, patch: Partial<ChangeRevClock>): readonly ChangeRev[] => {
+  const patchRevisionClock = (pr: Change, patch: Partial<ChangeRevClock>): readonly ChangeRev[] => {
     const currentRevision = currentChangeRev(pr)
     let found = false
     const revisions = pr.revs.map((revision) => {
@@ -3011,7 +3011,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         pushedAt: applied.ts,
         ...(pushed.props === undefined ? {} : { props: pushed.props }),
       }
-      const pr: PR =
+      const pr: Change =
         existing === undefined
           ? {
               id: pushed.pr,
@@ -3284,7 +3284,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const pr = current.prs[changed.pr]
       if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
       assertTerminalApplies(pr, changed, applied.name)
-      const rejected: PR = {
+      const rejected: Change = {
         ...pr,
         state: "open",
         merged: false,

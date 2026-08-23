@@ -7,7 +7,7 @@ import {
   resolveBay,
   type Bay,
   type HasBays,
-  type PR,
+  type Change,
 } from "@yrd/bay"
 import {
   command,
@@ -615,7 +615,7 @@ async function ensureExactPR(
   record: DeepReadonly<ContestRecord>,
   pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>,
   options: Parameters<typeof createContests>[0],
-): Promise<DeepReadonly<PR>> {
+): Promise<DeepReadonly<Change>> {
   let pr = changeForBay(options.runtime().bays, pin.bay)
   if (pr === undefined || !exactPR(pr, pin, record.base) || changeDeliveryState(pr) === "rejected") {
     // Promotion intake trusts the verified write-once pin and intentionally re-drives a rejected winner.
@@ -889,7 +889,7 @@ function passedRunnerOutput(job: DeepReadonly<Job> | undefined): AttemptRunOutpu
     : undefined
 }
 
-function exactPR(pr: DeepReadonly<PR>, pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>, base: string): boolean {
+function exactPR(pr: DeepReadonly<Change>, pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>, base: string): boolean {
   return (
     pr.bay === pin.bay &&
     pr.branch === pin.branch &&

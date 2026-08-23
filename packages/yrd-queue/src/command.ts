@@ -2256,10 +2256,10 @@ export function createGitChangeRemerger(options: {
 }): GitChangeRemerger {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return Object.freeze({ recut: (input: ChangeRemergeInput) => remergePR(git, repo, input) })
+  return Object.freeze({ recut: (input: ChangeRemergeInput) => remergeChange(git, repo, input) })
 }
 
-async function remergePR(git: Git, repo: string, input: ChangeRemergeInput): Promise<ChangeRemergeResult> {
+async function remergeChange(git: Git, repo: string, input: ChangeRemergeInput): Promise<ChangeRemergeResult> {
   if (input.proposedHeadSha !== undefined) {
     const certificateGit = createGit(git.process, git.env, { noLazyFetch: true })
     const target = await inspectLiveQueueBase(certificateGit, repo, input.base)
@@ -2303,7 +2303,7 @@ async function remergePR(git: Git, repo: string, input: ChangeRemergeInput): Pro
   let localSourceTips: ReadonlySet<string> | undefined
   if (remergeInput.composition === undefined) {
     const converted = await sourceOnlyCarrierComposition(git, repo, target, remergeInput)
-    if (converted === undefined) return remergeDirectPR(git, repo, target, remergeInput)
+    if (converted === undefined) return remergeDirectChange(git, repo, target, remergeInput)
     remergeInput = {
       ...remergeInput,
       headSha: converted.sourceBase,
@@ -2854,7 +2854,7 @@ async function assertCurrentRemergeCertificate(
   }
 }
 
-async function remergeDirectPR(
+async function remergeDirectChange(
   git: Git,
   repo: string,
   target: GitQueueTarget,

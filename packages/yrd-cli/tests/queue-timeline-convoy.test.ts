@@ -2,7 +2,7 @@
 // @level l2
 // @consumer @yrd/cli
 
-import type { PR } from "@yrd/bay"
+import type { Change } from "@yrd/bay"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { createRenderer } from "silvery/test"
@@ -37,7 +37,7 @@ function convoySnapshot(): ReturnType<typeof fixtureSnapshot> {
 /** A PR withdrawn AFTER a refusal was recorded against it. `PR.needsAuthor` has
  * no clearing path through withdrawn/integrated/canceled, so the refusal
  * outlives the close — the pr#1073 specimen. */
-function withdrawnAfterRefusal(): PR {
+function withdrawnAfterRefusal(): Change {
   return {
     ...fixturePr("PR1073", "withdrawn", SUBMITTED_AT, "Withdrawn change", { withdrawnAt: MERGED_AT }),
     needsAuthor: {

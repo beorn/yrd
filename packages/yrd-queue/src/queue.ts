@@ -24,11 +24,11 @@ import {
   changeSourceReadyAt,
   resolveBase,
   changeNotFoundMessage,
-  resolvePR,
+  resolveChange,
   reviewState,
   type BaysState,
   type HasBays,
-  type PR,
+  type Change,
   type ChangeAdmission,
   type ChangeAdmissionRecord,
   type ChangeAdmissionRecordedFact,
@@ -488,7 +488,7 @@ export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
  * Membership is by exact code, and the code is the discrimination: the sibling
  * `recut-certificate` / `recut-gitlink-object-missing` refusals report an
  * unreadable repository, which a fetch cures, and stay on the ordinary retry
- * threshold. See `recutBaseMovement` in command.ts for where the two are told
+ * threshold. See `remergeBaseMovement` in command.ts for where the two are told
  * apart.
  */
 const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict", "recut-base-diverged"])
@@ -1522,7 +1522,7 @@ function createQueue<Shape extends ChangeShape>(
   const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
     const snapshot = runtime()
     let record = Queues.resolve(snapshot.queues, selector)
-    let pr = resolvePR(snapshot.bays, selector)
+    let pr = resolveChange(snapshot.bays, selector)
     if (record !== undefined && pr !== undefined) {
       if (record.id === selector) pr = undefined
       else if (pr.id === selector) record = undefined
@@ -1734,7 +1734,7 @@ function createQueue<Shape extends ChangeShape>(
    * strength of a housekeeping pass.
    */
   const refreshCheckIdentities = async (
-    prs: readonly DeepReadonly<PR>[],
+    prs: readonly DeepReadonly<Change>[],
     resolveCycleBase: CycleBaseResolver | undefined,
   ): Promise<void> => {
     if (resolveCycleBase === undefined) return
@@ -1748,7 +1748,7 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   const resolveCandidateBaseSha = async (
-    prs: readonly DeepReadonly<PR>[],
+    prs: readonly DeepReadonly<Change>[],
     resolveCycleBase: CycleBaseResolver | undefined,
   ): Promise<string> => {
     const first = prs[0]
@@ -1844,12 +1844,12 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   const candidateFacts = (
-    prs: readonly DeepReadonly<PR>[],
+    prs: readonly DeepReadonly<Change>[],
     baseSha: string,
   ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> =>
     candidateFactsForSnapshots(prs.map(Queues.snapshot), baseSha)
 
-  const recordRevisionAdmission = (pr: DeepReadonly<PR>, admission: ChangeAdmissionRecord): Promise<CommandResult> =>
+  const recordRevisionAdmission = (pr: DeepReadonly<Change>, admission: ChangeAdmissionRecord): Promise<CommandResult> =>
     actions.recordAdmission({
       pr: pr.id,
       revision: changeRevisionNumber(pr),
@@ -1866,7 +1866,7 @@ function createQueue<Shape extends ChangeShape>(
    * granted" and deny the carrier its next retry — so the fact is recorded
    * verbatim AND said out loud here, which is the only place holding both the
    * carrier and the logger (@yrd/core/rebuilt-carrier-denied-retry). */
-  const verdictRequestCount = (pr: DeepReadonly<PR>, baseSha: string): number | "unresolved" => {
+  const verdictRequestCount = (pr: DeepReadonly<Change>, baseSha: string): number | "unresolved" => {
     const tally = revisionCheckRequestTally(pr, baseSha)
     if (tally.status === "unresolved") {
       log.warn?.("queue admission could not resolve the base of every check request for this tree", {
@@ -1882,7 +1882,7 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   const refuseRevisionAdmission = async (
-    pr: DeepReadonly<PR>,
+    pr: DeepReadonly<Change>,
     baseSha: string,
     step: string,
     result: JobError,
@@ -1918,7 +1918,7 @@ function createQueue<Shape extends ChangeShape>(
   }>
 
   const admitChangeRevision = async (
-    pr: DeepReadonly<PR>,
+    pr: DeepReadonly<Change>,
     baseSha: string,
     runOptions?: RunJobOptions,
   ): Promise<RevisionAdmissionOutcome> => {
@@ -2060,7 +2060,7 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   const waitingRevisionAdmission = (selector: string, requestedStep?: string): WaitingAdmissionStep | undefined => {
-    const pr = resolvePR(runtime().bays, selector)
+    const pr = resolveChange(runtime().bays, selector)
     if (pr === undefined) return undefined
     const request = checkRequest(pr)
     const baseSha = request?.baseSha ?? changeBaseSha(pr)
@@ -2079,7 +2079,7 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   const cancelAdmissionJobsForRevision = async (args: CancelAdmissionJobsArgs): Promise<readonly string[]> => {
-    const pr = resolvePR(runtime().bays, args.pr)
+    const pr = resolveChange(runtime().bays, args.pr)
     if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, args.pr))
     if (!pr.revs.some((revision) => revision.n === args.revision)) {
       raiseFailure("refusal", "pr-revision-not-found", `yrd: PR '${pr.id}' has no revision ${args.revision}`)
@@ -2094,7 +2094,7 @@ function createQueue<Shape extends ChangeShape>(
     return selected.map((job) => job.id)
   }
 
-  const cancelRevisionAdmissionJobs = async (pr: DeepReadonly<PR>, reason: string): Promise<void> => {
+  const cancelRevisionAdmissionJobs = async (pr: DeepReadonly<Change>, reason: string): Promise<void> => {
     await cancelAdmissionJobsForRevision({
       pr: pr.id,
       revision: changeRevisionNumber(pr),
@@ -2136,7 +2136,7 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<void> => {
     for (const selector of selectors) {
       if (selector === undefined) continue
-      const pr = resolvePR(runtime().bays, selector)
+      const pr = resolveChange(runtime().bays, selector)
       // A selector that names no PR is the `pr-not-found` refusal itself: there
       // is nothing to attribute a streak to, and the caller already logged it
       // loud. Anything else would invent a wedge against a phantom id.
@@ -2194,7 +2194,7 @@ function createQueue<Shape extends ChangeShape>(
     const selectorless = selection !== "explicit"
     for (const selector of selectors) {
       try {
-        const pr = resolvePR(runtime().bays, selector)
+        const pr = resolveChange(runtime().bays, selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, selector))
         const snapshot = runtime()
         const delivery = changeDeliveryState(pr)
@@ -2254,7 +2254,7 @@ function createQueue<Shape extends ChangeShape>(
     const targets = new Set(selectors)
     const admitted = new Set<string>()
     for (const selector of targets) {
-      const pr = resolvePR(runtime().bays, selector)
+      const pr = resolveChange(runtime().bays, selector)
       if (pr === undefined) continue
       const delivery = changeDeliveryState(pr)
       if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
@@ -2322,7 +2322,7 @@ function createQueue<Shape extends ChangeShape>(
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) continue
 
       for (const selector of targets) {
-        const pr = resolvePR(snapshot.bays, selector)
+        const pr = resolveChange(snapshot.bays, selector)
         if (pr === undefined) continue
         const runId = checkEligibility(snapshot, pr, steps).run
         if (runId !== undefined) {
@@ -2338,7 +2338,7 @@ function createQueue<Shape extends ChangeShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
-    admissionOrder: () => admissionOrderPRs(runtime().bays).map((pr) => pr.id),
+    admissionOrder: () => admissionOrderChanges(runtime().bays).map((pr) => pr.id),
     async reconcileMerge(args) {
       await actions.reconcileMerge(args)
     },
@@ -2350,7 +2350,7 @@ function createQueue<Shape extends ChangeShape>(
           attributes: { selectors: args.prs },
           outcome: (prs) =>
             prs.some((selector) => {
-              const pr = resolvePR(runtime().bays, selector)
+              const pr = resolveChange(runtime().bays, selector)
               if (pr === undefined) {
                 throw new Error(`yrd: accepted change '${selector}' disappeared from bay state`)
               }
@@ -2371,7 +2371,7 @@ function createQueue<Shape extends ChangeShape>(
             requestedSelectors === undefined
               ? admissionQueue(snapshot, steps)
               : requestedSelectors.map((selector) => {
-                  const pr = resolvePR(snapshot.bays, selector)
+                  const pr = resolveChange(snapshot.bays, selector)
                   if (pr === undefined) {
                     raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
                   }
@@ -2393,7 +2393,7 @@ function createQueue<Shape extends ChangeShape>(
       const snapshot = runtime()
       const base = queueBase(snapshot, args.base)
       const allowedPRs = args.allowedPRs.map((selector) => {
-        const pr = resolvePR(snapshot.bays, selector)
+        const pr = resolveChange(snapshot.bays, selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
         return pr.id
       })
@@ -2448,7 +2448,7 @@ function createQueue<Shape extends ChangeShape>(
         token: completion.token,
         result: completion.result,
       })
-      const pr = resolvePR(runtime().bays, waiting.pr)
+      const pr = resolveChange(runtime().bays, waiting.pr)
       if (pr === undefined || changeRevisionNumber(pr) !== waiting.revision) {
         raiseFailure("refusal", "stale-pr", `yrd: PR '${waiting.pr}' changed while a required check was waiting`)
       }
@@ -2648,7 +2648,7 @@ function createQueue<Shape extends ChangeShape>(
             // also makes the returned set the set actually admitted from, rather
             // than dropping every pushed carrier the drain took.
             const entering = refreshable.flatMap((pr) => {
-              const current = resolvePR(runtime().bays, pr.id)
+              const current = resolveChange(runtime().bays, pr.id)
               return current === undefined ? [] : [current]
             })
             await drainAdmissions(
@@ -2676,7 +2676,7 @@ function createQueue<Shape extends ChangeShape>(
           }
           snapshot = runtime()
           const currentChecked = checked.flatMap((pr) => {
-            const current = resolvePR(snapshot.bays, pr.id)
+            const current = resolveChange(snapshot.bays, pr.id)
             return current === undefined ? [] : [current]
           })
           const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -3161,10 +3161,10 @@ function createQueue<Shape extends ChangeShape>(
     audit: (options = {}) => auditQueues(runtime(), steps, progress, needsPersonOwner, options),
     eligibility(selector, projected) {
       // Called once per PR by the queue views, and the single largest stage of a
-      // cold `queue ls` — resolvePR plus prEligibility together dominate it.
+      // cold `queue ls` — resolveChange plus checkEligibility together dominate it.
       return stage("eligibility", () => {
         const snapshot = projected ?? runtime()
-        const pr = resolvePR(snapshot.bays, selector)
+        const pr = resolveChange(snapshot.bays, selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
         return ChangeEligibility(snapshot, pr, steps, needsPersonOwner)
       })
@@ -3202,7 +3202,7 @@ function createQueue<Shape extends ChangeShape>(
         selectors === undefined
           ? Object.values(snapshot.bays.prs)
           : selectors.map((selector) => {
-              const pr = resolvePR(snapshot.bays, selector)
+              const pr = resolveChange(snapshot.bays, selector)
               if (pr === undefined) {
                 raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
               }
@@ -5660,7 +5660,7 @@ function assertCurrentFlow(flow: DeepReadonly<FlowPin> | undefined, config: YrdC
 function samePayloadPRs(
   state: DeepReadonly<BaysState>,
   snapshots: readonly DeepReadonly<ChangeSnapshot>[],
-): readonly DeepReadonly<PR>[] {
+): readonly DeepReadonly<Change>[] {
   const payloads = new Set(snapshots.map(payloadIdentity))
   return Object.values(state.prs).filter(
     (pr) =>
@@ -5670,7 +5670,7 @@ function samePayloadPRs(
   )
 }
 
-function payloadIdentity(pr: DeepReadonly<PR> | DeepReadonly<ChangeSnapshot>): string {
+function payloadIdentity(pr: DeepReadonly<Change> | DeepReadonly<ChangeSnapshot>): string {
   if ("revs" in pr) {
     return `${baseIdentity(pr.base)}\0${changeHead(pr)}\0${JSON.stringify(changeComposition(pr))}`
   }
@@ -6318,7 +6318,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
  * such data — a stale base and an unrecoverable draft — are absent by
  * construction, not by omission; {@link YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS}
  * records why. */
-function draftReviewCertification(pr: DeepReadonly<PR>): QueueAuditReviewCertification {
+function draftReviewCertification(pr: DeepReadonly<Change>): QueueAuditReviewCertification {
   const decision = reviewState(pr).current?.decision
   if (decision === "approve") return "approved"
   if (decision === "reject") return "changes-requested"
@@ -6379,7 +6379,7 @@ function auditQueues(
     for (const pr of Object.values(state.bays.prs)) {
       if (changeDeliveryState(pr) !== "pushed") continue
       // The SAME revision the certification is derived from: `reviewState` and
-      // `prDeliveryState` both read `currentPRRev`, so re-picking the tip by
+      // `changeDeliveryState` both read `currentChangeRev`, so re-picking the tip by
       // hand here is a second definition of "current" that can only ever drift.
       const revision = currentChangeRev(pr)
       const pushedAtMs = parseAuditTime(revision.pushedAt, "pr pushed clock")
@@ -6583,7 +6583,7 @@ function auditQueues(
 
 function admissionRefusalAuditFindings(
   state: DeepReadonly<RuntimeState>,
-  queued: readonly DeepReadonly<PR>[],
+  queued: readonly DeepReadonly<Change>[],
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
 ): QueueAuditFindingEmission[] {
@@ -6650,7 +6650,7 @@ function admissionRefusalAuditFindings(
 
 function queueProgressAuditFindings(
   state: DeepReadonly<RuntimeState>,
-  queued: readonly DeepReadonly<PR>[],
+  queued: readonly DeepReadonly<Change>[],
   refusalFindings: readonly QueueAuditFinding[],
   progress: QueueProgressPolicy,
   options: QueueAuditOptions,
@@ -6809,11 +6809,11 @@ function recordedPlanDrift(
   return undefined
 }
 
-function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] | undefined {
+function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change[] | undefined {
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {
-    const pr = resolvePR(state, selector)
+    const pr = resolveChange(state, selector)
     if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
     return pr
   })
@@ -6829,7 +6829,7 @@ function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] |
 
 type QueuePosition = Readonly<{ at: string; identity: string }>
 
-function changeQueuePosition(pr: DeepReadonly<PR>): QueuePosition {
+function changeQueuePosition(pr: DeepReadonly<Change>): QueuePosition {
   const submittedAt = currentChangeRev(pr).submittedAt
   if (submittedAt === undefined) throw new Error(`yrd: queued change '${pr.id}' has no submit time`)
   // Legacy projections expose no cross-plugin journal ordinal. Equal clocks
@@ -6847,7 +6847,7 @@ function requestedPRs(
   args: QueueRunArgs,
   excluded: ReadonlySet<string> = new Set(),
   implicitBefore?: QueuePosition,
-): PR[] {
+): Change[] {
   const explicit = explicitPRs(state, args)
   const prs = (
     explicit ??
@@ -7001,7 +7001,7 @@ function checkRunStatus(run: Run, selectedCount: number): ChangeEligibility["che
 const AUTOMATIC_ADMISSION_RETRIES = 1
 function automaticAdmissionAttemptsExhausted(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   snapshot: DeepReadonly<ChangeSnapshot>,
   selected: readonly RuntimeStep[],
 ): boolean {
@@ -7020,7 +7020,7 @@ function admissionQueue(
   state: DeepReadonly<RuntimeState>,
   steps: readonly RuntimeStep[],
   targets?: ReadonlySet<string>,
-): PR[] {
+): Change[] {
   const selected = admissionSteps(steps)
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
@@ -7081,7 +7081,7 @@ function admissionQueue(
  * must span that gap or the exact "admission passes, nothing merges" failure is
  * invisible.
  */
-function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
+function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): Change[] {
   const selected = declaredDefaultSteps(steps)
   if (!selected.some((step) => step.kind === "merge")) return []
   return Object.values(state.bays.prs)
@@ -7105,7 +7105,7 @@ function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly R
  * queue state, including `queue recover`, the tool that repairs exactly this
  * shape. A comparator is never the place to assert an invariant: the audit
  * names the state (`queue-never-started`) instead. */
-function queueProgressTime(pr: DeepReadonly<PR>): string {
+function queueProgressTime(pr: DeepReadonly<Change>): string {
   return checkRequest(pr)?.at ?? changeSourceReadyAt(pr)
 }
 
@@ -7121,7 +7121,7 @@ function queueProgressTime(pr: DeepReadonly<PR>): string {
  * out of the next pass. A position is where you stand in the queue, not a claim
  * that the next pass will take you.
  */
-function admissionOrderPRs(bays: DeepReadonly<BaysState>): PR[] {
+function admissionOrderChanges(bays: DeepReadonly<BaysState>): Change[] {
   return requestedPRs(bays, {}).toSorted(
     (left, right) =>
       queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
@@ -7130,11 +7130,11 @@ function admissionOrderPRs(bays: DeepReadonly<BaysState>): PR[] {
 
 /** This PR's one-based place in the published queue order; absent when it holds none. */
 function admissionPosition(bays: DeepReadonly<BaysState>, pr: string): number | undefined {
-  const index = admissionOrderPRs(bays).findIndex((candidate) => candidate.id === pr)
+  const index = admissionOrderChanges(bays).findIndex((candidate) => candidate.id === pr)
   return index < 0 ? undefined : index + 1
 }
 
-function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {
+function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] {
   return Object.values(state.bays.prs)
     .filter((pr) => changeDeliveryState(pr) === "needs-author" && changeAdmission(pr)?.status === "refused")
     .toSorted(
@@ -7163,8 +7163,8 @@ function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): PR[] {
 function admissionLineHolder(
   state: DeepReadonly<RuntimeState>,
   steps: readonly RuntimeStep[],
-  pr: DeepReadonly<PR>,
-): DeepReadonly<PR> | undefined {
+  pr: DeepReadonly<Change>,
+): DeepReadonly<Change> | undefined {
   const queued = admissionQueue(state, steps)
   const position = queued.findIndex((candidate) => candidate.id === pr.id)
   const ahead = position < 0 ? queued : queued.slice(0, position)
@@ -7173,7 +7173,7 @@ function admissionLineHolder(
 
 function blockingQueuePause(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
 ): DeepReadonly<QueuePause> | undefined {
   const pause = state.queues.pauses[baseIdentity(pr.base)]
   return pause === undefined || pause.allowedPRs.includes(pr.id) ? undefined : pause
@@ -7181,7 +7181,7 @@ function blockingQueuePause(
 
 function hasFreshRevisionCheckAuthority(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
 ): boolean {
   const request = checkRequest(pr)
@@ -7245,7 +7245,7 @@ type RevisionCheckRequestTally =
  * from the total, because a shortfall indistinguishable from "no authority was
  * granted" is exactly what denies a carrier its retry.
  */
-function revisionCheckRequestTally(pr: DeepReadonly<PR>, baseSha: string): RevisionCheckRequestTally {
+function revisionCheckRequestTally(pr: DeepReadonly<Change>, baseSha: string): RevisionCheckRequestTally {
   const revision = currentChangeRev(pr)
   const forThisTree = pr.checkRequests.filter((candidate) => candidate.headSha === revision.head)
   const unreadable = forThisTree.filter(
@@ -7265,7 +7265,7 @@ function recordedRequestCount(tally: RevisionCheckRequestTally): number | "unres
 
 function checkEligibility(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
 ): ChangeEligibility["checks"] {
   const request = checkRequest(pr)
@@ -7313,7 +7313,7 @@ function checkEligibility(
   // excludes it, but that exclusion only ever reached `position`, never
   // `status`. Runs that actually executed are settled above and survive: they
   // are recorded facts, not a claim about a live slot. (22390)
-  const delivery = changeDeliveryState(pr as PR)
+  const delivery = changeDeliveryState(pr as Change)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
     return { status: "not-requested", ...timing }
   }
@@ -7377,7 +7377,7 @@ function checkStatus(job: Job | undefined, run: Run): ChangeCheckRecord["status"
 }
 
 function projectCheckStep(
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   run: Run,
   step: QueueStep,
   queuedAt: string | undefined,
@@ -7419,7 +7419,7 @@ function projectCheckStep(
 
 function projectRevisionAdmissionJobs(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
   queuedAt: string | undefined,
 ): ChangeCheckRecord[] | undefined {
@@ -7474,7 +7474,7 @@ function projectRevisionAdmissionJobs(
 
 function currentRevisionAdmissionJobs(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
 ): readonly (DeepReadonly<Job> | undefined)[] | undefined {
   const request = checkRequest(pr)
@@ -7493,7 +7493,7 @@ function currentRevisionAdmissionJobs(
 
 function projectChangeChecks(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
 ): ChangeCheckRecord[] {
   const checks = checkEligibility(state, pr, steps)
@@ -7631,7 +7631,7 @@ function reusablePrefix(
   return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
 }
 
-type RunnableChangeDecision = Readonly<{ pr: PR; eligibility: ChangeEligibility }>
+type RunnableChangeDecision = Readonly<{ pr: Change; eligibility: ChangeEligibility }>
 
 function runnableChangeSelection(
   state: DeepReadonly<RuntimeState>,
@@ -7640,7 +7640,7 @@ function runnableChangeSelection(
   needsPersonOwner: string,
   excluded: ReadonlySet<string> = new Set(),
   options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
-): Readonly<{ prs: PR[]; decisions: RunnableChangeDecision[] }> {
+): Readonly<{ prs: Change[]; decisions: RunnableChangeDecision[] }> {
   const requested = requestedPRs(state.bays, args, excluded, options.implicitBefore)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const ignoredClaims = new Set(
@@ -7676,7 +7676,7 @@ function runnablePRs(
   needsPersonOwner: string,
   excluded: ReadonlySet<string> = new Set(),
   options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
-): PR[] {
+): Change[] {
   return runnableChangeSelection(state, args, steps, needsPersonOwner, excluded, options).prs
 }
 
@@ -7821,7 +7821,7 @@ export function authorAttributionResult(
  * needs-author reads the result directly from the PR fact. */
 function needsAuthorResult(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
 ): JobError | undefined {
   const current = changeNeedsAuthor(pr)
@@ -7842,7 +7842,7 @@ function needsAuthorResult(
   return undefined
 }
 
-function needsAuthorMessage(pr: DeepReadonly<PR>, result: JobError): string {
+function needsAuthorMessage(pr: DeepReadonly<Change>, result: JobError): string {
   const attributed = CandidateFailureResultEvidenceSchema.safeParse(result.evidence)
   if (!attributed.success) return `PR '${pr.id}' cannot be composed as submitted: ${result.message}`
   const failures = attributed.data.failures
@@ -7880,7 +7880,7 @@ function admissionRefusalNext(
  * revision proves nothing about the current one. */
 function settledAdmissionRefusal(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
 ): Readonly<{ disposition: string; reason: string; settledAt: string }> | undefined {
   const refusal = state.queues.admissionRefusals[pr.id]
   if (refusal?.settlement === undefined) return undefined
@@ -7890,7 +7890,7 @@ function settledAdmissionRefusal(
 
 function ChangeEligibility(
   state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   steps: readonly RuntimeStep[],
   needsPersonOwner: string,
   options: Readonly<{
@@ -8062,8 +8062,8 @@ function ChangeEligibility(
     : verdict()
 }
 
-function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
-  const groups = new Map<string, PR[]>()
+function partitionCandidates(prs: readonly Change[], batchSize: number): Change[][] {
+  const groups = new Map<string, Change[]>()
   for (const pr of prs) {
     const proof = pr.integration
     const flow = pr.flow
@@ -8072,7 +8072,7 @@ function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
     if (group === undefined) groups.set(key, [pr])
     else group.push(pr)
   }
-  const candidates: PR[][] = []
+  const candidates: Change[][] = []
   for (const group of groups.values()) {
     for (let index = 0; index < group.length; index += batchSize) candidates.push(group.slice(index, index + batchSize))
   }
@@ -8084,7 +8084,7 @@ function ChangeShape(prs: readonly ChangeSnapshot[]): ChangeShape {
   return { results: {} }
 }
 
-function integratedChangeShape(prs: readonly PR[]): IntegratedShape | undefined {
+function integratedChangeShape(prs: readonly Change[]): IntegratedShape | undefined {
   if (prs.every((pr) => !pr.merged)) return undefined
   const proof = prs[0]?.integration
   const alreadyMerged = prs[0]?.alreadyLanded

@@ -17,7 +17,7 @@ import {
   changeProps,
   changeDeliveryState,
   changeHead,
-  isLivePR,
+  isLiveChange,
   changeNeedsAuthor,
   changeRevisionNumber,
   changeRevisionLineage,
@@ -30,13 +30,13 @@ import {
   isConcurrentCheckabilityConflict,
   resolveBay,
   resolveBase,
-  resolvePR,
-  requireLivePR,
+  resolveChange,
+  requireLiveChange,
   type Bay,
   type BaysState,
   type CompositionV1,
   type ChangeProps,
-  type PR,
+  type Change,
   type ChangeFreshnessTransition,
   type ChangeDeliveryState,
   type ChangeRegression,
@@ -2350,7 +2350,7 @@ type TrackerBridgeV2 = Readonly<{
 }>
 
 function trackerDeliveryV2(
-  pr: DeepReadonly<PR>,
+  pr: DeepReadonly<Change>,
   state: DeepReadonly<YrdCliState>,
   eligibility: ChangeEligibility,
 ): TrackerDeliveryV2 | undefined {
@@ -2969,7 +2969,7 @@ type ChangeListStatusProjection = Omit<ReturnType<typeof projectChangeTaskStatus
   }>
 
 function projectChangeTaskStatusWithEligibility(
-  pr: PR,
+  pr: Change,
   eligibility: ChangeEligibility,
   merge?: ChangeMerge,
 ): ChangeListStatusProjection {
@@ -3080,7 +3080,7 @@ function bayOpenIdentity(
   requestedBay: string,
   branchSeed: string,
   issue: string | undefined,
-  targetedPr?: PR,
+  targetedPr?: Change,
 ): Readonly<{ claim: string; bay: string; branch: string; issue?: string; reattached: boolean }> {
   const bay = requestedBay.trim()
   if (
@@ -3094,7 +3094,7 @@ function bayOpenIdentity(
     usage("bay open --bay names must be Git-safe")
   }
   if (targetedPr !== undefined) {
-    if (!isLivePR(targetedPr)) {
+    if (!isLiveChange(targetedPr)) {
       refusal(`PR '${targetedPr.id}' is ${changeDeliveryState(targetedPr)}; --pr requires a live PR`)
     }
     if (issue !== undefined && targetedPr.issue !== undefined && issue !== targetedPr.issue) {
@@ -3109,7 +3109,7 @@ function bayOpenIdentity(
     }
   }
   const claim = issue ?? branchSeed
-  const claimPrs = issue === undefined ? [] : app.bays.prs().filter((pr) => pr.issue === issue && isLivePR(pr))
+  const claimPrs = issue === undefined ? [] : app.bays.prs().filter((pr) => pr.issue === issue && isLiveChange(pr))
   if (claimPrs.length > 1) {
     refusal(
       `claim '${claim}' has multiple live PRs (${claimPrs.map((pr) => pr.id).join(", ")}); ` +
@@ -3129,7 +3129,7 @@ function bayOpenIdentity(
     ...prs.filter((pr) => pr.branch === branch).map((pr) => pr.issue),
   ]
   const isForeignBranch = (branch: string) => branchOwners(branch).some((owner) => owner !== issue)
-  const terminalDefault = prs.some((pr) => pr.branch === defaultBranch && pr.issue === issue && !isLivePR(pr))
+  const terminalDefault = prs.some((pr) => pr.branch === defaultBranch && pr.issue === issue && !isLiveChange(pr))
   const collisionBranch = `${defaultBranch}-${createHash("sha256").update(claim).digest("hex").slice(0, 8)}`
   const branch = isForeignBranch(defaultBranch) || terminalDefault ? collisionBranch : defaultBranch
   if (isForeignBranch(branch)) {
@@ -3705,7 +3705,7 @@ async function ensureIssueDraft(
   branch: string,
   io: YrdCliIO,
   options: Readonly<{ track: boolean }>,
-): Promise<Readonly<{ pr: PR; warnings: readonly string[] }>> {
+): Promise<Readonly<{ pr: Change; warnings: readonly string[] }>> {
   const selection = { issue, ...(options.track ? { track: true } : {}) }
   const result = await applyChangeSelection(app, [branch], selection, io, "pr.create")
   const pr = result.prs[0]
@@ -3910,7 +3910,7 @@ async function closeBays(
     try {
       const withdrawing =
         options.withdraw === true
-          ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
+          ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
           : []
       const current = await closeBayWithProcessReap(
         app,
@@ -4156,7 +4156,7 @@ function gatherBayStatusFacts(
 
   const openChangeIds = app.bays
     .prs()
-    .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLivePR(pr))
+    .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
     .map((pr) => pr.id)
   const openedAt = Date.parse(bay.openedAt)
   const ageMs = Number.isFinite(openedAt) ? Math.max(0, now - openedAt) : undefined
@@ -4383,11 +4383,11 @@ function shellQuote(value: string): string {
  * that machinery is update-only — as does a DELETED, off-main, or unpublished one.
  * See tests/authored-gitlink-admission.test.ts and @i/10-merge-queue/shaset-model.
  */
-export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServices, io: YrdCliIO): Promise<void> {
+export async function requireQueueableSubmodulePins(pr: Change, services: YrdCliServices, io: YrdCliIO): Promise<void> {
   if (services.process === undefined) return
   const repo = io.cwd ?? process.cwd()
   const headSha = changeHead(pr)
-  // Not prBaseSha(pr). That field is set at create, re-set at recut, and chased
+  // Not changeBaseSha(pr). That field is set at create, re-set at recut, and chased
   // forward to track current main while the author's head stays exactly where
   // they left it, so a two-dot diff from it reports every pin that moved on
   // main as this PR's authorship and refuses a branch for a gitlink it never
@@ -4515,7 +4515,7 @@ export async function requireQueueableSubmodulePins(pr: PR, services: YrdCliServ
 }
 
 async function requireQueueableSubmodulePinsForCommand(
-  pr: PR,
+  pr: Change,
   services: YrdCliServices,
   options: JsonOption,
   io: YrdCliIO,
@@ -4541,7 +4541,7 @@ type PublicationProjection = Readonly<{
   error?: JobError
 }>
 
-function publicationJob(app: YrdCliApp, pr: PR): Job | undefined {
+function publicationJob(app: YrdCliApp, pr: Change): Job | undefined {
   const revision = currentChangeRev(pr)
   const current = app.jobs.getByKey(
     changePublicationJobKey({ pr: pr.id, revision: revision.n, headSha: revision.head }),
@@ -4689,7 +4689,7 @@ async function readyPr(
   return changeDeliveryState(pr) === "needs-author" ? 1 : 0
 }
 
-async function remergePr(
+async function remergeChange(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
@@ -4728,7 +4728,7 @@ async function remergePr(
   const selectedRevision = options.revision ?? commandCurrent.n
   const selected = pr.revs.find((revision) => revision.n === selectedRevision)
   let proposedHeadSha = explicitProposedHeadSha
-  if (explicitProposedHeadSha === undefined && isLivePR(pr) && selected !== undefined) {
+  if (explicitProposedHeadSha === undefined && isLiveChange(pr) && selected !== undefined) {
     const freshness = await requireImplicitRemergeBranchFreshness(pr, selected, options, services, io)
     if (freshness.status === "tracked-drift") proposedHeadSha = freshness.liveHead
   }
@@ -4783,7 +4783,7 @@ async function remergePr(
     )
     return delivery === "needs-author" ? 1 : 0
   }
-  const outcome = await executeRemergePr(
+  const outcome = await executeRemergeChange(
     app,
     services,
     selector,
@@ -4843,7 +4843,7 @@ async function cancelSupersededRevisionRuns(
   }
 }
 
-async function executeRemergePr(
+async function executeRemergeChange(
   app: YrdCliApp,
   services: Pick<YrdCliServices, "process" | "recut">,
   selector: string,
@@ -5391,7 +5391,7 @@ function createOnlyRefusal(
 }
 
 type ChangeSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"
-type ChangeSelectionResult = Readonly<{ prs: readonly PR[]; warnings: readonly string[] }>
+type ChangeSelectionResult = Readonly<{ prs: readonly Change[]; warnings: readonly string[] }>
 
 async function applyChangeSelection(
   app: YrdCliApp,
@@ -5407,7 +5407,7 @@ async function applyChangeSelection(
   const cwd = io.cwd ?? process.cwd()
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
-  const prs: PR[] = []
+  const prs: Change[] = []
   // Advisory warnings for submissions that SUCCEED with a caveat (e.g. a dirty
   // worktree — D3). Collected from the bay operation and rendered in the result
   // envelope, matching the queue list/status `warnings` shape.
@@ -5573,13 +5573,13 @@ function refuseTerminalBaySubmitBinding(app: YrdCliApp, selectors: readonly stri
     const bay = app.bays.get(selector)
     if (bay === undefined) continue
     const bound = app.bays.pr(bay.id)
-    if (bound === undefined || isLivePR(bound)) continue
+    if (bound === undefined || isLiveChange(bound)) continue
     const delivery = changeDeliveryState(bound)
     if (delivery !== "withdrawn" && delivery !== "canceled") continue
     const branch = currentGitBranch(bay.path ?? cwd, io)
     if (branch === undefined || branch === bay.branch) continue
     const branchPr = app.bays.pr(branch)
-    const target = branchPr !== undefined && isLivePR(branchPr) ? branchPr.id : branch
+    const target = branchPr !== undefined && isLiveChange(branchPr) ? branchPr.id : branch
     bayBindingRefusal(
       bay,
       bound,
@@ -5755,8 +5755,8 @@ async function readComposition(path: string | undefined, io: YrdCliIO): Promise<
   }
 }
 
-function requiredPr(app: YrdCliApp, selector: string): PR {
-  return app.bays.pr(selector) ?? requireLivePR(stateOf(app).bays, selector)
+function requiredPr(app: YrdCliApp, selector: string): Change {
+  return app.bays.pr(selector) ?? requireLiveChange(stateOf(app).bays, selector)
 }
 
 type ChangeMergeOutcome =
@@ -5780,7 +5780,7 @@ type ChangeMergeOutcome =
     }>
   | Readonly<{ outcome: "not-landed"; status: Exclude<ChangeDeliveryState, "integrated" | "already-landed"> }>
 
-function ChangeMergeOutcome(pr: DeepReadonly<PR>): ChangeMergeOutcome {
+function ChangeMergeOutcome(pr: DeepReadonly<Change>): ChangeMergeOutcome {
   const delivery = changeDeliveryState(pr)
   if (delivery === "already-landed") {
     const hasRunProof = pr.terminalRun !== undefined
@@ -5825,11 +5825,11 @@ function allQueueRuns(app: YrdCliApp): Run[] {
     .toSorted(byQueueRunChronology)
 }
 
-function changeQueueRuns(app: YrdCliApp, pr: PR): Run[] {
+function changeQueueRuns(app: YrdCliApp, pr: Change): Run[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
 }
 
-function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly CompositionV1[] | undefined {
+function sameIssueIntegratedCompositions(app: YrdCliApp, pr: Change): readonly CompositionV1[] | undefined {
   if (pr.issue === undefined) return undefined
   const integrated = new Set(
     app.bays
@@ -5984,7 +5984,7 @@ function changeListRetainedRows<T extends Readonly<{ id: string; state: string }
 // `state` is the PR record's own field — PR.state in yrd-bay/src/model.ts,
 // "is the PR record open or closed?". `--state open` and `--state closed`
 // filter it directly.
-const CHANGE_LIST_RECORD_STATES: readonly PR["state"][] = ["open", "closed"]
+const CHANGE_LIST_RECORD_STATES: readonly Change["state"][] = ["open", "closed"]
 const CHANGE_LIST_RECORD_STATE_HELP = CHANGE_LIST_RECORD_STATES.join(", ")
 
 // `status` is the derived delivery label — the ChangeDeliveryState union in
@@ -6015,7 +6015,7 @@ async function listPrs(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
-  const byRecordState = options.state !== undefined && CHANGE_LIST_RECORD_STATES.includes(options.state as PR["state"])
+  const byRecordState = options.state !== undefined && CHANGE_LIST_RECORD_STATES.includes(options.state as Change["state"])
   const byDeliveryStatus =
     options.state !== undefined && CHANGE_LIST_STATES.includes(options.state as ChangeDeliveryState)
   // A value that both vocabularies define has two readings, and picking one
@@ -6214,11 +6214,11 @@ async function viewChangeRuns(
 ): Promise<void> {
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
-    let pr = resolvePR(snapshot.state.bays, selector)
+    let pr = resolveChange(snapshot.state.bays, selector)
     if (pr === undefined) {
       const confirmed = await app.journalSnapshot()
       if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
-      pr = requireLivePR(snapshot.state.bays, selector)
+      pr = requireLiveChange(snapshot.state.bays, selector)
     }
     const runs = changeQueueRuns(app, pr)
     const attempts = await queueAttempts(services)
@@ -6332,7 +6332,7 @@ function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
   }
 }
 
-function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
+function currentPr(app: YrdCliApp, io: YrdCliIO): Change {
   const state = stateOf(app)
   const cwd = io.cwd ?? process.cwd()
   const bay = currentBay(state.bays, cwd)
@@ -6341,10 +6341,10 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
     (bay === undefined ? undefined : Object.values(state.bays.prs).find((candidate) => candidate.bay === bay.id)) ??
     Object.values(state.bays.prs).find((candidate) => candidate.branch === branch)
   if (pr === undefined) refusal("the current bay or branch has no PR; submit it with 'yrd pr submit'")
-  return pr as PR
+  return pr as Change
 }
 
-async function queuedChangePosition(app: YrdCliApp, pr: PR, io: YrdCliIO): Promise<number | undefined> {
+async function queuedChangePosition(app: YrdCliApp, pr: Change, io: YrdCliIO): Promise<number | undefined> {
   const delivery = changeDeliveryState(pr)
   if (delivery !== "submitted" && delivery !== "ready") return undefined
   return (await queuedChangePositions(app, pr.base, io)).get(pr.id)
@@ -6459,7 +6459,7 @@ async function recordChangeRegression(
   )
 }
 
-function changeFact(pr: DeepReadonly<PR>): Readonly<{
+function changeFact(pr: DeepReadonly<Change>): Readonly<{
   id: string
   branch: string
   base: string
@@ -6478,7 +6478,7 @@ function changeFact(pr: DeepReadonly<PR>): Readonly<{
   }
 }
 
-function selectedCheckPRs(app: YrdCliApp, selectors: readonly string[]): PR[] {
+function selectedCheckPRs(app: YrdCliApp, selectors: readonly string[]): Change[] {
   // Was a hand-rolled `no PR '<selector>'`, a third spelling of a fact the bay
   // model already words. Routing through requiredPr keeps ONE not-found
   // message, so the searched-count reaches every surface instead of the one
@@ -6636,7 +6636,7 @@ async function preparePublicationQueueCycle(
     if (pr === undefined || changeDeliveryState(pr) !== "pushed") continue
     const revision = currentChangeRev(pr)
     if (revision.n !== input.revision || revision.head !== input.headSha) continue
-    await executeRemergePr(
+    await executeRemergeChange(
       app,
       services,
       pr.id,
@@ -6743,7 +6743,7 @@ async function recoverQueue(
     ...(options.runner === undefined ? {} : { runner: options.runner }),
   })
   const findings = await queueAuditFindings(app, services)
-  const blocked = admissionBlockedPrs(app)
+  const blocked = admissionBlockedChanges(app)
   await printResult(
     io,
     jsonEnabled(options),
@@ -6850,10 +6850,10 @@ function isPlanFinding(finding: Readonly<{ code: string }>): boolean {
   return finding.code === "installed-plan-stale" || finding.code === "run-plan-mismatch"
 }
 
-function admissionBlockedPrs(
+function admissionBlockedChanges(
   app: YrdCliApp,
   selectedChangeIds?: ReadonlySet<string>,
-): Array<Readonly<{ pr: PR; eligibility: ChangeEligibility }>> {
+): Array<Readonly<{ pr: Change; eligibility: ChangeEligibility }>> {
   return Object.values(stateOf(app).bays.prs)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
@@ -7100,7 +7100,7 @@ export async function queueArtifactOutputs(
   return outputs
 }
 
-function queueChangeDiffSource(pr: PR, revision: number): Readonly<{ base: string; headSha: string }> | undefined {
+function queueChangeDiffSource(pr: Change, revision: number): Readonly<{ base: string; headSha: string }> | undefined {
   const revisionRecord = pr.revs.find((candidate) => candidate.n === revision)
   const isCurrent = revision === changeRevisionNumber(pr)
   const headSha = isCurrent ? changeHead(pr) : revisionRecord?.head
@@ -7111,7 +7111,7 @@ function queueChangeDiffSource(pr: PR, revision: number): Readonly<{ base: strin
   return base === undefined ? undefined : { base, headSha }
 }
 
-function queueChangeDiffResult(pr: PR, revision: number, numstat: string, patch: string): QueueChangeDiff {
+function queueChangeDiffResult(pr: Change, revision: number, numstat: string, patch: string): QueueChangeDiff {
   const rows = numstat.split("\0").filter((row) => row !== "")
   let additions = 0
   let deletions = 0
@@ -7129,7 +7129,7 @@ function queueChangeDiffResult(pr: PR, revision: number, numstat: string, patch:
 }
 
 /** Resolve a revision-bound PR delta for the watch detail's PR overview. */
-export function queueChangeDiff(cwd: string, pr: PR, revision = changeRevisionNumber(pr)): QueueChangeDiff {
+export function queueChangeDiff(cwd: string, pr: Change, revision = changeRevisionNumber(pr)): QueueChangeDiff {
   const source = queueChangeDiffSource(pr, revision)
   if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
   // Missing objects are the one recoverable absence state. Validate the
@@ -7159,7 +7159,7 @@ export function queueChangeDiff(cwd: string, pr: PR, revision = changeRevisionNu
 
 async function queueChangeDiffAsync(
   cwd: string,
-  pr: PR,
+  pr: Change,
   revision: number,
   runGit: QueueGitRunner,
 ): Promise<QueueChangeDiff> {
@@ -7182,7 +7182,7 @@ async function queueChangeDiffAsync(
 }
 
 type QueueChangeDiffResolver = Readonly<{
-  resolve(cwd: string, pr: PR, revision: number, now?: number): Promise<QueueChangeDiff>
+  resolve(cwd: string, pr: Change, revision: number, now?: number): Promise<QueueChangeDiff>
 }>
 
 function requiredQueueReadModel(services: Pick<YrdCliServices, "queueReadModel">): QueueReadModel {
@@ -7210,14 +7210,14 @@ async function queueAttempts(services: Pick<YrdCliServices, "queueReadModel">): 
  * hit; a bounded cache that occasionally misses beats an unbounded one that
  * never does.
  */
-const QUEUE_PR_DIFF_CACHE_MAX = 256
+const QUEUE_CHANGE_DIFF_CACHE_MAX = 256
 
 export function createQueueChangeDiffResolver(
   options: Readonly<{ runGit?: QueueGitRunner; negativeTtlMs?: number; maxEntries?: number }> = {},
 ): QueueChangeDiffResolver {
   const runGit = options.runGit ?? gitAsync
   const negativeTtlMs = options.negativeTtlMs ?? 30_000
-  const maxEntries = Math.max(1, options.maxEntries ?? QUEUE_PR_DIFF_CACHE_MAX)
+  const maxEntries = Math.max(1, options.maxEntries ?? QUEUE_CHANGE_DIFF_CACHE_MAX)
   const resolved = new Map<string, QueueChangeDiff>()
   const retryAt = new Map<string, number>()
   const inFlight = new Map<string, Promise<QueueChangeDiff>>()
@@ -7991,7 +7991,7 @@ function resolveQueueTargets(
   const selected = new Set<string>()
   if (base !== undefined) bases.add(selectedBase(state, base))
   for (const selector of selectors) {
-    const pr = resolvePR(state.bays, selector)
+    const pr = resolveChange(state.bays, selector)
     if (pr === undefined) bases.add(selectedBase(state, selector))
     else {
       bases.add(pr.base)
@@ -8002,7 +8002,7 @@ function resolveQueueTargets(
   if (filterPr !== undefined) {
     // Same consolidation as selectedCheckPRs: one not-found message, worded by
     // the bay model, so `queue run <unknown>` reports what it searched too.
-    const found = resolvePR(state.bays, filterPr) ?? requireLivePR(state.bays, filterPr)
+    const found = resolveChange(state.bays, filterPr) ?? requireLiveChange(state.bays, filterPr)
     canonicalFilter = found.id
     selected.add(found.id)
     bases.add(found.base)
@@ -9701,11 +9701,11 @@ export type ResidentTrackedRevisionTransition =
       message: string
     }>
 
-function trackedPreflightSettlementRef(pr: PR, revision: Pick<ChangeRev, "n" | "head">): string {
+function trackedPreflightSettlementRef(pr: Change, revision: Pick<ChangeRev, "n" | "head">): string {
   return `yrd:track-preflight-needs-person:${pr.id}:${revision.n}:${revision.head}`
 }
 
-function trackedPreflightNeedsPerson(pr: PR, revision: ChangeRev): boolean {
+function trackedPreflightNeedsPerson(pr: Change, revision: ChangeRev): boolean {
   const ref = trackedPreflightSettlementRef(pr, revision)
   return pr.comments.some(
     (comment) => comment.revision === revision.n && comment.headSha === revision.head && comment.ref === ref,
@@ -9748,7 +9748,7 @@ export type TrackedObservationBackoff = Map<string, Readonly<{ failures: number;
 
 const MAX_OBSERVATION_SKIP = 32
 
-function trackedObservationKey(pr: PR, revision: Pick<ChangeRev, "n" | "head">): string {
+function trackedObservationKey(pr: Change, revision: Pick<ChangeRev, "n" | "head">): string {
   return `${pr.id}:${revision.n}:${revision.head}`
 }
 
@@ -9772,7 +9772,7 @@ export async function refreshTrackedQueueRevisions(
   const candidates = Object.values(stateOf(app).bays.prs)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
-      return pr.track === true && isLivePR(pr) && delivery !== "pushed"
+      return pr.track === true && isLiveChange(pr) && delivery !== "pushed"
     })
     .toSorted(
       (left, right) =>
@@ -10007,7 +10007,7 @@ export async function refreshAdmittedQueueRevisions(
   )
   const staleRunsByPr = new Map<string, Run[]>()
   const staleRunIds = new Set<string>()
-  const staleAdmissionRevisionsByPr = new Map<string, number[]>()
+  const staleAdmissionRevisionsByChange = new Map<string, number[]>()
   const staleJobsByPr = new Map<string, string[]>()
   for (const pr of interrupted) {
     const claim = snapshot.queues.authority.claims[pr.id]
@@ -10015,7 +10015,7 @@ export async function refreshAdmittedQueueRevisions(
     const staleAdmissionRevisions = pr.revs
       .map(({ n }) => n)
       .filter((candidateRevision) => candidateRevision !== revision.n)
-    if (staleAdmissionRevisions.length > 0) staleAdmissionRevisionsByPr.set(pr.id, staleAdmissionRevisions)
+    if (staleAdmissionRevisions.length > 0) staleAdmissionRevisionsByChange.set(pr.id, staleAdmissionRevisions)
     if (claim?.consumedBy === undefined || (claim.revision === revision.n && claim.headSha === revision.head)) {
       continue
     }
@@ -10033,7 +10033,7 @@ export async function refreshAdmittedQueueRevisions(
   }
   for (const pr of interrupted) {
     const jobIds: string[] = []
-    for (const revision of staleAdmissionRevisionsByPr.get(pr.id) ?? []) {
+    for (const revision of staleAdmissionRevisionsByChange.get(pr.id) ?? []) {
       jobIds.push(
         ...(await app.queue.cancelAdmissionJobs({
           pr: pr.id,
@@ -10099,7 +10099,7 @@ export async function refreshAdmittedQueueRevisions(
     }
 
     try {
-      const remerge = await executeRemergePr(
+      const remerge = await executeRemergeChange(
         app,
         services,
         candidate.id,
@@ -10322,7 +10322,7 @@ async function applyPreflightVerdict(
   // `admit: false` for the same reason the freshness pass uses it: the compose
   // that follows in THIS cycle owns admission. The remedy's job is to leave a
   // queueable revision behind, not to start a second admission path.
-  await executeRemergePr(
+  await executeRemergeChange(
     app,
     services,
     preflight.pr,
@@ -10356,7 +10356,7 @@ async function applyRefusalRemedy(
       continue
     }
     if (step.preflight !== true) {
-      await executeRemergePr(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
+      await executeRemergeChange(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
       continue
     }
     // The printed `--apply` command executes this exact verdict in-process, so
@@ -11283,7 +11283,7 @@ async function refuseChangeMerge(
 }
 
 function changeMergeRefusalDetail(
-  pr: PR,
+  pr: Change,
   position: number | undefined,
   latestRun: Run | undefined,
 ): Readonly<{
@@ -12082,7 +12082,7 @@ function buildProgram(
       const runs = await runQueues(app, selectors, options, io)
       const selectedChangeIds =
         selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
-      const blocked = admissionBlockedPrs(app, selectedChangeIds)
+      const blocked = admissionBlockedChanges(app, selectedChangeIds)
       const blockerText = blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n")
       const human =
         blocked.length === 0
@@ -12283,7 +12283,7 @@ function buildProgram(
     .option("--force", "recut even when the current revision already passed its checks")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
-      setExit(await remergePr(installed(), installedServices(), selector, options, io)),
+      setExit(await remergeChange(installed(), installedServices(), selector, options, io)),
     )
   addAuthoredCarrierWorkflow(remerge, name)
   // Hidden with recut: the draft story is `create` = draft, `submit` = ready.

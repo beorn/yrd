@@ -32,7 +32,7 @@ import {
   withBays,
   withDeployments,
   type BayWorkspace,
-  type PR,
+  type Change,
   type ChangeDeliveryState,
   type ChangeRev,
 } from "@yrd/bay"
@@ -203,7 +203,7 @@ function submittedRunClock(run: Run, submittedAt: string) {
   ] as const
 }
 
-function currentChangeSnapshot(pr: PR) {
+function currentChangeSnapshot(pr: Change) {
   const revision = currentChangeRev(pr)
   return {
     id: pr.id,
@@ -575,7 +575,7 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
   return { io, stdout: () => stdout, stderr: () => stderr }
 }
 
-function fixtureAdmissionOrder(prs: readonly PR[]): string[] {
+function fixtureAdmissionOrder(prs: readonly Change[]): string[] {
   return prs
     .filter((pr) => {
       const state = changeDeliveryState(pr)
@@ -1809,7 +1809,7 @@ describe("runYrd", () => {
 
     const json = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
-    const jsonIds = (JSON.parse(json.stdout()) as { prs: readonly PR[] }).prs.map(({ id }) => id)
+    const jsonIds = (JSON.parse(json.stdout()) as { prs: readonly Change[] }).prs.map(({ id }) => id)
     expect(jsonIds).toHaveLength(520)
     expect(jsonIds.at(0)).toBe("PR1")
     expect(jsonIds.at(-1)).toBe("PR520")
@@ -2432,9 +2432,9 @@ describe("runYrd", () => {
       lineage: [1, 2],
       unchanged: false,
     })
-    const remergePr = app.bays.pr("PR1")!
-    expect(changeDeliveryState(remergePr)).toBe("submitted")
-    expect(currentChangeRev(remergePr)).toMatchObject({
+    const remergeChange = app.bays.pr("PR1")!
+    expect(changeDeliveryState(remergeChange)).toBe("submitted")
+    expect(currentChangeRev(remergeChange)).toMatchObject({
       n: 2,
       head: nextHead,
       props,
@@ -2454,11 +2454,11 @@ describe("runYrd", () => {
         ],
       },
     })
-    expect(remergePr.revs).toMatchObject([
+    expect(remergeChange.revs).toMatchObject([
       { n: 1, props, submittedAt: sourceReadyAt },
       { n: 2, props, submittedAt: expect.any(String) },
     ])
-    expect(remergePr.revs[1]?.submittedAt).not.toBe(sourceReadyAt)
+    expect(remergeChange.revs[1]?.submittedAt).not.toBe(sourceReadyAt)
     expect(app.bays.reviewState("PR1")).toMatchObject({
       approved: true,
       current: { carriedFrom: { revision: 1, headSha: HEAD_SHA } },
@@ -3922,7 +3922,7 @@ describe("runYrd", () => {
       ...(terminal === undefined ? {} : { terminal }),
       ...(submitter === undefined ? {} : { submitter }),
     })
-    const pr = (id: string, branch: string, status: ChangeDeliveryState, clock: ChangeRev): PR => ({
+    const pr = (id: string, branch: string, status: ChangeDeliveryState, clock: ChangeRev): Change => ({
       id,
       branch,
       base: clock.base,
@@ -3937,7 +3937,7 @@ describe("runYrd", () => {
       ...(status === "integrated" ? { integratedAt: clock.terminal?.at } : {}),
     })
     const review = { required: false, approved: false, stale: false } as const
-    const entries: ReadonlyArray<Readonly<{ pr: PR; eligibility: ChangeEligibility }>> = [
+    const entries: ReadonlyArray<Readonly<{ pr: Change; eligibility: ChangeEligibility }>> = [
       {
         pr: pr(
           "PR1",
@@ -7268,7 +7268,7 @@ describe("runYrd", () => {
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const patchId = "d".repeat(40)
     const treeSha = "e".repeat(40)
-    const pr: PR = {
+    const pr: Change = {
       id: "PR1",
       branch: "topic/recut",
       base: "main",
@@ -7369,7 +7369,7 @@ describe("runYrd", () => {
     ])
 
     const finishedAt = "2026-07-13T12:00:00.000Z"
-    const integratedPr: PR = {
+    const integratedPr: Change = {
       ...pr,
       state: "closed",
       merged: true,
@@ -7445,7 +7445,7 @@ describe("runYrd", () => {
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const submittedAt = "2026-07-13T11:30:00.000Z"
     const finishedAt = "2026-07-13T11:50:00.000Z"
-    const pr = (id: string, submitter: string, headSha: string): PR => ({
+    const pr = (id: string, submitter: string, headSha: string): Change => ({
       id,
       name: `${id} subject`,
       branch: `topic/${id}`,
@@ -8909,7 +8909,7 @@ describe("runYrd", () => {
     const submittedAt = "2026-07-13T11:00:00.000Z"
     // Released runs leave their PR submitted for the next queue pass; a true
     // decision rejection owns the PR's terminal revision clock.
-    const prs: PR[] = cases.map((entry) => {
+    const prs: Change[] = cases.map((entry) => {
       const rejected = ["check-failed", "novel-failure-code"].includes(entry.code)
       return {
         id: entry.pr,
@@ -10774,7 +10774,7 @@ describe("runYrd", () => {
       ...pr,
       revs: [pr.revs[0]!, { ...pr.revs[1]!, terminal: undefined }],
       rejectedAt: undefined,
-    } satisfies PR
+    } satisfies Change
     const pending = humanQueueProjection(
       { ...result, prs: [awaitingCurrentRun], admissionOrder: ["PR1"], finished: [prior] },
       Date.parse("2026-07-09T12:13:00.000Z"),
@@ -10798,7 +10798,7 @@ describe("runYrd", () => {
       steps: [],
       error: { code: "check-failed", message: "failed" },
     })
-    const pr: PR = {
+    const pr: Change = {
       id: "PR-clock",
       branch: "topic/clock",
       base: "main",
@@ -14804,7 +14804,7 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(view.stdout()).toBe("")
   })
 
-  function metadataPr(overrides: Partial<PR> = {}): PR {
+  function metadataPr(overrides: Partial<Change> = {}): Change {
     return {
       id: "PR1",
       branch: "topic/metadata",
@@ -14848,7 +14848,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     reviews: [],
     comments: [],
     checkRequests: [],
-  } satisfies PR
+  } satisfies Change
 
   it("fails loudly when a hot queue command lacks the queue attempt read capability", async () => {
     const app = await createApp()
@@ -15400,7 +15400,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     const multiPR = {
       ...focusedPR,
       revs: [1, 2, 3, 4].map((n) => submittedRevision(n, String(n).repeat(40), "2026-07-09T12:00:00.000Z")),
-    } satisfies PR
+    } satisfies Change
 
     // Fill past the cap of three.
     for (const revision of [1, 2, 3, 4]) await resolver.resolve("/repo", multiPR, revision, 1_000)
@@ -15426,8 +15426,8 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     // `CAP` keys are all hits (at least the cap is kept) and every older key
     // misses (at most the cap is kept).
     const CAP = 8
-    const PR_COUNT = 10
-    const REVS_PER_PR = 5
+    const CHANGE_COUNT = 10
+    const REVS_PER_CHANGE = 5
     const calls: string[][] = []
     const resolver = runInternals.createQueueChangeDiffResolver({
       maxEntries: CAP,
@@ -15440,21 +15440,21 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     })
     // Ten PRs of five revisions each: 50 distinct keys, every head distinct so
     // no two collapse onto one cache entry.
-    const prs = Array.from({ length: PR_COUNT }, (_pr, changeIndex) => {
+    const prs = Array.from({ length: CHANGE_COUNT }, (_pr, changeIndex) => {
       return {
         ...focusedPR,
         id: `PR${String(changeIndex + 1)}`,
-        revs: Array.from({ length: REVS_PER_PR }, (_rev, revIndex) =>
+        revs: Array.from({ length: REVS_PER_CHANGE }, (_rev, revIndex) =>
           submittedRevision(
             revIndex + 1,
-            String(changeIndex * REVS_PER_PR + revIndex + 1).padStart(40, "0"),
+            String(changeIndex * REVS_PER_CHANGE + revIndex + 1).padStart(40, "0"),
             "2026-07-09T12:00:00.000Z",
           ),
         ),
-      } satisfies PR
+      } satisfies Change
     })
     const keys = prs.flatMap((pr) => pr.revs.map((rev) => ({ pr, revision: rev.n })))
-    expect(keys, "the fill must exceed the cap by enough to expose a slow leak").toHaveLength(PR_COUNT * REVS_PER_PR)
+    expect(keys, "the fill must exceed the cap by enough to expose a slow leak").toHaveLength(CHANGE_COUNT * REVS_PER_CHANGE)
 
     /** Whether this resolve reached git — a cache miss — rather than being served. */
     const missed = async (key: (typeof keys)[number], now: number): Promise<boolean> => {

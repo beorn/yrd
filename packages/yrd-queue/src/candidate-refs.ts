@@ -25,7 +25,7 @@
  * now reads both namespaces in one `for-each-ref` and judges them by the same
  * rule — one retention window, one command, not two sweepers to keep in sync. A
  * source-tip ref is claimed through `Candidate.sourceRewrites` (the submodule-
- * wrapper case) or `Candidate.revs[].head` (the direct-recut case: `recutDirectPR`
+ * wrapper case) or `Candidate.revs[].head` (the direct-recut case: `remergeDirectChange`
  * publishes the ref straight from a PR's certified head, with no per-source
  * record). KNOWN GAP: refs `publishSourceCandidate` pushes into a SUBMODULE's own
  * origin (`source.repo !== "."`, e.g. `vendor/silvery`) live in that submodule's
@@ -51,7 +51,7 @@ export function candidateRefFor(sha: string): string {
 export const SOURCE_CANDIDATE_REF_NAMESPACE = "refs/heads/yrd/candidates"
 
 /** The one place the source-tip ref name is formed — the mirror of
- * `candidateRefFor` for `recutDirectPR` and `publishSourceCandidate`. Both used to
+ * `candidateRefFor` for `remergeDirectChange` and `publishSourceCandidate`. Both used to
  * spell `refs/heads/yrd/candidates/${sha}` independently; one authored function
  * is what makes the writer and this sweep unable to drift apart. */
 export function sourceCandidateRefFor(sha: string): string {
@@ -174,7 +174,7 @@ function recordIsTerminal(record: DeepReadonly<QueueRecord>): boolean {
  * (`candidate.ref`/`candidate.sha`), a source-tip ref per rewritten submodule
  * (`sourceRewrites[]`), and — for a direct PR recut that never went through a
  * submodule wrapper — the revision head itself (`revs[].head`), which is exactly
- * the sha `recutDirectPR` published the source-tip ref under.
+ * the sha `remergeDirectChange` published the source-tip ref under.
  */
 function liveCandidateOwners(
   queues: DeepReadonly<QueuesState>,

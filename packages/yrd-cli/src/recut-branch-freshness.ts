@@ -1,4 +1,4 @@
-import { changeDeliveryState, changeRevisionLineage, type PR, type ChangeRev } from "@yrd/bay"
+import { changeDeliveryState, changeRevisionLineage, type Change, type ChangeRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -28,7 +28,7 @@ function gitFailure(result: ProcessResult): string {
   return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
 }
 
-function requireObservedBranch(observed: LiveBranchObservation, pr: PR, remedy: string, injected: boolean): string {
+function requireObservedBranch(observed: LiveBranchObservation, pr: Change, remedy: string, injected: boolean): string {
   if (!observed.ok && observed.phase === "observer") {
     raiseFailure(
       "configuration",
@@ -56,7 +56,7 @@ function requireObservedBranch(observed: LiveBranchObservation, pr: PR, remedy: 
 }
 
 async function liveBranchHead(
-  pr: PR,
+  pr: Change,
   recorded: ChangeRev,
   options: RemergeBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,
@@ -169,7 +169,7 @@ export type RemergeBranchFreshness =
  * and continues. Reproducibility is untouched: each run still executes a
  * frozen recorded revision. */
 export async function requireImplicitRemergeBranchFreshness(
-  pr: PR,
+  pr: Change,
   selected: ChangeRev,
   options: RemergeBranchFreshnessOptions,
   services: Pick<YrdCliServices, "process">,

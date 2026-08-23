@@ -601,7 +601,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
    * composes its result with the resident heartbeat rather than pushing runtime
    * liveness into the queue package. This pins the audit half: ONE admission check is a queue barely
    * tried, not a queue trying and failing, so it must not read as stalled. The
-   * count is computable from state today — `PRCheckRequest` already carries `at`
+   * count is computable from state today — `ChangeCheckRequest` already carries `at`
    * — so this needs no new recording, only the predicate.
    *
    * The clocks deliberately stay separate: `QueueAuditOptions` is `{ now?: string }`,

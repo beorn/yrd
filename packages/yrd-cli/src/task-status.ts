@@ -1,4 +1,4 @@
-import { changeDeliveryState, type PR, type ChangeDeliveryState } from "@yrd/bay"
+import { changeDeliveryState, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { ChangeCheckRecord, Run, QueueStep } from "@yrd/queue"
@@ -42,7 +42,7 @@ export function taskStatusFields(taskStatus: TaskStatus): TaskStatusFields {
   return { taskStatus, glyph: taskStatusGlyph(taskStatus) }
 }
 
-export function changeTaskStatusOf(pr: PR): TaskStatus {
+export function changeTaskStatusOf(pr: Change): TaskStatus {
   return changeDeliveryTaskStatusOf(changeDeliveryState(pr))
 }
 
@@ -183,7 +183,7 @@ export function contestTaskStatusOf(contest: Pick<Contest, "status">): TaskStatu
 
 export function issueTaskStatusOf(
   issue: Readonly<{
-    prs: readonly PR[]
+    prs: readonly Change[]
     contests: readonly Pick<Contest, "status">[]
   }>,
 ): TaskStatus {
@@ -199,14 +199,14 @@ export function issueTaskStatusOf(
   return "dropped"
 }
 
-export type ProjectedPR = PR &
+export type ProjectedChange = Change &
   TaskStatusFields &
   Readonly<{
     /** answers: What delivery result should a reader act on? tense: current. */
     status: ChangeDeliveryState
   }>
 
-export function projectChangeTaskStatus(pr: PR): ProjectedPR {
+export function projectChangeTaskStatus(pr: Change): ProjectedChange {
   return { ...pr, status: changeDeliveryState(pr), ...taskStatusFields(changeTaskStatusOf(pr)) }
 }
 

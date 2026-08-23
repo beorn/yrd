@@ -29,7 +29,7 @@ import {
   projectBranchLifecycles,
   resolveBase,
   type DeprovisionedBay,
-  type PR,
+  type Change,
   type ProvisionedBay,
   type RefreshedBay,
 } from "../src/model.ts"
@@ -184,7 +184,7 @@ async function createHarness(log?: ConditionalLogger) {
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
 
-function changeFacts(pr: PR | undefined) {
+function changeFacts(pr: Change | undefined) {
   if (pr === undefined) throw new Error("expected PR")
   return { ...pr, delivery: changeDeliveryState(pr), current: currentChangeRev(pr) }
 }

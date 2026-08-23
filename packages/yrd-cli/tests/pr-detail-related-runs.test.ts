@@ -2,14 +2,14 @@
 // @level l1
 // @consumer @yrd/cli
 
-import { changeBaseSha, changeHead, changeRevisionNumber, type PR } from "@yrd/bay"
+import { changeBaseSha, changeHead, changeRevisionNumber, type Change } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { describe, expect, test } from "vitest"
 import { ChangeDetailData } from "../src/queue-status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 
-function fixturePr(id: string, submittedAt: string): PR {
+function fixturePr(id: string, submittedAt: string): Change {
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
   const headSha = digit.repeat(40)
   return {
@@ -29,7 +29,7 @@ function fixturePr(id: string, submittedAt: string): PR {
 
 function fixtureRun(
   id: string,
-  prs: readonly PR[],
+  prs: readonly Change[],
   status: Run["status"],
   startedAt: string,
   conclusion?: Run["conclusion"],
@@ -58,7 +58,7 @@ function fixtureRun(
   }
 }
 
-describe("prDetailData related runs", () => {
+describe("ChangeDetailData related runs", () => {
   const pr1 = fixturePr("PR1", "2026-07-13T09:00:00.000Z")
   const pr2 = fixturePr("PR2", "2026-07-13T09:05:00.000Z")
   const pr1RetryRun = fixtureRun("R1", [pr1], "completed", "2026-07-13T10:00:00.000Z", "failure")

@@ -3,11 +3,11 @@ import type { GitProcessResult } from "git-super/process"
 import { createElement } from "react"
 import {
   currentChangeRev,
-  isLivePR,
+  isLiveChange,
   changeDeliveryState,
   changeNeedsAuthor,
   changeNotFoundMessage,
-  type PR,
+  type Change,
 } from "@yrd/bay"
 import { raiseFailure, requireLinearRootTip } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
@@ -37,26 +37,26 @@ function short(sha: string): string {
 /** Resolve one live PR or raise the typed refusal that names why it cannot be
  * withdrawn. An unknown selector and a terminal PR are both loud failures —
  * never a silent no-op. */
-function requiredLivePr(app: YrdCliApp, selector: string): PR {
+function requiredLivePr(app: YrdCliApp, selector: string): Change {
   const pr = app.bays.pr(selector)
   if (pr === undefined) {
     raiseFailure("refusal", "pr-missing", changeNotFoundMessage(app.state().bays, selector))
   }
   const delivery = changeDeliveryState(pr)
-  if (!isLivePR(pr)) {
+  if (!isLiveChange(pr)) {
     raiseFailure("refusal", "pr-terminal", `yrd: PR '${pr.id}' is ${delivery}; a terminal PR cannot be withdrawn`)
   }
-  return pr as PR
+  return pr as Change
 }
 
 /** Withdraw the selected live PR revision: emit pr/withdrawn with the recorded
  * reason and terminalize any Queue work still holding that authority. */
-async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefined, io: YrdCliIO): Promise<PR> {
+async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefined, io: YrdCliIO): Promise<Change> {
   await app.bays.closePr({ pr: id, ...(reason === undefined ? {} : { reason }) })
   const withdrawn = app.bays.pr(id)
   if (withdrawn === undefined) throw new Error(`yrd: PR '${id}' disappeared after withdraw`)
   await app.queue.cancel({ prs: [id], by: io.runner ?? "operator", reason: reason ?? DEFAULT_WITHDRAW_REASON })
-  return withdrawn as PR
+  return withdrawn as Change
 }
 
 /** What closing this revision spends, in the operator's own terms: the exact
@@ -65,7 +65,7 @@ async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefine
  * one command that brings the payload back. */
 type PayloadSpend = Readonly<{ pr: string; revision: number; headSha: string; branch: string; reopen: string }>
 
-function payloadSpend(pr: PR): PayloadSpend {
+function payloadSpend(pr: Change): PayloadSpend {
   const revision = currentChangeRev(pr)
   return {
     pr: pr.id,
@@ -121,7 +121,7 @@ export async function withdrawPrs(
   if (options.reason !== undefined && (reason === undefined || reason === "")) {
     usage("--reason requires non-empty text")
   }
-  const targets: PR[] = []
+  const targets: Change[] = []
   const seen = new Set<string>()
   for (const selector of selectors) {
     const pr = requiredLivePr(app, selector)
@@ -136,7 +136,7 @@ export async function withdrawPrs(
   for (const spend of spends) {
     io.stderr(`yrd: spending payload identity: ${spendLine(spend)} — reopen only with '${spend.reopen}'\n`)
   }
-  const withdrawn: PR[] = []
+  const withdrawn: Change[] = []
   for (const target of targets) {
     withdrawn.push(await withdrawOne(app, target.id, reason, io))
   }
@@ -213,7 +213,7 @@ function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: 
   return `PR '${pr}' could not be ${action}: ${cause}`
 }
 
-function pruneError(pr: PR, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
+function pruneError(pr: Change, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
   const message = pruneFailureMessage(pr.id, "judged", error)
   const revision = currentChangeRev(pr)
   return {
@@ -239,7 +239,7 @@ function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
 /** A merge moves the base before its Job can record `pr/integrated`. During
  * that side-effect boundary, pruning the exact revision would cancel its own
  * landing and replace the truthful integration with `pr/withdrawn` (22454). */
-function mergeRunOwningRevision(app: YrdCliApp, pr: PR): Run | undefined {
+function mergeRunOwningRevision(app: YrdCliApp, pr: Change): Run | undefined {
   const revision = currentChangeRev(pr)
   return Queues.ids(app.state().queues)
     .map((id) => app.queue.get(id))
@@ -256,7 +256,7 @@ function mergeRunOwningRevision(app: YrdCliApp, pr: PR): Run | undefined {
     })
 }
 
-function mergeOwnedPruneRow(pr: PR, run: Run): PruneRow {
+function mergeOwnedPruneRow(pr: Change, run: Run): PruneRow {
   const revision = currentChangeRev(pr)
   const reason = `merge run '${run.id}' owns the in-flight landing for revision ${revision.n} (${revision.head})`
   return {
@@ -272,7 +272,7 @@ function mergeOwnedPruneRow(pr: PR, run: Run): PruneRow {
   }
 }
 
-function changedPruneRow(row: PruneRow, pr: PR): PruneRow {
+function changedPruneRow(row: PruneRow, pr: Change): PruneRow {
   const revision = currentChangeRev(pr)
   const reason =
     `PR changed during prune from revision ${row.revision} (${row.headSha}) ` +
@@ -297,7 +297,7 @@ async function contentChecks(headSha: string, baseSha: string, git: PruneGitFact
 /** Prove one PR's superseded verdict against its resolved base tip. Every
  * check that ran (and every check that was skipped, with why) is named in the
  * returned row so the operator sees exactly what was verified. */
-async function pruneVerdict(pr: PR, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
+async function pruneVerdict(pr: Change, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
   const revision = currentChangeRev(pr)
   const identity = {
     pr: pr.id,
@@ -551,10 +551,10 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
   // the per-tick listing path the collator hoist targets.
   const live = app.bays
     .prs()
-    .filter((pr) => isLivePR(pr))
+    .filter((pr) => isLiveChange(pr))
     .toSorted(
       (left, right) => left.id.localeCompare(right.id, "en", { numeric: true }), // collator-hoist-allow: locale-pinned, cold path
-    ) as readonly PR[]
+    ) as readonly Change[]
 
   const rows: PruneRow[] = []
   for (const pr of live) {
@@ -577,14 +577,14 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
     }
   }
 
-  const withdrawn: PR[] = []
+  const withdrawn: Change[] = []
   if (!dryRun) {
     for (const [index, row] of rows.entries()) {
       if (row.verdict !== "withdraw") continue
       try {
         await app.refresh()
         const current = app.bays.pr(row.pr)
-        if (current !== undefined && isLivePR(current)) {
+        if (current !== undefined && isLiveChange(current)) {
           const revision = currentChangeRev(current)
           if (revision.n !== row.revision || revision.head !== row.headSha) {
             rows[index] = changedPruneRow(row, current)
