@@ -566,6 +566,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
       to: first.manifest.targetIdentity,
     })
+    // Production journal stored identity 2026-08-23, measured from the live
+    // refusal 348ade4e→288eb203 (history evicted through cursor 27609). Its
+    // edge is what lets a deployment cross the cut that took the declared step
+    // list out of `initialState`.
+    expect(first.manifest.edges).toContainEqual({
+      from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
+      to: first.manifest.targetIdentity,
+    })
     // 23192: a queue-CONFIG change must NOT move the projection identity.
     // While the declared step list sat in `initialState` it did, and an
     // ordinary `.yrd.yml` checks edit then demanded a checkpoint migration
@@ -2962,6 +2970,12 @@ checks: [{check: {run: "true"}}]
       {
         // The production composition's correlation-era identity (props cut).
         from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        // The production identity before the declared step list left
+        // `initialState` (23192), measured from the live journal's refusal.
+        from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
         to: attestation.manifest.targetIdentity,
       },
       {

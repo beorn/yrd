@@ -281,6 +281,15 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // from this identity (refusal f41d7eff→0150a374). Measured from the
   // production journal itself, never a harness (PR1305 / R2732).
   "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
+  // The PRODUCTION composition's identity immediately before the declared step
+  // list left `initialState` (23192). Measured from the live journal's own
+  // refusal on 2026-08-23 — `yrd pr create` printed the pair
+  // 348ade4e→288eb203 with history evicted through cursor 27609, so a rebuild
+  // from complete history is unavailable and only a retained edge can carry
+  // the deployment across. Never a harness value (the PR1305 / R2732 lesson
+  // above); the harness composition now hashes to the same identity anyway,
+  // because a config change no longer moves it.
+  "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -1805,10 +1814,17 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // callback, so this single drop covers all of them.
         const { intents: _deadIntents, ...withoutDeadIntents } = compacted as typeof compacted &
           Readonly<{ intents?: unknown }>
+        // Same reason as `batchSize` below, and the defect that made it urgent
+        // (23192): the declared step list is construction policy, not a journal
+        // fact. Nothing plans from the stored copy any more, so drop it here
+        // rather than carry a list into every future checkpoint that only ever
+        // reports as drift. `@yrd/queue` still reports one it finds, because a
+        // library cannot assume its host ran this migration.
+        const { defaultSteps: _retiredStepPlan, ...queuesWithoutStoredPlan } = compacted.queues
         return {
           ...withoutDeadIntents,
           queues: {
-            ...compacted.queues,
+            ...queuesWithoutStoredPlan,
             // Construction policy is not a journal fact. A retained checkpoint
             // keeps historical Run widths, but future candidates must use the
             // current config/default selected by this process.

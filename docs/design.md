@@ -423,7 +423,10 @@ never an input to a plan. Three consequences, and each one paid for itself:
   the declaration, the Run records the superseded list in
   `stepSelection.supersededSteps` and `queue audit` emits `step-plan-drift`
   naming both lists and their sources. The declared plan is what runs; the
-  stored one is only reported.
+  stored one is only reported. The CLI's checkpoint migration drops the stored
+  list on the way in, for the same reason it resets `batchSize`; `@yrd/queue`
+  keeps reporting one it still finds, because a library cannot assume its host
+  ran that migration.
 
 **C12. The installed baseline is required INPUT to the audit, not optional
 context.** `installed-baseline.json` under the state dir has exactly one writer,
