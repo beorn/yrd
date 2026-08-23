@@ -1447,6 +1447,12 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   return Object.freeze(definition)
 }
 
+/** Two unrelated "checkpoint" concepts exist in yrd; this is the JOURNAL one.
+ * The projection checkpoint snapshots projected state, keyed by the identity
+ * below (initialState + event schemas + replayEvents + projectionVersions) —
+ * renaming any persisted key or version string moves it and orphans stored
+ * checkpoints. `BayWorkspace.checkpoint` (yrd-bay/src/plugin.ts) is the other
+ * one: it preserves a bay's working tree. They share nothing but the word. */
 function projectionCheckpointIdentity<State extends object, Commands extends CommandTree, Features extends object>(
   definition: YrdDef<State, Commands, Features>,
 ): string {

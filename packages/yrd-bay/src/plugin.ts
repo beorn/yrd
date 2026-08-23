@@ -657,6 +657,11 @@ const ChangeReviewRequestFactSchema = z
   .object({ pr: PRIdSchema, reviewers: z.array(TextSchema), requestedBy: TextSchema })
   .strict()
 
+/** Two unrelated "checkpoint" concepts exist in yrd; this is the BAY one.
+ * `BayWorkspace.checkpoint` preserves a bay's working tree (commit + push WIP
+ * before recycle). The JOURNAL checkpoint — `projectionCheckpointIdentity` and
+ * the checkpoint store in yrd-core/src/app.ts — is a projection-state snapshot
+ * keyed by schema identity. They share nothing but the word. */
 export type BayWorkspace = Readonly<{
   revision: string
   provision(
