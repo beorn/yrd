@@ -1,7 +1,7 @@
 /**
  * @failure Two bun binaries on one host produced two revision families that the resident and operators swapped forever (22374).
  * @level l1
- * @consumer @yrd/cli installed-baseline
+ * @consumer @yrd/queue step-revision-drift
  */
 import { describe, expect, it } from "vitest"
 import { queueStepRevision, type ToolchainFingerprint } from "../src/host-revision.ts"

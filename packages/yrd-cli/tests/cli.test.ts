@@ -127,7 +127,6 @@ import * as runInternals from "../src/run.ts"
 import { MergeAuthorityBoundary } from "../src/merge-authority-boundary.ts"
 import { queueStats } from "../src/time-stats.ts"
 import { YRD_VERSION } from "../src/version.ts"
-import { writeInstalledBaseline } from "../src/installed-baseline.ts"
 import {
   jobAttemptTaskStatusOf,
   changeDeliveryTaskStatusOf,
@@ -863,16 +862,22 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
   }
 }
 
-/** A stubbed environment audit still has to say WHAT IT COMPARED: the emission
- * type makes a denominator-free audit unrepresentable, because a bare
+/** A stubbed plan audit still has to say WHAT IT COMPARED: the emission type
+ * makes a denominator-free audit unrepresentable, because a bare
  * `findings: []` reads the same whether nothing drifted or nothing was ever
- * read (23193). Stubs declare one installed baseline unless they say otherwise. */
-function stubAuditComparison(bases: readonly string[] = ["main"]): QueueEnvironmentAuditComparison {
+ * read (23193). Stubs declare one tip with one installed plan and no journal
+ * walk unless they say otherwise. */
+function stubAuditComparison(base = "main"): QueueEnvironmentAuditComparison {
   return {
-    baselinePath: "/state/installed-baseline.json",
-    baselines: bases.length,
-    bases,
-    against: ["configured"],
+    base,
+    tip: {
+      sha: "1".repeat(40),
+      configAuthority: ".yrd.yml",
+      configBlobSha: "2".repeat(40),
+      steps: ["check", "merge"],
+      batchSize: 1,
+    },
+    installed: { steps: ["check", "merge"], batchSize: 1 },
   }
 }
 
@@ -1008,10 +1013,12 @@ describe("runYrd", () => {
     expect(queueHelp).not.toMatch(/^\s+(?:init|deinit|provision|deprovision)\b/mu)
     expect(queueHelp).toMatch(/^Examples:\n\s+\$ yrd queue\b/mu)
 
+    // `admin queue init/deinit` are retired (23192/23193): still routable so an
+    // old runbook gets the reason, never advertised.
     const adminQueue = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("admin", "queue", "--help"), adminQueue.io)).toBe(0)
-    expect(adminQueue.stdout()).toMatch(/^\s+init\b/mu)
-    expect(adminQueue.stdout()).toMatch(/^\s+deinit\b/mu)
+    expect(adminQueue.stdout()).toContain("retired queue administration")
+    expect(adminQueue.stdout()).not.toMatch(/^\s+(?:init|deinit)\b/mu)
   })
 
   it("names the question and tense of every pr list status vocabulary", async () => {
@@ -1616,23 +1623,37 @@ describe("runYrd", () => {
     const resume = outputIO()
     expect(await runYrd(app, yrd("queue", "resume", "MAIN", "--json"), resume.io), resume.stderr()).toBe(0)
     expect(JSON.parse(resume.stdout())).toMatchObject({ command: "queue.resume", base: "main" })
+  })
 
-    const bases: string[] = []
-    const services: YrdCliServices = {
-      queue: {
-        provision: async (base) => {
-          bases.push(base ?? "main")
-          return { ready: true }
-        },
-      },
+  it("refuses the retired admin queue init/deinit verbs by name, never a silent no-op (23192/23193)", async () => {
+    // Their one durable effect was installed-baseline.json, the stored plan
+    // copy the audit compared against. The file is gone: printing
+    // "initialized" without installing anything would be the silent no-op the
+    // baseline itself turned out to be, so each verb refuses with the reason
+    // and the replacement.
+    const app = await createApp()
+    for (const [verb, replacements] of [
+      ["init", ["yrd admin init", "yrd queue audit"]],
+      ["deinit", ["yrd queue audit"]],
+    ] as const) {
+      const human = outputIO()
+      expect(await runYrd(app, yrd("admin", "queue", verb, "main"), human.io)).toBe(1)
+      expect(human.stderr()).toContain(`error: admin queue ${verb} is retired and does nothing`)
+      expect(human.stderr()).toContain("installed-baseline.json")
+      for (const replacement of replacements) expect(human.stderr()).toContain(`resolve: ${replacement}`)
+      // The one command the remedy must never name is the retired verb itself.
+      expect(human.stderr()).not.toContain(`resolve: yrd admin queue ${verb}`)
+      const json = outputIO()
+      expect(await runYrd(app, yrd("admin", "queue", verb, "--json"), json.io)).toBe(1)
+      expect(JSON.parse(json.stderr())).toMatchObject({
+        failure: { kind: "refusal", code: "queue-administration-retired", resolution: [...replacements] },
+      })
     }
-    const init = outputIO()
-    expect(
-      await runYrd(app, yrd("admin", "queue", "init", "ORIGIN/MAIN", "--json"), init.io, services),
-      init.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(init.stdout())).toMatchObject({ command: "queue.init", base: "main" })
-    expect(bases).toEqual(["main"])
+    // Retired, not unknown: the verbs stay registered so an old runbook gets
+    // the reason, but they no longer advertise themselves.
+    const help = outputIO()
+    expect(await runYrd(app, yrd("admin", "--help"), help.io)).toBe(0)
+    expect(help.stdout()).not.toMatch(/^\s+queue\b/mu)
   })
 
   it("reports folded selector collisions instead of choosing the first base", async () => {
@@ -3389,7 +3410,7 @@ describe("runYrd", () => {
       code: "submodule-pin-unpublished",
       count: 1,
     })
-    expect(gate, "a post-mutation refusal must re-prove the installed baseline").toHaveBeenCalledTimes(2)
+    expect(gate, "a post-mutation refusal must re-read the declared plan").toHaveBeenCalledTimes(2)
   })
 
   it("exits non-zero when an internal scope aborts an unchanged idle follow tick", async () => {
@@ -3418,7 +3439,7 @@ describe("runYrd", () => {
 
     await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(3)
     expect(sleeps).toEqual([1_000, 1_000])
-    expect(gate, "an unchanged idle tick must not re-run the installed-baseline gate").toHaveBeenCalledTimes(1)
+    expect(gate, "an unchanged idle tick must not re-run the declared-plan gate").toHaveBeenCalledTimes(1)
     expect(queueRun, "an unchanged idle tick must not traverse and compose the full queue").toHaveBeenCalledTimes(1)
   })
 
@@ -3428,35 +3449,58 @@ describe("runYrd", () => {
     // a completed drain and not restart it, and the queue would sit unattended
     // behind a green exit. Refusals classify to 1 (invocation.ts
     // `classifyFailure`); this pins the whole path from the gate to the code.
-    const refuse = (code: "runtime-drift" | "config-drift"): YrdCliServices => ({
+    const requested: number[] = []
+    const refuse: YrdCliServices = {
       queue: {
-        auditEnvironment: async () => ({
-          findings: [{ code, message: `queue base 'main' ${code} blocks the resident` }],
-          comparison: stubAuditComparison(),
-        }),
+        auditEnvironment: async (options) => {
+          requested.push(options?.recordedRuns ?? -1)
+          return {
+            findings: [
+              { code: "installed-plan-stale", message: "this process installed check→merge, but main tip declares …" },
+            ],
+            comparison: stubAuditComparison(),
+          }
+        },
       },
-    })
+    }
 
-    // Runtime drift: this process's own queue policy diverged, so no baseline
-    // rewrite can save it — the resident must die and be restarted.
+    // The installed plan is not the one the tip declares, and no process host
+    // is wired to exec a replacement in place: the resident must die and be
+    // restarted rather than refuse every candidate it prepares.
     const runtime = outputIO()
     const app = await createApp()
-    expect(await runYrd(app, yrd("queue", "run"), runtime.io, refuse("runtime-drift"))).toBe(1)
-    expect(runtime.stderr()).toContain("runtime-drift")
-
-    // Config drift with no provision capability wired: follow mode cannot
-    // re-provision its way out, so this refuses too rather than draining on a
-    // baseline it cannot prove.
-    const config = outputIO()
-    const configApp = await createApp()
-    expect(await runYrd(configApp, yrd("queue", "run"), config.io, refuse("config-drift"))).toBe(1)
-    expect(config.stderr()).toContain("config-drift")
+    expect(await runYrd(app, yrd("queue", "run"), runtime.io, refuse)).toBe(1)
+    expect(runtime.stderr()).toContain("error: this process installed check→merge, but main tip declares")
+    const runtimeJson = outputIO()
+    expect(await runYrd(await createApp(), yrd("queue", "run", "--json"), runtimeJson.io, refuse)).toBe(1)
+    expect(JSON.parse(runtimeJson.stderr())).toMatchObject({
+      failure: { kind: "refusal", code: "installed-plan-stale" },
+    })
 
     // The one-shot path shares the gate and must agree: a refusal is a refusal
     // whether or not a resident is following.
     const once = outputIO()
     const onceApp = await createApp()
-    expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse("runtime-drift"))).toBe(1)
+    expect(await runYrd(onceApp, yrd("queue", "run", "--once"), once.io, refuse)).toBe(1)
+    expect(once.stderr()).toContain("error: this process installed check→merge, but main tip declares")
+    // The gate reads the installed leg only: a journal walk is `queue audit`'s
+    // job, and a stale record is not something a restart fixes.
+    expect(requested).toEqual([0, 0, 0])
+
+    // A recorded-run mismatch is an audit finding, never a reason to stop the
+    // runner: the journal disagreeing with git about a PAST Run says nothing
+    // about whether this process can execute the NEXT one.
+    const mismatchOnly: YrdCliServices = {
+      queue: {
+        auditEnvironment: async () => ({
+          findings: [{ code: "run-plan-mismatch", message: "run R1 recorded a plan git does not derive" }],
+          comparison: stubAuditComparison(),
+        }),
+      },
+    }
+    const tolerant = outputIO()
+    const tolerantApp = await createApp()
+    expect(await runYrd(tolerantApp, yrd("queue", "run", "--once"), tolerant.io, mismatchOnly)).toBe(0)
   })
 
   it("expires a hold on an otherwise idle follow tick without exiting the runner", async () => {
@@ -3521,7 +3565,7 @@ describe("runYrd", () => {
     try {
       await expect(runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate)).resolves.toBe(3)
       expect(sleeps).toEqual([1_000, 1_000])
-      expect(gate, "new durable work must re-open the installed-baseline gate").toHaveBeenCalledTimes(2)
+      expect(gate, "new durable work must re-open the declared-plan gate").toHaveBeenCalledTimes(2)
       expect(queueRun, "new durable work must wake the queue compose path").toHaveBeenCalledTimes(2)
       expect(runner.bays.pr("PR1"), "the wake-up cycle must observe the appended PR").toBeDefined()
     } finally {
@@ -6557,8 +6601,8 @@ describe("runYrd", () => {
           comparison: stubAuditComparison(),
           findings: [
             {
-              code: "config-drift",
-              message: "queue base 'main' installed baseline is stale",
+              code: "installed-plan-stale",
+              message: "this process installed check→merge, but main tip 11111111 declares check→affected-tests→merge",
             },
           ],
         }),
@@ -6568,8 +6612,8 @@ describe("runYrd", () => {
 
     expect(await runYrd(app, yrd("queue", "recover"), recovery.io, services), recovery.stderr()).toBe(0)
     expect(recovery.stdout()).not.toContain("Queue idle")
-    expect(recovery.stdout()).toContain("config-drift")
-    expect(recovery.stdout()).toContain("queue base 'main' installed baseline is stale")
+    expect(recovery.stdout()).toContain("installed-plan-stale")
+    expect(recovery.stdout()).toContain("main tip 11111111 declares check→affected-tests→merge")
 
     const json = outputIO()
     expect(await runYrd(app, yrd("queue", "recover", "--json"), json.io, services), json.stderr()).toBe(0)
@@ -7648,13 +7692,10 @@ describe("runYrd", () => {
     execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
     const baseSha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
     const stateDir = join(repo, ".git", "yrd")
-    await writeInstalledBaseline(stateDir, {
-      base: "main",
-      baseSha,
-      installedAt: "2026-07-09T11:00:00.000Z",
-      batchSize: 1,
-      steps: [{ name: "check", title: "check", revision: "check-v1", kind: "check" }],
-    })
+    // The checkout sits one commit ahead of the queue base's tip (`main`):
+    // the distance the probe reports is measured against that tip, the ref
+    // every Run resolves its plan from, never against a stored file.
+    execFileSync("git", ["-C", repo, "checkout", "-q", "-b", "local-ahead"])
     writeFileSync(join(repo, "distance.txt"), "ahead\n")
     execFileSync("git", ["-C", repo, "add", "distance.txt"])
     execFileSync("git", ["-C", repo, "commit", "-qm", "ahead"])
@@ -7683,7 +7724,7 @@ describe("runYrd", () => {
         service: "yrd-runner-under-test",
         state: "absent",
         running: false,
-        facts: { lease: "free", git: { dirty: true, baselines: [{ base: "main", ahead: 1, behind: 0 }] } },
+        facts: { lease: "free", git: { dirty: true, base: { base: "main", baseSha, ahead: 1, behind: 0 } } },
       })
 
       await openAndSubmit(app)
@@ -7997,9 +8038,11 @@ describe("runYrd", () => {
 
       findings = [
         {
-          code: "config-drift",
+          code: "installed-plan-stale",
           message:
-            "queue base 'main' installed baseline is stale. Run 'yrd admin queue deinit main' then 'yrd admin queue init main' to migrate it.",
+            "yrd: this process installed check→merge (batch 1), but main tip 11111111 (config blob 22222222) declares " +
+            "check→affected-tests→merge (batch 1): step 'affected-tests' is declared at the tip but not installed in " +
+            "this process. Restart this queue runner so it builds the declared steps.",
         },
       ]
       const unhealthy = outputIO({ cwd: repo })
@@ -8009,16 +8052,20 @@ describe("runYrd", () => {
         state: "unhealthy",
         running: true,
         error: {
-          code: "config-drift",
-          resolution: ["yrd admin queue deinit main", "yrd admin queue init main"],
+          code: "installed-plan-stale",
+          resolution: ["Restart the resident queue runner so it builds the steps the base declares."],
         },
       })
 
       const human = outputIO({ cwd: repo })
       expect(await runYrd(app, yrd("queue", "list", "--check"), human.io, services)).toBe(2)
-      expect(human.stdout()).toContain("err=config-drift")
-      expect(human.stdout()).toContain("resolve: yrd admin queue deinit main")
-      expect(human.stdout()).toContain("resolve: yrd admin queue init main")
+      expect(human.stdout()).toContain("err=installed-plan-stale")
+      expect(human.stdout()).toContain("main tip 11111111 (config blob 22222222) declares")
+      expect(human.stdout()).toContain("step 'affected-tests' is declared at the tip but not installed in this process")
+      expect(human.stdout()).toContain(
+        "resolve: Restart the resident queue runner so it builds the steps the base declares.",
+      )
+      expect(human.stdout()).toContain(`git main: ahead=1 behind=0 tip=${baseSha.slice(0, 12)}`)
     } finally {
       lockRelease.resolve()
       await lock
@@ -12636,8 +12683,8 @@ describe("runYrd", () => {
     expect(missingWaitingRun.stderr()).toBe("error: no queue run or PR 'PR404'\n")
 
     const unsupported = outputIO()
-    expect(await runYrd(app, yrd("admin", "queue", "init"), unsupported.io)).toBe(2)
-    expect(unsupported.stderr()).toBe("error: queue.init capability is not installed\n")
+    expect(await runYrd(app, yrd("admin", "journal", "bump", "2"), unsupported.io)).toBe(2)
+    expect(unsupported.stderr()).toBe("error: journal bump capability is not installed\n")
 
     const missingIssueSource = outputIO()
     expect(
@@ -12659,7 +12706,7 @@ describe("runYrd", () => {
     expect(infrastructure.stderr()).toBe("error: corrupt event log at row 4\n")
   })
 
-  it("projects installed queue administration and cancels an idle watch deterministically", async () => {
+  it("carries a foreign environment-audit finding and cancels an idle watch deterministically", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
@@ -12667,6 +12714,14 @@ describe("runYrd", () => {
     const coreAudit = outputIO()
     expect(await runYrd(app, yrd("queue", "audit", "--json"), coreAudit.io)).toBe(0)
     expect(JSON.parse(coreAudit.stdout())).toMatchObject({ findings: [] })
+    // No environment audit is wired into this embedded app, and the denominator
+    // line says so rather than printing a compared zero (23193).
+    const coreHuman = outputIO()
+    expect(await runYrd(app, yrd("queue", "audit"), coreHuman.io)).toBe(0)
+    expect(coreHuman.stdout()).toContain("queue audit clean")
+    expect(coreHuman.stdout()).toContain(
+      "plan audit: not wired for this invocation — nothing was compared against git.",
+    )
 
     const services: YrdCliServices = {
       queue: {
@@ -12679,26 +12734,8 @@ describe("runYrd", () => {
             findings: [{ code: "operator-finding", message: "inspect runner" }],
             comparison: stubAuditComparison(),
           }) as unknown as QueueEnvironmentAuditEmission,
-        provision: async (base?: string) => ({ base: base ?? "main", ready: true }),
-        deprovision: async (base?: string) => ({ base: base ?? "main", released: true }),
       },
     }
-
-    const init = outputIO()
-    expect(await runYrd(app, yrd("admin", "queue", "init", "release/2.0", "--json"), init.io, services)).toBe(0)
-    expect(JSON.parse(init.stdout())).toEqual({
-      base: "release/2.0",
-      command: "queue.init",
-      result: { base: "release/2.0", ready: true },
-    })
-
-    const deinit = outputIO()
-    expect(await runYrd(app, yrd("admin", "queue", "deinit", "release/2.0", "--json"), deinit.io, services)).toBe(0)
-    expect(JSON.parse(deinit.stdout())).toEqual({
-      base: "release/2.0",
-      command: "queue.deinit",
-      result: { base: "release/2.0", released: true },
-    })
 
     const audit = outputIO()
     expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io, services)).toBe(1)

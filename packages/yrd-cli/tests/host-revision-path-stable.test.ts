@@ -1,7 +1,7 @@
 /**
  * @failure Relative vs absolute repo/stateDir paths produced two revision families (22334).
  * @level l1
- * @consumer @yrd/cli installed-baseline
+ * @consumer @yrd/queue step-revision-drift
  */
 import { describe, expect, it } from "vitest"
 import { queueStepRevision } from "../src/host-revision.ts"

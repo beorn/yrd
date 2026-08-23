@@ -954,8 +954,6 @@ yrd queue recover [--reason <text>] [--runner <id>] [--json]
 yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>
   --attempt <number> --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
-yrd admin queue init [base] [--json]
-yrd admin queue deinit [base] [--json]
 yrd admin bay prune [--apply] [--json]
 yrd admin pr prune [--dry-run] [--json]
 yrd admin journal bump <version> [--json]
@@ -964,15 +962,13 @@ yrd admin journal bump <version> [--json]
 | Command              | Input                                              | Output and state                                                                                                      |
 | -------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `list` / `ls` / bare | Optional OR filters, base, status, window, latest  | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
-| `list --check`       | Repository                                         | Typed resident lease/heartbeat/baseline health plus installed-base Git distance                                       |
+| `list --check`       | Repository                                         | Typed resident lease/heartbeat health, the plan the base tip declares, and the checkout's Git distance from that tip  |
 | `run`                | Zero or more eligible PRs                          | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
 | `pause`              | Optional base, required reason, optional allowlist | Pauses new runs (including retries) while active work settles; the default queue read shows the pause                 |
 | `resume`             | Optional base                                      | Removes the queue pause                                                                                               |
 | `recover`            | Optional reason or known-dead runner id            | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
 | `finish`             | One waiting PR/step plus job/runner/attempt/token  | Records external-runner evidence and resumes that exact durable run                                                   |
-| `audit`              | Repository                                         | Journal, projection, pinned-plan, installed-policy, and queue-progress findings; no state change                      |
-| `admin queue init`   | Optional base                                      | Resolves queue resources and installs the managed pre-submit hook                                                     |
-| `admin queue deinit` | Optional base                                      | Releases resources owned by the installed queue adapter                                                               |
+| `audit`              | Repository                                         | Journal, projection, queue-progress, and derived plan findings (git vs recorded runs vs this process); no state change |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command
@@ -984,13 +980,13 @@ losslessly.
 
 `queue list --check` is the process-health affordance for supervisors. It
 tries the resident's existing OS lease (it never creates a second authority),
-checks heartbeat freshness and installed-baseline drift, and emits
+checks heartbeat freshness, reads the plan the base tip declares, and emits
 `hab-service-health/1`. Exit 0 means a healthy resident owns the lease; exit 1
 means no resident owns it while the queue is empty; exit 2 means unhealthy and
 carries a typed error with `cause` and `resolution` steps. In particular,
 submitted work with no resident is `resident-runner-missing`, never a quiet
-absence. `--json` also reports the checkout HEAD and ahead/behind distance from
-each installed base SHA.
+absence. `--json` also reports the checkout HEAD and its ahead/behind distance
+from the base tip (`origin/<base>` when a remote is configured).
 
 `queue audit` is the progress-health affordance. Submitted work that never
 starts required checks emits `queue-never-started` after the configured
@@ -1001,6 +997,20 @@ interval. A repeated exact refusal emits the more specific
 head, so one wedge has one actionable specimen. Findings carry stable
 `specimen`, `since`, `blockedMs`, and count fields; process or lease PIDs never
 participate in their identity. `--json` exits `1` when findings exist.
+
+`queue audit` is also the plan audit, and it is derived — there is no written
+baseline. It reads the step plan `.yrd.yml` declares at the base tip and
+compares it with the plan this process installed (`installed-plan-stale`: a
+declared step with no Job here means every Run would refuse with
+`declared-step-not-installed`, so the finding names the step and the restart)
+and with each of the most recent recorded Runs' plans against git at their own
+base shas (`run-plan-mismatch`: equal by construction, so a delta means the
+journal and the repository disagree about what judged that Run). Every side is
+printed with the sha it was read from, and the denominator is printed whether
+or not anything was found — how many Runs were read and compared, which were
+explicit `--steps` selections and so not comparable, and whether the config
+changed since the latest Run (both blob shas). An empty journal prints
+"0 runs compared against tip `<sha>` blob `<sha>`", never "no drift".
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
@@ -1013,19 +1023,20 @@ resident freshness transition is the one mechanical carry-forward: its
 certified successor atomically retains the prior revision's submit and check
 authority on the same PR.
 
-The resident re-proves the installed baseline before every cycle. A
-`config-drift` finding first executes the same in-place `admin queue deinit` /
-`admin queue init` migration printed by the health surface, then re-audits
-before starting work. If either capability is absent or the post-migration audit remains red
-on configuration drift, the cycle refuses loudly. True runtime drift asks the
-resident host to unwind its heartbeat and leases, close its runtime, and
-`execve` the exact same argv and source in place. The OS PID stays stable while
-the reconstructed host loads the current repository configuration and mints a
-new driver epoch; before unwinding, the resident writes the `runtime-drift`
-finding into its durable heartbeat so the cause survives the control transfer.
-If `execve` itself fails, Yrd reports `runtime-reload-exec-failed`, exits with
-the infrastructure code `3`, and Hab restarts the unchanged argv. A one-shot
-run still refuses instead of reloading itself.
+The resident re-reads the plan the base tip declares before every working
+cycle (the installed leg of the plan audit, nothing from the journal). Each Run
+already reads its own plan from git at its base sha and refuses a step this
+process cannot execute, so correctness never depends on this gate; what the
+gate buys is the remedy. An `installed-plan-stale` finding asks the resident
+host to unwind its heartbeat and leases, close its runtime, and `execve` the
+exact same argv and source in place. The OS PID stays stable while the
+reconstructed host loads the current repository configuration and mints a new
+driver epoch; before unwinding, the resident writes the finding into its
+durable heartbeat so the cause survives the control transfer. If `execve`
+itself fails, Yrd reports `runtime-reload-exec-failed`, exits with the
+infrastructure code `3`, and Hab restarts the unchanged argv. A one-shot run
+refuses instead of reloading itself. `yrd admin queue init` and `deinit`, which
+used to write and remove the baseline file, are retired and refuse by name.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new Queue work, lets the active run finish, and exits with

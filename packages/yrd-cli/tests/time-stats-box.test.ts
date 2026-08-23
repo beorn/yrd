@@ -382,17 +382,10 @@ describe("QueueStatsPanel", () => {
     await app.hover(x, y)
 
     expect(app.text).toContain("FAILS · TODAY")
-    for (const label of [
-      "check-failed 0",
-      "env 1",
-      "stale 0",
-      "timeout 0",
-      "config-drift 0",
-      "canceled 0",
-      "other 0",
-    ]) {
+    for (const label of ["check-failed 0", "env 1", "stale 0", "timeout 0", "canceled 0", "other 0"]) {
       expect(app.text).toContain(label)
     }
+    expect(app.text).not.toContain("config-drift")
   })
 
   it("exposes failure, duration, and retry details through the keyboard focus path", async () => {

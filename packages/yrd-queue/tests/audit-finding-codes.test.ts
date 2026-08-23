@@ -9,10 +9,11 @@ import { describe, expect, it } from "vitest"
 import { YRD_QUEUE_AUDIT_FINDING_CODES, type QueueAuditEmission } from "@yrd/queue"
 
 /** The two producers whose findings `queue audit` concatenates: the core walk
- * in this package, and the environment (installed-baseline) audit in the CLI. */
+ * in this package, and the derived plan audit (git vs journal vs process) in
+ * the CLI. */
 const PRODUCERS = [
   { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "\nfunction latestQueueMergeMs(" },
-  { module: "packages/yrd-cli/src/installed-baseline.ts", from: "export function installedBaselineDrift(", to: null },
+  { module: "packages/yrd-cli/src/plan-audit.ts", from: "export function installedPlanStale(", to: null },
 ] as const
 
 const REPOSITORY = fileURLToPath(new URL("../../..", import.meta.url))

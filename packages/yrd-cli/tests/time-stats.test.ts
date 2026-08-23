@@ -275,10 +275,12 @@ describe("queueStats calendar buckets", () => {
         "stale",
         "job-lost",
         "lost",
-        "config-drift",
         "queue-canceled",
         "canceled",
         "review-rejected",
+        // A retired class folds into `other` rather than keeping a row that
+        // can only ever read zero (23192/23193).
+        "config-drift",
       ].map(failureBreakdownClass),
     ).toEqual([
       "check-failed",
@@ -288,9 +290,9 @@ describe("queueStats calendar buckets", () => {
       "stale",
       "timeout",
       "timeout",
-      "config-drift",
       "canceled",
       "canceled",
+      "other",
       "other",
     ])
   })

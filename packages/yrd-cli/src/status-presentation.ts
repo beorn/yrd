@@ -32,14 +32,13 @@ export type StatusPresentation = Readonly<{
 }>
 
 export type FailureStatusClass = "failed" | "env" | "stale" | "timeout" | "canceled" | "needs-author"
-export type FailureBreakdownClass = "check-failed" | "env" | "stale" | "timeout" | "config-drift" | "canceled" | "other"
+export type FailureBreakdownClass = "check-failed" | "env" | "stale" | "timeout" | "canceled" | "other"
 
 export const FAILURE_BREAKDOWN_CLASSES: readonly FailureBreakdownClass[] = [
   "check-failed",
   "env",
   "stale",
   "timeout",
-  "config-drift",
   "canceled",
   "other",
 ]
@@ -224,12 +223,14 @@ export function failureStatusClass(code: string): FailureStatusClass {
 }
 
 /** The statistics breakdown is a projection of the same durable failure
- * classifier and presentation aliases used by StatusNotice. Only the two
- * operator-requested classes are intentionally more specific. */
+ * classifier and presentation aliases used by StatusNotice. Only the one
+ * operator-requested class is intentionally more specific. (`config-drift`
+ * was a second one; no Run has ever failed with it — the gate that raised it
+ * ran before any Run started — and the gate is gone with the installed
+ * baseline, 23192/23193.) */
 export function failureBreakdownClass(code: string): FailureBreakdownClass {
   const normalized = code.trim().toLocaleLowerCase()
   if (normalized === "check-failed") return "check-failed"
-  if (normalized === "config-drift") return "config-drift"
   const status = failureStatusClass(normalized)
   if (status === "env" || status === "stale" || status === "timeout" || status === "canceled") return status
   const terminalStatus = knownStatusPresentationState(normalized)

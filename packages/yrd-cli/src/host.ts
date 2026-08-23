@@ -89,19 +89,21 @@ import {
   type PinIntentProvisioner,
   type ChangeShape,
   type DeclaredStepPlanAtBase,
+  type QueueAuditFindingEmission,
+  type QueueRecord,
   type StepDef,
   type StepExecution,
   type StepRunner,
+  Queues,
 } from "@yrd/queue"
 import {
-  installedBaselineCreationRemedy,
-  installedBaselineDrift,
-  readInstalledBaselines,
-  removeInstalledBaseline,
-  runtimeBaselineDrift,
-  writeInstalledBaseline,
-  type InstalledQueueDescriptor,
-} from "./installed-baseline.ts"
+  installedPlanStale,
+  recentRootRuns,
+  runPlanMismatch,
+  tipSinceLatestRun,
+  type DeclaredPlanAt,
+  type QueuePlanDescriptor,
+} from "./plan-audit.ts"
 import {
   createExclusive,
   createJournal,
@@ -1235,18 +1237,71 @@ function configuredStepDescriptors(
   })
 }
 
-/** Re-derive the current config's queue descriptor from disk. Fails loud on an
- * invalid config so the environment audit never certifies a broken selection. */
-async function reloadConfiguredQueueDescriptor(
+/** The plan git declares at ONE EXACT commit, as full step descriptors.
+ *
+ * The same recipe this process uses for its own installed set
+ * ({@link configuredStepDescriptors}), fed the config blob at `sha` instead of
+ * the base tip, so revisions on both sides of a comparison are comparable:
+ * the derived audit reads git HERE for the tip (leg c) and for each recorded
+ * Run's own base sha (leg a), with no written baseline in between (23193).
+ * Fails loud on an invalid config so the audit never certifies a broken
+ * selection. */
+async function declaredPlanAt(
   repository: YrdRepository,
   process: Pick<Process, "run">,
+  sha: string,
   configPath?: string,
-): Promise<InstalledQueueDescriptor> {
-  const loaded = await loadRepositoryConfig(repository, process, configPath)
+): Promise<DeclaredPlanAt> {
+  const env = cleanGitEnvironment(globalThis.process.env)
+  const exists = await process.run({
+    argv: ["git", "-C", repository.repo, "cat-file", "-e", `${sha}^{commit}`],
+    cwd: repository.repo,
+    env,
+  })
+  if (exists.exitCode !== 0) {
+    raiseFailure(
+      "infrastructure",
+      "plan-base-missing",
+      `yrd: commit ${sha.slice(0, 8)} is not in repository '${repository.repo}', so the plan git declares there ` +
+        "cannot be derived. A recorded Run's base is an ancestor of the base branch; one that is gone means the " +
+        "repository history or the journal has been altered since that Run.",
+    )
+  }
+  let configBlobSha: string | undefined
+  const loaded = await loadYrdConfig({
+    repo: repository.repo,
+    defaultBase: repository.defaultBase,
+    ...(configPath === undefined ? {} : { configPath }),
+    readAuthority: async (_base, path) => {
+      const object = `${sha}:${path}`
+      const blob = await process.run({
+        argv: ["git", "-C", repository.repo, "rev-parse", object],
+        cwd: repository.repo,
+        env,
+      })
+      if (blob.exitCode !== 0) return undefined
+      const shown = await process.run({
+        argv: ["git", "-C", repository.repo, "show", object],
+        cwd: repository.repo,
+        env,
+      })
+      if (shown.exitCode !== 0) {
+        raiseFailure(
+          "infrastructure",
+          "config-read-failed",
+          shown.stderr.trim() || `yrd: failed to read '${path}' at ${sha.slice(0, 8)}`,
+        )
+      }
+      configBlobSha = blob.stdout.trim()
+      return shown.stdout
+    },
+  })
   validateConfig(loaded.config)
   const mergeCommand =
     loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
   return {
+    sha,
+    ...(configBlobSha === undefined ? {} : { configBlobSha }),
     batchSize: configuredBatchSize(loaded.config.batch),
     steps: configuredStepDescriptors(
       { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
@@ -2292,87 +2347,121 @@ async function intakeResult(
   )
 }
 
+/** How many most-recent root Runs `queue audit` compares against git when the
+ * caller does not say. Each distinct base sha costs two git reads, so the
+ * walk stays bounded while still covering more history than any one incident. */
+const DEFAULT_AUDITED_RUNS = 20
+
+/**
+ * The derived plan audit (23192, 23193) — git against the journal against
+ * this process, every side named by the sha it was read from and no written
+ * baseline anywhere:
+ *
+ * - **leg c, `installed-plan-stale`:** the plan THIS PROCESS installed versus
+ *   the plan the base tip declares now. The per-cycle run gate reads only
+ *   this leg (`recordedRuns: 0`).
+ * - **leg a, `run-plan-mismatch`:** each recent recorded Run's plan versus
+ *   what git derives at that Run's own base sha. Equal by construction.
+ * - **leg b, informational:** the tip's plan versus the most recent
+ *   declared-at-base Run, printed with both blob shas whether or not it moved.
+ *
+ * `runtime` is absent for the supervisor health probe, which deliberately
+ * builds no queue runtime and opens no journal; the comparison then says so
+ * instead of reporting an empty leg as a clean one.
+ */
 function queueAdministration(
   process: Pick<Process, "run">,
   repository: YrdRepository,
-  defaultBase: string,
-  deriveConfiguredQueue: () => Promise<InstalledQueueDescriptor>,
-  runtimeQueue: (() => InstalledQueueDescriptor) | undefined,
+  options: Readonly<{
+    base: string
+    /** Repository-relative config authority path, `.yrd.yml` unless `--config` named another. */
+    configAuthority: string
+    configPath?: string
+    runtime?: Readonly<{
+      installed(): QueuePlanDescriptor
+      records(): readonly QueueRecord[]
+    }>
+  }>,
 ): YrdCliQueueAdministration {
-  const inspect = async (base = defaultBase) => {
-    const baseSha = await resolveCommit(process, repository.repo, base)
-    if (baseSha === undefined) throw new Error(`yrd: queue base '${base}' does not resolve`)
-    return { base, baseSha }
-  }
+  const base = baseIdentity(options.base)
+  const declaredAt = (sha: string) => declaredPlanAt(repository, process, sha, options.configPath)
   return Object.freeze({
-    async auditEnvironment(): Promise<QueueEnvironmentAuditEmission> {
-      // Re-derive the selected config's queue descriptor from disk on EVERY
-      // audit so a config change after startup is proven, not masked by a stale snapshot.
-      // The audit proves THREE-WAY equality (merge-queue R41b): runtime
-      // batch policy/revisions == persisted baseline == fresh disk derivation.
-      // Legs form a remedy ladder per base: a baseline-vs-disk delta names the
-      // deinit/init migration first (migrating the baseline may make the
-      // runtime leg moot or freshly actionable); only when baseline and disk
-      // agree is the runtime leg proven, so a resident built before another
-      // process's migration fails loud instead of certifying baseline == disk
-      // while it still executes the old queue policy.
-      const [stored, current] = await Promise.all([
-        readInstalledBaselines(repository.stateDir),
-        deriveConfiguredQueue(),
-      ])
-      // An ABSENT authority file is not an empty one. Iterating `{}` here found
-      // nothing and reported no drift, so `queue audit` answered "clean" for a
-      // queue it had never compared against anything — the exact silent-zero
-      // this audit exists to prevent, and the reason a declared-but-unexecuted
-      // check survived two reviews (23193).
-      if (!stored.present) {
-        raiseFailure(
-          "refusal",
-          "installed-baseline-missing",
-          `yrd: no installed baseline at ${stored.path}, so this audit has nothing to compare and cannot ` +
-            `report whether the queue drifted. ${installedBaselineCreationRemedy(defaultBase)}`,
-        )
+    async auditEnvironment(auditOptions = {}): Promise<QueueEnvironmentAuditEmission> {
+      const recordedRuns = auditOptions.recordedRuns ?? DEFAULT_AUDITED_RUNS
+      if (!Number.isSafeInteger(recordedRuns) || recordedRuns < 0) {
+        throw new Error(`yrd: queue audit recordedRuns must be a non-negative integer, got ${String(recordedRuns)}`)
       }
-      const baselines = stored.baselines
-      const runtime = runtimeQueue?.()
+      // The tip is inspected, never fetched: the audit is a read, and it must
+      // name the same ref every Run resolves (origin/<base> when a remote is
+      // configured, the local branch otherwise).
+      const target = await inspectGitQueueTarget({ inject: { process }, repo: repository.repo, branch: base })
+      const tip = await declaredAt(target.sha)
+      const findings: QueueAuditFindingEmission[] = []
+      const installed = options.runtime?.installed()
+      if (installed !== undefined) {
+        const stale = installedPlanStale(base, tip, installed)
+        if (stale !== undefined) findings.push(stale)
+      }
+      let runs: NonNullable<QueueEnvironmentAuditComparison["runs"]> | undefined
+      if (options.runtime !== undefined && recordedRuns > 0) {
+        const recent = recentRootRuns(options.runtime.records(), recordedRuns)
+        const declaredByBase = new Map<string, Promise<DeclaredPlanAt>>()
+        let compared = 0
+        let explicit = 0
+        let unrecorded = 0
+        let latest: NonNullable<QueueEnvironmentAuditComparison["runs"]>["latest"] | undefined
+        let sinceLatest: string | undefined
+        for (const recorded of recent) {
+          if (recorded.source === "explicit") {
+            explicit += 1
+            continue
+          }
+          if (recorded.source === undefined || recorded.baseSha === undefined) {
+            unrecorded += 1
+            continue
+          }
+          let declared = declaredByBase.get(recorded.baseSha)
+          if (declared === undefined) {
+            declared = declaredAt(recorded.baseSha)
+            declaredByBase.set(recorded.baseSha, declared)
+          }
+          const mismatch = runPlanMismatch(recorded, await declared)
+          if (mismatch !== undefined) findings.push(mismatch)
+          compared += 1
+          if (latest === undefined) {
+            latest = {
+              run: recorded.run,
+              baseSha: recorded.baseSha,
+              ...(recorded.configBlobSha === undefined ? {} : { configBlobSha: recorded.configBlobSha }),
+              steps: recorded.steps.map((step) => step.name),
+            }
+            sinceLatest = tipSinceLatestRun(base, tip, recorded)
+          }
+        }
+        runs = {
+          read: recent.length,
+          compared,
+          explicit,
+          unrecorded,
+          ...(latest === undefined ? {} : { latest }),
+          ...(sinceLatest === undefined ? {} : { sinceLatest }),
+        }
+      }
       const comparison: QueueEnvironmentAuditComparison = {
-        baselinePath: stored.path,
-        baselines: Object.keys(baselines).length,
-        bases: Object.keys(baselines).toSorted(),
-        against: runtime === undefined ? ["configured"] : ["configured", "runtime"],
+        base,
+        tip: {
+          sha: tip.sha,
+          configAuthority: options.configAuthority,
+          ...(tip.configBlobSha === undefined ? {} : { configBlobSha: tip.configBlobSha }),
+          steps: tip.steps.map((step) => step.name),
+          batchSize: tip.batchSize,
+        },
+        ...(installed === undefined
+          ? {}
+          : { installed: { steps: installed.steps.map((step) => step.name), batchSize: installed.batchSize } }),
+        ...(runs === undefined ? {} : { runs }),
       }
-      const baselineFindings = Object.values(baselines).flatMap((baseline) => {
-        const configDrift = installedBaselineDrift(baseline, current)
-        if (configDrift !== undefined) return [configDrift]
-        const runtimeDrift = runtime === undefined ? undefined : runtimeBaselineDrift(baseline, runtime)
-        return runtimeDrift === undefined ? [] : [runtimeDrift]
-      })
-      // How the runner is LAUNCHED decides what may change under it: an
-      // immutable artifact cannot change, and a hot-reloading dev run is
-      // meant to. The runtime does not second-guess that choice by
-      // comparing its own checkout to a pin.
-      return { findings: baselineFindings, comparison }
-    },
-    async provision(base) {
-      const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredQueue()])
-      await writeInstalledBaseline(repository.stateDir, {
-        ...inspected,
-        installedAt: new Date().toISOString(),
-        ...current,
-      })
-      return { ...inspected, steps: current.steps.map((step) => step.name), persistentResources: false }
-    },
-    async deprovision(base = defaultBase) {
-      // Deinit must clear the stored baseline by key WITHOUT requiring the base
-      // ref to resolve: a deleted stale base is exactly the case whose prescribed
-      // remedy is `yrd admin queue deinit <base>`, so a wedged ref must not block it.
-      const stored = (await readInstalledBaselines(repository.stateDir)).baselines[base]
-      const baseSha = (await resolveCommit(process, repository.repo, base)) ?? stored?.baseSha
-      const released = (await removeInstalledBaseline(repository.stateDir, base)) ? ["installed-baseline"] : []
-      if (baseSha === undefined) {
-        throw new Error(`yrd: queue base '${base}' does not resolve and no installed baseline is stored for it`)
-      }
-      return { base, baseSha, released, persistentResources: false }
+      return { findings, comparison }
     },
   })
 }
@@ -2693,9 +2782,11 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
 }
 
 /**
- * Build only the read-only queue audit needed by the resident health command.
- * The audit reuses the canonical config/baseline comparison but deliberately
- * has no app and no journal, so its cost cannot grow with delivery history.
+ * Build only the read-only plan audit needed by the resident health command.
+ * It reads the base tip's declared plan from git but deliberately has no app
+ * and no journal, so its cost cannot grow with delivery history — and its
+ * comparison says which legs that leaves unread rather than reporting them
+ * clean.
  */
 async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promise<YrdCliServices> {
   const scope = createScope("yrd-runner-health")
@@ -2712,22 +2803,19 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
-    const administration = queueAdministration(
-      process,
-      repository,
-      loaded.config.base,
-      () => reloadConfiguredQueueDescriptor(repository, process, options.configPath),
-      undefined,
-    )
+    const administration = queueAdministration(process, repository, {
+      base: loaded.config.base,
+      configAuthority: loaded.path === undefined ? ".yrd.yml" : relative(repository.repo, loaded.path),
+      ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
+    })
     if (administration.auditEnvironment === undefined) {
       throw new Error("yrd: runner health audit is unavailable")
     }
     // The audit still runs EAGERLY here — the probe closes its process and
     // scope in `finally`, so a deferred audit would have no runtime left. A
-    // REFUSAL is carried forward rather than thrown out of construction: the
-    // health classifier owns what an absent installed baseline means for a
-    // service (never installed vs. running unguarded), and it cannot classify
-    // a failure that already escaped past it.
+    // failure is carried forward rather than thrown out of construction: the
+    // health classifier owns what it means for a service, and it cannot
+    // classify a failure that already escaped past it.
     const audit = await administration.auditEnvironment().then(
       (result) => () => Promise.resolve(result),
       (error: unknown) => () => Promise.reject(error),
@@ -2934,15 +3022,18 @@ async function createYrdRuntimeHost(
       ).sha
     const services = Object.freeze({
       ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
-      queue: queueAdministration(
-        process,
-        repository,
-        loaded.config.base,
-        () => reloadConfiguredQueueDescriptor(repository, process, options.configPath),
-        // The RUNTIME leg must come from the live runtime object — the policy
-        // and steps this process actually installed — never re-derived from config.
-        () => ({ batchSize: runtimeApp.queue.state().batchSize, steps: runtimeApp.queue.steps() }),
-      ),
+      queue: queueAdministration(process, repository, {
+        base: loaded.config.base,
+        configAuthority: loaded.path === undefined ? ".yrd.yml" : relative(repository.repo, loaded.path),
+        ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
+        runtime: {
+          // The installed leg must come from the live runtime object — the
+          // policy and steps this process actually installed — never
+          // re-derived from config, which is the other side of the comparison.
+          installed: () => ({ batchSize: runtimeApp.queue.state().batchSize, steps: runtimeApp.queue.steps() }),
+          records: () => Queues.values(runtimeApp.queue.state()),
+        },
+      }),
       recut: createGitChangeRemerger({ inject: { process }, repo: repository.repo, env }),
       mergeRecords: Object.freeze({
         async find(selector: string) {

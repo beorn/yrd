@@ -49,36 +49,66 @@ export type YrdBayProtection = Readonly<{
   evidence: string
 }>
 
-/** Optional operator capabilities supplied by a queue-environment plugin. The
- * CLI never simulates these lifecycle operations when no plugin owns them. */
-/** What an environment audit actually COMPARED.
+/** What the derived plan audit COMPARED, with every side named by the sha it
+ * was read from (23192, 23193).
  *
- * A zero-finding audit is a result only when it can say how many declarations
- * it read and against what; without a denominator, "nothing drifted" and
- * "nothing was there to check" are the same sentence. */
+ * A zero-finding audit is a result only when it can say which population it
+ * compared and against what. Without a denominator, "nothing drifted" and
+ * "nothing was there to check" are the same sentence — which is how a queue
+ * running a plan its config did not declare was certified clean twice in one
+ * night. Every optional member below is ABSENT when that leg did not run in
+ * this invocation, never an empty value standing in for it. */
 export type QueueEnvironmentAuditComparison = Readonly<{
-  /** Resolved path of the installed-baseline authority file. */
-  baselinePath: string
-  /** Installed baselines compared — the denominator. */
-  baselines: number
-  /** The bases compared, named. */
-  bases: readonly string[]
-  /** Which live side each baseline was compared against. `runtime` is absent
-   * when no live queue runtime is wired to compare with. */
-  against: readonly ("configured" | "runtime")[]
+  /** The base ref whose tip was read. */
+  base: string
+  /** The tip at audit time and the plan git declares there. `configBlobSha` is
+   * absent only when that commit carries no config file (built-in plan). */
+  tip: Readonly<{
+    sha: string
+    /** Repository-relative path of the config authority read at the tip. */
+    configAuthority: string
+    configBlobSha?: string
+    steps: readonly string[]
+    batchSize: number
+  }>
+  /** The plan this process installed, compared against the tip (leg c).
+   * Absent when this invocation built no queue runtime (the health probe). */
+  installed?: Readonly<{ steps: readonly string[]; batchSize: number }>
+  /** The recorded Runs read from the journal, newest first (legs a and b).
+   * Absent when this invocation opened no journal or asked for no runs. */
+  runs?: Readonly<{
+    /** How many most-recent root Runs were read — the denominator. */
+    read: number
+    /** Runs whose recorded plan was compared against git at their base sha. */
+    compared: number
+    /** Runs judged by an operator's explicit `--steps` selection: not comparable. */
+    explicit: number
+    /** Runs recorded before 23192, with no plan source: not comparable. */
+    unrecorded: number
+    /** The most recent declared-at-base Run and what it ran, for leg (b). */
+    latest?: Readonly<{ run: string; baseSha: string; configBlobSha?: string; steps: readonly string[] }>
+    /** Leg (b) in one sentence, printed whether or not anything changed. */
+    sinceLatest?: string
+  }>
 }>
 
 export type QueueEnvironmentAuditEmission = QueueAuditEmission &
   Readonly<{ comparison: QueueEnvironmentAuditComparison }>
 
+export type QueueEnvironmentAuditOptions = Readonly<{
+  /** How many most-recent root Runs to compare against git. `0` skips the
+   * journal leg entirely (the per-cycle gate only needs leg c), and the
+   * comparison then carries no `runs` member rather than a zero. Default 20. */
+  recordedRuns?: number
+}>
+
+/** Optional operator capabilities supplied by a queue-environment plugin. The
+ * CLI never simulates these operations when no plugin owns them. */
 export type YrdCliQueueAdministration = Readonly<{
   /** A PRODUCER: findings are built here, so the closed emission type applies —
    * a plugin cannot invent a code no consumer whitelists. Readers of the
-   * concatenated audit keep the open {@link QueueAuditResult}. Refuses rather
-   * than returning an empty comparison when the installed baseline is absent. */
-  auditEnvironment?(): Promise<QueueEnvironmentAuditEmission>
-  provision?(base?: string): Promise<unknown>
-  deprovision?(base?: string): Promise<unknown>
+   * concatenated audit keep the open {@link QueueAuditResult}. */
+  auditEnvironment?(options?: QueueEnvironmentAuditOptions): Promise<QueueEnvironmentAuditEmission>
 }>
 
 export type YrdCliJournalAdministration = Readonly<{

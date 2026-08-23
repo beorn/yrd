@@ -23,7 +23,7 @@ tradeoffs.
 | 6   | Job status/conclusion spellings                        | **Settled, GitHub verbatim** (B6): `status: queued \| in_progress \| waiting \| completed`; `conclusion: success \| failure \| cancelled \| skipped \| timed_out` (`action_required`/`neutral` reserved for adapters that need them). `waiting` is a status, exactly as GitHub Actions uses it for deployment approvals. Run uses the same split. |
 | 7   | Readiness projection + concurrency boundaries          | **Confirmed** derived readiness (no `PRReadiness` aggregate). Merge serialization is a per-`(repository, base branch)` lock shared across all Queues on that base — the lock is keyed by base, not by Queue (C4).                                                                                                                                 |
 | 8   | `Command`/`Event` vs `Op`/`OpCall`                     | **Confirmed CQRS names.** The former `Operation {op, args}` is `Command`; `CommandResult {command, events, value?}` is the dispatch return; `Frame` is below the Journal interface and no longer exported from core. Runtime execution is one `dispatch()` surface rather than the former `command()`/`operation()`/`invoke()` triple.            |
-| 9   | `init/deinit` vs `provision/deprovision`               | **Admin-only lifecycle.** Queues materialize lazily; installed adapters expose `yrd admin queue init/deinit`, while daily queue verbs remain outside `admin`.                                                                                                                                                                                        |
+| 9   | `init/deinit` vs `provision/deprovision`               | **Retired (C12).** Queues materialize lazily and need no installation step: their only durable effect was the installed-baseline file, which is gone. `yrd admin queue init/deinit` stay registered solely to refuse by name; daily queue verbs remain outside `admin`.                                                                          |
 | 10  | `.yrd.yml` configures checks, not Runner identity      | **Confirmed.** Runner and Context identities are runtime evidence on the Job. Config authority is the base branch (C5), and repository config contains one `checks:` list.                                                                                                                                                                        |
 
 ## B. The model
@@ -436,26 +436,35 @@ plan `baseSha` and `configBlobSha` name the commit and the exact config bytes.
 The per-step `revision` already digests the runner environment, so the record
 carries that too without inventing a second digest.
 
-**C12. The installed baseline is required INPUT to the audit, not optional
-context.** `installed-baseline.json` under the state dir has exactly one writer,
-`yrd admin queue init <base>` (`yrd admin init` is a different command — config
-scaffold plus pre-submit hook — and never writes it). Reading it reports whether
-the file was PRESENT, separately from how many baselines it held:
+**C12. The plan audit is DERIVED — git against the journal against this
+process — and there is no written baseline.** `installed-baseline.json` is
+deleted along with its writer (`yrd admin queue init`, now a refusal by name),
+its reader, and the run-start freshness gate that compared against it. A stored
+copy of the declared plan was a second authority that could disagree with git,
+and when it was absent the audit iterated nothing and reported "no drift".
+`yrd queue audit` now compares three things that already exist, printing every
+side with the sha it was read from:
 
-- **Absent ⇒ refuse.** `queue audit` and the run-start freshness gate both
-  refuse with `installed-baseline-missing`, naming the resolved path and the
-  creating command. Iterating an absent file as an empty one made "nothing
-  drifted" and "nothing was read" the same sentence, and that clean answer was
-  cited as evidence while the queue ran a plan its config did not declare.
-- **Present ⇒ state the denominator.** The audit reports how many baselines it
-  compared, which bases, and against what (the current config-derived
-  descriptor, and this process's runtime when one is wired). A zero finding
-  count without that population is not a result.
-- **Between `deinit` and `init` there is no authority**, so the queue cannot
-  certify freshness and does not start Runs until `init` restores it. The
-  supervisor health probe is the one consumer that reads the same absence as
-  `absent` — the service was never installed here — and it still carries the
-  refusal's code and remedy in its payload.
+- **Leg c — this process vs the tip (`installed-plan-stale`).** The step
+  descriptors this process installed (name, revision, kind, order, batch)
+  against the ones derived from `.yrd.yml` at the base tip through the same
+  recipe. A declared step with no Job here means every Run would refuse with
+  `declared-step-not-installed`, so the finding predicts that refusal and names
+  the restart. The per-cycle run gate reads only this leg; in follow mode a
+  stale resident reloads itself in place (same-PID `execve`), a one-shot
+  refuses.
+- **Leg a — each recent recorded Run vs git at its own base sha
+  (`run-plan-mismatch`).** Equal by construction, because the Run read its plan
+  from that very blob; a delta means the journal and the repository disagree
+  about what judged the Run, and both blob shas and both lists are printed.
+- **Leg b — the tip vs the most recent Run, informational.** "Config changed
+  since run R… (blob a → b); the next run uses the new plan", or that nothing
+  changed, in either case with the shas.
+- **The denominator is always printed.** How many Runs were read and compared,
+  which were explicit selections or pre-23192 records and so not comparable,
+  and which legs this invocation could not run at all (the supervisor health
+  probe builds no runtime and opens no journal, and says so). An empty journal
+  prints "0 runs compared against tip `<sha>` blob `<sha>`", never "no drift".
 
 ## D. Current code → target (refit map, not a rewrite)
 

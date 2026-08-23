@@ -180,15 +180,15 @@ describe("actionable failure projection", () => {
 
   it("extracts exact commands already embedded in a mechanical remedy", () => {
     const failure = actionableFailure({
-      code: "config-drift",
+      code: "queue-administration-retired",
       message:
-        "queue base 'main' installed baseline is stale. Run 'yrd admin queue deinit main' then 'yrd admin queue init main' to migrate it.",
+        "yrd: admin queue init is retired and does nothing. Run 'yrd admin init' to install the managed pre-submit hook, and 'yrd queue audit' to compare git against the recorded runs.",
     })
 
-    expect(failure.resolution).toEqual(["yrd admin queue deinit main", "yrd admin queue init main"])
-    expect(formatActionableFailure(failure)).toContain("err=config-drift")
-    expect(formatActionableFailure(failure)).toContain("cause: queue base 'main' installed baseline is stale")
-    expect(formatActionableFailure(failure)).toContain("resolve: yrd admin queue deinit main")
+    expect(failure.resolution).toEqual(["yrd admin init", "yrd queue audit"])
+    expect(formatActionableFailure(failure)).toContain("err=queue-administration-retired")
+    expect(formatActionableFailure(failure)).toContain("cause: admin queue init is retired and does nothing")
+    expect(formatActionableFailure(failure)).toContain("resolve: yrd admin init")
   })
 
   it("projects retained-evidence cleanup from its shape, independent of failure code", () => {

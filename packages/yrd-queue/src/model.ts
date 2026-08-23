@@ -953,8 +953,8 @@ export type QueueAuditReviewCertification = (typeof YRD_QUEUE_AUDIT_REVIEW_CERTI
 /** Every finding code `yrd queue audit` can emit, in ONE authoritative place.
  * It is the union of BOTH producers whose findings that command concatenates:
  * `auditQueues` in `queue.ts` (the hold, draft, record, refusal and progress
- * walks) and the environment audit in `@yrd/cli` (`installedBaselineDrift` /
- * `runtimeBaselineDrift`). Consumers whitelist these codes to decide what
+ * walks) and the derived plan audit in `@yrd/cli` (`plan-audit.ts`:
+ * `runPlanMismatch` / `installedPlanStale`). Consumers whitelist these codes to decide what
  * reaches a page, and that whitelist was scattered across repositories — a code
  * added here but missing there pages nobody. Producers emit
  * {@link QueueAuditFindingEmission}, so a new code that is not listed here is a
@@ -985,8 +985,15 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "admission-refusal-needs-person",
   "queue-never-started",
   "queue-progress-stalled",
-  "config-drift",
-  "runtime-drift",
+  /** A recorded Run's plan is not the plan git derives at that Run's own base
+   * sha (23193 leg a): the journal and the repository disagree about what
+   * judged it. Equal by construction, so any instance is a real finding. */
+  "run-plan-mismatch",
+  /** The plan this process installed is not the plan the base tip declares
+   * (23192 leg c): a declared step with no Job here makes every Run refuse
+   * with `declared-step-not-installed`; any other delta means stale step
+   * definitions. The remedy is restarting the runner, never a state write. */
+  "installed-plan-stale",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]

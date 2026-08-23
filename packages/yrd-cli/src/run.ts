@@ -54,7 +54,6 @@ import {
   requireLinearRootTip,
   SUPPORTED_VERSIONS,
   type DeepReadonly,
-  type FailureFact,
   type JournalSnapshot,
 } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
@@ -104,6 +103,7 @@ import {
 import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
+import { INSTALLED_PLAN_STALE_RESOLUTION, RUN_PLAN_MISMATCH_RESOLUTION } from "./plan-audit.ts"
 import {
   classifyFailure,
   configureYrdGlobalOptions,
@@ -252,7 +252,6 @@ import {
 import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
 import { retainedWorkspaceNote } from "./workspace-retention.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
-import { readInstalledBaselines } from "./installed-baseline.ts"
 import {
   addedSubmodulePins,
   authoredSubmodulePinBase,
@@ -911,7 +910,10 @@ type RunnerGitHealth = Readonly<{
   cwd: string
   headSha: string
   dirty: boolean
-  baselines: readonly RunnerGitDistance[]
+  /** The checkout's distance from the queue base's tip (`origin/<base>` when
+   * a remote is configured, the local branch otherwise) — the same ref every
+   * Run resolves its plan from. Absent only when the base does not resolve. */
+  base?: RunnerGitDistance
 }>
 
 /** The toolchain THIS invocation is running on. Step identity no longer depends
@@ -1230,24 +1232,43 @@ function residentBootedSha(implementationSource: string | undefined): string | u
   return match === null ? undefined : (match[1] ?? "").toLowerCase()
 }
 
-async function runnerGitHealth(cwd: string): Promise<RunnerGitHealth> {
+function runnerGitHealth(cwd: string, base: string): RunnerGitHealth {
   const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) {
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
   }
   const headSha = gitSync(cwd, ["rev-parse", "HEAD"]).trim().toLowerCase()
   const dirty = gitSync(cwd, ["status", "--porcelain"]).trim() !== ""
-  const { baselines } = await readInstalledBaselines(join(gitDir, "yrd"))
+  const baseSha = queueBaseTipSync(cwd, base)
   return {
     cwd,
     headSha,
     dirty,
-    baselines: Object.values(baselines).map((baseline) => ({
-      base: baseline.base,
-      baseSha: baseline.baseSha,
-      ...gitDistance(cwd, baseline.baseSha, headSha),
-    })),
+    ...(baseSha === undefined ? {} : { base: { base, baseSha, ...gitDistance(cwd, baseSha, headSha) } }),
   }
+}
+
+/** The base tip as the queue resolves it, without a fetch: `origin/<base>`
+ * when a remote is configured, else the local branch; undefined when neither
+ * resolves. Mirrors `inspectQueueBase` in `@yrd/queue` for this synchronous
+ * probe path. */
+function queueBaseTipSync(cwd: string, base: string): string | undefined {
+  const resolveRef = (ref: string): string | undefined => {
+    try {
+      const sha = gitSync(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])
+        .trim()
+        .toLowerCase()
+      return sha === "" ? undefined : sha
+    } catch (error) {
+      // `--verify --quiet` exits 1 for a ref that does not exist — a real
+      // answer. Anything else (exit 128: not a repository, a corrupt object)
+      // is a failure of the probe itself and stays loud.
+      if ((error as { status?: unknown }).status === 1) return undefined
+      throw error
+    }
+  }
+  const remote = resolveRef(`refs/remotes/origin/${base}`)
+  return remote ?? resolveRef(`refs/heads/${base}`)
 }
 
 function runnerHealthError(code: string, cause: string, resolution: readonly string[]) {
@@ -1430,17 +1451,10 @@ export function residentDriverLastMerged(app: YrdCliApp, base: string): QueueDri
   )
 }
 
-/** The probe's answer when the health read itself failed.
- *
- * One typed exception: an ABSENT installed baseline. A baseline is what a queue
- * service IS in a repository, so its absence means nothing was ever installed
- * here — `absent`, the same answer a repository with no runner gets, not a page.
- * The refusal is still carried into the payload by code and remedy, never
- * swallowed: `queue audit` and the run gate both refuse on that same absence,
- * and this is the one consumer for which "not installed" is the honest reading
- * (23193). A runner HOLDING the drain lease over a queue with no baseline is a
- * different condition and stays unhealthy, as does every other failure.
- */
+/** The probe's answer when the health read itself failed: always unhealthy,
+ * carrying the failure's code and remedy. Whether the service was ever
+ * installed here is answered by the lease and the queued work below, never
+ * by a file's absence. */
 function runnerHealthFailure(
   error: unknown,
   observed: Readonly<{ service: string; leaseHeld: boolean | undefined; git: RunnerGitHealth }>,
@@ -1450,14 +1464,13 @@ function runnerHealthFailure(
     message: error instanceof Error ? error.message : String(error),
   }
   const held = observed.leaseHeld === true
-  const absent = fact.code === "installed-baseline-missing" && !held
   return {
-    exitCode: absent ? 1 : 2,
+    exitCode: 2,
     payload: {
       schema: "hab-service-health/1",
       command: "queue.list.check",
       service: observed.service,
-      state: absent ? "absent" : "unhealthy",
+      state: "unhealthy",
       running: held,
       error: actionableFailure(fact),
       facts: {
@@ -1483,9 +1496,10 @@ async function queueRunnerHealth(
   const cwd = io.cwd ?? process.cwd()
   const service = io.healthServiceName?.trim() || "yrd-runner"
   const audit = services.queue?.auditEnvironment
+  const base = baseIdentity(services.base ?? "main")
   let leaseHeld: boolean | undefined
   let leaseDriver: ResidentRunnerLeaseObservation["driver"]
-  let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false, baselines: [] }
+  let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false }
   try {
     const lease = await residentRunnerLeaseObservation(cwd)
     leaseHeld = lease.held
@@ -1494,11 +1508,11 @@ async function queueRunnerHealth(
       raiseFailure(
         "configuration",
         "queue-audit-unavailable",
-        "yrd: queue.audit capability is not installed; runner health cannot prove baseline freshness",
+        "yrd: queue.audit capability is not installed; runner health cannot read the plan the base declares",
       )
     }
     const runner = activeResidentRunner(await residentRunnerStatus(cwd))
-    git = await runnerGitHealth(cwd)
+    git = runnerGitHealth(cwd, base)
     const auditResult = await audit()
     const now = io.now?.() ?? Date.now()
     const runnerAgeMs = runner === null ? undefined : Math.max(0, now - Date.parse(runner.lastTickAt))
@@ -1516,9 +1530,7 @@ async function queueRunnerHealth(
       launcher: runnerLauncherFacts(),
       git,
     }
-    const drift = auditResult.findings.filter(
-      (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
-    )
+    const drift = auditResult.findings.filter(isPlanFinding)
     if (drift.length > 0) {
       const first = drift[0]
       if (first === undefined) throw new Error("drift projection lost its first finding")
@@ -1530,7 +1542,19 @@ async function queueRunnerHealth(
           service,
           state: "unhealthy",
           running: leaseHeld,
-          error: actionableFailure({ code: first.code, message: drift.map((finding) => finding.message).join("\n") }),
+          error: actionableFailure({
+            code: first.code,
+            message: drift.map((finding) => finding.message).join("\n"),
+            // The producer already attached each finding's structured remedy
+            // (neither is a yrd command the prose projection could lift); a
+            // finding parsed back from a foreign version may lack it, so the
+            // code's own remedy is the fallback rather than "retry".
+            resolution:
+              first.resolution ??
+              (first.code === "installed-plan-stale"
+                ? [INSTALLED_PLAN_STALE_RESOLUTION]
+                : [RUN_PLAN_MISMATCH_RESOLUTION]),
+          }),
           facts,
         },
       }
@@ -1584,7 +1608,6 @@ async function queueRunnerHealth(
         },
       }
     }
-    const base = baseIdentity(services.base ?? "main")
     const expectedLastMerged = app === undefined ? undefined : residentDriverLastMerged(app, base)
     const driverError =
       runner === null ? undefined : runnerDriverHealthError(runner, canonicalQueueId(cwd, base), expectedLastMerged)
@@ -1785,11 +1808,15 @@ async function checkQueueRunner(
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const result = await queueRunnerHealth(app, services, io)
-  const gitLines = result.payload.facts.git.baselines.map((distance) =>
-    distance.unavailable === undefined
-      ? `git ${distance.base}: ahead=${distance.ahead ?? 0} behind=${distance.behind ?? 0} baseline=${distance.baseSha.slice(0, 12)}`
-      : `git ${distance.base}: distance unavailable (${distance.unavailable})`,
-  )
+  const distance = result.payload.facts.git.base
+  const gitLines =
+    distance === undefined
+      ? [`git: queue base does not resolve in ${result.payload.facts.git.cwd}; no distance to report`]
+      : [
+          distance.unavailable === undefined
+            ? `git ${distance.base}: ahead=${distance.ahead ?? 0} behind=${distance.behind ?? 0} tip=${distance.baseSha.slice(0, 12)}`
+            : `git ${distance.base}: distance unavailable (${distance.unavailable})`,
+        ]
   const human = [
     `yrd-runner ${result.payload.state} (lease=${result.payload.facts.lease}, heartbeat=${result.payload.facts.runnerStatus})`,
     ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
@@ -6706,19 +6733,57 @@ async function queueAuditReport(
   }
 }
 
-/** One line naming what the environment leg compared, printed whether or not
- * anything was found. Without it a clean audit and an unwired one print the
- * same word — and an operator cited the clean one as evidence twice. */
+/** The plan audit's denominator, printed whether or not anything was found:
+ * what git declares at the tip, what this process installed, and how many
+ * recorded Runs were compared — each side with the sha it was read from.
+ * Without it a clean audit and an unwired one print the same word, and an
+ * operator cited the clean one as evidence twice (23193). A leg that did not
+ * run says so; it never prints as a compared zero. */
 export function queueAuditComparisonLine(comparison: QueueEnvironmentAuditComparison | undefined): string {
   if (comparison === undefined) {
-    return "environment audit: not wired for this invocation — no installed baseline was compared."
+    return "plan audit: not wired for this invocation — nothing was compared against git."
   }
-  const bases = comparison.bases.length === 0 ? "no base" : comparison.bases.join(", ")
-  const plural = comparison.baselines === 1 ? "baseline" : "baselines"
-  return (
-    `environment audit: compared ${String(comparison.baselines)} installed ${plural} (${bases}) ` +
-    `against ${comparison.against.join(" and ")}, from ${comparison.baselinePath}.`
-  )
+  const short = (sha: string | undefined): string => (sha === undefined ? "none" : sha.slice(0, 8))
+  const arrow = (steps: readonly string[]): string => (steps.length === 0 ? "(no steps)" : steps.join("→"))
+  const { tip, installed, runs } = comparison
+  const lines = [
+    `plan audit: ${comparison.base} tip ${short(tip.sha)} declares ${arrow(tip.steps)} (batch ${String(tip.batchSize)}) ` +
+      (tip.configBlobSha === undefined
+        ? `— no '${tip.configAuthority}' at that commit, so the built-in plan is in force.`
+        : `from '${tip.configAuthority}' blob ${short(tip.configBlobSha)}.`),
+    installed === undefined
+      ? "plan audit: this invocation built no queue runtime, so no installed plan was compared against the tip."
+      : `plan audit: this process installed ${arrow(installed.steps)} (batch ${String(installed.batchSize)}); compared against the tip.`,
+  ]
+  if (runs === undefined) {
+    lines.push("plan audit: recorded runs were not read in this invocation, so none was compared against git.")
+  } else if (runs.read === 0) {
+    lines.push(
+      `plan audit: 0 runs compared against tip ${short(tip.sha)} blob ${short(tip.configBlobSha)} — the journal holds no recorded run.`,
+    )
+  } else {
+    const skipped = [
+      runs.explicit === 0
+        ? undefined
+        : `${String(runs.explicit)} explicit --steps selection${runs.explicit === 1 ? "" : "s"} not comparable`,
+      runs.unrecorded === 0
+        ? undefined
+        : `${String(runs.unrecorded)} pre-23192 record${runs.unrecorded === 1 ? "" : "s"} with no plan source`,
+    ].filter((part): part is string => part !== undefined)
+    lines.push(
+      `plan audit: ${String(runs.compared)} of the ${String(runs.read)} most recent runs compared against git at their base shas` +
+        (skipped.length === 0 ? "." : ` (${skipped.join("; ")}).`),
+    )
+    if (runs.sinceLatest !== undefined) lines.push(`plan audit: ${runs.sinceLatest}`)
+  }
+  return lines.join("\n")
+}
+
+/** The audit findings that make a running queue unhealthy or block a Run:
+ * this process cannot (or should not) execute the plan git declares, or a
+ * recorded Run disagrees with the repository about what judged it. */
+function isPlanFinding(finding: Readonly<{ code: string }>): boolean {
+  return finding.code === "installed-plan-stale" || finding.code === "run-plan-mismatch"
 }
 
 function admissionBlockedPrs(
@@ -8050,87 +8115,62 @@ async function logRuns(
   )
 }
 
-/** Refuse to start expensive queue Runs while the installed baseline is stale.
- * Non-drift environment findings stay audit-only; drift on EITHER audited leg
- * blocks the run — config drift with the migration remedy, runtime drift
- * (merge-queue R41b: this process's batch policy or installed steps diverge
- * from the migrated baseline) with the restart remedy. */
-export async function requireFreshInstalledBaseline(
+/** The one finding the run gate acts on: this process's installed plan is not
+ * the plan the base tip declares (23192 leg c). */
+export type InstalledPlanStaleFinding = Readonly<{ code: "installed-plan-stale"; message: string }>
+
+/** Refuse to start queue Runs from a process whose installed step set is not
+ * the plan the base tip declares — read from git, never from a written file.
+ *
+ * A Run reads WHICH steps run from git at its own base sha and refuses a step
+ * it cannot execute (`declared-step-not-installed`), so correctness does not
+ * depend on this gate. What the gate buys is the remedy: a resident that
+ * discovers the gap here, before composing a candidate, reloads itself in
+ * place and continues, instead of refusing every candidate it prepares until
+ * someone restarts it by hand. A one-shot refuses loudly; it has no next cycle
+ * to reload into. Only the installed leg is read (`recordedRuns: 0`): the
+ * journal walk is `queue audit`'s job, and a stale record is not something a
+ * restart fixes. */
+export async function requireInstalledDeclaredPlan(
   services: YrdCliServices,
   options: Readonly<{
     reloadInPlace?: Readonly<{
-      base?: string
       /** Unwind the resident completely, then replace this process image. */
-      request?: (finding: Readonly<{ code: "runtime-drift"; message: string }>) => never
+      request?: (finding: InstalledPlanStaleFinding) => never
     }>
   }> = {},
 ): Promise<void> {
   const administration = services.queue
-  // No queue administration is wired (embedded / no-administration host) → the
-  // installed-baseline gate is a legacy no-op, as before.
+  // No queue administration is wired (embedded / no-administration host): an
+  // app built from a hand-supplied config has no git authority to compare
+  // against, and its Runs keep the installed set.
   if (administration === undefined) return
-  // Administration IS wired but the audit capability is missing: the guard cannot
-  // prove freshness, so it must fail loud rather than silently grant zero
-  // staleness protection (a config change would slip past unguarded).
+  // Administration IS wired but the audit capability is missing: the guard
+  // cannot read the declared plan, so it must fail loud rather than silently
+  // grant zero staleness protection.
   if (administration.auditEnvironment === undefined) {
     configuration("queue.audit capability is not installed")
   }
-  const auditDrift = async () => {
-    const result = await administration.auditEnvironment?.()
-    return (result?.findings ?? []).filter(
-      (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
-    )
-  }
-  const drift = await auditDrift()
-  if (drift.length === 0) return
-  // 22306 residual (with 22334 constraint): follow-mode may re-provision on
-  // config-drift via the SAME `provision()` path as `admin queue init` — one descriptor
-  // recipe, not a second revision family. That converts "landing advanced the
-  // base / another seat wrote a foreign baseline" into a hiccup, not a fatal
-  // resident exit. One-shot stays fail-loud (no accidental baseline rewrite).
-  // Runtime-drift still fails: this process's construction-time queue policy is
-  // wrong and needs a restart, not another baseline write.
-  const reload = options.reloadInPlace
-  if (
-    reload !== undefined &&
-    administration.provision !== undefined &&
-    drift.every((finding) => finding.code === "config-drift")
-  ) {
-    await administration.provision(reload.base)
-    const after = await auditDrift()
-    if (after.length === 0) return
-    const runtimeDrift = after.find(
-      (finding): finding is Readonly<{ code: "runtime-drift"; message: string }> => finding.code === "runtime-drift",
-    )
-    if (runtimeDrift !== undefined && reload.request !== undefined) {
-      reload.request(runtimeDrift)
-    }
-    const firstAfter = after[0]
-    if (firstAfter === undefined) return
-    raiseFailure("refusal", firstAfter.code, after.map((finding) => finding.message).join("\n"))
-  }
-  const runtimeDrift = drift.find(
-    (finding): finding is Readonly<{ code: "runtime-drift"; message: string }> => finding.code === "runtime-drift",
+  const result = await administration.auditEnvironment({ recordedRuns: 0 })
+  const stale = result.findings.find(
+    (finding): finding is InstalledPlanStaleFinding => finding.code === "installed-plan-stale",
   )
-  if (reload?.request !== undefined && runtimeDrift !== undefined) {
-    reload.request(runtimeDrift)
-  }
-  const first = drift[0]
-  if (first === undefined) return
-  raiseFailure("refusal", first.code, drift.map((finding) => finding.message).join("\n"))
+  if (stale === undefined) return
+  if (options.reloadInPlace?.request !== undefined) options.reloadInPlace.request(stale)
+  raiseFailure("refusal", stale.code, stale.message)
 }
 
 class YrdRuntimeReloadRequest extends Error {
   override readonly name = "YrdRuntimeReloadRequest"
 
-  constructor(readonly finding: Readonly<{ code: "runtime-drift"; message: string }>) {
+  constructor(readonly finding: InstalledPlanStaleFinding) {
     super(finding.message)
   }
 }
 
 /** Typed control transfer: unwind the resident heartbeat before the process
  * host closes leases/resources and performs the same-PID exec. */
-export function requestYrdRuntimeReload(finding: Readonly<{ code: "runtime-drift"; message: string }>): never {
+export function requestYrdRuntimeReload(finding: InstalledPlanStaleFinding): never {
   throw new YrdRuntimeReloadRequest(finding)
 }
 
@@ -9250,26 +9290,32 @@ async function bumpJournal(
   )
 }
 
-async function queueAdministration(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  command: "init" | "deinit",
-  base: string | undefined,
-  options: JsonOption,
-  io: YrdCliIO,
-): Promise<void> {
-  const action = command === "init" ? "provision" : "deprovision"
-  const administration = services.queue
-  const capability = administration?.[action]
-  if (capability === undefined) configuration(`queue.${command} capability is not installed`)
-  const selected = selectedBase(stateOf(app), base ?? "main")
-  const result = await capability(selected)
-  if (command === "init") await services.checks?.install(io.cwd ?? process.cwd())
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: `queue.${command}`, base: selected, result },
-    `${selected} ${command === "init" ? "initialized" : "deinitialized"}`,
+/** `yrd admin queue init|deinit` are RETIRED, and say so rather than doing
+ * nothing. Their one durable effect was writing and removing
+ * `installed-baseline.json`, the stored copy of the declared plan that
+ * `queue audit` and the run gate compared against. That file is gone
+ * (23192, 23193): every Run reads its plan from git at its own base sha, and
+ * the audit compares git against the recorded Runs and this process directly.
+ * A queue therefore needs no installation step, and a verb that printed
+ * "initialized" without installing anything would be the silent no-op the
+ * baseline itself turned out to be. The hook `init` also installed has its
+ * own command. */
+function refuseRetiredQueueAdministration(command: "init" | "deinit"): never {
+  // The retired verb is deliberately NOT quoted: a quoted `yrd …` in a failure
+  // message is lifted into its `resolution`, and the one command this must
+  // never recommend is itself.
+  raiseFailure(
+    "refusal",
+    "queue-administration-retired",
+    `yrd: admin queue ${command} is retired and does nothing. It used to ${
+      command === "init" ? "write" : "remove"
+    } installed-baseline.json, the stored step plan the audit compared against; that file no longer ` +
+      "exists (23192/23193): each Run reads its plan from .yrd.yml at its own base sha, and a stale resident " +
+      "reloads itself. " +
+      (command === "init"
+        ? "Run 'yrd admin init' to install the managed pre-submit hook, and 'yrd queue audit' to compare git " +
+          "against the recorded runs and this process."
+        : "There is nothing to release; run 'yrd queue audit' to compare git against the recorded runs and this process."),
   )
 }
 
@@ -10661,9 +10707,9 @@ export async function followQueueRuns(
         return scope.signal.aborted ? RESIDENT_INTERRUPTED_EXIT : null
       }
       firstCycle = false
-      // Re-prove the installed baseline before EACH cycle: a config change while
-      // watching must stop the watch, never let a fresh cycle start expensive
-      // Runs on a stale baseline.
+      // Re-read the base tip's declared plan before EACH cycle: a config change
+      // while watching reloads the resident in place, never lets a fresh cycle
+      // prepare candidates a stale step set would then refuse.
       await gate()
       if (maintenanceDue) lastMaintenanceAt = cycleNow
       let runRequired = starting || refreshed || holdExpired
@@ -10682,9 +10728,9 @@ export async function followQueueRuns(
       // 22474 — a wedged PR whose refusal printed a deterministic remedy gets
       // that remedy applied here, once per revision, before the next compose
       // snapshot. Same recutter, same serialized cycle as the freshness pass.
-      // A mechanical recut may itself take long enough for installed Queue
-      // definitions to move. Re-prove the baseline before admitting its fresh
-      // revision; never start a Run under the pre-recut gate snapshot.
+      // A mechanical recut may itself take long enough for the declared plan
+      // to move. Re-read it before admitting the fresh revision; never start a
+      // Run under the pre-recut gate snapshot.
       if (await prepareResidentQueueCycle(app, services, io, remedied, observation)) {
         runRequired = true
         await gate()
@@ -11824,7 +11870,7 @@ function buildProgram(
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe resident lease, heartbeat, baseline health, and Git distance")
+    .option("--check", "probe resident lease, heartbeat, declared-plan freshness, and Git distance")
     .option("--json", "emit stable JSON")
     .action(listQueue)
   queue
@@ -11837,7 +11883,7 @@ function buildProgram(
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe resident lease, heartbeat, baseline health, and Git distance")
+    .option("--check", "probe resident lease, heartbeat, declared-plan freshness, and Git distance")
     .option("--json", "emit stable JSON")
     .action(listQueue)
   queue
@@ -11892,7 +11938,7 @@ function buildProgram(
       const mode = invocation.queueRunMode
       if (mode === undefined) throw new Error("yrd: normalized queue run mode is missing")
       const gate = () =>
-        requireFreshInstalledBaseline(
+        requireInstalledDeclaredPlan(
           installedServices(),
           mode === "follow"
             ? { reloadInPlace: bootstrap === undefined ? {} : { request: requestYrdRuntimeReload } }
@@ -12213,17 +12259,19 @@ function buildProgram(
     .description("scaffold .yrd.yml and install the managed pre-submit hook")
     .option("--json", "emit stable JSON")
     .action(async (options) => initYrdConfig(installedServices(), options, io))
-  const adminQueue = admin.command("queue").description("administer queue resources")
+  // Retired verbs stay registered so an operator following an old runbook
+  // gets the reason and the replacement, not "unknown command".
+  const adminQueue = admin.command("queue", { hidden: true }).description("retired queue administration")
   adminQueue
-    .command("init [base]")
-    .description("prepare queue resources")
+    .command("init [base]", { hidden: true })
+    .description("retired: refuses and names why")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(installed(), installedServices(), "init", base, options, io))
+    .action(() => refuseRetiredQueueAdministration("init"))
   adminQueue
-    .command("deinit [base]")
-    .description("release queue resources")
+    .command("deinit [base]", { hidden: true })
+    .description("retired: refuses and names why")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(installed(), installedServices(), "deinit", base, options, io))
+    .action(() => refuseRetiredQueueAdministration("deinit"))
   const adminBay = admin.command("bay").description("administer work bays")
   adminBay
     .command("prune")
