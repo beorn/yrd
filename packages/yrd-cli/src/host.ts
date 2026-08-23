@@ -101,6 +101,7 @@ import {
   recentRootRuns,
   runPlanMismatch,
   tipSinceLatestRun,
+  type AdmissionLookup,
   type DeclaredPlanAt,
   type QueuePlanDescriptor,
 } from "./plan-audit.ts"
@@ -2390,6 +2391,11 @@ function queueAdministration(
       pid?: number
       installed(): QueuePlanDescriptor
       records?(): readonly QueueRecord[]
+      /** The passed checks-before-queueing record for one Run member at one
+       * exact base sha — how legs a/b count a check the Run itself did not
+       * execute as executed. Absent (the probe) leaves those checks read as
+       * run-executed-only, which is why the probe never walks records. */
+      admission?: AdmissionLookup
     }>
     /** Why no installed leg could run, when `runtime` is absent: named in the
      * comparison so an unread leg never prints as a clean one. */
@@ -2446,7 +2452,7 @@ function queueAdministration(
             declared = declaredAt(recorded.baseSha)
             declaredByBase.set(recorded.baseSha, declared)
           }
-          const mismatch = runPlanMismatch(recorded, await declared)
+          const mismatch = runPlanMismatch(recorded, await declared, runtime.admission)
           if (mismatch !== undefined) findings.push(mismatch)
           compared += 1
           if (latest === undefined) {
@@ -2456,7 +2462,7 @@ function queueAdministration(
               ...(recorded.configBlobSha === undefined ? {} : { configBlobSha: recorded.configBlobSha }),
               steps: recorded.steps.map((step) => step.name),
             }
-            sinceLatest = tipSinceLatestRun(base, tip, recorded)
+            sinceLatest = tipSinceLatestRun(base, tip, recorded, runtime.admission)
           }
         }
         runs = {
@@ -3080,6 +3086,20 @@ async function createYrdRuntimeHost(
           // re-derived from config, which is the other side of the comparison.
           installed: () => ({ batchSize: runtimeApp.queue.state().batchSize, steps: runtimeApp.queue.steps() }),
           records: () => Queues.values(runtimeApp.queue.state()),
+          // How legs a/b see the checks-before-queueing stage: the passed
+          // record for the member's EXACT revision at the Run's own base sha.
+          // A Run that reused this evidence executed only the remainder, and
+          // reading its executed steps alone as "what was checked" is the
+          // false "did not run" this closes (item 0).
+          admission: (member, baseSha) => {
+            const pr = runtimeApp.state().bays.prs[member.id]
+            const revision = pr?.revs.find((rev) => rev.n === member.revision)
+            const admission = revision?.admission
+            if (admission?.status !== "passed" || admission.baseSha !== baseSha) return undefined
+            return admission.steps
+              .filter((step) => step.status === "passed")
+              .map((step) => ({ name: step.name, revision: step.revision }))
+          },
         },
       }),
       recut: createGitChangeRemerger({ inject: { process }, repo: repository.repo, env }),

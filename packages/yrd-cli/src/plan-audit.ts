@@ -25,13 +25,21 @@ export type DeclaredPlanAt = QueuePlanDescriptor &
     configBlobSha?: string
   }>
 
-/** One recorded Run's plan, as the journal holds it: the descriptors that
- * judged it plus where that list came from (23192 records the source and, for
- * a declared plan, the base and config blob shas it was read from). */
+/** One recorded Run's plan, as the journal holds it.
+ *
+ * `plan` is the FULL ordered list that judged the Run (`stepSelection.steps`,
+ * read from the config blob at `baseSha`); `steps` are the descriptors the Run
+ * executed ITSELF. The two differ by design: when a change's checks already
+ * ran at the checks-before-queueing stage against the same base sha, the Run
+ * reuses that evidence and executes only the remainder — usually the single
+ * merge. Reading `steps` as "what was checked" is how a live audit called four
+ * executed checks "did not run" (item 0 of this slice). */
 export type RecordedRunPlan = Readonly<{
   run: string
   startedAt: string
   steps: readonly InstalledStep[]
+  plan?: readonly string[]
+  members: readonly Readonly<{ id: string; revision: number }>[]
   source?: StepPlanSource
   authority?: StepSelection["authority"]
   baseSha?: string
@@ -44,11 +52,74 @@ export function recordedRunPlan(record: QueueRecord): RecordedRunPlan {
     run: record.id,
     startedAt: record.startedAt,
     steps: record.steps,
+    ...(selection?.steps === undefined ? {} : { plan: selection.steps }),
+    members: record.prs.map((pr) => ({ id: pr.id, revision: pr.revision })),
     ...(selection?.source === undefined ? {} : { source: selection.source }),
     ...(selection?.authority === undefined ? {} : { authority: selection.authority }),
     ...(selection?.baseSha === undefined ? {} : { baseSha: selection.baseSha }),
     ...(selection?.configBlobSha === undefined ? {} : { configBlobSha: selection.configBlobSha }),
   }
+}
+
+/** One check the checks-before-queueing stage certified for one change
+ * revision at one exact base sha, as `ChangeAdmission.steps` records it. */
+export type AdmissionCheck = Readonly<{ name: string; revision: string }>
+
+/** The passed checks recorded for one Run member at one exact base sha, or
+ * undefined when that member has no passed record at that base. The audit is
+ * handed this as a lookup so the pure comparison never touches state. */
+export type AdmissionLookup = (
+  member: Readonly<{ id: string; revision: number }>,
+  baseSha: string,
+) => readonly AdmissionCheck[] | undefined
+
+/** Where each step of a Run's judged plan actually executed.
+ *
+ * - `run` — the Run executed it itself (`steps` carries its descriptor).
+ * - `admission` — every member's checks-before-queueing record at the Run's
+ *   own base sha carried it passed; the Run reused that evidence.
+ * - `missing` — neither stage executed it. That is the real finding.
+ */
+export type StepExecutionPlace = Readonly<{
+  name: string
+  where: "run" | "admission" | "missing"
+  /** The executing side's recorded revision (`admission`: the first member's). */
+  revision?: string
+}>
+
+export function accountRunSteps(recorded: RecordedRunPlan, admissionFor?: AdmissionLookup): StepExecutionPlace[] {
+  const plan = recorded.plan ?? recorded.steps.map((step) => step.name)
+  const ran = new Map(recorded.steps.map((step) => [step.name, step] as const))
+  const memberEvidence =
+    recorded.baseSha === undefined || admissionFor === undefined || recorded.members.length === 0
+      ? undefined
+      : recorded.members.map((member) => admissionFor(member, recorded.baseSha as string))
+  return plan.map((name) => {
+    const inRun = ran.get(name)
+    if (inRun !== undefined) return { name, where: "run", revision: inRun.revision }
+    const evidence = memberEvidence?.map((checks) => checks?.find((check) => check.name === name))
+    if (evidence !== undefined && evidence.length > 0 && evidence.every((check) => check !== undefined)) {
+      return { name, where: "admission", ...(evidence[0] === undefined ? {} : { revision: evidence[0].revision }) }
+    }
+    return { name, where: "missing" }
+  })
+}
+
+/** "merge ran in the Run; typecheck, affected-tests ran at admission for base
+ * 6a3cbce6, the Run's base" — the sentence a healthy accounting reads as. */
+export function describeStepExecution(places: readonly StepExecutionPlace[], baseSha: string | undefined): string {
+  const at = (where: StepExecutionPlace["where"]): string[] =>
+    places.filter((place) => place.where === where).map((place) => place.name)
+  const parts: string[] = []
+  const ran = at("run")
+  if (ran.length > 0) parts.push(`${ran.join(", ")} ran in the Run`)
+  const admitted = at("admission")
+  if (admitted.length > 0) {
+    parts.push(`${admitted.join(", ")} ran at admission for base ${shortSha(baseSha)}, the Run's base`)
+  }
+  const missing = at("missing")
+  if (missing.length > 0) parts.push(`${missing.join(", ")} executed in NEITHER stage`)
+  return parts.join("; ")
 }
 
 /** The most recent root Runs, newest first. Bisection children inherit their
@@ -194,31 +265,52 @@ export const INSTALLED_PLAN_STALE_RESOLUTION =
 export const RUN_PLAN_MISMATCH_RESOLUTION =
   "Inspect the journal and the repository history: a Run's record must equal the config at its base."
 
-/** Leg (a): a recorded Run's plan against what git declares at that Run's own
- * base sha. Equal by construction — the Run read its plan from that very blob
- * — so any delta means the record and the repository disagree about what
- * judged the Run: the config bytes at that base are not the blob the record
- * names, or the same bytes now derive different step descriptors than the
- * ones that executed (a stale process ran an older definition under the
- * declared name). Both blob shas and both lists are printed. */
+/** Leg (a): a recorded Run against what git declares at that Run's own base
+ * sha, with the checks-before-queueing stage counted as execution.
+ *
+ * The judged plan (`stepSelection.steps`) was read from that very blob, so
+ * its names and order equal the derivation by construction; a delta there
+ * means the journal and the repository disagree. Each declared step must then
+ * have EXECUTED somewhere: in the Run itself, or at admission for the Run's
+ * own base sha (every member, name and revision) — the Run reuses that
+ * evidence by design and runs only the remainder. Only a step neither stage
+ * executed, a revision that does not match the derivation, or a blob the
+ * repository does not hold at that base is a finding. */
 export function runPlanMismatch(
   recorded: RecordedRunPlan,
   declared: DeclaredPlanAt,
+  admissionFor?: AdmissionLookup,
 ): QueueAuditFindingEmission | undefined {
-  const deltas = planDeltas(
-    { batchSize: declared.batchSize, steps: declared.steps },
-    // The record carries no batch size of its own to compare; the declared one
-    // is echoed so only the step descriptors are judged here.
-    { batchSize: declared.batchSize, steps: recorded.steps },
-    {
-      expected: `git at base ${shortSha(declared.sha)}`,
-      actual: `run ${recorded.run}`,
-      missingActual: `is declared at that base but the run never executed it`,
-      missingExpected: `executed in the run but is not declared at that base`,
-    },
-  )
+  const plan = recorded.plan ?? recorded.steps.map((step) => step.name)
+  const declaredByName = new Map(declared.steps.map((step) => [step.name, step] as const))
+  const problems: string[] = []
+  if (plan.join(">") !== declared.steps.map((step) => step.name).join(">")) {
+    problems.push(`the judged plan ${plan.join("→")} is not the plan git derives there (${planArrow(declared.steps)})`)
+  }
+  const places = accountRunSteps(recorded, admissionFor)
+  for (const place of places) {
+    const expected = declaredByName.get(place.name)
+    if (place.where === "missing") {
+      problems.push(
+        `step '${place.name}' is declared at that base and executed neither in the Run nor at admission for base ${shortSha(recorded.baseSha)}`,
+      )
+      continue
+    }
+    if (expected !== undefined && place.revision !== undefined && place.revision !== expected.revision) {
+      problems.push(
+        `step '${place.name}' executed ${place.where === "run" ? "in the Run" : "at admission"} at revision ` +
+          `'${shortRevision(place.revision)}', but git at that base derives '${shortRevision(expected.revision)}'`,
+      )
+    }
+  }
+  const planned = new Set(plan)
+  for (const step of recorded.steps) {
+    if (!planned.has(step.name)) {
+      problems.push(`step '${step.name}' executed in the Run but is not in the judged plan`)
+    }
+  }
   const blobMismatch = recorded.configBlobSha !== undefined && recorded.configBlobSha !== declared.configBlobSha
-  if (deltas.length === 0 && !blobMismatch) return undefined
+  if (problems.length === 0 && !blobMismatch) return undefined
   const blobs = blobMismatch
     ? `The record names config blob ${shortSha(recorded.configBlobSha)}, but git holds blob ` +
       `${shortSha(declared.configBlobSha)} at that base. `
@@ -226,42 +318,59 @@ export function runPlanMismatch(
   return {
     code: "run-plan-mismatch",
     message:
-      `yrd: run ${recorded.run} (started ${recorded.startedAt}) recorded the plan ${planArrow(recorded.steps)} ` +
-      `read from base ${shortSha(recorded.baseSha)}, but git at ${shortSha(declared.sha)} derives ` +
-      `${planArrow(declared.steps)}${deltas.length === 0 ? "" : `: ${deltas.join("; ")}`}. ${blobs}` +
-      "A Run's record must equal the config at its base; this one does not, so either the journal or the " +
-      "repository history has been altered since the Run — inspect both before trusting either.",
+      `yrd: run ${recorded.run} (started ${recorded.startedAt}) was judged by the plan ${plan.join("→")} ` +
+      `read from base ${shortSha(recorded.baseSha)}${problems.length === 0 ? "" : `: ${problems.join("; ")}`}. ${blobs}` +
+      "A Run's record must equal the config at its base and every declared check must have executed in the Run " +
+      "or at admission for that base; this one does not hold — inspect the journal and the repository history " +
+      "before trusting either.",
     resolution: [RUN_PLAN_MISMATCH_RESOLUTION],
   }
 }
 
 /** Leg (b), informational: how the tip's plan relates to the most recent
- * declared-at-base Run. A difference is not a finding — the next Run reads the
- * new plan from git — but it is printed with both blob shas so a reader can
- * tell "the config changed since the last Run" from "nothing changed". */
-export function tipSinceLatestRun(base: string, tip: DeclaredPlanAt, latest: RecordedRunPlan): string {
-  const deltas = planDeltas(
-    { batchSize: tip.batchSize, steps: tip.steps },
-    { batchSize: tip.batchSize, steps: latest.steps },
-    {
-      expected: `${base} tip ${shortSha(tip.sha)}`,
-      actual: `run ${latest.run}`,
-      missingActual: `is declared at the tip and did not run in that Run`,
-      missingExpected: `ran in that Run and is no longer declared at the tip`,
-    },
-  )
-  const sameBlob = latest.configBlobSha === tip.configBlobSha
-  if (deltas.length === 0 && sameBlob) {
-    return `latest run ${latest.run} (base ${shortSha(latest.baseSha)}, blob ${shortSha(latest.configBlobSha)}) ran ${planArrow(latest.steps)}, the plan the tip declares.`
-  }
-  if (deltas.length === 0) {
+ * declared-at-base Run. "Config changed" is claimed ONLY when the blob
+ * actually differs; with the same blob the line accounts for WHERE each
+ * declared check executed — the Run, or admission at the Run's own base —
+ * because a merge-only Run whose checks passed at admission is the designed
+ * shape, not a gap (item 0: a live audit read exactly that as "did not run"). */
+export function tipSinceLatestRun(
+  base: string,
+  tip: DeclaredPlanAt,
+  latest: RecordedRunPlan,
+  admissionFor?: AdmissionLookup,
+): string {
+  const plan = latest.plan ?? latest.steps.map((step) => step.name)
+  const places = accountRunSteps(latest, admissionFor)
+  const execution = describeStepExecution(places, latest.baseSha)
+  if (latest.configBlobSha === tip.configBlobSha) {
+    const judged =
+      plan.join(">") === tip.steps.map((step) => step.name).join(">")
+        ? "the plan the tip declares"
+        : `${plan.join("→")} — NOT the plan the tip derives from the same blob; see run-plan-mismatch`
     return (
-      `latest run ${latest.run} (base ${shortSha(latest.baseSha)}) ran ${planArrow(latest.steps)}; the config blob ` +
-      `changed since (${shortSha(latest.configBlobSha)} → ${shortSha(tip.configBlobSha)}) without changing the declared plan.`
+      `latest run ${latest.run} (base ${shortSha(latest.baseSha)}, blob ${shortSha(latest.configBlobSha)}) ` +
+      `was judged by ${judged}: ${execution}.`
     )
   }
+  const tipNames = tip.steps.map((step) => step.name)
+  const planSet = new Set(plan)
+  const tipSet = new Set(tipNames)
+  const changes = [
+    ...tipNames
+      .filter((name) => !planSet.has(name))
+      .map((name) => `step '${name}' is declared at the tip and was not in that run's plan`),
+    ...plan
+      .filter((name) => !tipSet.has(name))
+      .map((name) => `step '${name}' was in that run's plan and is no longer declared at the tip`),
+  ]
+  const shared = plan.filter((name) => tipSet.has(name))
+  const sharedAtTip = tipNames.filter((name) => planSet.has(name))
+  if (shared.join(">") !== sharedAtTip.join(">")) {
+    changes.push(`step order ${shared.join("→")} (run) vs ${sharedAtTip.join("→")} (tip)`)
+  }
   return (
-    `config changed since run ${latest.run} (blob ${shortSha(latest.configBlobSha)} → ${shortSha(tip.configBlobSha)}): ` +
-    `${deltas.join("; ")}. The next run uses the new plan ${planArrow(tip.steps)}.`
+    `config changed since run ${latest.run} (blob ${shortSha(latest.configBlobSha)} → ${shortSha(tip.configBlobSha)})` +
+    `${changes.length === 0 ? " without changing the declared step names" : `: ${changes.join("; ")}`}. ` +
+    `That run: ${execution}. The next run uses the new plan ${planArrow(tip.steps)}.`
   )
 }

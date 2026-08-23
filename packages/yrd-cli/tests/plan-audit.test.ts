@@ -18,6 +18,7 @@ import {
   recentRootRuns,
   runPlanMismatch,
   tipSinceLatestRun,
+  type AdmissionLookup,
   type DeclaredPlanAt,
   type RecordedRunPlan,
 } from "../src/plan-audit.ts"
@@ -119,41 +120,119 @@ describe("leg c — this process against the base tip", () => {
   })
 })
 
+/** The four-check plan main declares, as descriptors, matching the live shape
+ * that produced the false finding (item 0). */
+const FOUR_CHECK_TIP: DeclaredPlanAt = {
+  sha: SHA_B,
+  configBlobSha: BLOB_2,
+  batchSize: 1,
+  steps: [
+    step("typecheck", "tc-v1"),
+    step("manifest-co-change", "mc-v1"),
+    step("substrate-pair", "sp-v1"),
+    step("affected-tests", "at-v1"),
+    step("merge", "merge-v1"),
+  ],
+}
+
+/** A merge-only Run whose four checks passed at admission for its own base —
+ * the DESIGNED shape of every ordinary merge (PR1946's R3404). */
+const MERGE_ONLY_RUN: RecordedRunPlan = {
+  run: "R3404",
+  startedAt: "2026-08-23T12:13:00.000Z",
+  steps: [step("merge", "merge-v1")],
+  plan: ["typecheck", "manifest-co-change", "substrate-pair", "affected-tests", "merge"],
+  members: [{ id: "PR1946", revision: 1 }],
+  source: "declared-at-base",
+  authority: "configured",
+  baseSha: SHA_B,
+  configBlobSha: BLOB_2,
+}
+
+const ADMISSION_AT_TIP_BASE: AdmissionLookup = (member, baseSha) =>
+  member.id === "PR1946" && member.revision === 1 && baseSha === SHA_B
+    ? [
+        { name: "typecheck", revision: "tc-v1" },
+        { name: "manifest-co-change", revision: "mc-v1" },
+        { name: "substrate-pair", revision: "sp-v1" },
+        { name: "affected-tests", revision: "at-v1" },
+      ]
+    : undefined
+
 describe("leg a — a recorded Run against git at its own base sha", () => {
   const declared: DeclaredPlanAt = { sha: SHA_A, configBlobSha: BLOB_1, batchSize: 1, steps: TIP.steps }
   const recorded: RecordedRunPlan = {
     run: "R7",
     startedAt: "2026-08-23T10:00:00.000Z",
     steps: TIP.steps,
+    plan: TIP.steps.map((planned) => planned.name),
+    members: [{ id: "PR7", revision: 2 }],
     source: "declared-at-base",
     authority: "configured",
     baseSha: SHA_A,
     configBlobSha: BLOB_1,
   }
 
-  it("is silent when the record equals the derivation — the by-construction case", () => {
+  it("is silent when the Run executed every declared step itself — the by-construction case", () => {
     expect(runPlanMismatch(recorded, declared)).toBeUndefined()
   })
 
-  it("names both blob shas and both lists when the same bytes now derive a different plan", () => {
+  it("counts a check the admission stage executed at the Run's base as executed — no finding (item 0)", () => {
+    expect(runPlanMismatch(MERGE_ONLY_RUN, { ...FOUR_CHECK_TIP, sha: SHA_B }, ADMISSION_AT_TIP_BASE)).toBeUndefined()
+  })
+
+  it("finds a check that executed in neither stage, naming the base the admission was required at", () => {
+    // The admission that exists was recorded at base X (SHA_B); the Run merged
+    // onto base Y (SHA_A) — its members' checks were never proven against Y.
+    const runAtOtherBase: RecordedRunPlan = { ...MERGE_ONLY_RUN, baseSha: SHA_A, configBlobSha: BLOB_1 }
     const finding = runPlanMismatch(
-      { ...recorded, steps: [step("typecheck", "tc-v0"), step("merge", "merge-v1")] },
+      runAtOtherBase,
+      { ...FOUR_CHECK_TIP, sha: SHA_A, configBlobSha: BLOB_1 },
+      ADMISSION_AT_TIP_BASE,
+    )
+    expect(finding?.code).toBe("run-plan-mismatch")
+    expect(finding?.message).toContain(
+      `step 'typecheck' is declared at that base and executed neither in the Run nor at admission for base ${SHA_A.slice(0, 8)}`,
+    )
+    expect(finding?.message).toContain(
+      "every declared check must have executed in the Run or at admission for that base",
+    )
+  })
+
+  it("names a revision the derivation no longer holds, whichever stage executed the step", () => {
+    const finding = runPlanMismatch(
+      { ...recorded, steps: [step("typecheck", "tc-v0"), ...TIP.steps.slice(1)] },
       declared,
     )
     expect(finding?.code).toBe("run-plan-mismatch")
-    expect(finding?.message).toContain("run R7 (started 2026-08-23T10:00:00.000Z) recorded the plan typecheck→merge")
+    expect(finding?.message).toContain("run R7 (started 2026-08-23T10:00:00.000Z) was judged by the plan")
     expect(finding?.message).toContain(
-      `read from base ${SHA_A.slice(0, 8)}, but git at ${SHA_A.slice(0, 8)} derives typecheck→affected-tests→merge`,
+      "step 'typecheck' executed in the Run at revision 'tc-v0', but git at that base derives 'tc-v1'",
     )
-    expect(finding?.message).toContain("step 'typecheck' revision 'tc-v1' (git at base aaaaaaaa) vs 'tc-v0' (run R7)")
-    expect(finding?.message).toContain("step 'affected-tests' is declared at that base but the run never executed it")
-    expect(finding?.message).toContain(`Both name config blob ${BLOB_1.slice(0, 8)}.`)
     expect(finding?.resolution).toEqual([
       "Inspect the journal and the repository history: a Run's record must equal the config at its base.",
     ])
+    const staleAdmission = runPlanMismatch(MERGE_ONLY_RUN, { ...FOUR_CHECK_TIP, sha: SHA_B }, (member, baseSha) =>
+      ADMISSION_AT_TIP_BASE(member, baseSha)?.map((check) =>
+        check.name === "typecheck" ? { ...check, revision: "tc-v0" } : check,
+      ),
+    )
+    expect(staleAdmission?.message).toContain(
+      "step 'typecheck' executed at admission at revision 'tc-v0', but git at that base derives 'tc-v1'",
+    )
   })
 
-  it("names a blob the repository does not hold at that base even when the lists agree", () => {
+  it("finds a judged plan that is not what git derives at that base", () => {
+    const finding = runPlanMismatch(
+      { ...recorded, plan: ["typecheck", "merge"], steps: [step("typecheck", "tc-v1"), step("merge", "merge-v1")] },
+      declared,
+    )
+    expect(finding?.message).toContain(
+      "the judged plan typecheck→merge is not the plan git derives there (typecheck→affected-tests→merge)",
+    )
+  })
+
+  it("names a blob the repository does not hold at that base even when everything executed", () => {
     const finding = runPlanMismatch({ ...recorded, configBlobSha: BLOB_2 }, declared)
     expect(finding?.code).toBe("run-plan-mismatch")
     expect(finding?.message).toContain(
@@ -167,24 +246,47 @@ describe("leg b — the tip against the latest recorded Run, informational", () 
     run: "R9",
     startedAt: "2026-08-23T11:00:00.000Z",
     steps: [step("typecheck", "tc-v1"), step("merge", "merge-v1")],
+    plan: ["typecheck", "merge"],
+    members: [{ id: "PR9", revision: 1 }],
     source: "declared-at-base",
     baseSha: SHA_A,
     configBlobSha: BLOB_1,
   }
 
-  it("says the config changed, with both blob shas and the plan the next run uses", () => {
-    expect(tipSinceLatestRun("main", TIP, latest)).toBe(
-      `config changed since run R9 (blob ${BLOB_1.slice(0, 8)} → ${BLOB_2.slice(0, 8)}): step 'affected-tests' is declared at the tip and did not run in that Run. The next run uses the new plan typecheck→affected-tests→merge.`,
+  it("accounts a merge-only Run's checks to the admission stage — never 'did not run' (item 0)", () => {
+    expect(tipSinceLatestRun("main", FOUR_CHECK_TIP, MERGE_ONLY_RUN, ADMISSION_AT_TIP_BASE)).toBe(
+      `latest run R3404 (base ${SHA_B.slice(0, 8)}, blob ${BLOB_2.slice(0, 8)}) was judged by the plan the tip ` +
+        `declares: merge ran in the Run; typecheck, manifest-co-change, substrate-pair, affected-tests ran at ` +
+        `admission for base ${SHA_B.slice(0, 8)}, the Run's base.`,
     )
   })
 
-  it("says nothing changed, still with the shas, and distinguishes a byte-only change", () => {
-    expect(tipSinceLatestRun("main", TIP, { ...latest, steps: TIP.steps, configBlobSha: BLOB_2 })).toBe(
-      `latest run R9 (base ${SHA_A.slice(0, 8)}, blob ${BLOB_2.slice(0, 8)}) ran typecheck→affected-tests→merge, the plan the tip declares.`,
+  it("claims 'config changed' ONLY when the blob differs, and still accounts the run's execution", () => {
+    expect(tipSinceLatestRun("main", TIP, latest)).toBe(
+      `config changed since run R9 (blob ${BLOB_1.slice(0, 8)} → ${BLOB_2.slice(0, 8)}): step 'affected-tests' is ` +
+        `declared at the tip and was not in that run's plan. That run: typecheck, merge ran in the Run. ` +
+        `The next run uses the new plan typecheck→affected-tests→merge.`,
     )
-    expect(tipSinceLatestRun("main", TIP, { ...latest, steps: TIP.steps })).toBe(
-      `latest run R9 (base ${SHA_A.slice(0, 8)}) ran typecheck→affected-tests→merge; the config blob changed since (${BLOB_1.slice(0, 8)} → ${BLOB_2.slice(0, 8)}) without changing the declared plan.`,
+  })
+
+  it("distinguishes a byte-only config change from a plan change", () => {
+    expect(
+      tipSinceLatestRun("main", TIP, {
+        ...latest,
+        steps: TIP.steps,
+        plan: TIP.steps.map((planned) => planned.name),
+      }),
+    ).toBe(
+      `config changed since run R9 (blob ${BLOB_1.slice(0, 8)} → ${BLOB_2.slice(0, 8)}) without changing the ` +
+        `declared step names. That run: typecheck, affected-tests, merge ran in the Run. ` +
+        `The next run uses the new plan typecheck→affected-tests→merge.`,
     )
+  })
+
+  it("flags a step that executed in neither stage instead of blaming the config", () => {
+    const line = tipSinceLatestRun("main", FOUR_CHECK_TIP, MERGE_ONLY_RUN, () => undefined)
+    expect(line).toContain("typecheck, manifest-co-change, substrate-pair, affected-tests executed in NEITHER stage")
+    expect(line).not.toContain("config changed")
   })
 })
 
@@ -489,11 +591,46 @@ describe("the derived plan audit against a real repository", () => {
       expect(after?.comparison.runs).toMatchObject({ read: 1, compared: 1 })
       expect(after?.comparison.runs?.sinceLatest).toBe(
         `config changed since run ${run?.id} (blob ${baseBlob.slice(0, 8)} → ${tipBlob.slice(0, 8)}): ` +
-          "step 'second' is declared at the tip and did not run in that Run. The next run uses the new plan check→second→merge.",
+          "step 'second' is declared at the tip and was not in that run's plan. " +
+          "That run: check, merge ran in the Run. The next run uses the new plan check→second→merge.",
       )
       const text = queueAuditComparisonLine(after?.comparison)
       expect(text).toContain("plan audit: 1 of the 1 most recent runs compared against git at their base shas.")
       expect(text).toContain(`plan audit: config changed since run ${run?.id}`)
+    } finally {
+      await host.close()
+    }
+  })
+
+  it("audits the designed shape clean: checks at admission, then a merge-only Run reusing them (item 0)", async () => {
+    const repo = await queueRepository()
+    const featureSha = await featureBranch(repo, "issue/feature")
+    const host = await createYrdHost({ cwd: repo })
+    try {
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await host.app.bays.requestChecks({ pr: "PR1" })
+      // The selectorless drain runs the checks-before-queueing stage first,
+      // then the integrating Run reuses that evidence and executes only merge
+      // — the exact live shape (PR1946/R3404) the audit misread as "did not
+      // run" before this accounting.
+      let integrating
+      for (let pass = 0; pass < 3 && integrating === undefined; pass += 1) {
+        const runs = await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })
+        integrating = runs.find((run) => run.steps.some((step) => step.kind === "merge"))
+      }
+      expect(integrating).toMatchObject({ status: "completed", conclusion: "success" })
+      expect(integrating?.steps.map((step) => step.name)).toEqual(["merge"])
+      expect(integrating?.stepSelection).toMatchObject({ source: "declared-at-base", steps: ["check", "merge"] })
+
+      const audit = await host.services.queue?.auditEnvironment?.()
+      expect(audit?.findings, JSON.stringify(audit?.findings)).toEqual([])
+      const sinceLatest = audit?.comparison.runs?.sinceLatest
+      expect(sinceLatest).toContain("was judged by the plan the tip declares")
+      expect(sinceLatest).toContain("merge ran in the Run")
+      expect(sinceLatest).toContain("check ran at admission for base")
+      expect(sinceLatest).toContain("the Run's base")
+      expect(sinceLatest).not.toContain("config changed")
+      expect(sinceLatest).not.toContain("did not run")
     } finally {
       await host.close()
     }
