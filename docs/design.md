@@ -452,7 +452,13 @@ side with the sha it was read from:
   `declared-step-not-installed`, so the finding predicts that refusal and names
   the restart. The per-cycle run gate reads only this leg; in follow mode a
   stale resident reloads itself in place (same-PID `execve`), a one-shot
-  refuses.
+  refuses. Reloads are bounded: `YRD_RUNTIME_RELOADS` rides the exec env, a
+  clean gate pass resets it, and the fourth consecutive stale gate refuses
+  with `installed-plan-reload-exhausted` (tip, blob, count, the by-hand
+  restart) instead of looping. The resident also publishes its installed plan
+  in the heartbeat, so the supervisor probe — which builds no runtime — runs
+  this leg against the PUBLISHED set, and names an unpublished one instead of
+  comparing nothing.
 - **Leg a — each recent recorded Run vs git at its own base sha
   (`run-plan-mismatch`).** Equal by construction, because the Run read its plan
   from that very blob; a delta means the journal and the repository disagree

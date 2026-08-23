@@ -28,6 +28,7 @@ import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/cor
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type {
   Candidate,
+  InstalledStep,
   IntegrationProof,
   ChangeCheckRecord,
   ChangeEligibility,
@@ -716,6 +717,23 @@ export type QueueTimelineRunner = Readonly<{
    * today, matching every other resident-observed fact on this type.
    */
   needsPerson?: readonly QueueAuditFinding[]
+  /**
+   * The step plan this resident built at startup — batch size and the full
+   * installed descriptors (name, revision, kind, classification, order) — so
+   * the supervisor probe can compare the RESIDENT's plan against the plan the
+   * base tip declares without building a runtime of its own (23192 leg c).
+   * Static for the life of the pid: a resident that must change it reloads.
+   *
+   * Absent means NOT PUBLISHED (a status record written by a resident older
+   * than this field), and the probe says so rather than comparing nothing.
+   */
+  installedPlan?: ResidentInstalledPlan
+}>
+
+/** What a resident publishes about the plan it can execute. */
+export type ResidentInstalledPlan = Readonly<{
+  batchSize: number
+  steps: readonly InstalledStep[]
 }>
 
 export type QueueRunnerRefusal = Readonly<{

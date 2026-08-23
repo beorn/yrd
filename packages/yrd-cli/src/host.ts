@@ -166,11 +166,14 @@ import {
   type YrdSettlementLaunch,
 } from "./settlement.ts"
 import {
+  activeResidentRunner,
   canonicalQueueId,
   isYrdRuntimeReloadRequest,
   residentRunnerLeaseHeld,
+  residentRunnerStatus,
   runYrdHelp,
   runYrdProcessRuntime,
+  runtimeReloadEnv,
   yrdJsonOutputRequested,
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"
@@ -2377,10 +2380,20 @@ function queueAdministration(
     /** Repository-relative config authority path, `.yrd.yml` unless `--config` named another. */
     configAuthority: string
     configPath?: string
+    /** The installed leg's subject. A full host compares its OWN runtime; the
+     * supervisor probe, which builds none, compares the plan the live resident
+     * PUBLISHED in its heartbeat. `records` is absent when the invocation
+     * opened no journal. */
     runtime?: Readonly<{
+      source: "this-process" | "resident-heartbeat"
+      /** Pid of the resident whose published plan is compared. */
+      pid?: number
       installed(): QueuePlanDescriptor
-      records(): readonly QueueRecord[]
+      records?(): readonly QueueRecord[]
     }>
+    /** Why no installed leg could run, when `runtime` is absent: named in the
+     * comparison so an unread leg never prints as a clean one. */
+    installedUnavailable?: string
   }>,
 ): YrdCliQueueAdministration {
   const base = baseIdentity(options.base)
@@ -2397,14 +2410,22 @@ function queueAdministration(
       const target = await inspectGitQueueTarget({ inject: { process }, repo: repository.repo, branch: base })
       const tip = await declaredAt(target.sha)
       const findings: QueueAuditFindingEmission[] = []
-      const installed = options.runtime?.installed()
-      if (installed !== undefined) {
-        const stale = installedPlanStale(base, tip, installed)
+      const runtime = options.runtime
+      const installed = runtime?.installed()
+      if (runtime !== undefined && installed !== undefined) {
+        const stale = installedPlanStale(
+          base,
+          tip,
+          installed,
+          runtime.source === "resident-heartbeat"
+            ? `the resident runner${runtime.pid === undefined ? "" : ` (pid ${String(runtime.pid)})`}`
+            : undefined,
+        )
         if (stale !== undefined) findings.push(stale)
       }
       let runs: NonNullable<QueueEnvironmentAuditComparison["runs"]> | undefined
-      if (options.runtime !== undefined && recordedRuns > 0) {
-        const recent = recentRootRuns(options.runtime.records(), recordedRuns)
+      if (runtime?.records !== undefined && recordedRuns > 0) {
+        const recent = recentRootRuns(runtime.records(), recordedRuns)
         const declaredByBase = new Map<string, Promise<DeclaredPlanAt>>()
         let compared = 0
         let explicit = 0
@@ -2456,9 +2477,19 @@ function queueAdministration(
           steps: tip.steps.map((step) => step.name),
           batchSize: tip.batchSize,
         },
-        ...(installed === undefined
+        ...(runtime === undefined || installed === undefined
           ? {}
-          : { installed: { steps: installed.steps.map((step) => step.name), batchSize: installed.batchSize } }),
+          : {
+              installed: {
+                source: runtime.source,
+                ...(runtime.pid === undefined ? {} : { pid: runtime.pid }),
+                steps: installed.steps.map((step) => step.name),
+                batchSize: installed.batchSize,
+              },
+            }),
+        ...(runtime !== undefined || options.installedUnavailable === undefined
+          ? {}
+          : { installedUnavailable: options.installedUnavailable }),
         ...(runs === undefined ? {} : { runs }),
       }
       return { findings, comparison }
@@ -2803,10 +2834,26 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadRepositoryConfig(repository, process, options.configPath)
+    // The probe builds no runtime, so its installed leg is the plan the LIVE
+    // resident published in its heartbeat (23192 leg c). Liveness is judged
+    // exactly as the health classifier judges it: an exit marker or a dead pid
+    // means nothing is serving, and a resident older than the field published
+    // nothing — each named in the comparison, never compared as empty.
+    const resident = activeResidentRunner(await residentRunnerStatus(repository.repo, repository.stateDir))
+    const published = resident?.installedPlan
     const administration = queueAdministration(process, repository, {
       base: loaded.config.base,
       configAuthority: loaded.path === undefined ? ".yrd.yml" : relative(repository.repo, loaded.path),
       ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
+      ...(resident !== undefined && resident !== null && published !== undefined
+        ? { runtime: { source: "resident-heartbeat", pid: resident.pid, installed: () => published } }
+        : {
+            installedUnavailable:
+              resident === null || resident === undefined
+                ? "no live resident runner, so no installed plan was published to compare"
+                : `the resident runner (pid ${String(resident.pid)}) published no installed plan — it predates the ` +
+                  "field; restart it to publish one",
+          }),
     })
     if (administration.auditEnvironment === undefined) {
       throw new Error("yrd: runner health audit is unavailable")
@@ -3027,6 +3074,7 @@ async function createYrdRuntimeHost(
         configAuthority: loaded.path === undefined ? ".yrd.yml" : relative(repository.repo, loaded.path),
         ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
         runtime: {
+          source: "this-process",
           // The installed leg must come from the live runtime object — the
           // policy and steps this process actually installed — never
           // re-derived from config, which is the other side of the comparison.
@@ -3508,7 +3556,10 @@ async function runYrdProcessHost(
           closeLog: () => log?.end(),
           execPath: globalThis.process.execPath,
           argv,
-          env,
+          // Same argv, same env — plus the consecutive-reload count, so the
+          // replacement can tell a transition from a loop and refuse at the
+          // bound instead of exec'ing forever.
+          env: runtimeReloadEnv(env, error),
           execve: (execPath, execArgv, execEnv) => {
             const execve = globalThis.process.execve
             if (execve === undefined) throw new Error("this Bun runtime cannot reload a resident with execve")

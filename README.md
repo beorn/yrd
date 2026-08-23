@@ -1038,6 +1038,18 @@ infrastructure code `3`, and Hab restarts the unchanged argv. A one-shot run
 refuses instead of reloading itself. `yrd admin queue init` and `deinit`, which
 used to write and remove the baseline file, are retired and refuse by name.
 
+Consecutive reloads are bounded. The exec env carries `YRD_RUNTIME_RELOADS`,
+a clean gate pass resets it, and a fourth stale gate in a row refuses with
+`installed-plan-reload-exhausted` — naming the tip, the blob, the count and
+the by-hand restart — instead of exec'ing forever against a plan this source
+cannot build or a tip that keeps moving. The heartbeat also publishes the
+resident's `installedPlan` (batch size and full step descriptors), which is
+what `queue list --check` compares against the tip: the probe builds no
+runtime of its own, so its plan-audit leg reads the published set, reports
+`installed-plan-stale` when the tip declares a step the resident lacks, and
+says "published no installed plan" for a resident older than the field
+rather than comparing nothing.
+
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new Queue work, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to

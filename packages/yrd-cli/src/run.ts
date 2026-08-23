@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { Fragment, createElement } from "react"
+import * as z from "zod"
 import {
   CompositionV1Schema,
   ChangePropsSchema,
@@ -72,6 +73,7 @@ import {
   isQueueRunningConflict,
   CANDIDATE_REF_RETENTION_MS,
   candidateRefDenominator,
+  InstalledStepSchema,
   IntentRecordIdSchema,
   MERGE_RECORD_REF,
   mergeJoinedNothing,
@@ -104,6 +106,13 @@ import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import { INSTALLED_PLAN_STALE_RESOLUTION, RUN_PLAN_MISMATCH_RESOLUTION } from "./plan-audit.ts"
+import {
+  MAX_CONSECUTIVE_RUNTIME_RELOADS,
+  YRD_RUNTIME_RELOADS_ENV,
+  runtimeReloadLineage,
+  withRuntimeReloads,
+  type RuntimeReloadLineage,
+} from "./runtime-reload.ts"
 import {
   classifyFailure,
   configureYrdGlobalOptions,
@@ -156,6 +165,7 @@ import {
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
+  type ResidentInstalledPlan,
   type RunnerSourcePin,
   type UncarriedObservation,
   uncarriedCoverageFloor,
@@ -579,6 +589,28 @@ function parseFindingsField(value: unknown, field: string): readonly QueueAuditF
   return value.map((finding) => parseQueueAuditFinding(finding, `${field} finding`))
 }
 
+const ResidentInstalledPlanSchema = z
+  .object({
+    batchSize: z.number().int().min(1),
+    steps: z.array(InstalledStepSchema).min(1),
+  })
+  .strict()
+
+/** Absent is a real answer (a resident older than the field); a present value
+ * that does not parse is a broken wire, never silently "not published". */
+function parseResidentInstalledPlan(value: unknown): ResidentInstalledPlan | undefined {
+  if (value === undefined) return undefined
+  const parsed = ResidentInstalledPlanSchema.safeParse(value)
+  if (!parsed.success) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      `yrd: resident runner installedPlan is invalid: ${parsed.error.message}`,
+    )
+  }
+  return parsed.data
+}
+
 function parseQueueDriverEpoch(value: unknown): QueueDriverEpoch | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "object" || value === null) {
@@ -777,6 +809,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   const retention = parseJournalRetentionObservation(record.retention)
   const staleDrafts = parseFindingsField(record.staleDrafts, "staleDrafts")
   const needsPerson = parseFindingsField(record.needsPerson, "needsPerson")
+  const installedPlan = parseResidentInstalledPlan(record.installedPlan)
   if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
     raiseFailure(
       "infrastructure",
@@ -818,6 +851,7 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
     ...(retention === undefined ? {} : { retention }),
     ...(staleDrafts === undefined ? {} : { staleDrafts }),
     ...(needsPerson === undefined ? {} : { needsPerson }),
+    ...(installedPlan === undefined ? {} : { installedPlan }),
     ...(record.command === undefined ? {} : { command: record.command as string }),
     ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
     ...(record.clean === undefined ? {} : { clean: record.clean }),
@@ -894,7 +928,7 @@ function observeResidentRunner(
   }
 }
 
-function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
+export function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
   return observeResidentRunner(runner).runner
 }
 
@@ -949,6 +983,10 @@ type RunnerHealthFacts = Readonly<{
   queueProgressAgeMs?: number
   launcher: RunnerLauncherFacts
   git: RunnerGitHealth
+  /** What the plan audit compared for this probe: the tip's declared plan
+   * against the plan the live resident published (23192 leg c), with the
+   * legs it could not run named. Absent only when the audit itself failed. */
+  planAudit?: QueueEnvironmentAuditComparison
 }>
 
 type RunnerHealthPayload = Readonly<{
@@ -1529,6 +1567,7 @@ async function queueRunnerHealth(
       ...(progressAgeMs === undefined ? {} : { queueProgressAgeMs: progressAgeMs }),
       launcher: runnerLauncherFacts(),
       git,
+      planAudit: auditResult.comparison,
     }
     const drift = auditResult.findings.filter(isPlanFinding)
     if (drift.length > 0) {
@@ -1810,17 +1849,23 @@ async function checkQueueRunner(
   const result = await queueRunnerHealth(app, services, io)
   const distance = result.payload.facts.git.base
   const gitLines =
-    distance === undefined
-      ? [`git: queue base does not resolve in ${result.payload.facts.git.cwd}; no distance to report`]
-      : [
-          distance.unavailable === undefined
-            ? `git ${distance.base}: ahead=${distance.ahead ?? 0} behind=${distance.behind ?? 0} tip=${distance.baseSha.slice(0, 12)}`
-            : `git ${distance.base}: distance unavailable (${distance.unavailable})`,
-        ]
+    result.payload.facts.git.headSha === "unknown"
+      ? ["git: not read — the health probe failed before its git read"]
+      : distance === undefined
+        ? [`git: queue base does not resolve in ${result.payload.facts.git.cwd}; no distance to report`]
+        : [
+            distance.unavailable === undefined
+              ? `git ${distance.base}: ahead=${distance.ahead ?? 0} behind=${distance.behind ?? 0} tip=${distance.baseSha.slice(0, 12)}`
+              : `git ${distance.base}: distance unavailable (${distance.unavailable})`,
+          ]
   const human = [
     `yrd-runner ${result.payload.state} (lease=${result.payload.facts.lease}, heartbeat=${result.payload.facts.runnerStatus})`,
     ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
     ...gitLines,
+    // The denominator, printed whether or not anything was found: which plan
+    // the probe compared against the tip (the resident's published one, or
+    // none and why), so a clean probe never reads as an unread one.
+    ...(result.payload.facts.planAudit === undefined ? [] : [queueAuditComparisonLine(result.payload.facts.planAudit)]),
   ].join("\n")
   // Non-fatal by construction: a stale draft (or an unrouted needs-person
   // change) never flips `state`/`exitCode` — draft WIP is first-class
@@ -1935,6 +1980,10 @@ export async function startResidentRunnerHeartbeat(
      * page-worthy the moment it exists
      * (@i/10-merge-queue/22918-needs-person-unowned). */
     needsPerson?: (now: string) => readonly QueueAuditFinding[]
+    /** The step plan this resident built — published so the supervisor
+     * probe can compare it against the base tip's declared plan without a
+     * runtime of its own (23192 leg c). Read once: it is static for the pid. */
+    installedPlan?: () => ResidentInstalledPlan
   }> = {},
 ): Promise<ResidentRunnerHeartbeat> {
   const cwd = io.cwd ?? process.cwd()
@@ -1977,6 +2026,14 @@ export async function startResidentRunnerHeartbeat(
   }
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
+  const installedPlan = options.installedPlan?.()
+  if (installedPlan?.steps.length === 0) {
+    raiseFailure(
+      "configuration",
+      "resident-installed-plan-empty",
+      "yrd: resident runner has no installed steps to publish; a queue with no plan cannot serve",
+    )
+  }
   const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
     await mkdir(directory, { recursive: true })
     const lastTickAt = nowIso()
@@ -1998,6 +2055,7 @@ export async function startResidentRunnerHeartbeat(
       // omits the key.
       ...(staleDrafts === undefined ? {} : { staleDrafts }),
       ...(needsPerson === undefined ? {} : { needsPerson }),
+      ...(installedPlan === undefined ? {} : { installedPlan }),
       ...(options.retention === undefined || driverEpoch === undefined
         ? {}
         : {
@@ -6752,8 +6810,14 @@ export function queueAuditComparisonLine(comparison: QueueEnvironmentAuditCompar
         ? `— no '${tip.configAuthority}' at that commit, so the built-in plan is in force.`
         : `from '${tip.configAuthority}' blob ${short(tip.configBlobSha)}.`),
     installed === undefined
-      ? "plan audit: this invocation built no queue runtime, so no installed plan was compared against the tip."
-      : `plan audit: this process installed ${arrow(installed.steps)} (batch ${String(installed.batchSize)}); compared against the tip.`,
+      ? `plan audit: no installed plan was compared against the tip — ${
+          comparison.installedUnavailable ?? "this invocation built no queue runtime and read no resident heartbeat"
+        }.`
+      : installed.source === "resident-heartbeat"
+        ? `plan audit: the resident runner${installed.pid === undefined ? "" : ` (pid ${String(installed.pid)})`} ` +
+          `published installed ${arrow(installed.steps)} (batch ${String(installed.batchSize)}) in its heartbeat; ` +
+          "compared against the tip."
+        : `plan audit: this process installed ${arrow(installed.steps)} (batch ${String(installed.batchSize)}); compared against the tip.`,
   ]
   if (runs === undefined) {
     lines.push("plan audit: recorded runs were not read in this invocation, so none was compared against git.")
@@ -8135,8 +8199,14 @@ export async function requireInstalledDeclaredPlan(
   services: YrdCliServices,
   options: Readonly<{
     reloadInPlace?: Readonly<{
-      /** Unwind the resident completely, then replace this process image. */
-      request?: (finding: InstalledPlanStaleFinding) => never
+      /** Unwind the resident completely, then replace this process image.
+       * `reloads` is the consecutive count the replacement starts from. */
+      request?: (finding: InstalledPlanStaleFinding, reloads: number) => never
+      /** This process's place in its reload lineage (inherited from the exec
+       * env). A clean pass resets it; a stale pass past the bound refuses
+       * instead of requesting another reload. Absent counts as a fresh
+       * lineage, which is what an embedded host without an exec path is. */
+      lineage?: RuntimeReloadLineage
     }>
   }> = {},
 ): Promise<void> {
@@ -8155,23 +8225,61 @@ export async function requireInstalledDeclaredPlan(
   const stale = result.findings.find(
     (finding): finding is InstalledPlanStaleFinding => finding.code === "installed-plan-stale",
   )
-  if (stale === undefined) return
-  if (options.reloadInPlace?.request !== undefined) options.reloadInPlace.request(stale)
+  const reload = options.reloadInPlace
+  if (stale === undefined) {
+    // A pass that found nothing stale ends the chain: whatever this process
+    // was exec'd to fix is fixed, and the next reload — if a later landing
+    // needs one — starts counting from one again.
+    if (reload?.lineage !== undefined) reload.lineage.consecutiveReloads = 0
+    return
+  }
+  if (reload?.request !== undefined) {
+    const consecutive = reload.lineage?.consecutiveReloads ?? 0
+    if (consecutive >= MAX_CONSECUTIVE_RUNTIME_RELOADS) {
+      const { tip } = result.comparison
+      raiseFailure(
+        "refusal",
+        "installed-plan-reload-exhausted",
+        `yrd: this process was exec'd in place ${String(consecutive)} times in a row ` +
+          `(${YRD_RUNTIME_RELOADS_ENV}=${String(consecutive)}) and its installed plan is still not the one ` +
+          `${result.comparison.base} tip ${tip.sha.slice(0, 8)} (config blob ${tip.configBlobSha?.slice(0, 8) ?? "none"}) ` +
+          `declares: ${stale.message.replace(/^yrd:\s*/u, "")} A ${ordinal(consecutive + 1)} reload would loop ` +
+          "forever — either this source cannot build the declared steps, or the tip keeps moving under the reload. " +
+          "Fix the config or the source, then restart the habitant by hand; a clean cycle resets the count.",
+      )
+    }
+    reload.request(stale, consecutive + 1)
+  }
   raiseFailure("refusal", stale.code, stale.message)
+}
+
+function ordinal(count: number): string {
+  const suffix = count % 100 >= 11 && count % 100 <= 13 ? "th" : (["th", "st", "nd", "rd"][count % 10] ?? "th")
+  return `${String(count)}${suffix}`
 }
 
 class YrdRuntimeReloadRequest extends Error {
   override readonly name = "YrdRuntimeReloadRequest"
 
-  constructor(readonly finding: InstalledPlanStaleFinding) {
+  constructor(
+    readonly finding: InstalledPlanStaleFinding,
+    /** Consecutive reload the replacement process starts from (≥ 1); the host
+     * writes it into the exec env so the replacement can count too. */
+    readonly reloads: number,
+  ) {
     super(finding.message)
   }
 }
 
 /** Typed control transfer: unwind the resident heartbeat before the process
  * host closes leases/resources and performs the same-PID exec. */
-export function requestYrdRuntimeReload(finding: InstalledPlanStaleFinding): never {
-  throw new YrdRuntimeReloadRequest(finding)
+export function requestYrdRuntimeReload(finding: InstalledPlanStaleFinding, reloads: number): never {
+  throw new YrdRuntimeReloadRequest(finding, reloads)
+}
+
+/** The env the replacement process is exec'd with for one reload request. */
+export function runtimeReloadEnv(env: NodeJS.ProcessEnv, request: YrdRuntimeReloadRequest): NodeJS.ProcessEnv {
+  return withRuntimeReloads(env, request.reloads)
 }
 
 export function isYrdRuntimeReloadRequest(error: unknown): error is YrdRuntimeReloadRequest {
@@ -10650,6 +10758,10 @@ export async function followQueueRuns(
         uncarried: createUncarriedSweeper(app, io, base, app.log).observe,
         staleDrafts: (now) => staleDraftFindings(app, now, draftThresholdMs),
         needsPerson: (now) => needsPersonFindings(app, now),
+        // The plan THIS process built, from the live runtime object, so the
+        // supervisor probe compares the resident's own set against the tip
+        // (23192 leg c) rather than re-deriving one from config.
+        installedPlan: () => ({ batchSize: app.queue.state().batchSize, steps: app.queue.steps() }),
         ...(io.journalRetentionPolicy === undefined ? {} : { retention: io.journalRetentionPolicy }),
         driver: {
           queueId: io.driver?.queueId ?? `${resolve(io.repositoryRoot ?? io.cwd ?? process.cwd())}#${base}`,
@@ -10829,11 +10941,20 @@ export async function followQueueRuns(
       if (exit !== null) return exit
     }
   } catch (error) {
-    if (heartbeat !== undefined && isYrdRuntimeReloadRequest(error)) {
+    // The cause of a control transfer — a reload, or the refusal that ends a
+    // reload loop — survives in the durable heartbeat, so the supervisor reads
+    // WHY the pid went away rather than a bare unclean exit.
+    const exhausted = failureFact(error)
+    const finding = isYrdRuntimeReloadRequest(error)
+      ? error.finding
+      : exhausted?.code === "installed-plan-reload-exhausted"
+        ? { code: exhausted.code, message: exhausted.message }
+        : undefined
+    if (heartbeat !== undefined && finding !== undefined) {
       await heartbeat.recordProgress({
         state: "stalled",
         observedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
-        findings: [error.finding],
+        findings: [finding],
       })
     }
     throw error
@@ -11937,11 +12058,17 @@ function buildProgram(
     .action(async (selectors, options) => {
       const mode = invocation.queueRunMode
       if (mode === undefined) throw new Error("yrd: normalized queue run mode is missing")
+      // One lineage per process: the count this process was exec'd with, reset
+      // by a clean gate pass, carried forward by the next reload request.
+      const lineage = bootstrap === undefined ? undefined : runtimeReloadLineage(bootstrap.env)
       const gate = () =>
         requireInstalledDeclaredPlan(
           installedServices(),
           mode === "follow"
-            ? { reloadInPlace: bootstrap === undefined ? {} : { request: requestYrdRuntimeReload } }
+            ? {
+                reloadInPlace:
+                  bootstrap === undefined || lineage === undefined ? {} : { request: requestYrdRuntimeReload, lineage },
+              }
             : {},
         )
       if (mode === "follow") {

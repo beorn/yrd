@@ -877,7 +877,7 @@ function stubAuditComparison(base = "main"): QueueEnvironmentAuditComparison {
       steps: ["check", "merge"],
       batchSize: 1,
     },
-    installed: { steps: ["check", "merge"], batchSize: 1 },
+    installed: { source: "this-process", steps: ["check", "merge"], batchSize: 1 },
   }
 }
 

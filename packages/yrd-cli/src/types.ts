@@ -71,9 +71,19 @@ export type QueueEnvironmentAuditComparison = Readonly<{
     steps: readonly string[]
     batchSize: number
   }>
-  /** The plan this process installed, compared against the tip (leg c).
-   * Absent when this invocation built no queue runtime (the health probe). */
-  installed?: Readonly<{ steps: readonly string[]; batchSize: number }>
+  /** The installed plan compared against the tip (leg c): this process's own
+   * runtime, or — for the supervisor probe, which builds none — the plan the
+   * live resident published in its heartbeat. Absent when neither was
+   * available; `installedUnavailable` then says why. */
+  installed?: Readonly<{
+    source: "this-process" | "resident-heartbeat"
+    /** The resident whose published plan was compared. */
+    pid?: number
+    steps: readonly string[]
+    batchSize: number
+  }>
+  /** Why no installed plan could be compared, when `installed` is absent. */
+  installedUnavailable?: string
   /** The recorded Runs read from the journal, newest first (legs a and b).
    * Absent when this invocation opened no journal or asked for no runs. */
   runs?: Readonly<{

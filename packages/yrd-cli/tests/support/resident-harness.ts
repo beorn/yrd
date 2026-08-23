@@ -66,6 +66,12 @@ export function createResidentHarness(options: ResidentHarnessOptions) {
         runCalls += 1
         return options.run({ signal, call: runCalls })
       },
+      // What a resident publishes in its heartbeat: the plan it built.
+      state: () => ({ batchSize: 1 }),
+      steps: () => [
+        { name: "check", title: "check", revision: "check-v1", kind: "check", classification: "carrier" },
+        { name: "merge", title: "merge", revision: "merge-v1", kind: "merge" },
+      ],
     },
   } as unknown as YrdCliApp
   const io = {

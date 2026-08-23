@@ -6,11 +6,11 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { InstalledStep, QueueRecord } from "@yrd/queue"
 import { failureFact } from "@yrd/core"
 import { createLogger } from "loggily"
-import { createYrdHost as createYrdHostRaw } from "../src/host.ts"
+import { createYrdHost as createYrdHostRaw, runYrdProcess } from "../src/host.ts"
 import { queueAuditComparisonLine, requireInstalledDeclaredPlan } from "../src/run.ts"
 import {
   installedPlanStale,
@@ -241,7 +241,7 @@ describe("the denominator line", () => {
   it("prints an empty journal as zero runs compared against the named tip and blob, never as no drift", () => {
     const text = queueAuditComparisonLine({
       ...comparison,
-      installed: { steps: ["typecheck", "merge"], batchSize: 1 },
+      installed: { source: "this-process", steps: ["typecheck", "merge"], batchSize: 1 },
       runs: { read: 0, compared: 0, explicit: 0, unrecorded: 0 },
     })
     expect(text).toBe(
@@ -258,19 +258,38 @@ describe("the denominator line", () => {
     expect(queueAuditComparisonLine(comparison)).toBe(
       [
         `plan audit: main tip ${SHA_B.slice(0, 8)} declares typecheck→merge (batch 1) from '.yrd.yml' blob ${BLOB_2.slice(0, 8)}.`,
-        "plan audit: this invocation built no queue runtime, so no installed plan was compared against the tip.",
+        "plan audit: no installed plan was compared against the tip — this invocation built no queue runtime and read no resident heartbeat.",
         "plan audit: recorded runs were not read in this invocation, so none was compared against git.",
       ].join("\n"),
+    )
+    expect(
+      queueAuditComparisonLine({
+        ...comparison,
+        installedUnavailable: "no live resident runner, so no installed plan was published to compare",
+      }),
+    ).toContain(
+      "plan audit: no installed plan was compared against the tip — no live resident runner, so no installed plan was published to compare.",
     )
     expect(queueAuditComparisonLine(undefined)).toBe(
       "plan audit: not wired for this invocation — nothing was compared against git.",
     )
   })
 
+  it("names the resident whose published plan the probe compared", () => {
+    expect(
+      queueAuditComparisonLine({
+        ...comparison,
+        installed: { source: "resident-heartbeat", pid: 4242, steps: ["typecheck", "merge"], batchSize: 1 },
+      }),
+    ).toContain(
+      "plan audit: the resident runner (pid 4242) published installed typecheck→merge (batch 1) in its heartbeat; compared against the tip.",
+    )
+  })
+
   it("prints the population it compared and what it could not compare", () => {
     const text = queueAuditComparisonLine({
       ...comparison,
-      installed: { steps: ["typecheck", "merge"], batchSize: 1 },
+      installed: { source: "this-process", steps: ["typecheck", "merge"], batchSize: 1 },
       runs: {
         read: 5,
         compared: 3,
@@ -353,7 +372,7 @@ describe("the derived plan audit against a real repository", () => {
           steps: ["check", "merge"],
           batchSize: 1,
         },
-        installed: { steps: ["check", "merge"], batchSize: 1 },
+        installed: { source: "this-process", steps: ["check", "merge"], batchSize: 1 },
         runs: { read: 0, compared: 0, explicit: 0, unrecorded: 0 },
       })
       expect(queueAuditComparisonLine(audit?.comparison)).toContain(
@@ -380,7 +399,7 @@ describe("the derived plan audit against a real repository", () => {
         steps: ["check", "second", "merge"],
         batchSize: 1,
       })
-      expect(audit?.comparison.installed).toEqual({ steps: ["check", "merge"], batchSize: 1 })
+      expect(audit?.comparison.installed).toEqual({ source: "this-process", steps: ["check", "merge"], batchSize: 1 })
       expect(audit?.comparison.runs, "recordedRuns: 0 leaves the journal leg unread, not zero").toBeUndefined()
       expect(audit?.findings).toHaveLength(1)
       const finding = audit?.findings[0]
@@ -422,7 +441,11 @@ describe("the derived plan audit against a real repository", () => {
     try {
       const audit = await fresh.services.queue?.auditEnvironment?.()
       expect(audit?.findings).toEqual([])
-      expect(audit?.comparison.installed).toEqual({ steps: ["check", "second", "merge"], batchSize: 1 })
+      expect(audit?.comparison.installed).toEqual({
+        source: "this-process",
+        steps: ["check", "second", "merge"],
+        batchSize: 1,
+      })
       await requireInstalledDeclaredPlan(fresh.services)
     } finally {
       await fresh.close()
@@ -535,5 +558,129 @@ describe("the run gate without a queue administration", () => {
     await requireInstalledDeclaredPlan({})
     const services: YrdCliServices = { queue: {} }
     await expect(requireInstalledDeclaredPlan(services)).rejects.toThrow(/queue.audit capability is not installed/u)
+  })
+})
+
+describe("the supervisor probe compares the plan the resident published", () => {
+  /** The probe reads the live resident's heartbeat; this writes one for a
+   * "resident" whose pid is this test process (alive, no exit marker) and
+   * whose installed plan is whatever the caller published. */
+  async function publishHeartbeat(repo: string, installedPlan: unknown): Promise<void> {
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    await mkdir(join(statusPath, ".."), { recursive: true })
+    await writeFile(
+      statusPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        startedAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTickAt: new Date().toISOString(),
+        implementationSource: `git:${"a".repeat(40)}`,
+        ...(installedPlan === undefined ? {} : { installedPlan }),
+      })}\n`,
+    )
+  }
+
+  async function probe(repo: string, json: boolean): Promise<Readonly<{ exit: number; stdout: string }>> {
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true)
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true)
+    try {
+      const exit = await runYrdProcess([
+        "/usr/bin/bun",
+        "/usr/local/bin/yrd",
+        "--repo",
+        repo,
+        "queue",
+        "list",
+        "--check",
+        ...(json ? ["--json"] : []),
+      ])
+      return { exit, stdout: stdout.mock.calls.map(([chunk]) => String(chunk)).join("") }
+    } finally {
+      stdout.mockRestore()
+      stderr.mockRestore()
+    }
+  }
+
+  it("reports installed-plan-stale when the tip declares a step the published set lacks, naming the resident", async () => {
+    const repo = await queueRepository()
+    // The plan a resident built at v1, captured from a real host so the
+    // published revisions are the ones the probe derives for that config.
+    const v1 = await createYrdHost({ cwd: repo })
+    const published = { batchSize: v1.app.queue.state().batchSize, steps: v1.app.queue.steps() }
+    await v1.close()
+    const tipSha = await commitConfig(repo, TWO_CHECKS, "declare a second check")
+    const blobSha = await git(repo, "rev-parse", `${tipSha}:.yrd.yml`)
+    await publishHeartbeat(repo, published)
+
+    const json = await probe(repo, true)
+    expect(json.exit, json.stdout).toBe(2)
+    const payload = JSON.parse(json.stdout) as {
+      state: string
+      error: { code: string; resolution: string[] }
+      facts: { planAudit: QueueEnvironmentAuditComparison }
+    }
+    expect(payload.state).toBe("unhealthy")
+    expect(payload.error.code).toBe("installed-plan-stale")
+    expect(payload.error.resolution).toEqual([
+      "Restart the resident queue runner so it builds the steps the base declares.",
+    ])
+    expect(payload.facts.planAudit).toMatchObject({
+      base: "main",
+      tip: { sha: tipSha, configBlobSha: blobSha, steps: ["check", "second", "merge"] },
+      installed: { source: "resident-heartbeat", pid: process.pid, steps: ["check", "merge"], batchSize: 1 },
+    })
+    expect(payload.facts.planAudit.runs, "the probe opens no journal").toBeUndefined()
+
+    const human = await probe(repo, false)
+    expect(human.exit).toBe(2)
+    expect(human.stdout).toContain("err=installed-plan-stale")
+    expect(human.stdout).toContain(`the resident runner (pid ${String(process.pid)}) installed check→merge (batch 1)`)
+    expect(human.stdout).toContain("step 'second' is declared at the tip but not installed in the resident runner")
+    // The renderer wraps long lines, so assert the head of the line only.
+    expect(human.stdout).toContain(
+      `plan audit: the resident runner (pid ${String(process.pid)}) published installed check→merge (batch 1) in its heartbeat;`,
+    )
+  })
+
+  it("reports the published set as compared, and an unpublished one as not compared, never as clean", async () => {
+    const repo = await queueRepository()
+    const host = await createYrdHost({ cwd: repo })
+    const published = { batchSize: host.app.queue.state().batchSize, steps: host.app.queue.steps() }
+    await host.close()
+    await publishHeartbeat(repo, published)
+
+    const compared = await probe(repo, true)
+    const payload = JSON.parse(compared.stdout) as {
+      state: string
+      error?: { code: string }
+      facts: { planAudit: QueueEnvironmentAuditComparison }
+    }
+    expect(payload.error?.code, compared.stdout).not.toBe("installed-plan-stale")
+    expect(payload.facts.planAudit.installed).toMatchObject({
+      source: "resident-heartbeat",
+      pid: process.pid,
+      steps: ["check", "merge"],
+    })
+    expect(queueAuditComparisonLine(payload.facts.planAudit)).toContain(
+      `plan audit: the resident runner (pid ${String(process.pid)}) published installed check→merge (batch 1) in its heartbeat; compared against the tip.`,
+    )
+
+    // A resident older than the field published nothing: the probe says so
+    // instead of comparing an empty set and calling it clean.
+    await publishHeartbeat(repo, undefined)
+    const unpublished = await probe(repo, true)
+    const older = JSON.parse(unpublished.stdout) as { facts: { planAudit: QueueEnvironmentAuditComparison } }
+    expect(older.facts.planAudit.installed).toBeUndefined()
+    expect(older.facts.planAudit.installedUnavailable).toBe(
+      `the resident runner (pid ${String(process.pid)}) published no installed plan — it predates the field; restart it to publish one`,
+    )
+
+    // No resident at all: nothing is published, and the line says that too.
+    await rm(join(repo, ".git", "yrd", "resident-runner", "status.json"))
+    const absent = await probe(repo, true)
+    const none = JSON.parse(absent.stdout) as { facts: { planAudit: QueueEnvironmentAuditComparison } }
+    expect(none.facts.planAudit.installedUnavailable).toBe(
+      "no live resident runner, so no installed plan was published to compare",
+    )
   })
 })

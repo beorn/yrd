@@ -8,8 +8,21 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { failureFact } from "@yrd/core"
-import { execYrdProcessInPlace } from "../src/runtime-reload.ts"
-import { isYrdRuntimeReloadRequest, requestYrdRuntimeReload } from "../src/run.ts"
+import {
+  MAX_CONSECUTIVE_RUNTIME_RELOADS,
+  YRD_RUNTIME_RELOADS_ENV,
+  consecutiveRuntimeReloads,
+  execYrdProcessInPlace,
+  runtimeReloadLineage,
+  withRuntimeReloads,
+} from "../src/runtime-reload.ts"
+import {
+  isYrdRuntimeReloadRequest,
+  requestYrdRuntimeReload,
+  requireInstalledDeclaredPlan,
+  runtimeReloadEnv,
+} from "../src/run.ts"
+import type { YrdCliServices } from "../src/types.ts"
 
 const roots: string[] = []
 
@@ -24,19 +37,113 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 describe("in-place runtime reload", () => {
-  it("is a typed control transfer carrying the installed-plan-stale finding", () => {
+  it("is a typed control transfer carrying the installed-plan-stale finding and the replacement's count", () => {
     const finding = { code: "installed-plan-stale" as const, message: "this process installed check→merge …" }
     const request = (() => {
       try {
-        requestYrdRuntimeReload(finding)
+        requestYrdRuntimeReload(finding, 2)
       } catch (error) {
         return error
       }
       return undefined
     })()
     expect(isYrdRuntimeReloadRequest(request)).toBe(true)
-    expect(request).toMatchObject({ name: "YrdRuntimeReloadRequest", finding })
+    expect(request).toMatchObject({ name: "YrdRuntimeReloadRequest", finding, reloads: 2 })
     expect(isYrdRuntimeReloadRequest(new Error("not a reload"))).toBe(false)
+    // The host execs the replacement with the same env plus its place in the
+    // lineage, which is the only thing that lets the replacement count too.
+    if (!isYrdRuntimeReloadRequest(request)) throw new Error("expected a reload request")
+    expect(runtimeReloadEnv({ PATH: "/usr/bin", YRD_RUNTIME_RELOADS: "1" }, request)).toEqual({
+      PATH: "/usr/bin",
+      YRD_RUNTIME_RELOADS: "2",
+    })
+  })
+
+  it("reads the lineage count from the exec env, absent as zero, and refuses a corrupt one", () => {
+    expect(consecutiveRuntimeReloads({})).toBe(0)
+    expect(consecutiveRuntimeReloads({ [YRD_RUNTIME_RELOADS_ENV]: "" })).toBe(0)
+    expect(consecutiveRuntimeReloads({ [YRD_RUNTIME_RELOADS_ENV]: "3" })).toBe(3)
+    expect(consecutiveRuntimeReloads(withRuntimeReloads({}, 1))).toBe(1)
+    expect(() => consecutiveRuntimeReloads({ [YRD_RUNTIME_RELOADS_ENV]: "three" })).toThrow(
+      /YRD_RUNTIME_RELOADS='three' is not a non-negative integer/u,
+    )
+    expect(() => withRuntimeReloads({}, 0)).toThrow(RangeError)
+  })
+
+  it("bounds consecutive reloads: three stale gates in a row reload, the fourth refuses instead of exec'ing", async () => {
+    // A fake execve: each reload request "replaces" the process by
+    // re-creating the lineage from the env the host would have exec'd with.
+    const stale = {
+      code: "installed-plan-stale" as const,
+      message: "yrd: this process installed check→merge, but main tip declares check→second→merge",
+    }
+    let findings: readonly { code: string; message: string }[] = [stale]
+    const services: YrdCliServices = {
+      queue: {
+        auditEnvironment: async () => ({
+          findings: findings as never,
+          comparison: {
+            base: "main",
+            tip: {
+              sha: "b".repeat(40),
+              configAuthority: ".yrd.yml",
+              configBlobSha: "2".repeat(40),
+              steps: ["check", "second", "merge"],
+              batchSize: 1,
+            },
+            installed: { source: "this-process", steps: ["check", "merge"], batchSize: 1 },
+          },
+        }),
+      },
+    }
+    let env: NodeJS.ProcessEnv = { PATH: "/usr/bin" }
+    let lineage = runtimeReloadLineage(env)
+    const execs: number[] = []
+    const gate = () =>
+      requireInstalledDeclaredPlan(services, {
+        reloadInPlace: {
+          lineage,
+          request: (finding, reloads) => {
+            expect(finding).toEqual(stale)
+            execs.push(reloads)
+            throw new Error(`execve replaced the process as reload ${String(reloads)}`)
+          },
+        },
+      })
+    const reexec = (reloads: number): void => {
+      env = withRuntimeReloads(env, reloads)
+      lineage = runtimeReloadLineage(env)
+    }
+
+    for (const expected of [1, 2, 3]) {
+      await expect(gate()).rejects.toThrow(`execve replaced the process as reload ${String(expected)}`)
+      expect(execs.at(-1)).toBe(expected)
+      reexec(expected)
+    }
+    expect(lineage.consecutiveReloads).toBe(MAX_CONSECUTIVE_RUNTIME_RELOADS)
+
+    // The fourth stale gate in a row is a refusal, not an exec: it names the
+    // tip, the blob, the count and the by-hand cure.
+    const exhausted = await gate().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    )
+    expect(failureFact(exhausted)).toMatchObject({ kind: "refusal", code: "installed-plan-reload-exhausted" })
+    const message = exhausted instanceof Error ? exhausted.message : String(exhausted)
+    expect(message).toContain("exec'd in place 3 times in a row (YRD_RUNTIME_RELOADS=3)")
+    expect(message).toContain(`main tip ${"b".repeat(8)} (config blob ${"2".repeat(8)})`)
+    expect(message).toContain("A 4th reload would loop forever")
+    expect(message).toContain("restart the habitant by hand")
+    expect(execs).toEqual([1, 2, 3])
+
+    // A cycle that completes without a stale finding ends the chain: the next
+    // stale gate reloads as number one again.
+    findings = []
+    await gate()
+    expect(lineage.consecutiveReloads).toBe(0)
+    findings = [stale]
+    await expect(gate()).rejects.toThrow("execve replaced the process as reload 1")
+    expect(execs).toEqual([1, 2, 3, 1])
   })
 
   it("closes the resident runtime before replacing the exact process image", async () => {

@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { raiseFailure } from "@yrd/core"
 import { uncarriedLine } from "../src/queue-status-view.tsx"
 import { followQueueRuns, requestYrdRuntimeReload, residentRunnerStatus } from "../src/run.ts"
 import { createResidentHarness } from "./support/resident-harness.ts"
@@ -76,13 +77,68 @@ describe("the resident's per-cycle declared-plan gate", () => {
 
     await expect(
       followQueueRuns(harness.app, [], { json: true, interval: 1 }, harness.io, async () => {
-        requestYrdRuntimeReload(finding)
+        requestYrdRuntimeReload(finding, 1)
       }),
-    ).rejects.toMatchObject({ name: "YrdRuntimeReloadRequest" })
+    ).rejects.toMatchObject({ name: "YrdRuntimeReloadRequest", reloads: 1 })
     await expect(residentRunnerStatus(repo)).resolves.toMatchObject({
       clean: false,
       queueProgress: { state: "stalled", observedAt: expect.any(String), findings: [finding] },
+      // The plan this resident built rides every heartbeat, so the supervisor
+      // probe can compare it against the tip without a runtime of its own.
+      installedPlan: {
+        batchSize: 1,
+        steps: [
+          { name: "check", title: "check", revision: "check-v1", kind: "check", classification: "carrier" },
+          { name: "merge", title: "merge", revision: "merge-v1", kind: "merge" },
+        ],
+      },
     })
+  })
+
+  it("records the reload-exhausted refusal in the heartbeat before the unclean exit", async () => {
+    const repo = await queueRepository()
+    const headSha = await git(repo, "rev-parse", "HEAD")
+    const harness = createResidentHarness({ run: async () => [] })
+    Object.assign(harness.io, {
+      cwd: repo,
+      repositoryRoot: repo,
+      runner: "yrd-cli:reload-exhausted",
+      implementationSource: `git:${headSha}`,
+    })
+    const message =
+      "yrd: this process was exec'd in place 3 times in a row (YRD_RUNTIME_RELOADS=3) and its installed plan is still not the one main tip declares"
+    await expect(
+      followQueueRuns(harness.app, [], { json: true, interval: 1 }, harness.io, async () => {
+        raiseFailure("refusal", "installed-plan-reload-exhausted", message)
+      }),
+    ).rejects.toMatchObject({ failure: { code: "installed-plan-reload-exhausted" } })
+    await expect(residentRunnerStatus(repo)).resolves.toMatchObject({
+      clean: false,
+      queueProgress: {
+        state: "stalled",
+        observedAt: expect.any(String),
+        findings: [{ code: "installed-plan-reload-exhausted", message }],
+      },
+    })
+  })
+
+  it("refuses a published plan that does not parse rather than reading it as unpublished", async () => {
+    const repo = await queueRepository()
+    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
+    await mkdir(join(statusPath, ".."), { recursive: true })
+    const baseStatus = {
+      pid: process.pid,
+      startedAt: "2026-08-23T20:00:00.000Z",
+      lastTickAt: "2026-08-23T20:01:00.000Z",
+      implementationSource: `git:${"a".repeat(40)}`,
+    }
+    await writeFile(statusPath, `${JSON.stringify({ ...baseStatus, installedPlan: { batchSize: 1, steps: [] } })}\n`)
+    await expect(residentRunnerStatus(repo)).rejects.toMatchObject({
+      failure: { code: "resident-runner-status-invalid" },
+    })
+    // Absent is a real answer: a resident older than the field.
+    await writeFile(statusPath, `${JSON.stringify(baseStatus)}\n`)
+    await expect(residentRunnerStatus(repo)).resolves.not.toHaveProperty("installedPlan")
   })
 })
 

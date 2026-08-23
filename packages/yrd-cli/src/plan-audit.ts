@@ -150,12 +150,16 @@ export function installedPlanStale(
   base: string,
   tip: DeclaredPlanAt,
   installed: QueuePlanDescriptor,
+  /** Whose installed plan this is: "this process" (the default, a full host
+   * judging its own runtime) or the resident whose PUBLISHED plan the
+   * supervisor probe compares, e.g. "the resident runner (pid 4242)". */
+  subject = "this process",
 ): QueueAuditFindingEmission | undefined {
   const deltas = planDeltas(tip, installed, {
     expected: `${base} tip ${shortSha(tip.sha)}`,
-    actual: "this process",
-    missingActual: "is declared at the tip but not installed in this process",
-    missingExpected: "is installed in this process but no longer declared at the tip",
+    actual: subject,
+    missingActual: `is declared at the tip but not installed in ${subject}`,
+    missingExpected: `is installed in ${subject} but no longer declared at the tip`,
   })
   if (deltas.length === 0) return undefined
   const installedNames = new Set(installed.steps.map((step) => step.name))
@@ -163,13 +167,13 @@ export function installedPlanStale(
   const consequence =
     missing.length > 0
       ? `Every Run at this tip would refuse with declared-step-not-installed because ${missing.join(", ")} ` +
-        `${missing.length === 1 ? "has" : "have"} no Job in this process. `
+        `${missing.length === 1 ? "has" : "have"} no Job in ${subject}. `
       : "Runs read WHICH steps run from git, but the commands they execute and the admission projections come " +
-        "from the step definitions this process built at startup, which no longer match the tip. "
+        `from the step definitions ${subject} built at startup, which no longer match the tip. `
   return {
     code: "installed-plan-stale",
     message:
-      `yrd: this process installed ${planArrow(installed.steps)} (batch ${String(installed.batchSize)}), but ` +
+      `yrd: ${subject} installed ${planArrow(installed.steps)} (batch ${String(installed.batchSize)}), but ` +
       `${base} tip ${shortSha(tip.sha)} (config blob ${shortSha(tip.configBlobSha)}) declares ` +
       `${planArrow(tip.steps)} (batch ${String(tip.batchSize)}): ${deltas.join("; ")}. ${consequence}` +
       "Restart this queue runner so it builds the declared steps.",
