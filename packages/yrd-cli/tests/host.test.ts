@@ -526,16 +526,16 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // retires the correlation pair from every schema that carries props — an
     // intentional persisted-contract change, so the identity moves and the
     // correlation-era predecessor gains a retained edge below.
-    // Conscious update 2026-08-23 (23192): the declared step list left
-    // `initialState`. While it lived there, an ordinary `.yrd.yml` checks edit
-    // was indistinguishable from a schema change — it invalidated every stored
-    // checkpoint and refused any Candidate carrying it with
+    // Conscious update 2026-08-23 (23192): `QueuesState.defaultSteps` is
+    // DELETED and every Run now records the plan git declared at its base sha
+    // (`source`, `baseSha`, `configBlobSha` on `stepSelection`). Both are
+    // persisted-contract changes, so the identity moves once, deliberately.
+    // While the step list lived in `initialState`, an ordinary `.yrd.yml`
+    // checks edit was indistinguishable from a schema change — it invalidated
+    // every stored checkpoint and refused any Candidate carrying it with
     // `checkpoint-migration-certificate-missing`, so the declared check could
-    // not be adopted at all. Nothing plans from the persisted copy any more, so
-    // it is not a persisted contract and does not belong in the identity.
-    // Registering a NEW step still moves the identity (a new job definition is
-    // a real persisted contract) — see docs/design.md § Step plan.
-    expect(first.manifest.targetIdentity).toBe("288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817")
+    // not be adopted at all.
+    expect(first.manifest.targetIdentity).toBe("ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
@@ -1905,7 +1905,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // through durable state: `queues.defaultSteps` is no longer seeded from
     // configuration, so a checkpoint can never supply a plan the configuration
     // does not declare, and a `.yrd.yml` edit is not a state change (23192).
-    expect(app.state().queues.defaultSteps).toBeUndefined()
+    expect("defaultSteps" in app.state().queues, "the durable state carries no step plan at all").toBe(false)
     expect(app.queue.steps().map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(Object.keys(app.commands.bay)).toEqual([
       "open",

@@ -82,7 +82,11 @@ function checkpointJournal(base: Journal<unknown>) {
   }
 }
 
-function queuePlugin(declared: readonly StepName[], ran: string[]) {
+function queuePlugin(
+  declared: readonly StepName[],
+  ran: string[],
+  resolveDeclaredPlan?: (baseSha: string) => { configBlobSha: string; steps: readonly string[] },
+) {
   const check = withStep(
     "check",
     (): JobResult<{ ok: boolean }> => {
@@ -111,12 +115,19 @@ function queuePlugin(declared: readonly StepName[], ran: string[]) {
     batch: false,
     defaultSteps: declared,
     resolveBaseSha: () => BASE,
+    ...(resolveDeclaredPlan === undefined ? {} : { resolveDeclaredPlan }),
   })
 }
 
-async function createApp(declared: readonly StepName[], journal: Journal<unknown>, id: () => string, ran: string[]) {
+async function createApp(
+  declared: readonly StepName[],
+  journal: Journal<unknown>,
+  id: () => string,
+  ran: string[],
+  resolveDeclaredPlan?: (baseSha: string) => { configBlobSha: string; steps: readonly string[] },
+) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = queuePlugin(declared, ran)
+  const queue = queuePlugin(declared, ran, resolveDeclaredPlan)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal, id, clock: () => "2026-01-01T00:00:00.000Z", log: createLogger("t", [{ level: "silent" }]) },
@@ -164,42 +175,60 @@ describe("declared step plan", () => {
     await app.queue.run({ prs: [await submit(app, "topic/configured", "1")] }, runtime)
     expect(app.state().queues.records.root?.entries?.[0]?.value?.stepSelection).toEqual({
       authority: "configured",
-      source: "declared",
+      source: "declared-at-base",
       steps: ["check", "review", "merge"],
     })
 
     await app.queue.run({ prs: [await submit(app, "topic/explicit", "2")], steps: ["check", "merge"] }, runtime)
-    expect(app.queue.get("R2")?.stepSelection).toMatchObject({ authority: "explicit", source: "requested" })
+    expect(app.queue.get("R2")?.stepSelection).toMatchObject({ authority: "explicit", source: "explicit" })
   })
 
-  it("re-derives over a stale stored step list and says so in the run record and the audit", async () => {
-    const cache = checkpointJournal(createMemoryJournal())
-    const id = ids()
+  it("runs the plan the base ref's config declares, recorded with its base and blob shas", async () => {
     const ran: string[] = []
-
-    {
-      await using first = await createApp(["check", "review", "merge"], cache.journal, id, ran)
-      await first.queue.run({ prs: [await submit(first, "topic/one", "1")] }, runtime)
-    }
-    // A checkpoint written before the declared plan became the authority: the
-    // same identity, a narrower list. Preferring it is the defect.
-    cache.setStoredDefaultSteps(["check", "merge"])
-
-    ran.length = 0
-    await using second = await createApp(["check", "review", "merge"], cache.journal, id, ran)
-    expect(second.state().queues.defaultSteps).toEqual(["check", "merge"])
-
-    await second.queue.run({ prs: [await submit(second, "topic/two", "2")] }, runtime)
-    expect(ran, "the declared plan runs; the stored list is history").toEqual(["check", "review", "merge"])
-    expect(second.queue.get("R2")?.stepSelection).toMatchObject({
-      authority: "configured",
-      source: "declared",
+    const blob = "c".repeat(40)
+    await using app = await createApp(["check", "merge"], createMemoryJournal(), ids(), ran, () => ({
+      configBlobSha: blob,
       steps: ["check", "review", "merge"],
-      supersededSteps: ["check", "merge"],
-    })
+    }))
 
-    const finding = second.queue.audit().findings.find((entry) => entry.code === "step-plan-drift")
-    expect(finding?.message).toContain("check→merge")
-    expect(finding?.message).toContain("check→review→merge")
+    await app.queue.run({ prs: [await submit(app, "topic/declared", "1")] }, runtime)
+
+    // The process was constructed declaring two steps; the base ref declares
+    // three. Git is the authority, so three run.
+    expect(ran).toEqual(["check", "review", "merge"])
+    expect(app.queue.get("R1")?.stepSelection).toMatchObject({
+      source: "declared-at-base",
+      baseSha: BASE,
+      configBlobSha: blob,
+      steps: ["check", "review", "merge"],
+    })
+  })
+
+  it("refuses a base ref that declares a step this process cannot execute", async () => {
+    const ran: string[] = []
+    await using app = await createApp(["check", "merge"], createMemoryJournal(), ids(), ran, () => ({
+      configBlobSha: "d".repeat(40),
+      steps: ["check", "publish", "merge"],
+    }))
+
+    // Steps carry their runner-bound Job, registered when the process was
+    // built. A step the base ref declares but this process never installed has
+    // nothing to execute, and running the rest silently is exactly the defect
+    // 23192 records — so the run refuses and names what is missing.
+    await expect(app.queue.run({ prs: [await submit(app, "topic/unknown", "1")] }, runtime)).rejects.toThrow(/publish/u)
+    expect(ran, "nothing may execute under a plan this process cannot honour").toEqual([])
+  })
+
+  it("keeps an explicit --steps selection authoritative over the declared plan", async () => {
+    const ran: string[] = []
+    await using app = await createApp(["check", "review", "merge"], createMemoryJournal(), ids(), ran, () => ({
+      configBlobSha: "e".repeat(40),
+      steps: ["check", "review", "merge"],
+    }))
+
+    await app.queue.run({ prs: [await submit(app, "topic/explicit", "1")], steps: ["check", "merge"] }, runtime)
+
+    expect(ran).toEqual(["check", "merge"])
+    expect(app.queue.get("R1")?.stepSelection).toMatchObject({ authority: "explicit", source: "explicit" })
   })
 })

@@ -116,6 +116,9 @@ import {
   type QueueStep,
   type QueueUnassociatedTerminal,
   type StepName,
+  DeclaredStepPlanSchema,
+  type DeclaredStepPlan,
+  type DeclaredStepPlanAtBase,
   type StepSelection,
   type ChangeEligibility,
   type ChangeCheckRecord,
@@ -209,6 +212,10 @@ const QueueRunArgsSchema = z
     steps: z.array(StepNameSchema).optional(),
     /** Exact queue tip resolved by the effectful Queue facade before dispatch. */
     baseSha: GitShaSchema.optional(),
+    /** The step plan the config at `baseSha` declares, read from git by the
+     * effectful Queue facade. The default authority for this run: `apply` is a
+     * pure reducer and cannot read a blob itself. */
+    declaredPlan: DeclaredStepPlanSchema.optional(),
     /** Immutable Candidate facts prepared by the effectful Queue facade. */
     candidate: CandidateCreatedSchema.optional(),
   })
@@ -711,6 +718,12 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   defaultBase?: string
   requires?: readonly QueueRequirement[]
   resolveBaseSha?(base: string): string | Promise<string>
+  /** Read the step plan the config at an exact base sha declares. Git is the
+   * authority for WHICH steps run; this process's installed set is the
+   * authority for which ones it can execute, and a plan naming a step it never
+   * installed refuses rather than running a shorter list (23192). Absent for
+   * embedded hosts with no repository, which fall back to the installed set. */
+  resolveDeclaredPlan?(baseSha: string): DeclaredStepPlanAtBase | Promise<DeclaredStepPlanAtBase>
   prepareCandidate?: CandidatePreparer
   /** Repository-truth sink for one immutable terminal merge record. */
   recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
@@ -1113,6 +1126,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             steps,
             options.defaultBase,
             options.resolveBaseSha,
+            options.resolveDeclaredPlan,
             options.prepareCandidate,
             options.recordMerge,
             configuredRunner,
@@ -1342,6 +1356,7 @@ function createQueue<Shape extends ChangeShape>(
   steps: readonly RuntimeStep[],
   defaultBase: string | undefined,
   resolveBaseSha: QueueOptions<readonly AnyStepDef[]>["resolveBaseSha"],
+  resolveDeclaredPlan: QueueOptions<readonly AnyStepDef[]>["resolveDeclaredPlan"],
   prepareCandidate: CandidatePreparer | undefined,
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
   configuredRunner: Runner | undefined,
@@ -1405,6 +1420,20 @@ function createQueue<Shape extends ChangeShape>(
       if (result === undefined) {
         result = Promise.resolve(resolveBaseSha(base))
         resolved.set(base, result)
+      }
+      return result
+    }
+  }
+
+  type CyclePlanResolver = (baseSha: string) => Promise<DeclaredStepPlan>
+  const createDeclaredPlanCycle = (): CyclePlanResolver | undefined => {
+    if (resolveDeclaredPlan === undefined) return undefined
+    const resolved = new Map<string, Promise<DeclaredStepPlan>>()
+    return (baseSha) => {
+      let result = resolved.get(baseSha)
+      if (result === undefined) {
+        result = Promise.resolve(resolveDeclaredPlan(baseSha)).then((plan) => ({ baseSha, ...plan }))
+        resolved.set(baseSha, result)
       }
       return result
     }
@@ -2481,6 +2510,7 @@ function createQueue<Shape extends ChangeShape>(
             }
           }
           const resolveCycleBase = createBaseResolutionCycle()
+          const resolveCyclePlan = createDeclaredPlanCycle()
           await actions.refresh()
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
@@ -2509,7 +2539,7 @@ function createQueue<Shape extends ChangeShape>(
             ),
           )
           const requested = requestedPRs(snapshot.bays, args, consumed, intentCutoff)
-          const authoritySteps = requestedOrDeclaredSteps(steps, args.steps)
+          const authoritySteps = requestedOrDeclaredSteps(steps, args.steps, args.declaredPlan)
           const authorityGaps = selectorless
             ? requested.flatMap((pr) => {
                 const requestedSnapshot = Queues.snapshot(pr)
@@ -2772,10 +2802,18 @@ function createQueue<Shape extends ChangeShape>(
                   `yrd: Candidate preparation did not settle for '${members.map((pr) => pr.id).join(", ")}'`,
                 )
               }
+              // Git is read HERE, at the exact base sha this candidate was
+              // prepared against — so a run re-prepared after the base moved
+              // picks up the config that moved with it, and `apply` stays a
+              // pure reducer over the plan it is handed.
+              const declaredPlan = await resolveCyclePlan?.(baseSha)
               const started = await actions.run({
                 prs: members.map((pr) => pr.id),
                 ...(args.steps === undefined ? {} : { steps: args.steps }),
                 baseSha,
+                ...(declaredPlan === undefined
+                  ? {}
+                  : { declaredPlan: { ...declaredPlan, steps: [...declaredPlan.steps] } }),
                 ...(facts === undefined ? {} : { candidate: facts }),
               })
               const ejected = started.events.find((applied) => applied.name === "pr/needs-author")
@@ -3604,12 +3642,12 @@ function createQueueCommands(
     params: QueueRunArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
-      const selected = requestedOrDeclaredSteps(steps, args.steps)
+      const selected = requestedOrDeclaredSteps(steps, args.steps, args.declaredPlan)
       const selection = stepSelection(
-        state.queues,
         steps,
         selected,
         args.steps === undefined ? "configured" : "explicit",
+        args.steps === undefined ? args.declaredPlan : undefined,
       )
       const explicitStepAuthority = selection.authority === "explicit"
       const selectionResult = runnableChangeSelection(state, args, steps, needsPersonOwner, new Set(), {
@@ -5048,30 +5086,50 @@ function declaredDefaultSteps(steps: readonly RuntimeStep[]): RuntimeStep[] {
   return steps.filter((step) => step.declaredDefault)
 }
 
-/** The plan a run request executes: an explicit `--steps` selection when the
- * caller gave one, the declared default plan otherwise. Never the durable
- * `queues.defaultSteps` — that copy is history (23192). */
-function requestedOrDeclaredSteps(steps: readonly RuntimeStep[], requested?: readonly string[]): RuntimeStep[] {
-  return requested === undefined ? declaredDefaultSteps(steps) : selectSteps(steps, requested)
+/** The plan a run request executes.
+ *
+ * Precedence: an explicit `--steps` selection, then the plan git declares at
+ * this run's base sha, then the installed set (embedded hosts with no
+ * repository to read). The durable state is never consulted — it no longer
+ * carries a plan at all (23192).
+ */
+function requestedOrDeclaredSteps(
+  steps: readonly RuntimeStep[],
+  requested?: readonly string[],
+  declared?: DeclaredStepPlan,
+): RuntimeStep[] {
+  if (requested !== undefined) return selectSteps(steps, requested)
+  if (declared !== undefined) return declaredPlanSteps(steps, declared)
+  return declaredDefaultSteps(steps)
 }
 
-/** The stored step list a restored checkpoint carries, when it disagrees with
- * what the configuration now declares.
+/** Map a git-declared plan onto this process's installed steps, IN THE ORDER
+ * THE CONFIG DECLARES.
  *
- * Quiet by construction once every live checkpoint was written by this code:
- * `queues.defaultSteps` is no longer seeded from configuration, so only a
- * checkpoint predating 23192 can hold one. While one does, the divergence is
- * reported — never used. */
-function supersededStepPlan(
-  queues: DeepReadonly<QueuesState>,
-  declared: readonly RuntimeStep[],
-): readonly StepName[] | undefined {
-  const stored = queues.defaultSteps
-  if (stored === undefined) return undefined
-  const names = declared.map((step) => step.name)
-  return stored.length === names.length && stored.every((name, index) => name === names[index])
-    ? undefined
-    : [...stored]
+ * A step defs's Job is registered when the process is built, so a name the base
+ * ref declares but this process never installed has nothing to execute. Running
+ * the remainder is precisely the defect 23192 records — a declared check that
+ * silently never ran — so this refuses and names the gap and its remedy. That
+ * refusal is also what keeps the pure admission projections honest: they read
+ * the installed set, and no run proceeds while the two disagree.
+ */
+function declaredPlanSteps(steps: readonly RuntimeStep[], declared: DeclaredStepPlan): RuntimeStep[] {
+  const installed = new Map(steps.map((step) => [step.name, step] as const))
+  const missing = declared.steps.filter((name) => !installed.has(name))
+  if (missing.length > 0) {
+    raiseFailure(
+      "refusal",
+      "declared-step-not-installed",
+      `yrd: the queue config at base ${declared.baseSha.slice(0, 8)} (blob ${declared.configBlobSha.slice(0, 8)}) ` +
+        `declares ${missing.map((name) => `'${name}'`).join(", ")}, which this runner did not install. ` +
+        `It installed ${steps.map((step) => step.name).join("→")}. Running the rest would execute fewer checks ` +
+        "than the base branch declares. Restart this queue runner so it builds the declared steps.",
+    )
+  }
+  return declared.steps.flatMap((name) => {
+    const step = installed.get(name)
+    return step === undefined ? [] : [step]
+  })
 }
 
 function descriptor(step: RuntimeStep | QueueStep): InstalledStep {
@@ -5096,16 +5154,16 @@ function selectSteps(steps: readonly RuntimeStep[], names?: readonly string[]): 
 }
 
 function stepSelection(
-  queues: DeepReadonly<QueuesState>,
   installed: readonly RuntimeStep[],
   selected: readonly RuntimeStep[],
   authority: StepSelection["authority"],
+  declaredPlan: DeclaredStepPlan | undefined,
 ): StepSelection {
   const names = selected.map((step) => step.name)
   const selectedNames = new Set(names)
-  const declared = declaredDefaultSteps(installed)
-  const configuredNames = new Set(declared.map((step) => step.name))
-  const superseded = authority === "configured" ? supersededStepPlan(queues, declared) : undefined
+  const configuredNames = new Set(
+    declaredPlan === undefined ? declaredDefaultSteps(installed).map((step) => step.name) : declaredPlan.steps,
+  )
   const plan = installed.filter((step) => selectedNames.has(step.name) || configuredNames.has(step.name))
   const omittedSteps =
     authority === "explicit"
@@ -5124,12 +5182,15 @@ function stepSelection(
       : []
   return {
     authority,
-    // Which list judged this Run is only half the record; where the list came
-    // from is the other half, and without it a reader cannot tell a plan the
-    // configuration declared from one a stored projection supplied (23192).
-    source: authority === "explicit" ? "requested" : "declared",
+    // Which list judged this Run is only half the record; WHERE it came from is
+    // the other half. `declared-at-base` carries the two shas an audit needs to
+    // compare what executed against what the config declares now, with no
+    // written baseline file in between (23192, 23193).
+    source: authority === "explicit" ? "explicit" : "declared-at-base",
+    ...(authority === "explicit" || declaredPlan === undefined
+      ? {}
+      : { baseSha: declaredPlan.baseSha, configBlobSha: declaredPlan.configBlobSha }),
     steps: names,
-    ...(superseded === undefined ? {} : { supersededSteps: superseded }),
     ...(omittedSteps.length === 0 ? {} : { omittedSteps }),
   }
 }
@@ -5664,11 +5725,7 @@ function materializeArchivedRun(
   if (!visit(id)) return undefined
 
   let projection: QueueState = {
-    queues: Queues.empty({
-      batchSize: live.batchSize,
-      ...(live.defaultSteps === undefined ? {} : { defaultSteps: live.defaultSteps }),
-      requires: live.requires,
-    }),
+    queues: Queues.empty({ batchSize: live.batchSize, requires: live.requires }),
   }
   for (const [, value] of [...entries].toSorted(([left], [right]) => left - right)) {
     const frame = parseJournalFrame(value)
@@ -6515,28 +6572,6 @@ function auditQueues(
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
-  // The one place the durable step list and the declared one are compared. A
-  // restored projection that predates 23192 still carries `defaultSteps`; the
-  // declared plan is what runs, so the stored list can only ever be stale — and
-  // a stale list nobody reports is how a declared check went unexecuted for a
-  // night while `queue audit` said clean. Print BOTH lists and name each side.
-  const declaredPlan = declaredDefaultSteps(steps)
-  const supersededPlan = supersededStepPlan(state.queues, declaredPlan)
-  if (supersededPlan !== undefined) {
-    findings.push({
-      code: "step-plan-drift",
-      message:
-        `Queue saved state carries step plan ${supersededPlan.join("\u2192")} (recorded by an earlier ` +
-        `configuration), while the declared configuration is ` +
-        `${declaredPlan.map((step) => step.name).join("\u2192")}. The declared plan is what runs; the saved ` +
-        "list is history and is never planned from. It clears when this projection next writes a checkpoint.",
-      specimen: "queue:step-plan",
-      resolution: [
-        "No action is required for the executed plan: runs already use the declared configuration.",
-        "Confirm the declared plan with 'yrd queue audit' after the next checkpoint write.",
-      ],
-    })
-  }
   const queued = admissionQueue(state, steps)
   const refusalFindings = admissionRefusalAuditFindings(state, queued, progress, needsPersonOwner)
   findings.push(...refusalFindings)

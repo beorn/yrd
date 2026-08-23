@@ -88,6 +88,7 @@ import {
   type IntegratedShape,
   type PinIntentProvisioner,
   type ChangeShape,
+  type DeclaredStepPlanAtBase,
   type StepDef,
   type StepExecution,
   type StepRunner,
@@ -133,7 +134,9 @@ import { ensureWorkspaceDependencies, type LockfileRegenerationEvidence } from "
 import { submoduleManifestDrift } from "./submodule-manifest-drift.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import {
+  declaredStepNames,
   loadYrdConfig,
+  parseYrdConfig,
   stepGateMode,
   validatePushedYrdConfig,
   type ResolvedYrdProjectConfig,
@@ -382,6 +385,10 @@ type DefaultYrdRuntimeAppOptions = DefaultYrdAppOptions &
     implementationSource?: string
     /** Source root used to derive manifests from the exact target Candidate. */
     implementationRoot?: string
+    /** Repository-relative path of the config authority this host resolved
+     * (`.yrd.yml` unless the invocation named another). Each Run re-reads THIS
+     * path at its own base sha to derive the plan that judges it. */
+    configAuthority?: string
   }>
 
 type CheckpointMigrationCertification = Readonly<{
@@ -1524,6 +1531,45 @@ async function readConfigFromBase(
   return shown.stdout
 }
 
+/** Read the step plan the config declares at ONE EXACT base sha.
+ *
+ * The per-Run authority (C5, C11): `.yrd.yml` at the commit the Run is landing
+ * onto, never a copy this process cached at startup and never durable state.
+ * Both the blob id and the derived list are returned so the Run records what it
+ * was judged by, and `queue audit` can compare that against the config now with
+ * no written baseline file in between (23193).
+ */
+export async function readDeclaredPlanAtBase(
+  process: Pick<Process, "run">,
+  repo: string,
+  baseSha: string,
+  authority: string,
+): Promise<DeclaredStepPlanAtBase> {
+  const object = `${baseSha}:${authority}`
+  const env = cleanGitEnvironment(globalThis.process.env)
+  const blob = await process.run({ argv: ["git", "-C", repo, "rev-parse", object], cwd: repo, env })
+  if (blob.exitCode !== 0) {
+    raiseFailure(
+      "refusal",
+      "queue-config-missing-at-base",
+      `yrd: base ${baseSha.slice(0, 8)} has no queue config at '${authority}', so it declares no step plan. ` +
+        "A Run's checks come from the config at the commit it lands onto; commit one to that base before queuing.",
+    )
+  }
+  const shown = await process.run({ argv: ["git", "-C", repo, "show", object], cwd: repo, env })
+  if (shown.exitCode !== 0) {
+    raiseFailure(
+      "infrastructure",
+      "config-read-failed",
+      shown.stderr.trim() || `yrd: failed to read '${authority}' at base ${baseSha.slice(0, 8)}`,
+    )
+  }
+  return {
+    configBlobSha: blob.stdout.trim(),
+    steps: declaredStepNames(parseYrdConfig(Bun.YAML.parse(shown.stdout))),
+  }
+}
+
 function loadRepositoryConfig(
   repository: YrdRepository,
   process: Pick<Process, "run">,
@@ -1718,6 +1764,16 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
           branch: baseIdentity(base),
         })
       ).sha,
+    // Only when this host RESOLVED a config authority in a repository: that is
+    // what makes the per-Run re-read a like-for-like comparison. An app built
+    // from a hand-supplied config has no file to re-read and keeps the
+    // installed set as its plan.
+    ...(options.configAuthority === undefined
+      ? {}
+      : {
+          resolveDeclaredPlan: (baseSha: string) =>
+            readDeclaredPlanAtBase(options.process, options.repo, baseSha, options.configAuthority ?? ".yrd.yml"),
+        }),
     prepareCandidate: gitCandidatePreparer({
       inject: { process: options.process },
       repo: options.repo,
@@ -1820,7 +1876,8 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // rather than carry a list into every future checkpoint that only ever
         // reports as drift. `@yrd/queue` still reports one it finds, because a
         // library cannot assume its host ran this migration.
-        const { defaultSteps: _retiredStepPlan, ...queuesWithoutStoredPlan } = compacted.queues
+        const { defaultSteps: _retiredStepPlan, ...queuesWithoutStoredPlan } =
+          compacted.queues as typeof compacted.queues & Readonly<{ defaultSteps?: unknown }>
         return {
           ...withoutDeadIntents,
           queues: {
@@ -2817,6 +2874,7 @@ async function createYrdRuntimeHost(
       journal,
       process,
       config: loaded.config,
+      ...(loaded.path === undefined ? {} : { configAuthority: relative(repository.repo, loaded.path) }),
       defaultSubmitter,
       ...(options.authorizeComponentModelChange === undefined
         ? {}

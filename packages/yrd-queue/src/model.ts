@@ -498,23 +498,47 @@ export type SkippedStep = InstalledStep &
 
 /** Where the step list that judged a Run came from.
  *
- * - `declared` — the plan this process's queue configuration declares.
- * - `requested` — an explicit `--steps` selection on the run itself.
+ * - `declared-at-base` — read from the config blob at the Run's base sha. This
+ *   is the git-derived answer and the only default authority.
+ * - `explicit` — an operator's `--steps` selection on the run itself.
  *
  * Absent on records written before 23192, where a default-authority plan was
- * read out of the durable `QueuesState.defaultSteps` and a reader had no way to
- * tell a declared plan from a stored one. */
-export type StepPlanSource = "declared" | "requested"
+ * read out of the durable `QueuesState.defaultSteps` — a stored copy that could
+ * disagree with the configuration and silently won when it did. */
+export type StepPlanSource = "declared-at-base" | "explicit"
+
+/** The step plan a base ref declares, as read from git.
+ *
+ * Both shas are recorded on the Run so an audit can compare what executed
+ * against what the config declares now WITHOUT a written baseline file: the
+ * base sha says which commit's config was read, and the blob id says which
+ * exact config bytes it was. */
+export type DeclaredStepPlan = Readonly<{
+  baseSha: string
+  configBlobSha: string
+  steps: readonly StepName[]
+}>
+
+/** What a reader of the config blob returns: the port is ASKED for one exact
+ * base sha, so it never echoes it back. */
+export type DeclaredStepPlanAtBase = Omit<DeclaredStepPlan, "baseSha">
+
+export const DeclaredStepPlanSchema = z
+  .object({
+    baseSha: GitShaSchema,
+    configBlobSha: GitShaSchema,
+    steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
+  })
+  .strict()
 
 type StepSelectionBase = Readonly<{
   authority: "configured" | "explicit" | "admission"
   source?: StepPlanSource
+  /** The commit whose config declared this plan, and that config's blob id.
+   * Present whenever `source` is `declared-at-base`. */
+  baseSha?: string
+  configBlobSha?: string
   steps: readonly StepName[]
-  /** The step list a restored projection still carried when this Run was
-   * planned, recorded ONLY when it disagreed with the declared plan. The
-   * declared plan is what ran; this names what was superseded so the journal
-   * says which list lost. */
-  supersededSteps?: readonly StepName[]
 }>
 
 export type StepSelection =
@@ -723,13 +747,6 @@ export type QueueAdmissionRefusal = Readonly<{
 
 export type QueuesState = Readonly<{
   batchSize: number
-  /** HISTORY ONLY. A step list a checkpoint written before 23192 still carries.
-   * Nothing plans from it: the executed plan is derived from the declared queue
-   * configuration at plan time. Seeding it from configuration made an ordinary
-   * `.yrd.yml` edit move the projection's checkpoint identity, so the edit could
-   * not be adopted at all; a divergence between this and the declared plan is
-   * reported as `step-plan-drift` and recorded on the Run as `supersededSteps`. */
-  defaultSteps?: readonly StepName[]
   requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
   candidates: Readonly<Record<CandidateId, Candidate>>
@@ -970,7 +987,6 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-progress-stalled",
   "config-drift",
   "runtime-drift",
-  "step-plan-drift",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]
@@ -1063,12 +1079,10 @@ const ReplaySkippedStepSchema = z.preprocess((value) => {
 const StepSelectionSchema = z
   .object({
     authority: z.enum(["configured", "explicit", "admission"]),
-    source: z.enum(["declared", "requested"]).optional(),
+    source: z.enum(["declared-at-base", "explicit"]).optional(),
+    baseSha: GitShaSchema.optional(),
+    configBlobSha: GitShaSchema.optional(),
     steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
-    supersededSteps: z
-      .array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu))
-      .min(1)
-      .optional(),
     omittedSteps: z.array(SkippedStepSchema).min(1).optional(),
   })
   .strict()
@@ -1093,12 +1107,10 @@ const StepSelectionSchema = z
 const ReplayStepSelectionSchema = z
   .object({
     authority: z.enum(["configured", "explicit", "admission"]),
-    source: z.enum(["declared", "requested"]).optional(),
+    source: z.enum(["declared-at-base", "explicit"]).optional(),
+    baseSha: GitShaSchema.optional(),
+    configBlobSha: GitShaSchema.optional(),
     steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
-    supersededSteps: z
-      .array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu))
-      .min(1)
-      .optional(),
     omittedSteps: z.array(ReplaySkippedStepSchema).min(1).optional(),
   })
   .strict()
@@ -1217,13 +1229,11 @@ export const Queues = Object.freeze({
   empty(
     options: Readonly<{
       batchSize: number
-      defaultSteps?: readonly StepName[]
       requires?: readonly QueueRequirement[]
     }>,
   ): QueuesState {
     return {
       batchSize: options.batchSize,
-      ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
       requires: options.requires ?? [],
       pauses: {},
       candidates: {},

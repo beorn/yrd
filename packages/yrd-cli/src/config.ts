@@ -475,7 +475,7 @@ export async function loadYrdConfig(options: {
   const definitions = Object.fromEntries(parsed.checks.map(resolveCheck))
   definitions.merge = { runner: "local", kind: "merge" }
   const checks = parsed.checks.map(checkName)
-  const steps = [...checks, "merge"]
+  const steps = [...declaredStepNames(parsed)]
   const flows = defineConfig(legacyFlow(steps, definitions))
   const kinds = new Map(flows.flows[0]?.steps.map((step) => [step.name, step.kind] as const) ?? [])
   const resolvedDefinitions = Object.fromEntries(
@@ -559,6 +559,17 @@ function legacyFlow(steps: readonly string[], definitions: Readonly<Record<strin
       return kind === "action" ? withActionStep(name, options) : withCheckStep(name, options)
     }),
   })
+}
+
+/** The ordered step names a parsed config declares: its checks, then the
+ * built-in merge.
+ *
+ * ONE definition, shared by the process's own config load and by the per-Run
+ * read of the config blob at a Run's base sha. A second spelling of this list
+ * is how a queue comes to execute something other than what it declares
+ * (23192), so there is deliberately only one. */
+export function declaredStepNames(config: YrdProjectConfig): readonly string[] {
+  return [...config.checks.map(checkName), "merge"]
 }
 
 function checkName(check: z.infer<typeof CheckEntrySchema>): string {

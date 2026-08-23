@@ -398,16 +398,22 @@ argv-array (no string interpolation into `sh -c`); Git ref/branch/issue names
 are treated as hostile input at every boundary (they ride argv, never shell
 text, and are schema-validated on intake).
 
-**C11. The step plan is DECLARED, never restored.** The list of steps a Run
-executes is derived from the queue's declared configuration at plan time
-(`.yrd.yml` checks plus the built-in `merge`, read from the base branch per
-C5). `QueuesState.defaultSteps` is history: a copy some earlier process wrote,
-never an input to a plan. Three consequences, and each one paid for itself:
+**C11. The step plan is READ FROM GIT, per Run, at that Run's base sha.** There
+is no durable step plan: `QueuesState.defaultSteps` is deleted. A Run's plan is
+the `.yrd.yml` blob at the exact commit it is landing onto — checks plus the
+built-in `merge`, the same derivation the process uses for its own config
+(`declaredStepNames`, one definition, deliberately not spelled twice). The
+effectful Queue facade reads it beside the base sha it already resolves and
+hands it to the command, so `apply` stays a pure reducer over a plan it was
+given. Four consequences, and each one paid for itself:
 
-- **Restoring saved state cannot change what runs.** While a plan was read back
-  out of the projection, a checkpoint written before a check was declared kept
-  that check from ever executing — and restarting could not activate it, because
-  the restart replayed the same saved list.
+- **Durable state cannot change what runs.** While a plan was read back out of
+  the projection, a checkpoint written before a check was declared kept that
+  check from ever executing — and restarting could not activate it, because the
+  restart replayed the same saved list.
+- **A base that moves takes its config with it.** A Run re-prepared against a
+  newer base sha resolves the plan at THAT sha, so a landed `.yrd.yml` edit is
+  in force for the next Run without a restart and without `--steps`.
 - **A config change is not a schema change.** The projection's checkpoint
   identity hashes the composition's initial state and registered event schemas.
   While the declared step list sat in that initial state, editing `.yrd.yml`'s
@@ -416,17 +422,19 @@ never an input to a plan. Three consequences, and each one paid for itself:
   the edit with `checkpoint-migration-certificate-missing`. Steps register no
   per-step event schema, so which steps are installed is not a persisted
   contract and is deliberately outside the identity.
-- **Every Run says which list judged it and where that list came from.**
-  `stepSelection.source` is `declared` (the configured plan) or `requested` (an
-  explicit `--steps` selection); `stepSelection.steps` is the list itself.
-  When a restored projection still carries a `defaultSteps` that disagrees with
-  the declaration, the Run records the superseded list in
-  `stepSelection.supersededSteps` and `queue audit` emits `step-plan-drift`
-  naming both lists and their sources. The declared plan is what runs; the
-  stored one is only reported. The CLI's checkpoint migration drops the stored
-  list on the way in, for the same reason it resets `batchSize`; `@yrd/queue`
-  keeps reporting one it still finds, because a library cannot assume its host
-  ran that migration.
+- **A plan this process cannot execute REFUSES.** A step def carries its
+  runner-bound Job, registered when the process was built, so a name the base
+  declares but this runner never installed has nothing to execute. Running the
+  remainder is the original defect, so the Run refuses with
+  `declared-step-not-installed`, naming the gap and the restart that closes it.
+  That refusal is also what keeps the pure admission projections honest: they
+  read the installed set, and no Run proceeds while the two disagree.
+
+Every Run records what judged it and where it came from: `stepSelection.source`
+is `declared-at-base` or `explicit`, `steps` is the list, and for a declared
+plan `baseSha` and `configBlobSha` name the commit and the exact config bytes.
+The per-step `revision` already digests the runner environment, so the record
+carries that too without inventing a second digest.
 
 **C12. The installed baseline is required INPUT to the audit, not optional
 context.** `installed-baseline.json` under the state dir has exactly one writer,
