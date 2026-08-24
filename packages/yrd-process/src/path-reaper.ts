@@ -132,7 +132,9 @@ export function pathReapFailure(result: PathReapResult): string | undefined {
  */
 export function pathReapDeletionFailure(result: PathReapResult): string | undefined {
   const parts = [pathReapFailure(result)]
-  if (result.survivorCoverage !== undefined && !result.survivorCoverage.complete) {
+  if (result.survivorCoverage === undefined) {
+    parts.push("path-holder census coverage missing; deletion cannot be certified")
+  } else if (!result.survivorCoverage.complete) {
     parts.push(
       `path-holder census incomplete; deletion cannot be certified: ${JSON.stringify(result.survivorCoverage)}`,
     )

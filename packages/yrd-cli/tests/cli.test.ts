@@ -604,6 +604,17 @@ function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
 
+function completePathReapResult() {
+  return {
+    targetedPids: [],
+    survivorPids: [],
+    survivorHolders: [],
+    survivorCoverage: { platform: "darwin" as const, mechanism: "lsof" as const, complete: true as const },
+    forcedKill: false,
+    signalFailures: [],
+  }
+}
+
 function runYrd(
   app: Parameters<typeof runYrdRaw>[0],
   argv: readonly string[],
@@ -639,7 +650,7 @@ function runYrd(
           timedOut: false,
         }
       },
-      reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+      reapPath: async () => completePathReapResult(),
     },
     ...services,
   })
@@ -949,7 +960,7 @@ describe("runYrd", () => {
     const services = {
       process: {
         run: async () => ({ stdout: "", stderr: "", exitCode: 1, signal: null, durationMs: 0, timedOut: false }),
-        reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+        reapPath: async () => completePathReapResult(),
       },
     } as unknown as YrdCliServices
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
@@ -4759,7 +4770,7 @@ describe("runYrd", () => {
         }),
         reapPath: async (path: string) => {
           reaped.push(path)
-          return { targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }
+          return completePathReapResult()
         },
       },
     } as unknown as YrdCliServices
@@ -5077,7 +5088,7 @@ describe("runYrd", () => {
           reapPath: async () => {
             reapAttempts += 1
             if (reapAttempts === 3) throw new Error("simulated reap failure")
-            return { targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }
+            return completePathReapResult()
           },
         },
       } as unknown as YrdCliServices
@@ -5115,7 +5126,7 @@ describe("runYrd", () => {
       const successfulApply = outputIO({ cwd: repo, now })
       const successfulServices = {
         process: {
-          reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+          reapPath: async () => completePathReapResult(),
         },
       } as unknown as YrdCliServices
 
@@ -15040,7 +15051,7 @@ describe("PR metadata — title, description, and issue link", () => {
               timedOut: false,
             }
           },
-          reapPath: async () => ({ targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }),
+          reapPath: async () => completePathReapResult(),
         },
       }),
       view.stderr(),

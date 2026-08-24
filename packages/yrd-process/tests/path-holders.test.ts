@@ -38,6 +38,14 @@ describe("inspectPathHolders", () => {
     )
     expect(pathHolderRefusal([])).toBeUndefined()
     expect(
+      pathReapDeletionFailure({
+        targetedPids: [],
+        survivorPids: [],
+        forcedKill: false,
+        signalFailures: [],
+      }),
+    ).toMatch(/coverage missing.*deletion cannot be certified/iu)
+    expect(
       pathReapFailure({
         targetedPids: [42, 57],
         survivorPids: [42, 57],
