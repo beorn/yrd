@@ -112,7 +112,7 @@ describe("convoy visibility — every member of a co-merge renders its own outco
   })
 
   it("shows the whole convoy through `yrd watch`, which shares the timeline renderer", async () => {
-    const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot: convoySnapshot() }))
+    const app = createRenderer({ cols: 220, rows: 50 })(createElement(QueueWatchFrame, { snapshot: convoySnapshot() }))
     try {
       await app.waitForLayoutStable()
       // The split panes share terminal lines and the DETAIL side names the

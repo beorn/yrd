@@ -87,14 +87,15 @@ function twoPaneSnapshot() {
 
 describe("queue watch per-pane selection scopes (item 4a)", () => {
   it("gives QUEUE, DETAIL, RUNNER, and STATS their own contain scopes", async () => {
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot: twoPaneSnapshot() }))
     try {
       await app.waitForLayoutStable()
       const text = app.text
-      // Columns 0..103 are the QUEUE pane, 104+ the DETAIL pane (0.52 split of 200).
-      const LEFT_MAX = 103
-      const RIGHT_MIN = 104
+      // At the 220-column side-by-side fixture the QUEUE pane keeps its
+      // 140-column natural width; DETAIL begins after that pane's divider.
+      const LEFT_MAX = 139
+      const RIGHT_MIN = 140
 
       // Three consecutive rows in the QUEUE list — all selectable, all resolving
       // to ONE shared scope: an in-pane drag between them selects and stays put.

@@ -53,7 +53,7 @@ describe("yrd watch enables terminal mouse tracking", () => {
   })
 
   it("copies selected detail output through OSC 52 while mouse tracking stays enabled", async () => {
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const controller = new AbortController()
     const handle = await run(
       createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),

@@ -7198,6 +7198,7 @@ describe("Queue command adapters", () => {
   })
 
   it("records exhausted thrown authority timeouts as environment refusal without rejecting the change", async () => {
+    const stderrSpy = vi.spyOn(globalThis.process.stderr, "write").mockImplementation(() => true)
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -7220,6 +7221,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("circuit breaker open after 3 consecutive timeouts"))
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -8259,6 +8261,7 @@ describe("Queue command adapters", () => {
   ] as const)(
     "keeps the candidate submitted after a cannot-probe $name",
     async (failure) => {
+      const stderrSpy = vi.spyOn(globalThis.process.stderr, "write").mockImplementation(() => true)
       const fixture = await hookedSubmoduleRepository({
         baseVersion: "base",
         candidateVersion: "candidate",
@@ -8328,7 +8331,14 @@ describe("Queue command adapters", () => {
         },
       })
       expect(configuredCheckRan).toBe(false)
-      expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
+      expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(failure.timedOut ? 3 : 1)
+      if (failure.timedOut) {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining("circuit breaker open after 3 consecutive timeouts"),
+        )
+      } else {
+        expect(stderrSpy).not.toHaveBeenCalled()
+      }
       expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,
@@ -8395,6 +8405,7 @@ describe("Queue command adapters", () => {
   ] as const)(
     "keeps the candidate submitted after a $name",
     async (failure) => {
+      const stderrSpy = vi.spyOn(globalThis.process.stderr, "write").mockImplementation(() => true)
       const fixture = await hookedSubmoduleRepository({
         baseVersion: "base",
         candidateVersion: "candidate",
@@ -8447,6 +8458,13 @@ describe("Queue command adapters", () => {
       })
       expect(configuredCheckRan).toBe(false)
       expect(injectedFailure).toBe(true)
+      if (failure.timedOut) {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining("circuit breaker open after 3 consecutive timeouts"),
+        )
+      } else {
+        expect(stderrSpy).not.toHaveBeenCalled()
+      }
       expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,

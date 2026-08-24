@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createBayJobDefs, currentChangeRev, changeDeliveryState, withBays } from "@yrd/bay"
 import {
   createFailure,
@@ -841,6 +841,7 @@ describe("pr recut --preflight", () => {
   })
 
   it("re-authorizes a certified current-base revision after the Queue consumes its submit authority", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
     const app = await createCliApp({
       merge: async () => ({
         status: "completed",
@@ -931,9 +932,15 @@ describe("pr recut --preflight", () => {
       result: { revision: 3, delivery: "ready" },
     })
     expect(app.state().bays.prs.PR1?.revs).toHaveLength(3)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("WARN yrd:queue"),
+      expect.stringContaining("without runnable authority"),
+      expect.objectContaining({ code: "queue-submit-authority-consumed" }),
+    )
   })
 
   it("does not turn an unchanged authored-content refusal into another identical revision", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
     const app = await createCliApp({
       prepareCandidate: () => {
         throw createFailure({
@@ -987,6 +994,11 @@ describe("pr recut --preflight", () => {
     expect(remedy.stderr()).toContain("composition-invalid")
     expect(remedy.stderr()).toContain("push new authored content")
     expect(app.state().bays.prs.PR1?.revs).toHaveLength(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("WARN yrd:queue"),
+      expect.stringContaining("failed its required checks"),
+      expect.objectContaining({ code: "composition-invalid" }),
+    )
   })
 
   it("refuses --ref with --revision before resolving or mutating anything", async () => {

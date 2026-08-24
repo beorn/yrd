@@ -7,7 +7,7 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 describe("QueueWatchFrame 21106 addendum 15f", () => {
   it("keeps j/k on runs while h/l, arrows, and pointer select one workflow-step tab", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
 
     try {
@@ -91,7 +91,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
   it("labels each step tab with a status glyph + duration, glyph colorized by status (item I)", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
-    const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
+    const app = createRenderer({ cols: 220, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       // The pane opens on the live step (check is running); its output is visible
@@ -135,7 +135,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     // Use the wide tier for an order assertion so the below-tier split does
     // not intentionally clip the tail of a long integrated detail. The 80×24
     // full-tier story separately proves JOB/RUNNER remains visible when narrow.
-    const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
+    const app = createRenderer({ cols: 220, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await app.press("Enter")

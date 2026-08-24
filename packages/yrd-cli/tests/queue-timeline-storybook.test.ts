@@ -60,7 +60,7 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 
 describe("queue timeline storybook", () => {
   it("renders the recovered queue IA without legacy work or disclosure chrome", async () => {
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(
       createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),
       term,
@@ -123,7 +123,7 @@ describe("queue timeline storybook", () => {
   })
 
   it("keeps the STATS detail keyboard-reachable inside the full resizable watch frame", async () => {
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(
       createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),
     )
@@ -140,7 +140,7 @@ describe("queue timeline storybook", () => {
   })
 
   it("opens on meaningful production queue rows and selected run detail", async () => {
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(createElement(QueueTimelineStorybook), term, {
       mouse: true,
       selection: false,
@@ -175,7 +175,7 @@ describe("queue timeline storybook", () => {
   })
 
   it("renders rejected detail without repeated PR, accordion, or DETAILS chrome", async () => {
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot: queueTimelineStories["selected-rejected"].snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -195,8 +195,8 @@ describe("queue timeline storybook", () => {
     }
   })
 
-  it("restores the wide BY column when Escape closes right-side detail", async () => {
-    using term = createTermless({ cols: 160, rows: 50 })
+  it("keeps the wide BY column at the 140-column side-by-side floor and after detail closes", async () => {
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(createElement(QueueTimelineStorybook), term, {
       mouse: true,
       selection: false,
@@ -208,7 +208,7 @@ describe("queue timeline storybook", () => {
         .find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("CHANGES"))
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
-      expect(timelineHeader()).not.toContain("BY")
+      expect(timelineHeader()).toContain("BY")
       // The bottom keybindings footer was removed entirely (item h).
       expect(term.screen.getText()).not.toContain("q quit")
 
@@ -261,7 +261,7 @@ describe("queue timeline storybook", () => {
   })
 
   it("advances shared snapshots without remounting the interactive watch state", async () => {
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(createElement(QueueTimelineStorybook), term, {
       mouse: true,
       selection: false,
@@ -528,7 +528,7 @@ describe("queue timeline storybook", () => {
 
   it("preserves the dragged split ratio when the queue cursor moves", async () => {
     const story = queueTimelineStories["mixed-completed"]
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot }), term, {
       mouse: true,
       selection: false,
@@ -539,7 +539,9 @@ describe("queue timeline storybook", () => {
       // the SplitPane divider (pane side walls start below the title rows).
       const initialDivider = findGlyphColumn(term, "│", 1)
       expect(initialDivider).toBeGreaterThan(0)
-      const draggedDivider = initialDivider + 12
+      // The list is already clamped at its 140-column minimum, so exercise a
+      // valid drag toward (rather than through) that minimum.
+      const draggedDivider = initialDivider - 2
 
       await term.mouse.down(initialDivider, 1)
       await term.mouse.move(draggedDivider, 1)
@@ -605,7 +607,7 @@ describe("queue timeline storybook", () => {
       belowAfterNaturalBoundary.unmount()
     }
 
-    const right = createRenderer({ cols: 160, rows: 50 })(
+    const right = createRenderer({ cols: 220, rows: 50 })(
       createElement(QueueWatchFrame, {
         snapshot: queueTimelineStories["production-overview"].snapshot,
       }),
@@ -614,7 +616,7 @@ describe("queue timeline storybook", () => {
       await right.waitForLayoutStable()
       const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("CHANGES"))
       expect(header).toContain("STATUS")
-      expect(header).not.toContain("BY")
+      expect(header).toContain("BY")
       expect(right.text).toContain("pr#42.1")
       expect(right.text).toContain("20:00")
     } finally {
@@ -625,7 +627,7 @@ describe("queue timeline storybook", () => {
     expect(live.snapshot.outputs?.[0]?.text).toBe("checking one\n")
     expect(live.nextSnapshot?.outputs?.[0]?.text).toBe("checking one\nchecking two\n")
     if (live.nextSnapshot === undefined) throw new Error("live-output-growth is missing its next snapshot")
-    const renderLive = createRenderer({ cols: 200, rows: 50 })
+    const renderLive = createRenderer({ cols: 220, rows: 50 })
     const outputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.snapshot }))
     try {
       await outputFrame.waitForLayoutStable()
@@ -643,7 +645,7 @@ describe("queue timeline storybook", () => {
 
     const anchored = queueTimelineStories["anchored-new"]
     if (anchored.nextSnapshot === undefined) throw new Error("anchored-new is missing its next snapshot")
-    const renderAnchored = createRenderer({ cols: 200, rows: 50 })
+    const renderAnchored = createRenderer({ cols: 220, rows: 50 })
     const anchoredFrame = renderAnchored(createElement(QueueWatchFrame, { snapshot: anchored.snapshot }))
     try {
       await anchoredFrame.waitForLayoutStable()
@@ -674,7 +676,7 @@ describe("queue timeline storybook", () => {
       ],
     })
 
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80) }))
     try {
       await handle.waitForLayoutStable()
@@ -780,7 +782,7 @@ describe("queue timeline storybook", () => {
 
   it("keeps pointer selection equivalent to keyboard cursor movement", async () => {
     const story = queueTimelineStories["pending-only"]
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()

@@ -30,13 +30,19 @@ import {
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 function mainQueue() {
-  const pr = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes")
+  const pr = fixturePr("PR1", "integrated", "2026-07-13T11:10:00.000Z", "Prepare release notes", {
+    integratedAt: "2026-07-13T11:25:00.000Z",
+    terminalRun: "R1",
+  })
   const run = fixtureRun("R1", [pr], "passed", "2026-07-13T11:20:00.000Z", { finishedAt: "2026-07-13T11:25:00.000Z" })
   return fixtureResult([pr], [run])
 }
 
 function releaseQueue() {
-  const pr = fixturePr("PR7", "submitted", "2026-07-13T11:22:00.000Z", "Cut the release branch")
+  const pr = fixturePr("PR7", "integrated", "2026-07-13T11:22:00.000Z", "Cut the release branch", {
+    integratedAt: "2026-07-13T11:44:00.000Z",
+    terminalRun: "R7",
+  })
   const run = fixtureRun("R7", [pr], "passed", "2026-07-13T11:30:00.000Z", { finishedAt: "2026-07-13T11:44:00.000Z" })
   return fixtureRebase("release/next", fixtureResult([pr], [run]))
 }
