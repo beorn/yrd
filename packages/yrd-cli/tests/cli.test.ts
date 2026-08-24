@@ -10311,7 +10311,7 @@ describe("runYrd", () => {
     expect(frame).not.toContain("pr#2.1")
   })
 
-  it("makes queue status the exact unfiltered 24h timeline, including the newest integration", async () => {
+  it("makes the queue view the exact unfiltered 24h timeline, including the newest integration", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     const integrated = outputIO()

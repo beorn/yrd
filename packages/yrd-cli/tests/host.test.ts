@@ -3943,7 +3943,7 @@ checks: [{check: {run: "true"}}]
     })
     expect(stderr).toContain("dep")
     expect(stderr).toContain(pin)
-    // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
+    // Pipeline-routed: the remedy names who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
     expect(stderr).toContain("ordinary change whose diff is the gitlink bump")
@@ -4159,7 +4159,7 @@ checks: [{check: {run: "true"}}]
         code: "submodule-pin-unpublished",
       },
     })
-    // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
+    // Pipeline-routed: the remedy names who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
     expect(stderr).toContain("ordinary change whose diff is the gitlink bump")
@@ -4240,7 +4240,7 @@ checks: [{check: {run: "true"}}]
         code: "submodule-pin-unpublished",
       },
     })
-    // Pipeline-routed: the remedy names the actor who must publish, never a hand-write.
+    // Pipeline-routed: the remedy names who must publish, never a hand-write.
     expect(stderr).not.toContain("git push")
     expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
     expect(stderr).toContain("ordinary change whose diff is the gitlink bump")

@@ -5,23 +5,23 @@ import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { QueueArtifactOutputView, type QueueArtifactOutput } from "../src/watch-pane.tsx"
 
-function artifactOutput(lineCount: number): Extract<QueueArtifactOutput, { source: "recorded" }> {
+function artifactOutput(rowCount: number): Extract<QueueArtifactOutput, { source: "recorded" }> {
   return {
     source: "recorded",
     run: "run-a15",
     step: "check",
     attempt: 1,
     path: "/tmp/run-a15-check.log",
-    text: Array.from({ length: lineCount }, (_, index) => `row ${String(index + 1).padStart(3, "0")}`).join("\n"),
+    text: Array.from({ length: rowCount }, (_, index) => `row ${String(index + 1).padStart(3, "0")}`).join("\n"),
     truncatedBytes: 0,
   }
 }
 
-function outputFrame(lineCount: number) {
+function outputFrame(rowCount: number) {
   return createElement(
     Box,
     { width: 80, height: 12, flexDirection: "column" },
-    createElement(QueueArtifactOutputView, { outputs: [artifactOutput(lineCount)] }),
+    createElement(QueueArtifactOutputView, { outputs: [artifactOutput(rowCount)] }),
   )
 }
 

@@ -1,6 +1,6 @@
 /**
  * @failure The run path and the status surface computed "runnable" separately
- * and disagreed: on 2026-08-16 `queue status` showed seven carriers ready and
+ * and disagreed: on 2026-08-16 the queue view showed seven carriers ready and
  * `mr list` runnable=true while the run path computed not-runnable for every
  * one, and six instruments reported healthy through a six-hour freeze
  * (@pm/incidents/22881; ruling @i/10-merge-queue/22895). Both surfaces now
@@ -194,9 +194,7 @@ describe("eligibility congruence — one fixture, both surfaces", () => {
     })
 
     await expect(app.queue.run({}, { runner: "local", leaseMs: 60_000 })).resolves.toEqual([])
-    const line = events.find(
-      (event) => event.kind === "log" && event.props?.action === "queue-run-no-submitted-prs",
-    )
+    const line = events.find((event) => event.kind === "log" && event.props?.action === "queue-run-no-submitted-prs")
     expect(line).toBeDefined()
     // info, never warn: the empty FIFO is the habitant runner's normal state.
     expect(line?.kind === "log" ? line.level : undefined).toBe("info")

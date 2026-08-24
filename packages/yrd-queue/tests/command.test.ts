@@ -9865,7 +9865,7 @@ describe("Queue command adapters", () => {
     },
   )
 
-  it("preserves canceled authority when another actor merges the same native candidate", async () => {
+  it("preserves canceled authority when another process merges the same native candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`

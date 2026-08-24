@@ -4805,8 +4805,9 @@ async function publishPr(
   const pr = requiredPr(app, selector)
   const revision = currentChangeRev(pr)
   const baseSha = changeBaseSha(pr)
-  if (baseSha === undefined)
-    {raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)}
+  if (baseSha === undefined) {
+    raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)
+  }
   const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
   const submodules = await changedSubmodulePins({
     process,
@@ -7658,7 +7659,7 @@ async function buildQueueListSnapshot(
   const target = resolveQueueTargets(state, [], options.base, options.pr)
   // An operator who named no base and no PR asked about the REPOSITORY, not
   // about `main`: every queue with work is in scope, and the view labels them
-  // 1..N (user directive 2026-08-13). `queue log` has always read its targets
+  // 1..N (user directive 2026-08-13). `yrd log` has always read its targets
   // this way; the listing and watch surfaces were the outliers, and a queue
   // nobody named was simply invisible.
   if (options.base === undefined && options.pr === undefined) {

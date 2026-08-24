@@ -10,7 +10,7 @@ import {
   statusPresentation,
 } from "../src/status-presentation.ts"
 
-describe("shared queue status presentation", () => {
+describe("shared queue-state presentation", () => {
   it("projects bay and queue states through one open/working/done/fail vocabulary", () => {
     expect([
       lifecycleStatus("active"),

@@ -5682,7 +5682,7 @@ describe("Queue", () => {
     expect(replay.queue.status("main").pause).toMatchObject({ allowedPRs: [allowed.id] })
   })
 
-  it("expires a TTL'd queue hold without stopping the habitant that clears it", async () => {
+  it("expires a TTL'd queue pause without stopping the habitant that clears it", async () => {
     const journal = createMemoryJournal()
     let now = "2026-01-01T00:00:00.000Z"
     const app = await createQueueApp({}, journal, () => now)

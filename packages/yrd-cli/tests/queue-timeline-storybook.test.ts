@@ -114,7 +114,7 @@ describe("queue timeline storybook", () => {
         await handle.waitForLayoutStable()
       })
       const changeFrame = term.screen.getText()
-      // Item 31: the fold row reads `▶ Diff +A −B` (minus sign, no line-count
+      // Item 31: the fold row reads `▶ Diff +A −B` (minus sign, no row-count
       // suffix) as the code group's last row.
       expect(changeFrame).toContain("Diff +324 −323")
     } finally {

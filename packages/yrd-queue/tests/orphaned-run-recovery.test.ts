@@ -445,12 +445,12 @@ describe("draft stranded — a pushed PR that nobody submitted must age loudly, 
 /**
  * The read side of the lease seam (@yrd/core/21085-target-model/21094, #undead).
  * The sibling defect above is a run with NO Job. This one has a Job, still
- * `in_progress`, whose executor is gone — so it projects as healthily running
+ * `in_progress`, whose runner is gone — so it projects as healthily running
  * for as long as nobody sweeps it. Live R1740: the lease expired 20:35:03.925Z
  * and the `lose` transition was not written until 20:45:27.620Z; for 10m24s
- * `queue status` showed a live run and `queue audit` reported nothing at all.
+ * the queue view showed a live run and `queue audit` reported nothing at all.
  */
-describe("lapsed executor lease — a Job-backed run projects as running with nothing renewing it", () => {
+describe("lapsed runner lease — a Job-backed run projects as running with nothing renewing it", () => {
   const LEASE_EXPIRES = "2026-01-01T00:00:30.000Z"
 
   async function leasedRun() {

@@ -1340,7 +1340,7 @@ describe("Jobs", () => {
   // execution to be settled `progress-stalled` at its lease. Renewal used to be gated
   // on child stdout, so silence read as death — live specimen R944 / PR165 rev7
   // (2026-08-04) started 18:00:59.800 and was killed 18:01:59.832, exactly 60.03s,
-  // with zero heartbeat transitions. A lease protects against a LOST EXECUTOR; a
+  // with zero heartbeat transitions. A lease protects against a LOST RUNNER; a
   // stall verdict judges a SILENT CHILD, and only the process supervisor holding the
   // child handle can tell those apart.
   it("renews the lease across multiple windows while a silent execution stays alive", async () => {
@@ -1383,7 +1383,7 @@ describe("Jobs", () => {
     await app.close()
   })
 
-  it("lapses a lease within one window when the executor is gone", async () => {
+  it("lapses a lease within one window when the runner is gone", async () => {
     const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID) })
     await app.dispatch(app.commands.sender.send, { message: "orphan" })
     await app.dispatch(app.commands.job.transition, {
