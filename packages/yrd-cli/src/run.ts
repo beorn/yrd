@@ -3025,7 +3025,9 @@ async function provisionBay(
   if (bay?.path === undefined || bay.status !== "active") refusal(`bay '${name}' did not become active`)
   if (options.expectedHead !== undefined && bay.headSha?.toLowerCase() !== options.expectedHead.toLowerCase()) {
     const expected =
-      pr === undefined ? `expected head ${options.expectedHead}` : `change '${pr}' revision head ${options.expectedHead}`
+      pr === undefined
+        ? `expected head ${options.expectedHead}`
+        : `change '${pr}' revision head ${options.expectedHead}`
     const recovery =
       pr === undefined ? "" : `; run 'yrd bay close ${name}', then retry 'yrd pr checkout ${pr} --bay ${name}'`
     refusal(`bay '${name}' HEAD ${bay.headSha ?? "(missing)"} does not match ${expected}${recovery}`)
@@ -4597,7 +4599,8 @@ export async function requireQueueableSubmodulePins(pr: Change, services: YrdCli
     raiseFailure(
       "refusal",
       "pr-base-unresolved",
-      `yrd: change '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}'; ` + "fetch the base branch, then retry",
+      `yrd: change '${pr.id}' base '${pr.base}' resolves to no ref in '${repo}'; ` +
+        "fetch the base branch, then retry",
     )
   }
   const changed = await changedSubmodulePins({
@@ -4802,7 +4805,8 @@ async function publishPr(
   const pr = requiredPr(app, selector)
   const revision = currentChangeRev(pr)
   const baseSha = changeBaseSha(pr)
-  if (baseSha === undefined) raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)
+  if (baseSha === undefined)
+    {raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)}
   const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
   const submodules = await changedSubmodulePins({
     process,
@@ -5076,7 +5080,11 @@ async function executeRemergeChange(
     delivery === "withdrawn" ||
     delivery === "canceled"
   ) {
-    raiseFailure("refusal", "terminal-target", `yrd: change '${pr.id}' is ${delivery}; a finished change cannot be re-merge`)
+    raiseFailure(
+      "refusal",
+      "terminal-target",
+      `yrd: change '${pr.id}' is ${delivery}; a finished change cannot be re-merge`,
+    )
   }
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
@@ -5102,7 +5110,11 @@ async function executeRemergeChange(
       )
     }
     if (approvedCurrentReview === undefined) {
-      raiseFailure("refusal", "review-required", `yrd: change '${pr.id}' needs approval for revision ${currentRevision.n}`)
+      raiseFailure(
+        "refusal",
+        "review-required",
+        `yrd: change '${pr.id}' needs approval for revision ${currentRevision.n}`,
+      )
     }
   }
   // Refuse to silently discard a green check: if the change's current head already
@@ -6214,7 +6226,8 @@ async function listPrs(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
-  const byRecordState = options.state !== undefined && CHANGE_LIST_RECORD_STATES.includes(options.state as Change["state"])
+  const byRecordState =
+    options.state !== undefined && CHANGE_LIST_RECORD_STATES.includes(options.state as Change["state"])
   const byDeliveryStatus =
     options.state !== undefined && CHANGE_LIST_STATES.includes(options.state as ChangeDeliveryState)
   // A value that both vocabularies define has two readings, and picking one
@@ -6750,29 +6763,26 @@ async function ensureIssueDelivery(
 }
 
 async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
-  for (let read = 0; read < 3; read += 1) {
-    const snapshot = await app.journalSnapshot()
-    const issues = issueRows(app, snapshot.state, selected)
-    const bridges = trackerBridges(app, snapshot, ({ issueRef }) => selected === undefined || issueRef === selected)
-    const confirmed = await app.journalSnapshot()
-    if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
-    await printResult(
-      io,
-      jsonEnabled(options),
-      {
-        command: selected === undefined ? "issue.list" : "issue.view",
-        issues,
-        ...bridges,
-      },
-      createElement(IssueLensView, {
-        rows: issues,
-        ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridges.trackerBridgeV2) }),
-      }),
-    )
-    return
-  }
-  refusal(
-    `journal changed while reading issues; retry with 'yrd issue${selected === undefined ? "" : ` view ${selected}`}${jsonEnabled(options) ? " --json" : ""}'`,
+  // journalSnapshot is already one immutable state+cursor cut. Re-reading the
+  // journal to prove that nobody appended after that cut made an ordinary
+  // snapshot query refuse under a live writer even though the first answer was
+  // internally complete. Every field below is projected synchronously from
+  // this one cut; later frames belong to the next invocation.
+  const snapshot = await app.journalSnapshot()
+  const issues = issueRows(app, snapshot.state, selected)
+  const bridges = trackerBridges(app, snapshot, ({ issueRef }) => selected === undefined || issueRef === selected)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    {
+      command: selected === undefined ? "issue.list" : "issue.view",
+      issues,
+      ...bridges,
+    },
+    createElement(IssueLensView, {
+      rows: issues,
+      ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridges.trackerBridgeV2) }),
+    }),
   )
 }
 
@@ -10019,11 +10029,14 @@ export async function refreshTrackedQueueRevisions(
         message: failure.message,
       }
       outcomes.push(outcome)
-      app.log.warn?.(`Could not observe tracked change ${candidate.id}'s branch; it remains queued for another cycle.`, {
-        action: "queue-track-observation-deferred",
-        attempts,
-        ...outcome,
-      })
+      app.log.warn?.(
+        `Could not observe tracked change ${candidate.id}'s branch; it remains queued for another cycle.`,
+        {
+          action: "queue-track-observation-deferred",
+          attempts,
+          ...outcome,
+        },
+      )
       continue
     }
     try {

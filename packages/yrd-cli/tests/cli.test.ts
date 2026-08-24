@@ -13893,6 +13893,37 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
 }
 
 describe("typed issue merge bridge", () => {
+  it("returns one immutable issue snapshot while another runtime appends to the journal", async () => {
+    const journal = createMemoryJournal()
+    await using reader = await createApp({ journal })
+    await using writer = await createApp({ journal, id: ids(20_000) })
+    let reads = 0
+    const racingReader = {
+      ...reader,
+      async journalSnapshot() {
+        const snapshot = await reader.journalSnapshot()
+        reads += 1
+        await writer.bays.submit({
+          branch: `topic/concurrent-issue-${reads}`,
+          headSha: String(reads + 1).repeat(40),
+          base: "main",
+          issue: `@yrd/core/concurrent-issue-${reads}`,
+        })
+        return snapshot
+      },
+    }
+
+    const output = outputIO()
+    expect(await runYrd(racingReader, yrd("issue", "--json"), output.io), output.stderr()).toBe(0)
+    expect(reads).toBe(1)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "issue.list",
+      issues: [],
+      trackerBridge: { asOf: { cursor: 0 }, deliveries: [] },
+      trackerBridgeV2: { asOf: { cursor: 0 }, deliveries: [] },
+    })
+  })
+
   it("keeps a queued submitted revision externally submitted in both tracker bridges", async () => {
     const issueRef = "@yrd/core/22494-trackerbridge-drops-submitted-delivery"
     await using app = await createApp()
