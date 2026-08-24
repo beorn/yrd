@@ -5236,6 +5236,20 @@ async function executeRemergeChange(
             rangeDiff: rewrite.rangeDiff,
           })),
         ]
+  // Re-merge Phase 1 (22925 family, staged-interim per (A)): this call still
+  // mints a ChangeRev for the direct path — the OLD handle, kept as transition
+  // staging, not new persistence semantics. `command.ts:2308`'s
+  // `remergeDirectChangeByMerge` computes `result` by MERGE now, not rebase,
+  // and `result.patchId` is an honest plain identity (no equivalence was
+  // certified — there is nothing to certify against under merge). The
+  // `rangeDiff: "="` tag on the root `sources[0]` entry above is a
+  // schema-constrained literal (no other value type-checks) that no read site
+  // for THIS array currently branches on — verified by inspection, not
+  // exhaustively — so it is a shape discriminant here, not a live "equivalence
+  // was proven" claim; flagging for whoever does the Phase-2 deletion, since a
+  // future consumer that starts reading it would need this same caveat.
+  // Phase 2 deletes this mint entirely for the direct path (candidate-ref +
+  // checks-cache tracking replaces it) — see the plan doc's DoD row.
   const recorded = await app.bays.recut({
     pr: pr.id,
     fromRevision: source.n,
