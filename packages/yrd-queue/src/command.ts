@@ -46,6 +46,7 @@ import type {
 import {
   SubmoduleMainOutcomesSchema,
   CandidateChangeSchema,
+  ChangeSnapshotSchema,
   SubmoduleModelChangeAuthorizationSchema,
   IntegrationProofSchema,
   QueueSubmoduleResolutionEvidenceSchema,
@@ -85,6 +86,7 @@ import {
   type CommandDiagnostic as SharedCommandDiagnostic,
 } from "./check-attribution.ts"
 import { deterministicParentDate } from "./deterministic-parent-date.ts"
+import { exactDelta } from "./content-identity.ts"
 import {
   MERGE_RECORD_NOTES_NAME,
   MERGE_RECORD_REF,
@@ -3678,7 +3680,10 @@ async function prepareCandidateMembers(
     guilty.id = pr.id
     if (pr.intent !== undefined) {
       if (input.prs.length !== 1) {
-        return candidateFailure("intent-batch-refused", "yrd: changes of min commits are serial Queue members, never a batch")
+        return candidateFailure(
+          "intent-batch-refused",
+          "yrd: changes of min commits are serial Queue members, never a batch",
+        )
       }
       if (pr.headSha !== authoritativeBase) {
         return candidateFailure(
@@ -4078,6 +4083,320 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
     if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
     throw new Error("yrd: Candidate scratch construction did not complete")
   }
+}
+
+/**
+ * Re-merge Phase 1 — rebuild by merge, never by rebase.
+ *
+ * A candidate is `merge(base tip, unchanged authored tip)` plus the shaset
+ * fill-in. This is not a second implementation of that merge: it builds one
+ * synthetic single-member `StepExecution` and hands it to
+ * `prepareCandidateMembers` — the SAME per-member logic `gitCandidatePreparer`
+ * uses to build a run's first candidate. One code path serves both a fresh
+ * candidate and a stale-base rebuild; `rebuild-candidate-by-merge.test.ts`
+ * test 9 proves it by replaying a first-candidate witness fixture through
+ * this entry point instead.
+ *
+ * The synthetic member carries neither `recut` nor `intent` nor
+ * `composition` — a rebuild mints no revision and certifies nothing; the
+ * queue never rewrites the author's commits, so there is nothing to certify
+ * against. `remergeChange`'s composed and proposed/preflight sub-paths are
+ * NOT routed through this function (re-merge Phase 1 scope: direct revisions
+ * only; composed revisions rewrite SUBMODULE-side history, a different
+ * problem this phase does not touch).
+ *
+ * Content conflicts refuse `merge-conflict`, whatever the underlying
+ * conflict-resolution machinery's own code — normalized here because that
+ * machinery (`resolveCandidateSubmoduleConflict`) predates this phase's
+ * vocabulary and serves batch (multi-member) submodule composition, a
+ * different case from a single rebuilt member's base-moved conflict.
+ */
+export type RebuildByMergeInput = Readonly<{
+  /** The change id, used only for error attribution and the synthetic commit
+   * message — never persisted, never a revision number. */
+  id: string
+  /** The author's branch name, carried through for error messages only. */
+  branch: string
+  /** The unchanged authored tip. Never rewritten. */
+  headSha: string
+}>
+
+export type RebuildByMergeOptions = Readonly<{
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  artifactRoot?: string
+  env?: NodeJS.ProcessEnv
+  provisionPinIntent?: PinIntentProvisioner
+}>
+
+export type RebuildByMergeResult = Readonly<{
+  /** The candidate: the worktree HEAD after the merge and any shaset fill-in. */
+  sha: string
+  treeSha: string
+  /** True when `exactDelta(target, sha)` is empty — the rebuild changed
+   * nothing against the current base, whether because the authored tip is a
+   * literal ancestor or because its content is already fully contained
+   * (the 23167 specimen: `git cherry` still reports unique commits). */
+  unchanged: boolean
+}>
+
+/**
+ * The ONLY two codes `resolveCandidateSubmoduleConflict`'s conflict branch
+ * (inside `prepareCandidateMembers`, on `git merge`'s own non-zero exit) can
+ * raise: `candidate-conflict` (three sites, including plain content) and
+ * `submodule-composition-conflict`. This phase renames exactly those two to
+ * `merge-conflict` — a NARROW allowlist of what to rename, not a denylist of
+ * what to spare. Everything else `prepareCandidateMembers` can raise (the
+ * deletion/contribution witnesses after a successful merge, the shaset
+ * fill-in's own refusals including `min-commit-unpublished`, the component-
+ * model-authorization family) is a different fact from a different check and
+ * must pass through unrenamed — a denylist here would silently relabel a
+ * witness catching real lost work as an ordinary conflict, which is exactly
+ * the failure mode `unauthoredDeletionFailure` exists to make visible.
+ */
+const CONFLICT_CODES_TO_RENAME = new Set<string>(["candidate-conflict", "submodule-composition-conflict"])
+/** Phase 0's stated remedy, verbatim (hub/yrd/2026-08-23-remerge-phase0-replay.md
+ * § Design call step 3) — appended, never substituted, so the underlying
+ * conflict detail (which paths, which git output) survives alongside it. */
+const MERGE_CONFLICT_REMEDY = "merge or rebase locally and push"
+
+/**
+ * The manual fallback for a merge that conflicts ONLY on gitlink paths the
+ * shaset fill-in already owns. Runs the exact same pieces
+ * `prepareCandidateMembers` runs for its plain (non-composed) member —
+ * `fillAuthoredGitlinksFromMain` (already called by the caller to reach this
+ * function; its result is `fillable`'s corresponding fill, recomputed once
+ * more here so a `min-commit-unpublished` refusal is still possible even when
+ * `git merge` itself did not conflict on every authored gitlink), the two
+ * kept witnesses, `synthesizeGitlinkWrapper` — with ONE difference: any
+ * conflict on a path this change's own fill covers resolves to the base's
+ * (current worktree's) side, since the fill-in overwrites it regardless of
+ * which side `git merge` would otherwise have picked.
+ */
+async function rebuildGitlinkConflictByTakingBase(
+  git: Git,
+  repo: string,
+  path: string,
+  pr: ChangeSnapshot,
+  input: RebuildByMergeInput,
+  target: Readonly<{ sha: string }>,
+  authoredGitlinks: readonly string[],
+  options: RebuildByMergeOptions,
+): Promise<Readonly<{ status: "completed"; conclusion: "success"; output: Readonly<{ sha: string }> }>> {
+  const filled = await fillAuthoredGitlinksFromMain(git, repo, path, pr, authoredGitlinks, undefined)
+  if (filled.status === "failed") {
+    throw createFailure({
+      kind: "refusal",
+      code: filled.error.code,
+      message: filled.error.message,
+      ...(filled.error.pr === undefined ? {} : { pr: filled.error.pr }),
+    })
+  }
+  const fillPaths = new Set(filled.output.updates.map((update) => update.path))
+  const before = await git.commit(path, "HEAD")
+  const message = candidateChangeCommitMessage("merge", pr)
+  const merged = await git.run(path, ["merge", "--no-verify", "--no-ff", "-m", message, input.headSha], true)
+  if (merged.code !== 0) {
+    // A failed submodule merge ("not checked out" — this scratch worktree's
+    // gitlink checkouts are not fully materialized) does not always leave a
+    // normal multi-stage index entry, so `git diff --diff-filter=U`
+    // (`unmergedPaths`, built for ordinary content conflicts) can miss it
+    // silently. `readQueueTreeConflicts` reads `git ls-files --unmerged`
+    // directly — the raw index stages — and is what the first-candidate path
+    // already trusts for this exact shape.
+    const conflicts = (await readQueueTreeConflicts(git, path)).map((conflict) => conflict.path)
+    const nonFillable = conflicts.filter((conflict) => !fillPaths.has(conflict))
+    if (nonFillable.length > 0) {
+      await git.run(path, ["merge", "--abort"], true)
+      throw createFailure({
+        kind: "refusal",
+        code: "merge-conflict",
+        message:
+          `change '${input.id}' could not be merged onto '${target.sha}' at [${conflicts.join(", ")}]\n` +
+          `remedy: ${MERGE_CONFLICT_REMEDY}`,
+        pr: input.id,
+      })
+    }
+    for (const conflict of conflicts) {
+      // A gitlink conflict has no blob content to check out — it is a bare
+      // (mode, oid) index entry — so the fix is `update-index --cacheinfo`
+      // directly (the same primitive Phase 0's design call names, and the
+      // same one `writeQueueGitlink` already wraps for exactly this shape),
+      // not `checkout --ours`, which leaves the conflicted stages standing
+      // for a path with no worktree file to resolve against.
+      const oursValue = await readGitlink(git, path, before, conflict)
+      if (oursValue === undefined) {
+        await git.run(path, ["merge", "--abort"], true)
+        throw createFailure({
+          kind: "refusal",
+          code: "merge-conflict",
+          message: `change '${input.id}' could not read the base value for conflicted gitlink '${conflict}'`,
+          pr: input.id,
+        })
+      }
+      const staged = await writeQueueGitlink(git, path, conflict, oursValue)
+      if (!queueGitlinkWriteSucceeded(staged)) {
+        await git.run(path, ["merge", "--abort"], true)
+        throw createFailure({
+          kind: "refusal",
+          code: "merge-conflict",
+          message: `change '${input.id}' could not resolve gitlink '${conflict}' to the base value: ${queueGitlinkWriteFailure(staged)}`,
+          pr: input.id,
+        })
+      }
+    }
+    const continued = await git.run(path, ["-c", "core.editor=true", "commit", "--no-edit"], true)
+    if (continued.code !== 0) {
+      await git.run(path, ["merge", "--abort"], true)
+      throw createFailure({
+        kind: "refusal",
+        code: "merge-conflict",
+        message: `change '${input.id}' could not finalize the base-resolved merge: ${continued.stderr || continued.stdout}`,
+        pr: input.id,
+      })
+    }
+  }
+  const mergedHead = await git.commit(path, "HEAD")
+  const erased = await unauthoredDeletionFailure(git, path, input.id, input.headSha, before, mergedHead)
+  if (erased !== undefined) {
+    throw createFailure({ kind: "refusal", code: erased.error.code, message: erased.error.message, pr: input.id })
+  }
+  const unwitnessed = await droppedContributionFailure(git, path, input.id, input.headSha, before, mergedHead)
+  if (unwitnessed !== undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: unwitnessed.error.code,
+      message: unwitnessed.error.message,
+      pr: input.id,
+    })
+  }
+  let finalSha = mergedHead
+  if (filled.output.updates.length > 0) {
+    const synthesized = await synthesizeGitlinkWrapper(
+      git,
+      path,
+      mergedHead,
+      filled.output.updates,
+      candidateChangeCommitMessage("compose", pr),
+      options.provisionPinIntent,
+    )
+    if (synthesized.status === "failed") {
+      throw createFailure({
+        kind: "refusal",
+        code: synthesized.error.code,
+        message: synthesized.error.message,
+        pr: input.id,
+      })
+    }
+    finalSha = synthesized.output.commit
+  }
+  return { status: "completed", conclusion: "success", output: { sha: finalSha } }
+}
+
+export async function rebuildCandidateByMerge(
+  options: RebuildByMergeOptions,
+  target: Readonly<{ sha: string }>,
+  input: RebuildByMergeInput,
+): Promise<RebuildByMergeResult> {
+  const repo = resolve(options.repo)
+  const git = createGit(options.inject.process, options.env)
+  const pr = ChangeSnapshotSchema.parse({
+    id: input.id,
+    branch: input.branch,
+    base: input.branch,
+    revision: 1,
+    headSha: input.headSha,
+  })
+  const execution: StepExecution = {
+    run: input.id,
+    step: "rebuild-by-merge",
+    index: 0,
+    prs: [pr],
+    shape: { results: {} },
+  }
+  const guilty: { id?: string } = {}
+  const outcome = await withScratch<Readonly<{ sha: string }>>(git, repo, target.sha, undefined, async (path, root) => {
+    const artifactRoot = resolve(options.artifactRoot ?? join(root, "artifacts"))
+    try {
+      const prepared = await prepareCandidateMembers(
+        guilty,
+        git,
+        repo,
+        path,
+        target.sha,
+        execution,
+        1,
+        artifactRoot,
+        undefined,
+        options.provisionPinIntent,
+        undefined,
+      )
+      if (prepared.status === "failed") {
+        const rename = CONFLICT_CODES_TO_RENAME.has(prepared.error.code)
+        throw createFailure({
+          kind: "refusal",
+          code: rename ? "merge-conflict" : prepared.error.code,
+          message: rename ? `${prepared.error.message}\nremedy: ${MERGE_CONFLICT_REMEDY}` : prepared.error.message,
+          ...(prepared.error.pr === undefined ? {} : { pr: prepared.error.pr }),
+        })
+      }
+      return { status: "completed", conclusion: "success", output: { sha: prepared.output.sha } }
+    } catch (cause) {
+      // `resolveCandidateSubmoduleConflict` composes a batch's DIVERGENT
+      // submodule commits together — the right question for two different
+      // members of the SAME candidate advancing one gitlink two ways. A
+      // single-member rebuild is never that: the shaset fill-in already owns
+      // the final value (`fillAuthoredGitlinksFromMain`, called below,
+      // computed independently of how `git merge` resolves this path), so a
+      // conflict here is exactly Phase 0's "not a conflict, the shaset's job
+      // arriving early" — take the base's value and let the fill-in overwrite
+      // it. Reached only when the shared path could not handle a gitlink this
+      // change authored; every other failure (content conflicts, the
+      // witnesses, anything with no authored gitlink in play) rethrows
+      // unchanged, so the common case's proof (test 9) is untouched by this
+      // branch existing.
+      // `resolveCandidateSubmoduleConflict`'s "composed" path can complete
+      // every git operation — including the merge commit itself — and crash
+      // only on its OWN output's schema validation on the way out (a real,
+      // separate bug: `QueueSubmoduleResolutionEvidenceSchema` rejects the
+      // shape `executeQueueSubmoduleComposition` actually returns). That
+      // leaves HEAD moved to a commit this phase never chose to keep — a
+      // composed submodule value, not the base's, when Phase 0's rule says
+      // to take the base's and let the shaset fill-in overwrite it later.
+      // Reset to the untouched base before recomputing what this change
+      // authored, or the delta-base read below sees no change at all (HEAD
+      // already contains it) and silently skips the fill-in.
+      // `submodule.recurse` (set by `git submodule add`, inherited here) would
+      // make a plain `reset --hard` also reset the submodule's OWN worktree —
+      // and a fresh `git worktree add` scratch checkout's submodule git-dir
+      // reference is not something this reset needs to touch at all; only the
+      // superproject's index and gitlink entries matter to what follows.
+      const reset = await git.run(path, ["-c", "submodule.recurse=false", "reset", "--hard", target.sha], true)
+      if (reset.code !== 0) throw cause
+      const fillable = await authoredGitlinkPaths(git, path, input.id, input.headSha)
+      if (fillable.status === "failed" || fillable.output.length === 0) throw cause
+      return rebuildGitlinkConflictByTakingBase(git, repo, path, pr, input, target, fillable.output, options)
+    }
+  })
+  if (outcome.status !== "completed" || outcome.conclusion !== "success") {
+    throw new Error(`yrd: rebuild-by-merge scratch worktree did not complete for change '${input.id}'`)
+  }
+  // exactDelta wants a RefGit — trimmed stdout, throws on non-zero — not this
+  // module's own Git, whose `.run` returns a {code, stdout, stderr} result for
+  // every tolerant caller in this file. A local, minimal bridge rather than
+  // reaching for a shared adapter: this is the one call site in `command.ts`
+  // that needs one today.
+  const refGit: Pick<import("./content-identity.ts").ExactDeltaGit, "run"> = {
+    async run(r, a) {
+      const result = await git.run(r, a, true)
+      if (result.code !== 0) {
+        throw new Error(`git ${a.join(" ")} exited ${result.code}: ${(result.stderr || result.stdout).trim()}`)
+      }
+      return result.stdout.trim()
+    },
+  }
+  const delta = await exactDelta(refGit, repo, target.sha, outcome.output.sha)
+  return { sha: outcome.output.sha, treeSha: delta.candidateTree, unchanged: delta.entries.length === 0 }
 }
 
 type RemergeBaseMovement =
@@ -5070,6 +5389,15 @@ async function fillAuthoredGitlinksFromMain(
   const filledPins: Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[] = []
   const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const refused: string[] = []
+  /** Distinct from `refused`: this gitlink was neither added nor removed, and
+   * the fetch that would answer "is it on main" succeeded — the min commit
+   * itself is simply not published there yet (re-merge Phase 1, the shaset
+   * model's own precondition, stated as its own refusal per the design call
+   * at hub/yrd/2026-08-23-remerge-phase0-replay.md). Kept separate from the
+   * add/remove `refused` list below: that one is a component-model ruling
+   * question, this one is a "push it to main first" question, and the two
+   * remedies must never collapse into one generic message. */
+  const unpublished: Readonly<{ path: string; authored: string; main: string }>[] = []
   const declared = parseSubmoduleModelChangeAuthorization(pr)
   for (const gitlink of gitlinks) {
     const authored = await readGitlink(git, path, pr.headSha, gitlink)
@@ -5163,14 +5491,29 @@ async function fillAuthoredGitlinksFromMain(
       // The min commit is not on its submodule's main (the probe fetch
       // succeeded, so absence from the fetched history is a fact about main,
       // not about the network): submodule-main-first parks this before
-      // queueing, and here the existing refusal below stays the backstop.
-      refused.push(gitlink)
+      // queueing.
+      unpublished.push({ path: gitlink, authored, main: main.sha })
       continue
     }
     if (main.sha === authored) continue
     // Main moved past the floor: write main's newest commit into the shaset.
     updates.push({ path: gitlink, sha: main.sha })
     filledPins.push({ kind: "pin", path: gitlink, sha: main.sha })
+  }
+  if (unpublished.length > 0) {
+    const paths = unpublished.map((entry) => entry.path)
+    const detail = unpublished
+      .map(
+        (entry) => `'${entry.path}' authored min commit '${entry.authored}' is not on submodule main '${entry.main}'`,
+      )
+      .join("; ")
+    return candidateFailure(
+      "min-commit-unpublished",
+      `change '${pr.id}' cannot fill the shaset: ${detail}; the author's gitlink is a min commit, never a value — ` +
+        "push it to the submodule's own main first, then resubmit",
+      ".",
+      paths,
+    )
   }
   if (refused.length > 0) {
     const workflow = await intentSubmissionWorkflow(git, path, "HEAD", pr.headSha, refused, pr.issue)
@@ -7572,7 +7915,7 @@ export async function overlayGateScripts(
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
-  if (differing.length === 0) return { differing, restore: async () => undefined }
+  if (differing.length === 0) return { differing, restore: () => Promise.resolve() }
 
   const materialize = async (sourceSha: string, side: string): Promise<void> => {
     const present: string[] = []

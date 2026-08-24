@@ -3543,7 +3543,11 @@ describe("Queue command adapters", () => {
     // mechanism: a floor ON its submodule's main now composes (covered in
     // tests/composition-fill-in.test.ts), so the refusal this test pins — and
     // its needs-author routing — survives exactly for a floor that is NOT on
-    // main, which candidateOffMain arranges.
+    // main, which candidateOffMain arranges. Re-merge Phase 1 gives this its
+    // own code, `min-commit-unpublished`, split out of the broader
+    // `authored-gitlink` per the Phase 0 design call (hub/yrd/2026-08-23-
+    // remerge-phase0-replay.md) — a min-commit-not-on-main refusal is now
+    // distinct from an added/removed gitlink, both still needs-author.
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -3561,8 +3565,8 @@ describe("Queue command adapters", () => {
       status: "completed",
       conclusion: "failure",
       error: {
-        code: "authored-gitlink",
-        message: expect.stringMatching(/'dep''s own main, then submit an ordinary change/u),
+        code: "min-commit-unpublished",
+        message: expect.stringMatching(/'dep'.*is not on submodule main.*push it to the submodule's own main/su),
       },
     })
     expect(run.error?.message).not.toContain("yrd pr recut")
@@ -3579,7 +3583,7 @@ describe("Queue command adapters", () => {
     expect(eventNames).not.toContain("pr/rejected")
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility.reason?.code).toBe("needs-author")
-    expect(eligibility.reason?.result).toMatchObject({ code: "authored-gitlink" })
+    expect(eligibility.reason?.result).toMatchObject({ code: "min-commit-unpublished" })
   })
 
   it("puts a provisioned lockfile in the immutable pin candidate before checks run", async () => {
@@ -3827,8 +3831,11 @@ describe("Queue command adapters", () => {
       error: {
         failure: {
           kind: "refusal",
-          code: "authored-gitlink",
-          message: expect.stringMatching(/dep''s own main, then submit an ordinary change/iu),
+          // Split from `authored-gitlink` by re-merge Phase 1 (Phase 0 design
+          // call, hub/yrd/2026-08-23-remerge-phase0-replay.md): a min commit
+          // not yet on its submodule's main is `min-commit-unpublished` now.
+          code: "min-commit-unpublished",
+          message: expect.stringMatching(/'dep'.*is not on submodule main.*push it to the submodule's own main/su),
         },
       },
     })
@@ -4474,7 +4481,9 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "composition-invalid",
-        message: expect.stringMatching(/root code must be submitted separately from changes of submodule min commits/iu),
+        message: expect.stringMatching(
+          /root code must be submitted separately from changes of submodule min commits/iu,
+        ),
       },
     })
     expect(run.error?.message).not.toContain("yrd pr recut")

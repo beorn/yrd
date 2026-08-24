@@ -1849,7 +1849,10 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<z.infer<typeof CandidateCreatedSchema> | undefined> =>
     candidateFactsForSnapshots(prs.map(Queues.snapshot), baseSha)
 
-  const recordRevisionAdmission = (pr: DeepReadonly<Change>, admission: ChangeAdmissionRecord): Promise<CommandResult> =>
+  const recordRevisionAdmission = (
+    pr: DeepReadonly<Change>,
+    admission: ChangeAdmissionRecord,
+  ): Promise<CommandResult> =>
     actions.recordAdmission({
       pr: pr.id,
       revision: changeRevisionNumber(pr),
@@ -2455,7 +2458,11 @@ function createQueue<Shape extends ChangeShape>(
       const request = checkRequest(pr)
       const baseSha = request?.baseSha ?? changeBaseSha(pr)
       if (baseSha === undefined) {
-        raiseFailure("infrastructure", "base-sha-missing", `yrd: change '${pr.id}' required checks have no resolved base`)
+        raiseFailure(
+          "infrastructure",
+          "base-sha-missing",
+          `yrd: change '${pr.id}' required checks have no resolved base`,
+        )
       }
       const outcome = await admitChangeRevision(pr, baseSha, options)
       if (outcome.refusal !== undefined) await noteRevisionAdmissionRefusal(pr.id, outcome.refusal)
@@ -7664,7 +7671,11 @@ function runnableChangeSelection(
       return []
     }
     const reason = eligibility.reason
-    raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `change '${pr.id}' is not ready`}`)
+    raiseFailure(
+      "refusal",
+      reason?.code ?? "pr-not-ready",
+      `yrd: ${reason?.message ?? `change '${pr.id}' is not ready`}`,
+    )
   })
   return { prs, decisions }
 }
@@ -7705,6 +7716,17 @@ export const COMPOSITION_FAILURE_BUCKETS = {
   "needs-author": new Set<string>([
     "authored-gitlink",
     "carrier-drops-landed",
+    // The declared component-model change (an add or remove ruling, carried
+    // as a --prop) either has no resolver available, has no immutable base to
+    // bind a receipt to, or was declared but not authorized — all three are
+    // the author's to fix: get the ruling, carry the right prop, or run
+    // through a host that can resolve it. Pre-existing, unclassified gap
+    // (re-merge Phase 1: found while adding `min-commit-unpublished` below,
+    // fixed in the same pass since the exhaustiveness test fails on any one
+    // of the four together).
+    "component-model-authorization-refused",
+    "component-model-authorizer-unavailable",
+    "component-model-identity-unavailable",
     // Author-actionable like its siblings, but the action is "close", not
     // "re-author": the carrier's pins already merged, so there is nothing to
     // rebuild.
@@ -7720,6 +7742,12 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "dropped-parent-contribution",
     "gitlink-inspection",
     "merge-tip-carrier",
+    // The author's gitlink is a min commit, never a value — the shaset fill-in
+    // needs it reachable from the submodule's own main before it can compute
+    // the final value. Re-merge Phase 1's own refusal (the shaset model's
+    // stated precondition, given its own code per the Phase 0 design call
+    // rather than folding into the broader `authored-gitlink`).
+    "min-commit-unpublished",
     "refused-path",
     "refused-path-inspection",
     // The remedy is the same linear rebuild `carrier-drops-landed` prescribes;

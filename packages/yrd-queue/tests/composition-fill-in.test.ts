@@ -300,7 +300,7 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
     expect(prepared.submoduleResolutions).toBeUndefined()
   })
 
-  it("keeps the authored-gitlink refusal for a min commit that is not on its submodule's main", async () => {
+  it("refuses min-commit-unpublished for a min commit that is not on its submodule's main", async () => {
     const { repo, module, moduleA, rootBase } = await baseRepo()
     // The floor lives only on a side branch: submodule-main-first is not met.
     const moduleB = await moduleCommit(module, "feature", moduleA, "b")
@@ -316,8 +316,11 @@ describe("authored-gitlink fill-in — the queue writes the shaset from each sub
 
     const fact = failureFact(error)
     if (fact === undefined) throw new Error(`expected a typed refusal, got ${String(error)}`)
-    // The composition-side backstop until step (d): same code, same shape.
-    expect(fact.code).toBe("authored-gitlink")
+    // Split from `authored-gitlink` by re-merge Phase 1 (Phase 0 design call,
+    // hub/yrd/2026-08-23-remerge-phase0-replay.md): a min commit not yet on
+    // its submodule's main is its own code now, distinct from an added or
+    // removed gitlink.
+    expect(fact.code).toBe("min-commit-unpublished")
     expect(fact.message).toContain("dep")
   })
 
