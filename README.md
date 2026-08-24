@@ -317,11 +317,15 @@ the workspace.
 
 A provision failure that never records a workspace path ends immediately as
 `closed-degenerate`: there is no workspace to deprovision, and the branch name
-is reusable. `yrd admin bay prune` is dry-run by default; `--apply` closes only
-the `PRUNE` set. Its JSON conservation report puts every examined workspace in
-exactly one of `outcomes.pruned`, `outcomes.kept`, or `outcomes.paged` and
-counts the same population in `histogram`. An apply that examines workspaces but
-prunes none exits non-zero, as does any report with missing-evidence pages.
+is reusable. `yrd admin bay prune` is dry-run by default. Save a reviewed census
+with `--save-approval <path>` (and repeatable `--exclude <bay>` selections), then
+apply exactly that fingerprinted set with `--apply --approval <path>`; any census
+drift refuses before mutation. Its JSON conservation report puts every examined
+workspace in exactly one of `outcomes.prunable`, `outcomes.kept`, or
+`outcomes.paged`, counts the same population in `histogram`, and records apply
+progress in `closed`, `failed`, and `notAttempted`. An apply that examines
+workspaces but closes none exits non-zero, as does any report with
+missing-evidence pages.
 
 `bay in` (also spelled root `yrd in`) attaches a guest process without opening,
 checkpointing, closing, or otherwise taking ownership of the workspace lifecycle.
@@ -954,7 +958,8 @@ yrd queue recover [--reason <text>] [--runner <id>] [--json]
 yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>
   --attempt <number> --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
-yrd admin bay prune [--apply] [--json]
+yrd admin bay prune [--exclude <bay>...] [--save-approval <path>] [--json]
+yrd admin bay prune --apply --approval <path> [--json]
 yrd admin pr prune [--dry-run] [--json]
 yrd admin journal bump <version> [--json]
 ```
