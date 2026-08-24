@@ -212,6 +212,47 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
     await git.run(fixture.moduleRepo, ["merge-base", "--is-ancestor", fixture.authorModuleSha, submoduleMain])
   })
 
+  it("4b. the pre-branch routes around resolveCandidateSubmoduleConflict entirely — proven by construction, not by luck", async () => {
+    // This exact fixture (both sides move the same gitlink, author's move
+    // published to main) is the ORIGINAL bug repro: before the pre-branch
+    // rework, this call threw
+    //   ZodError: Unrecognized keys: "origin", "baseSha", "currentSha", "incomingSha", "message"
+    // from resolveCandidateSubmoduleConflict's "composed" branch — which
+    // completes every git operation, including the merge commit, and crashes
+    // ONLY on its own output's schema validation on the way out. That crash is
+    // unconditional once the branch runs: there is no code path through it
+    // that both composes a gitlink AND avoids the schema parse. So a clean
+    // result here is not "it happened not to crash this time" — it is proof
+    // the branch was never entered, which the source confirms independently:
+    // `rebuildCandidateByMerge`'s pre-branch returns from
+    // `rebuildGitlinkConflictByTakingBase` before `prepareCandidateMembers` —
+    // the only caller of `resolveCandidateSubmoduleConflict` in this file — is
+    // ever invoked, whenever `authoredGitlinkPaths` is non-empty.
+    const fixture = await gitlinkConflictFixture({ authorPublishedToMain: true })
+    roots.push(fixture.root)
+
+    // Independent, external confirmation that the pre-branch's OWN condition
+    // is true for this fixture — checked with plain git, not by calling the
+    // internal `authoredGitlinkPaths` this test cannot import: the author's
+    // tip records a DIFFERENT gitlink value than its own merge-base against
+    // the target, which is exactly "this change authors the gitlink path".
+    const mergeBase = await git.run(fixture.superRepo, ["merge-base", fixture.targetSha, fixture.authorTip])
+    const baseGitlink = await git.run(fixture.superRepo, ["rev-parse", `${mergeBase}:${fixture.gitlinkPath}`])
+    const authoredGitlink = await git.run(fixture.superRepo, [
+      "rev-parse",
+      `${fixture.authorTip}:${fixture.gitlinkPath}`,
+    ])
+    expect(authoredGitlink).not.toBe(baseGitlink)
+
+    // The call that would have thrown the ZodError above, pre-rework.
+    const result = await rebuildCandidateByMerge(
+      options(fixture.superRepo),
+      { sha: fixture.targetSha },
+      { id: "PR1", branch: fixture.authorBranch, headSha: fixture.authorTip },
+    )
+    expect(result.sha).toBeTruthy()
+  })
+
   it("5. author's submodule commit is NOT published to the submodule's main: refuses min-commit-unpublished", async () => {
     const fixture = await gitlinkConflictFixture({ authorPublishedToMain: false })
     roots.push(fixture.root)

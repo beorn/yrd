@@ -4161,17 +4161,22 @@ const CONFLICT_CODES_TO_RENAME = new Set<string>(["candidate-conflict", "submodu
 const MERGE_CONFLICT_REMEDY = "merge or rebase locally and push"
 
 /**
- * The manual fallback for a merge that conflicts ONLY on gitlink paths the
- * shaset fill-in already owns. Runs the exact same pieces
- * `prepareCandidateMembers` runs for its plain (non-composed) member —
- * `fillAuthoredGitlinksFromMain` (already called by the caller to reach this
- * function; its result is `fillable`'s corresponding fill, recomputed once
- * more here so a `min-commit-unpublished` refusal is still possible even when
- * `git merge` itself did not conflict on every authored gitlink), the two
- * kept witnesses, `synthesizeGitlinkWrapper` — with ONE difference: any
- * conflict on a path this change's own fill covers resolves to the base's
- * (current worktree's) side, since the fill-in overwrites it regardless of
- * which side `git merge` would otherwise have picked.
+ * The dedicated path for a single-member change that authors at least one
+ * gitlink — the caller's pre-branch (`rebuildCandidateByMerge`) routes here
+ * BEFORE any merge is attempted, so the worktree is always the untouched
+ * `target.sha` on entry; `resolveCandidateSubmoduleConflict`'s composition
+ * branch is never reached from this call, by construction. Runs the exact
+ * same pieces `prepareCandidateMembers` runs for its plain (non-composed)
+ * member — `fillAuthoredGitlinksFromMain` (the caller already computed
+ * `authoredGitlinks` to decide whether to route here at all; the fill itself
+ * still runs here, since knowing WHICH paths were authored is not the same as
+ * knowing what to fill them WITH), the two kept witnesses,
+ * `synthesizeGitlinkWrapper` — with ONE difference from the ordinary path:
+ * any merge conflict on a path this change's own fill covers resolves to the
+ * base's (current worktree's) side via `writeQueueGitlink`, since the fill-in
+ * overwrites it regardless of which side `git merge` would otherwise have
+ * picked — Phase 0's rule, applied directly rather than through the
+ * composition machinery that was built for a different problem.
  */
 async function rebuildGitlinkConflictByTakingBase(
   git: Git,
@@ -4317,66 +4322,63 @@ export async function rebuildCandidateByMerge(
   const guilty: { id?: string } = {}
   const outcome = await withScratch<Readonly<{ sha: string }>>(git, repo, target.sha, undefined, async (path, root) => {
     const artifactRoot = resolve(options.artifactRoot ?? join(root, "artifacts"))
-    try {
-      const prepared = await prepareCandidateMembers(
-        guilty,
-        git,
-        repo,
-        path,
-        target.sha,
-        execution,
-        1,
-        artifactRoot,
-        undefined,
-        options.provisionPinIntent,
-        undefined,
-      )
-      if (prepared.status === "failed") {
-        const rename = CONFLICT_CODES_TO_RENAME.has(prepared.error.code)
-        throw createFailure({
-          kind: "refusal",
-          code: rename ? "merge-conflict" : prepared.error.code,
-          message: rename ? `${prepared.error.message}\nremedy: ${MERGE_CONFLICT_REMEDY}` : prepared.error.message,
-          ...(prepared.error.pr === undefined ? {} : { pr: prepared.error.pr }),
-        })
-      }
-      return { status: "completed", conclusion: "success", output: { sha: prepared.output.sha } }
-    } catch (cause) {
-      // `resolveCandidateSubmoduleConflict` composes a batch's DIVERGENT
-      // submodule commits together — the right question for two different
-      // members of the SAME candidate advancing one gitlink two ways. A
-      // single-member rebuild is never that: the shaset fill-in already owns
-      // the final value (`fillAuthoredGitlinksFromMain`, called below,
-      // computed independently of how `git merge` resolves this path), so a
-      // conflict here is exactly Phase 0's "not a conflict, the shaset's job
-      // arriving early" — take the base's value and let the fill-in overwrite
-      // it. Reached only when the shared path could not handle a gitlink this
-      // change authored; every other failure (content conflicts, the
-      // witnesses, anything with no authored gitlink in play) rethrows
-      // unchanged, so the common case's proof (test 9) is untouched by this
-      // branch existing.
-      // `resolveCandidateSubmoduleConflict`'s "composed" path can complete
-      // every git operation — including the merge commit itself — and crash
-      // only on its OWN output's schema validation on the way out (a real,
-      // separate bug: `QueueSubmoduleResolutionEvidenceSchema` rejects the
-      // shape `executeQueueSubmoduleComposition` actually returns). That
-      // leaves HEAD moved to a commit this phase never chose to keep — a
-      // composed submodule value, not the base's, when Phase 0's rule says
-      // to take the base's and let the shaset fill-in overwrite it later.
-      // Reset to the untouched base before recomputing what this change
-      // authored, or the delta-base read below sees no change at all (HEAD
-      // already contains it) and silently skips the fill-in.
-      // `submodule.recurse` (set by `git submodule add`, inherited here) would
-      // make a plain `reset --hard` also reset the submodule's OWN worktree —
-      // and a fresh `git worktree add` scratch checkout's submodule git-dir
-      // reference is not something this reset needs to touch at all; only the
-      // superproject's index and gitlink entries matter to what follows.
-      const reset = await git.run(path, ["-c", "submodule.recurse=false", "reset", "--hard", target.sha], true)
-      if (reset.code !== 0) throw cause
-      const fillable = await authoredGitlinkPaths(git, path, input.id, input.headSha)
-      if (fillable.status === "failed" || fillable.output.length === 0) throw cause
-      return rebuildGitlinkConflictByTakingBase(git, repo, path, pr, input, target, fillable.output, options)
+    // POSITIVE PRE-BRANCH, not a catch around a known-crashing path. Computed
+    // BEFORE any merge is attempted, against the untouched worktree (still at
+    // `target.sha`) — a stated, checkable condition: does THIS change author a
+    // gitlink at all? `resolveCandidateSubmoduleConflict`'s "composed" branch
+    // composes a BATCH's divergent submodule commits together — the right tool
+    // for two different members of the SAME candidate advancing one gitlink two
+    // ways. A single-member rebuild is never that shape: the shaset fill-in
+    // (`fillAuthoredGitlinksFromMain`, inside `rebuildGitlinkConflictByTakingBase`
+    // below) already owns the final value, computed independently of how a merge
+    // would resolve the path. So compose is the wrong TOOL here, not merely a
+    // tool that happens to crash on this shape — it does crash on it separately
+    // (`QueueSubmoduleResolutionEvidenceSchema` rejects the shape
+    // `executeQueueSubmoduleComposition` actually returns, after every git
+    // operation including the commit itself has already run; tracked as its own
+    // shared-machinery finding, `@yrd/core/evidence-schema-rejects-its-producer`,
+    // P2, deliberately left unfixed here — out of scope, and dormant per the
+    // habitant runner's own journal). A change with no authored gitlink can
+    // never reach a gitlink-mode conflict at all — there is nothing gitlink-
+    // shaped it owns to conflict about — so delegating THAT case to
+    // `prepareCandidateMembers` is safe by construction, not merely convenient;
+    // `resolveCandidateSubmoduleConflict`'s composition branch is provably
+    // unreachable from this function for it.
+    const authoredGitlinks = await authoredGitlinkPaths(git, path, input.id, input.headSha)
+    if (authoredGitlinks.status === "failed") {
+      throw createFailure({
+        kind: "refusal",
+        code: authoredGitlinks.error.code,
+        message: authoredGitlinks.error.message,
+        ...(authoredGitlinks.error.pr === undefined ? {} : { pr: authoredGitlinks.error.pr }),
+      })
     }
+    if (authoredGitlinks.output.length > 0) {
+      return rebuildGitlinkConflictByTakingBase(git, repo, path, pr, input, target, authoredGitlinks.output, options)
+    }
+    const prepared = await prepareCandidateMembers(
+      guilty,
+      git,
+      repo,
+      path,
+      target.sha,
+      execution,
+      1,
+      artifactRoot,
+      undefined,
+      options.provisionPinIntent,
+      undefined,
+    )
+    if (prepared.status === "failed") {
+      const rename = CONFLICT_CODES_TO_RENAME.has(prepared.error.code)
+      throw createFailure({
+        kind: "refusal",
+        code: rename ? "merge-conflict" : prepared.error.code,
+        message: rename ? `${prepared.error.message}\nremedy: ${MERGE_CONFLICT_REMEDY}` : prepared.error.message,
+        ...(prepared.error.pr === undefined ? {} : { pr: prepared.error.pr }),
+      })
+    }
+    return { status: "completed", conclusion: "success", output: { sha: prepared.output.sha } }
   })
   if (outcome.status !== "completed" || outcome.conclusion !== "success") {
     throw new Error(`yrd: rebuild-by-merge scratch worktree did not complete for change '${input.id}'`)

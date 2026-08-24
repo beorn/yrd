@@ -7717,16 +7717,15 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "authored-gitlink",
     "carrier-drops-landed",
     // The declared component-model change (an add or remove ruling, carried
-    // as a --prop) either has no resolver available, has no immutable base to
-    // bind a receipt to, or was declared but not authorized — all three are
-    // the author's to fix: get the ruling, carry the right prop, or run
-    // through a host that can resolve it. Pre-existing, unclassified gap
-    // (re-merge Phase 1: found while adding `min-commit-unpublished` below,
-    // fixed in the same pass since the exhaustiveness test fails on any one
-    // of the four together).
+    // as a --prop) was evaluated and REFUSED — a decision was reached, and
+    // it's the author's to act on: get a different ruling, or carry the
+    // right prop. Pre-existing, unclassified gap (re-merge Phase 1: found
+    // while adding `min-commit-unpublished` below). Its two unavailable-
+    // capability siblings are NOT here — see `infra-retry` below; bouncing an
+    // unavailable host capability to the author is exactly the "authority
+    // must survive a refusal that is not the author's fault" violation this
+    // phase's own bead names.
     "component-model-authorization-refused",
-    "component-model-authorizer-unavailable",
-    "component-model-identity-unavailable",
     // Author-actionable like its siblings, but the action is "close", not
     // "re-author": the carrier's pins already merged, so there is nothing to
     // rebuild.
@@ -7775,6 +7774,18 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "source-publish",
     "scratch-cleanup-failed",
     "wrapper-generation",
+    // This Yrd HOST has no verdict-message resolver wired up, or cannot
+    // compute a patch-bound authorization identity (no immutable base SHA, no
+    // stable patch identity for the diff) — a host-capability gap, not a fact
+    // about the author's content. Reclassified out of `needs-author` (re-merge
+    // Phase 1, on review): that bucket bounces the refusal to the author as
+    // if THEIR request were wrong, when the host is what's missing the
+    // capability. Neither is truly "retry and it clears itself" like this
+    // bucket's other members, but this is the closer of the two available
+    // buckets, and the alternative — needs-author — is the one the bundling
+    // review specifically ruled out as the finding-5 violation.
+    "component-model-authorizer-unavailable",
+    "component-model-identity-unavailable",
   ]),
   "recut-lineage": new Set<string>(["recut-certificate", "recut-base-diverged", "restack-conflict", "restack-failed"]),
   "plain-rejected": new Set<string>(["intent-base-moved", "intent-batch-refused", "intent-component-unknown"]),
