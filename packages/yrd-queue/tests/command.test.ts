@@ -3968,6 +3968,25 @@ describe("Queue command adapters", () => {
       gitCandidatePreparer({ inject: { process }, repo: fixture.repo })(input("C2", mergeTip)),
     )
 
+    // A3 (2026-08-23): `authored`'s gitlink pin (`fixture.featureSha`) sits on
+    // the submodule's unpublished `side` branch, deliberately — `fixture` was
+    // built with `candidateOffMain: true` so PR1's own authored-gitlink
+    // refusal (captured above, before this point) has a genuinely unpublished
+    // floor. PR3 reuses `authored`'s shape to exercise a DIFFERENT axis (a
+    // linear, non-merge-tip carrier building the byte-stable Queue wrapper),
+    // but under Phase 1's min-commit-unpublished discipline, reusing that
+    // same off-main pin now refuses it too — the mechanism that used to make
+    // "linear" and "published" independent axes (certification could accept
+    // an unpublished-but-verifiable pin) is exactly what Phase 1 retires.
+    // Publish the submodule's candidate commit to its own main here, after
+    // PR1/PR2's outcomes are already captured (so their off-main/refusal
+    // assertions are unaffected), so PR3's remerge fills its shaset cleanly
+    // and the byte-stable-wrapper property below is actually exercised
+    // rather than short-circuited by a refusal this test isn't about.
+    const candidateModule = join(fixture.repo, "..", "module")
+    await git(candidateModule, ["switch", "-q", "main"])
+    await git(candidateModule, ["merge", "-q", "--ff-only", "side"])
+
     // The supported linear carrier survives a base move through the normal
     // recut certificate, then two Queue preparations with different ambient
     // time zones must write identical wrapper commit bytes.
