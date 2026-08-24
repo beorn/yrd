@@ -4783,45 +4783,60 @@ describe("runYrd", () => {
       ],
     })
 
-    expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(1)
+    expect(await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io), output.stderr()).toBe(1)
     const result = JSON.parse(output.stdout()) as {
       examined: number
       outcomes: {
-        pruned: readonly string[]
+        prunable: readonly string[]
         kept: readonly unknown[]
         paged: readonly unknown[]
       }
       histogram: {
-        pruned: number
+        prunable: number
         keptByReason: Readonly<Record<string, number>>
         pagedByReason: Readonly<Record<string, number>>
       }
     }
     expect(result).toMatchObject({
       command: "bay.prune",
-      dryRun: false,
+      dryRun: true,
       examined: 1,
       closed: [],
       outcomes: {
-        pruned: [],
+        prunable: [],
         kept: [{ bay: "B1", reasons: ["consumer"] }],
         paged: [],
       },
       histogram: {
-        pruned: 0,
+        prunable: 0,
         keptByReason: { consumer: 1 },
         pagedByReason: {},
       },
     })
-    expect(result.outcomes.pruned.length + result.outcomes.kept.length + result.outcomes.paged.length).toBe(
+    expect(result.outcomes.prunable.length + result.outcomes.kept.length + result.outcomes.paged.length).toBe(
       result.examined,
     )
     expect(
-      result.histogram.pruned +
+      result.histogram.prunable +
         Object.values(result.histogram.keptByReason).reduce((sum, count) => sum + count, 0) +
         Object.values(result.histogram.pagedByReason).reduce((sum, count) => sum + count, 0),
     ).toBe(result.examined)
     expect(app.state().bays.byId.B1?.status).toBe("active")
+  })
+
+  it("reports the repository scope when the prune census is empty", async () => {
+    const app = await createApp()
+    const output = outputIO({ cwd: "/repo" })
+
+    expect(await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "bay.prune",
+      dryRun: true,
+      repository: "/repo",
+      examined: 0,
+      excluded: [],
+      outcomes: { prunable: [], kept: [], paged: [] },
+    })
   })
 
   it("admin bay prune decides a missing worktree from its persisted head", async () => {
@@ -4845,6 +4860,8 @@ describe("runYrd", () => {
       const headSha = git(repo, "rev-parse", "HEAD")
       const app = await createApp({ bayPath: missingBay, provisionedHead: headSha })
       await openTestBay(app, { name: "missing-worktree", branch: "task/missing-worktree" })
+      await openTestBay(app, { name: "missing-worktree-two", branch: "task/missing-worktree-two" })
+      await openTestBay(app, { name: "missing-worktree-three", branch: "task/missing-worktree-three" })
       const now = () => Date.parse("2026-07-12T12:01:00.000Z")
       const statusOutput = outputIO({ cwd: repo, now })
 
@@ -4863,25 +4880,200 @@ describe("runYrd", () => {
 
       const exit = await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io)
       expect(JSON.parse(output.stdout())).toMatchObject({
-        examined: 1,
-        outcomes: { pruned: ["B1"], kept: [], paged: [] },
-        histogram: { pruned: 1, keptByReason: {}, pagedByReason: {} },
+        examined: 3,
+        outcomes: { prunable: ["B1", "B2", "B3"], kept: [], paged: [] },
+        histogram: { prunable: 3, keptByReason: {}, pagedByReason: {} },
       })
       expect(exit, output.stderr()).toBe(0)
 
+      const help = outputIO({ cwd: repo, now })
+      expect(await runYrd(app, yrd("admin", "bay", "prune", "--help"), help.io), help.stderr()).toBe(0)
+      expect(help.stdout()).toContain("--save-approval <path>")
+      expect(help.stdout()).toContain("--approval <path>")
+      expect(help.stdout()).toContain("--exclude <bay>")
+
+      const excludedApprovalPath = join(root, "excluded-approval.json")
+      const excludedApproval = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(
+          app,
+          yrd(
+            "admin",
+            "bay",
+            "prune",
+            "--exclude",
+            "B2",
+            "--exclude",
+            "B3",
+            "--save-approval",
+            excludedApprovalPath,
+            "--json",
+          ),
+          excludedApproval.io,
+        ),
+        excludedApproval.stderr(),
+      ).toBe(0)
+      const excludedArtifact = JSON.parse(readFileSync(excludedApprovalPath, "utf8"))
+      const excludedFingerprint = createHash("sha256")
+        .update('version=1\nprunable=["B1"]\nexcluded=["B2","B3"]\n')
+        .digest("hex")
+      expect(excludedArtifact).toEqual({
+        version: 1,
+        prunable: ["B1"],
+        excluded: ["B2", "B3"],
+        fingerprint: `sha256:${excludedFingerprint}`,
+      })
+
+      const approvalPath = join(root, "approval.json")
+      const approval = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(app, yrd("admin", "bay", "prune", "--save-approval", approvalPath, "--json"), approval.io),
+        approval.stderr(),
+      ).toBe(0)
+
+      const bareApply = outputIO({ cwd: repo, now })
+      expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), bareApply.io)).toBe(2)
+      expect(bareApply.stderr()).toContain("--apply requires --approval <path>")
+
+      const missingApprovalPath = join(root, "missing-approval.json")
+      const missingApproval = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", missingApprovalPath, "--json"),
+          missingApproval.io,
+        ),
+      ).toBe(2)
+      expect(missingApproval.stderr()).toContain(missingApprovalPath)
+      expect(missingApproval.stderr()).toContain("cannot read bay prune approval")
+
+      const tamperedApprovalPath = join(root, "tampered-approval.json")
+      writeFileSync(
+        tamperedApprovalPath,
+        JSON.stringify({
+          ...JSON.parse(readFileSync(approvalPath, "utf8")),
+          fingerprint: `sha256:${"0".repeat(64)}`,
+        }),
+      )
+      const tamperedApproval = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", tamperedApprovalPath, "--json"),
+          tamperedApproval.io,
+        ),
+      ).toBe(1)
+      expect(tamperedApproval.stderr()).toContain(tamperedApprovalPath)
+      expect(tamperedApproval.stderr()).toContain("fingerprint mismatch")
+
+      const excludedApply = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", approvalPath, "--exclude", "B3", "--json"),
+          excludedApply.io,
+        ),
+      ).toBe(2)
+      expect(excludedApply.stderr()).toContain("--exclude cannot be combined with --apply")
+
+      const protectedApprovalPath = join(root, "protected-approval.json")
+      const protectedApproval = outputIO({
+        cwd: repo,
+        now,
+        bayProtections: [
+          {
+            bay: "B3",
+            path: "/repo/.bays/B3",
+            source: "inhab-status",
+            evidence: "Inhab status home @dev.3 last state is ready",
+          },
+        ],
+      })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--save-approval", protectedApprovalPath, "--json"),
+          protectedApproval.io,
+        ),
+        protectedApproval.stderr(),
+      ).toBe(0)
+      const becamePrunable = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", protectedApprovalPath, "--json"),
+          becamePrunable.io,
+        ),
+      ).toBe(1)
+      expect(becamePrunable.stderr()).toContain(protectedApprovalPath)
+      expect(becamePrunable.stderr()).toContain("becamePrunable: B3")
+      expect(becamePrunable.stderr()).toContain("becameProtected: none")
+
+      const driftedApply = outputIO({
+        cwd: repo,
+        now,
+        bayProtections: [
+          {
+            bay: "B2",
+            path: "/repo/.bays/B2",
+            source: "inhab-status",
+            evidence: "Inhab status home @dev.2 last state is ready",
+          },
+        ],
+      })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", approvalPath, "--json"),
+          driftedApply.io,
+        ),
+      ).toBe(1)
+      expect(driftedApply.stderr()).toContain(approvalPath)
+      expect(driftedApply.stderr()).toContain("becamePrunable: none")
+      expect(driftedApply.stderr()).toContain("becameProtected: B2")
+      expect(app.state().bays.byId.B1?.status).toBe("active")
+
       const apply = outputIO({ cwd: repo, now })
+      let reapAttempts = 0
       const failingServices = {
         process: {
           reapPath: async () => {
-            throw new Error("simulated reap failure")
+            reapAttempts += 1
+            if (reapAttempts === 3) throw new Error("simulated reap failure")
+            return { targetedPids: [], survivorPids: [], forcedKill: false, signalFailures: [] }
           },
         },
       } as unknown as YrdCliServices
 
-      expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), apply.io, failingServices)).toBe(3)
-      expect(apply.stdout()).toBe("")
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", approvalPath, "--json"),
+          apply.io,
+          failingServices,
+        ),
+      ).toBe(3)
+      expect(JSON.parse(apply.stdout())).toMatchObject({
+        closed: ["B1"],
+        failed: [{ bay: "B2", error: "Bay 'missing-worktree-two' was not closed: simulated reap failure" }],
+        notAttempted: ["B3"],
+        outcomes: { prunable: ["B1", "B2", "B3"], kept: [], paged: [] },
+      })
       expect(apply.stderr()).toContain("simulated reap failure")
-      expect(app.state().bays.byId.B1?.status).toBe("active")
+      expect(app.state().bays.byId.B1?.status).toBe("closed")
+      expect(app.state().bays.byId.B2?.status).toBe("active")
+      expect(app.state().bays.byId.B3?.status).toBe("active")
+
+      const remainingApprovalPath = join(root, "remaining-approval.json")
+      const remainingApproval = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--save-approval", remainingApprovalPath, "--json"),
+          remainingApproval.io,
+        ),
+        remainingApproval.stderr(),
+      ).toBe(0)
 
       const successfulApply = outputIO({ cwd: repo, now })
       const successfulServices = {
@@ -4891,15 +5083,23 @@ describe("runYrd", () => {
       } as unknown as YrdCliServices
 
       expect(
-        await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), successfulApply.io, successfulServices),
+        await runYrd(
+          app,
+          yrd("admin", "bay", "prune", "--apply", "--approval", remainingApprovalPath, "--json"),
+          successfulApply.io,
+          successfulServices,
+        ),
         successfulApply.stderr(),
       ).toBe(0)
       expect(successfulApply.stdout().trim().split("\n")).toHaveLength(1)
       expect(JSON.parse(successfulApply.stdout())).toMatchObject({
-        closed: ["B1"],
-        outcomes: { pruned: ["B1"], kept: [], paged: [] },
+        closed: ["B2", "B3"],
+        failed: [],
+        notAttempted: [],
+        outcomes: { prunable: ["B2", "B3"], kept: [], paged: [] },
       })
-      expect(app.state().bays.byId.B1?.status).toBe("closed")
+      expect(app.state().bays.byId.B2?.status).toBe("closed")
+      expect(app.state().bays.byId.B3?.status).toBe("closed")
     } finally {
       safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
     }
@@ -4950,9 +5150,9 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("admin", "bay", "prune", "--json"), output.io), output.stderr()).toBe(1)
     const result = JSON.parse(output.stdout()) as {
       examined: number
-      outcomes: { pruned: readonly string[]; kept: readonly unknown[]; paged: readonly { reasons: string[] }[] }
+      outcomes: { prunable: readonly string[]; kept: readonly unknown[]; paged: readonly { reasons: string[] }[] }
       histogram: {
-        pruned: number
+        prunable: number
         keptByReason: Readonly<Record<string, number>>
         pagedByReason: Readonly<Record<string, number>>
       }
@@ -4961,10 +5161,10 @@ describe("runYrd", () => {
       command: "bay.prune",
       dryRun: true,
       examined: 1,
-      outcomes: { pruned: [], kept: [], paged: [{ bay: "B1", reasons: expect.arrayContaining(["consumer"]) }] },
+      outcomes: { prunable: [], kept: [], paged: [{ bay: "B1", reasons: expect.arrayContaining(["consumer"]) }] },
     })
     expect(
-      result.histogram.pruned +
+      result.histogram.prunable +
         Object.values(result.histogram.keptByReason).reduce((sum, count) => sum + count, 0) +
         Object.values(result.histogram.pagedByReason).reduce((sum, count) => sum + count, 0),
     ).toBe(result.examined)
@@ -5007,7 +5207,7 @@ describe("runYrd", () => {
       })
 
       expect(
-        await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), protectedOutput.io),
+        await runYrd(app, yrd("admin", "bay", "prune", "--json"), protectedOutput.io),
         protectedOutput.stderr(),
       ).toBe(1)
       expect(JSON.parse(protectedOutput.stdout())).toMatchObject({
@@ -5017,14 +5217,24 @@ describe("runYrd", () => {
       expect(Object.values(app.state().jobs.byId).filter((job) => job.definition === "bay.checkpoint")).toHaveLength(0)
       expect(app.bays.get("B1")).toMatchObject({ status: "active" })
 
+      const approvalPath = join(root, "dirty-approval.json")
+      const approval = outputIO({ cwd: repo, now })
+      expect(
+        await runYrd(app, yrd("admin", "bay", "prune", "--save-approval", approvalPath, "--json"), approval.io),
+        approval.stderr(),
+      ).toBe(1)
+
       const output = outputIO({ cwd: repo, now })
 
-      expect(await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--json"), output.io), output.stderr()).toBe(1)
+      expect(
+        await runYrd(app, yrd("admin", "bay", "prune", "--apply", "--approval", approvalPath, "--json"), output.io),
+        output.stderr(),
+      ).toBe(1)
       expect(JSON.parse(output.stdout())).toMatchObject({
         command: "bay.prune",
         preserved: ["B1"],
-        outcomes: { pruned: [], kept: [], paged: [{ bay: "B1", reasons: ["worktree"] }] },
-        histogram: { pruned: 0, keptByReason: {}, pagedByReason: { worktree: 1 } },
+        outcomes: { prunable: [], kept: [], paged: [{ bay: "B1", reasons: ["worktree"] }] },
+        histogram: { prunable: 0, keptByReason: {}, pagedByReason: { worktree: 1 } },
       })
       expect(app.bays.get("B1")).toMatchObject({ status: "active", dirty: false })
       expect(readFileSync(join(bay, "dirty.txt"), "utf8")).toBe("preserve me\n")

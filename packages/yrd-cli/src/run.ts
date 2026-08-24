@@ -4240,21 +4240,159 @@ async function bayStatusCommand(
   return exit
 }
 
-/** Sweep open bays via the status oracle. --dry-run is the DEFAULT (22290). */
+const BayPruneApprovalSchema = z
+  .object({
+    version: z.literal(1),
+    prunable: z.array(z.string()),
+    excluded: z.array(z.string()),
+    fingerprint: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+  })
+  .strict()
+
+type BayPruneApproval = z.infer<typeof BayPruneApprovalSchema>
+
+function sortedUniqueBayIds(ids: readonly string[]): string[] {
+  return [...new Set(ids)].toSorted(compareNatural)
+}
+
+/**
+ * Canonical UTF-8 fingerprint preimage, including the final newline:
+ * version=<decimal>\nprunable=<JSON sorted array>\nexcluded=<JSON sorted array>\n
+ */
+function bayPruneApprovalPreimage(approval: Pick<BayPruneApproval, "version" | "prunable" | "excluded">): string {
+  return (
+    `version=${String(approval.version)}\n` +
+    `prunable=${JSON.stringify(approval.prunable)}\n` +
+    `excluded=${JSON.stringify(approval.excluded)}\n`
+  )
+}
+
+function createBayPruneApproval(prunable: readonly string[], excluded: readonly string[]): BayPruneApproval {
+  const content = {
+    version: 1 as const,
+    prunable: sortedUniqueBayIds(prunable),
+    excluded: sortedUniqueBayIds(excluded),
+  }
+  return {
+    ...content,
+    fingerprint: `sha256:${createHash("sha256").update(bayPruneApprovalPreimage(content)).digest("hex")}`,
+  }
+}
+
+async function readBayPruneApproval(path: string): Promise<BayPruneApproval> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await readFile(path, "utf8"))
+  } catch (error) {
+    raiseFailure(
+      "configuration",
+      "bay-prune-approval-unreadable",
+      `cannot read bay prune approval '${path}': ${errorDetail(error)}`,
+    )
+  }
+  const result = BayPruneApprovalSchema.safeParse(parsed)
+  if (!result.success) {
+    raiseFailure(
+      "configuration",
+      "bay-prune-approval-invalid",
+      `bay prune approval '${path}' is invalid: ${z.prettifyError(result.error)}`,
+    )
+  }
+  const approval = result.data
+  const canonicalPrunable = sortedUniqueBayIds(approval.prunable)
+  const canonicalExcluded = sortedUniqueBayIds(approval.excluded)
+  if (
+    JSON.stringify(approval.prunable) !== JSON.stringify(canonicalPrunable) ||
+    JSON.stringify(approval.excluded) !== JSON.stringify(canonicalExcluded)
+  ) {
+    raiseFailure(
+      "configuration",
+      "bay-prune-approval-noncanonical",
+      `bay prune approval '${path}' must contain sorted, duplicate-free prunable and excluded arrays`,
+    )
+  }
+  const overlap = approval.prunable.filter((bay) => new Set(approval.excluded).has(bay))
+  if (overlap.length > 0) {
+    raiseFailure(
+      "configuration",
+      "bay-prune-approval-overlap",
+      `bay prune approval '${path}' lists bays as both prunable and excluded: ${overlap.join(", ")}`,
+    )
+  }
+  const expected = createBayPruneApproval(approval.prunable, approval.excluded).fingerprint
+  if (approval.fingerprint !== expected) {
+    raiseFailure(
+      "refusal",
+      "bay-prune-approval-fingerprint-mismatch",
+      `bay prune approval '${path}' fingerprint mismatch: expected ${expected}, found ${approval.fingerprint}`,
+    )
+  }
+  return approval
+}
+
+type BayPruneCommandOptions = {
+  json?: boolean
+  apply?: boolean
+  approval?: string
+  saveApproval?: string
+  exclude?: readonly string[]
+}
+
+function validateBayPruneOptions(options: BayPruneCommandOptions): void {
+  const applying = options.apply === true
+  if (applying && options.approval === undefined) usage("--apply requires --approval <path>")
+  if (!applying && options.approval !== undefined) usage("--approval requires --apply")
+  if (applying && options.saveApproval !== undefined) usage("--save-approval cannot be combined with --apply")
+  if (applying && (options.exclude?.length ?? 0) > 0) usage("--exclude cannot be combined with --apply")
+}
+
+/** Sweep open bays via the status oracle. Dry-run is the default (22290). */
 async function bayPruneCommand(
   app: YrdCliApp,
   services: YrdCliServices,
-  options: { json?: boolean; apply?: boolean },
+  options: BayPruneCommandOptions,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? process.cwd()
+  const dryRun = options.apply !== true
+  validateBayPruneOptions(options)
+
   const open = app.bays.list().filter((bay) => bay.status !== "closed")
   const remoteTrackingFresh = await refreshBayStatusOrigin(cwd)
   const protections = activeBayProtections(io)
   const reports = open.map((bay) =>
     classifyBayStatus(gatherBayStatusFacts(app, bay, cwd, remoteTrackingFresh, protections, io.now?.() ?? Date.now())),
   )
-  const dryRun = options.apply !== true
+  const approvalPath = options.approval === undefined ? undefined : resolve(cwd, options.approval)
+  const approval = approvalPath === undefined ? undefined : await readBayPruneApproval(approvalPath)
+  const excluded =
+    approval === undefined
+      ? sortedUniqueBayIds(
+          (options.exclude ?? []).flatMap((selector) =>
+            selectedBays(stateOf(app).bays, [selector], cwd, "exclude from prune").map((bay) => {
+              if (bay.status === "closed") refusal(`cannot exclude closed Bay '${selector}' from prune`)
+              return bay.id
+            }),
+          ),
+        )
+      : approval.excluded
+  const excludedSet = new Set(excluded)
+  const censusOutcomes = bayPruneOutcomes(reports, new Set())
+  const currentPrunable = censusOutcomes.rows.pruned.filter((bay) => !excludedSet.has(bay))
+  if (approval !== undefined) {
+    const approvedSet = new Set(approval.prunable)
+    const currentSet = new Set(currentPrunable)
+    const becamePrunable = currentPrunable.filter((bay) => !approvedSet.has(bay))
+    const becameProtected = approval.prunable.filter((bay) => !currentSet.has(bay))
+    if (becamePrunable.length > 0 || becameProtected.length > 0) {
+      raiseFailure(
+        "refusal",
+        "bay-prune-approval-drift",
+        `bay prune approval '${approvalPath}' no longer matches the current census; becamePrunable: ${becamePrunable.join(", ") || "none"}; becameProtected: ${becameProtected.join(", ") || "none"}; rerun the dry-run and approve its replacement artifact`,
+      )
+    }
+  }
+
   const preserved: string[] = []
   if (!dryRun) {
     for (const report of reports) {
@@ -4272,11 +4410,47 @@ async function bayPruneCommand(
   }
   const preservedSet = new Set(preserved)
   const outcomes = bayPruneOutcomes(reports, preservedSet)
-
-  const closed =
-    !dryRun && outcomes.rows.pruned.length > 0
-      ? await closeBays(app, services, outcomes.rows.pruned, { quiet: true, requireAll: true }, io)
-      : []
+  const prunable = outcomes.rows.pruned.filter((bay) => !excludedSet.has(bay))
+  const approvalArtifact = createBayPruneApproval(prunable, excluded)
+  const savedApprovalPath = options.saveApproval === undefined ? undefined : resolve(cwd, options.saveApproval)
+  if (savedApprovalPath !== undefined) {
+    try {
+      await writeFile(savedApprovalPath, `${JSON.stringify(approvalArtifact, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      })
+    } catch (error) {
+      raiseFailure(
+        "infrastructure",
+        "bay-prune-approval-write-failed",
+        `cannot write bay prune approval '${savedApprovalPath}': ${errorDetail(error)}`,
+      )
+    }
+  }
+  const applyLedger: {
+    closed: string[]
+    failed: Array<{ bay: string; error: string }>
+    notAttempted: string[]
+  } = { closed: [], failed: [], notAttempted: [] }
+  if (!dryRun) {
+    for (const [index, bay] of prunable.entries()) {
+      try {
+        const closed = await closeBays(app, services, [bay], { quiet: true, requireAll: true }, io)
+        if (closed.length !== 1) throw new Error(`yrd: prune did not close Bay '${bay}'`)
+        applyLedger.closed.push(bay)
+      } catch (error) {
+        applyLedger.failed.push({ bay, error: errorDetail(error) })
+        applyLedger.notAttempted.push(...prunable.slice(index + 1))
+        break
+      }
+    }
+  }
+  const reportedOutcomes = { prunable, kept: outcomes.rows.kept, paged: outcomes.rows.paged }
+  const reportedHistogram = {
+    prunable: prunable.length,
+    keptByReason: outcomes.histogram.keptByReason,
+    pagedByReason: outcomes.histogram.pagedByReason,
+  }
 
   if (jsonEnabled(options)) {
     await printResult(
@@ -4285,27 +4459,48 @@ async function bayPruneCommand(
       {
         command: "bay.prune",
         dryRun,
+        repository: cwd,
         examined: reports.length,
         preserved,
-        outcomes: outcomes.rows,
-        histogram: outcomes.histogram,
-        closed: closed.map((bay) => bay.id),
+        excluded,
+        outcomes: reportedOutcomes,
+        histogram: reportedHistogram,
+        ...(savedApprovalPath === undefined
+          ? {}
+          : { approval: { path: savedApprovalPath, fingerprint: approvalArtifact.fingerprint } }),
+        ...applyLedger,
       },
       null,
     )
   } else {
     const lines = [
-      `bay prune ${dryRun ? "(dry-run DEFAULT — pass --apply to close PRUNE bays)" : "(APPLY)"}`,
-      `examined ${String(reports.length)} open bay(s); prune=${String(outcomes.rows.pruned.length)}; keep=${String(outcomes.rows.kept.length)}; page=${String(outcomes.rows.paged.length)}`,
+      `bay prune ${dryRun ? "(dry-run DEFAULT — pass --save-approval <path> to approve this census)" : "(APPLY — exact approved set)"}`,
+      `repository ${cwd}`,
+      `examined ${String(reports.length)} open bay(s); prunable=${String(prunable.length)}; excluded=${String(excluded.length)}; keep=${String(outcomes.rows.kept.length)}; page=${String(outcomes.rows.paged.length)}`,
+      ...(savedApprovalPath === undefined ? [] : [`approval ${savedApprovalPath} ${approvalArtifact.fingerprint}`]),
+      ...(dryRun || applyLedger.failed.length === 0
+        ? []
+        : [
+            `failed ${applyLedger.failed.map((entry) => `${entry.bay}: ${entry.error}`).join(", ")}`,
+            `not attempted ${applyLedger.notAttempted.join(", ") || "none"}`,
+          ]),
       "",
       ...reports.map((report) => {
-        const disposition = preservedSet.has(report.bay)
-          ? "PAGE"
-          : report.exit === 0
-            ? "PRUNE"
-            : report.exit === 1
-              ? "KEEP"
-              : "PAGE"
+        const disposition = excludedSet.has(report.bay)
+          ? "EXCLUDED"
+          : preservedSet.has(report.bay)
+            ? "PAGE"
+            : report.exit === 0
+              ? dryRun
+                ? "PRUNABLE"
+                : applyLedger.closed.includes(report.bay)
+                  ? "CLOSED"
+                  : applyLedger.failed.some((entry) => entry.bay === report.bay)
+                    ? "FAILED"
+                    : "NOT-ATTEMPTED"
+              : report.exit === 1
+                ? "KEEP"
+                : "PAGE"
         const evidenceLines = report.lines
           .filter((line) => line.verdict !== "PASS")
           .map((line) => `      ${line.class} ${line.verdict} ${line.evidence}`)
@@ -4319,6 +4514,10 @@ async function bayPruneCommand(
     await printHuman(io, lines.join("\n"))
   }
 
+  if (applyLedger.failed.length > 0) {
+    io.stderr(`${applyLedger.failed.map((entry) => `${entry.bay}: ${entry.error}`).join("\n")}\n`)
+    return 3
+  }
   if (reports.length === 0) return 0
   return outcomes.rows.paged.length > 0 || outcomes.rows.pruned.length === 0 ? 1 : 0
 }
@@ -12402,8 +12601,16 @@ function buildProgram(
   const adminBay = admin.command("bay").description("administer work bays")
   adminBay
     .command("prune")
-    .description("report (default) or close every bay classified PRUNE")
-    .option("--apply", "actually close PRUNE bays (default is dry-run)")
+    .description("census prunable bays and write an approval, or apply one exact approved set")
+    .option("--apply", "close the exact set in --approval")
+    .option("--approval <path>", "approval artifact to verify and apply")
+    .option("--save-approval <path>", "write the dry-run census as a new approval artifact")
+    .option(
+      "--exclude <bay>",
+      "exclude a bay from the dry-run approval (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
   const adminPr = admin.command("pr").description("administer changes")
