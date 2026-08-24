@@ -8328,7 +8328,14 @@ describe("Queue command adapters", () => {
         },
       })
       expect(configuredCheckRan).toBe(false)
-      expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
+      // git-super retries a STALLED read-only git call (3652bfe), so a probe that
+      // times out is attempted more than once. The exact count is git-super's retry
+      // policy, not yrd's contract: asserting it here would hand-sync someone else's
+      // constant into this suite and break on the next policy change. Assert the
+      // property that matters -- the probe happened, and retrying stayed bounded.
+      const depthProbes = requests.filter(({ argv }) => argv.includes("--depth=1"))
+      expect(depthProbes.length).toBeGreaterThanOrEqual(1)
+      expect(depthProbes.length).toBeLessThanOrEqual(5)
       expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
         status: "submitted",
         headSha: fixture.featureSha,
