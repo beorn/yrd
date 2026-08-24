@@ -4769,6 +4769,42 @@ describe("runYrd", () => {
     expect(reaped).toEqual([currentPath, currentPath])
   })
 
+  it("refuses Bay deletion when the final holder census is incomplete", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "blind-holder-census", branch: "topic/blind-holder-census" })
+    const source = () => ({ readable: 1, unavailable: { exited: 0, denied: 0 } })
+    const services = {
+      process: {
+        reapPath: async () => ({
+          targetedPids: [],
+          survivorPids: [],
+          survivorHolders: [],
+          survivorCoverage: {
+            platform: "linux",
+            scope: "same-uid",
+            procRoot: "/proc",
+            complete: false,
+            processes: { enumerated: 1, sameUid: 1, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+            sources: {
+              cwd: source(),
+              exe: source(),
+              root: source(),
+              maps: source(),
+              fd: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+            },
+          },
+          forcedKill: false,
+          signalFailures: [],
+        }),
+      },
+    } as unknown as YrdCliServices
+    const close = outputIO()
+
+    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io, services)).toBe(3)
+    expect(close.stderr()).toMatch(/census incomplete.*same-uid.*denied/iu)
+    expect(app.state().bays.byId.B1?.status).toBe("active")
+  })
+
   it("admin bay prune refuses a Bay protected by a live external consumer", async () => {
     const app = await createApp()
     await openTestBay(app, { name: "protected", branch: "topic/protected" })
