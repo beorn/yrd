@@ -4948,10 +4948,11 @@ describe("runYrd", () => {
       expect(missingApproval.stderr()).toContain("cannot read bay prune approval")
 
       const tamperedApprovalPath = join(root, "tampered-approval.json")
+      const approvalArtifact = JSON.parse(readFileSync(approvalPath, "utf8")) as Record<string, unknown>
       writeFileSync(
         tamperedApprovalPath,
         JSON.stringify({
-          ...JSON.parse(readFileSync(approvalPath, "utf8")),
+          ...approvalArtifact,
           fingerprint: `sha256:${"0".repeat(64)}`,
         }),
       )
@@ -15664,7 +15665,9 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       } satisfies Change
     })
     const keys = prs.flatMap((pr) => pr.revs.map((rev) => ({ pr, revision: rev.n })))
-    expect(keys, "the fill must exceed the cap by enough to expose a slow leak").toHaveLength(CHANGE_COUNT * REVS_PER_CHANGE)
+    expect(keys, "the fill must exceed the cap by enough to expose a slow leak").toHaveLength(
+      CHANGE_COUNT * REVS_PER_CHANGE,
+    )
 
     /** Whether this resolve reached git — a cache miss — rather than being served. */
     const missed = async (key: (typeof keys)[number], now: number): Promise<boolean> => {
