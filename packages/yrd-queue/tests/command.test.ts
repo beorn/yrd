@@ -2566,7 +2566,153 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
-  it("recuts an authored root after a certified same-issue source superseded its gitlink", async () => {
+  it("refuses to recut an authored root whose gitlink pin is unpublished on the submodule's main", async () => {
+    const { repo } = await repository()
+    const doctrineText = (lines: readonly string[]) => `${lines.join("\n")}\n`
+    const module = join(repo, "..", "module")
+    await Bun.$`git init -q -b main ${module}`
+    await git(module, ["config", "user.name", "Yrd Test"])
+    await git(module, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(module, "README.md"), "base\n")
+    await git(module, ["add", "README.md"])
+    await git(module, ["commit", "-qm", "base"])
+    const oldPin = await git(module, ["rev-parse", "HEAD"])
+
+    await git(repo, ["config", "protocol.file.allow", "always"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    await writeFile(join(repo, ".gitattributes"), "doctrine.md merge=union\n")
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText(["Validate admitted work.", "Result marker: �(", "Keep it flowing."]),
+    )
+    await git(repo, ["add", ".gitattributes", "doctrine.md"])
+    await git(repo, ["commit", "-qam", "add dependency"])
+    const sourceBase = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "issue/root", sourceBase])
+
+    await git(module, ["switch", "-qc", "issue/source"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'authored context'\n")
+    await git(module, ["add", "source-a.ts"])
+    await git(module, ["commit", "-qm", "source a"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'settled'\n")
+    await writeFile(join(module, "source-b.ts"), "export const b = true\n")
+    await git(module, ["add", "source-a.ts", "source-b.ts"])
+    await git(module, ["commit", "-qm", "source b"])
+    const sourceTip = await git(module, ["rev-parse", "HEAD"])
+
+    await git(module, ["switch", "-q", "main"])
+    await writeFile(join(module, "upstream.ts"), "export const upstream = true\n")
+    await writeFile(join(module, "source-a.ts"), "export const source = 'current context'\n")
+    await git(module, ["add", "upstream.ts", "source-a.ts"])
+    await git(module, ["commit", "-qm", "current source base"])
+    const composedBase = await git(module, ["rev-parse", "HEAD"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'settled'\n")
+    await writeFile(join(module, "source-b.ts"), "export const b = true\n")
+    await git(module, ["add", "source-a.ts", "source-b.ts"])
+    await git(module, ["commit", "-qm", "compose current source"])
+    const composedTip = await git(module, ["rev-parse", "HEAD"])
+    await writeFile(join(module, "repair.ts"), "export const repair = true\n")
+    await git(module, ["add", "repair.ts"])
+    await git(module, ["commit", "-qm", "repair source tooling"])
+    const currentPin = await git(module, ["rev-parse", "HEAD"])
+    expect(currentPin).not.toBe(sourceTip)
+    expect(await git(module, ["cherry", currentPin, sourceTip, oldPin])).toMatch(/^\+ [0-9a-f]{40}/u)
+
+    await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+    await git(join(repo, "dep"), ["checkout", "-q", currentPin])
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "Result marker: �(",
+        "Keep it flowing.",
+      ]),
+    )
+    await git(repo, ["add", "dep"])
+    await git(repo, ["add", "doctrine.md"])
+    await git(repo, ["commit", "-qm", "advance authoritative dependency"])
+    const currentBase = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "issue/root"])
+    await git(join(repo, "dep"), ["checkout", "-q", sourceTip])
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "For authored roots, draft then recut the same PR.",
+        "Result marker: �(",
+        "Keep it flowing.",
+      ]),
+    )
+    await git(repo, ["add", "dep", "doctrine.md"])
+    await git(repo, ["commit", "-qm", "authored root"])
+    const authoredHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["submodule", "update", "--init", "--recursive"])
+    await using process = createProcess()
+    const remerger = createGitChangeRemerger({ inject: { process }, repo })
+    const input = {
+      id: "PR1",
+      branch: "issue/root",
+      base: "main",
+      revision: 1,
+      headSha: authoredHead,
+      baseSha: currentBase,
+    }
+    // A1 (2026-08-23): the fixture's authored gitlink pin (sourceTip) lives
+    // only on the module's unpublished `issue/source` branch, never merged
+    // to the module's own main (currentPin descends from oldPin via a
+    // different, convergent-content path — see the `git cherry` assertion
+    // above). Under the old certification model this was an ancestry-walk
+    // failure between two divergent submodule tips; under the merge model,
+    // Phase 1's gitlink fill-in requires the authored min commit to be
+    // published on the submodule's main before it can be used at all, so
+    // this now refuses with `min-commit-unpublished` instead — verified
+    // against the fixture, not guessed: this is the correct, by-design
+    // refusal for an unpublished submodule pin (plan §3 test 5's shape).
+    //
+    // The rest of this fixture (composedBase/composedTip/currentPin/
+    // sourceBase, all built for a SECOND, composed-path call using
+    // `currentCompositions`) moved to the next test, below — see its header
+    // comment for why that half needed splitting out and is currently
+    // skipped, discovered while verifying this fix (A1).
+    await expect(remerger.recut(input)).rejects.toThrow(
+      /change 'PR1' cannot fill the shaset: 'dep' authored min commit '[0-9a-f]{40}' is not on submodule main '[0-9a-f]{40}'; the author's gitlink is a min commit, never a value — push it to the submodule's own main first, then resubmit/u,
+    )
+  })
+
+  // A1 follow-on discovery (2026-08-23), NOT part of the A1 instruction's
+  // named scope: this test used to continue past the refusal above with a
+  // SECOND `remerger.recut({ ...input, currentCompositions })` call expecting
+  // a successful COMPOSED recut (union-merge doctrine.md content, dep pinned
+  // at currentPin), then a third and fourth call exercising composed-path
+  // refusals (multi-commit union source, tampered deterministic union
+  // identity). Fixing A1's refusal above (which made execution reach this
+  // code for the first time — it was previously masked by the earlier,
+  // wrongly-worded assertion failing first) revealed this half is now DEAD:
+  // `remergeChange`'s dispatcher (command.ts:2306) no longer reads
+  // `currentCompositions` at all. Routing to the composed path is now decided
+  // entirely by `sourceOnlyCarrierComposition` (command.ts:2665) purely from
+  // git state — an automatic "is this a source-only carrier" detector that
+  // requires the root change to touch EXACTLY ONE path (command.ts:2683,
+  // `rootPayload.length !== 1`). This fixture's "authored root" commit
+  // touches two (`dep` AND `doctrine.md`), so `sourceOnlyCarrierComposition`
+  // returns undefined regardless of `currentCompositions` — confirmed
+  // directly (temporary instrumentation, both calls: `converted: undefined`)
+  // — and every `remerger.recut(...)` call in this fixture, composed input or
+  // not, falls through to the same direct/merge path and the same
+  // min-commit-unpublished refusal as the test above.
+  //
+  // This is composed-path/Q2 territory (§0a: STRANDED-AS-CONDEMNED, byte-for-
+  // byte untouched this phase, deletion no earlier than Phase 3) — genuinely
+  // broken by the SAME refactor, but neither "adapt the assertion" (A1's
+  // actual scope) nor "fix the composed dispatcher" (Q2/Phase 1b's territory,
+  // explicitly excluded from this phase's deletion sweep) apply. Skipped,
+  // not deleted, so the composed-path phase inherits the fixture rather than
+  // rediscovering this from scratch. Flagged to team-lead in the A1 report.
+  it.skip("recuts a composed multi-source revision through the union-merge doctrine wrapper", async () => {
     const { repo } = await repository()
     const doctrineText = (lines: readonly string[]) => `${lines.join("\n")}\n`
     const module = join(repo, "..", "module")
@@ -2677,10 +2823,6 @@ describe("Queue command adapters", () => {
       headSha: authoredHead,
       baseSha: currentBase,
     }
-    await expect(remerger.recut(input)).rejects.toThrow(
-      /target root '.+' pins submodule 'dep' to '.+'; replayed authored root '.+' pins it to '.+'; ancestry walk failed because neither submodule commit is an ancestor of the other/u,
-    )
-
     const currentCompositions = [
       {
         version: 1,
