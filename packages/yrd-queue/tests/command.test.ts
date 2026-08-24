@@ -4125,6 +4125,41 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.repo, ["show", "-s", "--format=%s", utc.sha])).toBe(
       `yrd: merge ${linear.id} revision ${linear.revision}`,
     )
+
+    // Owed by the Phase-1 completion review (`mergeTipCarrierFailure`
+    // per-member scoping): ONE preparation carrying BOTH the queue-recut
+    // member (PR1 — its head is legitimately a merge commit, the queue built
+    // it) and the raw-authored merge-tip member (PR2 — the smuggle case) must
+    // discriminate BY MEMBER: refuse naming PR2, never PR1. A batch-scoped
+    // check here is the 22925 regression shape — it refused every direct-path
+    // change on its first re-verification after a recut. Premises first, so
+    // this cannot pass vacuously:
+    expect(linear.recut).toBeDefined()
+    expect(
+      (await git(fixture.repo, ["rev-list", "--parents", "-n", "1", linear.headSha])).split(/\s+/u).length,
+    ).toBeGreaterThan(2)
+    const mixed = await capture(
+      gitCandidatePreparer({ inject: { process }, repo: fixture.repo })({
+        id: "C5",
+        queueId: "main",
+        baseSha: movedBase,
+        revs: [
+          { pr: linear.id, n: linear.revision, head: linear.headSha },
+          { pr: mergeTip.id, n: mergeTip.revision, head: mergeTip.headSha },
+        ],
+        prs: [linear, mergeTip],
+      }),
+    )
+    expect(mixed).toMatchObject({
+      error: {
+        failure: {
+          kind: "refusal",
+          code: "merge-tip-carrier",
+          message: expect.stringContaining("'PR2'"),
+        },
+      },
+    })
+    expect((mixed.error as { failure: { message: string } }).failure.message).not.toContain("'PR1'")
   }, 30_000)
 
   it("refuses an already-resolved stale merge tip that would cleanly drop merged commits", async () => {
