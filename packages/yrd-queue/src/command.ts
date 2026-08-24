@@ -2305,7 +2305,14 @@ async function remergeChange(git: Git, repo: string, input: ChangeRemergeInput):
   let localSourceTips: ReadonlySet<string> | undefined
   if (remergeInput.composition === undefined) {
     const converted = await sourceOnlyCarrierComposition(git, repo, target, remergeInput)
-    if (converted === undefined) return remergeDirectChange(git, repo, target, remergeInput)
+    // Re-merge Phase 1 (22925 family): the direct case is built by merge, not
+    // rebase — `remergeDirectChangeByMerge` wraps `rebuildCandidateByMerge`
+    // (this file, below) to the same `ChangeRemergeResult` contract
+    // `remergeDirectChange` used to return. `remergeDirectChange` itself is
+    // superseded and unreferenced from here on (see its own comment) — kept
+    // in place, not deleted, until an explicit cleanup pass confirms which of
+    // its exclusive helpers are safe to remove alongside it.
+    if (converted === undefined) return remergeDirectChangeByMerge(git, repo, target, remergeInput)
     remergeInput = {
       ...remergeInput,
       headSha: converted.sourceBase,
@@ -2856,6 +2863,17 @@ async function assertCurrentRemergeCertificate(
   }
 }
 
+/**
+ * SUPERSEDED (re-merge Phase 1, 22925 family) — no remaining call site.
+ * `remergeDirectChangeByMerge` (this file, near `rebuildCandidateByMerge`)
+ * replaced this rebase-based path: it re-derives the direct candidate by
+ * merge and lets `run.ts`/`plugin.ts`'s existing unchanged/mint-a-revision
+ * handling do the rest, unmodified. Left in place rather than deleted because
+ * several of its helpers (`changedPayloadIdentity`, `mergeTipCarrierFailure`,
+ * others) are shared with the composed path and still live; a correct
+ * deletion needs a per-helper audit this pass did not do. Cleanup candidate —
+ * flag before extending it further.
+ */
 async function remergeDirectChange(
   git: Git,
   repo: string,
@@ -3728,9 +3746,22 @@ async function prepareCandidateMembers(
       if (pr.recut !== undefined) {
         const dropped = await carrierDropsMergedFailure(git, repo, path, pr.id, pr.headSha, authoritativeBase)
         if (dropped !== undefined) return dropped
+      } else {
+        // Re-merge Phase 1 (22925 family): `mergeTipCarrierFailure` guards
+        // against an AUTHOR smuggling a merge commit as their own branch tip —
+        // meaningful only against the author's own, never-yet-recut
+        // submission. Once `pr.recut !== undefined`, `pr.headSha` is the
+        // QUEUE's own built candidate (`remergeDirectChangeByMerge`, this
+        // file), which is legitimately a merge commit for the direct path:
+        // the whole point of building by merge instead of rebase. Checking a
+        // queue-recut head here refused every direct-path change the moment
+        // it was re-verified after its first recut — caught by
+        // `command.test.ts`'s coupled-pin-and-code suite (22925 investigation,
+        // 2026-08-23). The protection this check exists for still runs, at
+        // the point it matters: initial submission, `pr.recut === undefined`.
+        const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
+        if (mergeTip !== undefined) return mergeTip
       }
-      const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
-      if (mergeTip !== undefined) return mergeTip
       if (pr.recut?.certificate === "frozen-code-carrier-v1") {
         const certified = await verifyRemergeCertificate(git, path, pr)
         if (certified !== undefined) return certified
@@ -4399,6 +4430,110 @@ export async function rebuildCandidateByMerge(
   }
   const delta = await exactDelta(refGit, repo, target.sha, outcome.output.sha)
   return { sha: outcome.output.sha, treeSha: delta.candidateTree, unchanged: delta.entries.length === 0 }
+}
+
+/**
+ * Adapts `rebuildCandidateByMerge`'s pure-git result to the `ChangeRemergeResult`
+ * contract this file's `remergeChange` dispatcher (line ~2308, `service.recut`)
+ * and its callers expect — the same shape `remergeDirectChange` (the rebase-based
+ * path this replaces for the direct case) has always returned. Everything
+ * downstream of `service.recut` — `run.ts`'s `executeRemergeChange` and the bay
+ * reducer `remergeChange` (`yrd-bay/src/plugin.ts`) — already treats `unchanged`
+ * as a no-op and any other result as "mint a revision", exactly what re-merge
+ * Phase 1 needs. Neither needed a single line changed: this seam is the whole
+ * change.
+ *
+ * `patchId`: a merge-based candidate has nothing to certify equivalence
+ * against — the tested object IS the merged object, so there is no rewrite to
+ * prove didn't drift. This is therefore a plain stable identity, not a
+ * certificate: the candidate's own diff against its own base, via the same
+ * primitive (`git.stablePatchId`) `remergeDirectChange` used for its
+ * `materializedPatchId`, without the certification apparatus (range-diff,
+ * absorbed paths, fast-forwarded-carrier-gitlink classification) that only
+ * exists to prove a REWRITE didn't drift.
+ *
+ * Ref publish: `sourceCandidateRefFor(sha)` plus a push to origin, matching
+ * what `remergeDirectChange` does at its own end — plain git in the caller's
+ * `repo`, not bay state, so it belongs at this seam regardless of which side
+ * built the candidate.
+ */
+async function remergeDirectChangeByMerge(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: ChangeRemergeInput,
+): Promise<ChangeRemergeResult> {
+  const oldBase = input.baseSha
+  if (oldBase === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-base-missing",
+      message: `yrd: change '${input.id}' revision ${input.revision} has no immutable base SHA`,
+    })
+  }
+  const built = await rebuildCandidateByMerge(
+    { inject: { process: git.process }, repo, env: git.env },
+    target,
+    { id: input.id, branch: input.branch, headSha: input.headSha },
+  )
+  // `built.unchanged` (from `exactDelta`) means the candidate carries no delta
+  // against `target.sha` — the author's tip is either a literal ancestor or its
+  // content is already fully contained (23167: `git cherry` still reports
+  // unique commits even then). A `target.sha..built.sha` diff is trivially
+  // empty in that case — `stablePatchId` returns undefined for an empty diff by
+  // construction (`git patch-id` emits nothing), not as a failure signal — so
+  // there is nothing there to identify. Fall back to the author's own range,
+  // exactly the identity `absorbedRemergeResult` (the rebase-path precedent for
+  // this same "fully absorbed" case, `command.ts` above) already used: a stable
+  // value independent of whether the base has moved at all.
+  const patchId = built.unchanged
+    ? await git.stablePatchId(repo, oldBase, input.headSha)
+    : await git.stablePatchId(repo, target.sha, built.sha)
+  if (patchId === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "payload-certificate",
+      message: `yrd: change '${input.id}' rebuild has no stable patch identity`,
+    })
+  }
+  const ref = sourceCandidateRefFor(built.sha)
+  const pinned = await git.run(
+    repo,
+    ["update-ref", "--create-reflog", ref, built.sha, "0".repeat(built.sha.length)],
+    true,
+  )
+  if (pinned.code !== 0 && (await git.optionalCommit(repo, ref)) !== built.sha) {
+    throw createFailure({
+      kind: "infrastructure",
+      code: "recut-publish",
+      message: `yrd: change '${input.id}' re-merge ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
+    })
+  }
+  const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  if (remote.code === 0 && remote.stdout !== "") {
+    const published = await pushRefUpdates({
+      root: repo,
+      git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+      timeoutMs: GIT_TIMEOUT_MS,
+      updates: [{ repository: repo, remote: "origin", source: built.sha, destination: ref }],
+    })
+    if (published.state !== "updated" && published.state !== "unchanged") {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "recut-publish",
+        message: `yrd: change '${input.id}' re-merge ref could not be published: ${
+          gitSuperFailureDetail(published)?.message ?? published.state
+        }`,
+      })
+    }
+  }
+  return {
+    headSha: built.sha,
+    baseSha: target.sha,
+    treeSha: built.treeSha,
+    patchId,
+    unchanged: built.unchanged,
+  }
 }
 
 type RemergeBaseMovement =
