@@ -2974,7 +2974,7 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
-  it("admits a mechanically certified two-commit recut that preserves an authored root gitlink", async () => {
+  it("recuts a two-commit authored branch that preserves an authored root gitlink", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -2995,11 +2995,33 @@ describe("Queue command adapters", () => {
       headSha: featureSha,
       baseSha,
     })
-    expect(await git(repo, ["rev-list", "--count", `${remerge.baseSha}..${remerge.headSha}`])).toBe("2")
-    expect(await git(repo, ["rev-parse", `${remerge.headSha}~2`])).toBe(remerge.baseSha)
+    // A2 (2026-08-23): the fixture's authored branch still carries exactly
+    // two commits ("feature dependency", "feature" — the title's "two-commit"
+    // describes THIS, unchanged). What changed is what `baseSha..headSha`
+    // counts: the old rebase-based path REPLAYED those two commits linearly
+    // on the new base, so the range was exactly those two commits. The merge
+    // model instead produces ONE merge commit (`yrd: merge PR1 revision 1`,
+    // first parent = baseSha directly, second parent = the ORIGINAL authored
+    // tip, byte-for-byte, per Q1's "authored tip is never rewritten") on top
+    // of the base — and a merge commit's second-parent history becomes newly
+    // reachable in `base..head` for the first time (a rebase's linear replay
+    // never had a second parent to make that history reachable this way).
+    // Confirmed directly, not assumed (temporary instrumentation, removed):
+    // `headSha~1` (first-parent) === baseSha exactly; `headSha^2` (second
+    // parent) === the original, unrewritten "feature" commit sha; the
+    // all-paths reversed subject list is exactly the 2 authored commits (in
+    // their original order) followed by the merge commit. Total: 2 authored
+    // + 1 merge = 3, not a bug — the natural, expected shape of a
+    // non-conflicting single-sided gitlink advance built by merge instead of
+    // rebase (this fixture's `requiredVersion: "base"` means main's own `dep`
+    // pin never moved, so no gitlink pre-branch/shaset fill-in is needed
+    // either — the merge is clean, nothing else added to the count).
+    expect(await git(repo, ["rev-list", "--count", `${remerge.baseSha}..${remerge.headSha}`])).toBe("3")
+    expect(await git(repo, ["rev-parse", `${remerge.headSha}~1`])).toBe(remerge.baseSha)
+    expect(await git(repo, ["rev-parse", `${remerge.headSha}^2`])).toBe(featureSha)
     expect(
       (await git(repo, ["log", "--reverse", "--format=%s", `${remerge.baseSha}..${remerge.headSha}`])).split("\n"),
-    ).toEqual(["feature dependency", "feature"])
+    ).toEqual(["feature dependency", "feature", "yrd: merge PR1 revision 1"])
     await using app = await checkedQueue(process, repo, ["true"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
     await app.bays.recut({
