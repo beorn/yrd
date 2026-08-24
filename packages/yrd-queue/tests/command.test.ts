@@ -2347,6 +2347,54 @@ describe("Queue command adapters", () => {
     })
   })
 
+  // Task C, "wiring-level interim test through the seam": the DI seam
+  // (`createGitChangeRemerger().recut`, `remergeChange`'s dispatcher) adapts
+  // `rebuildCandidateByMerge`'s pure-git result to `ChangeRemergeResult`
+  // (command.ts, `remergeDirectChangeByMerge`'s own return statement) with
+  // exactly five fields — headSha, baseSha, treeSha, patchId, unchanged — and
+  // no `composition` or `sourceRewrites` key at all for the direct case,
+  // unlike the composed path's return a few lines above it in the same
+  // dispatcher. That is the "plain identity, not a certificate" property Q3
+  // describes at the type level: nothing here is proving equivalence to a
+  // rewrite, so there is nothing to carry a composition/rewrite record for.
+  // No existing test asserts the field set directly; every other recut()
+  // caller uses `toMatchObject`, which only checks the fields it names and
+  // says nothing about a field's ABSENCE.
+  it("direct recut result carries only the five plain-identity fields, no composition or sourceRewrites", async () => {
+    const { repo } = await repository()
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/plain-identity"])
+    await writeFile(join(repo, "feature.txt"), "feature\n")
+    await git(repo, ["add", "feature.txt"])
+    await git(repo, ["commit", "-qm", "feature"])
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "advance authority\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+
+    await using process = createProcess()
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/plain-identity",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha: oldBaseSha,
+    })
+
+    expect(Object.keys(result).toSorted()).toEqual(["baseSha", "headSha", "patchId", "treeSha", "unchanged"])
+    expect(result).toMatchObject({
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+    // A genuine merge candidate, not the author's tip passed through: never
+    // rewritten (Q1) — it survives as the merge commit's own second parent.
+    expect(result.headSha).not.toBe(featureSha)
+    expect(await git(repo, ["rev-parse", `${result.headSha}^2`])).toBe(featureSha)
+  })
+
   // A0 correction (2026-08-23): restored per direct instruction — this test
   // was RED and UNEXAMINED at the time 971b5a04 deleted it, which classified
   // it as "dies with the mechanism" with no root cause, forbidden per

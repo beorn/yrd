@@ -121,6 +121,14 @@ async function gitlinkConflictFixture(options: {
   /** Whether the author's move is reachable from the submodule's own main
    * BEFORE the rebuild runs — the shaset fill-in's precondition. */
   authorPublishedToMain: boolean
+  /** Default true, matching every existing caller's assumption: main's own
+   * "advance dependency" step ALSO moves the same gitlink path, producing the
+   * genuine two-sided conflict `git merge` reports there. Set false for the
+   * narrow-trigger fixture (test 12): main advances an unrelated path
+   * instead, so the author's gitlink change is the only one at that path and
+   * a plain merge resolves it — the shape that must NEVER reach the
+   * pre-branch's fill-in machinery. */
+  mainAlsoMovesGitlink?: boolean
 }): Promise<{
   root: string
   superRepo: string
@@ -173,15 +181,27 @@ async function gitlinkConflictFixture(options: {
   const authorTip = await git.run(superRepo, ["rev-parse", "HEAD"])
 
   await git.run(superRepo, ["switch", "-q", "main"])
-  await Bun.write(`${moduleRepo}/main.txt`, "main\n")
-  await git.run(moduleRepo, ["add", "main.txt"])
-  await git.run(moduleRepo, ["commit", "-qm", "main move"])
-  const mainModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
-  await git.run(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
-  await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
-  await git.run(superRepo, ["add", "--", gitlinkPath])
-  await git.run(superRepo, ["commit", "-qm", "main: advance dependency"])
-  const targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+  let targetSha: string
+  if (options.mainAlsoMovesGitlink ?? true) {
+    await Bun.write(`${moduleRepo}/main.txt`, "main\n")
+    await git.run(moduleRepo, ["add", "main.txt"])
+    await git.run(moduleRepo, ["commit", "-qm", "main move"])
+    const mainModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
+    await git.run(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
+    await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
+    await git.run(superRepo, ["add", "--", gitlinkPath])
+    await git.run(superRepo, ["commit", "-qm", "main: advance dependency"])
+    targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+  } else {
+    // Genuine base divergence at a path disjoint from the gitlink: main moves
+    // forward, but never touches `gitlinkPath`, so the author's own gitlink
+    // change is the only one on that path — nothing for a merge to conflict
+    // on there.
+    await Bun.write(`${superRepo}/main-only.txt`, "main-only\n")
+    await git.run(superRepo, ["add", "main-only.txt"])
+    await git.run(superRepo, ["commit", "-qm", "main: unrelated advance"])
+    targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+  }
 
   if (options.authorPublishedToMain) {
     await git.run(moduleRepo, ["merge", "-q", "--no-ff", "-m", "publish author's move", "side"])
@@ -273,6 +293,71 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
         message: expect.stringMatching(new RegExp(`${fixture.gitlinkPath}.*${fixture.authorModuleSha}`, "u")),
       },
     })
+  })
+
+  it("12. genuine base divergence on an unrelated path with a non-conflicting authored gitlink never trips the pre-branch's conflict path", async () => {
+    // Task C, "narrow-trigger dedicated test": the pre-branch (01a2c79e) is
+    // scoped to fire its OWN conflict-resolution machinery
+    // (`rebuildGitlinkConflictByTakingBase`) ONLY on an actual gitlink-mode
+    // merge CONFLICT — a first cut that read "does this change author a
+    // gitlink at all" as the trigger hijacked every clean, single-sided
+    // gitlink advance too (command.test.ts:9195's queue-driven
+    // submodule-promotion suite proved it, per command.ts's own account of
+    // that regression). Tests 4/4b/5 above all use `gitlinkConflictFixture`'s
+    // DEFAULT shape, where BOTH sides move the SAME gitlink — a genuine
+    // conflict, exactly what SHOULD trigger it. This fixture is the other
+    // half: main advances (`mainAlsoMovesGitlink: false`, an unrelated path)
+    // so there is a real base divergence to merge across, but only the
+    // author's branch ever touches the gitlink — nothing for `git merge` to
+    // conflict on there, so the trial merge inside the pre-branch's own guard
+    // (command.ts, `if (trial.code !== 0)`) succeeds and takes the "clean
+    // merge" branch, never calling `rebuildGitlinkConflictByTakingBase`.
+    //
+    // Verified directly (temporary instrumentation, not left in): this
+    // fixture's gitlink is still an AUTHORED path (its value differs from
+    // the merge-base's), so it is unconditionally filled from the
+    // submodule's CURRENT main by `prepareCandidateMembers`'s own native
+    // authored-gitlink handling (command.ts, step (b): "an authored gitlink
+    // is a min commit, a floor... the queue writes the shaset commit that
+    // fills each value in from that submodule's main") — the SAME fill this
+    // fixture's `authorPublishedToMain: true` step makes available, whether
+    // or not the pre-branch ever ran. That fill is not this test's target;
+    // it is what tests 4/4b already prove for the CONFLICTING case. This
+    // test's own claim is narrower and still new: a genuine root-level base
+    // divergence on a path disjoint from the gitlink does not perturb that
+    // fill, and the candidate is produced successfully rather than
+    // mis-detected as a conflict it is not.
+    const fixture = await gitlinkConflictFixture({ authorPublishedToMain: true, mainAlsoMovesGitlink: false })
+    roots.push(fixture.root)
+    const publishedMain = await git.run(fixture.moduleRepo, ["rev-parse", "main"])
+    expect(publishedMain).not.toBe(fixture.authorModuleSha) // the --no-ff publish minted a new tip
+
+    const result = await rebuildCandidateByMerge(
+      options(fixture.superRepo),
+      { sha: fixture.targetSha },
+      { id: "PR1", branch: fixture.authorBranch, headSha: fixture.authorTip },
+    )
+
+    // Filled from the submodule's current main (published, a descendant of
+    // the author's own commit) — the correct, by-design outcome, not the
+    // author's literal value carried through untouched.
+    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])).toBe(publishedMain)
+    // The base's own divergent, gitlink-disjoint content survived the merge
+    // untouched, proving the real base move was actually merged across, not
+    // silently dropped or shortcut around.
+    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:main-only.txt`])).toBeTruthy()
+    // `result.sha` is the shaset wrapper (test 7 establishes this shape for
+    // the conflicting case; it holds here too, since this fill also touches
+    // an authored gitlink) — a single-parent commit whose parent is the
+    // merge itself. The merge commit one level up is where [target, authored
+    // tip] actually lives; unwrap one level to check it, same as test 7.
+    const wrapperParents = await git.run(fixture.superRepo, ["rev-list", "--parents", "-n1", result.sha])
+    const [wrapperSha, mergeSha, ...extra] = wrapperParents.split(/\s+/u)
+    expect(wrapperSha).toBe(result.sha)
+    expect(extra).toEqual([])
+    const mergeParents = await git.run(fixture.superRepo, ["rev-list", "--parents", "-n1", mergeSha!])
+    const [, ...mergeParentShas] = mergeParents.split(/\s+/u)
+    expect(mergeParentShas).toEqual([fixture.targetSha, fixture.authorTip])
   })
 })
 
