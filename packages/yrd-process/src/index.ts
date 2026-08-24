@@ -17,10 +17,17 @@ export {
 export { runWithGitTimeoutRetry, withGitTimeoutRetry } from "./git-timeout-retry.ts"
 
 export {
+  inspectPathHolderCensus,
   inspectPathHolders,
   pathHolderRefusal,
   pathReapFailure,
+  type DarwinPathHolderCoverage,
+  type LinuxPathHolderCoverage,
   type PathHolder,
+  type PathHolderCensus,
+  type PathHolderCoverage,
+  type PathHolderSourceCoverage,
+  type PathHolderUnavailableCoverage,
   type PathReapResult,
 } from "./path-reaper.ts"
 

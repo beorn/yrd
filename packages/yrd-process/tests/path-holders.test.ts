@@ -4,11 +4,17 @@
  * @consumer @yrd/process inspectPathHolders
  */
 import { afterEach, describe, expect, test, vi } from "vitest"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { inspectPathHolders, pathHolderRefusal, pathReapFailure, type PathHolder } from "../src/index.ts"
-import { inspectPathHoldersInProc } from "../src/path-reaper.ts"
+import {
+  inspectPathHolderCensus,
+  inspectPathHolders,
+  pathHolderRefusal,
+  pathReapFailure,
+  type PathHolder,
+} from "../src/index.ts"
+import { inspectPathHolderCensusInProc, inspectPathHoldersInProc } from "../src/path-reaper.ts"
 
 const scratch: string[] = []
 
@@ -19,6 +25,7 @@ afterEach(() => {
 
 describe("inspectPathHolders", () => {
   test("the public refusal preserves the holder source and target", () => {
+    expect(inspectPathHolderCensus).toBeTypeOf("function")
     expect(inspectPathHolders).toBeTypeOf("function")
     const holders: PathHolder[] = [
       { pid: 42, source: "cwd", target: "/tmp/bay" },
@@ -78,5 +85,110 @@ describe("inspectPathHolders", () => {
     await expect(inspectPathHoldersInProc(ownedPath, procRoot)).resolves.toEqual([
       { pid: 4242, source: "fd/maps", target: mappedFile },
     ])
+  })
+
+  test.runIf(process.platform === "linux")(
+    "reports reduced same-UID coverage instead of a clean empty census when a source is denied",
+    async () => {
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-denied-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      const processRoot = join(procRoot, "4242")
+      mkdirSync(ownedPath)
+      mkdirSync(join(processRoot, "fd"), { recursive: true })
+      symlinkSync("/", join(processRoot, "cwd"))
+      symlinkSync("/bin/sh", join(processRoot, "exe"))
+      symlinkSync("/", join(processRoot, "root"))
+      writeFileSync(join(processRoot, "maps"), "")
+      chmodSync(join(processRoot, "maps"), 0o000)
+
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({
+        platform: "linux",
+        scope: "same-uid",
+        complete: false,
+        processes: { enumerated: 1, sameUid: 1, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+        sources: {
+          cwd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          exe: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          root: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+          maps: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+          fd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
+        },
+      })
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "keeps an exited source separate from denial without reducing coverage",
+    async () => {
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-exited-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      const processRoot = join(procRoot, "4242")
+      mkdirSync(ownedPath)
+      mkdirSync(join(processRoot, "fd"), { recursive: true })
+      symlinkSync("/", join(processRoot, "cwd"))
+      symlinkSync("/bin/sh", join(processRoot, "exe"))
+      symlinkSync("/", join(processRoot, "root"))
+      // No maps entry: ENOENT represents a source that exited during traversal.
+
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({
+        platform: "linux",
+        complete: true,
+        sources: {
+          maps: { readable: 0, unavailable: { exited: 1, denied: 0 } },
+        },
+      })
+    },
+  )
+
+  test.runIf(process.platform === "linux")(
+    "a complete empty census says what proc root and same-UID scope were searched",
+    async () => {
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-empty-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      const procRoot = join(fixture, "proc")
+      mkdirSync(ownedPath)
+      mkdirSync(procRoot)
+
+      await expect(inspectPathHolderCensusInProc(ownedPath, procRoot)).resolves.toEqual({
+        holders: [],
+        coverage: {
+          platform: "linux",
+          scope: "same-uid",
+          procRoot,
+          complete: true,
+          processes: { enumerated: 0, sameUid: 0, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+          sources: {
+            cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            root: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            maps: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            fd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+          },
+        },
+      })
+    },
+  )
+
+  test.runIf(process.platform === "linux")("fails loudly when the required proc root is missing", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-missing-"))
+    scratch.push(fixture)
+    const ownedPath = join(fixture, "owned")
+    const procRoot = join(fixture, "missing-proc")
+    mkdirSync(ownedPath)
+
+    await expect(inspectPathHolderCensusInProc(ownedPath, procRoot)).rejects.toThrow(
+      `Linux path-holder census requires readable proc root '${procRoot}'`,
+    )
   })
 })
