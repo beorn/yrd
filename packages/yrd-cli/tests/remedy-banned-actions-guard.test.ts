@@ -55,6 +55,12 @@ const ALLOWLIST: readonly Allowed[] = [
       "to a human.",
   },
   {
+    file: "yrd-queue/src/command.ts",
+    reason:
+      "rebuildCandidateByMerge resets only its pipeline-owned ephemeral withScratch worktree after a clean " +
+      "trial merge, before the authoritative merge runs — never a canonical checkout and never printed to a human.",
+  },
+  {
     file: "yrd-bay/src/git.ts",
     reason:
       "Bay workspace checkpoint pushes a change's own branch (HEAD:refs/heads/<branch>) as part of provisioning — " +

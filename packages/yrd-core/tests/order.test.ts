@@ -238,8 +238,8 @@ describe("collator hoist guard", () => {
         // three-argument form (locales + options) reopens ICU per comparison.
         if (arity < 3) return []
         const line = source.slice(0, index).split("\n").length
-        const lineEnd = source.indexOf("\n", index)
-        const text = source.slice(index, lineEnd === -1 ? undefined : lineEnd)
+        const rowEnd = source.indexOf("\n", index)
+        const text = source.slice(index, rowEnd === -1 ? undefined : rowEnd)
         // An explicit `collator-hoist-allow:` comment on the same line records a
         // reviewed exception (e.g. a deliberately locale-pinned comparator).
         return text.includes("collator-hoist-allow:") ? [] : [`${file}:${line}: ${text.trim()}`]

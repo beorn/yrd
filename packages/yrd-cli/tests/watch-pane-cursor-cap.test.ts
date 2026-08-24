@@ -46,7 +46,7 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
     expect(snapshot.projection.rows.map((row) => row.group)).toEqual(["pending", "pending", "running"])
     expect(snapshot.projection.display).toMatchObject({ shown: 2, hidden: 1 })
 
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()

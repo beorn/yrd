@@ -14,6 +14,7 @@ import { createYrdHost, runYrdProcess } from "../src/host.ts"
 import { followQueueRuns } from "../src/run.ts"
 import { formatHabitantLogLine } from "../src/runner-timeline.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
 const YRD_BIN = join(import.meta.dirname, "../../../bin/yrd.ts")
@@ -41,7 +42,8 @@ async function runnerRepo(
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, "README.md"), "main\n")
   await writeFile(join(repo, ".yrd.yml"), config)
-  await git(repo, "add", "README.md", ".yrd.yml")
+  await installDeclaredYrdEntry(repo)
+  await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
   return { repo }
 }

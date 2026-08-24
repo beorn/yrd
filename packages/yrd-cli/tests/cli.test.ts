@@ -158,6 +158,13 @@ function remergeGitlinkConflictReason(pr: string, targetRoot: string): string {
   )
 }
 
+function remergeBaseDivergedReason(pr: string, targetRoot: string): string {
+  return (
+    `change '${pr}' revision 2 certifies base '${BASE_SHA}', but the authoritative candidate base is ` +
+    `'${targetRoot}', which never descended from it; the certificate cannot become valid without a fresh revision`
+  )
+}
+
 function revisionAdmissionJob(
   app: Awaited<ReturnType<typeof createApp>>,
   prId: string,
@@ -3296,8 +3303,8 @@ describe("runYrd", () => {
       Promise.reject(
         createFailure({
           kind: "refusal",
-          code: "recut-gitlink-conflict",
-          message: remergeGitlinkConflictReason("PR1", nextBase),
+          code: "recut-base-diverged",
+          message: remergeBaseDivergedReason("PR1", nextBase),
         }),
       ),
     )
@@ -3333,7 +3340,7 @@ describe("runYrd", () => {
     expect(remerge, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
     expect(app.state().queues.admissionRefusals.PR1?.settlement).toMatchObject({
       disposition: "needs-person",
-      reason: expect.stringContaining("neither submodule commit is an ancestor"),
+      reason: expect.stringContaining("never descended from it"),
     })
     expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
   })
@@ -3742,8 +3749,8 @@ describe("runYrd", () => {
         return Promise.reject(
           createFailure({
             kind: "refusal",
-            code: "recut-gitlink-conflict",
-            message: remergeGitlinkConflictReason("PR1", nextBase),
+            code: "recut-base-diverged",
+            message: remergeBaseDivergedReason("PR1", nextBase),
           }),
         )
       }
@@ -3761,7 +3768,7 @@ describe("runYrd", () => {
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
     await expect(refresh(app, services, io)).resolves.toEqual([
-      expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-gitlink-conflict" }),
+      expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-base-diverged" }),
       expect.objectContaining({ status: "refreshed", pr: "PR2" }),
     ])
     expect(resolveQueueTarget).toHaveBeenCalledTimes(1)
@@ -3772,7 +3779,7 @@ describe("runYrd", () => {
         props: expect.objectContaining({
           action: "queue-freshness-refused",
           pr: "PR1",
-          code: "recut-gitlink-conflict",
+          code: "recut-base-diverged",
         }),
       }),
     )
@@ -3786,15 +3793,15 @@ describe("runYrd", () => {
       pr: "PR1",
       revision: 2,
       headSha: "2".repeat(40),
-      code: "recut-gitlink-conflict",
-      reason: remergeGitlinkConflictReason("PR1", nextBase),
+      code: "recut-base-diverged",
+      reason: remergeBaseDivergedReason("PR1", nextBase),
       count: 1,
     })
     await expect(runInternals.applyRefusalRemedies(app, services, io, new Set())).resolves.toEqual([])
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
       settlement: {
         disposition: "needs-person",
-        reason: expect.stringContaining("neither submodule commit is an ancestor"),
+        reason: expect.stringContaining("never descended from it"),
       },
     })
     expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
@@ -3807,7 +3814,7 @@ describe("runYrd", () => {
       ),
     ).toHaveLength(1)
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       count: 1,
       settlement: { disposition: "needs-person" },
     })
@@ -8862,9 +8869,9 @@ describe("runYrd", () => {
       // same as the yrd-queue unit coverage (admission-refusal-oracle.test.ts).
       await app.queue.recordAdmissionRefusal({
         pr: pr.id,
-        code: "recut-gitlink-conflict",
+        code: "recut-base-diverged",
         kind: "refusal",
-        reason: "two fixed gitlink commits are non-ancestral",
+        reason: "the authoritative candidate base never descended from the certified base",
       })
 
       const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
@@ -8889,7 +8896,7 @@ describe("runYrd", () => {
           {
             code: "admission-refusal-needs-person",
             pr: pr.id,
-            refusal: "recut-gitlink-conflict",
+            refusal: "recut-base-diverged",
             owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
           },
         ])
@@ -8993,9 +9000,9 @@ describe("runYrd", () => {
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
       await app.queue.recordAdmissionRefusal({
         pr: pr.id,
-        code: "recut-gitlink-conflict",
+        code: "recut-base-diverged",
         kind: "refusal",
-        reason: "two fixed gitlink commits are non-ancestral",
+        reason: "the authoritative candidate base never descended from the certified base",
       })
 
       // No grace period, unlike a draft: the very next read already pages.
@@ -10351,7 +10358,7 @@ describe("runYrd", () => {
     expect(frame).not.toContain("pr#2.1")
   })
 
-  it("makes queue status the exact unfiltered 24h timeline, including the newest integration", async () => {
+  it("makes the queue view the exact unfiltered 24h timeline, including the newest integration", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     const integrated = outputIO()
@@ -13525,8 +13532,8 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
       prepareCandidate: async () => {
         throw createFailure({
           kind: "refusal",
-          code: "recut-gitlink-conflict",
-          message: "two fixed gitlink commits are non-ancestral",
+          code: "recut-base-diverged",
+          message: "the authoritative candidate base never descended from the certified base",
         })
       },
     })
@@ -13535,11 +13542,11 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
 
     expect(await runYrd(app, yrd("queue", "run", "--once"), run.io), run.stderr()).toBe(0)
     expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       count: 1,
       settlement: {
         disposition: "needs-person",
-        reason: "two fixed gitlink commits are non-ancestral",
+        reason: "the authoritative candidate base never descended from the certified base",
       },
     })
     expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")

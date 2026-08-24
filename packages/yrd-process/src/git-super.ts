@@ -51,7 +51,7 @@ type SyncGitExecution = Readonly<{
   timeoutMs?: number
 }>
 
-type SyncGitExecutor = (execution: SyncGitExecution) => GitProcessResult
+type SyncGitExecutionHandler = (execution: SyncGitExecution) => GitProcessResult
 
 function cleanGitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(
@@ -125,19 +125,19 @@ function syncReadArgv(command: GitSyncReadCommand): readonly string[] {
 export function adaptProcessGit(
   process: undefined,
   defaults?: GitProcessDefaults,
-  inject?: Readonly<{ executeSync?: SyncGitExecutor }>,
+  inject?: Readonly<{ executeSync?: SyncGitExecutionHandler }>,
 ): GitSyncReader
 export function adaptProcessGit(
   process: Pick<Process, "run">,
   defaults?: GitProcessDefaults,
-  inject?: Readonly<{ executeSync?: SyncGitExecutor }>,
+  inject?: Readonly<{ executeSync?: SyncGitExecutionHandler }>,
 ): YrdGitProcess
 
 /** Yrd's only adapter from its supervised process port to git-super's Git port. */
 export function adaptProcessGit(
   process: Pick<Process, "run"> | undefined,
   defaults: GitProcessDefaults = {},
-  inject: Readonly<{ executeSync?: SyncGitExecutor }> = {},
+  inject: Readonly<{ executeSync?: SyncGitExecutionHandler }> = {},
 ): YrdGitProcess | GitSyncReader {
   const readSync: GitSyncReader["readSync"] = (request) => {
     const argv = syncReadArgv(request.command)

@@ -9,6 +9,7 @@ import { isAbsolute, join } from "node:path"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { runYrdProcess } from "../src/host.ts"
 import type { YrdCliIO } from "../src/types.ts"
+import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
 const spawnedYrdProcesses = new Set<ReturnType<typeof Bun.spawn>>()
@@ -456,7 +457,7 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     }
     expect(payload.reports[0]?.lines.find((line) => line.class === "commits")).toMatchObject({
       verdict: "PASS",
-      evidence: "tip is durable at origin/main (same changes)",
+      evidence: "tip is durable at origin/main (same changes) (proof used live worktree HEAD)",
     })
   })
 
@@ -1346,7 +1347,13 @@ printf ran > "$YRD_TEST_SHELL_LOG"
       bays: [
         expect.objectContaining({
           issue: claim,
-          orphan: expect.objectContaining({ reason: expect.stringContaining("setup failed") }),
+          nativeStatus: "closed",
+          status: "fail",
+          closure: expect.objectContaining({ kind: "closed-degenerate" }),
+          failure: expect.objectContaining({
+            code: "provision-failed",
+            message: expect.stringContaining("already exists without matching claim provenance"),
+          }),
         }),
       ],
     })
@@ -1374,7 +1381,13 @@ printf ran > "$YRD_TEST_SHELL_LOG"
       bays: [
         expect.objectContaining({
           issue: claim,
-          orphan: expect.objectContaining({ reason: expect.stringContaining("setup failed") }),
+          nativeStatus: "closed",
+          status: "fail",
+          closure: expect.objectContaining({ kind: "closed-degenerate" }),
+          failure: expect.objectContaining({
+            code: "provision-failed",
+            message: expect.stringContaining("already exists without matching claim provenance"),
+          }),
         }),
       ],
     })
@@ -1599,6 +1612,7 @@ async function repository(): Promise<{ repo: string }> {
   await git(repo, "config", "user.name", "Yrd Test")
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await git(repo, "remote", "add", "origin", origin)
+  await installDeclaredYrdEntry(repo)
   await writeFile(join(repo, "README.md"), "main\n")
   await writeFile(
     join(repo, ".yrd.yml"),
@@ -1607,7 +1621,7 @@ batch: 1
 checks: [{check: {run: "true"}}]
 ${JOURNAL_CONFIG}`,
   )
-  await git(repo, "add", "README.md", ".yrd.yml")
+  await git(repo, "add", "README.md", ".yrd.yml", "bin/yrd")
   await git(repo, "commit", "-qm", "main")
   await git(repo, "push", "-q", "-u", "origin", "main")
   return { repo }

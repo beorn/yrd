@@ -3631,7 +3631,7 @@ function createQueueCommands(
   })
 
   const expirePause = command({
-    title: "Expire queue hold",
+    title: "Expire queue pause",
     visibility: "internal",
     params: ExpireQueuePauseArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ base: string; expiresAt: string }>) {
@@ -6378,7 +6378,7 @@ function auditQueues(
       })
       continue
     }
-    const expiresAtMs = parseAuditTime(pause.expiresAt, "queue hold expiry")
+    const expiresAtMs = parseAuditTime(pause.expiresAt, "queue pause expiry")
     if (auditNowMs !== undefined && expiresAtMs <= auditNowMs) {
       findings.push({
         code: "queue-hold-expired",
@@ -6500,7 +6500,7 @@ function auditQueues(
     }
     // The read side of the lease seam (21094). A step whose Job is still
     // `in_progress` PROJECTS as running no matter how long ago its lease lapsed,
-    // so `queue status` showed a healthy run and audit said nothing while
+    // so the queue view showed a healthy run and audit said nothing while
     // nothing was left to renew it. R1740's lease expired at 20:35:03.925Z and
     // the `lose` transition was not written until 20:45:27.620Z — 10m24s in
     // which every reader was told the run was fine. `recover` is the writer that
@@ -6517,7 +6517,7 @@ function auditQueues(
           code: "run-lease-expired",
           message:
             `queue run '${record.id}' step '${step.name}' still reports job '${job.id}' running, but its ` +
-            `executor lease expired at ${job.leaseExpiresAt} and nothing is renewing it; 'recover' settles it`,
+            `runner lease expired at ${job.leaseExpiresAt} and nothing is renewing it; 'recover' settles it`,
           run: record.id,
           step: step.name,
           since: job.leaseExpiresAt,

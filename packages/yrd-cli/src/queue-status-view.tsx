@@ -992,7 +992,10 @@ export function queueRunRevisionKey(run: Pick<Run, "id">, revision: PinnedChange
   return JSON.stringify([run.id, revision.id, revision.revision, revision.headSha])
 }
 
-export function queueRunRevisionClocks(prs: Iterable<Change>, runs: Iterable<Run>): Map<string, ChangeRunRevisionClock> {
+export function queueRunRevisionClocks(
+  prs: Iterable<Change>,
+  runs: Iterable<Run>,
+): Map<string, ChangeRunRevisionClock> {
   const byId = new Map([...prs].map((pr) => [pr.id, pr]))
   const clocks = new Map<string, ChangeRunRevisionClock>()
   for (const run of runs) {
@@ -1313,7 +1316,11 @@ function eligibilityForCurrentRevision(result: QueueStatusResult, pr: Change): C
 
 /** The submitter handle recorded on one exact immutable PR revision, or
  * undefined for revisions journaled before submitter identity was recorded. */
-function revisionSubmitter(pr: Change, revision = changeRevisionNumber(pr), headSha = changeHead(pr)): string | undefined {
+function revisionSubmitter(
+  pr: Change,
+  revision = changeRevisionNumber(pr),
+  headSha = changeHead(pr),
+): string | undefined {
   return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.submitter
 }
 
@@ -1566,7 +1573,10 @@ export function changeRevisionClocks(pr: Change): readonly ChangeRevisionHistory
   return clocks
 }
 
-function revisionCheckRequests(pr: Change, clock: ChangeRevisionHistoryClock): readonly Change["checkRequests"][number][] {
+function revisionCheckRequests(
+  pr: Change,
+  clock: ChangeRevisionHistoryClock,
+): readonly Change["checkRequests"][number][] {
   return pr.checkRequests
     .filter((request) => request.revision === clock.revision && request.headSha === clock.headSha)
     .map((request) => {
@@ -2084,7 +2094,10 @@ function preRunBand(
 
 /** Thin consumer of {@link queueDisplayState} — kept as the named surface every
  * status caller already reads, but no longer a second derivation of it. */
-export function projectedChangeStatus(pr: Change, eligibility?: ChangeEligibility): ChangeDeliveryState | "needs-author" {
+export function projectedChangeStatus(
+  pr: Change,
+  eligibility?: ChangeEligibility,
+): ChangeDeliveryState | "needs-author" {
   return queueDisplayState(pr, eligibility === undefined ? {} : { eligibility }).delivery
 }
 
@@ -3870,7 +3883,12 @@ export function ChangeDetailData(
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
 }
 
-function diagnosticBlocker(pr: Change, run: Run | undefined, step: QueueStep | undefined, now: number): string | undefined {
+function diagnosticBlocker(
+  pr: Change,
+  run: Run | undefined,
+  step: QueueStep | undefined,
+  now: number,
+): string | undefined {
   const job = step?.job
   const context = { delivery: changeDeliveryState(pr) }
   if (job?.status === "completed" && job.conclusion === "failure") {
@@ -7402,7 +7420,11 @@ function changeTerminalLineageEntries(
     .flatMap((clock) => {
       if (clock.terminal === undefined) return []
       const submittedAt = clock.submittedAt ?? clock.pushedAt
-      const ageMs = elapsedMs(submittedAt, clock.terminal.at, `change '${pr.id}' revision ${clock.revision} terminal age`)
+      const ageMs = elapsedMs(
+        submittedAt,
+        clock.terminal.at,
+        `change '${pr.id}' revision ${clock.revision} terminal age`,
+      )
       const reason =
         clock.terminal.kind === "rejected"
           ? (runDetails.find((detail) => detail.run === clock.terminal?.run)?.failure?.summary ?? "reason not recorded")
@@ -7566,7 +7588,7 @@ type ChangeMetadataFact = Readonly<{ key: string; value: string; render?: () => 
 
 /**
  * The per-change metadata under the ratified design (operator ruling
- * 2026-08-18, item 31): three blank-line-separated groups, no group labels,
+ * 2026-08-18, item 31): three groups separated by blank rows, no group labels,
  * keys muted uppercase in one fixed-width column —
  *
  *   identity — ISSUE, BY (plus the change's own annotations: NOTE, DETAIL,

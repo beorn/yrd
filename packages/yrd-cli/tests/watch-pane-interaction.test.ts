@@ -54,7 +54,7 @@ describe("queueLandingLabel", () => {
 describe("QueueWatchFrame 21106 interaction", () => {
   it("removes the bottom keybindings footer and keeps the detail clean", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -78,7 +78,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("selects a run by clicking its row and follows it in the detail pane", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -98,7 +98,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("hovering a row does not switch the detail selection; clicking does (item P)", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(createElement(QueueWatchFrame, { snapshot }), term, { mouse: true, selection: false })
     try {
       // Default cursor is the first running row (PR42), so the detail opens on it.
@@ -127,7 +127,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("paints a hover-affordance background under the pointer, distinct from selection, and clears on leave (item P)", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -182,7 +182,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       fixturePr(`PR${index + 1}`, "submitted", `2026-07-13T11:${String(10 + index).padStart(2, "0")}:00.000Z`),
     )
     const snapshot = fixtureSnapshot(fixtureResult(prs, []), { rowLimit: 30 })
-    const render = createRenderer({ cols: 200, rows: 28 })
+    const render = createRenderer({ cols: 220, rows: 28 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -209,7 +209,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("keeps the selected run while wheel-scrolling inside the detail pane", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -227,7 +227,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("clamps divider drag at the panes' minimum sizes", async () => {
     const story = queueTimelineStories["mixed-completed"]
-    using term = createTermless({ cols: 200, rows: 50 })
+    using term = createTermless({ cols: 220, rows: 50 })
     const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot }), term, {
       mouse: true,
       selection: false,
@@ -253,7 +253,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("selects status courts with o/r/d/f and restores all courts with a", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -284,7 +284,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("selects a status court by clicking its pill", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
@@ -308,7 +308,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
   it("hides and shows the detail pane with Esc and Enter", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
+    const render = createRenderer({ cols: 220, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()

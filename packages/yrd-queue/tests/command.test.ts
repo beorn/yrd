@@ -7198,6 +7198,7 @@ describe("Queue command adapters", () => {
   })
 
   it("records exhausted thrown authority timeouts as environment refusal without rejecting the change", async () => {
+    const stderrSpy = vi.spyOn(globalThis.process.stderr, "write").mockImplementation(() => true)
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
@@ -7220,6 +7221,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("circuit breaker open after 3 consecutive timeouts"))
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -9854,7 +9856,7 @@ describe("Queue command adapters", () => {
     },
   )
 
-  it("preserves canceled authority when another actor merges the same native candidate", async () => {
+  it("preserves canceled authority when another process merges the same native candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`

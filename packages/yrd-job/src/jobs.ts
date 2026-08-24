@@ -1368,8 +1368,8 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
 }
 
 /**
- * The lease is an EXECUTOR-liveness signal, so the heartbeat renews it for as
- * long as this executor still owns a live execution. It deliberately does not
+ * The lease is a RUNNER-liveness signal, so the heartbeat renews it for as
+ * long as this runner still owns a live execution. It deliberately does not
  * consult the child's output: a check that prints nothing for a lease interval
  * is quiet, not dead, and gating renewal on bytes printed put a productivity
  * signal where a liveness signal belongs (@yrd/core/21085-target-model/21094).

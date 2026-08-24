@@ -20,12 +20,7 @@ import {
   fixtureSnapshot,
   fixtureStep,
 } from "../dev/queue-timeline-fixtures.ts"
-import {
-  QueueShowView,
-  queueStatusNotice,
-  queueShowData,
-  type QueueShowData,
-} from "../src/queue-status-view.tsx"
+import { QueueShowView, queueStatusNotice, queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const BRANCH_GLYPH = ""
@@ -122,7 +117,7 @@ describe("detail pane top — the RUN status box, no identity title above it (it
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:55:00.000Z",
     })
-    const app = createRenderer({ cols: 180, rows: 50 })(
+    const app = createRenderer({ cols: 220, rows: 50 })(
       createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [run])) }),
     )
     try {
@@ -153,7 +148,7 @@ describe("detail pane top — the RUN status box, no identity title above it (it
   })
 
   it("renders the no-selection placeholder when the projection has no rows", async () => {
-    const app = createRenderer({ cols: 180, rows: 40 })(
+    const app = createRenderer({ cols: 220, rows: 40 })(
       createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([], [])) }),
     )
     try {
@@ -227,7 +222,7 @@ describe("watch detail composite header + status notice", () => {
         ),
       ],
     })
-    const app = createRenderer({ cols: 180, rows: 50 })(
+    const app = createRenderer({ cols: 220, rows: 50 })(
       createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [run])) }),
     )
     try {
@@ -258,8 +253,10 @@ describe("watch detail composite header + status notice", () => {
         app.cell(rows[noticeY]?.indexOf("failed") ?? -1, noticeY).fg,
       )
       expect(app.text).toContain("err=check-failed")
-      expect(app.text).toContain("not retried")
-      expect(app.text).toContain("automatically; the author")
+      // Screen text interleaves the left pane between wrapped right-pane
+      // lines, so assert the two visible fragments independently.
+      expect(app.text).toContain("This failure is not")
+      expect(app.text).toContain("retried automatically; the author")
       expect(app.text).toContain("author must fix the branch and resubmit")
       expect(app.text).not.toMatch(/^(?:ERROR|CAUSE|RESOLVE|LOST|NEXT)\b/mu)
       // The failed step line carries its remedy inline on the status box

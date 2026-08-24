@@ -139,7 +139,7 @@ function detailShows(text: string, id: string): boolean {
 
 describe("QueueWatchFrame live-follow cursor contract", () => {
   it("follows the physical newest row until the operator moves the cursor", async () => {
-    const render = createRenderer({ cols: 200, rows: 30 })
+    const render = createRenderer({ cols: 220, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([integratedItem(1), queuedItem(2)]) }))
     try {
       await waitFor(() => detailShows(app.text, "pr#2.1"))
@@ -157,7 +157,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
 
   it("keeps latest rows visible while a settled cursor stays on the same PR", async () => {
     const initialItems = Array.from({ length: 30 }, (_, index) => integratedItem(index + 1))
-    const render = createRenderer({ cols: 200, rows: 22 })
+    const render = createRenderer({ cols: 220, rows: 22 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot(initialItems) }))
     try {
       await app.waitForLayoutStable()
@@ -181,7 +181,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     const followed = runningItem(80, 80)
     const next = runningItem(81, 90)
     const bottom = integratedItem(10)
-    const render = createRenderer({ cols: 200, rows: 30 })
+    const render = createRenderer({ cols: 220, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([top, followed, next, bottom]) }))
     try {
       await app.waitForLayoutStable()
@@ -206,7 +206,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
     const firstQueued = queuedItem(70)
     const laterQueued = queuedItem(60)
     const bottom = integratedItem(10)
-    const render = createRenderer({ cols: 200, rows: 30 })
+    const render = createRenderer({ cols: 220, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([top, firstQueued, laterQueued, bottom]) }))
     try {
       await app.waitForLayoutStable()
@@ -214,7 +214,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
       await waitFor(() => detailShows(app.text, "pr#10.1"))
 
       await app.press("g")
-      await waitFor(() => detailShows(app.text, "pr#60.1"))
+      await waitFor(() => detailShows(app.text, "pr#70.1"))
 
       await app.press("g")
       await waitFor(() => detailShows(app.text, "pr#200.1"))
@@ -226,7 +226,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
   it("uses G for absolute bottom and keeps that manual selection fixed", async () => {
     const first = runningItem(10, 10)
     const bottom = runningItem(20, 20)
-    const render = createRenderer({ cols: 200, rows: 30 })
+    const render = createRenderer({ cols: 220, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([first, bottom]) }))
     try {
       await app.waitForLayoutStable()
@@ -248,7 +248,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
 
   it("follows running work by run-start order, then holds when no run remains", async () => {
     const followed = runningItem(80, 80)
-    const render = createRenderer({ cols: 200, rows: 30 })
+    const render = createRenderer({ cols: 220, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot([followed]) }))
     try {
       await waitFor(() => detailShows(app.text, "pr#80.1"))
@@ -276,7 +276,7 @@ describe("QueueWatchFrame live-follow cursor contract", () => {
 
   it("chooses the prior nearest surviving neighbor and reports a disappeared selection", async () => {
     const initial = [integratedItem(10), integratedItem(11), integratedItem(12)]
-    const render = createRenderer({ cols: 200, rows: 30 })
+    const render = createRenderer({ cols: 220, rows: 30 })
     const app = render(createElement(QueueWatchFrame, { snapshot: snapshot(initial) }))
     try {
       await app.waitForLayoutStable()

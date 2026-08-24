@@ -1102,7 +1102,7 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     },
     widths: [80, 140],
     selectedStatus: "running",
-    viewport: { columns: 200, rows: 50 },
+    viewport: { columns: 220, rows: 50 },
   },
   // The user-settled 21106 mockup shape: one pending PR, one batched running
   // Run rendered one row per member, one rejected and one integrated Run.
@@ -1114,7 +1114,7 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
       ),
     ),
     widths: [80, 120, 160, 200],
-    viewport: { columns: 200, rows: 50 },
+    viewport: { columns: 220, rows: 50 },
   },
   idle: { snapshot: fixtureSnapshot(fixtureResult([], [])), widths: [100] },
   "multiple-queues": {
@@ -1171,10 +1171,10 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     selectedStatus: "rev",
   },
   "selected-integrated": { snapshot: integratedSnapshot, widths: [100], selectedStatus: "integrated" },
-  "detail-right": { snapshot: integratedSnapshot, widths: [140], viewport: { columns: 200, rows: 50 } },
+  "detail-right": { snapshot: integratedSnapshot, widths: [140], viewport: { columns: 220, rows: 50 } },
   "detail-below": { snapshot: integratedSnapshot, widths: [100], viewport: { columns: 100, rows: 40 } },
   "detail-full": { snapshot: integratedSnapshot, widths: [80], viewport: { columns: 80, rows: 24 } },
-  "detail-controls": { snapshot: integratedSnapshot, widths: [140], viewport: { columns: 200, rows: 50 } },
+  "detail-controls": { snapshot: integratedSnapshot, widths: [140], viewport: { columns: 220, rows: 50 } },
   "long-subject": {
     snapshot: fixtureSnapshot(fixtureResult([longSubjectPr], [longSubjectRun])),
     widths: [80, 120, 160, 200],
@@ -1190,6 +1190,6 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     ),
     widths: [120],
     selectedStatus: "running",
-    viewport: { columns: 200, rows: 50 },
+    viewport: { columns: 220, rows: 50 },
   },
 }
