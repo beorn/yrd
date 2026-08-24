@@ -17,6 +17,48 @@ export type PathHolder = Readonly<{
   target: string
 }>
 
+export type PathHolderUnavailableCoverage = Readonly<{
+  /** ENOENT/ESRCH: the live proc entry disappeared while the census ran. */
+  exited: number
+  /** EACCES/EPERM: the entry remained but the caller was not allowed to inspect it. */
+  denied: number
+}>
+
+export type PathHolderSourceCoverage = Readonly<{
+  readable: number
+  unavailable: PathHolderUnavailableCoverage
+}>
+
+export type LinuxPathHolderCoverage = Readonly<{
+  platform: "linux"
+  /** Linux filters numeric proc entries to the caller's UID before inspecting holder sources. */
+  scope: "same-uid"
+  procRoot: string
+  /** False only when permission denial may have hidden a same-UID holder. Exited entries are not gaps. */
+  complete: boolean
+  processes: Readonly<{
+    enumerated: number
+    sameUid: number
+    otherUid: number
+    unavailable: PathHolderUnavailableCoverage
+  }>
+  sources: Readonly<Record<"cwd" | "exe" | "root" | "maps" | "fd", PathHolderSourceCoverage>>
+}>
+
+export type DarwinPathHolderCoverage = Readonly<{
+  platform: "darwin"
+  mechanism: "lsof"
+  /** A successful lsof traversal is complete; failures throw instead of returning an empty census. */
+  complete: true
+}>
+
+export type PathHolderCoverage = LinuxPathHolderCoverage | DarwinPathHolderCoverage
+
+export type PathHolderCensus = Readonly<{
+  holders: PathHolder[]
+  coverage: PathHolderCoverage
+}>
+
 export type PathReapResult = Readonly<{
   targetedPids: readonly number[]
   survivorPids: readonly number[]
@@ -102,22 +144,51 @@ async function waitForPathProcesses(read: () => Promise<number[]>, timeoutMs: nu
   return live
 }
 
+/**
+ * Inspect every observable process holder and report whether the observation was complete.
+ *
+ * Required resources are the target path plus `/proc` on Linux or `/usr/sbin/lsof`
+ * on Darwin. Missing resources and unexpected I/O failures throw. A complete empty
+ * result means the reported scope was searched and no holders were found; permission
+ * denial is returned as reduced coverage, never collapsed into that empty result.
+ */
+export async function inspectPathHolderCensus(path: string): Promise<PathHolderCensus> {
+  return pathProcessHolderCensus(await canonicalPath(path))
+}
+
+/**
+ * Backward-compatible holder-only view; all traversal lives in the structured census.
+ * Destructive callers must use inspectPathHolderCensus so reduced coverage cannot
+ * masquerade as a certified empty holder set.
+ */
 export async function inspectPathHolders(path: string): Promise<PathHolder[]> {
-  return pathProcessHolders(await canonicalPath(path))
+  return (await inspectPathHolderCensus(path)).holders
 }
 
 /** @internal Deterministic Linux seam for a synthetic proc tree. */
-export async function inspectPathHoldersInProc(path: string, procRoot: string): Promise<PathHolder[]> {
-  return pathProcessHolders(await canonicalPath(path), { procRoot })
+export async function inspectPathHolderCensusInProc(path: string, procRoot: string): Promise<PathHolderCensus> {
+  return pathProcessHolderCensus(await canonicalPath(path), { procRoot })
 }
 
-async function pathProcessHolders(root: string, options: Readonly<{ procRoot?: string }> = {}): Promise<PathHolder[]> {
-  if (process.platform === "linux") return linuxPathProcessHolders(root, options.procRoot ?? "/proc")
-  if (process.platform === "darwin") return darwinPathProcessHolders(root)
+/** @internal Backward-compatible holder-only synthetic-proc seam. */
+export async function inspectPathHoldersInProc(path: string, procRoot: string): Promise<PathHolder[]> {
+  return (await inspectPathHolderCensusInProc(path, procRoot)).holders
+}
+
+async function pathProcessHolders(root: string): Promise<PathHolder[]> {
+  return (await pathProcessHolderCensus(root)).holders
+}
+
+async function pathProcessHolderCensus(
+  root: string,
+  options: Readonly<{ procRoot?: string }> = {},
+): Promise<PathHolderCensus> {
+  if (process.platform === "linux") return linuxPathProcessHolderCensus(root, options.procRoot ?? "/proc")
+  if (process.platform === "darwin") return darwinPathProcessHolderCensus(root)
   throw new Error(`unsupported platform ${process.platform}; cannot certify path ownership`)
 }
 
-async function darwinPathProcessHolders(root: string): Promise<PathHolder[]> {
+async function darwinPathProcessHolderCensus(root: string): Promise<PathHolderCensus> {
   const child = Bun.spawn(["/usr/sbin/lsof", "+D", root, "-Fpfn"], {
     cwd: "/",
     stdin: "ignore",
@@ -129,8 +200,9 @@ async function darwinPathProcessHolders(root: string): Promise<PathHolder[]> {
     new Response(child.stderr).text(),
     child.exited,
   ])
-  // lsof uses 1 for a successful empty selection.
-  if (exitCode !== 0 && (exitCode !== 1 || stderr.trim() !== "")) {
+  // lsof uses 1 for a successful empty selection. Any diagnostic means the
+  // traversal cannot honestly claim complete coverage, even with exit 0.
+  if ((exitCode !== 0 && exitCode !== 1) || stderr.trim() !== "") {
     throw new Error(`lsof exited ${exitCode}: ${stderr.trim() || "no diagnostic"}`)
   }
   const holders: PathHolder[] = []
@@ -157,55 +229,98 @@ async function darwinPathProcessHolders(root: string): Promise<PathHolder[]> {
       holders.push({ pid, source, target: line.slice(1) })
     }
   }
-  return uniquePathHolders(holders)
+  return {
+    holders: uniquePathHolders(holders),
+    coverage: { platform: "darwin", mechanism: "lsof", complete: true },
+  }
 }
 
-async function linuxPathProcessHolders(root: string, procRoot: string): Promise<PathHolder[]> {
-  const entries = await readdir(procRoot, { withFileTypes: true })
+type SourceAvailability = "readable" | "exited" | "denied"
+type SourceObservation<T> = Readonly<{ availability: SourceAvailability; value: T }>
+
+async function linuxPathProcessHolderCensus(root: string, procRoot: string): Promise<PathHolderCensus> {
+  const entries = await readdir(procRoot, { withFileTypes: true }).catch((error: unknown) => {
+    throw new Error(`Linux path-holder census requires readable proc root '${procRoot}': ${errorDetail(error)}`, {
+      cause: error,
+    })
+  })
   const uid = process.getuid?.()
   if (uid === undefined) throw new Error("Linux process census requires the current uid")
+  const numericEntries = entries.filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name))
+  const processCoverage = {
+    enumerated: numericEntries.length,
+    sameUid: 0,
+    otherUid: 0,
+    unavailable: { exited: 0, denied: 0 },
+  }
+  const sourceCoverage: Record<"cwd" | "exe" | "root" | "maps" | "fd", MutableSourceCoverage> = {
+    cwd: emptySourceCoverage(),
+    exe: emptySourceCoverage(),
+    root: emptySourceCoverage(),
+    maps: emptySourceCoverage(),
+    fd: emptySourceCoverage(),
+  }
   const matches = await Promise.all(
-    entries
-      .filter((entry) => entry.isDirectory() && /^\d+$/u.test(entry.name))
-      .map(async (entry): Promise<PathHolder[]> => {
-        const pid = Number(entry.name)
-        const proc = `${procRoot}/${entry.name}`
-        const metadata = await stat(proc).catch((error: unknown) => {
-          if (processEntryUnavailable(error)) return undefined
-          throw error
-        })
-        if (metadata === undefined || metadata.uid !== uid) return []
-        const [cwd, executable, processRoot, mappedFiles] = await Promise.all([
-          readProcessLink(`${proc}/cwd`),
-          readProcessLink(`${proc}/exe`),
-          readProcessLink(`${proc}/root`),
-          readProcessMaps(`${proc}/maps`),
-        ])
-        const holders: PathHolder[] = []
-        if (cwd !== undefined && pathWithin(root, cwd)) holders.push({ pid, source: "cwd", target: cwd })
-        if (executable !== undefined && pathWithin(root, executable)) {
-          holders.push({ pid, source: "exe", target: executable })
+    numericEntries.map(async (entry): Promise<PathHolder[]> => {
+      const pid = Number(entry.name)
+      const proc = `${procRoot}/${entry.name}`
+      const metadata = await observeSource(() => stat(proc), undefined)
+      if (metadata.availability !== "readable") {
+        processCoverage.unavailable[metadata.availability] += 1
+        return []
+      }
+      if (metadata.value?.uid !== uid) {
+        processCoverage.otherUid += 1
+        return []
+      }
+      processCoverage.sameUid += 1
+      const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
+        observeProcessLink(`${proc}/cwd`),
+        observeProcessLink(`${proc}/exe`),
+        observeProcessLink(`${proc}/root`),
+        observeProcessMaps(`${proc}/maps`),
+        observeProcessDescriptors(`${proc}/fd`),
+      ])
+      recordSourceCoverage(sourceCoverage.cwd, cwd.availability)
+      recordSourceCoverage(sourceCoverage.exe, executable.availability)
+      recordSourceCoverage(sourceCoverage.root, processRoot.availability)
+      recordSourceCoverage(sourceCoverage.maps, mappedFiles.availability)
+      recordSourceCoverage(sourceCoverage.fd, descriptors.availability)
+      const holders: PathHolder[] = []
+      if (cwd.value !== undefined && pathWithin(root, cwd.value)) {
+        holders.push({ pid, source: "cwd", target: cwd.value })
+      }
+      if (executable.value !== undefined && pathWithin(root, executable.value)) {
+        holders.push({ pid, source: "exe", target: executable.value })
+      }
+      if (processRoot.value !== undefined && pathWithin(root, processRoot.value)) {
+        holders.push({ pid, source: "root", target: processRoot.value })
+      }
+      for (const mappedFile of mappedFiles.value) {
+        if (pathWithin(root, mappedFile)) holders.push({ pid, source: "fd/maps", target: mappedFile })
+      }
+      for (const descriptor of descriptors.value) {
+        if (pathWithin(root, descriptor.target)) {
+          holders.push({ pid, source: `fd/${descriptor.name}`, target: descriptor.target })
         }
-        if (processRoot !== undefined && pathWithin(root, processRoot)) {
-          holders.push({ pid, source: "root", target: processRoot })
-        }
-        for (const mappedFile of mappedFiles) {
-          if (pathWithin(root, mappedFile)) holders.push({ pid, source: "fd/maps", target: mappedFile })
-        }
-        const descriptors = await readdir(`${proc}/fd`).catch((error: unknown) => {
-          if (processEntryUnavailable(error)) return []
-          throw error
-        })
-        for (const descriptor of descriptors) {
-          const target = await readProcessLink(`${proc}/fd/${descriptor}`)
-          if (target !== undefined && pathWithin(root, target)) {
-            holders.push({ pid, source: `fd/${descriptor}`, target })
-          }
-        }
-        return holders
-      }),
+      }
+      return holders
+    }),
   )
-  return uniquePathHolders(matches.flat())
+  const complete =
+    processCoverage.unavailable.denied === 0 &&
+    Object.values(sourceCoverage).every((coverage) => coverage.unavailable.denied === 0)
+  return {
+    holders: uniquePathHolders(matches.flat()),
+    coverage: {
+      platform: "linux",
+      scope: "same-uid",
+      procRoot,
+      complete,
+      processes: processCoverage,
+      sources: sourceCoverage,
+    },
+  }
 }
 
 async function currentProcessAncestry(): Promise<Set<number>> {
@@ -269,19 +384,38 @@ function darwinHolderSource(field: string): PathHolder["source"] {
   return `fd/${field}`
 }
 
-async function readProcessLink(path: string): Promise<string | undefined> {
-  return readlink(path).catch((error: unknown) => {
-    if (processEntryUnavailable(error)) return undefined
-    throw error
-  })
+type MutableSourceCoverage = {
+  readable: number
+  unavailable: { exited: number; denied: number }
 }
 
-async function readProcessMaps(path: string): Promise<string[]> {
-  const contents = await readFile(path, "utf8").catch((error: unknown) => {
-    if (processEntryUnavailable(error)) return undefined
-    throw error
-  })
-  if (contents === undefined) return []
+function emptySourceCoverage(): MutableSourceCoverage {
+  return { readable: 0, unavailable: { exited: 0, denied: 0 } }
+}
+
+function recordSourceCoverage(coverage: MutableSourceCoverage, availability: SourceAvailability): void {
+  if (availability === "readable") coverage.readable += 1
+  else coverage.unavailable[availability] += 1
+}
+
+async function observeSource<T>(read: () => Promise<T>, unavailableValue: T): Promise<SourceObservation<T>> {
+  try {
+    return { availability: "readable", value: await read() }
+  } catch (error) {
+    const availability = processEntryUnavailability(error)
+    if (availability === undefined) throw error
+    return { availability, value: unavailableValue }
+  }
+}
+
+function observeProcessLink(path: string): Promise<SourceObservation<string | undefined>> {
+  return observeSource(() => readlink(path), undefined)
+}
+
+async function observeProcessMaps(path: string): Promise<SourceObservation<string[]>> {
+  const observed = await observeSource(() => readFile(path, "utf8"), "")
+  if (observed.availability !== "readable") return { availability: observed.availability, value: [] }
+  const contents = observed.value
   const mappedFiles: string[] = []
   for (const line of contents.split("\n")) {
     // Linux maps: address perms offset device inode [pathname]. Capture the
@@ -290,17 +424,39 @@ async function readProcessMaps(path: string): Promise<string[]> {
     const target = match?.[1]
     if (target?.startsWith("/") === true) mappedFiles.push(target)
   }
-  return mappedFiles
+  return { availability: "readable", value: mappedFiles }
 }
 
-function processEntryUnavailable(error: unknown): boolean {
+async function observeProcessDescriptors(
+  path: string,
+): Promise<SourceObservation<Array<Readonly<{ name: string; target: string }>>>> {
+  const directory = await observeSource(() => readdir(path), [] as string[])
+  if (directory.availability !== "readable") return { availability: directory.availability, value: [] }
+  const links = await Promise.all(
+    directory.value.map(async (name) => ({ name, observed: await observeProcessLink(`${path}/${name}`) })),
+  )
+  const availability = links.some(({ observed }) => observed.availability === "denied")
+    ? "denied"
+    : links.some(({ observed }) => observed.availability === "exited")
+      ? "exited"
+      : "readable"
+  return {
+    availability,
+    value: links.flatMap(({ name, observed }) =>
+      observed.value === undefined ? [] : [{ name, target: observed.value }],
+    ),
+  }
+}
+
+function processEntryUnavailability(error: unknown): Exclude<SourceAvailability, "readable"> | undefined {
   const code = errorCode(error)
-  // `/proc` is a live, permission-filtered view. Entries may disappear between
-  // enumeration and inspection, while non-dumpable same-UID supervisors (for
-  // example sshd-session) expose root-owned links/maps that this user cannot
-  // read. Candidate workloads are ordinary dumpable descendants; keep checking
-  // every observable source so their cwd/maps/fds still enter the holder set.
-  return code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM"
+  // `/proc` is live: ENOENT/ESRCH means the observed entry exited and cannot
+  // still hold the path. EACCES/EPERM means it remains but may hide a holder;
+  // preserving that distinction is what keeps an incomplete empty census from
+  // masquerading as a complete clean result.
+  if (code === "ENOENT" || code === "ESRCH") return "exited"
+  if (code === "EACCES" || code === "EPERM") return "denied"
+  return undefined
 }
 
 function errorCode(error: unknown): string | undefined {
