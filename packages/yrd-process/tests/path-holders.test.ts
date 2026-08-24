@@ -11,6 +11,7 @@ import {
   inspectPathHolderCensus,
   inspectPathHolders,
   pathHolderRefusal,
+  pathReapDeletionFailure,
   pathReapFailure,
   type PathHolder,
 } from "../src/index.ts"
@@ -119,6 +120,16 @@ describe("inspectPathHolders", () => {
           fd: { readable: 1, unavailable: { exited: 0, denied: 0 } },
         },
       })
+      const reap = {
+        targetedPids: [],
+        survivorPids: [],
+        survivorHolders: [],
+        survivorCoverage: census.coverage,
+        forcedKill: false,
+        signalFailures: [],
+      }
+      expect(pathReapFailure(reap)).toBeUndefined()
+      expect(pathReapDeletionFailure(reap)).toMatch(/census incomplete.*same-uid.*denied/iu)
     },
   )
 

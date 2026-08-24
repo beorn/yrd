@@ -62,7 +62,7 @@ import type { Job, JobError } from "@yrd/job"
 import {
   adaptProcessGit,
   createProcess,
-  pathReapFailure,
+  pathReapDeletionFailure,
   type GitSyncReadCommand,
   type Process,
   type ProcessResult,
@@ -3847,7 +3847,7 @@ async function certifyBayProcessesStopped(
   if (path === undefined) return
   if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
   const reaped = await processService.reapPath(path)
-  const failure = pathReapFailure(reaped)
+  const failure = pathReapDeletionFailure(reaped)
   if (failure !== undefined) {
     throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}`)
   }
@@ -4805,8 +4805,9 @@ async function publishPr(
   const pr = requiredPr(app, selector)
   const revision = currentChangeRev(pr)
   const baseSha = changeBaseSha(pr)
-  if (baseSha === undefined)
-    {raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)}
+  if (baseSha === undefined) {
+    raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)
+  }
   const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
   const submodules = await changedSubmodulePins({
     process,

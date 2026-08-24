@@ -20,6 +20,7 @@ export {
   inspectPathHolderCensus,
   inspectPathHolders,
   pathHolderRefusal,
+  pathReapDeletionFailure,
   pathReapFailure,
   type DarwinPathHolderCoverage,
   type LinuxPathHolderCoverage,

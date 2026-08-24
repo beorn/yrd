@@ -64,6 +64,8 @@ export type PathReapResult = Readonly<{
   survivorPids: readonly number[]
   /** Exact read-only holder evidence from the final post-signal census. */
   survivorHolders?: readonly PathHolder[]
+  /** Coverage proof for the final post-signal census; deletion consumers must require completeness. */
+  survivorCoverage?: PathHolderCoverage
   forcedKill: boolean
   signalFailures: readonly string[]
 }>
@@ -73,9 +75,9 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
   const protectedPids = await currentProcessAncestry()
   const signalFailures: string[] = []
   const targeted = new Set<number>()
-  const census = async () => pathProcessHolders(root)
+  const census = async () => pathProcessHolderCensus(root)
   const killable = async (): Promise<number[]> =>
-    uniquePids((await census()).map(({ pid }) => pid)).filter((pid) => pid > 1 && !protectedPids.has(pid))
+    uniquePids((await census()).holders.map(({ pid }) => pid)).filter((pid) => pid > 1 && !protectedPids.has(pid))
   const signal = (pids: readonly number[], value: "SIGTERM" | "SIGKILL"): void => {
     for (const pid of pids) {
       targeted.add(pid)
@@ -101,12 +103,13 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
   // deliberately never signalled, but they remain survivor evidence: closing a
   // Bay from a shell inside that Bay must fail loudly instead of deleting the
   // workspace beneath a still-live process.
-  const survivorHolders = await census()
-  const survivorPids = uniquePids(survivorHolders.map(({ pid }) => pid))
+  const survivorCensus = await census()
+  const survivorPids = uniquePids(survivorCensus.holders.map(({ pid }) => pid))
   return {
     targetedPids: [...targeted].sort((a, b) => a - b),
     survivorPids,
-    survivorHolders,
+    survivorHolders: survivorCensus.holders,
+    survivorCoverage: survivorCensus.coverage,
     forcedKill,
     signalFailures,
   }
@@ -121,6 +124,21 @@ export function pathReapFailure(result: PathReapResult): string | undefined {
     parts.push(`process-tree reap failed; survivor pids: ${result.survivorPids.join(", ")}`)
   }
   return parts.length === 0 ? undefined : parts.join("; ")
+}
+
+/**
+ * Settlement failure plus the stronger coverage proof required before deleting
+ * an owned path. Blindness is a deletion refusal, not a generic process-run failure.
+ */
+export function pathReapDeletionFailure(result: PathReapResult): string | undefined {
+  const parts = [pathReapFailure(result)]
+  if (result.survivorCoverage !== undefined && !result.survivorCoverage.complete) {
+    parts.push(
+      `path-holder census incomplete; deletion cannot be certified: ${JSON.stringify(result.survivorCoverage)}`,
+    )
+  }
+  const failures = parts.filter((part): part is string => part !== undefined)
+  return failures.length === 0 ? undefined : failures.join("; ")
 }
 
 /** Render read-only holder evidence into an actionable destructive-operation refusal. */
@@ -173,10 +191,6 @@ export async function inspectPathHolderCensusInProc(path: string, procRoot: stri
 /** @internal Backward-compatible holder-only synthetic-proc seam. */
 export async function inspectPathHoldersInProc(path: string, procRoot: string): Promise<PathHolder[]> {
   return (await inspectPathHolderCensusInProc(path, procRoot)).holders
-}
-
-async function pathProcessHolders(root: string): Promise<PathHolder[]> {
-  return (await pathProcessHolderCensus(root)).holders
 }
 
 async function pathProcessHolderCensus(
