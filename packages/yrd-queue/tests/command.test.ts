@@ -1221,7 +1221,12 @@ describe("Queue command adapters", () => {
         baseSha: oldBaseSha,
       }),
     ).rejects.toMatchObject({
-      failure: { kind: "refusal", code: "recut-conflict", message: expect.stringContaining("candidate.txt") },
+      // Re-merge Phase 1 (22925 family): the direct path refuses a genuine
+      // content conflict as `merge-conflict` now (CONFLICT_CODES_TO_RENAME in
+      // command.ts), not the rebase-path's `recut-conflict` - the property
+      // (a real conflict is refused, naming the conflicted file) survives
+      // unchanged; only the retired code name needed updating.
+      failure: { kind: "refusal", code: "merge-conflict", message: expect.stringContaining("candidate.txt") },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
@@ -2320,7 +2325,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     await expect(
       createGitChangeRemerger({ inject: { process }, repo }).recut({
-        id: "PR-MULTI",
+        id: "PR99",
         branch: "issue/multi",
         base: "main",
         revision: 1,
@@ -2440,16 +2445,14 @@ describe("Queue command adapters", () => {
     expect(rawDiff).toContain("+beta")
 
     await using process = createProcess()
-    const rebaseCommands: string[][] = []
-    const capturingProcess: Pick<Process, "run"> = {
-      run(request) {
-        if (request.argv[0] === "git" && request.argv.includes("rebase")) {
-          rebaseCommands.push([...request.argv])
-        }
-        return process.run(request)
-      },
-    }
-    const result = await createGitChangeRemerger({ inject: { process: capturingProcess }, repo }).recut({
+    // Re-merge Phase 1 (22925 family): the direct path is rebuilt by MERGE,
+    // never rebase, so `expectNonInteractiveRebases` (a hygiene check on the
+    // OLD rebase invocation's `-c core.editor=true` flag) tests a mechanism
+    // this path no longer has — no rebase command is ever run, so the
+    // property it proved cannot apply. The property that DOES survive —
+    // certificate correctness is textconv-independent, and the final content
+    // is right — is the two assertions kept below.
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
       branch: "issue/payload",
       base: "main",
@@ -2460,7 +2463,6 @@ describe("Queue command adapters", () => {
 
     expect(result.patchId).toMatch(/^[0-9a-f]{40}$/u)
     expect(await git(repo, ["show", `${result.headSha}:payload.dat`])).toBe("beta")
-    expectNonInteractiveRebases(rebaseCommands)
   })
 
   it("certifies the raw carrier object when a local replacement ref is present", async () => {

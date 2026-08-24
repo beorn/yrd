@@ -4603,25 +4603,29 @@ async function remergeDirectChangeByMerge(
     }
   }
   // `built.unchanged` (rebuildCandidateByMerge's own signal) is a pure
-  // content check: does the candidate's tree differ from target.sha's. The
-  // OUTER ChangeRemergeResult.unchanged this function returns means
-  // something different and CROSS-CALL: "has anything the queue needs to act
-  // on changed since this was last evaluated." remergeDirectChange's OLD
-  // early-return used exactly `sourceBase === target.sha` (the recorded base
-  // still matches the current authoritative one) for that, independent of
-  // whether the author's own commits carry real content beyond it. Two
-  // fixtures pinned the distinction during bucket-2/3 triage (22925 family):
-  // "certifies the raw carrier object when a local replacement ref is
-  // present" (oldBase === target.sha, author's tip carries real new content
-  // — payload.txt — expects unchanged:true) vs. recut-absorbed-payload's
-  // "carrying only the paths the base did not already merge" (oldBase !==
-  // target.sha — main moved via cherry-pick since oldBase was recorded —
-  // expects unchanged:false even though the candidate is a trivial
-  // fast-forward). Either condition alone justifies "nothing new to act on":
-  // the base is exactly where it was (oldBase === target.sha), or the
-  // content really is identical regardless (built.unchanged, e.g. the 23167
-  // cherry-dedup specimen).
-  const unchanged = oldBase === target.sha || built.unchanged
+  // content check: does the candidate's tree differ from target.sha's — true
+  // both for a trivial fast-forward AND for a genuine merge that happens to
+  // land back on target's own content (the rare 23167 cherry-dedup case).
+  // The OUTER ChangeRemergeResult.unchanged this function returns means
+  // something narrower: "was this a pure fast-forward AND has the recorded
+  // base not moved since — i.e. is there nothing for the queue to newly act
+  // on" — OR the rarer built.unchanged case above. `oldBase === target.sha`
+  // ALONE is not sufficient: three fixtures pinned this precisely, not two
+  // (22925 family, bucket-2/3 triage). "certifies the raw carrier object
+  // when a local replacement ref is present" (oldBase === target.sha AND a
+  // literal fast-forward — expects unchanged:true) vs. recut-absorbed-
+  // payload's "carrying only the paths the base did not already merge"
+  // (oldBase !== target.sha, ALSO a fast-forward — expects unchanged:false)
+  // vs. "recuts from the source merge base when submission recorded
+  // authoritative current base" (oldBase === target.sha, but NOT a
+  // fast-forward — a genuine two-sided merge of independently-diverged
+  // content — expects unchanged:false even though oldBase matches target).
+  // `built.sha === input.headSha` is the fast-forward tell: the short-circuit
+  // in rebuildCandidateByMerge returns the author's own sha verbatim; the
+  // full merge path always produces a new --no-ff commit that can never
+  // equal it.
+  const wasFastForward = built.sha === input.headSha
+  const unchanged = (wasFastForward && oldBase === target.sha) || built.unchanged
   return {
     headSha: built.sha,
     baseSha: target.sha,
