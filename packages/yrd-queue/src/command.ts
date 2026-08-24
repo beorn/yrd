@@ -4393,28 +4393,51 @@ export async function rebuildCandidateByMerge(
   const guilty: { id?: string } = {}
   const outcome = await withScratch<Readonly<{ sha: string }>>(git, repo, target.sha, undefined, async (path, root) => {
     const artifactRoot = resolve(options.artifactRoot ?? join(root, "artifacts"))
-    // POSITIVE PRE-BRANCH, not a catch around a known-crashing path. Computed
-    // BEFORE any merge is attempted, against the untouched worktree (still at
-    // `target.sha`) — a stated, checkable condition: does THIS change author a
-    // gitlink at all? `resolveCandidateSubmoduleConflict`'s "composed" branch
-    // composes a BATCH's divergent submodule commits together — the right tool
-    // for two different members of the SAME candidate advancing one gitlink two
-    // ways. A single-member rebuild is never that shape: the shaset fill-in
-    // (`fillAuthoredGitlinksFromMain`, inside `rebuildGitlinkConflictByTakingBase`
-    // below) already owns the final value, computed independently of how a merge
-    // would resolve the path. So compose is the wrong TOOL here, not merely a
-    // tool that happens to crash on this shape — it does crash on it separately
-    // (`QueueSubmoduleResolutionEvidenceSchema` rejects the shape
+    // POSITIVE PRE-BRANCH, not a catch around a known-crashing path — but
+    // narrowed to Phase 0's actual rule: "take the base's gitlink ON
+    // CONFLICT", not on every authored gitlink unconditionally. A first cut
+    // read "does this change author a gitlink at all" as the trigger; that
+    // hijacked every clean, non-conflicting gitlink advance too (command.
+    // test.ts:9195's queue-driven submodule-promotion/retry suite proved
+    // it — the queue's OWN promotion machinery never got a chance to run,
+    // because this pre-branch intercepted before any merge was even
+    // attempted). Corrected per team-lead's ruling (22925 family): trigger
+    // EXACTLY where the old code would have called
+    // `resolveCandidateSubmoduleConflict` — a gitlink-mode conflict actually
+    // DETECTED during the member merge — and nowhere else. No conflict means
+    // the normal merge flow below runs untouched: a cleanly-merged
+    // single-sided gitlink advance already carries the authored value, needs
+    // no fill, and stays reachable by the queue's promotion/convergence
+    // machinery exactly as before this function existed.
+    //
+    // Detection is a non-destructive TRIAL of the exact merge
+    // `prepareCandidateMembers` would otherwise attempt (same target, same
+    // head, same flags) — never a guess computed from authored-path lists
+    // alone, since only git's own merge machinery can say whether a
+    // divergent gitlink pin auto-resolves (one side's submodule commit an
+    // ancestor of the other's) or is a genuine, unresolvable conflict. On
+    // conflict, `readGitlinkConflictStages` (already used elsewhere in this
+    // file for exactly this per-path question) tells us whether it is
+    // gitlink-shaped; the trial is aborted/reset either way, so
+    // `prepareCandidateMembers` below always starts from the same clean
+    // `target.sha` state regardless of which branch this took.
+    //
+    // `resolveCandidateSubmoduleConflict`'s "composed" branch composes a
+    // BATCH's divergent submodule commits together — the right tool for two
+    // different members of the SAME candidate advancing one gitlink two
+    // ways, and NOT the tool for a single member's own conflict, which the
+    // shaset fill-in (`fillAuthoredGitlinksFromMain`, inside
+    // `rebuildGitlinkConflictByTakingBase` below) already owns independently
+    // of how a merge would resolve the path. Composing here would also crash
+    // separately (`QueueSubmoduleResolutionEvidenceSchema` rejects the shape
     // `executeQueueSubmoduleComposition` actually returns, after every git
-    // operation including the commit itself has already run; tracked as its own
-    // shared-machinery finding, `@yrd/core/evidence-schema-rejects-its-producer`,
-    // P2, deliberately left unfixed here — out of scope, and dormant per the
-    // habitant runner's own journal). A change with no authored gitlink can
-    // never reach a gitlink-mode conflict at all — there is nothing gitlink-
-    // shaped it owns to conflict about — so delegating THAT case to
-    // `prepareCandidateMembers` is safe by construction, not merely convenient;
-    // `resolveCandidateSubmoduleConflict`'s composition branch is provably
-    // unreachable from this function for it.
+    // operation including the commit itself has already run; tracked as its
+    // own shared-machinery finding,
+    // `@yrd/core/evidence-schema-rejects-its-producer`, P2, deliberately left
+    // unfixed here — out of scope, and dormant per the habitant runner's own
+    // journal) — a conflict this pre-branch now routes around before ever
+    // reaching it, rather than a tool it happens to be safe from by
+    // construction.
     const authoredGitlinks = await authoredGitlinkPaths(git, path, input.id, input.headSha)
     if (authoredGitlinks.status === "failed") {
       throw createFailure({
@@ -4425,7 +4448,33 @@ export async function rebuildCandidateByMerge(
       })
     }
     if (authoredGitlinks.output.length > 0) {
-      return rebuildGitlinkConflictByTakingBase(git, repo, path, pr, input, target, authoredGitlinks.output, options)
+      const trialMessage = candidateChangeCommitMessage("merge", pr)
+      const trial = await git.run(path, ["merge", "--no-verify", "--no-ff", "-m", trialMessage, input.headSha], true)
+      if (trial.code !== 0) {
+        let gitlinkConflict = false
+        for (const conflictPath of authoredGitlinks.output) {
+          if ((await readGitlinkConflictStages(git, path, conflictPath)) !== undefined) {
+            gitlinkConflict = true
+            break
+          }
+        }
+        await git.run(path, ["merge", "--abort"], true)
+        if (gitlinkConflict) {
+          return rebuildGitlinkConflictByTakingBase(git, repo, path, pr, input, target, authoredGitlinks.output, options)
+        }
+        // Not a gitlink conflict — some other path collided. Not this
+        // pre-branch's business; prepareCandidateMembers below re-attempts
+        // the same merge and handles it exactly as it always has.
+      } else {
+        // Clean merge. Reset the trial so prepareCandidateMembers performs
+        // the real, authoritative merge (witness checks, shaset-fill-if-
+        // needed, wrapper stabilization) untouched, rather than this
+        // pre-branch silently keeping its own throwaway result.
+        // submodule.recurse disabled: this scratch worktree's submodule
+        // git-dir references are broken (git worktree add), and a plain
+        // reset --hard would otherwise try to recurse into them.
+        await git.run(path, ["-c", "submodule.recurse=false", "reset", "--hard", target.sha], true)
+      }
     }
     const prepared = await prepareCandidateMembers(
       guilty,
