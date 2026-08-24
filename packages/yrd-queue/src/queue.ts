@@ -480,18 +480,31 @@ export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmission
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 /**
  * Refusals a retry cannot change, because the fact they report is fixed for the
- * revision that carries it: non-ancestral gitlink commits do not become
- * ancestral, and a certified re-merge base the authoritative base never descended
- * from does not become ancestral either. Both need a NEW revision, so the queue
- * parks them on the first refusal rather than re-refusing them at the head.
+ * revision that carries it: a certified re-merge base the authoritative base
+ * never descended from does not become ancestral by retrying. It needs a NEW
+ * revision, so the queue parks it on the first refusal rather than
+ * re-refusing it at the head.
  *
  * Membership is by exact code, and the code is the discrimination: the sibling
  * `recut-certificate` / `recut-gitlink-object-missing` refusals report an
  * unreadable repository, which a fetch cures, and stay on the ordinary retry
  * threshold. See `remergeBaseMovement` in command.ts for where the two are told
  * apart.
+ *
+ * `recut-gitlink-conflict` (a non-ancestral gitlink commit) was this set's
+ * other member through Phase 0 of the re-merge refactor. Phase 1's deletion
+ * sweep (task B, 2026-08-23) removed its only producers,
+ * `resolveGitlinkFastForward`/`resolveGitlinkByFinalPin` (the old rebase-based
+ * direct path's per-gitlink conflict resolution) — confirmed by exhaustive
+ * `rg` across yrd-queue/yrd-cli/yrd-bay `src`: zero remaining `createFailure`/
+ * `candidateFailure` call sites use this code, only this set's own (now
+ * corrected) definition and one presentation-layer consumer,
+ * `yrd-cli/src/actionable-error.ts`'s now-dead `recut-gitlink-conflict`
+ * branch (left as residue — six test files still reference the code by name,
+ * out of this pass's scope; see the handoff report). Pruned here rather than
+ * left dangling in a set with no other member producing it.
  */
-const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-gitlink-conflict", "recut-base-diverged"])
+const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-base-diverged"])
 
 /** How long a pushed-but-unsubmitted PR may sit before `queue audit` flags it
  * `draft-stranded`. Mirrors the 15m orphaned-run grace: long enough for a

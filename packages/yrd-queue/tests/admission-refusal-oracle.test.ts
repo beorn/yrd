@@ -271,17 +271,17 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       kind: "refusal",
-      reason: "two fixed gitlink commits are non-ancestral",
+      reason: "the authoritative candidate base diverged from the certified base",
     })
 
     expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       count: 1,
       settlement: {
         disposition: "needs-person",
-        reason: "two fixed gitlink commits are non-ancestral",
+        reason: "the authoritative candidate base diverged from the certified base",
       },
     })
     expect(app.queue.eligibility(pr.id).reason).toMatchObject({ code: "admission-refused" })
@@ -292,12 +292,12 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit().findings).toContainEqual({
       code: "admission-refusal-needs-person",
       message:
-        `change '${pr.id}' needs a person: its entry-check failure 'recut-gitlink-conflict' has no ` +
-        "mechanical remedy — two fixed gitlink commits are non-ancestral. " +
+        `change '${pr.id}' needs a person: its entry-check failure 'recut-base-diverged' has no ` +
+        "mechanical remedy — the authoritative candidate base diverged from the certified base. " +
         "Owner: unowned — no needsPerson.owner is configured in .yrd.yml.",
       pr: pr.id,
       specimen: `pr:${pr.id}:needs-person`,
-      refusal: "recut-gitlink-conflict",
+      refusal: "recut-base-diverged",
       since: "2026-01-01T00:00:00.000Z",
       owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
     })
@@ -318,9 +318,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       kind: "refusal",
-      reason: "two fixed gitlink commits are non-ancestral",
+      reason: "the authoritative candidate base diverged from the certified base",
     })
 
     expect(app.queue.audit().findings).toContainEqual(
@@ -348,9 +348,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       kind: "refusal",
-      reason: "two fixed gitlink commits are non-ancestral",
+      reason: "the authoritative candidate base diverged from the certified base",
     })
 
     expect(app.queue.audit().findings).toContainEqual(
@@ -372,13 +372,17 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const seeded = createMemoryJournal()
     {
-      await using seed = await createApp(refuseForever(() => ""), clock.read, seeded)
+      await using seed = await createApp(
+        refuseForever(() => ""),
+        clock.read,
+        seeded,
+      )
       const pr = await submitAndRequestChecks(seed, "issue/unattributed-permanent-refusal")
       await seed.queue.recordAdmissionRefusal({
         pr: pr.id,
-        code: "recut-gitlink-conflict",
+        code: "recut-base-diverged",
         kind: "refusal",
-        reason: "two fixed gitlink commits are non-ancestral",
+        reason: "the authoritative candidate base diverged from the certified base",
       })
     }
     await using app = await createApp(
@@ -495,9 +499,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.recordAdmissionRefusal({
       pr: behind.id,
-      code: "recut-gitlink-conflict",
+      code: "recut-base-diverged",
       kind: "refusal",
-      reason: "two fixed gitlink commits are non-ancestral",
+      reason: "the authoritative candidate base diverged from the certified base",
     })
 
     // Parked behind the head — it does not promote itself back into the
@@ -1070,7 +1074,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     await using app = await createApp(
       refuseForever(() => blocked, {
         code: "recut-base-diverged",
-        message: (pr) => `change '${pr}' revision 1 certifies a base the authoritative candidate base never descended from`,
+        message: (pr) =>
+          `change '${pr}' revision 1 certifies a base the authoritative candidate base never descended from`,
       }),
       clock.read,
     )
