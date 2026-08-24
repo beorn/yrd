@@ -4336,6 +4336,46 @@ export async function rebuildCandidateByMerge(
 ): Promise<RebuildByMergeResult> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
+  // exactDelta wants a RefGit — trimmed stdout, throws on non-zero — not this
+  // module's own Git, whose `.run` returns a {code, stdout, stderr} result for
+  // every tolerant caller in this file. A local, minimal bridge rather than
+  // reaching for a shared adapter: this is the one call site in `command.ts`
+  // that needs one today. Built up front so both the fast-forward
+  // short-circuit below and the merge path's own tail share ONE exactDelta
+  // convention for `unchanged` — see the bug that cost: a first cut hardcoded
+  // `unchanged: true` on the fast-forward path, conflating "no merge commit
+  // needed" with "literally nothing changed". Wrong whenever the author's tip
+  // has real commits beyond target that a bare fast-forward still delivers —
+  // caught by recut-absorbed-payload.test.ts: target genuinely an ancestor of
+  // headSha, but headSha carries one more authored commit beyond it.
+  const refGit: Pick<import("./content-identity.ts").ExactDeltaGit, "run"> = {
+    async run(r, a) {
+      const result = await git.run(r, a, true)
+      if (result.code !== 0) {
+        throw new Error(`git ${a.join(" ")} exited ${result.code}: ${(result.stderr || result.stdout).trim()}`)
+      }
+      return result.stdout.trim()
+    },
+  }
+  // A literal fast-forward: the current base is ALREADY an ancestor of the
+  // author's own tip, so there is nothing to MERGE — `prepareCandidateMembers`'s
+  // merge step below is `--no-ff` unconditionally (it exists to combine
+  // genuinely divergent members), so delegating to it here would manufacture
+  // a needless merge commit with a DIFFERENT sha for content a plain
+  // fast-forward already delivers — breaking every downstream comparison that
+  // expects a trivial rebuild's head to equal the author's own tip. Found via
+  // bucket-2 triage (22925 family): 13 cannot-probe/infra-retry tests all
+  // failed on exactly this headSha mismatch, not on refusal classification —
+  // the retryable-infra logic itself was never wrong. Mirrors
+  // remergeDirectChange's own early-return for the identical case
+  // (sourceBase === target.sha), computed directly here rather than via a
+  // merge-base helper that returns more than this needs. `unchanged` still
+  // goes through exactDelta below, never a hardcoded true — ancestry only
+  // proves no merge commit is needed, not that nothing changed.
+  if (await isAncestor(git, repo, target.sha, input.headSha)) {
+    const delta = await exactDelta(refGit, repo, target.sha, input.headSha)
+    return { sha: input.headSha, treeSha: delta.candidateTree, unchanged: delta.entries.length === 0 }
+  }
   const pr = ChangeSnapshotSchema.parse({
     id: input.id,
     branch: input.branch,
@@ -4413,20 +4453,6 @@ export async function rebuildCandidateByMerge(
   })
   if (outcome.status !== "completed" || outcome.conclusion !== "success") {
     throw new Error(`yrd: rebuild-by-merge scratch worktree did not complete for change '${input.id}'`)
-  }
-  // exactDelta wants a RefGit — trimmed stdout, throws on non-zero — not this
-  // module's own Git, whose `.run` returns a {code, stdout, stderr} result for
-  // every tolerant caller in this file. A local, minimal bridge rather than
-  // reaching for a shared adapter: this is the one call site in `command.ts`
-  // that needs one today.
-  const refGit: Pick<import("./content-identity.ts").ExactDeltaGit, "run"> = {
-    async run(r, a) {
-      const result = await git.run(r, a, true)
-      if (result.code !== 0) {
-        throw new Error(`git ${a.join(" ")} exited ${result.code}: ${(result.stderr || result.stdout).trim()}`)
-      }
-      return result.stdout.trim()
-    },
   }
   const delta = await exactDelta(refGit, repo, target.sha, outcome.output.sha)
   return { sha: outcome.output.sha, treeSha: delta.candidateTree, unchanged: delta.entries.length === 0 }
@@ -4527,12 +4553,32 @@ async function remergeDirectChangeByMerge(
       })
     }
   }
+  // `built.unchanged` (rebuildCandidateByMerge's own signal) is a pure
+  // content check: does the candidate's tree differ from target.sha's. The
+  // OUTER ChangeRemergeResult.unchanged this function returns means
+  // something different and CROSS-CALL: "has anything the queue needs to act
+  // on changed since this was last evaluated." remergeDirectChange's OLD
+  // early-return used exactly `sourceBase === target.sha` (the recorded base
+  // still matches the current authoritative one) for that, independent of
+  // whether the author's own commits carry real content beyond it. Two
+  // fixtures pinned the distinction during bucket-2/3 triage (22925 family):
+  // "certifies the raw carrier object when a local replacement ref is
+  // present" (oldBase === target.sha, author's tip carries real new content
+  // — payload.txt — expects unchanged:true) vs. recut-absorbed-payload's
+  // "carrying only the paths the base did not already merge" (oldBase !==
+  // target.sha — main moved via cherry-pick since oldBase was recorded —
+  // expects unchanged:false even though the candidate is a trivial
+  // fast-forward). Either condition alone justifies "nothing new to act on":
+  // the base is exactly where it was (oldBase === target.sha), or the
+  // content really is identical regardless (built.unchanged, e.g. the 23167
+  // cherry-dedup specimen).
+  const unchanged = oldBase === target.sha || built.unchanged
   return {
     headSha: built.sha,
     baseSha: target.sha,
     treeSha: built.treeSha,
     patchId,
-    unchanged: built.unchanged,
+    unchanged,
   }
 }
 
