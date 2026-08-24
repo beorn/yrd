@@ -43,3 +43,20 @@ wrapper.
 
 Tests and alternate hosts may inject `scope`, `log`, `now`, and `spawn`. Domain
 packages receive a `Process`; they do not call `Bun.spawn` themselves.
+
+## Retries and refusal latency
+
+`git-super` retries a read-only Git call it detects as stalled. One queue run
+makes roughly ninety sequential Git calls, and at a measured 20–40% per-call
+stall rate against origin the chance that all ninety succeed is vanishing — that
+compounding, rather than any queue defect, is why the queue could land nothing
+for hours (git-super `3652bfe`, 2026-08-21).
+
+The cost is paid on genuine failures. A submodule that really is unreachable is
+probed more than once before Yrd refuses, so refusal latency is a small multiple
+of one probe's timeout. **If you are debugging a refusal that looks slow, that
+multiple is expected and is not a hang.**
+
+The retry count is git-super's policy, not Yrd's contract. Tests assert a
+*bounded* number of probes rather than an exact one, so that this suite does not
+carry a hand-synced copy of another package's constant.
