@@ -4,7 +4,7 @@
  * @consumer @yrd/process inspectPathHolders
  */
 import { afterEach, describe, expect, test, vi } from "vitest"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { inspectPathHolders, pathHolderRefusal, pathReapFailure, type PathHolder } from "../src/index.ts"
@@ -51,11 +51,32 @@ describe("inspectPathHolders", () => {
     symlinkSync("/", join(processRoot, "cwd"))
     symlinkSync("/bin/sh", join(processRoot, "exe"))
     symlinkSync(ownedPath, join(processRoot, "root"))
+    writeFileSync(join(processRoot, "maps"), "")
 
     const kill = vi.spyOn(process, "kill")
     await expect(inspectPathHoldersInProc(ownedPath, procRoot)).resolves.toEqual([
       { pid: 4242, source: "root", target: ownedPath },
     ])
     expect(kill).not.toHaveBeenCalled()
+  })
+
+  test.runIf(process.platform === "linux")("reports mapped files below the owned path", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-path-maps-"))
+    scratch.push(fixture)
+    const ownedPath = join(fixture, "owned")
+    const mappedFile = join(ownedPath, "native.node")
+    const procRoot = join(fixture, "proc")
+    const processRoot = join(procRoot, "4242")
+    mkdirSync(ownedPath)
+    writeFileSync(mappedFile, "mapped fixture\n")
+    mkdirSync(join(processRoot, "fd"), { recursive: true })
+    symlinkSync("/", join(processRoot, "cwd"))
+    symlinkSync("/bin/sh", join(processRoot, "exe"))
+    symlinkSync("/", join(processRoot, "root"))
+    writeFileSync(join(processRoot, "maps"), `7f000000-7f001000 r--p 00000000 00:00 0 ${mappedFile}\n`)
+
+    await expect(inspectPathHoldersInProc(ownedPath, procRoot)).resolves.toEqual([
+      { pid: 4242, source: "fd/maps", target: mappedFile },
+    ])
   })
 })

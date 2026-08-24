@@ -8,7 +8,7 @@
  * process in the Bay lifecycle even after reparenting.
  */
 
-import { readdir, readlink, realpath, stat } from "node:fs/promises"
+import { readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
 import { resolve, sep } from "node:path"
 
 export type PathHolder = Readonly<{
@@ -175,10 +175,11 @@ async function linuxPathProcessHolders(root: string, procRoot: string): Promise<
           throw error
         })
         if (metadata === undefined || metadata.uid !== uid) return []
-        const [cwd, executable, processRoot] = await Promise.all([
+        const [cwd, executable, processRoot, mappedFiles] = await Promise.all([
           readProcessLink(`${proc}/cwd`),
           readProcessLink(`${proc}/exe`),
           readProcessLink(`${proc}/root`),
+          readProcessMaps(`${proc}/maps`),
         ])
         const holders: PathHolder[] = []
         if (cwd !== undefined && pathWithin(root, cwd)) holders.push({ pid, source: "cwd", target: cwd })
@@ -187,6 +188,9 @@ async function linuxPathProcessHolders(root: string, procRoot: string): Promise<
         }
         if (processRoot !== undefined && pathWithin(root, processRoot)) {
           holders.push({ pid, source: "root", target: processRoot })
+        }
+        for (const mappedFile of mappedFiles) {
+          if (pathWithin(root, mappedFile)) holders.push({ pid, source: "fd/maps", target: mappedFile })
         }
         const descriptors = await readdir(`${proc}/fd`).catch((error: unknown) => {
           if (processEntryUnavailable(error)) return []
@@ -272,13 +276,30 @@ async function readProcessLink(path: string): Promise<string | undefined> {
   })
 }
 
+async function readProcessMaps(path: string): Promise<string[]> {
+  const contents = await readFile(path, "utf8").catch((error: unknown) => {
+    if (processEntryUnavailable(error)) return undefined
+    throw error
+  })
+  if (contents === undefined) return []
+  const mappedFiles: string[] = []
+  for (const line of contents.split("\n")) {
+    // Linux maps: address perms offset device inode [pathname]. Capture the
+    // whole optional pathname because real mapped files may contain spaces.
+    const match = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/u.exec(line)
+    const target = match?.[1]
+    if (target?.startsWith("/") === true) mappedFiles.push(target)
+  }
+  return mappedFiles
+}
+
 function processEntryUnavailable(error: unknown): boolean {
   const code = errorCode(error)
   // `/proc` is a live, permission-filtered view. Entries may disappear between
-  // readdir and inspection, and Linux security policy may hide cwd/exe/fd for
-  // an otherwise same-uid process. Treat each hidden source as unavailable and
-  // continue checking the remaining sources; an observable Bay-owned path
-  // still enters the kill/survivor set.
+  // enumeration and inspection, while non-dumpable same-UID supervisors (for
+  // example sshd-session) expose root-owned links/maps that this user cannot
+  // read. Candidate workloads are ordinary dumpable descendants; keep checking
+  // every observable source so their cwd/maps/fds still enter the holder set.
   return code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM"
 }
 
