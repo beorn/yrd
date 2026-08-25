@@ -36,6 +36,7 @@ import {
   type JournalCompatibility,
   type JournalFrame,
 } from "./frame.ts"
+import { systemClock } from "./clock.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
 import { stage } from "./stage-clock.ts"
 import type { Cursor, Journal, JournalCheckpoint, JournalHistory, JournalHistoryDiagnostics } from "./journal.ts"
@@ -587,7 +588,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 ): Promise<Yrd<State, Commands> & Features> {
   const journal = options.inject.journal
   const history = journal.history
-  const clock = options.inject.clock ?? (() => new Date().toISOString())
+  const clock = options.inject.clock ?? systemClock.iso
   const id = options.inject.id ?? uuidv7
   const log = options.inject.log ?? createLogger("yrd")
   const coreLog = log.child("core")

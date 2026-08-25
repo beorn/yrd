@@ -13,6 +13,7 @@ import {
   observeYrdLifecycle,
   parseJournalFrame,
   type JournalHistory,
+  systemClock,
 } from "@yrd/core"
 import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
@@ -901,7 +902,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     requireStatus(requested, "queued", "queued")
     const installed = definitionFor(requested)
     const attempt = requested.attempt + 1
-    const now = runOptions.now ?? Date.now
+    const now = runOptions.now ?? systemClock.now
     const observation = installed.observe?.(requested.input) ?? {}
     let observedResult: JobResult | undefined
     return observeYrdLifecycle(

@@ -1,4 +1,5 @@
 import { basename } from "node:path"
+import { systemClock } from "@yrd/core"
 import type { Process, ProcessRequest, ProcessResult } from "./index.ts"
 
 /** Two backoffs → three attempts. N=90 git calls at 20–40% per-call stall is
@@ -84,7 +85,7 @@ async function runWithGitTimeoutRetry(
   const sleep = options.sleep ?? ((delayMs: number) => Bun.sleep(delayMs))
   const limit = options.consecutiveTimeoutLimit ?? DEFAULT_CONSECUTIVE_TIMEOUT_LIMIT
   const windowMs = options.breakerWindowMs ?? DEFAULT_BREAKER_WINDOW_MS
-  const now = options.now ?? Date.now
+  const now = options.now ?? systemClock.now
   const announce =
     options.announce ?? ((message: string) => void globalThis.process.stderr.write(`${message}\n`))
   const state = options.breaker ?? { consecutiveTimeouts: 0, openedAtMs: undefined }

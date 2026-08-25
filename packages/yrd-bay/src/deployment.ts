@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, link, mkdir, open, readFile, readdir, realpath, stat, unlink } from "node:fs/promises"
 import { join, resolve } from "node:path"
-import type { JsonValue } from "@yrd/core"
+import { systemClock, type JsonValue } from "@yrd/core"
 import { createJobDef, type JobDef } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import { createGitWorktreeStore, type GitWorktreeStoreOptions } from "git-super/worktree"
@@ -272,7 +272,7 @@ export async function createGitDeploymentStore(options: GitDeploymentStoreOption
   const deploymentsRoot = resolve(options.deploymentsRoot ?? join(worktrees.repo, ".yrd-deployments"))
   const rootsRoot = join(deploymentsRoot, "roots")
   const recordsRoot = join(deploymentsRoot, "records")
-  const now = options.now ?? (() => new Date().toISOString())
+  const now = options.now ?? systemClock.iso
   await mkdir(rootsRoot, { recursive: true })
   await mkdir(recordsRoot, { recursive: true })
   await worktrees.prepareRoot(deploymentsRoot)

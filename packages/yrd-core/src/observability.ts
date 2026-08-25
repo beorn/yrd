@@ -1,4 +1,5 @@
 import type { ConditionalLogger, LogLevel } from "loggily"
+import { systemClock } from "./clock.ts"
 import { failureFact } from "./failure.ts"
 
 /** Default severity by lifecycle outcome. Delivery-step starts are the one
@@ -69,7 +70,7 @@ export async function observeYrdLifecycle<Result>(
   options: YrdLifecycleOptions<Result>,
   operation: () => Result | Promise<Result>,
 ): Promise<Result> {
-  const now = options.now ?? Date.now
+  const now = options.now ?? systemClock.now
   const startedAt = now()
   const log = root.child(options.lifecycle)
   const spanProps: Record<string, unknown> = {

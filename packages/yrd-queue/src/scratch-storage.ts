@@ -1,5 +1,6 @@
 import { lstat, readdir, rm, statfs } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
+import { systemClock } from "@yrd/core"
 import type { JobError } from "@yrd/job"
 
 /**
@@ -270,7 +271,7 @@ export async function reapOrphanedScratch(
   options: Readonly<{ olderThanMs?: number; now?: number; keep?: ReadonlySet<string>; namePrefix?: string }> = {},
 ): Promise<ScratchReapReport> {
   const olderThanMs = options.olderThanMs ?? ORPHANED_SCRATCH_MAX_AGE_MS
-  const now = options.now ?? Date.now()
+  const now = options.now ?? systemClock.now()
   const keep = options.keep ?? new Set<string>()
   const namePrefix = options.namePrefix ?? SCRATCH_NAME_PREFIX
   let entries: string[]

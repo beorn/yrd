@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises"
 import { basename, delimiter, dirname, join, resolve } from "node:path"
+import { systemClock } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
@@ -403,7 +404,7 @@ async function prepareReceiverUpdates(
   input: string | readonly ReceiverRefUpdate[],
   options: ReceiverHookOptions,
 ): Promise<ReceiverResult[]> {
-  const clock = options.clock ?? (() => new Date().toISOString())
+  const clock = options.clock ?? systemClock.iso
   const created: string[] = []
   const results: ReceiverResult[] = []
   try {
@@ -435,7 +436,7 @@ async function finalizeReceiverUpdates(
   input: string | readonly ReceiverRefUpdate[],
   options: ReceiverHookOptions,
 ): Promise<ReceiverResult[]> {
-  const clock = options.clock ?? (() => new Date().toISOString())
+  const clock = options.clock ?? systemClock.iso
   const results: ReceiverResult[] = []
   for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
     const update = ReceiverRefUpdateSchema.parse(value)
