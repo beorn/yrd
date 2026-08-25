@@ -504,20 +504,27 @@ export function configuredChecks(
         environment[name] === undefined ? [] : [[name, environment[name]]],
       ),
     )
-    const environmentFor = (candidate: string) => ({
+    const environmentFor = (candidate: string, tmpDir?: string) => ({
       ...inherited,
       ...declared,
+      // Heavy checks write whole fixture trees through TMPDIR, and the
+      // inherited value usually points at a small tmpfs /tmp whose per-user
+      // quota mid-run turns a green candidate into dozens of spurious EDQUOT
+      // suite failures. Every run gets a run-scoped tmp dir on the
+      // repository's own filesystem instead; a check definition's env.TMPDIR
+      // still wins.
+      ...(tmpDir === undefined ? {} : { TMPDIR: tmpDir }),
       ...definition.env,
       YRD_REPO: repo,
       YRD_BASE_SHA: baseSha,
       YRD_CANDIDATE_SHA: candidate,
       ...(definition.environment === undefined ? {} : { YRD_ENVIRONMENT: definition.environment }),
     })
-    const run = (workingDirectory: string, candidate: string) =>
+    const run = (workingDirectory: string, candidate: string, tmpDir?: string) =>
       process.run({
         argv: shellCommand(definition.run ?? ""),
         cwd: workingDirectory,
-        env: environmentFor(candidate),
+        env: environmentFor(candidate, tmpDir),
         timeoutMs: stepTimeoutMs(definition),
       })
     // A required check has to judge what the queue will judge: the candidate
@@ -539,13 +546,24 @@ export function configuredChecks(
     // It always executes in a materialized checkout, where the declared paths
     // are overlaid with the base's version before the command starts.
     const pinnedScripts = definition.scripts ?? []
-    if (ref === undefined && !composes && pinnedScripts.length === 0) return run(cwd, candidateSha)
-
-    const checkoutSha = composes ? baseSha : candidateSha
     const parent = join(stateDir, "pre-submit-worktrees")
     mkdirSync(parent, { recursive: true })
+    if (ref === undefined && !composes && pinnedScripts.length === 0) {
+      const inPlaceTmp = await mkdtemp(join(parent, "check-tmp-"))
+      try {
+        return await run(cwd, candidateSha, inPlaceTmp)
+      } finally {
+        await rm(inPlaceTmp, { recursive: true, force: true })
+      }
+    }
+
+    const checkoutSha = composes ? baseSha : candidateSha
     const checkoutRoot = await mkdtemp(join(parent, "check-"))
     const checkout = join(checkoutRoot, "worktree")
+    // Lives and dies with checkoutRoot; retained alongside a kept failure
+    // workspace, where leftover fixture temp is evidence rather than litter.
+    const checkTmp = join(checkoutRoot, "tmp")
+    mkdirSync(checkTmp, { recursive: true })
     // Candidate materialization is trusted Yrd plumbing. Repository hooks run
     // in that process by default, so the shared worktree capability quarantines
     // hooks instead of exposing Yrd's ambient authority to hook code.
@@ -666,7 +684,7 @@ export function configuredChecks(
         path: checkout,
         subject: `required check '${name}' workspace`,
         manifestSubject: "candidate",
-        env: environmentFor(candidate),
+        env: environmentFor(candidate, checkTmp),
         fail(message) {
           raiseFailure("infrastructure", "candidate-provision-failed", `yrd: ${message}`)
         },
@@ -688,7 +706,7 @@ export function configuredChecks(
           pinnedScripts,
         )
       }
-      const result = await run(checkout, candidate)
+      const result = await run(checkout, candidate, checkTmp)
       failed = result.exitCode !== 0 || result.timedOut
       if (!failed || !keepOnFailure) return result
       return { ...result, retainedWorkspace: { path: checkout, cleanup: "worktree" } }

@@ -1091,6 +1091,72 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await git(repo, "merge-base", "--is-ancestor", featureSha, composed!)
   })
 
+  it("overrides an inherited tmpfs TMPDIR with a run-scoped dir for an in-place check, then removes it", async () => {
+    const { repo } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["tmp-probe"],
+      requires: [],
+      definitions: {
+        "tmp-probe": {
+          run:
+            'test -n "$TMPDIR" && test "$TMPDIR" != "/inherited-tmpfs-probe" && ' +
+            'case "$TMPDIR" in */pre-submit-worktrees/check-tmp-*) touch "$TMPDIR/probe.txt";; ' +
+            '*) printf "unexpected TMPDIR %s\\n" "$TMPDIR" >&2; exit 1;; esac',
+          runner: "local",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["tmp-probe"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const stateDir = join(repo, ".git", "yrd")
+    const checks = configuredChecks(process, stateDir, config, {
+      PATH: globalThis.process.env.PATH,
+      TMPDIR: "/inherited-tmpfs-probe",
+    })
+
+    // No ref, current base: the in-place path — the check runs in the
+    // operator's own tree but must still get a run-scoped disk-backed TMPDIR.
+    const result = await checks.run("tmp-probe", repo, {})
+
+    expect(result.stderr).toBe("")
+    expect(result.exitCode).toBe(0)
+    expect(await readdir(join(stateDir, "pre-submit-worktrees"))).toEqual([])
+  })
+
+  it("gives a checkout-path check a TMPDIR inside its own workspace root, removed with it", async () => {
+    const { repo, featureSha } = await staleBaseCandidateRepository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["tmp-probe"],
+      requires: [],
+      definitions: {
+        "tmp-probe": {
+          run:
+            'test "$TMPDIR" != "/inherited-tmpfs-probe" && ' +
+            'case "$TMPDIR" in */pre-submit-worktrees/check-*/tmp) touch "$TMPDIR/probe.txt";; ' +
+            '*) printf "unexpected TMPDIR %s\\n" "$TMPDIR" >&2; exit 1;; esac',
+          runner: "local",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["tmp-probe"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const stateDir = join(repo, ".git", "yrd")
+    const checks = configuredChecks(process, stateDir, config, {
+      PATH: globalThis.process.env.PATH,
+      TMPDIR: "/inherited-tmpfs-probe",
+    })
+
+    const result = await checks.run("tmp-probe", repo, { ref: featureSha })
+
+    expect(result.stderr).toBe("")
+    expect(result.exitCode).toBe(0)
+    expect(await readdir(join(stateDir, "pre-submit-worktrees"))).toEqual([])
+  })
+
   it("composes the operator's own stale branch before an explicit local check reads the tree", async () => {
     const { repo } = await staleBaseCandidateRepository()
     await git(repo, "switch", "-q", "issue/feature")
