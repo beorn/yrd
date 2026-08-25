@@ -1,7 +1,6 @@
 import { changeDeliveryState, changeRevisionLineage, isTracked, type Change, type ChangeRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
-import type { Process, ProcessResult } from "@yrd/process"
-import { cleanGitEnvironment } from "./git-environment.ts"
+import { cleanGitEnvironment, type Process, type ProcessResult } from "@yrd/process"
 import { observeLiveBranch, type LiveBranchObservation } from "./remote-branch.ts"
 import type { YrdCliIO, YrdCliServices } from "./types.ts"
 

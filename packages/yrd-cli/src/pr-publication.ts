@@ -1,9 +1,14 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import type { JobResult } from "@yrd/job"
 import type { ChangePublicationInput, ChangePublicationOutput, ChangePublicationService } from "@yrd/bay"
-import { adaptProcessGit, gitSuperFailureDetail, type Process, type ProcessResult } from "@yrd/process"
+import {
+  adaptProcessGit,
+  cleanGitEnvironment,
+  gitSuperFailureDetail,
+  type Process,
+  type ProcessResult,
+} from "@yrd/process"
 import { pushRefUpdates } from "git-super/push"
-import { cleanGitEnvironment } from "./git-environment.ts"
 import { changedSubmodulePins } from "./pr-submodule-publication.ts"
 
 const GIT_TIMEOUT_MS = 30_000

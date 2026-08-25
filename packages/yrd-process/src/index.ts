@@ -7,6 +7,7 @@ import { pathReapFailure, reapOwnedPath, type PathReapResult } from "./path-reap
 
 export {
   adaptProcessGit,
+  cleanGitEnvironment,
   gitSuperFailureDetail,
   type GitProcessDefaults,
   type GitSyncReadCommand,

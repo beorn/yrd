@@ -1,5 +1,4 @@
-import type { Process, ProcessResult } from "@yrd/process"
-import { cleanGitEnvironment } from "./git-environment.ts"
+import { cleanGitEnvironment, type Process, type ProcessResult } from "@yrd/process"
 import { GIT_PLUMBING_TIMEOUT_MS } from "./git-timeouts.ts"
 
 /** Two backoffs → three attempts. A 30s cap that is 1.8s in a clear window and

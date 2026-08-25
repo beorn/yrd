@@ -116,6 +116,7 @@ import {
 } from "@yrd/persistence"
 import {
   adaptProcessGit,
+  cleanGitEnvironment,
   createProcess,
   shellCommand,
   withGitTimeoutRetry,
@@ -125,7 +126,6 @@ import {
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
-import { cleanGitEnvironment } from "./git-environment.ts"
 import { guardScopedPaths } from "./pre-submit-guard-scope.ts"
 import { CHECKOUT_TIMEOUT_ENV, resolveCheckoutTimeoutMs } from "./git-timeouts.ts"
 import { observeFreshRemoteBranch, observeOriginBranchAdvertisement, observeOriginRemote } from "./remote-branch.ts"

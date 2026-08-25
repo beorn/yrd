@@ -1,10 +1,9 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
 import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
-import { adaptProcessGit, type Process, type ProcessResult } from "@yrd/process"
+import { adaptProcessGit, cleanGitEnvironment, type Process, type ProcessResult } from "@yrd/process"
 import { resolveSubmoduleMain, type SubmoduleMainGit } from "@yrd/queue"
 import { changedCommitGitlinks, readCommitGitlinks } from "git-super/commit-graph"
 import { remoteContainsCommit } from "git-super/push"
-import { cleanGitEnvironment } from "./git-environment.ts"
 
 const GIT_TIMEOUT_MS = 30_000
 

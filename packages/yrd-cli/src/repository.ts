@@ -1,6 +1,5 @@
 import { join, resolve } from "node:path"
-import { createProcess, type Process, type ProcessResult } from "@yrd/process"
-import { cleanGitEnvironment } from "./git-environment.ts"
+import { cleanGitEnvironment, createProcess, type Process, type ProcessResult } from "@yrd/process"
 
 export type YrdRepository = Readonly<{
   repo: string

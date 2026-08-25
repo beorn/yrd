@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import type { Process } from "@yrd/process"
-import { cleanGitEnvironment } from "./git-environment.ts"
+import { cleanGitEnvironment, type Process } from "@yrd/process"
 import { yrdSourceRoot } from "./version.ts"
 
 const GIT_TIMEOUT_MS = 30_000

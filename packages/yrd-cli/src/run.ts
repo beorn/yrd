@@ -62,6 +62,7 @@ import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job, JobError } from "@yrd/job"
 import {
   adaptProcessGit,
+  cleanGitEnvironment,
   createProcess,
   pathReapDeletionFailure,
   type GitSyncReadCommand,
@@ -104,7 +105,6 @@ import {
   type ResolvedYrdProjectConfig,
 } from "./config.ts"
 import { diagnoseYrdFlows } from "./config-doctor.ts"
-import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import { INSTALLED_PLAN_STALE_RESOLUTION, RUN_PLAN_MISMATCH_RESOLUTION } from "./plan-audit.ts"
 import {
