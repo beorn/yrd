@@ -7806,6 +7806,271 @@ export const COMPOSITION_FAILURE_BUCKETS = {
 
 const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 
+/**
+ * Every failure/refusal code `@yrd/cli`'s `failureDisposition` (in
+ * status-presentation.ts) must classify, in ONE authoritative place — the
+ * `YRD_QUEUE_AUDIT_FINDING_CODES` pattern applied to the OTHER durable code
+ * vocabulary this codebase has, so a code nobody registered turns into a
+ * thrown error instead of a silent `{ state: "failed", owner: "author" }`
+ * default (measured cost: `checkpoint-migration-certificate-missing`, an
+ * infra refusal, billed the author and consumed a submit authority).
+ *
+ * Curated, not a raw grep dump: `code: "..."` object literals across
+ * `packages/*\/src`, unioned with every DIRECT `JobResult.error.code`
+ * constructor at the same confidence tier — `candidateFailure(code, …)` in
+ * command.ts and its sibling `failed(code, …)` / `failedWithEvidence(code, …)`
+ * (both return `{ status: "completed", conclusion: "failure", error: { code,
+ * message } }` outright, no indirection) — plus every
+ * {@link COMPOSITION_FAILURE_BUCKETS} member (folded in WHOLE, not just the
+ * `needs-author`/`infra-retry` buckets `failureDisposition` already reads —
+ * `recut-lineage` and `plain-rejected` reach it the identical way and were
+ * silently defaulting too). A handful of spelling duplicates this codebase
+ * already tolerated ad hoc — see {@link YRD_REFUSAL_CODE_ALIASES} — are
+ * collapsed to ONE canonical spelling each rather than counted as independent
+ * codes, so this list is the DISTINCT-CONCEPT count, not a raw literal census.
+ * (`stale-base` and `check-failed` — both `failed()`-only, no `code: "..."`
+ * literal anywhere — are the reason this union matters: an object-literal-only
+ * census silently misses live producers.)
+ *
+ * Deliberately NOT exhaustive over every `raiseFailure()` call in `@yrd/cli`
+ * (run.ts, host.ts and siblings raise ~230 more distinct codes): most are
+ * CLI-invocation-time refusals (usage/configuration kind, caught by
+ * invocation.ts and rendered through actionable-error.ts, never becoming a
+ * persisted Run/Job failure). A demonstrated few DO cross over — host.ts's
+ * required-check and checkpoint-migration infra codes are forwarded into a
+ * `JobError.code` by the three `fact?.code ?? ...` catches wrapping required-
+ * check execution in command.ts — closing that surface needs its own call-
+ * graph trace and is deliberately left for a follow-up, not folded in here
+ * unverified.
+ */
+export const YRD_REFUSAL_CODES = [
+  "admission-refusal-loop",
+  "admission-refusal-needs-person",
+  "admission-refused",
+  "artifact-root-unresolved",
+  "attempt-base-mismatch",
+  "attempt-pin-mismatch",
+  "authored-gitlink",
+  // No current producer constructs the bare form — kept because
+  // CANCELED_FAILURE_CODES already accepted it (historical/external data);
+  // "cancelled" registers as its alias below.
+  "canceled",
+  "candidate-conflict",
+  "candidate-conflicting",
+  "candidate-ref-refused",
+  "candidate-revision-mismatch",
+  "candidate-submodules-failed",
+  "carrier-drops-landed",
+  "carrier-inspection",
+  "carrier-pin-already-landed",
+  "check-definition-missing",
+  // The generic required-check catch-all `failed()` emits in command.ts —
+  // no bucket of its own, always the plain default disposition. Load-bearing
+  // for status-presentation.test.ts.
+  "check-failed",
+  "checking",
+  "checkpoint-migration-certificate-missing",
+  "checkpoint-migration-certificate-stale",
+  "checkpoint-migration-path-ambiguous",
+  "checkpoint-migration-path-cyclic",
+  "checkpoint-migration-path-missing",
+  "checks-pending",
+  "claimed",
+  "command-refused",
+  "component-main-inspection-failed",
+  "component-model-authorization-refused",
+  "component-model-authorizer-unavailable",
+  "component-model-identity-unavailable",
+  "composition-invalid",
+  "config-not-found",
+  "config-path-invalid",
+  "contribution-inspection",
+  "definition-read-only",
+  "deletion-inspection",
+  "dirty-base",
+  "dirty-worktree",
+  "draft",
+  "draft-stranded",
+  "dropped-parent-contribution",
+  "evaluator-missing-result",
+  "exclusive-busy",
+  "flow-fingerprint-drift",
+  "flow-missing",
+  "flow-revision-drift",
+  "gate-script-diff-failed",
+  "gate-script-missing-at-base",
+  "gate-script-overlay-failed",
+  "gitlink-inspection",
+  "heartbeat-failed",
+  "installed-plan-stale",
+  "intent-base-moved",
+  "intent-batch-refused",
+  "intent-component-unknown",
+  "invalid-arguments",
+  "invalid-candidate",
+  "invalid-command",
+  "invalid-config",
+  "invalid-config-module",
+  "invalid-run",
+  "job-canceled",
+  "job-lease-expired",
+  "job-lost",
+  "job-skipped",
+  "journal-busy",
+  "journal-version-skew",
+  "legacy-quiesced",
+  "merge-canceled",
+  "merge-command-did-not-land",
+  "merge-command-waited",
+  "merge-conflict",
+  "merge-failed",
+  "merge-push-failed",
+  "merge-record-estate-unreadable",
+  "merge-record-retraction-refused",
+  "merge-record-unprovable-claim",
+  "merge-rollback-failed",
+  "merge-tip-carrier",
+  "merge-unauthored-deletion",
+  "merge-verification-failed",
+  "min-commit-unpublished",
+  "missing-pr",
+  // TEST-FIXTURE-ONLY narrative codes (queue-watch-round6.test.ts's fictional
+  // design-review rounds) — never produced by real yrd code, registered
+  // as-is rather than rewriting the fixture's illustrative choice of string.
+  "mock-mismatch",
+  "needs-author",
+  "no-merge-authority",
+  "orphaned-requested-job",
+  "orphaned-run",
+  "payload-certificate",
+  "payload-identity",
+  "payload-mismatch",
+  "payload-overlap",
+  "pin-bay-invalid",
+  "pin-checkout-cleanup-failed",
+  "pin-invalid",
+  "pin-moved",
+  "pin-ref-invalid",
+  "pin-ref-mismatch",
+  "pin-resolution-failed",
+  "pr-not-checkable",
+  "publication-failed",
+  "publication-unavailable",
+  "pushed-not-submitted",
+  // No current producer — see "canceled" above; "queue-cancelled" registers
+  // as its alias below.
+  "queue-canceled",
+  "queue-environment-refused",
+  "queue-hold-expired",
+  "queue-hold-ttl-missing",
+  "queue-never-started",
+  "queue-only-merger",
+  "queue-paused",
+  "queue-progress-stalled",
+  "queue-read-boundary-moved",
+  "recut-base-diverged",
+  "recut-base-missing",
+  "recut-certificate",
+  "recut-certificate-missing",
+  "recut-current-changed",
+  "recut-publish",
+  "recut-scratch-failed",
+  "refusal-remedy-needs-withdraw",
+  "refused-path",
+  "refused-path-inspection",
+  "rejected",
+  "repository-corrupt",
+  "required-check-failed",
+  "restack-conflict",
+  "restack-failed",
+  "retired-command",
+  "review-rejected",
+  "review-required",
+  "run-canceled",
+  "run-lease-expired",
+  "run-plan-mismatch",
+  "run-without-check-ancestry",
+  "run-without-submit-ancestry",
+  "runner-error",
+  "runner-health-failed",
+  "runtime-reload-exec-failed",
+  "scratch-cleanup-failed",
+  "source-lineage",
+  "source-missing",
+  "source-publish",
+  "spawn-cwd-missing",
+  // `failed()`-only, like `check-failed` above — no `code: "..."` object
+  // literal anywhere; command.ts's three base-moved checks raise it directly.
+  "stale-base",
+  "stale-check",
+  "stale-intent",
+  "stale-plan",
+  "stale-pr",
+  "stale-steps",
+  "step-revision-drift",
+  "step-selection-superseded",
+  "step-unavailable",
+  "submodule-composition-conflict",
+  "submodule-composition-unavailable",
+  "terminal",
+  "unauthored-path-deletion",
+  "unexpected",
+  "unisolable-stale-plan",
+  "unrecorded-submit",
+  "viewer-read-only",
+  // Same TEST-FIXTURE-ONLY narrative family as "mock-mismatch" above.
+  "visual-rejected",
+  "wrapper-generation",
+  "wrapper-mismatch",
+] as const
+
+export type RefusalCode = (typeof YRD_REFUSAL_CODES)[number]
+
+const YRD_REFUSAL_CODE_SET: ReadonlySet<string> = new Set(YRD_REFUSAL_CODES)
+
+/**
+ * Alternate spellings for a handful of {@link YRD_REFUSAL_CODES} members —
+ * never a fresh concept, always the SAME failure this codebase already
+ * tolerated under an older or synonymous name (status-presentation.ts used to
+ * carry these as ad-hoc inline `code === "..."` checks and Set members; the
+ * tolerance itself was the tell the vocabulary never closed). Registered here
+ * so historical or external data in either spelling still classifies instead
+ * of throwing, without ratifying the drift as two independent codes.
+ */
+export const YRD_REFUSAL_CODE_ALIASES: Readonly<Record<string, RefusalCode>> = {
+  cancelled: "canceled",
+  "queue-cancelled": "queue-canceled",
+  "run-cancelled": "run-canceled",
+  "environment-refused": "queue-environment-refused",
+  "lease-timeout": "job-lease-expired",
+}
+
+/**
+ * `<step-name>-failed` — NOT a finite spelling to enumerate: `run.ts`
+ * (`` `${waiting.step.name}-failed` ``, an externally-completed waiting job)
+ * and `command.ts` (`` `${options.purpose}${waiting ? "-launcher" : ""}-failed` ``)
+ * both build this from a repo's OWN configured check/step name, which is open
+ * per-project by design — the same way `check-failed` (registered above) is
+ * the generic form when no step-specific code is available. Same disposition
+ * either way (neither is stale/env/timeout/canceled/needs-author, so both
+ * land on the plain default), so this is a STRUCTURAL alias family, checked
+ * only after the closed vocabulary and the discrete alias table both miss.
+ */
+const DYNAMIC_STEP_FAILURE_CODE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-failed$/u
+
+/** A raw failure code, resolved to its registered canonical spelling — itself
+ * if already canonical, its mapped form if it is a registered alias, the
+ * generic `check-failed` if it matches the {@link DYNAMIC_STEP_FAILURE_CODE}
+ * shape, or `undefined` if it is outside the closed vocabulary entirely. The
+ * one gate every consumer that must not silently misclassify an unknown code
+ * shares. */
+export function canonicalRefusalCode(code: string): RefusalCode | undefined {
+  if (YRD_REFUSAL_CODE_SET.has(code)) return code as RefusalCode
+  const alias = YRD_REFUSAL_CODE_ALIASES[code]
+  if (alias !== undefined) return alias
+  return DYNAMIC_STEP_FAILURE_CODE.test(code) ? "check-failed" : undefined
+}
+
 function admissionFailureKind(
   result: DeepReadonly<JobError>,
   infrastructure: boolean,

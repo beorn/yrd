@@ -1,4 +1,4 @@
-import { COMPOSITION_FAILURE_BUCKETS } from "@yrd/queue"
+import { canonicalRefusalCode, COMPOSITION_FAILURE_BUCKETS } from "@yrd/queue"
 
 export type StatusPresentationState =
   | "queued"
@@ -175,14 +175,10 @@ export function statusPresentation(status: string): StatusPresentation {
 }
 
 const AUTO_REQUEUE_STALE_FAILURE_CODES = new Set(["stale-check", "stale-steps", "stale-plan"])
-const CANCELED_FAILURE_CODES = new Set([
-  "canceled",
-  "cancelled",
-  "queue-canceled",
-  "queue-cancelled",
-  "run-canceled",
-  "run-cancelled",
-])
+// Both spellings ("cancelled"/"queue-cancelled"/"run-cancelled") resolve to
+// these canonical forms through YRD_REFUSAL_CODE_ALIASES before this Set is
+// ever consulted — see canonicalRefusalCode below.
+const CANCELED_FAILURE_CODES = new Set(["canceled", "queue-canceled", "run-canceled"])
 const NEEDS_AUTHOR_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
 const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["infra-retry"]
 
@@ -191,26 +187,40 @@ const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKE
  * insufficient: stale-base is mechanically re-merge, stale-check/config drift is
  * requeued unchanged, and stale-pr is an obsolete historical run with no retry
  * of its own. Keep those journal-observable distinctions intact.
+ *
+ * Every code is resolved against the closed `YRD_REFUSAL_CODES` vocabulary
+ * (`@yrd/queue`) first: a registered alias normalizes to its canonical
+ * spelling (so the checks below see ONE spelling per concept, never both), and
+ * a code that is neither canonical nor a registered alias throws rather than
+ * falling through to a silent `{ state: "failed", owner: "author" }` guess —
+ * mirroring lifecycleStatus/statusPresentationState above. Extend the
+ * vocabulary at its source (YRD_REFUSAL_CODES or YRD_REFUSAL_CODE_ALIASES in
+ * packages/yrd-queue/src/queue.ts), never by special-casing here.
  */
 export function failureDisposition(code: string): FailureDisposition {
-  if (code === "stale-base") return { state: "stale", automation: "auto-re-merge", owner: "queue" }
-  if (AUTO_REQUEUE_STALE_FAILURE_CODES.has(code)) {
+  const canonical = canonicalRefusalCode(code)
+  if (canonical === undefined) {
+    throw new TypeError(
+      `yrd: unknown failure code '${code}' — register it in YRD_REFUSAL_CODES or YRD_REFUSAL_CODE_ALIASES (packages/yrd-queue/src/queue.ts) before it can classify`,
+    )
+  }
+  if (canonical === "stale-base") return { state: "stale", automation: "auto-re-merge", owner: "queue" }
+  if (AUTO_REQUEUE_STALE_FAILURE_CODES.has(canonical)) {
     return { state: "stale", automation: "auto-requeue", owner: "queue" }
   }
-  if (code === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
+  if (canonical === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
   if (
-    code === "queue-environment-refused" ||
-    code === "environment-refused" ||
-    code === "orphaned-run" ||
-    INFRA_RETRY_FAILURE_CODES.has(code)
+    canonical === "queue-environment-refused" ||
+    canonical === "orphaned-run" ||
+    INFRA_RETRY_FAILURE_CODES.has(canonical)
   ) {
     return { state: "env", automation: "auto-requeue", owner: "queue" }
   }
-  if (code === "job-lost" || code === "lease-timeout" || code === "job-lease-expired") {
+  if (canonical === "job-lost" || canonical === "job-lease-expired") {
     return { state: "timeout", automation: "auto-requeue", owner: "queue" }
   }
-  if (CANCELED_FAILURE_CODES.has(code)) return { state: "canceled", automation: "none", owner: "queue" }
-  if (NEEDS_AUTHOR_FAILURE_CODES.has(code)) {
+  if (CANCELED_FAILURE_CODES.has(canonical)) return { state: "canceled", automation: "none", owner: "queue" }
+  if (NEEDS_AUTHOR_FAILURE_CODES.has(canonical)) {
     return { state: "needs-author", automation: "none", owner: "author" }
   }
   return { state: "failed", automation: "none", owner: "author" }
@@ -227,12 +237,22 @@ export function failureStatusClass(code: string): FailureStatusClass {
  * operator-requested class is intentionally more specific. (`config-drift`
  * was a second one; no Run has ever failed with it — the gate that raised it
  * ran before any Run started — and the gate is gone with the installed
- * baseline, 23192/23193.) */
+ * baseline, 23192/23193.)
+ *
+ * The one caller with no `failure.code` to report (`foldTerminalFacts` in
+ * queue-status-view.tsx) falls back to the row's plain STATUS string
+ * (`"failed"`, `"canceled"`, …) — a different vocabulary from the closed
+ * refusal-code registry, and never itself a registered code — so
+ * failureStatusClass runs only once `code` is confirmed to be one; anything
+ * else goes straight to the status-presentation fallback below exactly as
+ * before, rather than throwing on a shape this function is meant to accept. */
 export function failureBreakdownClass(code: string): FailureBreakdownClass {
   const normalized = code.trim().toLocaleLowerCase()
   if (normalized === "check-failed") return "check-failed"
-  const status = failureStatusClass(normalized)
-  if (status === "env" || status === "stale" || status === "timeout" || status === "canceled") return status
+  if (canonicalRefusalCode(normalized) !== undefined) {
+    const status = failureStatusClass(normalized)
+    if (status === "env" || status === "stale" || status === "timeout" || status === "canceled") return status
+  }
   const terminalStatus = knownStatusPresentationState(normalized)
   if (
     terminalStatus === "env" ||
