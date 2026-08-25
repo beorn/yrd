@@ -129,7 +129,8 @@ The implementation model and package boundaries are documented in
 Three rules generate everything else in this section:
 
 1. **A branch is a change.** Push a branch, record it once, and it is in
-   delivery. There is no separate pull-request object to author or keep in sync.
+   delivery. There is no second content artifact to author or keep in sync —
+   the change record derives from the pushed branch.
 2. **Changes are tracked by default.** The queue watches the live branch; a
    moved head becomes a new revision by itself. You never re-submit by hand.
 3. **The tested object is the merged object.** The queue builds a merge of your
@@ -157,7 +158,8 @@ $ yrd pr create task/fix-release        # draft change, not yet queued
 $ yrd pr submit task/fix-release        # runs local checks, records revision 1
 ```
 
-`pr create` records the pushed head as a draft. `pr submit` (or `pr ready` in a
+`pr create` records the pushed head as a draft — invisible to the queue and
+not yet observed; tracking begins at submit. `pr submit` (or `pr ready` in a
 review-gated repository) records the head as revision 1, runs the configured
 checks locally for fast feedback, and hands the change to the queue. A push to
 the managed receiver — the push namespace `refs/for/<base>/<issue>` on the yrd
@@ -232,7 +234,7 @@ exact commit. Publication is a compare-and-swap ref update: the target branch
 moves to the candidate only if the target is still the tip the candidate was
 built on. Before that move the queue proves four facts: the recorded check
 results name the candidate's own sha; the candidate is the merge commit
-itself, or the shaset commit standing on it; the merge's parents are the
+itself, or the shaset commit whose first parent is that merge; the merge's parents are the
 recorded target and authored tips; and the change's submitted tip still
 equals that authored parent. (A fast-forward candidate has no merge; it is
 instead proven to be the authored tip standing directly on the target.) If
@@ -255,12 +257,15 @@ Two consequences fall out:
   stamps it into the landed merge commit — no commit-msg hook to install —
   linking main back to the change and every revision of it. It survives
   amends and rebases because it lives on the change, not in your commits.
-- **History is merge-shaped.** The target's first-parent chain is one entry
-  per merged change — the merge commit, or the change's own commits where it
-  fast-forwarded. That is noisier to read linearly than a squashed log; the
-  antidote is built into git: `git log --first-parent` reads main as a clean
-  sequence of changes, and `git bisect --first-parent` bisects over the same
-  spine of published states.
+- **History is merge-shaped.** The target's first-parent chain is one merge
+  per landed change — plus its shaset commit on a superproject, and a
+  fast-forwarded change rides the spine as its own commits. That is noisier
+  to read linearly than a squashed log; the antidote is built into git:
+  `git log --first-parent` reads main as a clean sequence of changes, and
+  `git bisect --first-parent` bisects over the same spine. The tested states
+  on that spine are the published candidates — on a superproject, the shaset
+  commits; the merge beneath each still holds authored min commits and is
+  scaffolding, not a tested state.
 
 ### Superproject merging
 
@@ -278,7 +283,7 @@ completely standard git.
   the mergeable contract. Before queueing, the queue checks each min commit
   is on that submodule's main; if not, the change waits — parked, visibly,
   with the missing commit named — until the submodule merges it.
-- At merge time the queue fills in each submodule's final commit from its main
+- When building the candidate the queue fills in each submodule's final commit from its main
   and writes the **shaset commit** — authored gitlink values never merge as-is,
   and the shaset the checks ran against is the shaset that ships, addressed by
   its own commit sha.
@@ -297,13 +302,12 @@ completely standard git.
 | **Zuul** | speculative merge of the whole train ahead | whatever the backing forge then merges | new patch set restarts the gate | backend-dependent | via the backend | many repos per change via `Depends-On`, not gitlinks |
 | **bors (bors-ng)** | staging merge of the batch | the exact staging sha, fast-forwarded | approval invalidated; re-approve | merge-shaped | merge commit names the PR | none |
 
-Honest trade-offs, in both directions:
+Trade-offs, in both directions:
 
 - **bors made the core invariant famous** — test the merge, fast-forward to
   the tested sha — and Yrd keeps it, adding what bors lacks: automatic revision
   tracking (bors invalidates approval on push and waits for a human `r+`) and
-  superproject awareness. Like bors-ng, a red batch is split to isolate the
-  culprit.
+  superproject awareness. bors-ng splits a red batch to isolate the culprit.
 - **GitHub's squash strategy buys a clean linear log**, and that is a real
   ergonomic win for casual reading. The price is that the commits developers
   authored never become main; "did my exact commit ship" has
