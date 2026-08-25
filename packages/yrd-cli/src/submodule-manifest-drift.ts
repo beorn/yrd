@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import type { Process } from "@yrd/process"
+import { adaptProcessGit, type Process } from "@yrd/process"
 
 /** Git reports an absent side of a gitlink change as an all-zero id. */
 const ABSENT_PIN = /^0+$/u
@@ -42,18 +42,16 @@ async function git(
   cwd: string,
   argv: readonly string[],
 ): Promise<string> {
-  const result = await processService.run({
-    argv: ["git", ...argv],
-    cwd,
+  const result = await adaptProcessGit(processService, {
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (result.exitCode !== 0 || result.timedOut) {
+  }).run({ repo: cwd, args: argv })
+  if (result.code !== 0 || result.timedOut === true) {
     const detail = (result.stderr || result.stdout || "no output").trim()
     options.fail(
       `could not read submodule manifest drift: 'git ${argv.join(" ")}' in ${cwd} ` +
-        `${result.timedOut ? `timed out after ${GIT_TIMEOUT_MS}ms` : `exited ${result.exitCode}`}: ${detail}`,
+        `${result.timedOut === true ? `timed out after ${GIT_TIMEOUT_MS}ms` : `exited ${result.code}`}: ${detail}`,
     )
   }
   return result.stdout

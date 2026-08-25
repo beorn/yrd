@@ -4,29 +4,19 @@ import type { ChangePublicationInput, ChangePublicationOutput, ChangePublication
 import {
   adaptProcessGit,
   cleanGitEnvironment,
+  gitFailure,
   gitSuperFailureDetail,
   type Process,
-  type ProcessResult,
 } from "@yrd/process"
 import { pushRefUpdates } from "git-super/push"
 import { changedSubmodulePins } from "./pr-submodule-publication.ts"
 
 const GIT_TIMEOUT_MS = 30_000
 
-function gitFailure(result: ProcessResult): string {
-  if (result.timedOut) return `timed out after ${GIT_TIMEOUT_MS}ms`
-  return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
-}
-
 async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]): Promise<string> {
-  const result = await process.run({
-    argv: ["git", "-C", cwd, ...args],
-    cwd,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  if (result.timedOut || result.exitCode !== 0) {
-    throw new Error(`git ${args.join(" ")} failed in '${cwd}': ${gitFailure(result)}`)
+  const result = await adaptProcessGit(process, { timeoutMs: GIT_TIMEOUT_MS }).run({ repo: cwd, args })
+  if (result.timedOut === true || result.code !== 0) {
+    throw new Error(`git ${args.join(" ")} failed in '${cwd}': ${gitFailure(result, GIT_TIMEOUT_MS)}`)
   }
   return result.stdout.trim()
 }

@@ -1,4 +1,4 @@
-import { cleanGitEnvironment, type Process, type ProcessResult } from "@yrd/process"
+import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
 import { GIT_PLUMBING_TIMEOUT_MS } from "./git-timeouts.ts"
 
 /** Two backoffs → three attempts. A 30s cap that is 1.8s in a clear window and
@@ -21,25 +21,15 @@ export type LiveBranchObservation =
 
 export type BranchCommitResolver = (ref: string) => string | undefined | Promise<string | undefined>
 
-async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]): Promise<ProcessResult> {
-  const request = {
-    argv: ["git", "-C", cwd, ...args],
-    cwd,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_PLUMBING_TIMEOUT_MS,
-  }
-  let result = await process.run(request)
+async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]) {
+  const git = adaptProcessGit(process, { timeoutMs: GIT_PLUMBING_TIMEOUT_MS })
+  let result = await git.run({ repo: cwd, args })
   for (const delayMs of PROBE_TIMEOUT_RETRY_DELAYS_MS) {
-    if (!result.timedOut) return result
+    if (result.timedOut !== true) return result
     await Bun.sleep(delayMs)
-    result = await process.run(request)
+    result = await git.run({ repo: cwd, args })
   }
   return result
-}
-
-function gitFailure(result: ProcessResult): string {
-  if (result.timedOut) return `timed out after ${GIT_PLUMBING_TIMEOUT_MS}ms`
-  return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
 }
 
 /** Distinguish a deliberately local-only repository from an origin-backed
@@ -50,9 +40,9 @@ export async function observeOriginRemote(
   cwd: string,
 ): Promise<OriginRemoteObservation> {
   const result = await runGit(process, cwd, ["config", "--get", "remote.origin.url"])
-  if (!result.timedOut && result.exitCode === 0) return { ok: true, configured: true }
-  if (!result.timedOut && result.exitCode === 1) return { ok: true, configured: false }
-  return { ok: false, detail: gitFailure(result), timedOut: result.timedOut }
+  if (result.timedOut !== true && result.code === 0) return { ok: true, configured: true }
+  if (result.timedOut !== true && result.code === 1) return { ok: true, configured: false }
+  return { ok: false, detail: gitFailure(result, GIT_PLUMBING_TIMEOUT_MS), timedOut: result.timedOut === true }
 }
 
 /** Ask origin whether it owns a branch name before submit chooses between the
@@ -64,9 +54,9 @@ export async function observeOriginBranchAdvertisement(
   branch: string,
 ): Promise<OriginBranchAdvertisement> {
   const result = await runGit(process, cwd, ["ls-remote", "--heads", "--exit-code", "origin", `refs/heads/${branch}`])
-  if (!result.timedOut && result.exitCode === 0) return { ok: true, advertised: true }
-  if (!result.timedOut && result.exitCode === 2) return { ok: true, advertised: false }
-  return { ok: false, detail: gitFailure(result), timedOut: result.timedOut }
+  if (result.timedOut !== true && result.code === 0) return { ok: true, advertised: true }
+  if (result.timedOut !== true && result.code === 2) return { ok: true, advertised: false }
+  return { ok: false, detail: gitFailure(result, GIT_PLUMBING_TIMEOUT_MS), timedOut: result.timedOut === true }
 }
 
 /** Fetch exactly one authored branch and resolve the remote-tracking commit.
@@ -87,8 +77,8 @@ export async function observeFreshRemoteBranch(
     "origin",
     `+${source}:${target}`,
   ])
-  if (fetched.timedOut || fetched.exitCode !== 0) {
-    return { ok: false, phase: "fetch", detail: gitFailure(fetched), target }
+  if (fetched.timedOut === true || fetched.code !== 0) {
+    return { ok: false, phase: "fetch", detail: gitFailure(fetched, GIT_PLUMBING_TIMEOUT_MS), target }
   }
   const resolved = await runGit(process, cwd, [
     "rev-parse",
@@ -98,8 +88,8 @@ export async function observeFreshRemoteBranch(
     `${target}^{commit}`,
   ])
   const head = resolved.stdout.trim().toLowerCase()
-  if (resolved.timedOut || resolved.exitCode !== 0 || head === "") {
-    return { ok: false, phase: "resolve", detail: gitFailure(resolved), target }
+  if (resolved.timedOut === true || resolved.code !== 0 || head === "") {
+    return { ok: false, phase: "resolve", detail: gitFailure(resolved, GIT_PLUMBING_TIMEOUT_MS), target }
   }
   return { ok: true, head, target }
 }

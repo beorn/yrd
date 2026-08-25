@@ -17,7 +17,7 @@
 import { readFileSync } from "node:fs"
 import { Glob } from "bun"
 import { raiseFailure } from "@yrd/core"
-import { adaptProcessGit, type Process } from "@yrd/process"
+import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
 import type { GitProcessResult } from "git-super/process"
 import type { ChangeStateGitFacts, YrdCliExitCode, YrdCliIO } from "./types.ts"
 
@@ -236,11 +236,6 @@ export async function applyChangeState(
   return 0
 }
 
-function gitFailure(result: GitProcessResult): string {
-  if (result.timedOut === true) return `timed out after ${String(GIT_TIMEOUT_MS)}ms`
-  return result.failure ?? (result.stderr.trim() || result.stdout.trim() || `exit ${String(result.code)}`)
-}
-
 function transportFailed(result: GitProcessResult): boolean {
   return result.timedOut === true || result.failure !== undefined
 }
@@ -256,7 +251,7 @@ export function createChangeStateGitFacts(cwd: string, process: Pick<Process, "r
         raiseFailure(
           "infrastructure",
           "change-state-branches-unreadable",
-          `yrd: could not list branches in '${cwd}': ${gitFailure(listed)}`,
+          `yrd: could not list branches in '${cwd}': ${gitFailure(listed, GIT_TIMEOUT_MS)}`,
         )
       }
       return listed.stdout.split("\n").filter((line) => line !== "")
@@ -267,7 +262,7 @@ export function createChangeStateGitFacts(cwd: string, process: Pick<Process, "r
         raiseFailure(
           "infrastructure",
           "change-state-remote-unreadable",
-          `yrd: could not read '${ref}' from origin: ${gitFailure(listed)}`,
+          `yrd: could not read '${ref}' from origin: ${gitFailure(listed, GIT_TIMEOUT_MS)}`,
         )
       }
       const sha = listed.stdout.split("\t")[0]?.trim()
@@ -281,7 +276,7 @@ export function createChangeStateGitFacts(cwd: string, process: Pick<Process, "r
         raiseFailure(
           "infrastructure",
           "change-state-push-unavailable",
-          `yrd: could not run the branch-state push in '${cwd}': ${gitFailure(pushed)}`,
+          `yrd: could not run the branch-state push in '${cwd}': ${gitFailure(pushed, GIT_TIMEOUT_MS)}`,
         )
       }
       return { ok: pushed.code === 0, output: `${pushed.stderr}${pushed.stdout}` }

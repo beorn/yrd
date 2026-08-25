@@ -1,6 +1,6 @@
 import { changeDeliveryState, changeRevisionLineage, isTracked, type Change, type ChangeRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
-import { cleanGitEnvironment, type Process, type ProcessResult } from "@yrd/process"
+import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
 import { observeLiveBranch, type LiveBranchObservation } from "./remote-branch.ts"
 import type { YrdCliIO, YrdCliServices } from "./types.ts"
 
@@ -13,18 +13,8 @@ type RemergeBranchFreshnessOptions = Readonly<{
   transition?: unknown
 }>
 
-async function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]): Promise<ProcessResult> {
-  return process.run({
-    argv: ["git", "-C", cwd, ...args],
-    cwd,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-}
-
-function gitFailure(result: ProcessResult): string {
-  if (result.timedOut) return `timed out after ${GIT_TIMEOUT_MS}ms`
-  return result.stderr.trim() || result.stdout.trim() || `exit ${String(result.exitCode)}`
+function runGit(process: Pick<Process, "run">, cwd: string, args: readonly string[]) {
+  return adaptProcessGit(process, { timeoutMs: GIT_TIMEOUT_MS }).run({ repo: cwd, args })
 }
 
 function requireObservedBranch(observed: LiveBranchObservation, pr: Change, remedy: string, injected: boolean): string {
@@ -89,8 +79,8 @@ async function commitRangeEvidence(
   }
   const cwd = io.cwd ?? globalThis.process.cwd()
   const distance = await runGit(process, cwd, ["rev-list", "--left-right", "--count", `${recordedHead}...${liveHead}`])
-  if (distance.timedOut || distance.exitCode !== 0) {
-    return `commits between: unavailable (${gitFailure(distance)})\ninspect: ${command}`
+  if (distance.timedOut === true || distance.code !== 0) {
+    return `commits between: unavailable (${gitFailure(distance, GIT_TIMEOUT_MS)})\ninspect: ${command}`
   }
   const counts = /^(\d+)\s+(\d+)$/u.exec(distance.stdout.trim())
   if (counts === null) {
@@ -118,8 +108,8 @@ async function commitRangeEvidence(
     `${recordedHead}..${liveHead}`,
     "--",
   ])
-  if (result.timedOut || result.exitCode !== 0) {
-    return `commits between: unavailable (${gitFailure(result)})\ninspect: ${command}`
+  if (result.timedOut === true || result.code !== 0) {
+    return `commits between: unavailable (${gitFailure(result, GIT_TIMEOUT_MS)})\ninspect: ${command}`
   }
   const rows = result.stdout.trim()
   return rows === ""
@@ -139,11 +129,11 @@ async function commitTree(services: Pick<YrdCliServices, "process">, io: YrdCliI
   }
   const result = await runGit(process, cwd, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${head}^{tree}`])
   const tree = result.stdout.trim()
-  if (result.timedOut || result.exitCode !== 0 || tree === "") {
+  if (result.timedOut === true || result.code !== 0 || tree === "") {
     raiseFailure(
       "configuration",
       "recut-tree-missing",
-      `yrd: commit '${head}' did not resolve to a tree: ${gitFailure(result)}`,
+      `yrd: commit '${head}' did not resolve to a tree: ${gitFailure(result, GIT_TIMEOUT_MS)}`,
     )
   }
   return tree

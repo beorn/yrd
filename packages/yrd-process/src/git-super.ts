@@ -196,3 +196,13 @@ export function gitSuperFailureDetail(result: GitSuperResult): GitResultDetail |
       .find((detail) => detail !== undefined)
   )
 }
+
+/** One human-readable line for a failed `adaptProcessGit` call: the process-level
+ * failure if there is one (a crash, a signal, a sweep that could not certify
+ * teardown), else the timeout, else Git's own stderr/stdout, else the bare exit
+ * code. `timeoutMs` only labels a timeout that already happened — it does not
+ * configure one. */
+export function gitFailure(result: GitProcessResult, timeoutMs: number): string {
+  if (result.timedOut === true) return `timed out after ${String(timeoutMs)}ms`
+  return result.failure ?? (result.stderr.trim() || result.stdout.trim() || `exit ${String(result.code)}`)
+}

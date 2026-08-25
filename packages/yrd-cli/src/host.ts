@@ -2184,13 +2184,10 @@ function targetCheckpointMigrationAttestor(
     // degrades to the assembly-root base, whose outside-assembly branch keeps
     // the implementation fixed rather than composing a phantom Candidate path.
     const gitLine = async (cwd: string, ...args: readonly string[]): Promise<string | undefined> => {
-      const result = await options.process.run({
-        argv: ["git", ...args],
-        cwd,
-        env: cleanGitEnvironment(globalThis.process.env),
+      const result = await adaptProcessGit(options.process, {
         timeoutMs: CHECKPOINT_MIGRATION_DERIVATION_TIMEOUT_MS,
-      })
-      return result.timedOut || result.exitCode !== 0 ? undefined : result.stdout.trim()
+      }).run({ repo: cwd, args })
+      return result.timedOut === true || result.code !== 0 ? undefined : result.stdout.trim()
     }
     let implementationWorkTree =
       (await gitLine(implementationRoot, "rev-parse", "--show-superproject-working-tree")) ?? ""

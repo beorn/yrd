@@ -1,4 +1,4 @@
-import { adaptProcessGit } from "@yrd/process"
+import { adaptProcessGit, gitFailure } from "@yrd/process"
 import { accessSync, constants, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import distribution from "../../../package.json" with { type: "json" }
@@ -45,8 +45,7 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
     command: { verb, args: rest },
   })
   if (result.failure !== undefined) {
-    const detail = result.timedOut === true ? `timed out after ${GIT_TIMEOUT_MS}ms` : result.failure
-    throw new Error(`yrd: git ${args.join(" ")} ${detail}`)
+    throw new Error(`yrd: git ${args.join(" ")} ${gitFailure(result, GIT_TIMEOUT_MS)}`)
   }
   return { status: result.code, stdout: result.stdout }
 }
