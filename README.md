@@ -43,7 +43,7 @@ A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstr
 
 The **shaset** is the set of submodule commits a superproject commit records; every merge writes a new one. In one paragraph:
 
-> A change's gitlinks are **min commits** — *at least this commit*. Before queueing, the queue checks each min commit is **on that submodule's main**; if not, the change **parks** until the submodule lands it. At merge, the queue **fills in** each submodule's final commit from its main and writes the **shaset** — authored gitlinks never land as-is. Nothing to merge = **nothing new**.
+> A change's gitlinks are **min commits** — _at least this commit_. Before queueing, the queue checks each min commit is **on that submodule's main**; if not, the change **parks** until the submodule lands it. At merge, the queue **fills in** each submodule's final commit from its main and writes the **shaset** — authored gitlinks never land as-is. Nothing to merge = **nothing new**.
 
 Standard git words — **submodule · gitlink · superproject** — mean exactly what git means by them; **shaset** is the one coined term.
 
@@ -51,11 +51,11 @@ Standard git words — **submodule · gitlink · superproject** — mean exactly
 
 A change's history holds exactly two commit species:
 
-| | **Content commit** | **Shaset commit** |
-|---|---|---|
+|               | **Content commit**             | **Shaset commit**                                    |
+| ------------- | ------------------------------ | ---------------------------------------------------- |
 | Diff contains | superproject tree changes only | gitlink updates + regenerated lockfile, nothing else |
-| Written by | the author | the queue |
-| Gitlinks | never | always |
+| Written by    | the author                     | the queue                                            |
+| Gitlinks      | never                          | always                                               |
 
 ```text
 change
@@ -69,19 +69,19 @@ pure pin advance = a change with exactly one shaset commit
 
 - Each time the queue moves the change's shaset up — a submodule's main advanced, the base moved — it writes a **new shaset commit**; no invisible rebase.
 - Only versions **checks actually ran against** are kept; superseded ones are pruned.
-- Payoffs: `git log` answers *which shaset did this run prove?* with a commit ref · review reads content diffs with zero gitlink noise · the machine half is machine-checkable.
+- Payoffs: `git log` answers _which shaset did this run prove?_ with a commit ref · review reads content diffs with zero gitlink noise · the machine half is machine-checkable.
 
 **Killed vocabulary** (operator-ratified 2026-08-18). These words still appear in older prose, refusal codes, and the `yrd intent` rail until the rename carrier lands; new writing must not use them:
 
-| Killed | Say instead |
-|---|---|
-| ~~admission~~ | the queue **checks before queueing** — no noun needed |
-| ~~derivation / derived~~ | the queue **fills in** the values and **writes the shaset** |
-| ~~demand~~ | **min commit** |
-| ~~component~~ | **submodule** — the git word, everywhere |
+| Killed                                                    | Say instead                                                                                                        |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| ~~admission~~                                             | the queue **checks before queueing** — no noun needed                                                              |
+| ~~derivation / derived~~                                  | the queue **fills in** the values and **writes the shaset**                                                        |
+| ~~demand~~                                                | **min commit**                                                                                                     |
+| ~~component~~                                             | **submodule** — the git word, everywhere                                                                           |
 | ~~intent / pin intent / `yrd intent submit` / `yrdpin#`~~ | a pure pin advance is an ordinary **change whose diff is one shaset commit**; deleting this rail is scheduled work |
-| ~~merge request / pull request~~ | **change** — `mr`/`pr` remain taught aliases; ids still print as `PRnnn` |
-| ~~correlation~~ | **props** — opaque `--prop key=value` labels on a change (km's noun); the legacy journal key stays readable |
+| ~~merge request / pull request~~                          | **change** — `mr`/`pr` remain taught aliases; ids still print as `PRnnn`                                           |
+| ~~correlation~~                                           | **props** — opaque `--prop key=value` labels on a change (km's noun); the legacy journal key stays readable        |
 
 ## The model — five objects, one pipeline
 
@@ -142,8 +142,9 @@ The words used below: a **change** is the queued unit — ids print as `PRnnn`
 and the CLI says `pr` purely because those spellings are familiar; no
 pull-request object exists. A **revision** is one immutable recorded head of
 the change's branch. A **candidate** is the merged object built for testing.
-A **run** is one queue execution against a candidate. **Re-merging** (the CLI
-verb is `pr recut`) is rebuilding the candidate after the target moved. The
+A **run** is one queue execution against a candidate. **Re-merging** is the
+queue rebuilding the candidate after the target moved — its own act, with no
+operator verb. The
 **shaset commit** (a "sha set") is the queue's own commit that fills in each
 submodule gitlink and the workspace lockfile those pins imply (see
 [Superprojects](#superprojects)). How runs are ordered, batched, and executed
@@ -179,7 +180,7 @@ long-running process observes the branch on `origin`. When the tip moved, the
 new head is recorded as the next revision, re-merged onto the current target,
 and queued — automatically, with no ceremony from the author. Tracking does not
 touch reproducibility. A run never executes "whatever the branch is now" — it
-executes one frozen recorded revision. Tracking only changes *which* revision
+executes one frozen recorded revision. Tracking only changes _which_ revision
 gets prepared next, never a running candidate.
 
 Opting out is explicit:
@@ -196,21 +197,16 @@ exact remedies:
 
 ```text
 error: change 'PR7' recorded revision 3 head 'a1b2c3d…', but live branch
-'task/fix-release' is 'e4f5a6b…'. This change is explicitly untracked, so a
-re-merge will not silently replay stale work.
+'task/fix-release' is 'e4f5a6b…'. This change is explicitly untracked, so the
+queue will not silently act on stale work.
 To adopt tracking (the default), so moved heads are recorded as revisions:
   yrd pr edit PR7 --track
-  yrd pr recut PR7 --queue
 To record the live head once while staying untracked:
   yrd pr submit task/fix-release
-  yrd pr recut PR7 --queue
-To deliberately replay the recorded revision:
-  yrd pr recut PR7 --revision 3 --preflight --queue
 ```
 
-(`--preflight` rebuilds and reports without recording anything.) The tracking
-bit only governs future rebuilds, so editing it on a terminal change (merged,
-withdrawn, canceled) is refused — nothing would ever read it.
+The tracking bit only governs future revisions, so editing it on a terminal
+change (merged, withdrawn, canceled) is refused — nothing would ever read it.
 
 ### The tested object is the merged object
 
@@ -294,13 +290,13 @@ completely standard git.
 
 ### Compared with other systems
 
-| | Object tested | Object merged | Branch moved → | History on main | Trace main → change | Superproject |
-|---|---|---|---|---|---|---|
-| **Yrd** | merge of target + authored tip (+ shaset) | the same commit, CAS ref update | tracked: auto new revision; untracked: refusal with remedies | merge-shaped; first-parent spine | authored tip is a parent; `Change-Id` trailer | queued and tested as one object; submodules stay standard |
-| **GitHub merge queue** | speculative merge group, strategy already applied | the group result | leaves the queue; re-queue | linear (squash/rebase) or merge | PR number in message; squash/rebase drop authored shas from main | none |
-| **Gerrit** | the patch set (one amended commit) | per submit strategy — rebase/cherry-pick mint a new sha at submit | new patch set: amend + `push refs/for/…` ceremony | per-project strategy; the default mints merge commits when the target moved | `Change-Id` trailer (Yrd adopts this) | subscription can bump gitlinks after merge, outside the queue |
-| **Zuul** | speculative merge of the whole train ahead | whatever the backing forge then merges | new patch set restarts the gate | backend-dependent | via the backend | many repos per change via `Depends-On`, not gitlinks |
-| **bors (bors-ng)** | staging merge of the batch | the exact staging sha, fast-forwarded | approval invalidated; re-approve | merge-shaped | merge commit names the PR | none |
+|                        | Object tested                                     | Object merged                                                     | Branch moved →                                               | History on main                                                             | Trace main → change                                              | Superproject                                                  |
+| ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| **Yrd**                | merge of target + authored tip (+ shaset)         | the same commit, CAS ref update                                   | tracked: auto new revision; untracked: refusal with remedies | merge-shaped; first-parent spine                                            | authored tip is a parent; `Change-Id` trailer                    | queued and tested as one object; submodules stay standard     |
+| **GitHub merge queue** | speculative merge group, strategy already applied | the group result                                                  | leaves the queue; re-queue                                   | linear (squash/rebase) or merge                                             | PR number in message; squash/rebase drop authored shas from main | none                                                          |
+| **Gerrit**             | the patch set (one amended commit)                | per submit strategy — rebase/cherry-pick mint a new sha at submit | new patch set: amend + `push refs/for/…` ceremony            | per-project strategy; the default mints merge commits when the target moved | `Change-Id` trailer (Yrd adopts this)                            | subscription can bump gitlinks after merge, outside the queue |
+| **Zuul**               | speculative merge of the whole train ahead        | whatever the backing forge then merges                            | new patch set restarts the gate                              | backend-dependent                                                           | via the backend                                                  | many repos per change via `Depends-On`, not gitlinks          |
+| **bors (bors-ng)**     | staging merge of the batch                        | the exact staging sha, fast-forwarded                             | approval invalidated; re-approve                             | merge-shaped                                                                | merge commit names the PR                                        | none                                                          |
 
 Trade-offs, in both directions:
 
@@ -330,8 +326,8 @@ Trade-offs, in both directions:
   the record.
 
 The common thread: every system above answers "what exactly did we test, and
-is that what shipped?" with some mixture of *trust the tool* and *content
-equivalence*. Yrd's answer is a sha equality you can check from any clone with
+is that what shipped?" with some mixture of _trust the tool_ and _content
+equivalence_. Yrd's answer is a sha equality you can check from any clone with
 nothing but git.
 
 ## Why Yrd
@@ -352,14 +348,14 @@ a contest whose winner is an immutable Git commit.
 
 That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 
-| Unmanaged state           | Yrd state                                        |
-| ------------------------- | ------------------------------------------------ |
-| dirty worktree            | active worktree, not submit-ready                |
-| ahead branch              | pushed, submitted, or ready PR                   |
-| branch needing repair     | draft PR plus `bay open --pr <PR>`               |
-| external CI still running | waiting queue step with URL and token            |
-| author-owned failure      | needs-author PR with typed receipt               |
-| unattributed rejection    | rejected PR with evidence                        |
+| Unmanaged state           | Yrd state                                             |
+| ------------------------- | ----------------------------------------------------- |
+| dirty worktree            | active worktree, not submit-ready                     |
+| ahead branch              | pushed, submitted, or ready PR                        |
+| branch needing repair     | draft PR plus `bay open --pr <PR>`                    |
+| external CI still running | waiting queue step with URL and token                 |
+| author-owned failure      | needs-author PR with typed receipt                    |
+| unattributed rejection    | rejected PR with evidence                             |
 | completed work            | integrated or already-landed PR and closable worktree |
 
 Yrd does not invent commits or silently discard work. It prevents ambiguous WIP
@@ -474,7 +470,7 @@ richer policy belong to the calling coordination system.
 When an author intentionally has no Git credentials, `yrd pr publish <PR>
 --queue` records one durable `pr.publish` Job instead of lending credentials to
 the author process. The existing Queue runner publishes the immutable submodule
-pins and root carrier, then performs the requested recut-and-queue continuation.
+pins and root carrier, then performs the requested record-and-queue continuation.
 `yrd queue run --once` performs this publication work before its ordinary queue
 pass; resident follow mode uses the same path. If neither runner form is active,
 the Job remains `publication-required` and `pr list` / `pr view` identify both
@@ -551,26 +547,26 @@ issue reference; `--issue` is its named alias and the two cannot be combined.
 Use `--bay` for an issue-less friendly workspace name and `--pr` only to continue an
 existing PR branch. Resolution has three product nouns:
 
-| Noun  | Resolution order                                          |
-| ----- | --------------------------------------------------------- |
-| issue | `--issue`, then the positional config                     |
-| PR    | `--pr`, then the issue's live PR, then a generated branch |
-| workspace | `--bay`, then the positional config, then the PR      |
+| Noun      | Resolution order                                          |
+| --------- | --------------------------------------------------------- |
+| issue     | `--issue`, then the positional config                     |
+| PR        | `--pr`, then the issue's live PR, then a generated branch |
+| workspace | `--bay`, then the positional config, then the PR          |
 
 ## Execution records
 
-| Concept            | Meaning                                                             |
-| ------------------ | ------------------------------------------------------------------- |
-| **Issue**          | Unit of intent from km, GitHub, another tracker, or a direct caller |
-| **Workspace**      | Named isolated Git worktree for one implementation attempt          |
-| **Change**         | One immutable submitted revision; `mr`/`pr` are taught aliases      |
-| **Queue**          | Ordered integration process attached to a base branch               |
-| **Step**           | Typed queue transition such as check, review, merge, or deploy      |
-| **Job**            | Durable executable work; retries are attempts on the same Job       |
-| **Contest**        | Multiple worktrees implementing the same issue for real selection   |
+| Concept            | Meaning                                                              |
+| ------------------ | -------------------------------------------------------------------- |
+| **Issue**          | Unit of intent from km, GitHub, another tracker, or a direct caller  |
+| **Workspace**      | Named isolated Git worktree for one implementation attempt           |
+| **Change**         | One immutable submitted revision; `mr`/`pr` are taught aliases       |
+| **Queue**          | Ordered integration process attached to a base branch                |
+| **Step**           | Typed queue transition such as check, review, merge, or deploy       |
+| **Job**            | Durable executable work; retries are attempts on the same Job        |
+| **Contest**        | Multiple worktrees implementing the same issue for real selection    |
 | **Attempt**        | One competitor's worktree, Git pin, metrics, and evaluation evidence |
-| **Evaluation run** | One evaluator Job against an immutable attempt pin                  |
-| **Base branch**    | Branch a queue merges into, such as `main` or `release/2.0`         |
+| **Evaluation run** | One evaluator Job against an immutable attempt pin                   |
+| **Base branch**    | Branch a queue merges into, such as `main` or `release/2.0`          |
 
 Issue is intent. A Command is serializable intent. A Step configures work
 on a Queue; a Job durably executes that work. Issue is adapter vocabulary. PR is
@@ -725,20 +721,20 @@ yrd run cancel <selector> [--reason <text>] [--json]
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native required-check surface below.
 
-| Command   | Input                                        | Output and state                                                                                                                                                      |
-| --------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`    | None                                         | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts                                                                                   |
-| `open`    | Issue, `--issue`, `--pr`, or `--bay`         | Provisions a persistent workspace and returns; never runs a command or creates a PR                                                                                   |
-| `run`     | Opener configuration plus exact argv         | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success                                                                                  |
-| `in`      | Workspace selector; optional exact argv after `--` | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                   |
-| `path`    | One workspace ID, name, or branch selector   | Prints the exact absolute path of one active workspace; read-only and never refreshes it                                                                              |
-| `refresh` | Zero or more workspaces                      | Re-reads Git head, base, dirty, path, and workspace status                                                                                                            |
-| `submit`  | Workspaces, PRs, or source branches          | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                     |
-| `close`   | Zero or more workspaces                      | Reaps and verifies processes holding each workspace, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
+| Command   | Input                                              | Output and state                                                                                                                                                            |
+| --------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`    | None                                               | Lists `BAY STATUS ISSUE BY BASE BRANCH`, including durable failure and orphan facts                                                                                         |
+| `open`    | Issue, `--issue`, `--pr`, or `--bay`               | Provisions a persistent workspace and returns; never runs a command or creates a PR                                                                                         |
+| `run`     | Opener configuration plus exact argv               | Owns the scoped bracket, checkpoints, and closes; `--keep` preserves a clean success                                                                                        |
+| `in`      | Workspace selector; optional exact argv after `--` | Attaches a PID-addressed lifecycle guest; never owns configuration or closure                                                                                               |
+| `path`    | One workspace ID, name, or branch selector         | Prints the exact absolute path of one active workspace; read-only and never refreshes it                                                                                    |
+| `refresh` | Zero or more workspaces                            | Re-reads Git head, base, dirty, path, and workspace status                                                                                                                  |
+| `submit`  | Workspaces, PRs, or source branches                | Creates or advances PRs to `submitted`; never executes Queue work                                                                                                           |
+| `close`   | Zero or more workspaces                            | Reaps and verifies processes holding each workspace, then checkpoints and deprovisions it; survivor PIDs fail loudly. `--withdraw` explicitly cancels an associated live PR |
 
 #### Process launch boundary
 
-Yrd owns Git-side delivery: issue resolution, workspaces, draft PR identity, recuts, and
+Yrd owns Git-side delivery: issue resolution, workspaces, draft PR identity, re-merges, and
 serialized landing. Agent selection, launch, supervision, and retry belong to the
 launcher. A launcher can compose `hab run` with `yrd issue ensure` and the
 ordinary PR/Queue verbs without putting agent policy in Yrd or `.yrd.yml`.
@@ -777,7 +773,7 @@ commit — the subject becomes the title and the commit body becomes the
 description, with a trailing `Issue: <ref>` reference appended when `--issue` is
 present. Explicit flags always win, and `pr edit` re-sets any of them on a live
 PR. Both are mutable delivery metadata (unlike the immutable issue join) and are
-carried forward unchanged across `pr recut` and `pr ready` revisions. The `pr
+carried forward unchanged across queue-refreshed and `pr ready` revisions. The `pr
 list` SUBJECT column shows the title over the branch name. `pr view` and the
 watch detail pane render the title and description block; issue URLs, paths, and
 path-form ids render as OSC 8 links (path-form ids use km's internal-link URI).
@@ -830,8 +826,6 @@ yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
   [--needs-review [--reviewer <reviewer>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
   [--title <text>] [--description <text>] [--track | --untrack] [--json]
-yrd pr recut <selector> [--revision <number> | --ref <candidate>] [--preflight]
-  [--apply] [--queue] [--force] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
   [--by <identity>] [--ref <id>] [--note <text>] [--json]
@@ -886,9 +880,9 @@ is empty.
 
 Every live PR is tracked by default — resident “merge into latest.” Before
 every Queue cycle, the resident observes the branch from `origin`; when its
-tip moved, Yrd records that exact SHA as a new immutable revision, runs
-`pr recut --preflight --queue`, and applies every queue-safe typed verdict
-before the normal ready path.
+tip moved, Yrd records that exact SHA as a new immutable revision, preflights
+it in-process, and applies every queue-safe typed verdict before the normal
+ready path.
 Decision-required withdrawal verdicts remain loud for an operator. A run
 always pins one frozen revision—tracking changes which revision is prepared,
 never a running Candidate. `--no-track` at `pr create` / `pr submit` opts a
@@ -920,112 +914,55 @@ process tree to certify, and it atomically creates or verifies a preservation
 ref for any recorded head before closing. This is the terminal recovery for a
 pathless workspace; creating an extra anonymous workspace is not required.
 
-`pr recut --ref <candidate>` is certification, not replay. The CLI resolves the
-ref once, passes only that immutable SHA to Queue, and records it directly as
-revision N+1 when its non-gitlink tree delta is identical to the approved
-change-set. The exact current revision must still be approved. Missing commits,
-dropped or extra paths, changed blob/mode/status identity, and added, modified,
-or deleted gitlinks are typed per-candidate refusals before any journal or Git
-mutation. A changed gitlink is an intent submission, never a code-carrier
-recut. `--ref` cannot combine with `--revision`.
-
-Without `--ref`, `pr recut` retains the ordinary mechanical base-refresh path:
-it fetches the authoritative base and records an equivalent,
-certificate-bearing successor on the same PR. `--revision` selects an older
-immutable revision; its props and approved-review provenance follow that
-selected payload. When submission recorded authority newer than the source
-branch, recut derives exactly one source merge base and refuses ambiguous
-lineage. `--queue` readies only the certified revision and requests fresh
-checks. List, detail, and watch output retain the recut lineage and cumulative
-source-ready age while reporting the successor revision's queue wait
-separately.
-
-An implicit PR-id recut is reproducible, not "whatever is on the branch now."
-Before either preflight or mutation, Yrd refreshes that exact branch from
-`origin` and compares its server-observed tip with the recorded authored source.
-For an untracked PR, a difference refuses before composition, journal writes,
-or a check request; the refusal names both heads, the intervening commits, and
-both explicit paths:
-
-```bash
-# Current intent: register the new head, reopening revision-bound review.
-yrd pr submit <branch>
-yrd pr recut <PR> --preflight --queue --apply
-
-# Historical intent: deliberately replay the recorded immutable revision.
-yrd pr recut <PR> --revision <number> --preflight --queue
-```
-
-Every new recut revision also persists `recut.sources`: the root source head and
-each rewritten submodule head mapped to the mechanically equivalent successor.
-This is the durable identity bridge when recomposition intentionally breaks Git
-ancestry. `yrd pr view <PR> --json` exposes it under
-`.detail.pr.revs[].recut.sources`, while the human detail view prints the same
-mapping as `RECOMPOSED`.
-
-`pr recut --preflight` is the non-mutating decision surface. It pins the
-authoritative target once and emits exactly one of `SUBSUMED-WITHDRAW`,
-`RECUT`, `RECUT-FORCE`, or `FRESH-NOOP`, followed by the exact next command.
-Its evidence names source/target pin distance, exact ancestry or merge-result
-tree proof, and any stable patch-id landing match. Tree equality—not patch-id
-alone—authorizes withdrawal because stable patch IDs intentionally ignore
-whitespace. Missing objects, diverged bases, and composed source payloads fail
-closed instead of producing a guessed verdict. Pass `--queue` to include the
-authoritative check request in the recommended next command.
-
-`pr recut --preflight --queue --apply` executes that same pinned decision
-without a second command or a second read. `RECUT`, `RECUT-FORCE`, and
-`FRESH-NOOP` apply their queue-safe action and return a receipt containing the
-verdict, executed command, and resulting revision/head. `SUBSUMED-WITHDRAW`
-still refuses with the exact withdrawal decision because retiring a delivery
-requires operator judgment. `--apply` cannot combine with `--revision` or
-caller-supplied `--force`; both authority choices come only from the preflight
-computed for the current revision. Repeating the command after a successful
-recut returns `FRESH-NOOP` without another recut.
+The retired `pr recut` verb has no successor spelling, on purpose:
+re-merging is the queue's own act. Resubmitting from the branch tip
+(`yrd pr submit <branch>`) is the one author-facing recovery for every
+delivery state, and a tracked change does not even need that — the resident
+records its moved head automatically. Review carry-over across a recorded
+moved head is plain patch equivalence: when the proposed tip's patch equals
+the approved revision's patch, the approval carries; new content needs a new
+review. There are no payload certificates left to re-verify — the candidate
+is rebuilt by merge and the tested object is the merged object.
 
 The resident Queue owns both tracked-source and base freshness. It first
 records and preflights branch movement for opted-in PRs, then, before each run
 snapshot, compares every requested revision's immutable base with the
-authoritative base; when the base advanced, it records a refreshed recut on the
-same PR with the same patch-id lineage and a fresh certificate. The append carries
-an expected-current revision/head guard, so an authored revision that arrives
-while Git proof is running wins and the stale automatic result is deferred.
-If the recutter proves that current main already contains the revision's whole
+authoritative base; when the base advanced, it rebuilds the candidate by merge
+and records the refreshed revision on the same PR with the same patch-id
+lineage. The append carries an expected-current revision/head guard, so an
+authored revision that arrives while Git proof is running wins and the stale
+automatic result is deferred.
+If the rebuild proves that current main already contains the revision's whole
 payload (`head == base` with the base tree), refresh does not mint an empty
 successor. It terminalizes the selected revision as `already-landed` with a
 `refresh-superseded / payload-already-contained` receipt naming the current-main
 SHA, equal tree hashes, and the authored patch id. Replaying the same journal
 therefore performs no Git work and appends nothing.
-Patch drift and gitlink pins that require authored composition remain loud,
-typed refusals; an independent PR can still refresh in the same cycle.
+Patch drift stays a loud, typed refusal; an independent PR can still refresh
+in the same cycle.
 Likewise, a tracked revision whose preflight proves `SUBSUMED-WITHDRAW` records
 one revision-bound machine comment and is not queued until an operator
 decides; later resident cycles do not repeat the same warning, while a new
 branch push creates a new revision and is evaluated normally.
 Separately, selectorless composition ejects a PR whose exact submit/check
 authority was already consumed, records `pr/needs-author` with the refusal code
-and an executable `pr recut --preflight --queue --apply` remedy, and keeps draining its
-healthy peers. An explicitly targeted run still fails loud after recording the
-same author receipt.
+and the resubmit remedy, and keeps draining its healthy peers. An explicitly
+targeted run still fails loud after recording the same author receipt.
 
-Required-check refusals are revision-scoped durable facts. Queue immediately
-records a `needs-person` settlement for a structurally permanent refusal —
-`recut-gitlink-conflict`, and `recut-base-diverged` for a revision certifying a
-base the authoritative base never descended from; recoverable refusals still
-wait for the resident's remedy classifier to reach a judgment-required or
-failed/no-remedy outcome. The distinction is the code, not the cause text: a
-certified base that is merely absent from the local repository is refused
-`recut-certificate` and retried, because a fetch cures it.
+Required-check refusals are revision-scoped durable facts. A refusal the
+resident's remedy classifier judges to have no mechanical remedy is settled
+`needs-person` (the certificate-era structurally-permanent codes that once
+auto-parked lost their producers with the rewrite machinery; the
+park-on-first mechanism remains for the next such code).
 The settlement names the exact revision and head. Selectorless one-shot and
 resident drains share the same selector, so neither process restart nor
 another cadence tick can select it again or grow the journal. A new authored
-or recut revision clears the settlement and is eligible normally. This is
+or refreshed revision clears the settlement and is eligible normally. This is
 Queue state, not a resident retry cache or restart budget.
 
 `yrd queue run --once` keeps that settled refusal visible instead of reporting
-`Queue idle`: human output names the refusal and
-`yrd pr recut <PR> --preflight --queue --apply`, while JSON includes the same canonical
-eligibility fact in `blocked`. A targeted one-shot reports blockers only for its
+`Queue idle`: human output names the refusal and its printed remedy, while
+JSON includes the same canonical eligibility fact in `blocked`. A targeted one-shot reports blockers only for its
 selected PRs; a selectorless pass reports them alongside any healthy Runs that
 made progress.
 
@@ -1038,18 +975,12 @@ attaching a composition manifest:
 # `submit`, which no state refuses.
 yrd pr create <branch>   # draft (pushed) PR
 yrd pr submit <branch>   # submitted, needs-author, rejected, reopened
-yrd pr recut <PR> --preflight --queue --apply
 ```
 
-A terminal PR (integrated, already-landed, withdrawn, canceled) cannot be
-recut; resubmitting its branch reopens or mints the delivery instead. The
-printed `resolve:` steps follow the PR's current delivery state, so they never
-name a command that state refuses.
-
-The preflight returns `RECUT-FORCE` when an authored-root rejection left a
-passing check attached to the current revision, making the required override
-explicit before recut replaces that revision with the machine-certified
-successor.
+Resubmitting a terminal PR's branch (integrated, already-landed, withdrawn,
+canceled) reopens or mints the delivery. The printed `resolve:` steps follow
+the PR's current delivery state, so they never name a command that state
+refuses.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
@@ -1060,57 +991,17 @@ There is no TTL, invalidation database, or second workflow engine.
 
 ### Composed Source Payloads
 
-`--composition` submits an immutable version-1 JSON source manifest for one
-selector. It is the source-only path for submodule work: the selected root
-branch contains no root changes, and Yrd Queue generates the root gitlink
-wrapper as the checked Candidate.
-
-```json
-{
-  "version": 1,
-  "sources": [
-    {
-      "repo": "vendor/example",
-      "branch": "issue/fix",
-      "baseSha": "0123456789abcdef0123456789abcdef01234567",
-      "tipSha": "89abcdef0123456789abcdef0123456789abcdef",
-      "payload": ["src/fix.ts", "tests/fix.test.ts"]
-    }
-  ]
-}
-```
-
-Repository and payload paths are normalized, repository-relative, sorted, and
-unique. Candidate preparation proves the declared source diff exactly matches
-`payload`, including blob, mode, status, and path identity. A generated
-successor must also retain the source's stable `patch-id` and produce only `=`
-rows from `git range-diff`; either proof failing rejects the Candidate before
-publication. When current main pins a descendant of `baseSha`, Yrd restacks
-only if the upstream and payload path sets are disjoint; overlaps and Git
-conflicts fail with exact paths. Each rewritten tip is published at
-`refs/heads/yrd/candidates/<new-tip-sha>` before the generated root wrapper can
-land. The Queue receipt retains that immutable ref, patch ID, `rangeDiff: "="`,
-and the old/new base and tip SHAs; ref loss during a remote landing fails closed
-and rolls the root branch back.
-
-Human-authored gitlink commits are refused. Submit each reviewed existing
-component advance with `yrd intent submit --component <path> --target <sha> --issue <ref>`;
-there is no intake bypass. Added and deleted gitlinks are not
-advance intents and remain refused. Queue owns the generated root carrier and
-writes it deterministically from the exact base and accepted intents.
-
-An explicitly ruled component-model addition or removal is the narrow
-exception. Its Candidate receipt binds the ruling to the PR, operation, exact
-path, current head, and stable patch ID. A later revision may reuse that
-one-shot ruling only when Yrd's recut certificate maps a previously authorized
-head to the new head with the same patch ID and `rangeDiff: "="`; retries of
-the identical receipt remain idempotent, while a different PR, path, operation,
-or unproven head is refused as a spent ruling.
-
-> **Legacy rail.** This whole passage speaks the killed vocabulary — see
-> [Vocabulary](#vocabulary). An authored gitlink is a **min commit**, checked
-> against the submodule's main before queueing, and this `yrd intent` rail is
-> scheduled for deletion once the queue fills in submodule values itself.
+> **Retired.** The `--composition` source-manifest rail — per-source restack,
+> payload/`range-diff` certificates, and the generated root wrapper — was
+> deleted with the re-merge cutover; the journal's own retained window showed
+> zero composed-revision traffic. A submodule advance is an ordinary root
+> change carrying its authored gitlink as a **min commit**: push the submodule
+> work to that submodule's own main first, submit the root branch, and the
+> queue fills each pin in from the submodule's main in its shaset commit (see
+> [Superprojects](#superprojects)). A historical member snapshot that still
+> declares a composition refuses loudly (`composition-retired`) instead of
+> merging as an empty no-op. Component-model additions and removals remain a
+> ruled, receipt-bound exception on the ordinary path.
 
 #### Resolving Divergent Gitlink Pins
 
@@ -1123,7 +1014,7 @@ or unproven head is refused as a spent ruling.
 The stable `recut-gitlink-conflict` code (visible in JSON and persisted views)
 names the authoritative root and pin plus the replayed authored root and pin.
 When neither submodule pin contains the other, publish a real composition
-commit in that submodule, update the carrier to pin it, and recut the same PR:
+commit in that submodule, update the carrier to pin it, and resubmit the branch:
 
 ```bash
 git -C <submodule> fetch --all --prune
@@ -1133,15 +1024,14 @@ git -C <submodule> merge <authoritative-pin>
 git -C <submodule> push -u origin HEAD
 git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
 yrd pr submit <branch>   # or `yrd pr create <branch>` while the PR is a draft
-yrd pr recut <PR> --preflight --queue --apply
 ```
 
 This recipe is deliberately NOT a machine remedy. Its merge composes two
 divergent submodule pins and can conflict, and resolving that conflict is a
-judgment call, so `recut-gitlink-conflict` projects an escalation instead: its
-`resolution` says escalate to a human, and the recipe rides `escalation.steps`
-(`ESCALATE`/`MANUAL` rows in the views, `escalate:`/`manual:` lines on stderr)
-as guidance for that human. Nothing should execute it unattended.
+judgment call. A historical `recut-gitlink-conflict` record now projects the
+generic correct-and-retry resolution (its certificate-era escalation
+projection was deleted with the rewrite machinery); this recipe remains the
+valid manual practice for that judgment.
 
 The composition commit must be published before the root carrier is submitted;
 otherwise the Queue cannot prove the gitlink object is remotely reachable.
@@ -1186,15 +1076,15 @@ yrd admin pr prune [--dry-run] [--json]
 yrd admin journal bump <version> [--json]
 ```
 
-| Command              | Input                                              | Output and state                                                                                                      |
-| -------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `list` / `ls` / bare | Optional OR filters, base, status, window, latest  | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
-| `list --check`       | Repository                                         | Typed resident lease/heartbeat health, the plan the base tip declares, and the checkout's Git distance from that tip  |
-| `run`                | Zero or more eligible PRs                          | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`              | Optional base, required reason, optional allowlist | Pauses new runs (including retries) while active work settles; the default queue read shows the pause                 |
-| `resume`             | Optional base                                      | Removes the queue pause                                                                                               |
-| `recover`            | Optional reason or known-dead runner id            | Reconciles abandoned work and releases queued runs whose installed step definition changed                            |
-| `finish`             | One waiting PR/step plus job/runner/attempt/token  | Records external-runner evidence and resumes that exact durable run                                                   |
+| Command              | Input                                              | Output and state                                                                                                       |
+| -------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest  | One base's pending/running/completed timeline; sibling queues stay named in the header                                 |
+| `list --check`       | Repository                                         | Typed resident lease/heartbeat health, the plan the base tip declares, and the checkout's Git distance from that tip   |
+| `run`                | Zero or more eligible PRs                          | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors  |
+| `pause`              | Optional base, required reason, optional allowlist | Pauses new runs (including retries) while active work settles; the default queue read shows the pause                  |
+| `resume`             | Optional base                                      | Removes the queue pause                                                                                                |
+| `recover`            | Optional reason or known-dead runner id            | Reconciles abandoned work and releases queued runs whose installed step definition changed                             |
+| `finish`             | One waiting PR/step plus job/runner/attempt/token  | Records external-runner evidence and resumes that exact durable run                                                    |
 | `audit`              | Repository                                         | Journal, projection, queue-progress, and derived plan findings (git vs recorded runs vs this process); no state change |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
