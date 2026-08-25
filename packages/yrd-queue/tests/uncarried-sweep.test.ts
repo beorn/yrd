@@ -599,11 +599,16 @@ describe("policy exemptions", () => {
   // opening it. @ci's pager reached 36 unread rows
   // (@i/10-merge-queue/23091-pager-rail-unread) while these refs paged
   // nightly about work that was never going anywhere.
-  it("exempts the archive namespace instead of paging on it forever", async () => {
+  it("exempts the archive namespaces instead of paging on them forever", async () => {
+    // preserve/ is the sharpest specimen: a preservation ref exists so its
+    // work is NOT carried, so a stranded finding on it is true by construction
+    // and would page until someone stops reading the rail.
     const git = fakeGit({
-      "for-each-ref": [refLine("origin/rescue/kernel-docs", 3 * HOUR), refLine("origin/task/stranded", 3 * HOUR)].join(
-        "\n",
-      ),
+      "for-each-ref": [
+        refLine("origin/rescue/kernel-docs", 3 * HOUR),
+        refLine("origin/preserve/migration-guard-wip", 3 * HOUR),
+        refLine("origin/task/stranded", 3 * HOUR),
+      ].join("\n"),
       "ls-tree": "160000 commit abc\tvendor/yrd",
       "rev-parse origin/task/stranded^{commit}": "deadbeefcafe",
       "diff --name-only": "src/thing.ts",
@@ -612,10 +617,13 @@ describe("policy exemptions", () => {
 
     const result = await sweepUncarriedRefs(git, OPTIONS)
 
-    // The archive ref never becomes a finding, and the ordinary one still does:
+    // The archive refs never become findings, and the ordinary one still does:
     // an exemption that also swallowed real work would be the worse bug.
     expect(result.findings.map((finding) => finding.ref)).toEqual(["origin/task/stranded"])
-    expect(result.exempted).toMatchObject([{ ref: "origin/rescue/kernel-docs", disposition: "archive" }])
+    expect(result.exempted).toMatchObject([
+      { ref: "origin/rescue/kernel-docs", disposition: "archive" },
+      { ref: "origin/preserve/migration-guard-wip", disposition: "archive" },
+    ])
   })
 
   it("keeps every exempted ref AGED, not merely counted", async () => {

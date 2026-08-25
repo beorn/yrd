@@ -93,8 +93,14 @@ export type ExemptedRef = Readonly<{
  * `isRescueBranch`. It is not imported because this module lives in the
  * `vendor/yrd` submodule and cannot reach the root repo; the twin is named here
  * so the duplication is visible rather than discovered.
+ *
+ * `preserve/` joined 2026-08-25: a preservation ref exists precisely so its
+ * work is NOT carried by a change, so a pushed-not-submitted finding on it is
+ * true forever by construction — the permanently-failing page that makes the
+ * rail unreadable. Same class as the seven permanently-true watcher conditions
+ * ruled on 2026-08-13.
  */
-export const ARCHIVE_REF_PREFIXES: readonly string[] = ["rescue/"]
+export const ARCHIVE_REF_PREFIXES: readonly string[] = ["rescue/", "preserve/"]
 
 /**
  * Host-evaluated exemptions applied AFTER the sweep. Not `retiredRefs`.
