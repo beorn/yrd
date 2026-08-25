@@ -1,5 +1,3 @@
-import { raiseFailure } from "./failure.ts"
-
 export type CherryUnique = Readonly<{ sha: string; subject: string }>
 
 /** Result of `git cherry <estate-pin> <submodule-main>` plus the two counts
@@ -10,28 +8,6 @@ export type CherryDragged = Readonly<{
   notYours?: number
   unreviewed?: number
 }>
-
-/**
- * The linear-root rule, stated once: a root carrier's tip must have at most
- * one parent. Every entrance raises the SAME refusal through here — the
- * submit branch resolver, the active-Bay submit path, `pr ready`, and the
- * re-merge preflight gate — so the rule cannot drift between an entrance and
- * the merge path. A merge-tip carrier once ran a whole gate clean and was
- * refused only at submit, after the gate investment, and the active-Bay
- * entrance met no check at all (PR1364, 2026-08-19). `identity` names what
- * the caller inspected; `branch` names the ref the author rebuilds.
- * `dragged` is the cherry unique list when the caller already has it; omitted
- * means print the command so the worker can run it.
- */
-export function requireLinearRootTip(
-  identity: string,
-  branch: string,
-  parents: readonly string[],
-  dragged?: CherryDragged,
-): void {
-  if (parents.length <= 1) return
-  raiseFailure("refusal", "merge-tip-carrier", linearRebuildMessage(identity, branch, parents.length, dragged))
-}
 
 /** The cherry denominator, stated once: merge-tip-carrier and the authored-gitlink
  * projection both instruct a submodule-main FF, and both must name what that FF
@@ -66,20 +42,4 @@ export function parseCherryVerbose(stdout: string): readonly CherryUnique[] {
     unique.push({ sha: match[1], subject: match[2] ?? "" })
   }
   return unique
-}
-
-function linearRebuildMessage(
-  identity: string,
-  branch: string,
-  parentCount: number,
-  dragged: CherryDragged | undefined,
-): string {
-  const prefix =
-    `yrd: ${identity}. The submitted branch tip is a merge commit with ${parentCount} parents; ` +
-    `Yrd requires a linear root carrier. linear rebuild required: `
-  const suffix =
-    `then merge inside the affected submodule repository, ` +
-    `fast-forward that submodule's main, rebuild '${branch}' as one linear pin-bump commit, push it to origin, ` +
-    `then run 'yrd pr submit ${branch}'`
-  return prefix + `${cherryFfInstruction(dragged)}; ` + suffix
 }

@@ -2205,10 +2205,8 @@ export type GitQueueTarget = Readonly<{
 
 export type ChangeRemergeInput = ChangeSnapshot &
   Readonly<{
-    /** CLI-resolved immutable code-carrier candidate. Queue never resolves a symbolic proposal ref. */
+    /** CLI-resolved immutable proposed tip (tracked delivery). Queue never resolves a symbolic proposal ref. */
     proposedHeadSha?: string
-    /** Same-issue source integrations already present on the authoritative root history, newest first. */
-    currentCompositions?: readonly NonNullable<ChangeSnapshot["composition"]>[]
     current?: Readonly<{
       revision: number
       headSha: string
@@ -2216,7 +2214,6 @@ export type ChangeRemergeInput = ChangeSnapshot &
       treeSha?: string
       patchId?: string
       fromRevision?: number
-      composition?: ChangeSnapshot["composition"]
     }>
   }>
 
@@ -2226,30 +2223,13 @@ export type ChangeRemergeResult = Readonly<{
   treeSha: string
   patchId: string
   unchanged: boolean
-  composition?: ChangeSnapshot["composition"]
-  sourceRewrites?: readonly SourceRewrite[]
+  /** Proposed-head records only: the proposed tip's patch equals the reviewed
+   * source revision's patch, so an approval may carry across (patch
+   * equivalence — the review-carry rule that replaced payload certificates). */
+  reviewEquivalent?: boolean
 }>
 
 export type GitChangeRemerger = Readonly<{ recut(input: ChangeRemergeInput): Promise<ChangeRemergeResult> }>
-
-/**
- * Base-independent composite patch identity for a composition's source rewrites.
- * A single source certifies by its own source-repo patch id; multiple sources
- * certify by a stable hash of their (repo, patchId) pairs in composition order.
- * Every source rewrite pins the fixed `source.baseSha..source.tipSha` payload, so
- * this identity does not depend on the authoritative root base — which is exactly
- * why it survives a base-chase re-anchoring while the whole-root treeSha does not.
- */
-function compositionPatchId(rewrites: readonly Readonly<{ repo: string; patchId: string }>[]): string {
-  const onlyRewrite = rewrites.length === 1 ? rewrites[0] : undefined
-  return onlyRewrite !== undefined
-    ? onlyRewrite.patchId
-    : createHash("sha256")
-        .update(
-          JSON.stringify(rewrites.map(({ repo: sourceRepo, patchId: sourcePatchId }) => [sourceRepo, sourcePatchId])),
-        )
-        .digest("hex")
-}
 
 export function createGitChangeRemerger(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
@@ -2263,25 +2243,26 @@ export function createGitChangeRemerger(options: {
 
 async function remergeChange(git: Git, repo: string, input: ChangeRemergeInput): Promise<ChangeRemergeResult> {
   if (input.proposedHeadSha !== undefined) {
-    const certificateGit = createGit(git.process, git.env, { noLazyFetch: true })
-    const target = await inspectLiveQueueBase(certificateGit, repo, input.base)
+    const recordGit = createGit(git.process, git.env, { noLazyFetch: true })
+    const target = await inspectLiveQueueBase(recordGit, repo, input.base)
     if (target.diverged) {
-      throw codeCarrierRefusal(
-        "queue-environment-refused",
-        `local '${target.branchRef}' and authoritative 'refs/remotes/origin/${target.branch}' differ; refresh or reconcile the target before certifying change '${input.id}'`,
-      )
+      throw createFailure({
+        kind: "refusal",
+        code: "queue-environment-refused",
+        message:
+          `yrd: local '${target.branchRef}' and authoritative 'refs/remotes/origin/${target.branch}' differ; ` +
+          `refresh or reconcile the target before recording change '${input.id}'`,
+      })
     }
-    return certifyProposedCodeCarrier(certificateGit, repo, target, input, input.proposedHeadSha)
+    return recordProposedHead(recordGit, repo, target, input, input.proposedHeadSha)
   }
   const target = await authoritativeQueueBase(git, repo, input.base)
   const current = input.current
-  // An already-landed direct revision delivers nothing beyond the base, so its
-  // head IS the base and `target..head` has no patch identity to certify
-  // against. Re-derive it from the immutable source instead of refusing
-  // `recut-certificate` on the fast path (22373). Composed revisions legitimately
-  // sit at the base and certify by wrapper replay, so they keep the fast path.
-  const alreadyMergedDirect =
-    (current?.composition ?? input.composition) === undefined && current?.headSha === target.sha
+  // An already-landed revision delivers nothing beyond the base, so its head
+  // IS the base and `target..head` has no patch identity to short-circuit on.
+  // Re-derive it from the immutable source instead of returning a stale
+  // unchanged fast path (22373).
+  const alreadyMergedDirect = current?.headSha === target.sha
   if (
     (current?.revision === input.revision || current?.fromRevision === input.revision) &&
     current.baseSha === target.sha &&
@@ -2289,90 +2270,73 @@ async function remergeChange(git: Git, repo: string, input: ChangeRemergeInput):
     current.patchId !== undefined &&
     !alreadyMergedDirect
   ) {
-    await assertCurrentRemergeCertificate(git, repo, target, input, current)
     return {
       headSha: current.headSha,
       baseSha: target.sha,
       treeSha: current.treeSha,
       patchId: current.patchId,
       unchanged: true,
-      ...((current.composition ?? input.composition) === undefined
-        ? {}
-        : { composition: current.composition ?? input.composition }),
     }
   }
-  let remergeInput = input
-  let localSourceTips: ReadonlySet<string> | undefined
-  if (remergeInput.composition === undefined) {
-    const converted = await sourceOnlyCarrierComposition(git, repo, target, remergeInput)
-    // Re-merge Phase 1 (22925 family): the direct case is built by merge, not
-    // rebase — `remergeDirectChangeByMerge` wraps `rebuildCandidateByMerge`
-    // (this file, below) to the same `ChangeRemergeResult` contract the old
-    // rebase-based `remergeDirectChange` used to return. That function became
-    // unreferenced from here the moment this seam was wired in; deleted
-    // 2026-08-23 (Phase 1 deletion sweep, task B) along with its nine
-    // exclusive helpers, once the per-helper audit its own removal comment
-    // called for confirmed each had no other caller (evidence in the deleting
-    // commit's message).
-    if (converted === undefined) return remergeDirectChangeByMerge(git, repo, target, remergeInput)
-    remergeInput = {
-      ...remergeInput,
-      headSha: converted.sourceBase,
-      composition: converted.composition,
-    }
-    localSourceTips = new Set(converted.composition.sources.map((source) => source.repo))
+  return remergeDirectChangeByMerge(git, repo, target, input)
+}
+
+/**
+ * Record a tracked branch's moved tip as the next revision's identity. The
+ * certificate era re-proved the whole reviewed payload here; under the merge
+ * model the candidate is rebuilt by merge at run time, so recording needs only
+ * honest identities: the proposed head itself, its tree, and its plain patch
+ * identity against the authoritative base. `reviewEquivalent` reports whether
+ * the proposed tip's patch equals the reviewed source revision's patch; the
+ * recorder carries an approval across only when it does.
+ */
+async function recordProposedHead(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: ChangeRemergeInput,
+  proposedHeadSha: string,
+): Promise<ChangeRemergeResult> {
+  if ((await git.optionalCommit(repo, proposedHeadSha)) !== proposedHeadSha) {
+    throw createFailure({
+      kind: "refusal",
+      code: "proposed-commit-missing",
+      message: `yrd: change '${input.id}' proposed commit '${proposedHeadSha}' is missing`,
+    })
   }
-  const declared = remergeInput.composition
-  if (declared === undefined) throw new Error("source-only carrier conversion produced no composition")
-  const outcome = await withScratch<ChangeRemergeResult>(git, repo, target.sha, undefined, async (path) => {
-    const composed = await composePR(git, repo, path, remergeInput, localSourceTips)
-    if (composed.status === "failed") {
-      throw createFailure({ kind: "refusal", code: composed.error.code, message: composed.error.message })
-    }
-    const candidateSha = await git.commit(path, "HEAD")
-    const treeSha = (await git.run(path, ["rev-parse", `${candidateSha}^{tree}`])).stdout
-    const rewrites = composed.output.rewrites
-    const byRepo = new Map(rewrites.map((rewrite) => [rewrite.repo, rewrite]))
-    const composition = {
-      version: 1 as const,
-      sources: declared.sources.map((source) => {
-        const rewrite = byRepo.get(source.repo)
-        if (rewrite === undefined) {
-          throw createFailure({
-            kind: "infrastructure",
-            code: "recut-certificate-missing",
-            message: `yrd: re-merge produced no source certificate for '${source.repo}'`,
-          })
-        }
-        return {
-          ...source,
-          branch: rewrite.candidateRef,
-          baseSha: rewrite.newBaseSha,
-          tipSha: rewrite.newTipSha,
-        }
-      }),
-    }
-    const patchId = compositionPatchId(rewrites)
-    return {
-      status: "completed",
-      conclusion: "success",
-      output: {
-        headSha: target.sha,
-        baseSha: target.sha,
-        treeSha,
-        patchId,
-        unchanged: false,
-        composition,
-        sourceRewrites: rewrites,
-      },
-    }
-  })
-  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
-  const message =
-    outcome.status === "completed" && outcome.conclusion === "failure"
-      ? outcome.error.message
-      : (outcome.detail ?? outcome.token)
-  throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+  const tree = await git.run(repo, ["rev-parse", `${proposedHeadSha}^{tree}`], true)
+  if (tree.code !== 0) throw new Error(`yrd: proposed commit '${proposedHeadSha}' has no readable tree`)
+  const sourceBaseSha = input.baseSha
+  const sourcePatchId =
+    sourceBaseSha === undefined ? undefined : await git.stablePatchId(repo, sourceBaseSha, input.headSha)
+  const proposedPatchId = await git.stablePatchId(repo, target.sha, proposedHeadSha)
+  // An empty target..proposed diff means the payload is already contained;
+  // fall back to the immutable source range's own identity, the same "fully
+  // absorbed" convention the merge rebuild uses.
+  const patchId = proposedPatchId ?? sourcePatchId
+  if (patchId === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "payload-certificate",
+      message: `yrd: change '${input.id}' proposed head has no stable patch identity`,
+    })
+  }
+  const current = input.current
+  const unchanged =
+    current !== undefined &&
+    (current.revision === input.revision || current.fromRevision === input.revision) &&
+    current.headSha === proposedHeadSha &&
+    current.baseSha === target.sha &&
+    current.treeSha === tree.stdout &&
+    current.patchId === patchId
+  return {
+    headSha: proposedHeadSha,
+    baseSha: target.sha,
+    treeSha: tree.stdout,
+    patchId,
+    unchanged,
+    reviewEquivalent: sourcePatchId !== undefined && sourcePatchId === proposedPatchId,
+  }
 }
 
 type GitlinkEntry = Readonly<{ path: string; from: string; to: string }>
@@ -2405,473 +2369,6 @@ async function rawPayload(
     paths: paths.toSorted(),
     gitlinks: gitlinks.toSorted((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
   }
-}
-
-/** Pathspec that excludes every listed path from a diff/patch-id computation
- * — `. ':(top,literal,exclude)<path>'` per path, git-super's established
- * idiom — so a legitimate gitlink value difference (obligation 3 below)
- * cannot perturb the ordinary payload equality obligations, which run over
- * the code payload alone. */
-function excludingGitlinks(paths: readonly string[]): readonly string[] | undefined {
-  return paths.length === 0 ? undefined : [".", ...paths.map((path) => `:(top,literal,exclude)${path}`)]
-}
-
-type FrozenCarrierRange = Readonly<{ baseSha: string; headSha: string }>
-type GitlinkValueMismatch = Readonly<{ path: string; expected: string; actual: string }>
-type FrozenCarrierFailure = Readonly<{
-  kind:
-    | "commit-missing"
-    | "lineage"
-    | "gitlink-drop"
-    | "gitlink-extra"
-    | "gitlink-value"
-    | "drop"
-    | "extra"
-    | "identity"
-    | "patch-id"
-    | "tree"
-  range?: "source" | "candidate"
-  endpoint?: "base" | "head"
-  sha?: string
-  paths?: readonly string[]
-  values?: readonly GitlinkValueMismatch[]
-}>
-type FrozenCarrierProof = Readonly<{ treeSha: string; patchId: string }>
-
-/** Render each gitlink obligation-2/3 mismatch as an explicit expected/actual
- * pair — NO SILENT ERRORS: a bare path list would leave the reader guessing
- * which value was reviewed and which one the candidate proposes instead. */
-function describeGitlinkMismatches(values: readonly GitlinkValueMismatch[]): string {
-  return values
-    .map((mismatch) => `'${mismatch.path}' expected '${mismatch.expected}', actual '${mismatch.actual}'`)
-    .join("; ")
-}
-
-/**
- * Certify that a re-merge candidate replays the reviewed source payload. An
- * authored gitlink value is a floor ("advance submodule S at least to X"),
- * not a fixed value pinned for all time, so it is ordinary admissible
- * payload as long as: (2) the re-merge can neither add nor remove a gitlink
- * bump relative to the reviewed source, and (3) each bumped value is either
- * the source's authored floor verbatim (a rebase that touched nothing about
- * it) or the target's own recorded value at the candidate's base (a
- * fast-forward conflict git already resolved, checkable entirely in the root
- * repo). Every other obligation about the payload — (1) — is certified with
- * gitlink paths excluded, so an admissible value difference under (3) cannot
- * perturb identity or patch-id. On-main-ness (is the value actually
- * reachable from the submodule's own main) is NOT this proof's job: that is
- * admission's, in fillAuthoredGitlinksFromMain.
- */
-async function deriveFrozenCodeCarrier(
-  git: Git,
-  repo: string,
-  source: FrozenCarrierRange,
-  candidate: FrozenCarrierRange,
-): Promise<FrozenCarrierProof | FrozenCarrierFailure> {
-  for (const [range, endpoint, sha] of [
-    ["source", "base", source.baseSha],
-    ["source", "head", source.headSha],
-    ["candidate", "base", candidate.baseSha],
-    ["candidate", "head", candidate.headSha],
-  ] as const) {
-    if ((await git.optionalCommit(repo, sha)) !== sha) return { kind: "commit-missing", range, endpoint, sha }
-  }
-  for (const [range, { baseSha, headSha }] of [
-    ["source", source],
-    ["candidate", candidate],
-  ] as const) {
-    if (!(await isAncestor(git, repo, baseSha, headSha))) return { kind: "lineage", range }
-  }
-  const [sourceRaw, candidateRaw] = await Promise.all([
-    rawPayload(git, repo, source.baseSha, source.headSha),
-    rawPayload(git, repo, candidate.baseSha, candidate.headSha),
-  ])
-
-  // Obligations 2/3, combined: a source gitlink path is admissible when its
-  // candidate value is either (a) an explicit diff entry equal to the
-  // source's own authored floor (rebase preserved it verbatim), or (b)
-  // simply absent from the candidate's own diff — meaning git's
-  // fast-forward conflict resolution kept the target's already-more-advanced
-  // value and the path never shows as "changed" at all. (b) is the ONLY way
-  // an absent path can be legitimate: a real diff entry's "to" can never
-  // equal its own "from", and "from" IS the target's recorded value at the
-  // candidate's base by construction of the diff — so a present candidate
-  // entry can only ever satisfy (a). (b) additionally requires proof the
-  // target actually moved this path since the review started (its value at
-  // candidate.baseSha differs from the source's own starting value);
-  // otherwise "absent" just means the floor was silently dropped, never
-  // applied at all. A path present only in the candidate is never admissible
-  // — a re-merge can neither add nor remove a gitlink bump relative to review.
-  const sourceGitlinks = new Map(sourceRaw.gitlinks.map((entry) => [entry.path, entry] as const))
-  const candidateGitlinks = new Map(candidateRaw.gitlinks.map((entry) => [entry.path, entry] as const))
-  const extraPaths = [...candidateGitlinks.keys()].filter((path) => !sourceGitlinks.has(path)).toSorted()
-  if (extraPaths.length > 0) {
-    return {
-      kind: "gitlink-extra",
-      paths: extraPaths,
-      values: extraPaths.map((path) => {
-        const actual = candidateGitlinks.get(path)
-        if (actual === undefined) throw new Error(`yrd: candidate gitlink census lost '${path}'`)
-        return { path, expected: "absent", actual: actual.to }
-      }),
-    }
-  }
-  const droppedGitlinks: GitlinkValueMismatch[] = []
-  const mismatches: GitlinkValueMismatch[] = []
-  for (const [path, sourceLink] of sourceGitlinks) {
-    const candidateLink = candidateGitlinks.get(path)
-    if (candidateLink !== undefined) {
-      if (candidateLink.to === sourceLink.to) continue // (a) rebase preserved the floor verbatim
-      mismatches.push({ path, expected: sourceLink.to, actual: candidateLink.to })
-      continue
-    }
-    const targetValue = await readGitlink(git, repo, candidate.baseSha, path)
-    if (targetValue !== undefined && targetValue !== sourceLink.from) continue // (b) target's own independent advance
-    droppedGitlinks.push({ path, expected: sourceLink.to, actual: targetValue ?? "absent" })
-  }
-  if (droppedGitlinks.length > 0) {
-    return {
-      kind: "gitlink-drop",
-      paths: droppedGitlinks.map((mismatch) => mismatch.path).toSorted(),
-      values: droppedGitlinks,
-    }
-  }
-  if (mismatches.length > 0) {
-    return { kind: "gitlink-value", paths: mismatches.map((mismatch) => mismatch.path).toSorted(), values: mismatches }
-  }
-
-  // Obligation 1: the ordinary equality obligations run over the payload
-  // EXCLUDING gitlink paths, so the admissible gitlink-value differences
-  // obligation 3 just cleared cannot perturb identity or patch-id.
-  const gitlinkPathspec = excludingGitlinks([...sourceGitlinks.keys()])
-  const [sourcePayload, candidatePayload] =
-    gitlinkPathspec === undefined
-      ? [sourceRaw, candidateRaw]
-      : await Promise.all([
-          rawPayload(git, repo, source.baseSha, source.headSha, gitlinkPathspec),
-          rawPayload(git, repo, candidate.baseSha, candidate.headSha, gitlinkPathspec),
-        ])
-  const candidatePaths = new Set(candidatePayload.paths)
-  const sourcePaths = new Set(sourcePayload.paths)
-  const dropped = sourcePayload.paths.filter((path) => !candidatePaths.has(path))
-  if (dropped.length > 0) return { kind: "drop", paths: dropped }
-  const extra = candidatePayload.paths.filter((path) => !sourcePaths.has(path))
-  if (extra.length > 0) return { kind: "extra", paths: extra }
-  if (sourcePayload.identity !== candidatePayload.identity) return { kind: "identity" }
-  const patchId = await git.stablePatchId(repo, source.baseSha, source.headSha, gitlinkPathspec)
-  if (patchId === undefined) return { kind: "patch-id" }
-  const tree = await git.run(repo, ["rev-parse", `${candidate.headSha}^{tree}`], true)
-  return tree.code === 0 ? { treeSha: tree.stdout, patchId } : { kind: "tree" }
-}
-
-function codeCarrierRefusal(code: string, message: string): YrdFailure {
-  return createFailure({ kind: "refusal", code, message: `yrd: ${message}` })
-}
-
-async function certifyProposedCodeCarrier(
-  git: Git,
-  repo: string,
-  target: GitQueueTarget,
-  input: ChangeRemergeInput,
-  proposedHeadSha: string,
-): Promise<ChangeRemergeResult> {
-  const sourceBaseSha = input.baseSha
-  if (sourceBaseSha === undefined) {
-    throw codeCarrierRefusal(
-      "recut-base-missing",
-      `change '${input.id}' revision ${input.revision} has no immutable source base SHA`,
-    )
-  }
-  const proof = await deriveFrozenCodeCarrier(
-    git,
-    repo,
-    { baseSha: sourceBaseSha, headSha: input.headSha },
-    { baseSha: target.sha, headSha: proposedHeadSha },
-  )
-  if ("kind" in proof) {
-    const paths = proof.paths ?? []
-    if (proof.kind === "commit-missing") {
-      if (proof.range === "candidate") {
-        throw codeCarrierRefusal(
-          "proposed-commit-missing",
-          `change '${input.id}' proposed commit '${proposedHeadSha}' is missing`,
-        )
-      }
-      throw codeCarrierRefusal(
-        "recut-source-missing",
-        `change '${input.id}' source ${String(proof.endpoint)} '${String(proof.sha)}' is missing`,
-      )
-    }
-    if (proof.kind === "lineage") {
-      throw proof.range === "candidate"
-        ? codeCarrierRefusal(
-            "carrier-drops-landed",
-            `change '${input.id}' proposed commit '${proposedHeadSha}' does not contain authoritative target '${target.sha}'`,
-          )
-        : codeCarrierRefusal(
-            "recut-lineage",
-            `change '${input.id}' source base '${sourceBaseSha}' is not an ancestor of source head '${input.headSha}'`,
-          )
-    }
-    if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
-      const workflow = await intentSubmissionWorkflow(git, repo, target.sha, proposedHeadSha, paths, input.issue)
-      const detail = describeGitlinkMismatches(proof.values ?? [])
-      throw codeCarrierRefusal(
-        "authored-gitlink",
-        `change '${input.id}' proposed commit '${proposedHeadSha}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
-      )
-    }
-    if (proof.kind === "drop" || proof.kind === "extra") {
-      throw codeCarrierRefusal(
-        `recut-certification-${proof.kind}`,
-        `change '${input.id}' proposed commit '${proposedHeadSha}' ${proof.kind === "drop" ? "drops approved" : "adds unapproved"} paths [${paths.join(", ")}]`,
-      )
-    }
-    if (proof.kind === "identity") {
-      throw codeCarrierRefusal(
-        "recut-certification-corrupt",
-        `change '${input.id}' proposed commit '${proposedHeadSha}' changes approved path, mode, blob, or status identity`,
-      )
-    }
-    if (proof.kind === "patch-id") {
-      throw codeCarrierRefusal(
-        "payload-certificate",
-        `change '${input.id}' revision ${input.revision} has no stable patch identity`,
-      )
-    }
-    throw new Error(`yrd: proposed commit '${proposedHeadSha}' has no readable tree`)
-  }
-  const current = input.current
-  const unchanged =
-    current !== undefined &&
-    (current.revision === input.revision || current.fromRevision === input.revision) &&
-    current.headSha === proposedHeadSha &&
-    current.baseSha === target.sha &&
-    current.treeSha === proof.treeSha &&
-    current.patchId === proof.patchId
-  return { headSha: proposedHeadSha, baseSha: target.sha, ...proof, unchanged }
-}
-
-type SourceOnlyCarrierComposition = Readonly<{
-  sourceBase: string
-  composition: NonNullable<ChangeSnapshot["composition"]>
-}>
-
-/**
- * Recognize the one-source root carrier shape that can be represented as an
- * internal composition manifest. This is eligibility only: prepareSource and
- * rebaseSource still own restacking and every payload/certificate proof. Mixed,
- * multi-source, overlapping, or unproven carriers fall through so the direct
- * remerger's existing refusal remains authoritative.
- */
-async function sourceOnlyCarrierComposition(
-  git: Git,
-  repo: string,
-  target: GitQueueTarget,
-  input: ChangeRemergeInput,
-): Promise<SourceOnlyCarrierComposition | undefined> {
-  const oldBase = input.baseSha
-  if (
-    oldBase === undefined ||
-    (await git.optionalCommit(repo, oldBase)) !== oldBase ||
-    (await git.optionalCommit(repo, input.headSha)) !== input.headSha ||
-    !(await isAncestor(git, repo, oldBase, target.sha))
-  ) {
-    return undefined
-  }
-  const sourceBase = await directRemergeSourceBase(git, repo, oldBase, input.headSha)
-  if (sourceBase === undefined) return undefined
-  const rootPayload = await changedPaths(git, repo, sourceBase, input.headSha)
-  if (rootPayload.length !== 1) return undefined
-
-  const mergeTipFailure = await mergeTipCarrierFailure(git, repo, input.id, input.headSha, target.sha)
-  if (mergeTipFailure !== undefined && mergeTipFailure.error.code !== "merge-tip-carrier") return undefined
-  const mergeTip = mergeTipFailure?.error.code === "merge-tip-carrier"
-  let hasDivergentPin = false
-  const sources: NonNullable<ChangeSnapshot["composition"]>["sources"][number][] = []
-  for (const path of rootPayload) {
-    const basePin = await readGitlink(git, repo, sourceBase, path)
-    const authoredPin = await readGitlink(git, repo, input.headSha, path)
-    const currentPin = await readGitlink(git, repo, target.sha, path)
-    if (basePin === undefined || authoredPin === undefined || currentPin === undefined) return undefined
-
-    const sourceRepo = join(repo, path)
-    try {
-      await realpath(sourceRepo)
-    } catch {
-      // silent-fallback-allow: undefined is this function's "cannot certify a
-      // source-only composition", and it is the FAIL-SAFE direction — six
-      // sibling bail-outs above return it for ordinary non-qualifying inputs,
-      // and the caller then takes the normal, more conservative re-merge path.
-      // An unresolvable submodule path means we cannot certify, so declining is
-      // correct; throwing would turn a non-qualifying candidate into an error.
-      return undefined
-    }
-    if (
-      (await git.optionalCommit(sourceRepo, basePin)) !== basePin ||
-      (await git.optionalCommit(sourceRepo, authoredPin)) !== authoredPin ||
-      (await git.optionalCommit(sourceRepo, currentPin)) !== currentPin ||
-      !(await isAncestor(git, sourceRepo, basePin, authoredPin)) ||
-      !(await isAncestor(git, sourceRepo, basePin, currentPin))
-    ) {
-      return undefined
-    }
-
-    const payload = await changedPaths(git, sourceRepo, basePin, authoredPin)
-    const currentPayload = await changedPaths(git, sourceRepo, basePin, currentPin)
-    if (payload.length === 0 || intersection(payload, currentPayload).length > 0) return undefined
-    if (
-      !(await isAncestor(git, sourceRepo, authoredPin, currentPin)) &&
-      !(await isAncestor(git, sourceRepo, currentPin, authoredPin))
-    ) {
-      hasDivergentPin = true
-    }
-    sources.push({
-      repo: path,
-      branch: sourceCandidateRefFor(authoredPin),
-      baseSha: basePin,
-      tipSha: authoredPin,
-      payload,
-    })
-  }
-  if (!mergeTip && !hasDivergentPin) return undefined
-
-  return {
-    sourceBase,
-    composition: { version: 1, sources },
-  }
-}
-
-async function assertCurrentRemergeCertificate(
-  git: Git,
-  repo: string,
-  target: GitQueueTarget,
-  input: ChangeRemergeInput,
-  current: NonNullable<ChangeRemergeInput["current"]>,
-): Promise<void> {
-  const certifiedTreeSha = current.treeSha
-  const certifiedPatchId = current.patchId
-  if (certifiedTreeSha === undefined || certifiedPatchId === undefined) {
-    throw createFailure({
-      kind: "refusal",
-      code: "recut-certificate",
-      message: `yrd: change '${input.id}' current revision ${current.revision} has no patch/tree certificate`,
-    })
-  }
-  const composition = current.composition ?? input.composition
-  if (composition === undefined) {
-    const headExists = (await git.optionalCommit(repo, current.headSha)) === current.headSha
-    const onTarget = headExists && (await isAncestor(git, repo, target.sha, current.headSha))
-    const tree = headExists ? await git.run(repo, ["rev-parse", `${current.headSha}^{tree}`], true) : undefined
-    const patchId = onTarget ? await git.stablePatchId(repo, target.sha, current.headSha) : undefined
-    if (tree?.code !== 0 || tree?.stdout !== certifiedTreeSha || patchId !== certifiedPatchId) {
-      throw createFailure({
-        kind: "refusal",
-        code: "recut-certificate",
-        message: `yrd: change '${input.id}' current patch/tree certificate does not match revision ${current.revision}`,
-      })
-    }
-    return
-  }
-
-  if (current.headSha !== target.sha) {
-    throw createFailure({
-      kind: "refusal",
-      code: "recut-certificate",
-      message: `yrd: change '${input.id}' current composed head does not match the authoritative base`,
-    })
-  }
-  const currentCompositionFailure = (message: string) =>
-    createFailure({
-      kind: "refusal",
-      code: "recut-certificate",
-      message: `yrd: change '${input.id}' current composed certificate could not replay: ${message}`,
-    })
-  const outcome = await withScratch<Readonly<{ treeSha: string; patchId: string }>>(
-    git,
-    repo,
-    target.sha,
-    undefined,
-    async (path) => {
-      const results: Readonly<{ repo: string; patchId: string }>[] = []
-      for (const source of composition.sources) {
-        const sourceRepo = join(repo, source.repo)
-        try {
-          await realpath(sourceRepo)
-        } catch {
-          throw currentCompositionFailure(`source repository '${source.repo}' is not initialized`)
-        }
-        const currentPin = await readGitlink(git, path, "HEAD", source.repo)
-        if (currentPin !== source.baseSha) {
-          throw currentCompositionFailure(`source '${source.repo}' base does not match the authoritative root pin`)
-        }
-        if (
-          (await git.optionalCommit(sourceRepo, source.baseSha)) !== source.baseSha ||
-          (await git.optionalCommit(sourceRepo, source.tipSha)) !== source.tipSha ||
-          !(await isAncestor(git, sourceRepo, source.baseSha, source.tipSha))
-        ) {
-          throw currentCompositionFailure(`source '${source.repo}' immutable range is missing or invalid`)
-        }
-        const payload = await changedPaths(git, sourceRepo, source.baseSha, source.tipSha)
-        const patchId = await git.stablePatchId(sourceRepo, source.baseSha, source.tipSha)
-        if (!samePaths(payload, source.payload)) {
-          throw currentCompositionFailure(`source '${source.repo}' payload differs`)
-        }
-        if (patchId === undefined) {
-          throw currentCompositionFailure(`source '${source.repo}' patch certificate does not replay`)
-        }
-        const staged = await writeQueueGitlink(git, path, source.repo, source.tipSha)
-        if (!queueGitlinkWriteSucceeded(staged)) {
-          throw currentCompositionFailure(
-            `source '${source.repo}' wrapper could not be staged: ${queueGitlinkWriteFailure(staged)}`,
-          )
-        }
-        results.push({ repo: source.repo, patchId })
-      }
-      const tree = await git.run(path, ["write-tree"], true)
-      if (tree.code !== 0) throw currentCompositionFailure("wrapper tree could not be written")
-      const materialized = await changedPaths(git, path, target.sha, tree.stdout)
-      if (
-        !samePaths(
-          materialized,
-          composition.sources.map((source) => source.repo),
-        )
-      ) {
-        throw currentCompositionFailure("wrapper paths do not match the current composition")
-      }
-      return {
-        status: "completed",
-        conclusion: "success",
-        output: {
-          treeSha: tree.stdout,
-          patchId: compositionPatchId(results),
-        },
-      }
-    },
-  )
-  if (outcome.status !== "completed" || outcome.conclusion !== "success") {
-    const message =
-      outcome.status === "completed" && outcome.conclusion === "failure"
-        ? outcome.error.message
-        : (outcome.detail ?? outcome.token)
-    throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
-  }
-  if (outcome.output.treeSha !== certifiedTreeSha || outcome.output.patchId !== certifiedPatchId) {
-    throw createFailure({
-      kind: "refusal",
-      code: "recut-certificate",
-      message: `yrd: change '${input.id}' current composed patch/tree certificate does not match revision ${current.revision}`,
-    })
-  }
-}
-
-async function directRemergeSourceBase(
-  git: Git,
-  repo: string,
-  oldBase: string,
-  headSha: string,
-): Promise<string | undefined> {
-  return (await isAncestor(git, repo, oldBase, headSha)) ? oldBase : uniqueMergeBase(git, repo, oldBase, headSha)
 }
 
 async function inspectQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
@@ -2918,6 +2415,10 @@ async function inspectQueueBase(git: Git, repo: string, branch: string): Promise
   throw new Error(`yrd: merge-queue base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
 }
 
+function queueRefusal(code: string, message: string): YrdFailure {
+  return createFailure({ kind: "refusal", code, message: `yrd: ${message}` })
+}
+
 async function inspectLiveQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
   const cached = await inspectQueueBase(git, repo, branch)
   const configuredRemote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
@@ -2927,13 +2428,13 @@ async function inspectLiveQueueBase(git: Git, repo: string, branch: string): Pro
   const inspected = await git.run(repo, ["ls-remote", "--exit-code", "origin", sourceRef], true)
   const live = /^([0-9a-f]{40,64})\s+refs\/heads\/.+$/iu.exec(inspected.stdout)?.[1]
   if (inspected.code !== 0 || live === undefined) {
-    throw codeCarrierRefusal(
+    throw queueRefusal(
       "queue-environment-refused",
       `live 'origin/${branch}' could not be proved without mutating the repository`,
     )
   }
   if (cached.remoteSha !== live || (cached.localSha !== undefined && cached.localSha !== live)) {
-    throw codeCarrierRefusal(
+    throw queueRefusal(
       "queue-environment-refused",
       `live 'origin/${branch}' is '${live}', but local/cached target refs do not both resolve to that SHA; refresh or reconcile the target before certifying`,
     )
@@ -3193,7 +2694,6 @@ type CandidatePreparation =
       output: Readonly<{
         sha: string
         changes: readonly CandidateChange[]
-        sourceRewrites: readonly SourceRewrite[]
         submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
         componentModelChanges: readonly SubmoduleModelChangeAuthorization[]
       }>
@@ -3255,7 +2755,6 @@ async function prepareCandidateMembers(
   provisionPinIntent?: PinIntentProvisioner,
   authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer,
 ): Promise<CandidatePreparation> {
-  const sourceRewrites: SourceRewrite[] = []
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const changes: CandidateChange[] = []
@@ -3320,39 +2819,13 @@ async function prepareCandidateMembers(
       })
       continue
     }
-    if (pr.composition === undefined) {
-      if (pr.recut !== undefined) {
-        const dropped = await carrierDropsMergedFailure(git, repo, path, pr.id, pr.headSha, authoritativeBase)
-        if (dropped !== undefined) return dropped
-      } else {
-        // Re-merge Phase 1 (22925 family): `mergeTipCarrierFailure` guards
-        // against an AUTHOR smuggling a merge commit as their own branch tip —
-        // meaningful only against the author's own, never-yet-recut
-        // submission. Once `pr.recut !== undefined`, `pr.headSha` is the
-        // QUEUE's own built candidate (`remergeDirectChangeByMerge`, this
-        // file), which is legitimately a merge commit for the direct path:
-        // the whole point of building by merge instead of rebase. Checking a
-        // queue-recut head here refused every direct-path change the moment
-        // it was re-verified after its first recut — caught by
-        // `command.test.ts`'s coupled-pin-and-code suite (22925 investigation,
-        // 2026-08-23). The protection this check exists for still runs, at
-        // the point it matters: initial submission, `pr.recut === undefined`.
-        const mergeTip = await mergeTipCarrierFailure(git, path, pr.id, pr.headSha, "HEAD")
-        if (mergeTip !== undefined) return mergeTip
-      }
-      if (pr.recut?.certificate === "frozen-code-carrier-v1") {
-        const certified = await verifyRemergeCertificate(git, path, pr)
-        if (certified !== undefined) return certified
-      }
-      // A post-merge actuator retry carries the same immutable PR snapshot
-      // against a base that already contains it. Re-checking its re-merge patch
-      // against itself produces an empty patch and a false certificate drift.
-      // Source-only compositions are excluded: their root head intentionally
-      // equals the base while their submodule payload still needs applying.
-      if (await isAncestor(git, path, pr.headSha, "HEAD")) {
-        recordChange(pr, pr.headSha)
-        continue
-      }
+    // A post-merge actuator retry carries the same immutable PR snapshot
+    // against a base that already contains it. Nothing is left to merge, and
+    // re-merging an already-contained head would only manufacture an empty
+    // merge commit.
+    if (await isAncestor(git, path, pr.headSha, "HEAD")) {
+      recordChange(pr, pr.headSha)
+      continue
     }
     if (refuse !== undefined && refuse.paths.length > 0) {
       const inspected = await refusedPayloadPaths(git, path, pr.headSha, refuse.paths)
@@ -3367,38 +2840,13 @@ async function prepareCandidateMembers(
         )
       }
     }
-    if (pr.composition !== undefined) {
-      let baseMoved = false
-      if (pr.recut !== undefined) {
-        const movement = await remergeBaseMovement(git, path, pr)
-        if (movement.status === "failed") return movement
-        baseMoved = movement.moved
-      }
-      const composed = await composePR(git, repo, path, pr, undefined, provisionPinIntent)
-      if (composed.status === "failed") return composed
-      const certificate = await verifyComposedRemergeCertificate(
-        git,
-        path,
-        pr,
-        composed.output.rewrites,
-        baseMoved,
-        composed.output.regenerated.length > 0,
-      )
-      if (certificate !== undefined) return certificate
-      sourceRewrites.push(...composed.output.rewrites)
-      recordChange(pr, await git.commit(path, "HEAD"))
-      continue
-    }
     let authoredFill:
       | Readonly<{
           updates: readonly GitlinkUpdate[]
           filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
         }>
       | undefined
-    if (pr.recut !== undefined && pr.recut.certificate !== "frozen-code-carrier-v1") {
-      const certified = await verifyRemergeCertificate(git, path, pr)
-      if (certified !== undefined) return certified
-    } else {
+    {
       const inspected = await authoredGitlinkPaths(git, path, pr.id, pr.headSha)
       if (inspected.status === "failed") return inspected
       if (inspected.output.length > 0) {
@@ -3496,7 +2944,6 @@ async function prepareCandidateMembers(
     output: {
       sha: await git.commit(path, "HEAD"),
       changes,
-      sourceRewrites,
       submoduleResolutions,
       componentModelChanges,
     },
@@ -3665,7 +3112,6 @@ export function gitCandidatePreparer(options: GitCandidatePreparerOptions): Cand
         treeSha: (await git.run(path, ["rev-parse", `${candidate.output.sha}^{tree}`])).stdout,
         ref,
         ...(candidate.output.changes.length === 0 ? {} : { changes: candidate.output.changes }),
-        ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
         ...(candidate.output.submoduleResolutions.length === 0
           ? {}
           : { submoduleResolutions: candidate.output.submoduleResolutions }),
@@ -4223,248 +3669,6 @@ async function remergeDirectChangeByMerge(
   }
 }
 
-type RemergeBaseMovement =
-  | CandidateFailure
-  | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
-
-/**
- * Classify how the authoritative candidate base relates to the reviewed re-merge base
- * for a `pr.recut` snapshot. `repo` is the candidate worktree; its HEAD is the base
- * this candidate is actually built on. `pr.baseSha` is the refreshable check/admission
- * identity; `pr.recut.baseSha` is the immutable base certified by the recut revision.
- * A re-merge certifies a mechanical rebase of the reviewed revision, so its certified base
- * must be an *ancestor* of the candidate base:
- * either the same commit (no movement) or a forward advance the reviewed change can be
- * re-anchored onto. A missing or non-ancestor base cannot be mechanically re-anchored
- * and stays a hard refusal.
- *
- * The two ways that fails are NOT the same failure, and the queue acts on the
- * difference (22647). An absent base OBJECT is an unfetched repository — the
- * 2026-07-27 partition refused 106 consecutive cycles on it and a retry cured
- * it — so it keeps the retryable `recut-certificate` code. A base that is
- * present and still not an ancestor is a lineage the authoritative base never
- * took: no retry can make it ancestral, only a fresh revision can, so it gets
- * its own `recut-base-diverged` code that parks the change on the first refusal
- * instead of storming the queue head.
- */
-async function remergeBaseMovement(
-  git: Git,
-  repo: string,
-  pr: StepExecution["prs"][number],
-): Promise<RemergeBaseMovement> {
-  const baseSha = pr.recut?.baseSha
-  if (baseSha === undefined) {
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge revision ${pr.revision} has no immutable certified base`,
-    )
-  }
-  const head = await git.commit(repo, "HEAD")
-  if (head === baseSha) return { status: "moved", moved: false, baseSha, head }
-  if (!(await isAncestor(git, repo, baseSha, head))) {
-    if ((await git.optionalCommit(repo, baseSha)) !== baseSha) {
-      return candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge base '${baseSha}' is not present in the candidate repository; fetch it and retry`,
-      )
-    }
-    return candidateFailure(
-      "recut-base-diverged",
-      `change '${pr.id}' revision ${pr.revision} certifies base '${baseSha}', but the authoritative candidate base is ` +
-        `'${head}', which never descended from it; the certificate cannot become valid without a fresh revision`,
-    )
-  }
-  return { status: "moved", moved: true, baseSha, head }
-}
-
-async function verifyRemergeCertificate(
-  git: Git,
-  repo: string,
-  pr: StepExecution["prs"][number],
-): Promise<CandidateFailure | undefined> {
-  if (pr.recut === undefined) return undefined
-  const sourceBaseSha = pr.recut.sourceBaseSha
-  const sourceHeadSha = pr.recut.sourceHeadSha
-  if (pr.recut.certificate === undefined && sourceBaseSha === undefined && sourceHeadSha === undefined) {
-    return verifyLegacyRemergeCertificate(git, repo, pr)
-  }
-  if (pr.recut.certificate !== "frozen-code-carrier-v1" || sourceBaseSha === undefined || sourceHeadSha === undefined) {
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge revision ${pr.revision} has no complete immutable source range`,
-    )
-  }
-  return verifyFrozenCodeCarrierCertificate(
-    createGit(git.process, git.env, { noLazyFetch: true }),
-    repo,
-    pr,
-    sourceBaseSha,
-    sourceHeadSha,
-  )
-}
-
-async function verifyLegacyRemergeCertificate(
-  git: Git,
-  repo: string,
-  pr: StepExecution["prs"][number],
-): Promise<CandidateFailure | undefined> {
-  if (pr.recut === undefined) return undefined
-  const treeSha = (await git.run(repo, ["rev-parse", `${pr.headSha}^{tree}`], true)).stdout
-  if (treeSha !== pr.recut.treeSha) {
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge tree certificate does not match revision ${pr.revision}`,
-    )
-  }
-  const movement = await remergeBaseMovement(git, repo, pr)
-  if (movement.status === "failed") return movement
-  if (!movement.moved) {
-    const patchId = await git.stablePatchId(repo, movement.baseSha, pr.headSha)
-    return patchId === pr.recut.patchId
-      ? undefined
-      : candidateFailure(
-          "recut-certificate",
-          `change '${pr.id}' re-merge patch certificate does not match revision ${pr.revision}`,
-        )
-  }
-  const rederived = await rederiveRemergePatchId(git, repo, pr.headSha)
-  if (rederived === undefined) {
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
-    )
-  }
-  return rederived === pr.recut.patchId
-    ? undefined
-    : candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge change did not survive the advanced base for revision ${pr.revision}`,
-      )
-}
-
-async function rederiveRemergePatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
-  const merged = await git.run(repo, ["merge-tree", "--write-tree", "HEAD", headSha], true)
-  if (merged.code !== 0) return undefined
-  const tree = merged.stdout.split("\n")[0]?.trim()
-  if (tree === undefined || !/^[0-9a-f]{40,64}$/iu.test(tree)) return undefined
-  return git.stablePatchId(repo, "HEAD", tree)
-}
-
-async function verifyFrozenCodeCarrierCertificate(
-  git: Git,
-  repo: string,
-  pr: StepExecution["prs"][number],
-  sourceBaseSha: string,
-  sourceHeadSha: string,
-): Promise<CandidateFailure | undefined> {
-  const remerge = pr.recut
-  if (remerge === undefined) return undefined
-  const candidateBaseSha = remerge.baseSha
-  if (candidateBaseSha === undefined) {
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge revision ${pr.revision} has no immutable candidate base`,
-    )
-  }
-  const proof = await deriveFrozenCodeCarrier(
-    git,
-    repo,
-    { baseSha: sourceBaseSha, headSha: sourceHeadSha },
-    { baseSha: candidateBaseSha, headSha: pr.headSha },
-  )
-  if ("kind" in proof) {
-    if (proof.kind === "commit-missing") {
-      return candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge ${String(proof.range)} ${String(proof.endpoint)} '${String(proof.sha)}' is missing for revision ${pr.revision}`,
-      )
-    }
-    if (proof.kind === "lineage") {
-      const range =
-        proof.range === "source"
-          ? { baseSha: sourceBaseSha, headSha: sourceHeadSha }
-          : { baseSha: candidateBaseSha, headSha: pr.headSha }
-      return candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge ${String(proof.range)} base '${range.baseSha}' is not an ancestor of ${String(proof.range)} head '${range.headSha}'`,
-      )
-    }
-    if (proof.kind === "gitlink-drop" || proof.kind === "gitlink-extra" || proof.kind === "gitlink-value") {
-      const paths = proof.paths ?? []
-      const workflow = await intentSubmissionWorkflow(git, repo, candidateBaseSha, pr.headSha, paths, pr.issue)
-      const detail = describeGitlinkMismatches(proof.values ?? [])
-      return candidateFailure(
-        "authored-gitlink",
-        `change '${pr.id}' changes generated-only gitlinks [${paths.join(", ")}] (${detail}); ${workflow}`,
-        ".",
-        paths,
-      )
-    }
-    if (proof.kind === "tree") {
-      return candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
-      )
-    }
-    if (proof.kind === "patch-id") {
-      return candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
-      )
-    }
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge source and candidate path, mode, blob, or status identities differ for revision ${pr.revision}`,
-    )
-  }
-  if (proof.treeSha !== remerge.treeSha) {
-    return candidateFailure(
-      "recut-certificate",
-      `change '${pr.id}' re-merge tree certificate does not match candidate revision ${pr.revision}`,
-    )
-  }
-  return proof.patchId === remerge.patchId
-    ? undefined
-    : candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' re-merge patch certificate does not match immutable source revision ${pr.revision}`,
-      )
-}
-
-async function verifyComposedRemergeCertificate(
-  git: Git,
-  repo: string,
-  pr: StepExecution["prs"][number],
-  rewrites: readonly SourceRewrite[],
-  baseMoved: boolean,
-  shasetFilledIn = false,
-): Promise<CandidateFailure | undefined> {
-  if (pr.recut === undefined) return undefined
-  const patchId = compositionPatchId(rewrites)
-  if (!baseMoved && !shasetFilledIn) {
-    // Fast path: base unchanged — both the recomposed whole-root tree and the
-    // base-independent source-patch identity must replay exactly.
-    const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
-    return treeSha === pr.recut.treeSha && patchId === pr.recut.patchId
-      ? undefined
-      : candidateFailure(
-          "recut-certificate",
-          `change '${pr.id}' recomposed patch/tree certificate does not match revision ${pr.revision}`,
-        )
-  }
-  // Base advanced, or the queue filled in the shaset (a regenerated bun.lock, or a
-  // submodule value fresher than the certified one): the whole-root treeSha legitimately
-  // differs, so certify the base-independent composite source patch identity instead.
-  // composePR already re-derived the source rewrites onto the current base; their
-  // identity must equal the reviewed one.
-  return patchId === pr.recut.patchId
-    ? undefined
-    : candidateFailure(
-        "recut-certificate",
-        `change '${pr.id}' recomposed change did not survive the advanced base for revision ${pr.revision}`,
-      )
-}
-
 type CandidateFailure = Readonly<{
   status: "failed"
   /**
@@ -4543,10 +3747,6 @@ async function readCherryDragged(
   return { unique: parseCherryVerbose(cherry.stdout) }
 }
 
-function submoduleIntentWorkflow(): string {
-  return "submit each submodule advance as its own ordinary change whose diff is only the gitlink bump; Queue owns the root carrier"
-}
-
 type BaseContainment =
   | Readonly<{ status: "contained" }>
   | Readonly<{ status: "drops-merged"; commits: string }>
@@ -4595,14 +3795,6 @@ async function inspectBaseContainment(
   return { status: "drops-merged", commits: dropped.stdout }
 }
 
-export function linearRebuildRemedy(
-  scope: string,
-  base: string,
-  next = "then re-merge and requeue the root branch",
-): string {
-  return `linear rebuild required: rebuild ${scope} as a one-parent linear branch on current base '${base}', ${next}`
-}
-
 /** Resolve the submodule checkout that can answer ancestry for a gitlink path.
  *
  * `join(root, path)` alone is not enough, and failing silently here is how this
@@ -4626,89 +3818,6 @@ async function submoduleCheckout(git: Git, root: string, path: string): Promise<
     // "no submodule here" rather than assuming one.
     return undefined
   }
-}
-
-/** Head staleness and payload spentness are different facts about a carrier, and
- * a gitlink-only carrier can carry both at once: root main moved on beneath it
- * (stale head) while the pin it authors was already promoted into that same
- * main by some other carrier.
- *
- * The head check can only witness the first, so on its own it prescribes a
- * linear rebuild — advice that cannot succeed here, because rebuilding a spent
- * pin onto current base regenerates an empty carrier that is refused again on
- * the same ground. That is the loop PR562 rode to revision 43.
- *
- * The pair is authored pin against THE PIN THE AUTHORITATIVE BASE CARRIES: an
- * authored pin that is an ancestor of (or equal to) the base's own pin for the
- * same path is the containment this check calls absorbed. Reading
- * it against submodule main instead answers a different question and gets this
- * exactly backwards: submodule main can hold the work while root main's gitlink
- * still points before it, and that carrier is the one that would perform the
- * promotion. Measured — with root's gitlink behind, a rebuild still delivers the
- * gitlink; with root's gitlink containing the pin, it delivers nothing. Only the
- * second is safe to close. */
-async function spentGitlinkCarrier(
-  git: Git,
-  repo: string,
-  candidate: string,
-  headSha: string,
-  authoritativeBase: string,
-): Promise<Readonly<{ merges: readonly string[] }> | undefined> {
-  const forkPoint = await git.run(candidate, ["merge-base", authoritativeBase, headSha], true)
-  if (forkPoint.code !== 0 || forkPoint.stdout === "") return undefined
-  const authored = await changedPaths(git, candidate, forkPoint.stdout, headSha)
-  if (authored.length === 0) return undefined
-
-  const merges: string[] = []
-  for (const path of authored) {
-    // A path that is not a gitlink on both sides carries payload this verdict
-    // cannot speak for, so the carrier is not pins-only.
-    const carrierPin = await readGitlink(git, candidate, headSha, path)
-    const basePin = await readGitlink(git, candidate, authoritativeBase, path)
-    if (carrierPin === undefined || basePin === undefined) return undefined
-    if (carrierPin === basePin) {
-      merges.push(`pin '${carrierPin}' for '${path}' is the pin the base already carries`)
-      continue
-    }
-    // Below this line every failure keeps the existing refusal rather than
-    // upgrading the verdict: an unprovable claim of spentness is not a reason to
-    // tell an author their work merged. Only the submodule can answer ancestry
-    // between two submodule shas.
-    const submodule = await submoduleCheckout(git, repo, path)
-    if (submodule === undefined) return undefined
-    if (!(await isAncestor(git, submodule, carrierPin, basePin))) return undefined
-    merges.push(`pin '${carrierPin}' for '${path}' is already contained in the base's pin '${basePin}'`)
-  }
-  return { merges }
-}
-
-async function carrierDropsMergedFailure(
-  git: Git,
-  repo: string,
-  candidate: string,
-  pr: string,
-  headSha: string,
-  authoritativeBase: string,
-): Promise<CandidateFailure | undefined> {
-  const containment = await inspectBaseContainment(git, candidate, authoritativeBase, headSha)
-  if (containment.status === "contained") return undefined
-  if (containment.status === "inspection-failed") {
-    return candidateFailure(
-      "carrier-inspection",
-      `could not compare root branch '${headSha}' for change '${pr}' with the merge-queue base '${authoritativeBase}': ${containment.detail}`,
-    )
-  }
-  const spent = await spentGitlinkCarrier(git, repo, candidate, headSha, authoritativeBase)
-  if (spent !== undefined) {
-    return candidateFailure(
-      "carrier-pin-already-landed",
-      `change '${pr}' branch '${headSha}' authors submodule pins only, and every one of them already merged: ${spent.merges.join("; ")}\nremedy: the branch has nothing left to deliver; close it, do not rebuild or requeue it`,
-    )
-  }
-  return candidateFailure(
-    "carrier-drops-landed",
-    `change '${pr}' branch '${headSha}' does not contain the merge-queue base '${authoritativeBase}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy("the branch", authoritativeBase)}`,
-  )
 }
 
 /** A deletion is the one merge outcome nothing announces. Every guard above this
@@ -4755,7 +3864,7 @@ async function unauthoredDeletionFailure(
     "unauthored-path-deletion",
     `merging change '${pr}' branch '${headSha}' deletes [${shown}], which its authored diff against ` +
       `'${base.sha}' never deletes; the merge resolved away merged work the branch never authored removing\n` +
-      `remedy: ${linearRebuildRemedy("the branch", before)}`,
+      `remedy: merge current base '${before}' into the branch, restore the merged content, and push`,
     ".",
     unauthored,
   )
@@ -4952,40 +4061,10 @@ async function droppedContributionFailure(
     "dropped-parent-contribution",
     `merging change '${pr}' branch '${headSha}' produced a result that drops content neither parent ` +
       `authored removing: ${shown}${drops.length > 4 ? ", …" : ""}\n${scope}\n` +
-      `remedy: ${linearRebuildRemedy("the branch", before)}`,
+      `remedy: merge current base '${before}' into the branch, restore the dropped content, and push`,
     ".",
     [...new Set(drops.map((drop) => drop.path))],
   )
-}
-
-async function mergeTipCarrierFailure(
-  git: Git,
-  repo: string,
-  pr: string,
-  headSha: string,
-  authoritativeBase: string,
-): Promise<CandidateFailure | undefined> {
-  if (await isAncestor(git, repo, headSha, authoritativeBase)) return undefined
-  const lineage = await git.run(repo, ["rev-list", "--parents", "-n", "1", headSha], true)
-  if (lineage.code !== 0 || lineage.stdout === "") {
-    return candidateFailure(
-      "carrier-inspection",
-      `could not inspect the root branch tip '${headSha}' for change '${pr}': ${lineage.stderr || lineage.stdout || "no lineage"}`,
-    )
-  }
-  const [commit, ...parents] = lineage.stdout.split(/\s+/u)
-  if (commit !== headSha) {
-    return candidateFailure(
-      "carrier-inspection",
-      `root branch history for change '${pr}' returned '${commit ?? "no commit"}', expected '${headSha}'`,
-    )
-  }
-  return parents.length > 1
-    ? candidateFailure(
-        "merge-tip-carrier",
-        `change '${pr}' root branch tip '${headSha}' is a merge commit with ${parents.length} parents; ${submoduleIntentWorkflow()}`,
-      )
-    : undefined
 }
 
 async function stabilizeGeneratedRootWrapper(
@@ -5146,7 +4225,7 @@ export function parseSubmoduleModelChangeAuthorizationValue(
   if (value === undefined) return undefined
   const match = SUBMODULE_MODEL_CHANGE_VALUE.exec(value.trim())
   if (match?.groups === undefined) {
-    throw codeCarrierRefusal(
+    throw queueRefusal(
       "component-model-authorization-invalid",
       `change '${pr}' has malformed '${SUBMODULE_MODEL_CHANGE_PROP}' prop; expected ` +
         `'<add|remove> <gitlink-path>; ruling <@cto-verdict-message-id>'`,
@@ -5164,18 +4243,6 @@ export function parseSubmoduleModelChangeAuthorization(
 ): Omit<SubmoduleModelChangeAuthorizationRequest, "pr" | "revision" | "headSha" | "patchId" | "source"> | undefined {
   return parseSubmoduleModelChangeAuthorizationValue(pr.id, pr.props?.[SUBMODULE_MODEL_CHANGE_PROP])
 }
-
-/** What composing one change wrote into the candidate: the certified source
- * rewrites, plus the paths the shaset provisioner regenerated (today exactly
- * `bun.lock`, or nothing) in the same shaset commit. Queue-composed submodule
- * commits ride VERBATIM: they live on queue-authored refs and are by
- * construction never on the submodule's main, so nothing here rewrites them —
- * the fill-in from main belongs to the AUTHORED leg alone
- * (fillAuthoredGitlinksFromMain). */
-type ComposedPR = Readonly<{
-  rewrites: readonly SourceRewrite[]
-  regenerated: readonly string[]
-}>
 
 /**
  * Fill in an authored gitlink delta from that submodule's main — the shaset
@@ -5354,355 +4421,6 @@ async function fillAuthoredGitlinksFromMain(
   return { status: "passed", output: { updates, filledPins, componentModelChanges } }
 }
 
-async function composePR(
-  git: Git,
-  repo: string,
-  path: string,
-  pr: StepExecution["prs"][number],
-  localSourceTips?: ReadonlySet<string>,
-  provisionPinIntent?: PinIntentProvisioner,
-): Promise<Readonly<{ status: "passed"; output: ComposedPR }> | CandidateFailure> {
-  if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
-    return candidateFailure(
-      "composition-invalid",
-      `change '${pr.id}' composition head '${pr.headSha}' contains root changes; root code must be submitted separately from changes of submodule min commits`,
-    )
-  }
-
-  const rewrites: SourceRewrite[] = []
-  const updates: GitlinkUpdate[] = []
-  for (const source of pr.composition?.sources ?? []) {
-    const currentPin = await readGitlink(git, path, "HEAD", source.repo)
-    if (currentPin === undefined) {
-      return candidateFailure(
-        "composition-invalid",
-        `change '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base; a change of min commits advances existing submodules only`,
-        source.repo,
-        [source.repo],
-      )
-    }
-    const prepared = await prepareSource(git, repo, source, currentPin, localSourceTips?.has(source.repo) === true)
-    if (prepared.status === "failed") return prepared
-    rewrites.push(prepared.output)
-    if (prepared.output.newTipSha === currentPin) continue
-    updates.push({ path: source.repo, sha: prepared.output.newTipSha })
-  }
-
-  const parent = await git.commit(path, "HEAD")
-  const synthesized = await synthesizeGitlinkWrapper(
-    git,
-    path,
-    parent,
-    updates,
-    candidateChangeCommitMessage("compose", pr),
-    provisionPinIntent,
-  )
-  if (synthesized.status === "failed") return synthesized
-  for (const rewrite of rewrites) {
-    if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {
-      return candidateFailure(
-        "wrapper-mismatch",
-        `change '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${rewrite.newTipSha}'`,
-        rewrite.repo,
-        [rewrite.repo],
-      )
-    }
-  }
-  return { status: "passed", output: { rewrites, regenerated: synthesized.output.generatedPaths } }
-}
-
-async function prepareSource(
-  git: Git,
-  repo: string,
-  source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
-  currentPin: string,
-  allowLocalTip = false,
-): Promise<Readonly<{ status: "passed"; output: SourceRewrite }> | CandidateFailure> {
-  const sourceRepo = join(repo, source.repo)
-  try {
-    await realpath(sourceRepo)
-  } catch {
-    return candidateFailure(
-      "source-missing",
-      `source repository '${source.repo}' is not initialized; run git submodule update --init --recursive`,
-      source.repo,
-      [source.repo],
-    )
-  }
-  const validBranch = await git.run(sourceRepo, ["check-ref-format", "--branch", source.branch], true)
-  if (validBranch.code !== 0) {
-    return candidateFailure("composition-invalid", `source '${source.repo}' has invalid branch '${source.branch}'`)
-  }
-  if (!allowLocalTip) {
-    const fetched = await git.run(
-      sourceRepo,
-      ["-c", "protocol.file.allow=always", "fetch", "--no-recurse-submodules", "--quiet", "origin", source.branch],
-      true,
-    )
-    if (fetched.code !== 0) {
-      return candidateFailure(
-        "source-missing",
-        `source '${source.repo}' branch '${source.branch}' could not be fetched: ${fetched.stderr || fetched.stdout}`,
-      )
-    }
-    const fetchedTip = await git.optionalCommit(sourceRepo, "FETCH_HEAD")
-    if (fetchedTip === undefined || !(await isAncestor(git, sourceRepo, source.tipSha, fetchedTip))) {
-      return candidateFailure(
-        "source-lineage",
-        `source '${source.repo}' branch '${source.branch}' no longer contains declared tip '${source.tipSha}' (resolved '${fetchedTip ?? "missing"}')`,
-      )
-    }
-  }
-  for (const sha of [source.baseSha, source.tipSha, currentPin]) {
-    if ((await git.optionalCommit(sourceRepo, sha)) !== sha) {
-      return candidateFailure("source-missing", `source '${source.repo}' is missing commit '${sha}'`)
-    }
-  }
-  if (!(await isAncestor(git, sourceRepo, source.baseSha, source.tipSha))) {
-    return candidateFailure(
-      "source-lineage",
-      `source '${source.repo}' declared base '${source.baseSha}' is not an ancestor of tip '${source.tipSha}'`,
-    )
-  }
-  if (!(await isAncestor(git, sourceRepo, source.baseSha, currentPin))) {
-    return candidateFailure(
-      "source-lineage",
-      `source '${source.repo}' current pin '${currentPin}' is not a descendant of declared base '${source.baseSha}'`,
-    )
-  }
-
-  const sourcePaths = await changedPaths(git, sourceRepo, source.baseSha, source.tipSha)
-  const sourceIdentity = await changedPayloadIdentity(git, sourceRepo, source.baseSha, source.tipSha)
-  const sourcePatchId = await git.stablePatchId(sourceRepo, source.baseSha, source.tipSha)
-  if (sourcePatchId === undefined) {
-    return candidateFailure(
-      "payload-certificate",
-      `source '${source.repo}' could not derive a stable patch identity`,
-      source.repo,
-      source.payload,
-    )
-  }
-  if (!samePaths(sourcePaths, source.payload)) {
-    return candidateFailure(
-      "payload-mismatch",
-      `source '${source.repo}' payload differs: declared [${source.payload.join(", ")}], materialized [${sourcePaths.join(", ")}]`,
-      source.repo,
-      symmetricDifference(sourcePaths, source.payload),
-    )
-  }
-
-  let newTipSha = source.tipSha
-  if (currentPin !== source.baseSha && !(await isAncestor(git, sourceRepo, currentPin, source.tipSha))) {
-    const upstreamPaths = await changedPaths(git, sourceRepo, source.baseSha, currentPin)
-    const overlap = intersection(sourcePaths, upstreamPaths)
-    if (overlap.length > 0) {
-      return candidateFailure(
-        "payload-overlap",
-        `source '${source.repo}' overlaps current pin '${currentPin}' at [${overlap.join(", ")}]`,
-        source.repo,
-        overlap,
-      )
-    }
-    const rebased = await rebaseSource(git, sourceRepo, source, currentPin)
-    if (rebased.status === "failed") return rebased
-    newTipSha = rebased.output
-  }
-
-  const materialized = await changedPaths(git, sourceRepo, currentPin, newTipSha)
-  if (!samePaths(materialized, source.payload)) {
-    return candidateFailure(
-      "wrapper-mismatch",
-      `source '${source.repo}' rewritten payload differs: declared [${source.payload.join(", ")}], materialized [${materialized.join(", ")}]`,
-      source.repo,
-      symmetricDifference(materialized, source.payload),
-    )
-  }
-  const materializedIdentity = await changedPayloadIdentity(git, sourceRepo, currentPin, newTipSha)
-  if (materializedIdentity !== sourceIdentity) {
-    return candidateFailure(
-      "payload-identity",
-      `source '${source.repo}' rewritten payload changed blob, mode, status, or path identity`,
-      source.repo,
-      source.payload,
-    )
-  }
-  const materializedPatchId = await git.stablePatchId(sourceRepo, currentPin, newTipSha)
-  if (materializedPatchId !== sourcePatchId) {
-    return candidateFailure(
-      "payload-certificate",
-      `source '${source.repo}' rewritten payload changed stable patch identity`,
-      source.repo,
-      source.payload,
-    )
-  }
-  const rangeDiff = await git.rangeDiff(sourceRepo, source.baseSha, source.tipSha, currentPin, newTipSha)
-  if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
-    return candidateFailure(
-      "payload-certificate",
-      `source '${source.repo}' rewritten commit range is not range-diff equivalent`,
-      source.repo,
-      source.payload,
-    )
-  }
-  const published = await publishSourceCandidate(git, sourceRepo, source.repo, newTipSha)
-  if (published.status === "failed") return published
-  const candidateRef = published.output
-  return {
-    status: "passed",
-    output: SourceRewriteSchema.parse({
-      repo: source.repo,
-      branch: source.branch,
-      oldBaseSha: source.baseSha,
-      oldTipSha: source.tipSha,
-      newBaseSha: currentPin,
-      newTipSha,
-      payload: source.payload,
-      candidateRef,
-      patchId: sourcePatchId,
-      rangeDiff: "=",
-    }),
-  }
-}
-
-async function publishSourceCandidate(
-  git: Git,
-  sourceRepo: string,
-  repoPath: string,
-  tipSha: string,
-): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
-  const candidateRef = sourceCandidateRefFor(tipSha)
-  const pinned = await git.run(
-    sourceRepo,
-    ["update-ref", "--create-reflog", candidateRef, tipSha, "0".repeat(tipSha.length)],
-    true,
-  )
-  if (pinned.code !== 0 && (await git.optionalCommit(sourceRepo, candidateRef)) !== tipSha) {
-    return candidateFailure(
-      "source-publish",
-      `source '${repoPath}' candidate ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
-    )
-  }
-  try {
-    const published = await pushRefUpdates({
-      root: sourceRepo,
-      git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
-      timeoutMs: GIT_TIMEOUT_MS,
-      verify: false,
-      updates: [
-        {
-          repository: sourceRepo,
-          remote: "origin",
-          source: tipSha,
-          destination: candidateRef,
-          expectedDestination: { state: "missing" },
-        },
-      ],
-    })
-    if (published.state !== "updated" && published.state !== "unchanged") {
-      throw new Error(gitSuperFailureDetail(published)?.message ?? `publication ended as ${published.state}`)
-    }
-  } catch (cause) {
-    return candidateFailure(
-      "source-publish",
-      `source '${repoPath}' candidate '${tipSha}' could not be published: ${messageOf(cause)}`,
-    )
-  }
-  return { status: "passed", output: candidateRef }
-}
-
-async function rebaseSource(
-  git: Git,
-  sourceRepo: string,
-  source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
-  currentPin: string,
-): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
-  return withScratchRoot(git, sourceRepo, "yrd-source-", undefined, (root) =>
-    rebaseSourceIn(git, sourceRepo, source, currentPin, root),
-  )
-}
-
-async function rebaseSourceIn(
-  git: Git,
-  sourceRepo: string,
-  source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
-  currentPin: string,
-  root: string,
-): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
-  const worktrees = createGitWorktreeStore({
-    repo: sourceRepo,
-    gitProcess: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
-    timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
-  })
-  const path = join(root, "worktree")
-  let added = false
-  let outcome: Readonly<{ status: "passed"; output: string }> | CandidateFailure | undefined
-  let operationFailure: unknown
-  try {
-    await worktrees.add({
-      kind: "detached",
-      path,
-      ref: source.tipSha,
-      operation: `Queue source ${source.repo} worktree add`,
-    })
-    added = true
-    const result = await git.run(
-      path,
-      [
-        "-c",
-        "user.name=Yrd Queue",
-        "-c",
-        "user.email=yrd-queue@example.invalid",
-        "-c",
-        "core.editor=true",
-        "rebase",
-        "--onto",
-        currentPin,
-        source.baseSha,
-        source.tipSha,
-      ],
-      true,
-    )
-    if (result.code !== 0) {
-      const paths = await unmergedPaths(git, path)
-      await git.run(path, ["rebase", "--abort"], true)
-      outcome =
-        paths.length === 0
-          ? candidateFailure(
-              "restack-failed",
-              `source '${source.repo}' could not restack onto '${currentPin}': ${result.stderr || result.stdout}`,
-            )
-          : candidateFailure(
-              "restack-conflict",
-              `source '${source.repo}' could not restack onto '${currentPin}' at [${paths.join(", ")}]`,
-              source.repo,
-              paths,
-            )
-    } else {
-      outcome = { status: "passed", output: await git.commit(path, "HEAD") }
-    }
-  } catch (cause) {
-    operationFailure = cause
-  }
-
-  let cleanupFailure: string | undefined
-  if (added) {
-    try {
-      await worktrees.remove(path, { operation: `Queue source ${source.repo} worktree remove` })
-    } catch (cause) {
-      cleanupFailure = messageOf(cause)
-    }
-  }
-  try {
-    await rm(root, { recursive: true, force: true })
-  } catch (cause) {
-    cleanupFailure ??= messageOf(cause)
-  }
-  if (operationFailure !== undefined) throw operationFailure
-  if (cleanupFailure !== undefined) return candidateFailure("scratch-cleanup-failed", cleanupFailure)
-  if (outcome === undefined) throw new Error("source restack produced no result")
-  return outcome
-}
-
 async function readGitlink(git: Git, repo: string, ref: string, path: string): Promise<string | undefined> {
   const result = await git.run(repo, ["ls-tree", "-z", ref, "--", path], true)
   if (result.code !== 0 || result.stdout === "") return undefined
@@ -5804,13 +4522,6 @@ async function isAncestor(git: Git, repo: string, ancestor: string, descendant: 
   return (await git.run(repo, ["merge-base", "--is-ancestor", ancestor, descendant], true)).code === 0
 }
 
-async function uniqueMergeBase(git: Git, repo: string, left: string, right: string): Promise<string | undefined> {
-  const result = await git.run(repo, ["merge-base", "--all", left, right], true)
-  if (result.code !== 0) return undefined
-  const bases = result.stdout.split(/\r?\n/u).filter((base) => base !== "")
-  return bases.length === 1 ? bases[0] : undefined
-}
-
 function nulPaths(value: string): string[] {
   return value
     .split("\0")
@@ -5825,18 +4536,6 @@ function normalizeConflictPath(path: string): string {
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
   const sortedRight = right.toSorted()
   return left.length === sortedRight.length && left.every((path, index) => path === sortedRight[index])
-}
-
-function isEqualRangeDiff(output: string): boolean {
-  const rows = output.split(/\r?\n/u).filter((row) => row.trim() !== "")
-  return (
-    rows.length > 0 && rows.every((row) => /^\d+:\s+[0-9a-f]+\s+=\s+\d+:\s+[0-9a-f]+(?:\s|$)/iu.test(row.trimStart()))
-  )
-}
-
-function intersection(left: readonly string[], right: readonly string[]): string[] {
-  const rightSet = new Set(right)
-  return left.filter((path) => rightSet.has(path)).toSorted()
 }
 
 function symmetricDifference(left: readonly string[], right: readonly string[]): string[] {
@@ -6238,7 +4937,7 @@ async function planSubmoduleMainPromotionGroup(
       }
     }
     if (containment.status === "drops-merged") {
-      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned submodule target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: ${linearRebuildRemedy(`submodule work for '${pin.path}'`, targetSha)}`
+      const message = `merged pin '${pin.path}' '${pin.sha}' does not contain planned submodule target '${targetSha}' at '${origin}' and would drop merged commits:\n${containment.commits}\nremedy: merge submodule target '${targetSha}' into the submodule work for '${pin.path}', then push and resubmit`
       return {
         status: "failed",
         error: submoduleMainFailure(
@@ -7126,7 +5825,6 @@ async function withPinnedCandidate<Output extends JsonValue>(
         candidateTreeSha: (await git.run(path, ["rev-parse", `${candidate.output.sha}^{tree}`])).stdout,
         candidateRef: pinned.ref,
         ...(candidate.output.changes.length === 0 ? {} : { changes: candidate.output.changes }),
-        ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
         ...(candidate.output.submoduleResolutions.length === 0
           ? {}
           : { submoduleResolutions: candidate.output.submoduleResolutions }),

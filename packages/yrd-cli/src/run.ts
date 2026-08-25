@@ -53,7 +53,6 @@ import {
   createFailure,
   failureFact,
   raiseFailure,
-  requireLinearRootTip,
   SUPPORTED_VERSIONS,
   type DeepReadonly,
   type JournalSnapshot,
@@ -4728,10 +4727,7 @@ async function requireQueueableSubmodulePinsForCommand(
     return undefined
   } catch (error) {
     if (failureFact(error) === undefined) throw error
-    await diagnostic(io, error, {
-      json: jsonEnabled(options),
-      actionableContext: { delivery: changeDeliveryState(pr) },
-    })
+    await diagnostic(io, error, { json: jsonEnabled(options) })
     return classifyFailure(error).exitCode
   }
 }
@@ -4864,14 +4860,6 @@ async function readyPr(
   const selected = requiredPr(app, selector)
   const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
   if (refusalExit !== undefined) return refusalExit
-  // The linear-root rule, before the expensive gate: a merge-tip head cannot
-  // merge, so refuse on the cheap lineage read instead of after paying for the
-  // required checks.
-  requireLinearRootTip(
-    `change '${selected.id}' head '${changeHead(selected)}'`,
-    selected.branch,
-    await requiredParents(changeHead(selected), io),
-  )
   await runPreSubmitGuards(services, io)
   await runRequiredChecks(services, io)
   await app.bays.ready({ pr: selector })
@@ -4892,125 +4880,6 @@ async function readyPr(
     createElement(ChangeResultView, { prs: [pr], runs: [], eligibilities: [eligibility] }),
   )
   return changeDeliveryState(pr) === "needs-author" ? 1 : 0
-}
-
-async function remergeChange(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  selector: string,
-  options: JsonOption &
-    Readonly<{
-      revision?: number
-      ref?: string
-      queue?: boolean
-      force?: boolean
-      preflight?: boolean
-      apply?: boolean
-    }>,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  if (options.ref !== undefined && options.revision !== undefined) {
-    usage("--ref cannot combine with --revision")
-  }
-  if (options.apply === true) {
-    if (options.preflight !== true || options.queue !== true) usage("--apply requires --preflight and --queue")
-    if (options.revision !== undefined) {
-      usage("--apply computes the current revision; it cannot combine with --revision")
-    }
-    if (options.force === true) usage("--apply computes whether force is safe; it cannot combine with --force")
-  }
-  const pr = requiredPr(app, selector)
-  const commandCurrent = currentChangeRev(pr)
-  const explicitProposedHeadSha =
-    options.ref === undefined
-      ? undefined
-      : ((await optionalRevision(options.ref, io)) ??
-        raiseFailure(
-          "refusal",
-          "proposed-commit-missing",
-          `yrd: proposed ref '${options.ref}' does not resolve to a commit`,
-        ))
-  const selectedRevision = options.revision ?? commandCurrent.n
-  const selected = pr.revs.find((revision) => revision.n === selectedRevision)
-  let proposedHeadSha = explicitProposedHeadSha
-  if (explicitProposedHeadSha === undefined && isLiveChange(pr) && selected !== undefined) {
-    const freshness = await requireImplicitRemergeBranchFreshness(pr, selected, options, services, io)
-    if (freshness.status === "tracked-drift") proposedHeadSha = freshness.liveHead
-  }
-  const currentRevisionAtStart = currentChangeRev(pr)
-  const sourceRevision =
-    proposedHeadSha !== undefined &&
-    options.revision === undefined &&
-    currentRevisionAtStart.head === proposedHeadSha &&
-    currentRevisionAtStart.recut?.fromRevision !== undefined
-      ? currentRevisionAtStart.recut.fromRevision
-      : selectedRevision
-  const expectedCurrent = {
-    revision: currentRevisionAtStart.n,
-    headSha: currentRevisionAtStart.head,
-    ...(isTracked(pr) ? { track: true } : {}),
-  }
-  if (options.preflight === true) {
-    const preflight = await preflightRemerge(
-      app,
-      selector,
-      {
-        ...(options.json === undefined ? {} : { json: options.json }),
-        ...(options.queue === undefined ? {} : { queue: options.queue }),
-        ...(options.revision !== undefined ||
-        (proposedHeadSha !== undefined && sourceRevision !== currentRevisionAtStart.n)
-          ? { revision: sourceRevision }
-          : {}),
-        ...(proposedHeadSha === undefined ? {} : { proposedHeadSha, expectedCurrent }),
-      },
-      options.apply === true ? { ...io, stdout: () => undefined } : io,
-    )
-    if (options.apply !== true) return 0
-    await applyPreflightVerdict(app, services, preflight, io)
-    const current = requiredPr(app, selector)
-    const revision = currentChangeRev(current)
-    const delivery = changeDeliveryState(current)
-    await printResult(
-      io,
-      jsonEnabled(options),
-      {
-        command: "pr.recut.apply",
-        pr: current.id,
-        verdict: preflight.verdict,
-        executed: preflight.next,
-        result: { revision: revision.n, headSha: revision.head, delivery },
-      },
-      [
-        `${preflight.verdict} ${current.id} r${preflight.revision}`,
-        `executed: ${preflight.next}`,
-        `result: ${current.id} r${revision.n} ${revision.head} (${delivery})`,
-      ].join("\n"),
-    )
-    return delivery === "needs-author" ? 1 : 0
-  }
-  const outcome = await executeRemergeChange(
-    app,
-    services,
-    selector,
-    {
-      ...(options.queue === undefined ? {} : { queue: options.queue }),
-      ...(options.force === undefined ? {} : { force: options.force }),
-      ...(proposedHeadSha === undefined
-        ? options.revision === undefined
-          ? {}
-          : { revision: options.revision }
-        : { revision: sourceRevision, proposedHeadSha, expectedCurrent }),
-    },
-    io,
-  )
-  const revision = changeRevisionNumber(outcome.current)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    outcome.output,
-    `${outcome.current.id} revision ${revision} ${outcome.unchanged ? "already matches" : "re-merge onto"} ${outcome.result.baseSha}`,
-  )
-  return changeDeliveryState(outcome.current) === "needs-author" ? 1 : 0
 }
 
 type ExecuteRemergeChangeOptions = Readonly<{
@@ -5096,29 +4965,6 @@ async function executeRemergeChange(
   if (source === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${fromRevision}`)
   }
-  const certificate = proposedHeadSha === undefined ? undefined : ("frozen-code-carrier-v1" as const)
-  const currentReview = app.bays.reviewState(pr.id).current
-  const approvedCurrentReview = currentReview?.decision === "approve" ? currentReview : undefined
-  if (certificate !== undefined) {
-    if (currentReview?.decision === "reject") {
-      raiseFailure(
-        "refusal",
-        "review-rejected",
-        `yrd: change '${pr.id}' was rejected by ${currentReview.by} for revision ${currentRevision.n}; ` +
-          `to replace that revision-bound verdict, ask ${currentReview.by} to run ` +
-          `'yrd pr review ${pr.id} --approve --by ${currentReview.by}'. ` +
-          `To answer with new content instead, push the corrected head to '${pr.branch}', then run ` +
-          `'yrd pr submit ${pr.branch}'.`,
-      )
-    }
-    if (approvedCurrentReview === undefined) {
-      raiseFailure(
-        "refusal",
-        "review-required",
-        `yrd: change '${pr.id}' needs approval for revision ${currentRevision.n}`,
-      )
-    }
-  }
   // Refuse to silently discard a green check: if the change's current head already
   // holds a passing check for its current revision, re-merging supersedes that
   // revision and throws the passing result away. Require an explicit --force so
@@ -5134,27 +4980,7 @@ async function executeRemergeChange(
   }
   const sourceReview = pr.reviews.findLast((review) => review.revision === source.n && review.headSha === source.head)
   const approval = sourceReview?.decision === "approve" ? sourceReview : undefined
-  const remergeExpectedCurrent = {
-    ...expectedCurrent,
-    ...(certificate === undefined || approvedCurrentReview === undefined
-      ? {}
-      : {
-          effectiveReview: {
-            revision: approvedCurrentReview.revision,
-            headSha: approvedCurrentReview.headSha,
-            by: approvedCurrentReview.by,
-            decision: approvedCurrentReview.decision,
-            at: approvedCurrentReview.at,
-            ...(approvedCurrentReview.ref === undefined ? {} : { ref: approvedCurrentReview.ref }),
-            ...(approvedCurrentReview.note === undefined ? {} : { note: approvedCurrentReview.note }),
-            ...(approvedCurrentReview.carriedFrom === undefined
-              ? {}
-              : { carriedFrom: approvedCurrentReview.carriedFrom }),
-          },
-          ...(options.force === true ? {} : { checksPassed: false as const }),
-        }),
-  }
-  const currentCompositions = source.composition === undefined ? sameIssueIntegratedCompositions(app, pr) : undefined
+  const remergeExpectedCurrent = expectedCurrent
   const remergeInput: Parameters<typeof service.recut>[0] = {
     id: pr.id,
     ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -5165,8 +4991,6 @@ async function executeRemergeChange(
     headSha: source.head,
     ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
     ...(source.props === undefined ? {} : { props: source.props }),
-    ...(source.composition === undefined ? {} : { composition: source.composition }),
-    ...(currentCompositions === undefined ? {} : { currentCompositions }),
     ...(proposedHeadSha === undefined ? {} : { proposedHeadSha }),
     ...(currentRevision.recut === undefined
       ? {}
@@ -5178,7 +5002,6 @@ async function executeRemergeChange(
             treeSha: currentRevision.recut.treeSha,
             patchId: currentRevision.recut.patchId,
             fromRevision: currentRevision.recut.fromRevision,
-            ...(currentRevision.composition === undefined ? {} : { composition: currentRevision.composition }),
           },
         }),
   }
@@ -5230,26 +5053,15 @@ async function executeRemergeChange(
             patchId: result.patchId,
             rangeDiff: "=" as const,
           },
-          ...(result.sourceRewrites ?? []).map((rewrite) => ({
-            repo: rewrite.repo,
-            fromHeadSha: rewrite.oldTipSha,
-            toHeadSha: rewrite.newTipSha,
-            patchId: rewrite.patchId,
-            rangeDiff: rewrite.rangeDiff,
-          })),
         ]
   // Re-merge Phase 1 (22925 family, staged-interim per (A)): this call still
-  // mints a ChangeRev for the direct path — the OLD handle, kept as transition
-  // staging, not new persistence semantics. `command.ts:2308`'s
-  // `remergeDirectChangeByMerge` computes `result` by MERGE now, not rebase,
-  // and `result.patchId` is an honest plain identity (no equivalence was
-  // certified — there is nothing to certify against under merge). The
-  // `rangeDiff: "="` tag on the root `sources[0]` entry above is a
-  // schema-constrained literal (no other value type-checks) that no read site
-  // for THIS array currently branches on — verified by inspection, not
-  // exhaustively — so it is a shape discriminant here, not a live "equivalence
-  // was proven" claim; flagging for whoever does the Phase-2 deletion, since a
-  // future consumer that starts reading it would need this same caveat.
+  // mints a ChangeRev — the OLD handle, kept as transition staging, not new
+  // persistence semantics. `result` is computed by MERGE (or, for a tracked
+  // drift, is the author's own proposed tip recorded verbatim), and
+  // `result.patchId` is an honest plain identity — no equivalence was
+  // certified, there is nothing to certify against under merge. Review
+  // carry-over for a proposed tip is gated on plain patch equivalence
+  // (`result.reviewEquivalent`), the rule that replaced payload certificates.
   // Phase 2 deletes this mint entirely for the direct path (candidate-ref +
   // checks-cache tracking replaces it) — see the plan doc's DoD row.
   const recorded = await app.bays.recut({
@@ -5259,10 +5071,8 @@ async function executeRemergeChange(
     baseSha: result.baseSha,
     treeSha: result.treeSha,
     patchId: result.patchId,
-    reviewCarried: approval !== undefined,
-    ...(certificate === undefined ? {} : { certificate }),
+    reviewCarried: approval !== undefined && result.reviewEquivalent !== false,
     sources,
-    ...(result.composition === undefined ? {} : { composition: result.composition }),
     expectedCurrent: remergeExpectedCurrent,
     ...(options.transition === undefined ? {} : { transition: options.transition }),
   })
@@ -6058,43 +5868,6 @@ function allQueueRuns(app: YrdCliApp): Run[] {
 
 function changeQueueRuns(app: YrdCliApp, pr: Change): Run[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
-}
-
-function sameIssueIntegratedCompositions(app: YrdCliApp, pr: Change): readonly CompositionV1[] | undefined {
-  if (pr.issue === undefined) return undefined
-  const integrated = new Set(
-    app.bays
-      .prs()
-      .filter(
-        (candidate) =>
-          candidate.id !== pr.id &&
-          candidate.issue === pr.issue &&
-          (changeDeliveryState(candidate) === "integrated" || changeDeliveryState(candidate) === "already-landed"),
-      )
-      .map((candidate) => candidate.id),
-  )
-  const compositions = allQueueRuns(app)
-    .filter(
-      (run) => Queues.succeeded(run) && run.prs.length > 0 && run.prs.every((member) => integrated.has(member.id)),
-    )
-    .toReversed()
-    .flatMap((run) => {
-      const rewrites = run.integration?.sourceRewrites
-      if (rewrites === undefined || rewrites.length === 0) return []
-      return [
-        CompositionV1Schema.parse({
-          version: 1,
-          sources: rewrites.map((rewrite) => ({
-            repo: rewrite.repo,
-            branch: rewrite.candidateRef,
-            baseSha: rewrite.newBaseSha,
-            tipSha: rewrite.newTipSha,
-            payload: rewrite.payload,
-          })),
-        }),
-      ]
-    })
-  return compositions.length === 0 ? undefined : compositions
 }
 
 async function listBays(
@@ -9874,23 +9647,12 @@ function habitantCycleRecovery(error: unknown): HabitantCycleRecovery | undefine
       fact.code === "pr-not-found" ||
       fact.code === "command-refused" ||
       fact.code === "candidate-ref-refused" ||
-      fact.code === "recut-certificate" ||
-      fact.code === "recut-base-diverged" ||
       fact.code === "authored-gitlink" ||
-      fact.code === "composition-invalid" ||
-      fact.code === "merge-tip-carrier" ||
       fact.code === "wrapper-mismatch" ||
-      fact.code === "source-missing" ||
-      fact.code === "source-lineage" ||
       fact.code === "payload-certificate" ||
-      fact.code === "payload-identity" ||
-      fact.code === "payload-mismatch" ||
-      fact.code === "payload-overlap" ||
       fact.code === "gitlink-inspection" ||
       fact.code === "refused-path" ||
       fact.code === "refused-path-inspection" ||
-      fact.code === "restack-conflict" ||
-      fact.code === "restack-failed" ||
       fact.code === "spawn-cwd-missing"
     if (changeScoped) {
       return {
@@ -10667,9 +10429,7 @@ export async function applyRefusalRemedies(
       attempted.add(refusalRemedyKey(current.id, revision.n, revision.head))
     }
     const identity = { pr: plan.pr, revision: plan.revision, code: plan.failure.code, count: plan.count }
-    const projected = actionableFailure(plan.failure, {
-      delivery: changeDeliveryState(requiredPr(app, plan.pr)),
-    })
+    const projected = actionableFailure(plan.failure)
     const settleNeedsPerson = async (reason: string): Promise<void> => {
       const current = app.bays.pr(plan.pr)
       const refusal = stateOf(app).queues.admissionRefusals[plan.pr]
@@ -12527,22 +12287,6 @@ function buildProgram(
     .option("--untrack", "stop tracking: a stale head again blocks the re-merge")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
-  // Off the help surface (I23: "re-merge disappears — resubmitting is submit
-  // again"); the verb keeps working for the flows that learned it.
-  const remerge = pr
-    .command("recut <selector>", { hidden: true })
-    .description("re-merge a change revision onto the current base")
-    .option("--revision <number>", "select an older immutable PR revision", int)
-    .option("--ref <ref>", "certify an independently authored candidate commit")
-    .option("--preflight", "classify re-merge, withdraw, force, or no-op without changing anything")
-    .option("--apply", "execute the regenerative verdict computed by --preflight")
-    .option("--queue", "submit the fresh revision and request its configured checks")
-    .option("--force", "re-merge even when the current revision already passed its checks")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      setExit(await remergeChange(installed(), installedServices(), selector, options, io)),
-    )
-  addAuthoredCarrierWorkflow(remerge, name)
   // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
   pr.command("publish <selector>", { hidden: true })
     .description("request credential-bearing publication of one immutable change revision")

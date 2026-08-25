@@ -25,8 +25,6 @@ export type ActionableFailure = Readonly<{
  * delivery state refuses is a wrong instruction, not a hint (22396). Callers
  * that hold the change thread its state; callers that do not get the remedy no
  * state refuses. */
-export type ActionableFailureContext = Readonly<{ delivery?: ChangeDeliveryState }>
-
 const GENERIC_RESOLUTION = "Correct the cause above, then retry the same Yrd command."
 
 function oneLineCause(message: string): string {
@@ -86,10 +84,6 @@ function quotedValue(message: string, pattern: RegExp): string | undefined {
   return pattern.exec(message)?.[1]
 }
 
-function prId(message: string): string | undefined {
-  return quotedValue(message, /\b(?:PR|change)\s+'([^']+)'/iu)
-}
-
 /** `yrd pr recut` refuses a terminal change outright (`terminal-target`): an
  * integrated/already-landed identity is frozen evidence and a
  * withdrawn/canceled one is reopened by resubmitting its branch, not re-merge. */
@@ -105,29 +99,6 @@ const REMERGE_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<Change
  * applied mechanically reads the same answer the printer used. */
 export function remergeRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
   return delivery !== undefined && REMERGE_REFUSING_STATES.has(delivery)
-}
-
-/** Re-record the branch's corrected head onto the change.
- *
- * `yrd pr create <branch>` is accepted only for a draft (pushed) PR — the
- * create path guards the delivery state twice and refuses every other one — so
- * it is emitted only when the projection positively knows the change is a draft,
- * where it is preferable because it keeps the change a draft. `yrd pr submit
- * <branch>` is refused by no delivery state (a pushed draft is submitted, a
- * submitted/needs-author PR records a fresh revision, a rejected one resumes,
- * a withdrawn/canceled one reopens, and a merged branch mints a fresh
- * delivery), so it is also the safe answer when the state is unknown. */
-function recordCommand(delivery: ChangeDeliveryState | undefined): string {
-  return delivery === "pushed" ? "yrd pr create <branch>" : "yrd pr submit <branch>"
-}
-
-function remergeSteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
-  if (remergeRefusedByDelivery(delivery)) return []
-  return [`yrd pr recut ${pr} --preflight --queue --apply`]
-}
-
-function redeliverySteps(pr: string, delivery: ChangeDeliveryState | undefined): readonly string[] {
-  return [recordCommand(delivery), ...remergeSteps(pr, delivery)]
 }
 
 function authoredGitlinkSubmodules(message: string): readonly string[] {
@@ -177,90 +148,13 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
   })
 }
 
-function remergeGitlinkFailure(
-  failure: FailureLike,
-  cause: string,
-  context: ActionableFailureContext,
-): ActionableFailure | undefined {
-  const pr = prId(failure.message)
-  const path = quotedValue(failure.message, /pins\s+submodule\s+'([^']+)'\s+to/iu)
-  const basePin = quotedValue(
-    failure.message,
-    /target\s+root\s+'[^']+'\s+pins\s+submodule\s+'[^']+'\s+to\s+'([^']+)'/iu,
-  )
-  const authoredPin = quotedValue(
-    failure.message,
-    /replayed\s+authored\s+root\s+'[^']+'\s+pins\s+(?:it|submodule\s+'[^']+')\s+to\s+'([^']+)'/iu,
-  )
-  if (pr === undefined || path === undefined || basePin === undefined || authoredPin === undefined) return undefined
-  // The compose recipe is NOT a mechanical remedy: its merge step composes two
-  // divergent submodule pins and can conflict, and resolving that conflict is a
-  // judgment call. `resolution` — the machine-readable channel — therefore
-  // carries the escalation, and the recipe rides `escalation.steps` as guidance
-  // for the human who takes it (22396).
-  return Object.freeze({
-    code: failure.code,
-    cause,
-    resolution: Object.freeze([
-      `Escalate to a human: composing '${path}' from authored pin '${authoredPin}' onto base pin '${basePin}' ` +
-        "needs merge-conflict judgment; do not run the recipe mechanically.",
-    ]),
-    escalation: Object.freeze({
-      reason:
-        `git -C ${path} merge ${basePin} composes two divergent submodule pins and can conflict; ` +
-        "conflict resolution is judgment, not a mechanical step.",
-      steps: Object.freeze([
-        `git -C ${path} fetch --all --prune`,
-        `git -C ${path} switch -c yrd/compose-${pr} ${authoredPin}`,
-        `git -C ${path} merge ${basePin}`,
-        `git -C ${path} push -u origin HEAD`,
-        `git add ${path} && git commit -m "fix(yrd): compose ${path} pins"`,
-        ...redeliverySteps(pr, context.delivery),
-      ]),
-    }),
-    reference: "README.md#resolving-divergent-gitlink-pins",
-  })
-}
-
-/**
- * A re-merge whose certified base the authoritative base never descended from is
- * cured by exactly one thing: a fresh revision recorded at the base the queue
- * actually holds. The generic "retry the same Yrd command" line is a wrong
- * instruction here — the queue already parked the change precisely because retrying
- * re-derives the same stale certificate — so this prints the redelivery pair
- * every delivery state accepts instead. No merge judgment is involved, so the
- * remedy stays machine-readable rather than an escalation.
- */
-function divergedRemergeBaseFailure(
-  failure: FailureLike,
-  cause: string,
-  context: ActionableFailureContext,
-): ActionableFailure | undefined {
-  const pr = prId(failure.message)
-  if (pr === undefined) return undefined
-  return Object.freeze({
-    code: failure.code,
-    cause,
-    resolution: Object.freeze(redeliverySteps(pr, context.delivery)),
-    reference: "README.md#pr-eligibility-and-checks",
-  })
-}
-
-export function actionableFailure(failure: FailureLike, context: ActionableFailureContext = {}): ActionableFailure {
+export function actionableFailure(failure: FailureLike): ActionableFailure {
   const cause = oneLineCause(failure.message)
   const retainedWorkspace = retainedWorkspaceFromMessage(failure.message)
   if (retainedWorkspace !== undefined || failure.code === "required-check-failed") {
     return retainedWorkspaceFailure(failure, cause, retainedWorkspace)
   }
   if (failure.code === "authored-gitlink") return authoredGitlinkFailure(failure, cause)
-  if (failure.code === "recut-gitlink-conflict") {
-    const projected = remergeGitlinkFailure(failure, cause, context)
-    if (projected !== undefined) return projected
-  }
-  if (failure.code === "recut-base-diverged") {
-    const projected = divergedRemergeBaseFailure(failure, cause, context)
-    if (projected !== undefined) return projected
-  }
   const commands = [...new Set([...(failure.resolution ?? []), ...embeddedYrdCommands(failure.message)])]
   return Object.freeze({
     code: failure.code,

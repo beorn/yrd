@@ -480,31 +480,17 @@ export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmission
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 /**
  * Refusals a retry cannot change, because the fact they report is fixed for the
- * revision that carries it: a certified re-merge base the authoritative base
- * never descended from does not become ancestral by retrying. It needs a NEW
- * revision, so the queue parks it on the first refusal rather than
- * re-refusing it at the head.
+ * revision that carries it. Such a refusal needs a NEW revision, so the queue
+ * parks it on the first refusal rather than re-refusing it at the head.
  *
- * Membership is by exact code, and the code is the discrimination: the sibling
- * `recut-certificate` / `recut-gitlink-object-missing` refusals report an
- * unreadable repository, which a fetch cures, and stay on the ordinary retry
- * threshold. See `remergeBaseMovement` in command.ts for where the two are told
- * apart.
- *
- * `recut-gitlink-conflict` (a non-ancestral gitlink commit) was this set's
- * other member through Phase 0 of the re-merge refactor. Phase 1's deletion
- * sweep (task B, 2026-08-23) removed its only producers,
- * `resolveGitlinkFastForward`/`resolveGitlinkByFinalPin` (the old rebase-based
- * direct path's per-gitlink conflict resolution) — confirmed by exhaustive
- * `rg` across yrd-queue/yrd-cli/yrd-bay `src`: zero remaining `createFailure`/
- * `candidateFailure` call sites use this code, only this set's own (now
- * corrected) definition and one presentation-layer consumer,
- * `yrd-cli/src/actionable-error.ts`'s now-dead `recut-gitlink-conflict`
- * branch (left as residue — six test files still reference the code by name,
- * out of this pass's scope; see the handoff report). Pruned here rather than
- * left dangling in a set with no other member producing it.
+ * Deliberately empty since the re-merge refactor deleted the certificate
+ * machinery (its members `recut-gitlink-conflict` and `recut-base-diverged`
+ * lost their last producers in Phase 1's deletion sweeps): candidates are
+ * rebuilt by merge, so no admission refusal is structurally permanent today.
+ * The set and its park-after-1-refusal machinery stay for the next such code;
+ * item 3's retirement-with-a-reason design is the eventual successor.
  */
-const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set(["recut-base-diverged"])
+const STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS = new Set<string>([])
 
 /** How long a pushed-but-unsubmitted PR may sit before `queue audit` flags it
  * `draft-stranded`. Mirrors the 15m orphaned-run grace: long enough for a
@@ -7718,8 +7704,6 @@ function runnablePRs(
  *   or a composition that built a candidate the merge floor refuses. Retried
  *   with backoff by the env-storm path (21622 condition 4); never routed to the
  *   author. The cure is always another composition, so the retry is the remedy.
- * - recut-lineage: owned by the auto-recut slice, which classifies these on its
- *   own path — not surfaced as needs-author here.
  * - plain-rejected: an ordinary failure with no composition meaning — no
  *   author-blame routing and no auto-retry; the operator re-evaluates. The
  *   intent-* codes live here because a stale evaluation is cured by
@@ -7739,21 +7723,16 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // must survive a refusal that is not the author's fault" violation this
     // phase's own bead names.
     "component-model-authorization-refused",
-    // Author-actionable like its siblings, but the action is "close", not
-    // "re-author": the carrier's pins already merged, so there is nothing to
-    // rebuild.
-    "carrier-pin-already-landed",
-    "composition-invalid",
     // All three read the branch's authored delta base, and all are cured the
     // same way `gitlink-inspection` is: the author restores readable history.
     "contribution-inspection",
     "deletion-inspection",
     // The merge kept only one parent's version of a contested file. The remedy
-    // is `carrier-drops-landed`'s linear rebuild, which makes the resolution a
-    // reviewable diff instead of one resolved against a virtual base.
+    // is the author's own merge of the current base, which makes the
+    // resolution a reviewable diff instead of one resolved against a virtual
+    // base.
     "dropped-parent-contribution",
     "gitlink-inspection",
-    "merge-tip-carrier",
     // The author's gitlink is a min commit, never a value — the shaset fill-in
     // needs it reachable from the submodule's own main before it can compute
     // the final value. Re-merge Phase 1's own refusal (the shaset model's
@@ -7762,16 +7741,11 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "min-commit-unpublished",
     "refused-path",
     "refused-path-inspection",
-    // The remedy is the same linear rebuild `carrier-drops-landed` prescribes;
-    // only the instrument that caught the lost merge differs.
+    // Same remedy as `dropped-parent-contribution`; only the instrument that
+    // caught the lost merge differs.
     "unauthored-path-deletion",
     "wrapper-mismatch",
-    "source-missing",
-    "source-lineage",
     "payload-certificate",
-    "payload-identity",
-    "payload-mismatch",
-    "payload-overlap",
   ]),
   "infra-retry": new Set<string>([
     "carrier-inspection",
@@ -7784,7 +7758,6 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // deletes those paths — so this must never present as needs-author; a fresh
     // composition against the current base is the whole remedy.
     "merge-unauthored-deletion",
-    "source-publish",
     "scratch-cleanup-failed",
     "wrapper-generation",
     // This Yrd HOST has no verdict-message resolver wired up, or cannot
@@ -7800,7 +7773,6 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     "component-model-authorizer-unavailable",
     "component-model-identity-unavailable",
   ]),
-  "recut-lineage": new Set<string>(["recut-certificate", "recut-base-diverged", "restack-conflict", "restack-failed"]),
   "plain-rejected": new Set<string>(["intent-base-moved", "intent-batch-refused", "intent-component-unknown"]),
 } as const
 

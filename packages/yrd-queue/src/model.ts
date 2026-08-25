@@ -54,11 +54,10 @@ const FlowPinSchema = z
   .strict()
 
 const ChangeSnapshotRemergeProofSchema = ChangeRemergeProofSchema.extend({
-  /** Current exact carrier certificate. Absence is accepted only for replaying legacy queue records. */
+  /** Replay-only: certificate-era queue records carry these; nothing mints
+   * them since the re-merge refactor deleted payload certificates. */
   certificate: ChangeRemergeCertificateSchema.optional(),
-  /** Immutable base certified by this re-merge revision. Optional only for replaying legacy queue records. */
   baseSha: GitShaSchema.optional(),
-  /** Immutable approved-source endpoints. Both are absent only for legacy queue records. */
   sourceBaseSha: GitShaSchema.optional(),
   sourceHeadSha: GitShaSchema.optional(),
 }).strict()
@@ -172,28 +171,8 @@ export const ChangeSnapshotSchema = z
       context.addIssue({ code: "custom", path: ["recut", ...path], message })
     const rootSources = snapshot.recut?.sources?.filter(({ repo }) => repo === ".") ?? []
     const rootSource = rootSources[0]
-    const frozen = snapshot.recut?.certificate === "frozen-code-carrier-v1"
-    if (frozen && snapshot.recut?.baseSha === undefined) {
-      remergeIssue(["baseSha"], "a frozen code-carrier certificate requires an immutable candidate base")
-    }
-    if (frozen && (snapshot.recut?.sourceBaseSha === undefined || snapshot.recut.sourceHeadSha === undefined)) {
-      remergeIssue([], "a frozen code-carrier certificate requires a complete immutable source range")
-    }
-    if (!frozen && (snapshot.recut?.sourceBaseSha !== undefined || snapshot.recut?.sourceHeadSha !== undefined)) {
-      remergeIssue([], "immutable source endpoints require a frozen code-carrier certificate")
-    }
     if (rootSources.length > 1) {
       remergeIssue(["sources"], "a re-merge snapshot may carry at most one root source mapping")
-    }
-    if (frozen && rootSources.length !== 1) {
-      remergeIssue(["sources"], "a frozen code-carrier certificate requires exactly one root source mapping")
-    }
-    if (
-      rootSource !== undefined &&
-      snapshot.recut?.sourceHeadSha !== undefined &&
-      rootSource.fromHeadSha !== snapshot.recut.sourceHeadSha
-    ) {
-      remergeIssue(["sources"], "root source mapping must start at the certified source head")
     }
     if (rootSource !== undefined && rootSource.toHeadSha !== snapshot.headSha) {
       remergeIssue(["sources"], "root source mapping must end at the current candidate head")
@@ -257,7 +236,11 @@ export const SubmoduleModelChangeAuthorizationSchema = z
     if (patchId === undefined) {
       context.addIssue({ code: "custom", message: "re-merge source requires patchId", path: ["patchId"] })
     } else if (source.patchId !== patchId) {
-      context.addIssue({ code: "custom", message: "re-merge source patchId must match receipt patchId", path: ["source"] })
+      context.addIssue({
+        code: "custom",
+        message: "re-merge source patchId must match receipt patchId",
+        path: ["source"],
+      })
     }
     if (source.toHeadSha !== headSha) {
       context.addIssue({ code: "custom", message: "re-merge source must end at receipt headSha", path: ["source"] })

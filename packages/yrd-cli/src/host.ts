@@ -47,7 +47,6 @@ import {
   failureFact,
   pipe,
   raiseFailure,
-  requireLinearRootTip,
   SUPPORTED_VERSIONS,
   stageReport,
   withCheckpointMigrations,
@@ -69,7 +68,6 @@ import {
   gitMergeStep,
   gitMergeRecorder,
   findRepositoryMergeRecords,
-  linearRebuildRemedy,
   repairMergeRecordEstate,
   inspectGitQueueTarget,
   overlayGateScripts,
@@ -623,11 +621,8 @@ export function configuredChecks(
           "refusal",
           "required-check-composition-conflict",
           `yrd: required-check candidate '${candidateSha}' conflicts with base '${baseSha}': ${detail}; ` +
-            linearRebuildRemedy(
-              "the change on a fresh branch",
-              config.base,
-              "then push that fresh branch and run 'yrd pr submit <new-branch>'",
-            ) +
+            `merge base '${config.base}' into the change's branch, resolve the conflict, ` +
+            `then push and run 'yrd pr submit <branch>'` +
             retained,
         )
       }
@@ -1572,40 +1567,6 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
-async function requireSubmitLinearTip(
-  process: Pick<Process, "run">,
-  repo: string,
-  branch: string,
-  head: string | undefined,
-  source: "local" | "origin",
-  localHead?: string,
-): Promise<string | undefined> {
-  if (head === undefined) return undefined
-  const args = ["rev-list", "--parents", "-n", "1", head]
-  const lineage = await process.run({
-    argv: ["git", "-C", repo, ...args],
-    cwd: repo,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  assertGitDidNotTimeOut(lineage, args)
-  const [commit, ...parents] = lineage.stdout.trim().toLowerCase().split(/\s+/u)
-  if (lineage.exitCode !== 0 || commit !== head) {
-    raiseFailure(
-      "configuration",
-      "submit-branch-lineage-inspection-failed",
-      `yrd: could not inspect submitted ${source === "origin" ? `branch 'origin/${branch}'` : `local branch '${branch}'`} ` +
-        `at '${head}': ${lineage.stderr.trim() || lineage.stdout.trim() || `exit ${String(lineage.exitCode)}`}`,
-    )
-  }
-  const identity =
-    source === "origin"
-      ? `live 'origin/${branch}' is '${head}'; local '${branch}' is '${localHead ?? "missing"}'`
-      : `local '${branch}' is '${head}'`
-  requireLinearRootTip(identity, branch, parents)
-  return head
-}
-
 /** Parent SHAs of one commit — the linear-root gate's evidence at entrances
  * that hold a sha rather than a branch (`pr ready`, active-Bay submit). */
 async function readCommitParents(process: Pick<Process, "run">, repo: string, sha: string): Promise<readonly string[]> {
@@ -1646,8 +1607,7 @@ async function resolveSubmitCommit(
     )
   }
   if (!origin.configured) {
-    const localHead = await resolveCommit(process, repo, `refs/heads/${branch}`)
-    return requireSubmitLinearTip(process, repo, branch, localHead, "local")
+    return resolveCommit(process, repo, `refs/heads/${branch}`)
   }
   const advertisement = await observeOriginBranchAdvertisement(process, repo, branch)
   if (!advertisement.ok) {
@@ -1661,8 +1621,7 @@ async function resolveSubmitCommit(
   // Origin absence is a fact, not a fetch failure: this is an unpublished
   // authored branch and its local commit is the only candidate available.
   if (!advertisement.advertised) {
-    const localHead = await resolveCommit(process, repo, `refs/heads/${branch}`)
-    return requireSubmitLinearTip(process, repo, branch, localHead, "local")
+    return resolveCommit(process, repo, `refs/heads/${branch}`)
   }
   const observed = await observeFreshRemoteBranch(process, repo, branch)
   if (!observed.ok && observed.phase === "fetch") {
@@ -1680,8 +1639,7 @@ async function resolveSubmitCommit(
       `yrd: refreshed live branch '${branch}' but '${observed.target}' did not resolve to a commit: ${observed.detail}`,
     )
   }
-  const localHead = await resolveCommit(process, repo, `refs/heads/${branch}`)
-  return requireSubmitLinearTip(process, repo, branch, observed.head, "origin", localHead)
+  return observed.head
 }
 
 async function readConfigFromBase(

@@ -2320,7 +2320,7 @@ function projectFailure(
   evidence?: HumanFailureProjection["evidence"],
   delivery?: ChangeDeliveryState,
 ): HumanFailureProjection {
-  const failure = actionableFailure(fact, delivery === undefined ? {} : { delivery })
+  const failure = actionableFailure(fact)
   return {
     ...failure,
     summary: actionableFailureSummary(failure),
@@ -3892,13 +3892,13 @@ function diagnosticBlocker(
   const job = step?.job
   const context = { delivery: changeDeliveryState(pr) }
   if (job?.status === "completed" && job.conclusion === "failure") {
-    return actionableFailureSummary(actionableFailure(job.error, context))
+    return actionableFailureSummary(actionableFailure(job.error))
   }
   if (job?.status === "completed" && job.conclusion === "timed_out") {
-    return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }, context))
+    return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }))
   }
   if (job?.status === "completed" && job.conclusion === "cancelled") {
-    return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }, context))
+    return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }))
   }
   if (job?.status === "in_progress") {
     const leaseExpiresAt = Date.parse(job.leaseExpiresAt)
@@ -3912,7 +3912,7 @@ function diagnosticBlocker(
     }
   }
   if (job?.status === "waiting") return `waiting: ${singleQueue(job.detail ?? job.url ?? job.token)}`
-  if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error, context))
+  if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error))
   if (pr.detail !== undefined) return singleQueue(pr.detail)
   return undefined
 }
