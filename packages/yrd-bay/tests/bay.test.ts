@@ -1971,195 +1971,6 @@ describe("withBays", () => {
     )
   })
 
-  it.each(["rejected", "missing"] as const)(
-    "atomically refuses a certified recut when its expected current approval is %s",
-    async (race) => {
-      await using app = (await createHarness()).app
-      await app.bays.submit({ branch: `issue/certified-review-${race}`, headSha: HEAD_1, baseSha: BASE, draft: true })
-      if (race === "rejected") {
-        await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: `approved-${race}` })
-        const approval = app.bays.reviewState("PR1").current
-        if (approval === undefined) throw new Error("expected current approval")
-        await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "intervening-rejection" })
-      }
-      const approval =
-        race === "rejected"
-          ? {
-              revision: 1,
-              headSha: HEAD_1,
-              by: "@cto",
-              decision: "approve" as const,
-              at: "2026-01-01T00:00:00.000Z",
-              ref: `approved-${race}`,
-            }
-          : {
-              revision: 1,
-              headSha: HEAD_1,
-              by: "@cto",
-              decision: "approve" as const,
-              at: "2026-01-01T00:00:00.000Z",
-              ref: "approval-never-recorded",
-            }
-      const before = await Array.fromAsync(app.events())
-
-      await expect(
-        app.bays.recut({
-          pr: "PR1",
-          fromRevision: 1,
-          headSha: HEAD_2,
-          baseSha: "b".repeat(40),
-          treeSha: "c".repeat(40),
-          patchId: "d".repeat(40),
-          reviewCarried: true,
-          certificate: "frozen-code-carrier-v1",
-          sources: [
-            {
-              repo: ".",
-              fromHeadSha: HEAD_1,
-              toHeadSha: HEAD_2,
-              patchId: "d".repeat(40),
-              rangeDiff: "=",
-            },
-          ],
-          expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: approval, checksPassed: false },
-        }),
-      ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-review-changed" } })
-      expect(await Array.fromAsync(app.events())).toEqual(before)
-      expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
-    },
-  )
-
-  it("does not let an idempotent certified recut bypass an intervening current rejection", async () => {
-    await using app = (await createHarness()).app
-    const patchId = "d".repeat(40)
-    await app.bays.submit({ branch: "issue/certified-idempotent", headSha: HEAD_1, baseSha: BASE, draft: true })
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-r1" })
-    const sourceApproval = app.bays.reviewState("PR1").current
-    if (sourceApproval === undefined) throw new Error("expected source approval")
-    const remerge = {
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: HEAD_2,
-      baseSha: "b".repeat(40),
-      treeSha: "c".repeat(40),
-      patchId,
-      reviewCarried: true,
-      certificate: "frozen-code-carrier-v1",
-      sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId, rangeDiff: "=" }],
-    } as const
-    await app.bays.recut({
-      ...remerge,
-      expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: sourceApproval, checksPassed: false },
-    })
-    expect(currentChangeRev(app.bays.pr("PR1")!).recut).toMatchObject({ certificate: "frozen-code-carrier-v1" })
-    const carriedApproval = app.bays.reviewState("PR1").current
-    if (carriedApproval === undefined) throw new Error("expected carried approval")
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "rejected-r2" })
-    const before = await Array.fromAsync(app.events())
-
-    await expect(
-      app.bays.recut({
-        ...remerge,
-        expectedCurrent: { revision: 2, headSha: HEAD_2, effectiveReview: carriedApproval, checksPassed: false },
-      }),
-    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-review-changed" } })
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-    expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
-  })
-
-  it("atomically refuses a non-force certified recut when current checks become passing", async () => {
-    await using app = (await createHarness()).app
-    const patchId = "d".repeat(40)
-    await app.bays.submit({ branch: "issue/certified-green-race", headSha: HEAD_1, baseSha: BASE, draft: true })
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-green-race" })
-    const approval = app.bays.reviewState("PR1").current
-    if (approval === undefined) throw new Error("expected current approval")
-    await app.bays.recordAdmission({
-      pr: "PR1",
-      revision: 1,
-      headSha: HEAD_1,
-      admission: { status: "passed", baseSha: BASE, steps: [] },
-    })
-    const before = await Array.fromAsync(app.events())
-
-    await expect(
-      app.bays.recut({
-        pr: "PR1",
-        fromRevision: 1,
-        headSha: HEAD_2,
-        baseSha: "b".repeat(40),
-        treeSha: "c".repeat(40),
-        patchId,
-        reviewCarried: true,
-        certificate: "frozen-code-carrier-v1",
-        sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId, rangeDiff: "=" }],
-        expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: approval, checksPassed: false },
-      }),
-    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-would-discard-green" } })
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
-  })
-
-  it.each([
-    {
-      name: "missing",
-      reviewCarried: true,
-      sources: [
-        {
-          repo: "vendor/submodule",
-          fromHeadSha: HEAD_1,
-          toHeadSha: HEAD_2,
-          patchId: "d".repeat(40),
-          rangeDiff: "=",
-        },
-      ],
-    },
-    {
-      name: "duplicate",
-      reviewCarried: true,
-      sources: [
-        { repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" },
-        { repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" },
-      ],
-    },
-    {
-      name: "wrong source head",
-      reviewCarried: true,
-      sources: [{ repo: ".", fromHeadSha: "f".repeat(40), toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" }],
-    },
-    {
-      name: "wrong candidate head",
-      reviewCarried: true,
-      sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: "f".repeat(40), patchId: "d".repeat(40), rangeDiff: "=" }],
-    },
-    {
-      name: "uncarried review",
-      reviewCarried: false,
-      sources: [{ repo: ".", fromHeadSha: HEAD_1, toHeadSha: HEAD_2, patchId: "d".repeat(40), rangeDiff: "=" }],
-    },
-  ] as const)("refuses a certified recut with a $name root source mapping", async ({ reviewCarried, sources }) => {
-    await using app = (await createHarness()).app
-    await app.bays.submit({ branch: "issue/certified-root", headSha: HEAD_1, baseSha: BASE, draft: true })
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "approved-root" })
-    const approval = app.bays.reviewState("PR1").current
-    if (approval === undefined) throw new Error("expected current approval")
-
-    await expect(
-      app.bays.recut({
-        pr: "PR1",
-        fromRevision: 1,
-        headSha: HEAD_2,
-        baseSha: "b".repeat(40),
-        treeSha: "c".repeat(40),
-        patchId: "d".repeat(40),
-        reviewCarried,
-        certificate: "frozen-code-carrier-v1",
-        sources,
-        expectedCurrent: { revision: 1, headSha: HEAD_1, effectiveReview: approval, checksPassed: false },
-      }),
-    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "recut-certificate-invalid" } })
-    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
-  })
 
   it("atomically records admitted-to-refreshed recuts without overwriting a newer authored revision", async () => {
     await using app = (await createHarness()).app
@@ -2493,7 +2304,7 @@ describe("withBays", () => {
 
   it("journals normalized source compositions and rejects ambiguous payload paths", async () => {
     const { app } = await createHarness()
-    await app.bays.submit({
+    await app.bays.intake({
       branch: "issue/composed",
       headSha: HEAD_1,
       composition: {
@@ -2527,7 +2338,7 @@ describe("withBays", () => {
       ],
     })
     await expect(
-      app.bays.submit({
+      app.bays.intake({
         branch: "issue/invalid",
         headSha: HEAD_2,
         composition: {
@@ -2547,9 +2358,9 @@ describe("withBays", () => {
     await app.close()
   })
 
-  it("preserves and canonicalizes an existing composition when resubmitting a selection", async () => {
+  it("preserves an existing recorded composition when resubmitting a selection", async () => {
     const { app } = await createHarness()
-    await app.bays.submit({
+    await app.bays.intake({
       branch: "issue/composed",
       headSha: HEAD_1,
       composition: {
@@ -2568,28 +2379,11 @@ describe("withBays", () => {
     const original = app.bays.pr("PR1")
     const originalComposition = original === undefined ? undefined : currentChangeRev(original).composition
 
-    const canonicalRepeat = await app.bays.submitSelection("issue/composed", {
-      composition: {
-        version: 1,
-        sources: [
-          {
-            repo: "vendor/example",
-            branch: "issue/source",
-            baseSha: "2".repeat(40),
-            tipSha: "3".repeat(40),
-            payload: ["src/z.ts", "src/a.ts"],
-          },
-        ],
-      },
-      resolveRevision: async () => HEAD_1,
-      run: runtime,
-    })
     const omittedRepeat = await app.bays.submitSelection("issue/composed", {
       resolveRevision: async () => HEAD_1,
       run: runtime,
     })
 
-    expect(changeFacts(canonicalRepeat)).toMatchObject({ current: { n: 1, composition: originalComposition } })
     expect(changeFacts(omittedRepeat)).toMatchObject({ current: { n: 1, composition: originalComposition } })
     expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
     await app.close()

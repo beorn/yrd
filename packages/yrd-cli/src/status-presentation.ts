@@ -180,7 +180,13 @@ const AUTO_REQUEUE_STALE_FAILURE_CODES = new Set(["stale-check", "stale-steps", 
 // ever consulted — see canonicalRefusalCode below.
 const CANCELED_FAILURE_CODES = new Set(["canceled", "queue-canceled", "run-canceled"])
 const NEEDS_AUTHOR_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["needs-author"]
-const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["infra-retry"]
+const INFRA_RETRY_FAILURE_CODES: ReadonlySet<string> = new Set([
+  ...COMPOSITION_FAILURE_BUCKETS["infra-retry"],
+  // Historical-only: the retired composed path's source publisher. Nothing
+  // produces it since the re-merge refactor, but recorded runs and release
+  // reasons still carry it, and their presentation stays honest.
+  "source-publish",
+])
 
 /**
  * One code-aware decision for every status consumer. Classification alone is

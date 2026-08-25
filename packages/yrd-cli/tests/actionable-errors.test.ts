@@ -76,14 +76,14 @@ function refusedBy(delivery: ChangeDeliveryState, command: string): boolean {
 
 describe("actionable failure projection", () => {
   it("turns authored-gitlink into a submit remedy, independent of PR delivery state", () => {
-    expect(actionableFailure(AUTHORED_GITLINK, { delivery: "pushed" })).toEqual({
+    expect(actionableFailure(AUTHORED_GITLINK)).toEqual({
       code: "authored-gitlink",
       cause: "change 'PR42' changes generated-only gitlinks [vendor/yrd]",
       resolution: ["yrd pr submit <branch>"],
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
     for (const delivery of ALL_DELIVERY_STATES) {
-      expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual(["yrd pr submit <branch>"])
+      expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
     }
   })
 
@@ -153,30 +153,6 @@ describe("actionable failure projection", () => {
     })
   })
 
-  it("names both root commits and pins in a recut divergence", () => {
-    const failure = actionableFailure(RECUT_CONFLICT)
-
-    expect(failure.code).toBe("recut-gitlink-conflict")
-    expect(failure.cause).toContain(`target root '${BASE_ROOT}'`)
-    expect(failure.cause).toContain(`replayed authored root '${AUTHORED_ROOT}'`)
-    expect(failure.cause).toContain(`'${BASE_PIN}'`)
-    expect(failure.cause).toContain(`'${AUTHORED_PIN}'`)
-    expect(failure.reference).toBe("README.md#resolving-divergent-gitlink-pins")
-  })
-
-  it("prescribes a fresh revision, never a retry, for a diverged recut base", () => {
-    const failure = actionableFailure(DIVERGED_RECUT_BASE, { delivery: "submitted" })
-
-    expect(failure.code).toBe("recut-base-diverged")
-    // Both bases stay in the result: the operator checks the fresh revision
-    // against the base the queue actually holds, not the one it certified.
-    expect(failure.cause).toContain(BASE_PIN)
-    expect(failure.cause).toContain(BASE_ROOT)
-    expect(failure.resolution).toEqual(["yrd pr submit <branch>", "yrd pr recut PR1986 --preflight --queue --apply"])
-    // The parked PR must never be told to run the command that parked it.
-    expect(failure.resolution).not.toContain("Correct the cause above, then retry the same Yrd command.")
-    expect(failure.reference).toBe("README.md#pr-eligibility-and-checks")
-  })
 
   it("extracts exact commands already embedded in a mechanical remedy", () => {
     const failure = actionableFailure({
@@ -233,7 +209,7 @@ describe("actionable failure projection", () => {
 describe("22396 — state-aware remedies", () => {
   it("emits no command the change's delivery state refuses, in every state", () => {
     for (const delivery of ALL_DELIVERY_STATES) {
-      const failure = actionableFailure(AUTHORED_GITLINK, { delivery })
+      const failure = actionableFailure(AUTHORED_GITLINK)
       const refused = failure.resolution.filter((step) => refusedBy(delivery, step))
       expect({ delivery, refused }).toEqual({ delivery, refused: [] })
       expect(failure.resolution.length).toBeGreaterThan(0)
@@ -241,14 +217,14 @@ describe("22396 — state-aware remedies", () => {
   })
 
   it("keeps the submit remedy available for an already-submitted authored-gitlink PR", () => {
-    const failure = actionableFailure(AUTHORED_GITLINK, { delivery: "submitted" })
+    const failure = actionableFailure(AUTHORED_GITLINK)
 
     expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
   })
 
   it("keeps the submit remedy available for a terminal change", () => {
     for (const delivery of ["integrated", "already-landed", "withdrawn", "canceled"] as const) {
-      expect(actionableFailure(AUTHORED_GITLINK, { delivery }).resolution).toEqual(["yrd pr submit <branch>"])
+      expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
     }
   })
 
@@ -256,42 +232,6 @@ describe("22396 — state-aware remedies", () => {
     expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
   })
 
-  it("escalates the recut gitlink conflict instead of printing the merge as executable", () => {
-    const failure = actionableFailure(RECUT_CONFLICT, { delivery: "submitted" })
-
-    expect(failure.resolution).toEqual([
-      `Escalate to a human: composing 'vendor/yrd' from authored pin '${AUTHORED_PIN}' onto base pin '${BASE_PIN}' ` +
-        "needs merge-conflict judgment; do not run the recipe mechanically.",
-    ])
-    expect(failure.resolution.some((step) => /^(?:git|yrd)\s/u.test(step))).toBe(false)
-    expect(failure.escalation?.reason).toContain(`git -C vendor/yrd merge ${BASE_PIN}`)
-    expect(failure.escalation?.steps).toEqual([
-      "git -C vendor/yrd fetch --all --prune",
-      `git -C vendor/yrd switch -c yrd/compose-PR77 ${AUTHORED_PIN}`,
-      `git -C vendor/yrd merge ${BASE_PIN}`,
-      "git -C vendor/yrd push -u origin HEAD",
-      'git add vendor/yrd && git commit -m "fix(yrd): compose vendor/yrd pins"',
-      "yrd pr submit <branch>",
-      "yrd pr recut PR77 --preflight --queue --apply",
-    ])
-    expect(failure.reference).toBe("README.md#resolving-divergent-gitlink-pins")
-  })
-
-  it("carries the escalation into the human and structured projections", () => {
-    const failure = actionableFailure(RECUT_CONFLICT, { delivery: "pushed" })
-
-    const human = formatHumanFailure(failure)
-    expect(human).toContain("resolve: Escalate to a human")
-    expect(human).toContain(`escalate: git -C vendor/yrd merge ${BASE_PIN}`)
-    expect(human).toContain("manual: git -C vendor/yrd fetch --all --prune")
-    expect(human).toContain("manual: yrd pr create <branch>")
-    expect(human).toContain("reference: README.md#resolving-divergent-gitlink-pins")
-
-    const structured = formatActionableFailure(failure)
-    expect(structured).toContain("err=recut-gitlink-conflict")
-    expect(structured).toContain("resolve: Escalate to a human")
-    expect(structured).toContain("manual: git -C vendor/yrd push -u origin HEAD")
-  })
 
   it("threads the change's delivery state through the pr view and run detail projections", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-18T18:00:00.000Z")

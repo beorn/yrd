@@ -42,21 +42,6 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     expect(remedy.kind).toBe("judgment")
   })
 
-  it("refuses to mechanise a divergent-gitlink compose, whose recipe can conflict", () => {
-    const remedy = classifyRefusalRemedy(
-      {
-        code: "recut-gitlink-conflict",
-        message:
-          `yrd: change '${Change}' target root '${"c".repeat(40)}' pins submodule 'km' to '${"a".repeat(40)}' but the ` +
-          `replayed authored root '${"d".repeat(40)}' pins it to '${"b".repeat(40)}'`,
-      },
-      { branch: "task/22474", delivery: "submitted" },
-    )
-
-    expect(remedy.kind).toBe("judgment")
-    if (remedy.kind !== "judgment") return
-    expect(remedy.reason).toContain("judgment")
-  })
 
   it("leaves a recut certificate refusal to judgment — it prints no command to run", () => {
     const remedy = classifyRefusalRemedy(

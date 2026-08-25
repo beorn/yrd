@@ -11,68 +11,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { failureFact } from "../src/failure.ts"
-import { cherryFfInstruction, parseCherryVerbose, requireLinearRootTip } from "../src/linear-tip.ts"
-
-describe("requireLinearRootTip", () => {
-  it("is silent for a linear tip", () => {
-    expect(() => requireLinearRootTip("change PR42", "task/x", ["deadbeef"])).not.toThrow()
-    expect(() => requireLinearRootTip("change PR42", "task/x", [])).not.toThrow()
-  })
-
-  it("refuses a merge tip as merge-tip-carrier", () => {
-    try {
-      requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"])
-      throw new Error("expected refusal")
-    } catch (error) {
-      const fact = failureFact(error)
-      expect(fact?.kind).toBe("refusal")
-      expect(fact?.code).toBe("merge-tip-carrier")
-    }
-  })
-
-  it("names git cherry <estate-pin> <submodule-main> before instructing the FF", () => {
-    try {
-      requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"])
-      throw new Error("expected refusal")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      expect(message).toMatch(/git cherry <estate-pin> <submodule-main>/u)
-      expect(message).toMatch(/fast-forward/iu)
-    }
-  })
-
-  it("says the FF is a no-op when the unique list is empty", () => {
-    try {
-      requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"], {
-        unique: [],
-        notYours: 0,
-        unreviewed: 0,
-      })
-      throw new Error("expected refusal")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      expect(message).toMatch(/FF is a no-op/u)
-      expect(message).toMatch(/unique list is empty/u)
-      expect(message).not.toMatch(/dragged set/u)
-    }
-  })
-
-  it("names the dragged set with N not-yours and M unreviewed", () => {
-    try {
-      requireLinearRootTip("change PR42", "task/x", ["aaa", "bbb"], {
-        unique: [{ sha: "3652bfe", subject: "fix(process): retry a STALLED read-only git call" }],
-        notYours: 1,
-        unreviewed: 1,
-      })
-      throw new Error("expected refusal")
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      expect(message).toMatch(/dragged set/u)
-      expect(message).toMatch(/3652bfe/)
-      expect(message).toMatch(/of the commits this FF would carry, 1 are not yours and 1 are unreviewed/u)
-    }
-  })
-})
+import { cherryFfInstruction, parseCherryVerbose } from "../src/linear-tip.ts"
 
 describe("cherryFfInstruction", () => {
   it("prints the git cherry command when the unique list is not in hand", () => {

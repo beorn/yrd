@@ -9648,6 +9648,7 @@ function habitantCycleRecovery(error: unknown): HabitantCycleRecovery | undefine
       fact.code === "command-refused" ||
       fact.code === "candidate-ref-refused" ||
       fact.code === "authored-gitlink" ||
+      fact.code === "composition-retired" ||
       fact.code === "wrapper-mismatch" ||
       fact.code === "payload-certificate" ||
       fact.code === "gitlink-inspection" ||
