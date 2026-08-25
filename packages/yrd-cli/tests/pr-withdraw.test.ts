@@ -1735,6 +1735,7 @@ describe("pr recut --preflight", () => {
       base: "main",
       baseSha: BASE_SHA,
     })
+    await app.bays.editPr({ pr: "PR1", track: false })
     const before = (await Array.fromAsync(app.events())).length
     const facts = remergePreflightGit({
       resolveCommit: (ref) =>

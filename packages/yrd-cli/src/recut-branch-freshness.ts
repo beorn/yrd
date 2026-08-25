@@ -203,9 +203,13 @@ export async function requireImplicitRemergeBranchFreshness(
     "refusal",
     "recut-branch-moved",
     `yrd: change '${pr.id}' recorded revision ${recorded.n} head '${recorded.head}', but live branch ` +
-      `'${pr.branch}' is '${liveHead}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
+      `'${pr.branch}' is '${liveHead}'. This change is explicitly untracked, so a re-merge will not silently ` +
+      `replay stale work.\n` +
       `${await commitRangeEvidence(services, io, recorded.head, liveHead)}\n` +
-      `To record the live head and finish the requested recut:\n  yrd pr ${recordVerb} ${pr.branch}\n` +
+      `To adopt tracking (the default), so moved heads are recorded as revisions:\n` +
+      `  yrd pr edit ${pr.id} --track\n` +
+      `  yrd pr recut ${pr.id}${queueFlag}\n` +
+      `To record the live head once while staying untracked:\n  yrd pr ${recordVerb} ${pr.branch}\n` +
       `  yrd pr recut ${pr.id}${queueFlag}\n` +
       `To deliberately replay the recorded revision:\n` +
       `  yrd pr recut ${pr.id} --revision ${recorded.n} --preflight${queueFlag}`,

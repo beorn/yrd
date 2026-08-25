@@ -1,4 +1,4 @@
-import { changeDeliveryState, type Change, type ChangeDeliveryState } from "@yrd/bay"
+import { changeDeliveryState, isTracked, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { ChangeCheckRecord, Run, QueueStep } from "@yrd/queue"
@@ -207,7 +207,10 @@ export type ProjectedChange = Change &
   }>
 
 export function projectChangeTaskStatus(pr: Change): ProjectedChange {
-  return { ...pr, status: changeDeliveryState(pr), ...taskStatusFields(changeTaskStatusOf(pr)) }
+  // Readers get the EFFECTIVE tracking state: a record minted before tracking
+  // became the default carries no bit yet behaves tracked, and the envelope
+  // must not make watchers re-derive the accessor's fallback.
+  return { ...pr, track: isTracked(pr), status: changeDeliveryState(pr), ...taskStatusFields(changeTaskStatusOf(pr)) }
 }
 
 export type ProjectedJob = Job & TaskStatusFields

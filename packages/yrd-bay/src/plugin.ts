@@ -2891,6 +2891,17 @@ function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
   const titleChanged = args.title !== undefined && args.title !== pr.title
   const descriptionChanged = args.description !== undefined && args.description !== pr.description
   const trackChanged = args.track !== undefined && args.track !== isTracked(pr)
+  // requireLiveChange admits a terminal change addressed by canonical id, so
+  // a track edit must re-check liveness here or it records a bit nothing will
+  // ever read — silently, unlike bindMetadata's warned skip on the submit path.
+  if (trackChanged && !isLiveChange(pr)) {
+    raiseFailure(
+      "refusal",
+      "track-terminal",
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; tracking governs future rebuilds and a terminal ` +
+        `change has none, so the flag was not recorded`,
+    )
+  }
   if (!issueChanged && args.note === undefined && !titleChanged && !descriptionChanged && !trackChanged) {
     return { events: [] }
   }

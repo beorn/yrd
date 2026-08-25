@@ -11,7 +11,7 @@
  * "the branch moved" is a deterministic fact rather than a Git race.
  */
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentChangeRev, changeAdmission, changeDeliveryState, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, changeAdmission, changeDeliveryState, isTracked, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -232,15 +232,20 @@ function failureMessage(stderr: string): string {
   return (JSON.parse(stderr) as { failure: { message: string } }).failure.message
 }
 
-/** The exact author-facing refusal an UNTRACKED moved branch must keep printing.
- * Tracking is opt-in; this text is the contract for everyone who did not opt in. */
+/** The exact author-facing refusal an explicitly UNTRACKED moved branch must keep
+ * printing. Tracking is the default; this text is the contract for everyone who
+ * recorded the opt-out. */
 function staleHeadRefusal(revision: number, recordedHead: string): string {
   return (
     `yrd: change 'PR1' recorded revision ${String(revision)} head '${recordedHead}', but live branch ` +
-    `'${BRANCH}' is '${LIVE_HEAD}'. Recut-by-PR is reproducible and will not silently replay stale work.\n` +
+    `'${BRANCH}' is '${LIVE_HEAD}'. This change is explicitly untracked, so a re-merge will not silently ` +
+    "replay stale work.\n" +
     "commits between: supplied observer did not enumerate the range\n" +
     `inspect: git log --oneline ${recordedHead}..${LIVE_HEAD}\n` +
-    "To record the live head and finish the requested recut:\n" +
+    "To adopt tracking (the default), so moved heads are recorded as revisions:\n" +
+    "  yrd pr edit PR1 --track\n" +
+    "  yrd pr recut PR1 --queue\n" +
+    "To record the live head once while staying untracked:\n" +
     `  yrd pr submit ${BRANCH}\n` +
     "  yrd pr recut PR1 --queue\n" +
     "To deliberately replay the recorded revision:\n" +
@@ -259,31 +264,38 @@ async function submitBranch(app: CliApp, head: () => string, ...flags: string[])
   expect(exit, output.stderr()).toBe(0)
 }
 
-describe("pr submit --track", () => {
-  it("records tracking on the change and exposes it in the delivery envelope", async () => {
+describe("pr submit tracking default", () => {
+  it("an ordinary submit is tracked by default and the envelope says so without writing the bit", async () => {
+    const app = await createCliApp()
+    const output = outputIO(() => RECORDED_HEAD)
+
+    expect(await runYrd(app, yrd("pr", "submit", BRANCH, "--json"), output.io, noRequiredChecks), output.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", track: true }] })
+    expect(app.bays.pr("PR1")?.track).toBeUndefined()
+    expect(isTracked(app.bays.pr("PR1")!)).toBe(true)
+  })
+
+  it("--no-track records the opt-out and the envelope exposes it", async () => {
     const app = await createCliApp()
     const output = outputIO(() => RECORDED_HEAD)
 
     expect(
-      await runYrd(app, yrd("pr", "submit", BRANCH, "--track", "--json"), output.io, noRequiredChecks),
+      await runYrd(app, yrd("pr", "submit", BRANCH, "--no-track", "--json"), output.io, noRequiredChecks),
       output.stderr(),
     ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", track: true }] })
-    expect(app.bays.pr("PR1")?.track).toBe(true)
-  })
-
-  it("leaves an ordinary submit untracked", async () => {
-    const app = await createCliApp()
-    await submitBranch(app, () => RECORDED_HEAD)
-    expect(app.bays.pr("PR1")?.track).toBeUndefined()
+    expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", track: false }] })
+    expect(app.bays.pr("PR1")?.track).toBe(false)
+    expect(isTracked(app.bays.pr("PR1")!)).toBe(false)
   })
 })
 
 describe("implicit recut of a moved branch", () => {
-  it("refuses an UNTRACKED PR with the full reproducibility refusal", async () => {
+  it("refuses an explicitly untracked PR with the full reproducibility refusal", async () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
-    await submitBranch(app, () => head)
+    await submitBranch(app, () => head, "--no-track")
 
     head = LIVE_HEAD
     const refused = outputIO(() => head)
@@ -295,12 +307,36 @@ describe("implicit recut of a moved branch", () => {
     expect(currentChangeRev(app.bays.pr("PR1")!).n).toBe(1)
   })
 
+  it("treats an unflagged change as tracked: a moved branch preflights instead of refusing", async () => {
+    const app = await createCliApp()
+    let head = RECORDED_HEAD
+    await submitBranch(app, () => head)
+
+    head = LIVE_HEAD
+    const tracked = outputIO(() => head)
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), tracked.io),
+      tracked.stderr(),
+    ).toBe(0)
+    expect(tracked.stderr()).toBe("")
+    expect(JSON.parse(tracked.stdout())).toMatchObject({
+      pr: "PR1",
+      verdict: "RECUT",
+      evidence: { headSha: RECORDED_HEAD, proposedHeadSha: LIVE_HEAD },
+    })
+  })
+
   it("prints a complete recovery that records and queues a moved draft without another remedy", async () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
     const created = outputIO(() => head)
     expect(
-      await runYrd(app, yrd("pr", "create", BRANCH, "--issue", "km#22454", "--json"), created.io, noRequiredChecks),
+      await runYrd(
+        app,
+        yrd("pr", "create", BRANCH, "--issue", "km#22454", "--no-track", "--json"),
+        created.io,
+        noRequiredChecks,
+      ),
       created.stderr(),
     ).toBe(0)
 
@@ -308,7 +344,7 @@ describe("implicit recut of a moved branch", () => {
     const refused = outputIO(() => head)
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), refused.io)).toBe(1)
     expect(failureMessage(refused.stderr())).toContain(
-      "To record the live head and finish the requested recut:\n" +
+      "To record the live head once while staying untracked:\n" +
         `  yrd pr create ${BRANCH}\n` +
         "  yrd pr recut PR1 --queue",
     )
@@ -361,7 +397,8 @@ describe("implicit recut of a moved branch", () => {
     const recorded = app.bays.pr("PR1")!
     expect(currentChangeRev(recorded)).toMatchObject({ n: 1, head: RECORDED_HEAD })
     expect(changeDeliveryState(recorded)).toBe("submitted")
-    expect(recorded.track).toBe(true)
+    expect(recorded.track).toBeUndefined()
+    expect(isTracked(recorded)).toBe(true)
     expect(JSON.parse(tracked.stdout())).toMatchObject({
       pr: "PR1",
       revision: 1,
@@ -494,8 +531,8 @@ describe("habitant merge-into-latest", () => {
         proposedHeadSha: LIVE_HEAD,
       }),
     )
+    expect(isTracked(app.bays.pr("PR1")!)).toBe(true)
     expect(app.bays.pr("PR1")).toMatchObject({
-      track: true,
       revs: [
         { n: 1, head: RECORDED_HEAD },
         { n: 2, head: REMERGE_HEAD, recut: { fromRevision: 1, certificate: "frozen-code-carrier-v1" } },
@@ -546,10 +583,10 @@ describe("habitant merge-into-latest", () => {
     expect(remerge).toHaveBeenCalledOnce()
   })
 
-  it("does not observe or re-record an untracked branch", async () => {
+  it("does not observe or re-record an explicitly untracked branch", async () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
-    await submitBranch(app, () => head)
+    await submitBranch(app, () => head, "--no-track")
     head = LIVE_HEAD
 
     const remerge = vi.fn()
@@ -678,7 +715,11 @@ describe("habitant merge-into-latest", () => {
     })
 
     await expect(
-      runInternals.refreshTrackedQueueRevisions(app, { recut: { recut: remerge } } as YrdCliServices, outputIO(() => head).io),
+      runInternals.refreshTrackedQueueRevisions(
+        app,
+        { recut: { recut: remerge } } as YrdCliServices,
+        outputIO(() => head).io,
+      ),
     ).resolves.toMatchObject([
       {
         status: "deferred",

@@ -23,6 +23,7 @@ import {
   ChangeAdmissionRecordedFactSchema,
   ChangeRejectedFactSchema,
   currentChangeRev,
+  isTracked,
   normalizeV2By,
   normalizeV2Submitter,
   changeDeliveryState,
@@ -2295,6 +2296,27 @@ describe("withBays", () => {
     expect(app.bays.pr("PR2")?.comments).toEqual([])
   })
 
+  it("refuses to record tracking on a terminal change but stays idempotent on its effective bit", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "issue/track-terminal", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.editPr({ pr: "PR1", track: false })
+    await app.bays.closePr({ pr: "PR1" })
+
+    // Changing the bit on a terminal change would record something nothing
+    // will ever read; the submit path warns and skips, the direct edit refuses.
+    await expect(app.bays.editPr({ pr: "PR1", track: true })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "track-terminal" },
+    })
+    // Restating the recorded value is a no-op, never a refusal, so an
+    // idempotent resubmit script can replay its own edit after the close.
+    expect((await app.bays.editPr({ pr: "PR1", track: false })).events).toEqual([])
+    // Metadata edits that do not touch tracking still land on a terminal change.
+    await app.bays.editPr({ pr: "PR1", title: "feat(bay): terminal title edit" })
+    expect(app.bays.pr("PR1")?.title).toBe("feat(bay): terminal title edit")
+    expect(isTracked(app.bays.pr("PR1")!)).toBe(false)
+  })
+
   it("settles a refresh-superseded recut revision without minting an empty successor (22528)", async () => {
     await using app = (await createHarness()).app
     const nextBase = "b".repeat(40)
@@ -2624,7 +2646,11 @@ describe("withBays", () => {
       return ref === "release/fix" ? HEAD_1 : undefined
     }
 
-    const bayPR = await app.bays.submitSelection("B1", { resolveRevision, resolveParents: async () => ["0".repeat(40)], run: runtime })
+    const bayPR = await app.bays.submitSelection("B1", {
+      resolveRevision,
+      resolveParents: async () => ["0".repeat(40)],
+      run: runtime,
+    })
     expect(changeFacts(bayPR)).toMatchObject({
       bay: "B1",
       delivery: "submitted",
@@ -2894,7 +2920,12 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     workspace.dirty = true
 
     const warnings: string[] = []
-    const pr = await app.bays.submitSelection("B1", { resolveRevision: async () => undefined, resolveParents: async () => ["0".repeat(40)], run: runtime, warnings })
+    const pr = await app.bays.submitSelection("B1", {
+      resolveRevision: async () => undefined,
+      resolveParents: async () => ["0".repeat(40)],
+      run: runtime,
+      warnings,
+    })
     // Submitted the committed head (HEAD_2 from refresh), never refused.
     expect(changeFacts(pr)).toMatchObject({ bay: "B1", delivery: "submitted", current: { head: HEAD_2 } })
     // Loud by construction: the caveat rides the result envelope (warnings array)…
@@ -3074,9 +3105,7 @@ describe("bay-base authority vs live queue", () => {
     const { app } = await createPinnedApp(liveSha)
     await finishJob(app, await app.bays.open({ name: "conflict", base: "main", baseSha: BASE, by: "test" }))
     liveSha.current = LIVE
-    await expect(
-      app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: STALE }),
-    ).rejects.toMatchObject({
+    await expect(app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: STALE })).rejects.toMatchObject({
       failure: {
         code: "base-authority-conflict",
         message: expect.stringMatching(/555555555555.*cccccccccccc/),

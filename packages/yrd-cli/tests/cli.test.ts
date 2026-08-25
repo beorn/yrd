@@ -2650,6 +2650,7 @@ describe("runYrd", () => {
         baseSha: BASE_SHA,
         ...(draft ? { draft: true } : {}),
       })
+      await app.bays.editPr({ pr: "PR1", track: false })
       const output = outputIO({
         pruneGit: () => ({
           resolveCommit: (ref) =>
@@ -2769,6 +2770,7 @@ describe("runYrd", () => {
 
       const app = await createApp()
       await app.bays.submit({ branch, headSha: recordedHead, baseSha: BASE_SHA })
+      await app.bays.editPr({ pr: "PR1", track: false })
       const requests: unknown[] = []
       await using runtimeProcess = createProcess({ cwd: observer })
       const services = {
@@ -2963,6 +2965,7 @@ describe("runYrd", () => {
       await app.bays.ready({ pr })
       await app.bays.requestChecks({ pr, baseSha: BASE_SHA })
     }
+    for (const pr of ["PR1", "PR2", "PR3", "PR4", "PR5"]) await app.bays.editPr({ pr, track: false })
 
     await refresh(app, services, io)
     expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
@@ -3091,6 +3094,7 @@ describe("runYrd", () => {
     const patchId = "d".repeat(40)
     const app = await createApp({ waitingCheck: true })
     await app.bays.submit({ branch: "issue/habitant-refresh", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.editPr({ pr: "PR1", track: false })
     await app.bays.recut({
       pr: "PR1",
       fromRevision: 1,

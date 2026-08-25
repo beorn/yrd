@@ -12,8 +12,8 @@ describe("isTracked", () => {
     expect(isTracked(change({ track: false }))).toBe(false)
   })
 
-  it("an absent bit resolves to the fleet default (untracked until tracked-delivery step 2 flips it)", () => {
-    expect(isTracked(change({}))).toBe(false)
+  it("an absent bit resolves to the fleet default: tracked (tracked-delivery step 2)", () => {
+    expect(isTracked(change({}))).toBe(true)
   })
 })
 

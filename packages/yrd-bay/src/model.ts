@@ -1230,11 +1230,13 @@ export function isLiveChange(pr: Change): boolean {
 }
 
 /** The one reader of `Change.track`. The fallback IS the fleet-wide default
- * for records that never wrote the bit (@yrd/core/tracked-delivery step 2
- * flips it); every behavioral site must go through here so the default is
- * one line, not a sweep. */
+ * for records that never wrote the bit: tracked, since 2026-08-25
+ * (@yrd/core/tracked-delivery step 2, operator-approved) — an absent bit
+ * means merge-into-latest, and every pre-existing open change adopted the
+ * default the moment this line changed. Untracked is the explicit opt-out
+ * (`--no-track`, `pr edit --untrack`), stored as `track: false`. */
 export function isTracked(pr: Change): boolean {
-  return pr.track ?? false
+  return pr.track ?? true
 }
 
 export function changeForBay(state: BaysState, bay: BayId): Change | undefined {

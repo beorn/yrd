@@ -5569,9 +5569,13 @@ async function resolveSubmitMetadata(
   }
 }
 
-/** One spelling of the tracking opt-in across every surface that records it. */
+/** One spelling of the tracking surface across every verb that records it.
+ * Tracking is the DEFAULT (tracked-delivery, 2026-08-25); `--track` is the
+ * explicit affirmation and `--no-track` the recorded opt-out. */
 const TRACK_OPTION_DESCRIPTION =
-  "merge into latest: the habitant records, preflights, and queues later branch pushes as frozen revisions"
+  "merge into latest (default): the habitant records, preflights, and queues later branch pushes as frozen revisions"
+const NO_TRACK_OPTION_DESCRIPTION =
+  "opt out of tracking: a moved branch head then refuses instead of being recorded as a revision"
 
 type ChangeSelectionOptions = {
   follow?: boolean
@@ -5662,7 +5666,7 @@ async function applyChangeSelection(
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
-      ...(options.track === true ? { track: true } : {}),
+      ...(options.track === false ? { track: false } : {}),
       ...(stageAsDraft ? { draft: true } : {}),
       ...(props === undefined ? {} : { props }),
       ...(composition === undefined ? {} : { composition }),
@@ -9951,10 +9955,13 @@ function trackedPreflightNeedsPerson(pr: Change, revision: ChangeRev): boolean {
  * Deliberately an explicit list read at the observation call rather than a test
  * on kind:"configuration" — that kind also covers real composition faults
  * (async-command, missing Git facts) which must keep stopping the runner
- * fail-loud. `recut-branch-observer-missing` is excluded on purpose: it says no
- * Git process is installed in THIS process, so it is identical for every
- * candidate, and deferring it per-PR would silently park the whole tracked set
- * instead of reporting a misbuilt CLI.
+ * fail-loud. `recut-branch-observer-missing` stays excluded: it says no Git
+ * process is installed in THIS process, so it is identical for every candidate,
+ * and deferring it per-PR would dress a process-wide gap as per-branch weather.
+ * {@link refreshTrackedQueueRevisions} instead detects the missing observer
+ * upfront and skips its pass with one cycle-level warning — tracking is the
+ * default, so an observer-less embedder reaches it with every live change, and
+ * crashing the queue runner over an ambient default would be disproportionate.
  */
 const TRACKED_OBSERVATION_CODES: ReadonlySet<string> = new Set([
   "recut-branch-refresh-failed",
@@ -10008,6 +10015,21 @@ export async function refreshTrackedQueueRevisions(
         baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
     )
   const outcomes: HabitantTrackedRevisionTransition[] = []
+  if (candidates.length > 0 && io.pruneGit === undefined && services.process === undefined) {
+    // Tracking is the default, so an embedder that wires no Git observer at all
+    // still reaches this pass with every live change. That gap is a fact about
+    // THIS process, identical for every candidate: report it once per cycle and
+    // leave the recorded revisions authoritative, instead of crashing the queue
+    // runner or parking candidates one by one as if it were per-branch weather.
+    app.log.warn?.(
+      `Skipped tracked-branch observation for ${String(candidates.length)} candidate(s): no Git process is installed.`,
+      {
+        action: "queue-track-observation-unavailable",
+        prs: candidates.map((candidate) => candidate.id),
+      },
+    )
+    return outcomes
+  }
   if (observation !== undefined) {
     // Drop entries for candidates that moved or left the tracked set: a new
     // authored revision must observe immediately, not inherit a skip window.
@@ -12054,6 +12076,7 @@ function buildProgram(
     )
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>
       setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "bay.submit")),
@@ -12430,6 +12453,7 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(
@@ -12465,6 +12489,7 @@ function buildProgram(
       [] as readonly string[],
     )
     .option("--track", TRACK_OPTION_DESCRIPTION)
+    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
     .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) =>

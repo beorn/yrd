@@ -274,12 +274,17 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
     log.end()
   })
 
-  it("still fails loud when the PROCESS has no Git observer at all", async () => {
-    // The containment is scoped to per-branch observation facts. A missing Git
-    // observer is identical for every candidate — a misbuilt CLI, not one change's
-    // condition — so deferring it would silently park the whole tracked set.
+  it("skips the pass with one loud warning when the PROCESS has no Git observer at all", async () => {
+    // A missing Git observer is identical for every candidate — a fact about
+    // THIS process, not one change's condition — so per-PR deferral would
+    // dress a process-wide gap as per-branch weather. And since tracking is
+    // the default, an embedder that wires no observer reaches this pass with
+    // every live change; crashing the queue runner over the ambient default
+    // would be disproportionate. The pass reports once per cycle and leaves
+    // the recorded revisions authoritative.
     const fixture = await repository()
-    const log = createLogger("yrd", [{ level: "silent" }])
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const app = await trackedApp(fixture.mainSha, log)
     const cliApp = app as unknown as YrdCliApp
     await app.bays.submit({ branch: HEALTHY, headSha: fixture.healthyRecorded, base: "main", baseSha: fixture.mainSha })
@@ -288,7 +293,14 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
     const services = { recut: { recut: vi.fn() } } as unknown as YrdCliServices
     await expect(
       runInternals.refreshTrackedQueueRevisions(cliApp, services, liveIO(fixture.repo), new Map()),
-    ).rejects.toThrow("no Git process is installed")
+    ).resolves.toEqual([])
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        level: "warn",
+        props: expect.objectContaining({ action: "queue-track-observation-unavailable", prs: ["PR1"] }),
+      }),
+    )
     log.end()
   })
 })
