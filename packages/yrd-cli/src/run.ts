@@ -3961,7 +3961,7 @@ async function closeBays(
       raiseFailure(
         "refusal",
         "request-refused",
-        `${outcome}; could not close ${String(refused.length)} bay(s); run bay status, or bay close --force <name>`,
+        `${outcome}; could not close ${String(refused.length)} bay(s); run 'yrd bay status', or 'yrd bay close --force <name>'`,
       )
     }
   }
@@ -4391,7 +4391,7 @@ async function bayPruneCommand(
       raiseFailure(
         "refusal",
         "bay-prune-approval-drift",
-        `bay prune approval '${approvalPath}' no longer matches the current census; becamePrunable: ${becamePrunable.join(", ") || "none"}; becameProtected: ${becameProtected.join(", ") || "none"}; rerun the dry-run and approve its replacement artifact`,
+        `bay prune approval '${approvalPath}' no longer matches the current census; becamePrunable: ${becamePrunable.join(", ") || "none"}; becameProtected: ${becameProtected.join(", ") || "none"}; rerun the dry-run and approve its replacement artifact with 'yrd admin bay prune --save-approval <path>'`,
       )
     }
   }
@@ -5129,7 +5129,7 @@ async function executeRemergeChange(
       "refusal",
       "recut-would-discard-green",
       `yrd: change '${pr.id}' revision ${currentRevision.n} already passed its checks; re-merge would discard that result. ` +
-        "Re-run with --force to override.",
+        `Re-run with --force to override: 'yrd pr recut ${pr.id} --force'.`,
     )
   }
   const sourceReview = pr.reviews.findLast((review) => review.revision === source.n && review.headSha === source.head)
