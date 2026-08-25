@@ -8314,44 +8314,75 @@ async function rollbackQueueBase(
   }
 }
 
+/** The one preamble `gitMergeStep` and `configuredMergeStep` both run before
+ * they diverge into a native merge or an external merge command: resolve the
+ * Candidate, and take the already-merged fast path if the base already
+ * contains it. `artifactRoot` is the only input difference between the two
+ * callers (`GitMergeOptions` has none; `ConfiguredMergeOptions` does). */
+async function mergeStepPreamble(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  options: Readonly<{
+    artifactRoot?: string
+    refuse?: RefusePathsPolicy
+    checkpointIdentity?: string | (() => string)
+    provisionPinIntent?: PinIntentProvisioner
+  }>,
+): Promise<
+  | Readonly<{ done: true; result: JobResult<IntegrationProof> }>
+  | Readonly<{ done: false; branch: string; base: GitQueueTarget; checked: PinnedCandidate }>
+> {
+  const branch = primaryPR(input).base
+  const candidate = await mergeCandidate(git, repo, input, context, {
+    artifactRoot: options.artifactRoot,
+    ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
+    ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
+    ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
+  })
+  if (candidate.status !== "completed" || candidate.conclusion !== "success") return { done: true, result: candidate }
+  const { base, checked } = candidate
+  const baseSha = base.sha
+  const alreadyMerged = await alreadyMergedEvidence(git, repo, baseSha, checked)
+  if (alreadyMerged === undefined) return { done: false, branch, base, checked }
+  const cancellation = mergeAuthorityCancellation(context)
+  if (cancellation !== undefined) return { done: true, result: cancellation }
+  const recovering = (await mergeAttemptRefs(git, repo, input, checked)).length > 0
+  const result = await withSubmoduleMainPromotions(
+    git,
+    repo,
+    undefined,
+    baseSha,
+    async (promotions, results) => {
+      const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+      if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
+      return {
+        status: "completed",
+        conclusion: "success",
+        output: recovering
+          ? await physicalIntegrationProof(git, repo, input, context, baseSha, checked, settlement.results)
+          : integrationProof(baseSha, checked, alreadyMerged, settlement.results),
+      }
+    },
+    { settleSafePromotions: true },
+  )
+  return { done: true, result }
+}
+
 export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
-      const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(git, repo, input, context, {
+      const preamble = await mergeStepPreamble(git, repo, input, context, {
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
         ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
         ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
       })
-      if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
-      const { base, checked } = candidate
+      if (preamble.done) return preamble.result
+      const { branch, base, checked } = preamble
       const baseSha = base.sha
-      const alreadyMerged = await alreadyMergedEvidence(git, repo, baseSha, checked)
-      if (alreadyMerged !== undefined) {
-        const cancellation = mergeAuthorityCancellation(context)
-        if (cancellation !== undefined) return cancellation
-        const recovering = (await mergeAttemptRefs(git, repo, input, checked)).length > 0
-        return await withSubmoduleMainPromotions(
-          git,
-          repo,
-          undefined,
-          baseSha,
-          async (promotions, results) => {
-            const settlement = await applySubmoduleMainPromotions(git, promotions, results)
-            if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
-            return {
-              status: "completed",
-              conclusion: "success",
-              output: recovering
-                ? await physicalIntegrationProof(git, repo, input, context, baseSha, checked, settlement.results)
-                : integrationProof(baseSha, checked, alreadyMerged, settlement.results),
-            }
-          },
-          { settleSafePromotions: true },
-        )
-      }
       const remote = base.remote
       if (remote !== undefined) {
         const branchRef = `refs/heads/${branch}`
@@ -8586,46 +8617,14 @@ export function configuredMergeStep<Shape extends ChangeShape>(
   const git = createGit(options.inject.process, options.env)
   const merge = async (input: StepExecution<Shape>, context: JobContext): Promise<JobResult<IntegrationProof>> => {
     try {
-      const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(git, repo, input, context, {
+      const preamble = await mergeStepPreamble(git, repo, input, context, {
         artifactRoot: options.artifactRoot,
         ...(options.refuse === undefined ? {} : { refuse: options.refuse }),
         ...(options.checkpointIdentity === undefined ? {} : { checkpointIdentity: options.checkpointIdentity }),
         ...(options.provisionPinIntent === undefined ? {} : { provisionPinIntent: options.provisionPinIntent }),
       })
-      if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
-      const alreadyMerged = await alreadyMergedEvidence(git, repo, candidate.base.sha, candidate.checked)
-      if (alreadyMerged !== undefined) {
-        const cancellation = mergeAuthorityCancellation(context)
-        if (cancellation !== undefined) return cancellation
-        const recovering = (await mergeAttemptRefs(git, repo, input, candidate.checked)).length > 0
-        return await withSubmoduleMainPromotions(
-          git,
-          repo,
-          undefined,
-          candidate.base.sha,
-          async (promotions, results) => {
-            const settlement = await applySubmoduleMainPromotions(git, promotions, results)
-            if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
-            return {
-              status: "completed",
-              conclusion: "success",
-              output: recovering
-                ? await physicalIntegrationProof(
-                    git,
-                    repo,
-                    input,
-                    context,
-                    candidate.base.sha,
-                    candidate.checked,
-                    settlement.results,
-                  )
-                : integrationProof(candidate.base.sha, candidate.checked, alreadyMerged, settlement.results),
-            }
-          },
-          { settleSafePromotions: true },
-        )
-      }
+      if (preamble.done) return preamble.result
+      const { branch, base, checked } = preamble
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
         command: options.command,
@@ -8639,8 +8638,8 @@ export function configuredMergeStep<Shape extends ChangeShape>(
           : { environmentPassthrough: options.environmentPassthrough }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         variables: () => ({
-          YRD_CANDIDATE_SHA: candidate.checked.candidateSha,
-          YRD_CANDIDATE_REF: candidate.checked.candidateRef,
+          YRD_CANDIDATE_SHA: checked.candidateSha,
+          YRD_CANDIDATE_REF: checked.candidateRef,
           ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
         }),
       })
@@ -8648,12 +8647,12 @@ export function configuredMergeStep<Shape extends ChangeShape>(
       return await withSubmoduleMainPromotions(
         git,
         repo,
-        candidate.checked.baseSha,
-        candidate.checked.candidateSha,
+        checked.baseSha,
+        checked.candidateSha,
         async () => {
           const cancellation = mergeAuthorityCancellation(context)
           if (cancellation !== undefined) return cancellation
-          await recordMergeAttempt(git, repo, input, context, candidate.checked)
+          await recordMergeAttempt(git, repo, input, context, checked)
           const outcome = await command(input, context)
           let merge: GitQueueTarget
           try {
@@ -8671,13 +8670,13 @@ export function configuredMergeStep<Shape extends ChangeShape>(
               ? failed(outcome.error.code, outcome.error.message)
               : failed("merge-verification-failed", messageOf(cause))
           }
-          const missing = await mergeError(git, repo, input, candidate.checked, merge.sha)
+          const missing = await mergeError(git, repo, input, checked, merge.sha)
           if (missing === undefined) {
-            const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
+            const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
             if (sourceRefError !== undefined) {
-              const rollbackError = await rollbackQueueBase(git, repo, candidate.base, merge)
+              const rollbackError = await rollbackQueueBase(git, repo, base, merge)
               if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
-              await clearMergeAttempts(git, repo, input, candidate.checked)
+              await clearMergeAttempts(git, repo, input, checked)
               return failed("invalid-candidate", sourceRefError)
             }
             return withSubmoduleMainPromotions(
@@ -8697,7 +8696,7 @@ export function configuredMergeStep<Shape extends ChangeShape>(
                     input,
                     context,
                     merge.sha,
-                    candidate.checked,
+                    checked,
                     settlement.results,
                   ),
                 }
@@ -8705,7 +8704,7 @@ export function configuredMergeStep<Shape extends ChangeShape>(
               { settleSafePromotions: true },
             )
           }
-          await clearMergeAttempts(git, repo, input, candidate.checked)
+          await clearMergeAttempts(git, repo, input, checked)
           if (outcome.status === "completed" && outcome.conclusion === "failure") {
             return failed(outcome.error.code, outcome.error.message)
           }
