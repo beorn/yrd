@@ -9,7 +9,7 @@ import {
   changeNotFoundMessage,
   type Change,
 } from "@yrd/bay"
-import { raiseFailure, requireLinearRootTip } from "@yrd/core"
+import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
@@ -44,7 +44,11 @@ function requiredLivePr(app: YrdCliApp, selector: string): Change {
   }
   const delivery = changeDeliveryState(pr)
   if (!isLiveChange(pr)) {
-    raiseFailure("refusal", "pr-terminal", `yrd: change '${pr.id}' is ${delivery}; a terminal change cannot be withdrawn`)
+    raiseFailure(
+      "refusal",
+      "pr-terminal",
+      `yrd: change '${pr.id}' is ${delivery}; a terminal change cannot be withdrawn`,
+    )
   }
   return pr as Change
 }
@@ -427,26 +431,6 @@ export async function preflightRemerge(
   }
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
-  // The linear-root rule, at the gate: a merge-tip head is refused HERE, at
-  // the first evaluation, with the SAME refusal the submit path raises — not
-  // after the whole preflight investment (2026-08-19: a merge-tip carrier ran
-  // this gate clean and was refused only at submit). Subsumed heads are
-  // exempt: their payload already merged, and a linear rebuild of spent
-  // content is advice that cannot succeed — withdrawal stays the verdict.
-  if (!subsumed) {
-    const parents =
-      git.parents ??
-      raiseFailure(
-        "configuration",
-        "recut-preflight-git-facts",
-        "yrd: installed PR Git facts do not provide commit-parent evidence",
-      )
-    requireLinearRootTip(
-      `change '${pr.id}' revision ${source.n} head '${candidateHeadSha}'`,
-      pr.branch,
-      await parents(candidateHeadSha),
-    )
-  }
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
   const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
@@ -479,11 +463,9 @@ export async function preflightRemerge(
         : requiresForce
           ? "RECUT-FORCE"
           : "RECUT"
-  const revisionFlag =
-    options.revision === undefined || options.proposedHeadSha !== undefined ? "" : ` --revision ${source.n}`
-  const queueFlag = options.queue === true ? " --queue" : ""
-  const candidateFlag = options.proposedHeadSha === undefined ? "" : ` --ref ${options.proposedHeadSha}`
-  const remergeCommand = `yrd pr recut ${pr.id}${revisionFlag}${candidateFlag}${queueFlag}`
+  // The hidden `yrd pr recut` verb is retired (the queue rebuilds by merge on
+  // its own): a human's RECUT spelling is resubmitting from the branch tip; the
+  // runner applies the same verdict in-process via `applyPreflightVerdict`.
   const next =
     verdict === "SUBSUMED-WITHDRAW"
       ? // The subsumed proof (head reachable from the base, or merging it reproduces
@@ -491,13 +473,11 @@ export async function preflightRemerge(
         // already merged has nothing left to resubmit. Printed WITH the flag so the
         // command runs as written rather than refusing whoever pastes it.
         `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
-      : verdict === "RECUT-FORCE"
-        ? `${remergeCommand} --force`
-        : verdict === "RECUT"
-          ? remergeCommand
-          : options.queue === true
-            ? `yrd pr ready ${pr.id}`
-            : `yrd pr view ${pr.id}`
+      : verdict === "RECUT-FORCE" || verdict === "RECUT"
+        ? `yrd pr submit ${pr.branch}`
+        : options.queue === true
+          ? `yrd pr ready ${pr.id}`
+          : `yrd pr view ${pr.id}`
   const evidence: RemergePreflightResult["evidence"] = {
     headSha: source.head,
     ...(options.proposedHeadSha === undefined ? {} : { proposedHeadSha: options.proposedHeadSha }),

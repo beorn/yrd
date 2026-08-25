@@ -4,7 +4,6 @@ import {
   journalEvent,
   observeYrdLifecycle,
   raiseFailure,
-  requireLinearRootTip,
   resolveSelector,
   type CommandHandler,
   type CommandResult,
@@ -28,7 +27,6 @@ import {
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { FlowPin, Submission } from "@yrd/config"
-import { isDeepStrictEqual } from "node:util"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { ChangeIdSchema, changeIdForCommand, type ChangeId } from "./change-identity.ts"
@@ -294,8 +292,6 @@ const ChangeRemergeExpectedCurrentSchema = z
     revision: RevisionSchema,
     headSha: GitShaSchema,
     track: z.boolean().optional(),
-    effectiveReview: ChangeReviewSchema.optional(),
-    checksPassed: z.boolean().optional(),
   })
   .strict()
 const ChangeRemergeArgsSchema = z
@@ -307,9 +303,7 @@ const ChangeRemergeArgsSchema = z
     treeSha: GitShaSchema,
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
-    certificate: ChangeRemergeCertificateSchema.optional(),
     sources: z.array(ChangeRemergeSourceSchema).min(1).readonly().optional(),
-    composition: CompositionV1Schema.optional(),
     expectedCurrent: ChangeRemergeExpectedCurrentSchema.optional(),
     transition: ChangeFreshnessTransitionSchema.optional(),
   })
@@ -1181,23 +1175,6 @@ export function createBays(
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
       }
-      // The linear-root rule at the one submit entrance the branch resolver's
-      // check never covers: an active Bay's head comes from the workspace
-      // refresh, so a merge-tip commit sailed into the ledger and was refused
-      // only on the merge path (PR1364, 2026-08-19). Absence of parent
-      // evidence is loud — skipping silently would re-open the hole.
-      if (options.resolveParents === undefined) {
-        raiseFailure(
-          "configuration",
-          "bay-head-lineage-unavailable",
-          `yrd: bay '${bay.id}' submission provides no commit-parent evidence; the linear-root gate cannot run`,
-        )
-      }
-      requireLinearRootTip(
-        `bay '${bay.id}' committed head is '${bay.headSha}'`,
-        bay.branch,
-        await options.resolveParents(bay.headSha),
-      )
       pr = changeForBay(snapshot, bay.id) ?? resolveChange(snapshot, bay.branch)
       const composition = requestedComposition ?? (pr === undefined ? undefined : changeComposition(pr))
       if (pr === undefined || changeHead(pr) !== bay.headSha || !sameComposition(composition, changeComposition(pr))) {
@@ -2376,38 +2353,14 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
   if (predecessor === undefined) {
     raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${args.fromRevision}`)
   }
-  if (args.certificate !== undefined) {
-    const expectedReview = args.expectedCurrent?.effectiveReview
-    const rootSources = args.sources?.filter((source) => source.repo === ".") ?? []
-    const rootSource = rootSources[0]
-    if (
-      args.expectedCurrent === undefined ||
-      expectedReview?.decision !== "approve" ||
-      !args.reviewCarried ||
-      rootSources.length !== 1 ||
-      rootSource?.fromHeadSha !== predecessor.head ||
-      rootSource.toHeadSha !== args.headSha ||
-      rootSource.patchId !== args.patchId
-    ) {
-      raiseFailure(
-        "refusal",
-        "recut-certificate-invalid",
-        `yrd: change '${pr.id}' certified rebuild requires an approved expected-current review and exactly one matching root source`,
-      )
-    }
-  }
   const remerge = changeRemerge(pr)
-  const payloadUnchanged =
-    changeHead(pr) === args.headSha &&
-    changeBaseSha(pr) === args.baseSha &&
-    sameComposition(changeComposition(pr), args.composition)
+  const payloadUnchanged = changeHead(pr) === args.headSha && changeBaseSha(pr) === args.baseSha
   const unchanged =
     payloadUnchanged &&
     remerge?.fromRevision === args.fromRevision &&
     remerge.patchId === args.patchId &&
     remerge.treeSha === args.treeSha &&
     remerge.reviewCarried === args.reviewCarried &&
-    remerge.certificate === args.certificate &&
     JSON.stringify(remerge.sources) === JSON.stringify(args.sources) &&
     remerge.transition?.from === args.transition?.from &&
     remerge.transition?.to === args.transition?.to
@@ -2422,7 +2375,7 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
   if (
     args.expectedCurrent !== undefined &&
     (changeRevisionNumber(pr) !== args.expectedCurrent.revision || changeHead(pr) !== args.expectedCurrent.headSha) &&
-    !(unchanged && args.certificate === undefined)
+    !unchanged
   ) {
     raiseFailure(
       "refusal",
@@ -2430,33 +2383,6 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
       `yrd: change '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
         ` to ${changeRevisionNumber(pr)}@${changeHead(pr)} while the rebuild was being computed`,
     )
-  }
-  if (
-    args.expectedCurrent?.effectiveReview !== undefined &&
-    !isDeepStrictEqual(reviewState(pr).current, args.expectedCurrent.effectiveReview)
-  ) {
-    raiseFailure(
-      "refusal",
-      "recut-review-changed",
-      `yrd: change '${pr.id}' effective review changed while the rebuild was being computed`,
-    )
-  }
-  if (args.expectedCurrent?.checksPassed !== undefined) {
-    const checksPassed = currentChangeRev(pr).admission?.status === "passed"
-    if (checksPassed !== args.expectedCurrent.checksPassed) {
-      if (checksPassed) {
-        raiseFailure(
-          "refusal",
-          "recut-would-discard-green",
-          `yrd: change '${pr.id}' checks passed while the rebuild was being computed; re-run with --force to replace green evidence`,
-        )
-      }
-      raiseFailure(
-        "refusal",
-        "recut-current-changed",
-        `yrd: change '${pr.id}' check status changed while the rebuild was being computed`,
-      )
-    }
   }
   // Only Queue authority-consumption results make an identical re-merge an
   // author reauthorization act. Authored-content failures need new bytes;
@@ -2528,7 +2454,6 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
         treeSha: args.treeSha,
         reviewCarried: args.reviewCarried,
         submitter: successorSubmitter,
-        ...(args.certificate === undefined ? {} : { certificate: args.certificate }),
         ...(args.sources === undefined ? {} : { sources: args.sources }),
         predecessor: {
           revision: predecessor.n,
@@ -2536,7 +2461,6 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
           ...(predecessor.baseSha === undefined ? {} : { baseSha: predecessor.baseSha }),
         },
         successor,
-        ...(args.composition === undefined ? {} : { composition: args.composition }),
         ...(args.transition === undefined ? {} : { transition: args.transition }),
       }),
       ...(args.transition === undefined

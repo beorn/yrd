@@ -101,7 +101,7 @@ export function formatRemedyCommand(step: RemedyStep): string {
  * if and only if it prints a mechanical drill.
  */
 export function classifyRefusalRemedy(failure: FailureLike, context: RefusalRemedyContext): RefusalRemedy {
-  const projected = actionableFailure(failure, context.delivery === undefined ? {} : { delivery: context.delivery })
+  const projected = actionableFailure(failure)
   if (projected.escalation !== undefined) {
     return Object.freeze({ kind: "judgment", reason: projected.escalation.reason })
   }
