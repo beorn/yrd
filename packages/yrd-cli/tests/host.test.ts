@@ -1119,7 +1119,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await git(repo, "rev-parse", "--abbrev-ref", "HEAD")).toBe("issue/feature")
   })
 
-  it("prints a linear rebuild instead of a merge-tip-producing conflict remedy", async () => {
+  it("prints the merge-and-resubmit remedy for a required-check composition conflict", async () => {
     const { repo } = await repository()
     await git(repo, "switch", "-q", "issue/feature")
     await writeFile(join(repo, "README.md"), "feature conflict\n")
@@ -1154,9 +1154,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       failure: { kind: "refusal", code: "required-check-composition-conflict" },
     })
     const message = failure instanceof Error ? failure.message : String(failure)
-    expect(message).toContain("linear rebuild required")
+    expect(message).toContain("merge base 'main' into the change's branch")
     expect(message).toContain("yrd pr submit")
-    expect(message).not.toContain("merge 'main' into the branch")
   })
 
   it.each(["checkout", "submodule"] as const)(
@@ -4035,52 +4034,6 @@ checks: [{check: {run: "true"}}]
     expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
   })
 
-  it("refuses the live remote merge tip at submit and names the divergent local ref", async () => {
-    const { author, observer, branch, staleHead } = await staleRemoteBranchRepository()
-    await git(author, "switch", "-qc", "issue/side", staleHead)
-    await writeFile(join(author, "side.txt"), "side\n")
-    await git(author, "add", "side.txt")
-    await git(author, "commit", "-qm", "side commit")
-    await git(author, "switch", "-q", branch)
-    await git(author, "merge", "--no-ff", "-qm", "merge side", "issue/side")
-    const remoteHead = await git(author, "rev-parse", "HEAD")
-    await git(author, "push", "-q", "origin", branch)
-
-    await git(observer, "switch", "-qc", branch, staleHead)
-    await writeFile(join(observer, "local.txt"), "local\n")
-    await git(observer, "add", "local.txt")
-    await git(observer, "commit", "-qm", "divergent local commit")
-    const localHead = await git(observer, "rev-parse", "HEAD")
-    // This test targets the pushed ref's merge-tip gate. Submitting while
-    // standing on the divergent local branch correctly triggers the earlier
-    // working-tree/ref mismatch refusal instead.
-    await git(observer, "switch", "-q", "main")
-    let stdout = ""
-    let stderr = ""
-
-    const exitCode = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "submit", branch, "--json"],
-      {
-        cwd: observer,
-        stdout: (text) => {
-          stdout += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-      },
-    )
-    expect(exitCode, stderr).toBe(1)
-    expect(stdout).toBe("")
-    expect(JSON.parse(stderr), stderr).toMatchObject({
-      failure: { kind: "refusal", code: "merge-tip-carrier" },
-    })
-    expect(stderr).toContain(`local '${branch}' is '${localHead}'`)
-    expect(stderr).toContain(`live 'origin/${branch}' is '${remoteHead}'`)
-    expect(stderr).toContain("merge commit with 2 parents")
-    expect(stderr).toContain("linear rebuild required")
-    expect(await journalEnvelope(observer)).toEqual([])
-  })
 
   it("fails typed instead of submitting a stale branch when origin cannot be fetched", async () => {
     const { observer, branch, staleHead } = await staleRemoteBranchRepository()
@@ -4184,81 +4137,6 @@ checks: [{check: {run: "true"}}]
     // covers that admission directly). This test stays scoped to the still-refusing case.
   })
 
-  it("refuses pr recut --queue when the recut revision retains an unpublished changed submodule pin", async () => {
-    const { repo, branch, pin } = await unpublishedSubmodulePinRepository()
-    const submodule = await realpath(join(repo, "dep"))
-    let stdout = ""
-    let stderr = ""
-
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "create", branch, "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          stdout += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-      }),
-      stderr,
-    ).toBe(0)
-    await git(repo, "-c", "push.recurseSubmodules=no", "push", "-q", "origin", `HEAD:refs/heads/${branch}`)
-
-    stdout = ""
-    stderr = ""
-    expect(
-      await runYrdProcess(
-        [
-          "/usr/bin/bun",
-          "/usr/local/bin/yrd",
-          "--repo",
-          repo,
-          "pr",
-          "recut",
-          "PR1",
-          "--revision",
-          "1",
-          "--queue",
-          "--json",
-        ],
-        {
-          cwd: repo,
-          stdout: (text) => {
-            stdout += text
-          },
-          stderr: (text) => {
-            stderr += text
-          },
-        },
-      ),
-      stderr,
-    ).toBe(1)
-    expect(stdout).toBe("")
-    expect(JSON.parse(stderr)).toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "submodule-pin-unpublished",
-      },
-    })
-    // Pipeline-routed: the remedy names who must publish, never a hand-write.
-    expect(stderr).not.toContain("git push")
-    expect(stderr).toContain(`whoever holds this commit in '${submodule}' must publish it`)
-    expect(stderr).toContain("ordinary change whose diff is the gitlink bump")
-
-    let listed = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          listed += text
-        },
-        stderr: () => undefined,
-      }),
-    ).toBe(0)
-    expect(JSON.parse(listed)).toMatchObject({
-      prs: [{ id: "PR1", branch, status: "pushed", checkRequests: [] }],
-    })
-  })
 
   it("keeps publication durable and visible until queue run --once publishes and queues it", async () => {
     const { repo, rootRemote, moduleRemote, branch, pin } = await unpublishedSubmodulePinRepository()
@@ -5312,131 +5190,6 @@ checks: [{check: {run: "true"}}]
     expect(managedCwd.startsWith(wrong.repo + sep)).toBe(false)
   })
 
-  it("submits and merges one composed source packet through the public CLI", async () => {
-    const { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await compositionRepository()
-    const manifest = join(repo, "..", "composition.json")
-    await writeFile(
-      manifest,
-      JSON.stringify({
-        version: 1,
-        sources: [
-          {
-            repo: "dep",
-            branch: "issue/source",
-            baseSha: oldPinSha,
-            tipSha: sourceTipSha,
-            payload: ["src/candidate.ts"],
-          },
-        ],
-      }),
-    )
-    let submitStdout = ""
-    let submitStderr = ""
-    expect(
-      await runYrdProcess(
-        [
-          "/usr/bin/bun",
-          "/usr/local/bin/yrd",
-          "bay",
-          "submit",
-          "issue/source",
-          "--base",
-          "main",
-          "--composition",
-          manifest,
-          "--json",
-        ],
-        {
-          cwd: repo,
-          stdout: (text) => {
-            submitStdout += text
-          },
-          stderr: (text) => {
-            submitStderr += text
-          },
-        },
-      ),
-      submitStderr,
-    ).toBe(0)
-    expect(JSON.parse(submitStdout)).toMatchObject({
-      prs: [
-        {
-          id: "PR1",
-          revs: [
-            expect.objectContaining({
-              composition: expect.objectContaining({
-                sources: [expect.objectContaining({ repo: "dep", tipSha: sourceTipSha })],
-              }),
-            }),
-          ],
-        },
-      ],
-    })
-    await rm(manifest)
-
-    let diffStdout = ""
-    let diffStderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "diff", "PR1"], {
-        cwd: repo,
-        stdout: (text) => {
-          diffStdout += text
-        },
-        stderr: (text) => {
-          diffStderr += text
-        },
-      }),
-      diffStderr,
-    ).toBe(0)
-    expect(diffStdout).toContain("Source composition")
-    expect(diffStdout).toContain("dep issue/source")
-    expect(diffStdout).toContain("src/candidate.ts")
-
-    let runStdout = ""
-    let runStderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          runStdout += text
-        },
-        stderr: (text) => {
-          runStderr += text
-        },
-      }),
-      runStderr,
-    ).toBe(0)
-    const result = z
-      .object({ results: z.array(z.object({ status: z.string(), integration: IntegrationProofSchema }).passthrough()) })
-      .parse(JSON.parse(runStdout)).results[0]
-    if (result === undefined) throw new Error("expected one composed Queue result")
-    expect(result).toMatchObject({
-      status: "completed",
-      conclusion: "success",
-      integration: {
-        commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
-        sourceRewrites: [
-          {
-            repo: "dep",
-            oldBaseSha: oldPinSha,
-            oldTipSha: sourceTipSha,
-            newBaseSha: newPinSha,
-            newTipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
-            patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
-            rangeDiff: "=",
-            payload: ["src/candidate.ts"],
-          },
-        ],
-      },
-    })
-    const candidateSha = result.integration.commit
-    const mergedPinSha = result.integration.sourceRewrites?.[0]?.newTipSha
-    if (mergedPinSha === undefined) throw new Error("expected one source rewrite result")
-    expect(await git(repo, "rev-parse", "main")).toBe(candidateSha)
-    expect(await git(repo, "rev-parse", "main^")).toBe(rootBaseSha)
-    expect(await git(join(repo, "dep"), "rev-parse", "HEAD")).toBe(mergedPinSha)
-    expect(await git(repo, "status", "--porcelain")).toBe("")
-  })
 
   it("fails a check that emits then goes silent as a stall instead of wedging the queue behind a live child", async () => {
     const { repo, featureSha } = await repository()

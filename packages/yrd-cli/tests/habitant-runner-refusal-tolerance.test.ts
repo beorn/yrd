@@ -179,7 +179,7 @@ describe("habitant runner — a change withdrawn mid-compose never kills the wat
     )
   })
 
-  it.each(["authored-gitlink", "merge-tip-carrier"] as const)(
+  it.each(["authored-gitlink", "composition-retired"] as const)(
     "skips the change-scoped refusal %s without dying (22306 class)",
     async (code) => {
       // @ci 2026-07-25: a single PR's authored-gitlink killed the whole habitant.

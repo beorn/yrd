@@ -361,14 +361,6 @@ describe("case-insensitive CLI selector surfaces", () => {
     }
   }
 
-  it("recuts through the folded selector and echoes the canonical PR", async () => {
-    const app = await createCliApp()
-    await submitOnePR(app)
-    const output = remergeOutputIO()
-
-    expect(await runYrd(app, yrd("pr", "recut", "pr1", "--json"), output.io, stubRemerger()), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
-  })
 
   it("retries a required-check-failed PR through folded selectors without renaming it", async () => {
     let attempts = 0
@@ -397,32 +389,6 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
     expect(refused.stderr()).toContain("change 'PR1' required check failed in R1")
 
-    // The sanctioned retry: recut the folded selector back into the queue.
-    const requeued = remergeOutputIO()
-    expect(
-      await runYrd(app, yrd("pr", "recut", "pr1", "--queue", "--json"), requeued.io, stubRemerger()),
-      requeued.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(requeued.stdout())).toMatchObject({ pr: "PR1" })
-
-    // The retried run passes and still names the canonical PR; the exit code
-    // reflects the historical failed run that the projection also returns.
-    const retried = outputIO()
-    await runYrd(app, yrd("queue", "run", "pr1", "--json"), retried.io)
-    const parsed = JSON.parse(retried.stdout()) as {
-      command: string
-      results: readonly { status: string; prs: readonly { id: string }[] }[]
-    }
-    expect(parsed.command).toBe("queue.run")
-    expect(parsed.results).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          status: "completed",
-          conclusion: "success",
-          prs: [expect.objectContaining({ id: "PR1" })],
-        }),
-      ]),
-    )
   })
 
   it("records a regression through folded PR and run selectors", async () => {

@@ -1879,7 +1879,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("change is the printed family name, mr and pr are ruled aliases, and recut/publish/ready leave the help surface", async () => {
+  it("change is the printed family name, mr and pr are ruled aliases, recut is deleted, and publish/ready leave the help surface", async () => {
     const app = await createApp()
 
     const mrHelp = outputIO({ columns: 100 })
@@ -1889,8 +1889,11 @@ describe("runYrd", () => {
     expect(mrHelp.stdout()).not.toMatch(/^\s{2}publish/mu)
     expect(mrHelp.stdout()).not.toMatch(/^\s{2}ready/mu)
 
-    // Hidden is not removed: every retired-from-help verb still answers.
-    for (const verb of ["recut", "publish", "ready"]) {
+    // recut is DELETED outright (the queue rebuilds by merge on its own);
+    // publish/ready stay hidden-but-answering.
+    const goneRecut = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("mr", "recut", "PR1"), goneRecut.io)).not.toBe(0)
+    for (const verb of ["publish", "ready"]) {
       const hidden = outputIO({ columns: 100 })
       expect(await runYrd(app, yrd("mr", verb, "--help"), hidden.io), hidden.stderr()).toBe(0)
       expect(hidden.stdout()).toContain(`Usage: yrd change ${verb}`)
@@ -1902,137 +1905,6 @@ describe("runYrd", () => {
     expect(JSON.parse(aliasJson.stdout())).toMatchObject({ command: "pr.list" })
   })
 
-  it("exposes the canonical same-PR recut command", async () => {
-    const app = await createApp()
-    const createHelp = outputIO({ columns: 100 })
-    const submitHelp = outputIO({ columns: 100 })
-    const help = outputIO({ columns: 100 })
-
-    expect(await runYrd(app, yrd("pr", "create", "--help"), createHelp.io), createHelp.stderr()).toBe(0)
-    expect(createHelp.stdout()).toContain("Usage: yrd change create [options] [selector]")
-    expect(createHelp.stdout()).toContain("--issue <ref>")
-    expect(createHelp.stdout()).toContain("Authored root branch")
-    expect(createHelp.stdout()).toContain("$ yrd pr create <branch>")
-    expect(createHelp.stdout()).not.toContain("--draft")
-
-    expect(await runYrd(app, yrd("pr", "submit", "--help"), submitHelp.io), submitHelp.stderr()).toBe(0)
-    expect(submitHelp.stdout()).not.toContain("--draft")
-    expect(submitHelp.stdout()).not.toContain("Authored root branch")
-
-    expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
-    expect(help.stdout()).toContain("Usage: yrd change recut [options] <selector>")
-    expect(help.stdout()).toContain("--revision <number>")
-    expect(help.stdout()).toContain("--preflight")
-    expect(help.stdout()).toContain("--apply")
-    expect(help.stdout()).toContain("--queue")
-    expect(help.stdout()).toContain("--json")
-    expect(help.stdout()).toContain("Authored root branch")
-    expect(help.stdout()).toContain("$ yrd pr create <branch>")
-    expect(help.stdout()).toContain("$ yrd pr recut <PR> --preflight --queue --apply")
-    expect(help.stdout()).toMatch(/no\s+composition\s+manifest\s+or\s+manual\s+triage/u)
-  })
-
-  it("creates an authored carrier draft and queues a recut revision on the same PR", async () => {
-    const checkedRevisions: string[] = []
-    const app = await createApp({ waitingCheck: true, checkedRevisions })
-    const nextHead = "2".repeat(40)
-    const nextBase = "b".repeat(40)
-    const treeSha = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: nextHead,
-            baseSha: nextBase,
-            treeSha,
-            patchId,
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-
-    expect(
-      await runYrd(app, yrd("pr", "create", "topic/root-carrier", "--json"), submitted.io),
-      submitted.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(submitted.stdout())).toMatchObject({
-      command: "pr.create",
-      prs: [
-        {
-          id: "PR1",
-          branch: "topic/root-carrier",
-          state: "open",
-          merged: false,
-          revs: [{ n: 1, head: HEAD_SHA }],
-        },
-      ],
-    })
-    expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(checkedRevisions).toEqual([])
-
-    const remerge = remergeIO(app)
-    expect(
-      await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services),
-      remerge.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(remerge.stdout())).toMatchObject({
-      pr: "PR1",
-      revision: 2,
-      baseSha: nextBase,
-      treeSha,
-      patchId,
-      lineage: [1, 2],
-      unchanged: false,
-    })
-    expect(app.bays.pr("PR1")).toMatchObject({
-      id: "PR1",
-      branch: "topic/root-carrier",
-      state: "open",
-      merged: false,
-      revs: [
-        { n: 1, head: HEAD_SHA },
-        { n: 2, head: nextHead, submittedAt: expect.any(String) },
-      ],
-    })
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(checkedRevisions).toEqual([])
-  })
-
-  it("queues a recut's authoritative checks without minting a Run", async () => {
-    const checkedRevisions: string[] = []
-    const app = await createApp({ waitingCheck: true, checkedRevisions })
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: "4".repeat(40),
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const created = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-    expect(
-      await runYrd(app, yrd("pr", "create", "topic/habitant-carrier", "--json"), created.io),
-      created.stderr(),
-    ).toBe(0)
-
-    const remerge = remergeIO(app, "PR1", { habitantLeaseHeld: () => Promise.resolve(true) })
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
-    expect(checkedRevisions).toEqual([])
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.bays.checksRequested("PR1")).toBe(true)
-  })
 
   it("queues ready's authoritative checks without minting a Run", async () => {
     const checkedRevisions: string[] = []
@@ -2053,253 +1925,6 @@ describe("runYrd", () => {
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
 
-  it("forwards a same-issue integrated source composition when recutting an authored carrier", async () => {
-    const issue = "@ag/super/21075-role-rotation/21142-authored-root-flow"
-    const rewrite: SourceRewrite = {
-      repo: "vendor/yrd",
-      branch: "task/21142-source",
-      oldBaseSha: "3".repeat(40),
-      oldTipSha: "4".repeat(40),
-      newBaseSha: "5".repeat(40),
-      newTipSha: "6".repeat(40),
-      candidateRef: "refs/yrd/candidates/R1/merge/attempt-1-source",
-      patchId: "7".repeat(40),
-      rangeDiff: "=",
-      payload: ["packages/yrd-cli/src/run.ts", "packages/yrd-queue/src/command.ts"],
-    }
-    const shadow: SourceRewrite = {
-      ...rewrite,
-      branch: "task/21142-repair",
-      oldBaseSha: "8".repeat(40),
-      oldTipSha: "9".repeat(40),
-      newBaseSha: "a".repeat(40),
-      newTipSha: "b".repeat(40),
-      candidateRef: "refs/yrd/candidates/R2/merge/attempt-1-repair",
-      patchId: "c".repeat(40),
-      payload: ["packages/yrd-cli/src/run.ts"],
-    }
-    const behavior = { sourceRewrites: [rewrite] }
-    const app = await createApp(behavior)
-    await app.bays.submit({
-      branch: "task/21142-source",
-      base: "main",
-      baseSha: BASE_SHA,
-      headSha: HEAD_SHA,
-      issue,
-    })
-    await app.bays.requestChecks({ pr: "PR1" })
-    const merged = outputIO()
-    expect(
-      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), merged.io),
-      merged.stderr(),
-    ).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
-    expect(app.bays.pr("PR1")).toMatchObject({ state: "closed", merged: true, issue })
-
-    behavior.sourceRewrites = [shadow]
-    await app.bays.submit({
-      branch: "task/21142-repair",
-      base: "main",
-      baseSha: BASE_SHA,
-      headSha: "d".repeat(40),
-      issue,
-    })
-    await app.bays.requestChecks({ pr: "PR2" })
-    const repaired = outputIO()
-    expect(
-      await runYrd(app, yrd("queue", "run", "PR2", "--steps", "check,merge", "--json"), repaired.io),
-      repaired.stderr(),
-    ).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
-    expect(app.bays.pr("PR2")).toMatchObject({ state: "closed", merged: true, issue })
-
-    await app.bays.submit({
-      branch: "task/21142-root",
-      base: "main",
-      baseSha: BASE_SHA,
-      headSha: "2".repeat(40),
-      issue,
-      draft: true,
-    })
-    const requests: unknown[] = []
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          requests.push(input)
-          return Promise.resolve({
-            headSha: "8".repeat(40),
-            baseSha: "9".repeat(40),
-            treeSha: "a".repeat(40),
-            patchId: "b".repeat(40),
-            unchanged: false,
-            sourceRewrites: [rewrite],
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const remerge = remergeIO(app, "PR3")
-
-    expect(await runYrd(app, yrd("pr", "recut", "PR3", "--queue", "--json"), remerge.io, services)).toBe(0)
-    expect(requests).toEqual([
-      expect.objectContaining({
-        id: "PR3",
-        currentCompositions: [shadow, rewrite].map((source) => ({
-          version: 1,
-          sources: [
-            {
-              repo: source.repo,
-              branch: source.candidateRef,
-              baseSha: source.newBaseSha,
-              tipSha: source.newTipSha,
-              payload: source.payload,
-            },
-          ],
-        })),
-      }),
-    ])
-    expect(currentChangeRev(app.bays.pr("PR3")!)).toMatchObject({
-      recut: {
-        sources: [
-          {
-            repo: ".",
-            fromHeadSha: "2".repeat(40),
-            toHeadSha: "8".repeat(40),
-            patchId: "b".repeat(40),
-            rangeDiff: "=",
-          },
-          {
-            repo: "vendor/yrd",
-            fromHeadSha: rewrite.oldTipSha,
-            toHeadSha: rewrite.newTipSha,
-            patchId: rewrite.patchId,
-            rangeDiff: "=",
-          },
-        ],
-      },
-    })
-  })
-
-  it("certifies and queues a pin-only authored carrier after draft registration", async () => {
-    const checkedRevisions: string[] = []
-    const app = await createApp({ waitingCheck: true, checkedRevisions })
-    const treeSha = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: HEAD_SHA,
-            baseSha: BASE_SHA,
-            treeSha,
-            patchId,
-            unchanged: true,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-
-    expect(await runYrd(app, yrd("pr", "create", "topic/pin-only", "--json"), submitted.io), submitted.stderr()).toBe(0)
-    expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(checkedRevisions).toEqual([])
-
-    const remerge = remergeIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
-    expect(JSON.parse(remerge.stdout())).toMatchObject({
-      pr: "PR1",
-      revision: 2,
-      baseSha: BASE_SHA,
-      treeSha,
-      patchId,
-      lineage: [1, 2],
-      unchanged: false,
-    })
-    expect(app.bays.pr("PR1")).toMatchObject({
-      state: "open",
-      merged: false,
-      revs: [
-        { n: 1, head: HEAD_SHA },
-        { n: 2, head: HEAD_SHA, submittedAt: expect.any(String), recut: { fromRevision: 1, treeSha, patchId } },
-      ],
-    })
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(checkedRevisions).toEqual([])
-  })
-
-  it("keeps unrelated members progressing when a recut supersedes their shared predecessor batch", async () => {
-    const app = await createApp({ batch: 2, waitingCheck: true })
-    await openAndSubmit(app)
-    await openTestBay(app, { name: "two" })
-    await submitBayFixture(app, "B2")
-    expect(await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
-      {
-        id: "R1",
-        status: "waiting",
-        prs: [
-          { id: "PR1", revision: 1 },
-          { id: "PR2", revision: 1 },
-        ],
-      },
-    ])
-
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: "3".repeat(40),
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const remerge = remergeIO(app)
-
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), remerge.io, services)).toBe(0)
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "stale-pr" },
-    })
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-    expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("submitted")
-    expect(currentChangeRev(app.bays.pr("PR2")!)).toMatchObject({ n: 1 })
-    expect(app.queue.checks(["PR2"])).toMatchObject([{ pr: "PR2", revision: 1, status: "not-requested" }])
-  })
-
-  it("cancels an active predecessor job before admitting a recut revision", async () => {
-    const app = await createApp({ waitingCheck: true })
-    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
-    const predecessorJob = revisionAdmissionJob(app, "PR1")
-    expect(predecessorJob).toMatchObject({ status: "queued" })
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: "2".repeat(40),
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-
-    const output = remergeIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
-
-    expect(app.jobs.get(predecessorJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-  })
 
   it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
     const app = await createApp({ waitingCheck: true })
@@ -2345,247 +1970,6 @@ describe("runYrd", () => {
     expect(cancel.stderr()).toContain("only a running or waiting run")
   })
 
-  it("admits only the recut target when an unrelated terminal predecessor consumed checks authority", async () => {
-    const behavior = { failingCheck: true, waitingCheck: false }
-    const app = await createApp(behavior)
-    await app.bays.submit({ branch: "issue/terminal", headSha: HEAD_SHA, baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 5 * 60_000 })).toEqual(["PR1"])
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "refused",
-      step: "check",
-      receipt: { code: "check-failed" },
-    })
-
-    // Keep the recut target pending so only the unrelated predecessor is terminal.
-    behavior.failingCheck = false
-    behavior.waitingCheck = true
-    await app.bays.submit({ branch: "issue/recut", headSha: "2".repeat(40), baseSha: BASE_SHA })
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: "3".repeat(40),
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-
-    const output = remergeIO(app, "PR2")
-    expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), output.io, services)).toBe(0)
-
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.queue.checks(["PR2"])).toMatchObject([{ pr: "PR2", revision: 2, status: "queued" }])
-  })
-
-  it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {
-    let clockTick = 0
-    const checkRuns: string[] = []
-    const mergeRuns: string[] = []
-    const app = await createApp({
-      requires: ["review"],
-      waitingCheck: true,
-      checkRuns,
-      mergeRuns,
-      clock: () => new Date(Date.parse("2026-07-09T10:00:00.000Z") + clockTick++ * 60_000).toISOString(),
-    })
-    const nextHead = "2".repeat(40)
-    const nextBase = "b".repeat(40)
-    const treeSha = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const props = { request: "recut-identity" }
-    const requests: unknown[] = []
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          requests.push(input)
-          return Promise.resolve({
-            headSha: nextHead,
-            baseSha: nextBase,
-            treeSha,
-            patchId,
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, props })
-    const sourceReadyAt = app.bays.pr("PR1")?.revs[0]?.submittedAt
-    if (sourceReadyAt === undefined) throw new Error("missing first revision submission clock")
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "review-r1" })
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
-    const predecessorJob = revisionAdmissionJob(app, "PR1")
-    expect(predecessorJob).toMatchObject({ status: "queued" })
-    expect(checkRuns).toEqual([])
-    expect(mergeRuns).toEqual([])
-    const output = remergeIO(app)
-
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
-
-    expect(requests).toEqual([
-      expect.objectContaining({
-        id: "PR1",
-        branch: "issue/recut",
-        base: "main",
-        revision: 1,
-        headSha: HEAD_SHA,
-        baseSha: BASE_SHA,
-        props,
-      }),
-    ])
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      pr: "PR1",
-      revision: 2,
-      baseSha: nextBase,
-      treeSha,
-      patchId,
-      reviewCarried: true,
-      props,
-      sourceReadyAt,
-      lineage: [1, 2],
-      unchanged: false,
-    })
-    const remergeChange = app.bays.pr("PR1")!
-    expect(changeDeliveryState(remergeChange)).toBe("submitted")
-    expect(currentChangeRev(remergeChange)).toMatchObject({
-      n: 2,
-      head: nextHead,
-      props,
-      recut: {
-        fromRevision: 1,
-        treeSha,
-        patchId,
-        reviewCarried: true,
-        sources: [
-          {
-            repo: ".",
-            fromHeadSha: HEAD_SHA,
-            toHeadSha: nextHead,
-            patchId,
-            rangeDiff: "=",
-          },
-        ],
-      },
-    })
-    expect(remergeChange.revs).toMatchObject([
-      { n: 1, props, submittedAt: sourceReadyAt },
-      { n: 2, props, submittedAt: expect.any(String) },
-    ])
-    expect(remergeChange.revs[1]?.submittedAt).not.toBe(sourceReadyAt)
-    expect(app.bays.reviewState("PR1")).toMatchObject({
-      approved: true,
-      current: { carriedFrom: { revision: 1, headSha: HEAD_SHA } },
-    })
-    expect(app.bays.checksRequested("PR1")).toBe(true)
-    expect(app.jobs.get(predecessorJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(checkRuns).toEqual([])
-    expect(mergeRuns).toEqual([])
-
-    const status = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
-    expect(await runYrd(app, yrd("pr", "list"), status.io, services)).toBe(0)
-    expect(status.stdout()).toContain("HISTORY")
-    expect(status.stdout()).toContain("1→2")
-
-    const detail = remergeIO(app, "PR1", { now: () => Date.parse("2026-07-09T12:00:00.000Z") })
-    expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
-    expect(detail.stdout()).toContain(`SOURCE READY ${sourceReadyAt}`)
-    expect(detail.stdout()).toContain("HISTORY rev1→rev2")
-    expect(detail.stdout()).toContain(`RECOMPOSED . ${HEAD_SHA.slice(0, 12)}→${nextHead.slice(0, 12)}`)
-
-    const repeated = remergeIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
-    expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
-    expect(app.bays.pr("PR1")?.revs).toHaveLength(2)
-  })
-
-  /**
-   * @i/10-merge-queue/a-counter-that-means-two-things.
-   *
-   * The revision counter increments both when a candidate is recut and when the
-   * recut that finally merges is built, so `43 → 45` cannot be told apart from
-   * `43 → 44 → merged`. Two readers watched PR537 climb during an 89-minute
-   * stall and both called it futile churn, while revision 45 was the merge.
-   *
-   * The fact that separates the two is ALREADY RECORDED and ALREADY RENDERED.
-   * `pr recut` returns `unchanged: true` for a rebuild that changed nothing, and
-   * the RECOMPOSED line prints a content fingerprint per recut. On the real
-   * PR537 that line reads `0d7566e4e3ae→0d7566e4e3ae` about forty times before
-   * changing once — a wall of identical hashes that says something precise and
-   * that no reader can read. PR645 and PR673 change on every recut, so the
-   * healthy and the pathological carrier are already distinguishable in the data.
-   *
-   * So this asks for no new field. It asks the surface to collapse a run of
-   * unchanged rebuilds into what the run already means. The assertions below
-   * pin the PROPERTY and not a layout, because a test that pins the exact
-   * spelling of a display string fails on the next wording change and teaches
-   * nobody anything.
-   */
-  it("collapses a run of unchanged recuts instead of printing one fingerprint per attempt", async () => {
-    let clockTick = 0
-    const app = await createApp({
-      requires: ["review"],
-      waitingCheck: true,
-      clock: () => new Date(Date.parse("2026-07-09T10:00:00.000Z") + clockTick++ * 60_000).toISOString(),
-    })
-    // Every recut returns the SAME head. That is the pathological carrier: the
-    // mechanical rebuild merges on byte-identical content over and over, which is
-    // how PR537 printed `0d7566e4e3ae→0d7566e4e3ae` about forty times.
-    //
-    // Note `unchanged: false` rather than true. A recut that reports itself
-    // unchanged records no source transition at all, so it produces no
-    // RECOMPOSED entry and cannot reproduce the wall. The real specimen has
-    // entries whose from and to are EQUAL — the recut ran and moved nothing.
-    // A fixture that skips the entry tests a different thing than the bug.
-    const frozenHead = "3".repeat(40)
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: frozenHead,
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-
-    await app.bays.submit({ branch: "issue/churn", headSha: HEAD_SHA, baseSha: BASE_SHA })
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "review-r1" })
-    await app.bays.requestChecks({ pr: "PR1" })
-
-    const RECUTS = 6
-    for (let i = 0; i < RECUTS; i += 1) {
-      const io = remergeIO(app)
-      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), io.io, services)).toBe(0)
-    }
-
-    const detail = remergeIO(app, "PR1", { now: () => Date.parse("2026-07-09T12:00:00.000Z") })
-    expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
-    const view = detail.stdout()
-
-    // The state is NAMED on the live surface, not left to be inferred from
-    // repetition. This is the wiring half: a collapse nobody renders is a
-    // capability with no consumer.
-    const fingerprint = frozenHead.slice(0, 12)
-    expect(view).toContain(fingerprint) // nothing is lost
-    expect(view.toLowerCase()).toContain("unchanged")
-
-    // The wall itself is a property of the pure collapse, so it is asserted
-    // there rather than counted across a wrapped render. Counting a fingerprint
-    // across the WHOLE view answers a different question than "does the
-    // RECOMPOSED line repeat itself" — the same scope error this bead is about.
-    expect(view).not.toContain(`${fingerprint}→${fingerprint}`)
-  })
 
   it("collapseRecomposedSources states a run of unchanged rebuilds and leaves a healthy carrier alone", () => {
     const frozen = "3".repeat(40)
@@ -2629,185 +2013,6 @@ describe("runYrd", () => {
     expect(() => collapseRecomposedSources(sparse)).toThrow("yrd: recomposed source 0 is missing")
   })
 
-  it.each([
-    { draft: false, refreshVerb: "submit" },
-    { draft: true, refreshVerb: "create" },
-  ])(
-    "refuses PR1640's implicit stale replay and tells a $draft draft to $refreshVerb the live head",
-    async ({ draft, refreshVerb }) => {
-      const app = await createApp()
-      const requests: unknown[] = []
-      const services = {
-        recut: {
-          recut(input: unknown) {
-            requests.push(input)
-            return Promise.resolve({
-              headSha: "3".repeat(40),
-              baseSha: "b".repeat(40),
-              treeSha: "c".repeat(40),
-              patchId: "d".repeat(40),
-              unchanged: false,
-            })
-          },
-        },
-      } as unknown as YrdCliServices
-      await app.bays.submit({
-        branch: PR1640_BRANCH,
-        headSha: PR1640_RECORDED_HEAD,
-        baseSha: BASE_SHA,
-        ...(draft ? { draft: true } : {}),
-      })
-      await app.bays.editPr({ pr: "PR1", track: false })
-      const output = outputIO({
-        pruneGit: () => ({
-          resolveCommit: (ref) =>
-            ref === `origin/${PR1640_BRANCH}` || ref === PR1640_BRANCH ? PR1640_LIVE_HEAD : undefined,
-          isAncestor: () => false,
-          mergeTree: () => undefined,
-          treeOf: () => PR1640_LIVE_HEAD,
-        }),
-      })
-
-      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
-      expect(output.stderr()).toContain(`recorded revision 1 head '${PR1640_RECORDED_HEAD}'`)
-      expect(output.stderr()).toContain(`live branch '${PR1640_BRANCH}' is '${PR1640_LIVE_HEAD}'`)
-      expect(output.stderr()).toContain(`yrd pr ${refreshVerb} ${PR1640_BRANCH}`)
-      expect(output.stderr()).toContain("yrd pr recut PR1 --revision 1 --preflight --queue")
-      expect(requests).toEqual([])
-      expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
-    },
-  )
-
-  it("names the exact authorized publication remedy when recut cannot refresh the branch", async () => {
-    const app = await createApp()
-    await app.bays.submit({
-      branch: PR1640_BRANCH,
-      headSha: PR1640_RECORDED_HEAD,
-      baseSha: BASE_SHA,
-      draft: true,
-    })
-    const requests: ProcessRequest[] = []
-    const process = {
-      async run(request: ProcessRequest): Promise<ProcessResult> {
-        requests.push(request)
-        return {
-          exitCode: 128,
-          signal: null,
-          stdout: "",
-          stderr: "fatal: could not read Username for 'https://github.com'",
-          durationMs: 6,
-          timedOut: false,
-          verdict: "EXITED",
-        }
-      },
-    }
-    const output = outputIO({ cwd: "/repo" })
-
-    expect(
-      await runYrd(app, yrd("pr", "recut", "PR1", "--preflight", "--queue", "--json"), output.io, {
-        process,
-      } as YrdCliServices),
-    ).toBe(2)
-    expect(requests).toEqual([
-      expect.objectContaining({
-        argv: [
-          "git",
-          "-C",
-          "/repo",
-          "fetch",
-          "--quiet",
-          "--no-tags",
-          "--no-recurse-submodules",
-          "origin",
-          `+refs/heads/${PR1640_BRANCH}:refs/remotes/origin/${PR1640_BRANCH}`,
-        ],
-      }),
-    ])
-    expect(JSON.parse(output.stderr())).toMatchObject({
-      failure: {
-        kind: "configuration",
-        code: "recut-branch-refresh-failed",
-        message:
-          `yrd: could not refresh live branch '${PR1640_BRANCH}' from origin: ` +
-          "fatal: could not read Username for 'https://github.com'\n" +
-          `remedy: request credential-bearing Yrd publication for branch '${PR1640_BRANCH}' on base 'main' ` +
-          `at base SHA '${BASE_SHA}' and recorded head '${PR1640_RECORDED_HEAD}':\n` +
-          "  yrd pr publish PR1 --queue\n" +
-          "This records a durable publication Job; without a runner it remains visible as publication-required.\n" +
-          "if the publication Job cannot run: escalate to @chief for a credential-bearing publish — this branch " +
-          "is never pushed by hand, not even as an emergency fallback.\n",
-      },
-    })
-  })
-
-  it("refreshes and reports both sides of a divergent authored branch", async () => {
-    const root = mkdtempSync(join(tmpdir(), "yrd-recut-live-branch-"))
-    const remote = join(root, "remote.git")
-    const author = join(root, "author")
-    const observer = join(root, "observer")
-    const branch = "topic/live-head"
-    const git = (cwd: string, ...args: string[]) =>
-      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim()
-    try {
-      execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" })
-      execFileSync("git", ["init", "-b", "main", author], { stdio: "ignore" })
-      git(author, "config", "user.name", "Yrd Test")
-      git(author, "config", "user.email", "yrd@example.test")
-      writeFileSync(join(author, "specimen.txt"), "base\n")
-      git(author, "add", "specimen.txt")
-      git(author, "commit", "-m", "base")
-      git(author, "remote", "add", "origin", remote)
-      git(author, "push", "-u", "origin", "main")
-      git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
-      git(author, "switch", "-c", branch)
-      writeFileSync(join(author, "specimen.txt"), "base\nrecorded\n")
-      git(author, "commit", "-am", "recorded PR head")
-      const recordedHead = git(author, "rev-parse", "HEAD")
-      git(author, "push", "-u", "origin", branch)
-      execFileSync("git", ["clone", "--quiet", remote, observer], { stdio: "ignore" })
-      git(observer, "fetch", "--quiet", "origin", `${branch}:refs/remotes/origin/${branch}`)
-      expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(recordedHead)
-
-      git(author, "switch", "-C", branch, "main")
-      writeFileSync(join(author, "specimen.txt"), "base\nlive\n")
-      git(author, "commit", "-am", "divergent live branch")
-      const liveHead = git(author, "rev-parse", "HEAD")
-      git(author, "push", "--force", "origin", branch)
-      expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(recordedHead)
-
-      const app = await createApp()
-      await app.bays.submit({ branch, headSha: recordedHead, baseSha: BASE_SHA })
-      await app.bays.editPr({ pr: "PR1", track: false })
-      const requests: unknown[] = []
-      await using runtimeProcess = createProcess({ cwd: observer })
-      const services = {
-        process: runtimeProcess,
-        recut: {
-          recut(input: unknown) {
-            requests.push(input)
-            return Promise.resolve({
-              headSha: "3".repeat(40),
-              baseSha: "b".repeat(40),
-              treeSha: "c".repeat(40),
-              patchId: "d".repeat(40),
-              unchanged: false,
-            })
-          },
-        },
-      } as unknown as YrdCliServices
-      const output = outputIO({ cwd: observer })
-
-      expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(1)
-      expect(output.stderr()).toContain(`recorded revision 1 head '${recordedHead}'`)
-      expect(output.stderr()).toContain(`live branch '${branch}' is '${liveHead}'`)
-      expect(output.stderr()).toContain("divergent: recorded-only=1, live-only=1")
-      expect(output.stderr()).not.toContain("commits between: none")
-      expect(requests).toEqual([])
-      expect(git(observer, "rev-parse", `origin/${branch}`)).toBe(liveHead)
-    } finally {
-      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
-    }
-  })
 
   it("mechanically recuts an admitted certificate across consecutive base advances (R1304/R1307)", async () => {
     const oldHead = "2".repeat(40)
@@ -3282,72 +2487,6 @@ describe("runYrd", () => {
     expect(remerge).toHaveBeenCalledTimes(5)
   })
 
-  it("does not count a refused freshness pass as habitant cycle progress", async () => {
-    const nextBase = "b".repeat(40)
-    const app = await createApp()
-    await app.bays.submit({
-      branch: "issue/permanent-refresh-refusal",
-      headSha: HEAD_SHA,
-      baseSha: BASE_SHA,
-      draft: true,
-    })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: "2".repeat(40),
-      baseSha: BASE_SHA,
-      treeSha: "c".repeat(40),
-      patchId: "d".repeat(40),
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-
-    const remerge = vi.fn(() =>
-      Promise.reject(
-        createFailure({
-          kind: "refusal",
-          code: "recut-base-diverged",
-          message: remergeBaseDivergedReason("PR1", nextBase),
-        }),
-      ),
-    )
-    const services = { recut: { recut: remerge } } as unknown as YrdCliServices
-    const queueRun = vi.fn(async () => [])
-    const viewer = {
-      ...app,
-      queue: {
-        ...app.queue,
-        run: queueRun,
-      },
-    } as TestApp
-    const controller = new AbortController()
-    const sleeps: number[] = []
-    let now = 0
-    const io = outputIO({
-      now: () => now,
-      resolveQueueTarget: async () => ({ base: "main", sha: nextBase }),
-      scope: {
-        signal: controller.signal,
-        sleep: async (milliseconds: number) => {
-          sleeps.push(milliseconds)
-          now += 60_000
-          if (sleeps.length === 2) controller.abort()
-        },
-      } as YrdCliIO["scope"],
-    }).io
-
-    await expect(
-      runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, async () => undefined, services),
-    ).resolves.toBe(3)
-
-    expect(remerge, "maintenance must not retry a settled permanent refusal").toHaveBeenCalledTimes(1)
-    expect(app.state().queues.admissionRefusals.PR1?.settlement).toMatchObject({
-      disposition: "needs-person",
-      reason: expect.stringContaining("never descended from it"),
-    })
-    expect(queueRun, "a refused operation is not progress and must not reopen compose").toHaveBeenCalledTimes(1)
-  })
 
   it("re-proves the baseline when freshness mutates the change before refusing it", async () => {
     const nextBase = "b".repeat(40)
@@ -3714,218 +2853,6 @@ describe("runYrd", () => {
     ])
   })
 
-  it("journals a refused freshness recut while refreshing independent candidates", async () => {
-    const nextBase = "b".repeat(40)
-    const logs: LogEvent[] = []
-    const app = await createApp({
-      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => logs.push(event) }]),
-    })
-    const refresh = runInternals.refreshAdmittedQueueRevisions
-
-    await app.bays.submit({ branch: "issue/needs-composition", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: "2".repeat(40),
-      baseSha: BASE_SHA,
-      treeSha: "3".repeat(40),
-      patchId: "4".repeat(40),
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-
-    await app.bays.submit({ branch: "issue/independent", headSha: "5".repeat(40), baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR2",
-      fromRevision: 1,
-      headSha: "6".repeat(40),
-      baseSha: BASE_SHA,
-      treeSha: "7".repeat(40),
-      patchId: "8".repeat(40),
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR2" })
-    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
-
-    const remerge = vi.fn((input: { id: string }) => {
-      if (input.id === "PR1") {
-        return Promise.reject(
-          createFailure({
-            kind: "refusal",
-            code: "recut-base-diverged",
-            message: remergeBaseDivergedReason("PR1", nextBase),
-          }),
-        )
-      }
-      return Promise.resolve({
-        headSha: "9".repeat(40),
-        baseSha: nextBase,
-        treeSha: "c".repeat(40),
-        patchId: "8".repeat(40),
-        unchanged: false,
-      })
-    })
-    const services = { recut: { recut: remerge } } as unknown as YrdCliServices
-    const resolveQueueTarget = vi.fn(async () => ({ base: "main", sha: nextBase }))
-    const io = outputIO({ resolveQueueTarget }).io
-    const before = await Array.fromAsync(app.events()).then((events) => events.length)
-
-    await expect(refresh(app, services, io)).resolves.toEqual([
-      expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-base-diverged" }),
-      expect.objectContaining({ status: "refreshed", pr: "PR2" }),
-    ])
-    expect(resolveQueueTarget).toHaveBeenCalledTimes(1)
-    expect(logs).toContainEqual(
-      expect.objectContaining({
-        kind: "log",
-        level: "warn",
-        props: expect.objectContaining({
-          action: "queue-freshness-refused",
-          pr: "PR1",
-          code: "recut-base-diverged",
-        }),
-      }),
-    )
-    const refused = app.bays.pr("PR1")!
-    const independent = app.bays.pr("PR2")!
-    expect(changeDeliveryState(refused)).toBe("submitted")
-    expect(currentChangeRev(refused)).toMatchObject({ n: 2, head: "2".repeat(40) })
-    expect(changeDeliveryState(independent)).toBe("submitted")
-    expect(currentChangeRev(independent)).toMatchObject({ n: 3, head: "9".repeat(40) })
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      pr: "PR1",
-      revision: 2,
-      headSha: "2".repeat(40),
-      code: "recut-base-diverged",
-      reason: remergeBaseDivergedReason("PR1", nextBase),
-      count: 1,
-    })
-    await expect(runInternals.applyRefusalRemedies(app, services, io, new Set())).resolves.toEqual([])
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      settlement: {
-        disposition: "needs-person",
-        reason: expect.stringContaining("never descended from it"),
-      },
-    })
-    expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
-
-    await expect(refresh(app, services, io)).resolves.toEqual([])
-    expect(remerge).toHaveBeenCalledTimes(2)
-    expect(
-      logs.filter(
-        (event) => event.kind === "log" && event.level === "warn" && event.props?.action === "queue-freshness-refused",
-      ),
-    ).toHaveLength(1)
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      code: "recut-base-diverged",
-      count: 1,
-      settlement: { disposition: "needs-person" },
-    })
-    const appended = (await Array.fromAsync(app.events())).slice(before)
-    expect(appended.filter(({ name }) => name === "pr/recut").map(({ data }) => (data as { pr: string }).pr)).toEqual([
-      "PR2",
-    ])
-  })
-
-  it("recomputes the certificate after an authored revision supersedes a recut head", async () => {
-    const app = await createApp()
-    const branch = "issue/recut-then-author"
-    const remergeHead = "2".repeat(40)
-    const authoredHead = "3".repeat(40)
-    const successorHead = "4".repeat(40)
-    const oldTreeSha = "c".repeat(40)
-    const oldPatchId = "d".repeat(40)
-    const nextTreeSha = "e".repeat(40)
-    const nextPatchId = "f".repeat(40)
-
-    await app.bays.submit({ branch, headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: remergeHead,
-      baseSha: BASE_SHA,
-      treeSha: oldTreeSha,
-      patchId: oldPatchId,
-      reviewCarried: false,
-    })
-    await app.bays.intake({ branch, headSha: authoredHead, base: "main", baseSha: BASE_SHA })
-
-    const requests: unknown[] = []
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          requests.push(input)
-          return Promise.resolve({
-            headSha: successorHead,
-            baseSha: "b".repeat(40),
-            treeSha: nextTreeSha,
-            patchId: nextPatchId,
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const output = remergeIO(app)
-
-    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), output.io, services)).toBe(0)
-
-    expect(requests).toHaveLength(1)
-    expect(requests[0]).not.toHaveProperty("current")
-    expect(app.bays.pr("PR1")).toMatchObject({
-      revs: [
-        { n: 1, head: HEAD_SHA },
-        { n: 2, head: remergeHead, recut: { fromRevision: 1, treeSha: oldTreeSha, patchId: oldPatchId } },
-        { n: 3, head: authoredHead },
-        { n: 4, head: successorHead, recut: { fromRevision: 3, treeSha: nextTreeSha, patchId: nextPatchId } },
-      ],
-    })
-  })
-
-  it("refuses to recut a change whose current head already holds a passing check unless forced", async () => {
-    const app = await createApp()
-    await openAndSubmit(app)
-    if (!app.bays.checksRequested("PR1")) await app.bays.requestChecks({ pr: "PR1" })
-    // Drive the current revision's check to green: admit runs the pre-integration
-    // check step (leaseMs/runner => the admission is drained, not just enqueued).
-    await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
-
-    let remergeCalls = 0
-    const services = {
-      recut: {
-        recut() {
-          remergeCalls += 1
-          return Promise.resolve({
-            headSha: "2".repeat(40),
-            baseSha: "b".repeat(40),
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-
-    // Without --force the recut is refused so nobody mechanically discards the green check.
-    const refused = remergeIO(app)
-    expect(await runYrd(app, yrd("pr", "recut", "PR1"), refused.io, services)).toBe(1)
-    expect(refused.stderr()).toContain("passed its checks")
-    expect(refused.stderr()).toContain("--force")
-    expect(remergeCalls).toBe(0)
-    // The passing check survives and the current revision is untouched.
-    expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: HEAD_SHA })
-
-    // With --force the recut proceeds exactly as before the guard.
-    const forced = remergeIO(app)
-    expect(
-      await runYrd(app, yrd("pr", "recut", "PR1", "--force", "--json"), forced.io, services),
-      forced.stderr(),
-    ).toBe(0)
-    expect(remergeCalls).toBe(1)
-    expect(JSON.parse(forced.stdout())).toMatchObject({ pr: "PR1", revision: 2, unchanged: false })
-  })
 
   it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
     const revision = (
@@ -5372,49 +4299,6 @@ describe("runYrd", () => {
     expect(localChecks).toEqual(["typecheck"])
   })
 
-  it("refuses an active-bay submit whose checked-out head is a merge commit", async () => {
-    const app = await createApp()
-    await openTestBay(app, { name: "merge-tip-bay" })
-
-    // The bay's committed head is a merge commit. Until now this entrance was
-    // the one submit path that never met the linear-root check at all: the
-    // branch resolver (where submit enforces it) is deliberately skipped for
-    // an ACTIVE bay, so the merge tip sailed into the ledger and was refused
-    // only later, on the merge path (PR1364 shape, 2026-08-19).
-    const submit = outputIO({
-      cwd: "/repo/.bays/B1",
-      parents: async () => ["e".repeat(40), "f".repeat(40)],
-    })
-    expect(await runYrd(app, yrd("pr", "submit"), submit.io)).toBe(1)
-    expect(submit.stderr()).toContain("merge commit with 2 parents")
-    expect(submit.stderr()).toContain("linear rebuild required")
-    // The refusal precedes the ledger write: nothing queued is left behind.
-    expect(app.bays.prs()).toEqual([])
-  })
-
-  it("refuses pr ready for a merge-tip head before running the required checks", async () => {
-    const localChecks: string[] = []
-    const app = await createApp()
-    await app.bays.submit({ branch: "topic/merge-tip-ready", headSha: MERGED_SHA, base: "main", draft: true })
-
-    const ready = outputIO({ parents: async () => ["e".repeat(40), "f".repeat(40)] })
-    expect(
-      await runYrd(app, yrd("pr", "ready", "PR1"), ready.io, {
-        checks: {
-          names: ["typecheck"],
-          run: async (name) => {
-            localChecks.push(name)
-            return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
-          },
-          install: async () => "/repo/.git/yrd/hooks/pre-submit",
-        },
-      }),
-    ).toBe(1)
-    expect(ready.stderr()).toContain("merge commit with 2 parents")
-    expect(ready.stderr()).toContain("linear rebuild required")
-    // The cheap lineage read fires BEFORE the expensive check gate pays out.
-    expect(localChecks).toEqual([])
-  })
 
   it("tells a bayless author which step is missing instead of that a lookup failed", async () => {
     const app = await createApp()
@@ -6377,64 +5261,6 @@ describe("runYrd", () => {
     })
   })
 
-  it("submits an immutable source composition from a JSON manifest", async () => {
-    const app = await createApp()
-    const root = mkdtempSync(join(tmpdir(), "yrd-composition-"))
-    const manifest = join(root, "composition.json")
-    writeFileSync(
-      manifest,
-      JSON.stringify({
-        version: 1,
-        sources: [
-          {
-            repo: "dep",
-            branch: "issue/source",
-            baseSha: "2".repeat(40),
-            tipSha: "3".repeat(40),
-            payload: ["src/candidate.ts"],
-          },
-        ],
-      }),
-    )
-    const submit = outputIO({ cwd: root, resolveRevision: () => Promise.resolve(HEAD_SHA) })
-
-    try {
-      expect(
-        await runYrd(
-          app,
-          yrd("bay", "submit", "issue/source", "--base", "main", "--composition", "composition.json", "--json"),
-          submit.io,
-        ),
-        submit.stderr(),
-      ).toBe(0)
-      expect(JSON.parse(submit.stdout())).toMatchObject({
-        prs: [
-          {
-            branch: "issue/source",
-            revs: [
-              {
-                head: HEAD_SHA,
-                composition: {
-                  version: 1,
-                  sources: [
-                    {
-                      repo: "dep",
-                      branch: "issue/source",
-                      baseSha: "2".repeat(40),
-                      tipSha: "3".repeat(40),
-                      payload: ["src/candidate.ts"],
-                    },
-                  ],
-                },
-              },
-            ],
-          },
-        ],
-      })
-    } finally {
-      safeRemoveSync(root, { within: tmpdir(), allowMissing: true })
-    }
-  })
 
   it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
     const app = await createApp()
@@ -8424,12 +7250,10 @@ describe("runYrd", () => {
       findings: [
         {
           ...refusalLoop,
-          resolution: [
-            "Escalate to a human: composing 'dep' from authored pin " +
-              "'dddddddddddddddddddddddddddddddddddddddd' onto base pin " +
-              "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' needs merge-conflict judgment; do not run the recipe " +
-              "mechanically.",
-          ],
+          // The certificate-era recut-gitlink-conflict projector is deleted with
+          // the rewrite machinery; a historical refusal now projects the
+          // generic resolution.
+          resolution: ["Correct the cause above, then retry the same Yrd command."],
         },
       ],
     })
@@ -8869,13 +7693,20 @@ describe("runYrd", () => {
       const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/permanent-refusal")
       if (pr === undefined) throw new Error("intake did not record the change")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
-      // Structurally permanent: settles to needs-person on its FIRST refusal,
-      // same as the yrd-queue unit coverage (admission-refusal-oracle.test.ts).
       await app.queue.recordAdmissionRefusal({
         pr: pr.id,
-        code: "recut-base-diverged",
+        code: "authored-gitlink",
         kind: "refusal",
-        reason: "the authoritative candidate base never descended from the certified base",
+        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+      })
+      // The runner's judgment classification settles a no-mechanical-remedy
+      // refusal needs-person; driven explicitly, since no code auto-parks.
+      await app.queue.settleAdmissionRefusal({
+        pr: pr.id,
+        revision: currentChangeRev(pr).n,
+        headSha: currentChangeRev(pr).head,
+        disposition: "needs-person",
+        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
       })
 
       const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
@@ -8900,7 +7731,7 @@ describe("runYrd", () => {
           {
             code: "admission-refusal-needs-person",
             pr: pr.id,
-            refusal: "recut-base-diverged",
+            refusal: "authored-gitlink",
             owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
           },
         ])
@@ -9004,9 +7835,18 @@ describe("runYrd", () => {
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
       await app.queue.recordAdmissionRefusal({
         pr: pr.id,
-        code: "recut-base-diverged",
+        code: "authored-gitlink",
         kind: "refusal",
-        reason: "the authoritative candidate base never descended from the certified base",
+        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+      })
+      // The runner's judgment classification settles a no-mechanical-remedy
+      // refusal needs-person; driven explicitly, since no code auto-parks.
+      await app.queue.settleAdmissionRefusal({
+        pr: pr.id,
+        revision: currentChangeRev(pr).n,
+        headSha: currentChangeRev(pr).head,
+        disposition: "needs-person",
+        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
       })
 
       // No grace period, unlike a draft: the very next read already pages.
@@ -13531,30 +12371,6 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     expect(run.stdout()).toContain("STATE")
   })
 
-  it("--once parks a structurally permanent refusal born during its only pass", async () => {
-    const app = await createApp({
-      prepareCandidate: async () => {
-        throw createFailure({
-          kind: "refusal",
-          code: "recut-base-diverged",
-          message: "the authoritative candidate base never descended from the certified base",
-        })
-      },
-    })
-    await openAndSubmit(app)
-    const run = outputIO()
-
-    expect(await runYrd(app, yrd("queue", "run", "--once"), run.io), run.stderr()).toBe(0)
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      code: "recut-base-diverged",
-      count: 1,
-      settlement: {
-        disposition: "needs-person",
-        reason: "the authoritative candidate base never descended from the certified base",
-      },
-    })
-    expect(app.queue.eligibility("PR1").reason?.code).toBe("admission-refused")
-  })
 
   it("a change selector is a single pass, not a follow loop", async () => {
     const app = await createApp()
@@ -14153,7 +12969,7 @@ describe("typed issue merge bridge", () => {
     const issueRef = "@yrd/core/21634-submit-and-stay"
     const failure = "submitted composition cannot be built"
     await using app = await createApp({
-      checkFailure: { code: "composition-invalid", message: failure },
+      checkFailure: { code: "composition-retired", message: failure },
     })
     await app.bays.submit({
       branch: "topic/needs-author-bridge",
@@ -14184,7 +13000,7 @@ describe("typed issue merge bridge", () => {
           status: "needs-author",
           runs: ["R1"],
           bounce: { run: "R1", detail: failure },
-          attributedResult: { code: "composition-invalid", message: failure },
+          attributedResult: { code: "composition-retired", message: failure },
         },
       ],
     })
@@ -14234,7 +13050,7 @@ describe("typed issue merge bridge", () => {
       eligibility: {
         reason: {
           code: "needs-author",
-          result: { code: "composition-invalid", message: failure },
+          result: { code: "composition-retired", message: failure },
         },
       },
     })
@@ -14244,13 +13060,13 @@ describe("typed issue merge bridge", () => {
     expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
     expect(human.stdout()).toContain("PR1 rev1 needs-author")
     expect(human.stdout()).toContain("OUTCOME needs-author")
-    expect(human.stdout()).toContain("ATTRIBUTED composition-invalid")
+    expect(human.stdout()).toContain("ATTRIBUTED composition-retired")
     expect(human.stdout()).toContain(failure)
 
     const humanRuns = outputIO()
     expect(await runYrd(app, yrd("pr", "runs", "PR1"), humanRuns.io), humanRuns.stderr()).toBe(0)
     expect(humanRuns.stdout()).toContain("STATUS needs-author")
-    expect(humanRuns.stdout()).toContain("ATTRIBUTED composition-invalid")
+    expect(humanRuns.stdout()).toContain("ATTRIBUTED composition-retired")
     expect(humanRuns.stdout()).toContain("NEXT fix the branch and push; the same PR resumes automatically")
 
     const dashboard = outputIO({

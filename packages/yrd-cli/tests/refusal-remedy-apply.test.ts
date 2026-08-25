@@ -182,7 +182,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
         revision: 1,
         code: "composition-invalid",
         count: 3,
-        commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr recut PR1791 --queue"],
+        commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr submit task/22474-carrier"],
         verdict: "RECUT",
       },
     ])
@@ -194,7 +194,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
           action: "queue-refusal-remedy-applied",
           pr: "PR1791",
           verdict: "RECUT",
-          commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr recut PR1791 --queue"],
+          commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr submit task/22474-carrier"],
         }),
       }),
     )
@@ -206,8 +206,10 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     const [outcome] = await applyRefusalRemedies(h.app, h.services, h.io, new Set())
 
     expect(outcome).toMatchObject({ status: "applied", verdict: "RECUT-FORCE" })
+    // The retired verb's --force spelling is gone; the verdict still applies
+    // force internally, and the printed next is the resubmit spelling.
     expect(outcome?.status === "applied" ? outcome.commands.at(-1) : undefined).toBe(
-      "yrd pr recut PR1791 --queue --force",
+      "yrd pr submit task/22474-carrier",
     )
   })
 
