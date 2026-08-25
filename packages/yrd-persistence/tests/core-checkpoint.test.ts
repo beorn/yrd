@@ -436,7 +436,7 @@ describe("persistent Core projection checkpoint", () => {
     const checkpoint = indexed.checkpoint()
     expect(checkpoint).toMatchObject({ cursor: 4_097, value: { v: 1 } })
     if (checkpoint === undefined) throw new Error("expected the warm checkpoint")
-    expect((checkpoint.value as { results: unknown[] }).results).toHaveLength(4_096)
+    expect((checkpoint.value as { receipts: unknown[] }).receipts).toHaveLength(4_096)
 
     await using reader = await createYrd(definition, { inject: { journal: indexed.journal, id: ids() } })
     const before = await Array.fromAsync(reader.events())
@@ -490,7 +490,7 @@ describe("persistent Core projection checkpoint", () => {
             value: {
               v: 1,
               state: { counter: { value: 41 } },
-              results: [],
+              receipts: [],
               causeIds: [],
               eventIds: [],
             },
@@ -760,9 +760,9 @@ describe("persistent Core projection checkpoint", () => {
       .get()
     if (row === null) throw new Error("expected a persisted checkpoint")
     const poisoned = JSON.parse(row.checkpoint_json) as {
-      value: { results: Array<{ command: { id: string }; cause: { commandId: string } }> }
+      value: { receipts: Array<{ command: { id: string }; cause: { commandId: string } }> }
     }
-    poisoned.value.results[0]!.cause.commandId = "00000000-0000-7000-8000-ffffffffffff"
+    poisoned.value.receipts[0]!.cause.commandId = "00000000-0000-7000-8000-ffffffffffff"
     const checkpointJson = JSON.stringify(poisoned)
     const checkpointSha256 = createHash("sha256").update(checkpointJson).digest("hex")
     database
@@ -788,14 +788,14 @@ describe("persistent Core projection checkpoint", () => {
     })
     const repaired = storedCheckpoint(dir)
     expect(repaired?.value).toMatchObject({
-      results: [{ command: { id: expect.any(String) }, cause: { commandId: expect.any(String) } }],
+      receipts: [{ command: { id: expect.any(String) }, cause: { commandId: expect.any(String) } }],
     })
     if (repaired === undefined) throw new Error("expected repaired checkpoint")
     const [result] = (
       repaired.value as {
-        results: Array<{ command: { id: string }; cause: { commandId: string } }>
+        receipts: Array<{ command: { id: string }; cause: { commandId: string } }>
       }
-    ).results
+    ).receipts
     expect(result?.cause.commandId).toBe(result?.command.id)
   })
 
@@ -812,9 +812,9 @@ describe("persistent Core projection checkpoint", () => {
       .get()
     if (row === null) throw new Error("expected a persisted checkpoint")
     const poisoned = JSON.parse(row.checkpoint_json) as {
-      value: { results: Array<{ command: { args: { by: number } }; cause: { commandHash: string } }> }
+      value: { receipts: Array<{ command: { args: { by: number } }; cause: { commandHash: string } }> }
     }
-    const result = poisoned.value.results[0]
+    const result = poisoned.value.receipts[0]
     if (result === undefined) throw new Error("expected a persisted result")
     const originalHash = result.cause.commandHash
     result.command.args.by = 999

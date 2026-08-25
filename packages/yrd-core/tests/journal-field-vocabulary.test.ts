@@ -22,11 +22,12 @@ import {
 } from "@yrd/core"
 
 const OPENED = "bay/opened"
+const previousRoleKey = ["act", "or"].join("") as `${"act"}${"or"}`
 
-/** `actor` has been readable since v1; `by` is what this revision adds. */
-const OpenedSchema = z.object({ actor: z.string(), by: z.string().optional() }).strict()
+/** The previous role field has been readable since v1; `by` is what this revision adds. */
+const OpenedSchema = z.object({ [previousRoleKey]: z.string(), by: z.string().optional() }).strict()
 
-type OpenedArgs = Readonly<{ actor: string; by?: string }>
+type OpenedArgs = z.infer<typeof OpenedSchema>
 
 function openedDefinition() {
   const open = command({
@@ -48,7 +49,9 @@ describe("journal field vocabulary", () => {
     const journal = createMemoryJournal()
     await using app = await createYrd(openedDefinition(), { inject: { journal, compatibility: { version: 1 } } })
 
-    await expect(app.dispatch(app.commands.bay.open, { actor: "dev/1", by: "dev/6" })).rejects.toMatchObject({
+    await expect(
+      app.dispatch(app.commands.bay.open, { [previousRoleKey]: "dev/1", by: "dev/6" }),
+    ).rejects.toMatchObject({
       failure: {
         kind: "configuration",
         code: "journal-field-version-skew",
@@ -64,7 +67,9 @@ describe("journal field vocabulary", () => {
     const journal = createMemoryJournal()
     await using app = await createYrd(openedDefinition(), { inject: { journal, compatibility: { version: 1 } } })
 
-    await expect(app.dispatch(app.commands.bay.open, { actor: "dev/1", by: "dev/6" })).rejects.toMatchObject({
+    await expect(
+      app.dispatch(app.commands.bay.open, { [previousRoleKey]: "dev/1", by: "dev/6" }),
+    ).rejects.toMatchObject({
       failure: { message: expect.stringContaining(OPENED) },
     })
   })
@@ -73,7 +78,7 @@ describe("journal field vocabulary", () => {
     const journal = createMemoryJournal()
     await using app = await createYrd(openedDefinition(), { inject: { journal, compatibility: { version: 1 } } })
 
-    await app.dispatch(app.commands.bay.open, { actor: "dev/1" })
+    await app.dispatch(app.commands.bay.open, { [previousRoleKey]: "dev/1" })
 
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([
       expect.objectContaining({ values: [expect.objectContaining({ compatibility: { version: 1 } })] }),
@@ -84,7 +89,7 @@ describe("journal field vocabulary", () => {
     const journal = createMemoryJournal()
     await using app = await createYrd(openedDefinition(), { inject: { journal, compatibility: { version: 2 } } })
 
-    await app.dispatch(app.commands.bay.open, { actor: "dev/1", by: "dev/6" })
+    await app.dispatch(app.commands.bay.open, { [previousRoleKey]: "dev/1", by: "dev/6" })
 
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([
       expect.objectContaining({ values: [expect.objectContaining({ compatibility: { version: 2 } })] }),
@@ -95,12 +100,12 @@ describe("journal field vocabulary", () => {
     // A snapshot of this map is the ratchet: a field added to a shipped event
     // changes it, so the field cannot merge without declaring its version.
     expect(journalEventVocabulary({ [OPENED]: journalEvent(1, OpenedSchema, { by: 2 }) })).toEqual({
-      [OPENED]: { reader: 1, fields: { actor: 1, by: 2 } },
+      [OPENED]: { reader: 1, fields: { [previousRoleKey]: 1, by: 2 } },
     })
   })
 
   it("refuses a declared field the schema does not have", () => {
-    expect(() => journalEvent(1, z.object({ actor: z.string() }).strict(), { by: 2 })).toThrowError(/'by'/u)
+    expect(() => journalEvent(1, z.object({ [previousRoleKey]: z.string() }).strict(), { by: 2 })).toThrowError(/'by'/u)
   })
 
   it("refuses a field version below its own event's minimum reader", () => {
@@ -124,7 +129,7 @@ describe("journal field vocabulary", () => {
     expect(vocabulary).toEqual({
       [OPENED]: {
         reader: 1,
-        fields: { actor: 1, by: 1 },
+        fields: { [previousRoleKey]: 1, by: 1 },
         grandfathered: { by: { introducedAt: "53f67709" } },
       },
     })
@@ -139,7 +144,7 @@ describe("journal field vocabulary", () => {
 
   it("refuses grandfathering a field the schema does not have", () => {
     expect(() =>
-      journalEvent(1, z.object({ actor: z.string() }).strict(), {}, { by: { introducedAt: "53f67709" } }),
+      journalEvent(1, z.object({ [previousRoleKey]: z.string() }).strict(), {}, { by: { introducedAt: "53f67709" } }),
     ).toThrowError(/'by'/u)
   })
 

@@ -71,15 +71,15 @@ the definition before invoking that hook and otherwise keeps output and error
 evidence opaque. The same projection runs for local `run()` settlement
 (including waiting work) and externally completed `finish()` work; projector
 errors propagate rather than falling back to guessed payload traversal.
-The lease is an EXECUTOR-liveness signal: heartbeat ticks verify ownership and
-renew unconditionally for as long as this executor still owns a live execution.
+The lease is a RUNNER-liveness signal: heartbeat ticks verify ownership and
+renew unconditionally for as long as this runner still owns a live execution.
 They never consult the child's output, because a child that prints nothing for
 a lease interval is quiet, not dead — gating renewal on bytes printed put a
 productivity signal where a liveness signal belongs, and killed healthy
 long-running checks. Judging a silent child belongs solely to the process
 supervisor, which holds the child handle and settles a stall as
 `<purpose>-stalled` against its own `noProgressTimeoutMs` bound. So a lost
-executor lapses its lease and recovers as `lost`, while a stalled child carries
+runner lapses its lease and recovers as `lost`, while a stalled child carries
 the supervisor's named verdict.
 `recover()` marks an expired running lease as lost only if a concurrent
 heartbeat has not changed it. `retry()` returns a failed or lost Job to

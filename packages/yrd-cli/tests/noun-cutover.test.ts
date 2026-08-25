@@ -306,19 +306,7 @@ describe("noun cutover ratchet", () => {
         stderr: "pipe",
       })
       const publicApiDetail = `${publicApi.stdout.toString()}${publicApi.stderr.toString()}`
-      const silvery = Bun.spawnSync({
-        cmd: ["bun", "-e", 'const silvery = await import("silvery"); process.exit(!("MarkdownView" in silvery))'],
-        cwd: standalone,
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      if (silvery.exitCode === 0) {
-        expect(publicApi.exitCode, publicApiDetail).toBe(0)
-      } else {
-        expect(publicApi.exitCode).toBe(1)
-        expect(publicApiDetail).toContain("Yrd dependency provisioning refused: Yrd main consumes silvery.MarkdownView")
-        expect(publicApiDetail).toContain("@km/infra/22627-silvery-0232-release")
-      }
+      expect(publicApi.exitCode, publicApiDetail).toBe(0)
     } finally {
       rmSync(standalone, { recursive: true, force: true })
     }

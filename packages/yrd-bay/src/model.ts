@@ -297,7 +297,7 @@ type BranchLifecycleBase = Readonly<{
   bay: BayId
   name: string
   issue?: string
-  /** Bay/runtime ownership: the process or actor that owns the workspace lifecycle. */
+  /** Bay/runtime ownership: the process or person that owns the workspace lifecycle. */
   by?: string
   /** Logical owner of the exact immutable PR revision projected by this lifecycle. */
   submitter?: string

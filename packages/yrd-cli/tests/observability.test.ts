@@ -3,7 +3,7 @@
  * @level l2
  * @consumer Yrd operators and observable CLI exemplars
  */
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -18,6 +18,7 @@ import {
   habitantObservability,
   resolveYrdObservability,
 } from "../src/observability.ts"
+import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 
 const roots: string[] = []
 
@@ -40,6 +41,7 @@ async function repository(root: string): Promise<string> {
   await git(repo, "config", "user.email", "yrd@example.invalid")
   await writeFile(join(repo, "README.md"), "main\n")
   await writeFile(join(repo, ".yrd.yml"), 'checks:\n  - {check: {run: "true"}}\n')
+  await installDeclaredYrdEntry(repo)
   await git(repo, "add", "README.md", ".yrd.yml")
   await git(repo, "commit", "-qm", "main")
   return repo
@@ -545,6 +547,8 @@ describe("observable CLI exemplar", () => {
     const logFile = join(root, "yrd.jsonl")
     const stdout: string[] = []
     const stderr: string[] = []
+    await mkdir(join(root, "caller"))
+    await mkdir(join(root, "selected"))
 
     const exitCode = await runObservableCli({
       globals: { repo: "../selected", verbose: 3 },

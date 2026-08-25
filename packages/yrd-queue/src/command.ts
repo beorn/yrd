@@ -4781,7 +4781,7 @@ async function witnessLines(git: Git, repo: string, rev: string, path: string): 
   const oid = /^\d{6} blob ([0-9a-f]{40,64})$/u.exec(tree.stdout.slice(0, tab))?.[1]
   const end = tree.stdout.indexOf("\0", tab + 1)
   if (tree.stdout.slice(tab + 1, end === -1 ? undefined : end) !== path) return { status: "absent" }
-  // A gitlink or a subtree is not line-comparable content, and who authored a
+  // A gitlink or a subtree cannot be compared by text rows, and who authored a
   // pin is the containment guards' subject, never this one's.
   if (oid === undefined) return { status: "opaque" }
   const blob = await git.raw(repo, ["cat-file", "blob", oid], true)
