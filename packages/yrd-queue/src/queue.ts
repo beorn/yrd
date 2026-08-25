@@ -7723,6 +7723,10 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // must survive a refusal that is not the author's fault" violation this
     // phase's own bead names.
     "component-model-authorization-refused",
+    // A certificate-era composed revision reaching candidate construction:
+    // the composed path is retired; the author resubmits the root change with
+    // its gitlink bumps.
+    "composition-retired",
     // All three read the branch's authored delta base, and all are cured the
     // same way `gitlink-inspection` is: the author restores readable history.
     "contribution-inspection",

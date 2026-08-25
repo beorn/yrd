@@ -154,7 +154,7 @@ describe("native needs-author lifecycle", () => {
     await using app = await createQueueApp(() => ({
       status: "completed",
       conclusion: "failure",
-      error: { code: "composition-invalid", message: "change 'PR1' composition head contains root changes" },
+      error: { code: "composition-retired", message: "change 'PR1' declares a source composition; composed revisions are retired" },
     }))
     const pr = await submitWithChecks(app, "topic/authored-root")
 
@@ -168,8 +168,8 @@ describe("native needs-author lifecycle", () => {
       kind: "refusal",
       step: "check",
       receipt: {
-        code: "composition-invalid",
-        message: "change 'PR1' composition head contains root changes",
+        code: "composition-retired",
+        message: "change 'PR1' declares a source composition; composed revisions are retired",
       },
     })
 
@@ -181,8 +181,8 @@ describe("native needs-author lifecycle", () => {
       run: refused?.status === "refused" ? refused.steps[0]?.job : undefined,
       step: "check",
       receipt: {
-        code: "composition-invalid",
-        message: "change 'PR1' composition head contains root changes",
+        code: "composition-retired",
+        message: "change 'PR1' declares a source composition; composed revisions are retired",
       },
     })
     expect(changeFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
@@ -216,7 +216,7 @@ describe("native needs-author lifecycle", () => {
     expect(eligibility.runnable).toBe(false)
     expect(eligibility.reason?.code).toBe("admission-refused")
     expect(eligibility.reason?.result).toBeUndefined()
-    expect(eligibility.reason?.message).toContain("composition-invalid")
+    expect(eligibility.reason?.message).toContain("composition-retired")
     expect(eligibility.reason?.message).toContain("yrd pr recut PR1 --preflight --queue --apply")
     expect(Queues.ids(app.state().queues)).toEqual([])
 
@@ -254,7 +254,7 @@ describe("native needs-author lifecycle", () => {
     expect(app.queue.eligibility(pr).checks.status).toBe("queued")
     expect(app.bays.pr(pr)?.revs[0]?.admission).toMatchObject({
       status: "refused",
-      receipt: { code: "composition-invalid" },
+      receipt: { code: "composition-retired" },
     })
   })
 
@@ -262,27 +262,14 @@ describe("native needs-author lifecycle", () => {
     await using app = await createQueueApp(() => ({
       status: "completed",
       conclusion: "failure",
-      error: { code: "composition-invalid", message: "submitted composition cannot be built" },
+      error: { code: "composition-retired", message: "submitted composition cannot be built" },
     }))
-    const composition = {
-      version: 1 as const,
-      sources: [
-        {
-          repo: "vendor/source",
-          branch: "topic/source",
-          baseSha: "b".repeat(40),
-          tipSha: "c".repeat(40),
-          payload: ["src/fix.ts"],
-        },
-      ],
-    }
     await app.bays.submit({
       branch: "topic/same-head",
       name: "original delivery",
       headSha: HEAD,
       base: "release/2.0",
       baseSha: BASE,
-      composition,
     })
     await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, runtime)
@@ -308,27 +295,21 @@ describe("native needs-author lifecycle", () => {
       base: "release/2.0",
       name: "original delivery",
       baseSha: BASE,
-      composition,
     })
     expect(await Array.fromAsync(app.events())).toEqual(before)
 
-    const changedComposition = {
-      ...composition,
-      sources: [{ ...composition.sources[0]!, tipSha: "d".repeat(40) }],
-    }
     const authoredChange = await app.bays.intake({
       branch: "topic/same-head",
       headSha: HEAD,
       base: "release/2.0",
-      baseSha: BASE,
-      composition: changedComposition,
+      baseSha: "d".repeat(40),
     })
     expect(authoredChange.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       revision: 2,
       headSha: HEAD,
       status: "submitted",
-      composition: changedComposition,
+      baseSha: "d".repeat(40),
     })
   })
 

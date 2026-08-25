@@ -525,9 +525,10 @@ function usableStepOutput(output: string | undefined): string | undefined {
 }
 
 function nativeMergeCommand(data: QueueShowData, step: string): string | undefined {
-  // Composition members are materialized through composePR rather than this
-  // git command. In that case the honest UI is the MERGE/PARENTS summary below,
-  // never a plausible-looking command the runner did not execute.
+  // Certificate-era composition members (replayed historical runs) were
+  // materialized through the retired composePR rather than this git command.
+  // For those the honest UI is the MERGE/PARENTS summary below, never a
+  // plausible-looking command the runner did not execute.
   if (step !== "merge" || data.prs.length === 0 || data.prs.some((pr) => pr.composition !== undefined)) {
     return undefined
   }

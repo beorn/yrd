@@ -2819,6 +2819,18 @@ async function prepareCandidateMembers(
       })
       continue
     }
+    // Composed revisions are retired with the certificate-era rewrite
+    // machinery. A member snapshot still declaring one (a certificate-era
+    // record) must refuse loudly here — its head deliberately sits at the
+    // base, so letting it fall through would "merge" it as an empty no-op and
+    // silently drop its submodule payload.
+    if (pr.composition !== undefined) {
+      return candidateFailure(
+        "composition-retired",
+        `change '${pr.id}' declares a source composition; composed revisions are retired — ` +
+          "submit the root change with its authored gitlink bumps instead (the queue fills the shaset from each submodule's main)",
+      )
+    }
     // A post-merge actuator retry carries the same immutable PR snapshot
     // against a base that already contains it. Nothing is left to merge, and
     // re-merging an already-contained head would only manufacture an empty
@@ -2846,7 +2858,11 @@ async function prepareCandidateMembers(
           filledPins: readonly Extract<QueueSubmoduleResolutionEvidence, { kind: "pin" }>[]
         }>
       | undefined
-    {
+    // First candidates only: a queue-rebuilt member (`pr.recut` set) already
+    // ran this inspection and fill inside `rebuildCandidateByMerge`, and a
+    // gitlink carrier bound for post-merge submodule-main promotion must not
+    // be re-refused `min-commit-unpublished` here on re-verification.
+    if (pr.recut === undefined) {
       const inspected = await authoredGitlinkPaths(git, path, pr.id, pr.headSha)
       if (inspected.status === "failed") return inspected
       if (inspected.output.length > 0) {
