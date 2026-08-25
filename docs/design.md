@@ -23,7 +23,7 @@ tradeoffs.
 | 6   | Job status/conclusion spellings                        | **Settled, GitHub verbatim** (B6): `status: queued \| in_progress \| waiting \| completed`; `conclusion: success \| failure \| cancelled \| skipped \| timed_out` (`action_required`/`neutral` reserved for adapters that need them). `waiting` is a status, exactly as GitHub Actions uses it for deployment approvals. Run uses the same split. |
 | 7   | Readiness projection + concurrency boundaries          | **Confirmed** derived readiness (no `PRReadiness` aggregate). Merge serialization is a per-`(repository, base branch)` lock shared across all Queues on that base — the lock is keyed by base, not by Queue (C4).                                                                                                                                 |
 | 8   | `Command`/`Event` vs `Op`/`OpCall`                     | **Confirmed CQRS names.** The former `Operation {op, args}` is `Command`; `CommandResult {command, events, value?}` is the dispatch return; `Frame` is below the Journal interface and no longer exported from core. Runtime execution is one `dispatch()` surface rather than the former `command()`/`operation()`/`invoke()` triple.            |
-| 9   | `init/deinit` vs `provision/deprovision`               | **Retired (C12).** Queues materialize lazily and need no installation step: their only durable effect was the installed-baseline file, which is gone. `yrd admin queue init/deinit` stay registered solely to refuse by name; daily queue verbs remain outside `admin`.                                                                          |
+| 9   | `init/deinit` vs `provision/deprovision`               | **Retired (C12).** Queues materialize lazily and need no installation step: their only durable effect was the installed-baseline file, which is gone. `yrd admin queue init/deinit` stay registered solely to refuse by name; daily queue verbs remain outside `admin`.                                                                           |
 | 10  | `.yrd.yml` configures checks, not Runner identity      | **Confirmed.** Runner and Context identities are runtime evidence on the Job. Config authority is the base branch (C5), and repository config contains one `checks:` list.                                                                                                                                                                        |
 
 ## B. The model
@@ -127,23 +127,13 @@ type Candidate = Readonly<{
   queueId: string
   baseSha: string
   revs: readonly { pr: string; n: number; head: string }[] // ordered
-  sha?: string // synthetic merge commit, once constructed
+  sha?: string // merge commit of base tip and the unchanged authored tip
   ref?: string // refs/yrd/candidates/<id>
-  sourceRewrites?: readonly SourceRewrite[]
+  // sourceRewrites (the retired composed path's per-source restack receipts)
+  // survives in replayed records only; nothing produces it since the re-merge
+  // cutover — the candidate is a merge, and authored tips are never rewritten.
   mergeability: "unknown" | "mergeable" | "conflicting"
   createdAt: string
-}>
-
-type SourceRewrite = Readonly<{
-  repo: string
-  oldBaseSha: string
-  oldTipSha: string
-  newBaseSha: string
-  newTipSha: string
-  candidateRef: string // refs/heads/yrd/candidates/<newTipSha>
-  patchId: string // stable patch-id shared by predecessor and successor
-  rangeDiff: "=" // every commit in the two ranges is patch-equivalent
-  payload: readonly string[]
 }>
 ```
 
@@ -199,12 +189,11 @@ type SourceRewrite = Readonly<{
   Unknown, unmatched, unique-work, or unpaired refs remain retained. The
   run-scoped `refs/yrd/candidates/<run>/<step>/attempt-*` namespace is separate
   protected evidence and is outside this source-ref policy.
-- A composed Candidate's root tree must pin every repository's final
-  `SourceRewrite.newTipSha`. The receipt retains every sequential rewrite in a
-  same-repository batch, while the final rewrite is the root gitlink binding.
-- Every generated rewrite records its predecessor and successor SHAs, their
-  shared stable patch ID, and an all-`=` range-diff result before the existing
-  payload-manifest and root-tree certificates can pass.
+- The Candidate is built by merge: `merge(base tip, authored tip)` plus the
+  shaset commit that fills each authored gitlink from its submodule's main.
+  Authored tips are never rewritten, so there is no per-source rewrite receipt
+  and no payload certificate to replay; historical composed receipts remain
+  readable in old records.
 - Bisection on a failing multi-rev Candidate creates **new child Candidates**
   (subset revs) with provenance recorded on the child Runs (`parent` run id).
   Candidates never mutate; today's `isolationPart` refits into this shape.
@@ -304,23 +293,23 @@ one is never comparable to a value from another. Naming the question is the
 whole point of this section: a vocabulary that cannot say what it answers is
 how a count gets compared to a different count.
 
-- **`PRDeliveryState`** (`yrd-bay/src/model.ts`) — *how far along the delivery
-  path is this change, and whose move is it?* `pushed · submitted · ready ·
-  needs-author · rejected · integrated · already-landed · withdrawn · canceled`.
-- **`PR.state`** (`yrd-bay/src/model.ts`) — *is this PR record still an active
-  object, or retired?* `open · closed`. Record lifetime, not delivery progress:
+- **`PRDeliveryState`** (`yrd-bay/src/model.ts`) — _how far along the delivery
+  path is this change, and whose move is it?_ `pushed · submitted · ready ·
+needs-author · rejected · integrated · already-landed · withdrawn · canceled`.
+- **`PR.state`** (`yrd-bay/src/model.ts`) — _is this PR record still an active
+  object, or retired?_ `open · closed`. Record lifetime, not delivery progress:
   a PR can be `closed` having reached any delivery state at all.
-- **`Candidate.mergeability`** (`yrd-queue/src/model.ts`) — *can this composed
-  candidate be built onto its base?* `unknown · mergeable · conflicting`. A
+- **`Candidate.mergeability`** (`yrd-queue/src/model.ts`) — _can this composed
+  candidate be built onto its base?_ `unknown · mergeable · conflicting`. A
   property of the candidate, not of the PR, and `unknown` means not yet
   evaluated rather than evaluated-and-uncertain.
-- **Job/Run `status` + `conclusion`** (§A6, GitHub verbatim) — *is this unit of
-  work still going* (`queued · in_progress · waiting · completed`) and, once it
-  is not, *how did it end* (`success · failure · cancelled · skipped ·
-  timed_out`). Two questions deliberately kept in two fields; collapsing them
+- **Job/Run `status` + `conclusion`** (§A6, GitHub verbatim) — _is this unit of
+  work still going_ (`queued · in_progress · waiting · completed`) and, once it
+  is not, _how did it end_ (`success · failure · cancelled · skipped ·
+timed_out`). Two questions deliberately kept in two fields; collapsing them
   is what makes "did it pass?" unanswerable for anything still running.
 - **`StatusPresentationState` / `LifecycleStatus`** (`yrd-cli/src/status-presentation.ts`)
-  — *what glyph and colour should a human see in this row?* Deliberately lossy
+  — _what glyph and colour should a human see in this row?_ Deliberately lossy
   and derived; never persisted, never an input to a decision.
 
 Readiness is not in this list on purpose: per §B7 it is a projection over
@@ -487,19 +476,19 @@ The implementation is close to the target; this is vocabulary + object
 extraction, keeping the proven machinery (journal CAS, Job transitions,
 receive-hook intake, bisection, waiting/finish/recover).
 
-| Pre-refit                                                     | Target                                                                                      | Nature                                                      |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `Operation {op,args}`, `operation()`, `command()`, `invoke()` | `Command`, single `dispatch()`, `CommandResult`                                             | rename + surface collapse (yrd-core)                        |
-| `Frame` exported from core domain                             | storage-internal to Journal                                                                 | demotion (yrd-core/yrd-persistence)                         |
-| `PR` with 5-way `PRStatus` + embedded `revisions[]`           | `PR {state, merged}` + `PRRev` extracted; readiness derived                                 | shrink + extraction (yrd-bay → landing domain in yrd-queue) |
-| `QueueRecord.prs: PRSnapshot[]` + `baseSha`                   | `Candidate` (id, exact receipt, artifact key, mergeability, ref)                            | extraction (yrd-queue)                                      |
-| `QueueRun` status `running/waiting/passed/failed`             | `Run` with status+conclusion split                                                          | refit (yrd-queue)                                           |
-| `InstalledStep {integrates, needsIntegration}`                | `StepDef {kind: check\|action\|merge}` + order                                              | refit (yrd-queue)                                           |
-| Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                                 | vocabulary (yrd-job)                                        |
-| injected `checkRunner`/`mergeRunner` capabilities             | `Runner` seam + `localRunner` + `worktreeContexts` leases                                   | generalization (yrd-job/yrd-process)                        |
-| programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*`; repository config remains YAML-only       | new package                                                 |
-| standalone bay projection                                    | `yrd bay` subtree; no compatibility projection                                             | CLI surface deletion (yrd-cli)                              |
-| `parent`/`isolationPart` bisection fields                     | child Candidates + `Run.parent` provenance                                                  | refit (yrd-queue)                                           |
+| Pre-refit                                                     | Target                                                                                 | Nature                                                      |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `Operation {op,args}`, `operation()`, `command()`, `invoke()` | `Command`, single `dispatch()`, `CommandResult`                                        | rename + surface collapse (yrd-core)                        |
+| `Frame` exported from core domain                             | storage-internal to Journal                                                            | demotion (yrd-core/yrd-persistence)                         |
+| `PR` with 5-way `PRStatus` + embedded `revisions[]`           | `PR {state, merged}` + `PRRev` extracted; readiness derived                            | shrink + extraction (yrd-bay → landing domain in yrd-queue) |
+| `QueueRecord.prs: PRSnapshot[]` + `baseSha`                   | `Candidate` (id, exact receipt, artifact key, mergeability, ref)                       | extraction (yrd-queue)                                      |
+| `QueueRun` status `running/waiting/passed/failed`             | `Run` with status+conclusion split                                                     | refit (yrd-queue)                                           |
+| `InstalledStep {integrates, needsIntegration}`                | `StepDef {kind: check\|action\|merge}` + order                                         | refit (yrd-queue)                                           |
+| Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                            | vocabulary (yrd-job)                                        |
+| injected `checkRunner`/`mergeRunner` capabilities             | `Runner` seam + `localRunner` + `worktreeContexts` leases                              | generalization (yrd-job/yrd-process)                        |
+| programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*`; repository config remains YAML-only | new package                                                 |
+| standalone bay projection                                     | `yrd bay` subtree; no compatibility projection                                         | CLI surface deletion (yrd-cli)                              |
+| `parent`/`isolationPart` bisection fields                     | child Candidates + `Run.parent` provenance                                             | refit (yrd-queue)                                           |
 
 Package set stays: core, bay, queue (landing domain: PR/PRRev/Candidate/Run/
 Flow), job, issue, contest, cli, persistence, process (absorbed into the local
