@@ -18,6 +18,7 @@ import {
   changeDeliveryState,
   changeHead,
   isLiveChange,
+  isTracked,
   changeNeedsAuthor,
   changeRevisionNumber,
   changeRevisionLineage,
@@ -4947,7 +4948,7 @@ async function remergeChange(
   const expectedCurrent = {
     revision: currentRevisionAtStart.n,
     headSha: currentRevisionAtStart.head,
-    ...(pr.track === true ? { track: true } : {}),
+    ...(isTracked(pr) ? { track: true } : {}),
   }
   if (options.preflight === true) {
     const preflight = await preflightRemerge(
@@ -5066,7 +5067,7 @@ async function executeRemergeChange(
   if (
     currentRevision.n !== expectedCurrent.revision ||
     currentRevision.head !== expectedCurrent.headSha ||
-    (expectedCurrent.track !== undefined && (pr.track ?? false) !== expectedCurrent.track)
+    (expectedCurrent.track !== undefined && isTracked(pr) !== expectedCurrent.track)
   ) {
     raiseFailure(
       "refusal",
@@ -6866,7 +6867,11 @@ async function preparePublicationQueueCycle(
       pr.id,
       {
         queue: true,
-        expectedCurrent: { revision: input.revision, headSha: input.headSha, ...(pr.track ? { track: true } : {}) },
+        expectedCurrent: {
+          revision: input.revision,
+          headSha: input.headSha,
+          ...(isTracked(pr) ? { track: true } : {}),
+        },
       },
       io,
     )
@@ -9996,7 +10001,7 @@ export async function refreshTrackedQueueRevisions(
   const candidates = Object.values(stateOf(app).bays.prs)
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
-      return pr.track === true && isLiveChange(pr) && delivery !== "pushed"
+      return isTracked(pr) && isLiveChange(pr) && delivery !== "pushed"
     })
     .toSorted(
       (left, right) =>

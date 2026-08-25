@@ -63,6 +63,7 @@ import {
   currentChangeRev,
   emptyBaysState,
   isLiveChange,
+  isTracked,
   needsReview,
   normalizeV2By,
   normalizeLegacyChangeKeys,
@@ -1078,7 +1079,7 @@ export function createBays(
     // would refuse the whole submit, so state loudly that the flag was not
     // recorded instead of pretending it was.
     const trackable = isLiveChange(pr)
-    const trackChanged = metadata.track !== undefined && metadata.track !== (pr.track ?? false)
+    const trackChanged = metadata.track !== undefined && metadata.track !== isTracked(pr)
     if (trackChanged && !trackable) {
       const warning =
         `change '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
@@ -1367,7 +1368,8 @@ export function createBays(
     pr: (selector) => resolveChange(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
     reviewState: (selector) => reviewState(required(resolveChange(state(), selector), "change", selector)),
-    needsReview: (selector, reviewer) => needsReview(required(resolveChange(state(), selector), "change", selector), reviewer),
+    needsReview: (selector, reviewer) =>
+      needsReview(required(resolveChange(state(), selector), "change", selector), reviewer),
     checksRequested: (selector) => checksRequested(required(resolveChange(state(), selector), "change", selector)),
     submitSelection,
     effectiveBase: async (selector, requestedBase) => {
@@ -1702,7 +1704,11 @@ function requestChangePublication(
   const pr = required(resolveChange(state.bays, args.pr), "change", args.pr)
   const revision = currentChangeRev(pr)
   if (changeDeliveryState(pr) !== "pushed") {
-    raiseFailure("refusal", "publication-pr-not-draft", `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
+    raiseFailure(
+      "refusal",
+      "publication-pr-not-draft",
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`,
+    )
   }
   if (revision.n !== args.revision || revision.head !== args.headSha || pr.branch !== args.branch) {
     raiseFailure(
@@ -1870,12 +1876,12 @@ function requireExpectedChangeCurrent(
     isLiveChange(pr) &&
     changeRevisionNumber(pr) === expected.revision &&
     changeHead(pr) === expected.headSha &&
-    (expected.track === undefined || (pr.track ?? false) === expected.track)
+    (expected.track === undefined || isTracked(pr) === expected.track)
   if (matches) return pr as LiveChange
   const actual =
     pr === undefined
       ? "missing"
-      : `${changeDeliveryState(pr)} revision ${changeRevisionNumber(pr)}@${changeHead(pr)} track=${String(pr.track ?? false)}`
+      : `${changeDeliveryState(pr)} revision ${changeRevisionNumber(pr)}@${changeHead(pr)} track=${String(isTracked(pr))}`
   const expectedTracking = expected.track === undefined ? "" : ` track=${String(expected.track)}`
   raiseFailure(
     "refusal",
@@ -2405,12 +2411,12 @@ function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, d
     JSON.stringify(remerge.sources) === JSON.stringify(args.sources) &&
     remerge.transition?.from === args.transition?.from &&
     remerge.transition?.to === args.transition?.to
-  if (args.expectedCurrent?.track !== undefined && (pr.track ?? false) !== args.expectedCurrent.track) {
+  if (args.expectedCurrent?.track !== undefined && isTracked(pr) !== args.expectedCurrent.track) {
     raiseFailure(
       "refusal",
       "recut-current-changed",
       `yrd: change '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
-        `to ${String(pr.track ?? false)} while the rebuild was being computed`,
+        `to ${String(isTracked(pr))} while the rebuild was being computed`,
     )
   }
   if (
@@ -2884,7 +2890,7 @@ function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
   // immutable issue join): a later edit overwrites the prior value with no conflict.
   const titleChanged = args.title !== undefined && args.title !== pr.title
   const descriptionChanged = args.description !== undefined && args.description !== pr.description
-  const trackChanged = args.track !== undefined && args.track !== (pr.track ?? false)
+  const trackChanged = args.track !== undefined && args.track !== isTracked(pr)
   if (!issueChanged && args.note === undefined && !titleChanged && !descriptionChanged && !trackChanged) {
     return { events: [] }
   }

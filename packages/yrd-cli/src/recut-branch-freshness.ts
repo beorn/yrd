@@ -1,4 +1,4 @@
-import { changeDeliveryState, changeRevisionLineage, type Change, type ChangeRev } from "@yrd/bay"
+import { changeDeliveryState, changeRevisionLineage, isTracked, type Change, type ChangeRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -195,7 +195,7 @@ export async function requireImplicitRemergeBranchFreshness(
         `'${pr.branch}' tree '${liveTree}'; --revision cannot replay different content`,
     )
   }
-  if (pr.track === true) return { status: "tracked-drift", recorded, liveHead }
+  if (isTracked(pr)) return { status: "tracked-drift", recorded, liveHead }
 
   const queueFlag = options.queue === true ? " --queue" : ""
   const recordVerb = changeDeliveryState(pr) === "pushed" ? "create" : "submit"

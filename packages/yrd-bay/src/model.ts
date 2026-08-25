@@ -1229,6 +1229,14 @@ export function isLiveChange(pr: Change): boolean {
   return pr.state === "open"
 }
 
+/** The one reader of `Change.track`. The fallback IS the fleet-wide default
+ * for records that never wrote the bit (@yrd/core/tracked-delivery step 2
+ * flips it); every behavioral site must go through here so the default is
+ * one line, not a sweep. */
+export function isTracked(pr: Change): boolean {
+  return pr.track ?? false
+}
+
 export function changeForBay(state: BaysState, bay: BayId): Change | undefined {
   return Object.values(state.prs).find((pr) => pr.bay === bay)
 }
