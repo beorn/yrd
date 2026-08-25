@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, withBays, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -261,47 +261,6 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
   })
 
-  it("parks a structurally permanent refusal as queue state on its first occurrence", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createApp(
-      refuseForever(() => ""),
-      clock.read,
-    )
-    const pr = await submitAndRequestChecks(app, "issue/permanent-head-refusal")
-
-    await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
-      code: "recut-base-diverged",
-      kind: "refusal",
-      reason: "the authoritative candidate base diverged from the certified base",
-    })
-
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
-      code: "recut-base-diverged",
-      count: 1,
-      settlement: {
-        disposition: "needs-person",
-        reason: "the authoritative candidate base diverged from the certified base",
-      },
-    })
-    expect(app.queue.eligibility(pr.id).reason).toMatchObject({ code: "admission-refused" })
-    // Parked at admission, never wedged — but NOT silent: settling a refusal
-    // stops the RETRY, it must not also stop the REPORT
-    // (@i/10-merge-queue/22918-needs-person-unowned). The finding names the
-    // owner explicitly, even unconfigured — never an omitted field.
-    expect(app.queue.audit().findings).toContainEqual({
-      code: "admission-refusal-needs-person",
-      message:
-        `change '${pr.id}' needs a person: its entry-check failure 'recut-base-diverged' has no ` +
-        "mechanical remedy — the authoritative candidate base diverged from the certified base. " +
-        "Owner: unowned — no needsPerson.owner is configured in .yrd.yml.",
-      pr: pr.id,
-      specimen: `pr:${pr.id}:needs-person`,
-      refusal: "recut-base-diverged",
-      since: "2026-01-01T00:00:00.000Z",
-      owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
-    })
-  })
 
   it("names a configured needsPersonOwner on a needs-person finding instead of the unowned default", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
@@ -318,9 +277,19 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
-      code: "recut-base-diverged",
+      code: "authored-gitlink",
       kind: "refusal",
-      reason: "the authoritative candidate base diverged from the certified base",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
+    // The runner's own judgment classification settles a no-mechanical-remedy
+    // refusal needs-person (applyRefusalRemedies -> settleAdmissionRefusal);
+    // driven explicitly here since no refusal code auto-parks any more.
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: 1,
+      headSha: currentChangeRev(pr).head,
+      disposition: "needs-person",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
 
     expect(app.queue.audit().findings).toContainEqual(
@@ -348,9 +317,19 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     await app.queue.recordAdmissionRefusal({
       pr: pr.id,
-      code: "recut-base-diverged",
+      code: "authored-gitlink",
       kind: "refusal",
-      reason: "the authoritative candidate base diverged from the certified base",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
+    // The runner's own judgment classification settles a no-mechanical-remedy
+    // refusal needs-person (applyRefusalRemedies -> settleAdmissionRefusal);
+    // driven explicitly here since no refusal code auto-parks any more.
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: 1,
+      headSha: currentChangeRev(pr).head,
+      disposition: "needs-person",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
 
     expect(app.queue.audit().findings).toContainEqual(
@@ -380,9 +359,16 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       const pr = await submitAndRequestChecks(seed, "issue/unattributed-permanent-refusal")
       await seed.queue.recordAdmissionRefusal({
         pr: pr.id,
-        code: "recut-base-diverged",
+        code: "authored-gitlink",
         kind: "refusal",
-        reason: "the authoritative candidate base diverged from the certified base",
+        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+      })
+      await seed.queue.settleAdmissionRefusal({
+        pr: pr.id,
+        revision: 1,
+        headSha: currentChangeRev(pr).head,
+        disposition: "needs-person",
+        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
       })
     }
     await using app = await createApp(
@@ -404,50 +390,6 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).not.toContain("undefined")
   })
 
-  it("parks a deterministically stale recut base on its FIRST refusal and drains the change behind it", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    const blocked = { id: "" }
-    const DIVERGED = "d".repeat(40)
-    await using app = await createApp(
-      refuseForever(() => blocked.id, {
-        code: "recut-base-diverged",
-        message: (pr) =>
-          `yrd: change '${pr}' certifies base '${DIVERGED}', but the authoritative candidate base is '${BASE}'`,
-      }),
-      clock.read,
-    )
-    const head = await submitAndRequestChecks(app, "issue/stale-recut-base")
-    blocked.id = head.id
-    const behind = await submitAndRequestChecks(app, "issue/ready-behind-the-stale-head")
-
-    await app.queue.run({}, HABITANT)
-
-    const refusal = app.state().queues.admissionRefusals[head.id]
-    expect(refusal).toMatchObject({
-      code: "recut-base-diverged",
-      count: 1,
-      settlement: { disposition: "needs-person" },
-    })
-    // The result carries the discriminating fact: which base the revision
-    // certifies and which one the queue actually holds.
-    expect(refusal?.settlement?.reason).toContain(DIVERGED)
-    expect(refusal?.settlement?.reason).toContain(BASE)
-    expect(app.queue.eligibility(head.id).reason).toMatchObject({ code: "admission-refused" })
-    // Parked at admission, not wedged: it no longer blocks the change behind it —
-    // but it is still visible and owned, never silently dropped
-    // (@i/10-merge-queue/22918-needs-person-unowned).
-    expect(app.queue.audit().findings).toContainEqual(
-      expect.objectContaining({
-        code: "admission-refusal-needs-person",
-        message: expect.stringContaining(DIVERGED),
-        pr: head.id,
-        specimen: `pr:${head.id}:needs-person`,
-        refusal: "recut-base-diverged",
-        owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
-      }),
-    )
-    expect(app.queue.eligibility(behind.id).checks.status).toBe("passed")
-  })
 
   it("keeps an I/O-flavored recut certificate refusal on the ordinary retry threshold", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
@@ -488,30 +430,6 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
   })
 
-  it("does not promote a structurally permanent refusal away from the queue head", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createApp(
-      refuseForever(() => ""),
-      clock.read,
-    )
-    const head = await submitAndRequestChecks(app, "issue/queue-head")
-    const behind = await submitAndRequestChecks(app, "issue/permanent-refusal-behind-head")
-
-    await app.queue.recordAdmissionRefusal({
-      pr: behind.id,
-      code: "recut-base-diverged",
-      kind: "refusal",
-      reason: "the authoritative candidate base diverged from the certified base",
-    })
-
-    // Parked behind the head — it does not promote itself back into the
-    // retry loop — but it is still visible and owned, never silently dropped
-    // (@i/10-merge-queue/22918-needs-person-unowned).
-    expect(app.queue.audit().findings).toContainEqual(
-      expect.objectContaining({ code: "admission-refusal-needs-person", pr: behind.id }),
-    )
-    expect(app.queue.eligibility(head.id).checks.position).toBe(1)
-  })
 
   it("keeps a passed admission in the no-merge progress population until delivery", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
@@ -1067,21 +985,27 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
   it("prints the settlement for a still-submitted PR whose refusal auto-settled needs-person", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     let blocked = ""
-    // recut-base-diverged is structurally permanent (auto-settles needs-person
-    // on the first refusal) and is NOT a needs-author code, so the change stays
-    // `submitted` — the exact shape the habitant's settleNeedsPerson leaves
-    // behind, reaching the settled admission-refusal verdict directly.
+    // authored-gitlink is a judgment-class refusal and NOT a needs-author code,
+    // so the change stays `submitted` — the exact shape the habitant's
+    // settleNeedsPerson leaves behind, reaching the settled admission-refusal
+    // verdict via the runner's own explicit settlement.
     await using app = await createApp(
       refuseForever(() => blocked, {
-        code: "recut-base-diverged",
-        message: (pr) =>
-          `change '${pr}' revision 1 certifies a base the authoritative candidate base never descended from`,
+        code: "authored-gitlink",
+        message: (pr) => `change '${pr}' revision 1 touches generated-only gitlinks; an exact ruling is needed`,
       }),
       clock.read,
     )
     const pr = await submitAndRequestChecks(app, "issue/settled-submitted")
     blocked = pr.id
     await app.queue.run({}, runtime)
+    await app.queue.settleAdmissionRefusal({
+      pr: pr.id,
+      revision: 1,
+      headSha: currentChangeRev(pr).head,
+      disposition: "needs-person",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
     expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toMatchObject({ disposition: "needs-person" })
 
     const message = app.queue.eligibility(pr.id).reason?.message

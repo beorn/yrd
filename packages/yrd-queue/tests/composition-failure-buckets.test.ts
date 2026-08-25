@@ -35,8 +35,8 @@ describe("composition failure buckets — the partition is total and disjoint", 
     // make every assertion below vacuously pass).
     expect(codes.length).toBeGreaterThan(10)
     expect(codes).toContain("authored-gitlink")
-    expect(codes).toContain("merge-tip-carrier")
-    expect(codes).toContain("source-publish")
+    expect(codes).toContain("min-commit-unpublished")
+    expect(codes).toContain("composition-retired")
   })
 
   it("classifies every derived candidateFailure code into exactly one bucket", () => {
@@ -51,16 +51,26 @@ describe("composition failure buckets — the partition is total and disjoint", 
 
   it("declares no phantom bucket code that command.ts never produces", () => {
     const derived = new Set(derivedCandidateFailureCodes())
+    // Produced by other live mints, not candidateFailure — the submodule-main
+    // promotion path (carrier-drops-landed) and the rebuild/record refusals
+    // thrown via createFailure (payload-certificate) — still run/admission
+    // error codes NEEDS_AUTHOR_CODES must classify.
+    const promotionPathCodes = new Set(["carrier-drops-landed", "payload-certificate", "scratch-cleanup-failed"])
     for (const [name, set] of BUCKETS) {
       for (const code of set) {
+        if (promotionPathCodes.has(code)) {
+          expect(commandSource).toContain(`"${code}"`)
+          continue
+        }
         expect(derived.has(code), `bucket '${name}' declares '${code}' which no candidateFailure() produces`).toBe(true)
       }
     }
   })
 
-  it("routes source-publish to infra-retry, not needs-author (a push/update-ref blip is transient)", () => {
-    expect(COMPOSITION_FAILURE_BUCKETS["infra-retry"].has("source-publish")).toBe(true)
-    expect(COMPOSITION_FAILURE_BUCKETS["needs-author"].has("source-publish")).toBe(false)
+  it("keeps needs-author free of the retired certificate-era codes", () => {
+    for (const retired of ["merge-tip-carrier", "source-publish", "composition-invalid", "recut-base-diverged"]) {
+      for (const [, set] of BUCKETS) expect(set.has(retired)).toBe(false)
+    }
   })
 
   it.each(["carrier-inspection", "wrapper-generation"])(

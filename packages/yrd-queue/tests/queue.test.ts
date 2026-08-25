@@ -802,93 +802,6 @@ describe("Queue", () => {
     expect(app.queue.audit().findings.filter(({ code }) => code === "candidate-revision-mismatch")).toEqual([])
   })
 
-  it("projects immutable recut source endpoints and rejects a mismatched root source mapping", async () => {
-    await using app = await createQueueApp()
-    const pr = await submitBranch(app, "topic/durable-recut-source")
-    const patchId = "d".repeat(40)
-    await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve", ref: "durable-source-review" })
-    const reviewed = app.state().bays.prs[pr.id]
-    const effectiveReview = reviewed?.reviews.findLast(
-      (review) => review.revision === pr.revision && review.headSha === pr.headSha,
-    )
-    if (effectiveReview === undefined) throw new Error("expected approved source review")
-    await app.bays.recut({
-      pr: pr.id,
-      fromRevision: pr.revision,
-      headSha: UPDATED,
-      baseSha: MERGED,
-      treeSha: "c".repeat(40),
-      patchId,
-      reviewCarried: true,
-      certificate: "frozen-code-carrier-v1",
-      sources: [{ repo: ".", fromHeadSha: pr.headSha, toHeadSha: UPDATED, patchId, rangeDiff: "=" }],
-      expectedCurrent: {
-        revision: pr.revision,
-        headSha: pr.headSha,
-        effectiveReview,
-        checksPassed: false,
-      },
-    })
-    const current = app.state().bays.prs[pr.id]
-    if (current === undefined) throw new Error("expected recut PR")
-
-    const snapshot = Queues.snapshot(current)
-    expect(snapshot).toMatchObject({
-      headSha: UPDATED,
-      recut: {
-        certificate: "frozen-code-carrier-v1",
-        baseSha: MERGED,
-        sourceBaseSha: BASE,
-        sourceHeadSha: pr.headSha,
-        sources: [{ repo: ".", fromHeadSha: pr.headSha, toHeadSha: UPDATED }],
-      },
-    })
-    expect(
-      ChangeSnapshotSchema.safeParse({
-        ...snapshot,
-        recut: {
-          ...snapshot.recut,
-          sources: [{ repo: ".", fromHeadSha: "f".repeat(40), toHeadSha: UPDATED, patchId, rangeDiff: "=" }],
-        },
-      }).success,
-    ).toBe(false)
-    expect(
-      ChangeSnapshotSchema.safeParse({
-        ...snapshot,
-        recut: {
-          ...snapshot.recut,
-          sources: [{ repo: ".", fromHeadSha: pr.headSha, toHeadSha: "e".repeat(40), patchId, rangeDiff: "=" }],
-        },
-      }).success,
-    ).toBe(false)
-    const certified = snapshot.recut!
-    const withoutSourceBase = (({ sourceBaseSha: _sourceBaseSha, ...rest }) => rest)(certified)
-    const withoutSourceHead = (({ sourceHeadSha: _sourceHeadSha, ...rest }) => rest)(certified)
-    const withoutCertificate = (({ certificate: _certificate, ...rest }) => rest)(certified)
-    for (const remerge of [
-      withoutSourceBase,
-      withoutSourceHead,
-      withoutCertificate,
-      { ...certified, sources: undefined },
-      {
-        ...certified,
-        sources: [{ repo: "dep", fromHeadSha: pr.headSha, toHeadSha: UPDATED, patchId, rangeDiff: "=" as const }],
-      },
-    ]) {
-      expect(ChangeSnapshotSchema.safeParse({ ...snapshot, remerge }).success).toBe(false)
-    }
-    expect(
-      ChangeSnapshotSchema.safeParse({
-        ...snapshot,
-        recut: {
-          fromRevision: pr.revision,
-          patchId,
-          treeSha: "c".repeat(40),
-          reviewCarried: false,
-        },
-      }).success,
-    ).toBe(true)
-  })
 
   // 22332, the C2465 shape: two composes that produce DIFFERENT trees are
   // published without either refusing the other. There is no retry here to make
@@ -3883,43 +3796,6 @@ describe("Queue", () => {
     expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "canceled", canceledBy: "@chief" })
   })
 
-  it("does not reconcile a same-root PR with a different source composition", async () => {
-    await using app = await createQueueApp()
-    const composition = (tip: string) => ({
-      version: 1 as const,
-      sources: [
-        {
-          repo: "vendor/example",
-          branch: `issue/source-${tip[0]}`,
-          baseSha: "2".repeat(40),
-          tipSha: tip,
-          payload: [`src/${tip[0]}.ts`],
-        },
-      ],
-    })
-    await app.bays.submit({
-      branch: "issue/root-a",
-      base: "main",
-      headSha: HEAD,
-      composition: composition("3".repeat(40)),
-    })
-    await app.bays.submit({
-      branch: "issue/root-b",
-      base: "main",
-      headSha: HEAD,
-      composition: composition("4".repeat(40)),
-    })
-
-    const run = (await app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime))[0]
-
-    expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      delivery: "integrated",
-      integration: run?.integration,
-    })
-    expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "submitted" })
-    expect(app.state().bays.prs.PR2?.integration).toBeUndefined()
-  })
 
   it("integrates the implicit queue in PR revision submission order", async () => {
     let tick = 0

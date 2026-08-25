@@ -223,7 +223,6 @@ const SubmitArgsSchema = z.union([
       draft: z.boolean().optional(),
       submitter: TextSchema.optional(),
       props: ChangePropsSchema.optional(),
-      composition: CompositionV1Schema.optional(),
       reviewers: z.array(TextSchema).optional(),
       flow: FlowPinSchema.optional(),
     })
@@ -242,7 +241,6 @@ export type SubmitSelectionOptions = Readonly<{
   track?: boolean
   draft?: boolean
   props?: ChangeProps
-  composition?: CompositionV1
   resolveRevision(ref: string): Promise<string | undefined>
   /** Parent SHAs of one commit in the submission repository. The active-Bay
    * path proves the checked-out head is linear BEFORE the ledger write — the
@@ -1007,7 +1005,6 @@ export function createBays(
             base: resolved.base,
             branch: args.branch,
             head: args.headSha,
-            ...(args.composition === undefined ? {} : { composition: args.composition }),
             ...(args.issue === undefined ? {} : { issue: args.issue }),
           }))
     return actions.submit({ ...args, ...resolved, ...(flow === undefined ? {} : { flow }) })
@@ -1104,8 +1101,6 @@ export function createBays(
     selector: string,
     options: SubmitSelectionOptions,
   ): Promise<DeepReadonly<Change>> => {
-    const requestedComposition =
-      options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
     const resolved = resolveChangeMatch(snapshot, selector)
     if (resolved?.revision !== undefined) requireLiveChange(snapshot, selector)
@@ -1176,7 +1171,7 @@ export function createBays(
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
       }
       pr = changeForBay(snapshot, bay.id) ?? resolveChange(snapshot, bay.branch)
-      const composition = requestedComposition ?? (pr === undefined ? undefined : changeComposition(pr))
+      const composition = pr === undefined ? undefined : changeComposition(pr)
       if (pr === undefined || changeHead(pr) !== bay.headSha || !sameComposition(composition, changeComposition(pr))) {
         await intake({
           bay: bay.id,
@@ -1212,7 +1207,7 @@ export function createBays(
       }
       if (headSha !== undefined) {
         const resolved = await target(options.base ?? pr.base, undefined)
-        const composition = requestedComposition ?? changeComposition(pr)
+        const composition = changeComposition(pr)
         if (
           headSha !== changeHead(pr) ||
           resolved.base !== pr.base ||
@@ -1276,7 +1271,7 @@ export function createBays(
             changeDeliveryState(candidate) === "needs-author") &&
           changeHead(candidate) === headSha &&
           candidate.base === resolved.base &&
-          sameComposition(changeComposition(candidate), requestedComposition),
+          changeComposition(candidate) === undefined,
       )
       if (live !== undefined) {
         const correlated = await bindSubmission(live, options)
@@ -1298,7 +1293,6 @@ export function createBays(
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.draft === true ? { draft: true } : {}),
         ...(options.props === undefined ? {} : { props: options.props }),
-        ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
       })
       const submitted = resolveChange(state(), selector)
       if (submitted === undefined) {
@@ -2050,7 +2044,7 @@ function submitWork(
     throw new Error(`yrd: branch '${args.branch}' already has live change '${existing.id}'`)
   }
   const baseSha = args.baseSha ?? (resumesSubmission ? changeBaseSha(existing) : undefined)
-  const composition = args.composition ?? (resumesSubmission ? changeComposition(existing) : undefined)
+  const composition = resumesSubmission ? changeComposition(existing) : undefined
   if (
     resumesSubmission &&
     changeHead(existing) === args.headSha &&

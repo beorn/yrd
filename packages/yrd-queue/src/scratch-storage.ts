@@ -29,7 +29,7 @@ type CommonDirGit = Readonly<{
  * tmpfs and is not shared with unrelated scratch.
  *
  * Derived from `--git-common-dir` rather than `join(repo, ".git")` because the
- * callers include submodule worktrees (`rebaseSource`) and linked worktrees,
+ * callers include submodule worktrees and linked worktrees,
  * where `.git` is a FILE and the naive join is not a directory at all.
  */
 export async function queueScratchParent(git: CommonDirGit, repo: string): Promise<string> {
