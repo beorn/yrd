@@ -2315,11 +2315,7 @@ function failureFact(run: Run | undefined, step: QueueStep | undefined): { code:
   return run?.error
 }
 
-function projectFailure(
-  fact: FailureLike,
-  evidence?: HumanFailureProjection["evidence"],
-  delivery?: ChangeDeliveryState,
-): HumanFailureProjection {
+function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["evidence"]): HumanFailureProjection {
   const failure = actionableFailure(fact)
   return {
     ...failure,
@@ -3876,8 +3872,7 @@ export function ChangeDetailData(
   attempts: readonly QueueAttempt[] = [],
 ): ChangeDetailData {
   const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
-  const delivery = changeDeliveryState(pr)
-  const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts, undefined, delivery))
+  const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts))
   const latest = latestChangeRun(pr, matchingRuns)
   const run = latest === undefined ? undefined : details.find((detail) => detail.run === latest.id)
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
@@ -3890,7 +3885,6 @@ function diagnosticBlocker(
   now: number,
 ): string | undefined {
   const job = step?.job
-  const context = { delivery: changeDeliveryState(pr) }
   if (job?.status === "completed" && job.conclusion === "failure") {
     return actionableFailureSummary(actionableFailure(job.error))
   }
@@ -6922,7 +6916,7 @@ function propsField(pr: Run["prs"][number] | Change | undefined): Readonly<{ pro
   return { props }
 }
 
-function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliveryState): QueueShowRow {
+function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const command = stepCommand(step)
@@ -6954,7 +6948,7 @@ function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliverySt
     ...(command === undefined ? {} : { command }),
     errorCode: stepErrorCode(step),
     error: stepError(step),
-    ...(stepFailure === undefined ? {} : { failure: projectFailure(stepFailure, undefined, delivery) }),
+    ...(stepFailure === undefined ? {} : { failure: projectFailure(stepFailure) }),
     lost: stepLost(step),
     detail: stepDetail(step),
     output: stepOutput(step),
@@ -6968,11 +6962,11 @@ function queueShowStepRow(run: Run, step: QueueStep, delivery?: ChangeDeliverySt
   }
 }
 
-function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: ChangeDeliveryState): QueueShowRow {
+function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
   const step = run.steps[attempt.index] ?? run.steps.find((candidate) => candidate.name === attempt.step)
   if (step?.job?.id === attempt.job && step.job.attempt === attempt.attempt) {
     return {
-      ...queueShowStepRow(run, step, delivery),
+      ...queueShowStepRow(run, step),
       requested: toIso(attempt.requestedAt),
       started: toIso(attempt.startedAt),
       finished: toIso(attempt.finishedAt),
@@ -6990,9 +6984,9 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: ChangeD
   const taskStatus = jobAttemptTaskStatusOf(attempt)
   const attemptFailure =
     attempt.result.status === "failed"
-      ? projectFailure(attempt.result.error, undefined, delivery)
+      ? projectFailure(attempt.result.error)
       : attempt.result.status === "lost"
-        ? projectFailure({ code: "job-lost", message: attempt.result.reason }, undefined, delivery)
+        ? projectFailure({ code: "job-lost", message: attempt.result.reason })
         : undefined
   return {
     step: attempt.step,
@@ -7035,11 +7029,7 @@ function queueShowAttemptRow(run: Run, attempt: QueueAttempt, delivery?: ChangeD
   }
 }
 
-function queueShowRows(
-  run: Run,
-  attempts: readonly QueueAttempt[],
-  delivery?: ChangeDeliveryState,
-): readonly QueueShowRow[] {
+function queueShowRows(run: Run, attempts: readonly QueueAttempt[]): readonly QueueShowRow[] {
   const terminalStepIndex = run.steps.findIndex((step) => {
     const job = step.job
     return (
@@ -7052,16 +7042,16 @@ function queueShowRows(
     const stepAttempts = attempts.filter((attempt) => attempt.index === index)
     if (stepAttempts.length > 0) {
       for (const attempt of stepAttempts) usedAttempts.add(attempt)
-      return stepAttempts.map((attempt) => queueShowAttemptRow(run, attempt, delivery))
+      return stepAttempts.map((attempt) => queueShowAttemptRow(run, attempt))
     }
-    const row = queueShowStepRow(run, step, delivery)
+    const row = queueShowStepRow(run, step)
     const canceled =
       terminalStepIndex >= 0 && index > terminalStepIndex && (step.job === undefined || step.job.status === "queued")
     return canceled ? [{ ...row, status: "canceled", ...taskStatusFields("dropped") }] : [row]
   })
   const unplanned = attempts
     .filter((attempt) => !usedAttempts.has(attempt))
-    .map((attempt) => queueShowAttemptRow(run, attempt, delivery))
+    .map((attempt) => queueShowAttemptRow(run, attempt))
   return [...planned, ...unplanned]
 }
 
@@ -7070,7 +7060,6 @@ export function queueShowData(
   allRuns: readonly Run[] = [],
   attempts: readonly QueueAttempt[] = [],
   revisionClock?: ChangeRunRevisionClock,
-  delivery?: ChangeDeliveryState,
 ): QueueShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "completed")
   const runAttempts = attempts
@@ -7113,11 +7102,11 @@ export function queueShowData(
     integration: run.status === "completed" && run.conclusion === "success" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
-    ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure, undefined, delivery) }),
+    ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure) }),
     prs: run.prs,
     ...(revisionClock === undefined ? {} : { revisionClock }),
     attempts: runAttempts,
-    steps: queueShowRows(run, runAttempts, delivery),
+    steps: queueShowRows(run, runAttempts),
   }
 }
 

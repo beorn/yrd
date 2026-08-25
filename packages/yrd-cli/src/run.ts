@@ -6233,7 +6233,7 @@ async function viewChangeRuns(
     const data = {
       pr,
       eligibility,
-      runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run), changeDeliveryState(pr))),
+      runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run))),
     }
     await printResult(
       io,

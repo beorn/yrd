@@ -245,7 +245,7 @@ describe("22396 — state-aware remedies", () => {
     expect(projected?.failure?.resolution).toEqual(["yrd pr submit <branch>"])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)
 
-    const draft = queueShowData(run, [], [], undefined, "pushed")
+    const draft = queueShowData(run)
     expect(draft.failure?.resolution).toEqual(["yrd pr submit <branch>"])
   })
 })
@@ -339,7 +339,7 @@ describe("actionable failure output", () => {
         ),
       ],
     })
-    const data = queueShowData(run, [], [], undefined, "rejected")
+    const data = queueShowData(run)
 
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
