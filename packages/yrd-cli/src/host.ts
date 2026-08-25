@@ -61,6 +61,7 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   configuredWaitingCommandStep,
+  censusSubmoduleAlternates,
   createCandidatePool,
   createCandidatePoolGit,
   createGitChangeRemerger,
@@ -74,6 +75,7 @@ import {
   inspectGitQueueTarget,
   overlayGateScripts,
   resolveGitQueueTarget,
+  submoduleAlternatesFindings,
   worktreeContexts,
   withQueue,
   withMerge,
@@ -2611,6 +2613,24 @@ function queueAdministration(
           ...(sinceLatest === undefined ? {} : { sinceLatest }),
         }
       }
+      // Submodule-alternates census (read-only): the environment fact the
+      // 2026-08-25 outage lacked — a dead store pages, an armed store becomes
+      // visible before it detonates. The audit only reports; repair stays
+      // chief-routed. The common dir is resolved here, never hardcoded, so the
+      // census follows whichever repository this administration serves.
+      const commonDirProbe = await process.run({
+        argv: ["git", "-C", repository.worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd: repository.worktree,
+        timeoutMs: 30_000,
+      })
+      const commonDir = commonDirProbe.stdout.trim()
+      if (commonDirProbe.timedOut || commonDirProbe.exitCode !== 0 || commonDir === "") {
+        throw new Error(
+          commonDirProbe.stderr.trim() ||
+            `yrd: cannot resolve the common git dir for '${repository.worktree}' to census submodule alternates`,
+        )
+      }
+      findings.push(...submoduleAlternatesFindings(await censusSubmoduleAlternates(commonDir), commonDir))
       const comparison: QueueEnvironmentAuditComparison = {
         base,
         tip: {

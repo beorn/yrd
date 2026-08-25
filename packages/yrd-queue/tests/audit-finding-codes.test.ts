@@ -8,12 +8,17 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { YRD_QUEUE_AUDIT_FINDING_CODES, type QueueAuditEmission } from "@yrd/queue"
 
-/** The two producers whose findings `queue audit` concatenates: the core walk
- * in this package, and the derived plan audit (git vs journal vs process) in
- * the CLI. */
+/** The three producers whose findings `queue audit` concatenates: the core
+ * walk in this package, the derived plan audit (git vs journal vs process) in
+ * the CLI, and the submodule-alternates census in this package. */
 const PRODUCERS = [
   { module: "packages/yrd-queue/src/queue.ts", from: "function auditQueues(", to: "\nfunction latestQueueMergeMs(" },
   { module: "packages/yrd-cli/src/plan-audit.ts", from: "export function installedPlanStale(", to: null },
+  {
+    module: "packages/yrd-queue/src/alternates-audit.ts",
+    from: "export function submoduleAlternatesFindings(",
+    to: null,
+  },
 ] as const
 
 const REPOSITORY = fileURLToPath(new URL("../../..", import.meta.url))

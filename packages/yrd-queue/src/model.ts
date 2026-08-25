@@ -257,7 +257,11 @@ export const SubmoduleModelChangeAuthorizationSchema = z
     if (patchId === undefined) {
       context.addIssue({ code: "custom", message: "re-merge source requires patchId", path: ["patchId"] })
     } else if (source.patchId !== patchId) {
-      context.addIssue({ code: "custom", message: "re-merge source patchId must match receipt patchId", path: ["source"] })
+      context.addIssue({
+        code: "custom",
+        message: "re-merge source patchId must match receipt patchId",
+        path: ["source"],
+      })
     }
     if (source.toHeadSha !== headSha) {
       context.addIssue({ code: "custom", message: "re-merge source must end at receipt headSha", path: ["source"] })
@@ -994,6 +998,20 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
    * with `declared-step-not-installed`; any other delta means stale step
    * definitions. The remedy is restarting the runner, never a state write. */
   "installed-plan-stale",
+  /** A submodule object store whose EVERY `objects/info/alternates` line
+   * dangles: the borrowed store — usually a recycled worktree's
+   * `worktrees/<wt>/modules` store — is gone and no live line remains, so
+   * every object read in that checkout fails (2026-08-25: 62 stores, all
+   * traced to two recycled trees). Emitted by the environment audit's
+   * alternates census (`alternates-audit.ts`); read-only, repair is
+   * chief-routed, never automatic. */
+  "submodule-alternates-dead-store",
+  /** A submodule object store whose only LIVE alternates lines point into
+   * `worktrees/<wt>/modules` stores: it reads today and dies the moment that
+   * worktree is recycled. Armed, not detonated — lower severity than
+   * dead-store. Re-materializing the checkout anchors the durable
+   * `modules/<name>` line and disarms it. */
+  "submodule-alternates-worktree-only",
 ] as const
 
 export type QueueAuditFindingCode = (typeof YRD_QUEUE_AUDIT_FINDING_CODES)[number]

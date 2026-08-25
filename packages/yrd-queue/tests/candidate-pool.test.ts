@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs"
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, sep } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
@@ -429,6 +429,41 @@ describe("warm candidate pool", () => {
     expect(spans(events, "materialize").length).toBeGreaterThanOrEqual(2)
     expect(existsSync(unexpectedHookSync)).toBe(false)
     void baseSha
+  })
+
+  it("anchors candidate stores to the durable module store when the pool serves a linked worktree", async () => {
+    // THE 2026-08-25 OUTAGE SHAPE: the resident runner served the pool from its
+    // own linked worktree, so every candidate's submodule alternates pointed at
+    // that worktree's disposable `worktrees/<wt>/modules` store instead of the
+    // primary repository's `.git/modules/<path>` store. Recycling the runner's
+    // tree (worktree54, B158) killed 62 candidate stores at once — B291's
+    // submit died at delivery-composition with "no readable HEAD". The pool's
+    // repo here IS a linked worktree, and the emitted alternates must still
+    // carry the durable line and never depend on a worktree-scoped store.
+    const { repo, baysRoot, ref } = await submoduleRepository()
+    const runner = join(repo, "..", "runner")
+    await git(repo, ["worktree", "add", "-q", "--detach", runner, ref])
+    await git(runner, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+
+    const { log } = capturingLog()
+    const pool = makePool(runner, baysRoot, 1, log)
+
+    await pool.withCandidate(ref, async (path) => {
+      const moduleGitDir = await git(join(path, "dep"), ["rev-parse", "--absolute-git-dir"])
+      const durable = join(await realpath(repo), ".git", "modules", "dep", "objects")
+      const lines = (await readFile(join(moduleGitDir, "objects", "info", "alternates"), "utf8"))
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+      expect(lines).toContain(durable)
+      // A line into any `worktrees/<wt>/modules` store dies with that worktree;
+      // the candidate must never DEPEND on one (a durable line must coexist).
+      const worktreeScoped = lines.filter((line) => line.includes(`${sep}worktrees${sep}`))
+      expect(
+        worktreeScoped,
+        `worktree-scoped alternates lines without a durable fallback: ${worktreeScoped.join(", ")}`,
+      ).toEqual([])
+      return passed
+    })
   })
 
   it("removes every warm worktree on close", async () => {
