@@ -7799,8 +7799,9 @@ const NEEDS_AUTHOR_CODES: ReadonlySet<string> = COMPOSITION_FAILURE_BUCKETS["nee
  * message } }` outright, no indirection) — plus every
  * {@link COMPOSITION_FAILURE_BUCKETS} member (folded in WHOLE, not just the
  * `needs-author`/`infra-retry` buckets `failureDisposition` already reads —
- * `recut-lineage` and `plain-rejected` reach it the identical way and were
- * silently defaulting too). A handful of spelling duplicates this codebase
+ * `plain-rejected` reaches it the identical way and was silently defaulting
+ * too; the former `recut-lineage` bucket went with the certificate machinery
+ * in re-merge Phase 1). A handful of spelling duplicates this codebase
  * already tolerated ad hoc — see {@link YRD_REFUSAL_CODE_ALIASES} — are
  * collapsed to ONE canonical spelling each rather than counted as independent
  * codes, so this list is the DISTINCT-CONCEPT count, not a raw literal census.
@@ -7838,7 +7839,6 @@ export const YRD_REFUSAL_CODES = [
   "candidate-submodules-failed",
   "carrier-drops-landed",
   "carrier-inspection",
-  "carrier-pin-already-landed",
   "check-definition-missing",
   // The generic required-check catch-all `failed()` emits in command.ts —
   // no bucket of its own, always the plain default disposition. Load-bearing
@@ -7857,7 +7857,10 @@ export const YRD_REFUSAL_CODES = [
   "component-model-authorization-refused",
   "component-model-authorizer-unavailable",
   "component-model-identity-unavailable",
-  "composition-invalid",
+  // The re-merge Phase 1 retirement refusal: a certificate-era composed
+  // revision reaching candidate construction (command.ts's bay submit /
+  // prepareCandidateMembers paths). Also a needs-author bucket member.
+  "composition-retired",
   "config-not-found",
   "config-path-invalid",
   "contribution-inspection",
@@ -7905,7 +7908,6 @@ export const YRD_REFUSAL_CODES = [
   "merge-record-retraction-refused",
   "merge-record-unprovable-claim",
   "merge-rollback-failed",
-  "merge-tip-carrier",
   "merge-unauthored-deletion",
   "merge-verification-failed",
   "min-commit-unpublished",
@@ -7919,9 +7921,6 @@ export const YRD_REFUSAL_CODES = [
   "orphaned-requested-job",
   "orphaned-run",
   "payload-certificate",
-  "payload-identity",
-  "payload-mismatch",
-  "payload-overlap",
   "pin-bay-invalid",
   "pin-checkout-cleanup-failed",
   "pin-invalid",
@@ -7930,6 +7929,10 @@ export const YRD_REFUSAL_CODES = [
   "pin-ref-mismatch",
   "pin-resolution-failed",
   "pr-not-checkable",
+  // Re-merge Phase 1 turned recordProposedHead's codeCarrierRefusal
+  // indirection into a direct `code:` literal (command.ts), so the census
+  // sees the producer it previously missed.
+  "proposed-commit-missing",
   "publication-failed",
   "publication-unavailable",
   "pushed-not-submitted",
@@ -7944,21 +7947,15 @@ export const YRD_REFUSAL_CODES = [
   "queue-paused",
   "queue-progress-stalled",
   "queue-read-boundary-moved",
-  "recut-base-diverged",
   "recut-base-missing",
-  "recut-certificate",
-  "recut-certificate-missing",
   "recut-current-changed",
   "recut-publish",
-  "recut-scratch-failed",
   "refusal-remedy-needs-withdraw",
   "refused-path",
   "refused-path-inspection",
   "rejected",
   "repository-corrupt",
   "required-check-failed",
-  "restack-conflict",
-  "restack-failed",
   "retired-command",
   "review-rejected",
   "review-required",
@@ -7971,8 +7968,12 @@ export const YRD_REFUSAL_CODES = [
   "runner-health-failed",
   "runtime-reload-exec-failed",
   "scratch-cleanup-failed",
-  "source-lineage",
-  "source-missing",
+  // HISTORICAL-ONLY: its producer (publishSourceCandidate, the composed
+  // path's source publisher) went with re-merge Phase 1, but recorded runs
+  // and release reasons still carry it, and status-presentation.ts keeps it
+  // in INFRA_RETRY_FAILURE_CODES so their presentation stays honest —
+  // unregistering it would make failureDisposition throw on exactly that
+  // recorded data.
   "source-publish",
   "spawn-cwd-missing",
   // `failed()`-only, like `check-failed` above — no `code: "..."` object
@@ -7986,6 +7987,12 @@ export const YRD_REFUSAL_CODES = [
   "step-revision-drift",
   "step-selection-superseded",
   "step-unavailable",
+  // Alternates-audit census findings (alternates-audit.ts) — like every
+  // other YRD_QUEUE_AUDIT_FINDING_CODES member above, registered so a
+  // finding code surfacing through a presentation path classifies instead
+  // of throwing.
+  "submodule-alternates-dead-store",
+  "submodule-alternates-worktree-only",
   "submodule-composition-conflict",
   "submodule-composition-unavailable",
   "terminal",
