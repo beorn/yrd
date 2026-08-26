@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
+import { createFailure, failureFact } from "@yrd/core"
 import type { JobResult } from "@yrd/job"
 import { adaptProcessGit, gitSuperFailureDetail, type Process } from "@yrd/process"
 import { pushRefUpdates } from "git-super/push"
@@ -56,10 +57,16 @@ export function gitWorkspaceRevision(options: GitWorkspaceRevisionOptions): stri
 const GIT_TIMEOUT_MS = 30_000
 
 function failure(code: string, cause: unknown): JobResult<never> {
+  // A typed YrdFailure cause keeps its own registered code: laundering a
+  // transport read failure into the phase's generic code makes a retryable
+  // origin outage indistinguishable from a content fault.
   return {
     status: "completed",
     conclusion: "failure",
-    error: { code, message: cause instanceof Error ? cause.message : String(cause) },
+    error: {
+      code: failureFact(cause)?.code ?? code,
+      message: cause instanceof Error ? cause.message : String(cause),
+    },
   }
 }
 
@@ -92,10 +99,16 @@ async function remoteBranchHead(git: Git, repo: string, branch: string): Promise
   const result = await git.run(repo, ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`], true)
   if (result.code === 2) return undefined
   if (result.code !== 0) {
-    throw new Error(
-      `could not verify branch '${branch}' on origin: ` +
+    // Exit 2 is origin ANSWERING "no such branch"; anything else is the wire
+    // failing — typed so provisioning surfaces a retryable transport fault
+    // instead of a generic provision failure.
+    throw createFailure({
+      kind: "infrastructure",
+      code: "transport-read-failed",
+      message:
+        `could not verify branch '${branch}' on origin: ` +
         (result.stderr.trim() || result.stdout.trim() || `git ls-remote exited ${result.code}`),
-    )
+    })
   }
   const headSha = result.stdout.trim().split(/\s+/u)[0]
   if (headSha === undefined || !/^[0-9a-f]{40,64}$/u.test(headSha)) {

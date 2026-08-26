@@ -7,12 +7,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createProcess } from "@yrd/process"
+import { failureFact } from "@yrd/core"
+import { createProcess, type Process, type ProcessRequest } from "@yrd/process"
 import { createJournal } from "@yrd/persistence"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import { createDefaultYrdApp, runYrd as runYrdRaw, type YrdCliApp, type YrdCliIO } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
+import { GIT_PLUMBING_TIMEOUT_MS } from "../src/git-timeouts.ts"
 import { printResultWithWarnings } from "../src/output.tsx"
 import {
   createSubmoduleBranchResolver,
@@ -283,6 +285,40 @@ describe("createSubmoduleBranchResolver (real ls-remote)", () => {
   it("reports an unreachable remote instead of throwing", async () => {
     const resolution = await createSubmoduleBranchResolver(tmpdir())("/no/such/remote.git")
     expect(resolution.status).toBe("unreachable")
+  })
+
+  it("bounds the ls-remote probe and types a process-level failure as transport-read-failed", async () => {
+    const requests: ProcessRequest[] = []
+    const process: Pick<Process, "run"> = {
+      async run(request) {
+        requests.push(request)
+        // A supervised-process failure (not a Git exit): the adapter surfaces it
+        // as `failure`, which previously escaped as a plain untyped throw.
+        return {
+          exitCode: 1,
+          signal: "SIGKILL",
+          stdout: "",
+          stderr: "",
+          durationMs: 5,
+          timedOut: false,
+          verdict: "STALLED",
+          stalled: true,
+          lastProgressAtMs: 0,
+          lastProgressBytes: 0,
+        }
+      },
+    }
+
+    const resolve = createSubmoduleBranchResolver("/repo", process)
+    const rejection = await Promise.resolve(resolve("https://origin.invalid/dep.git")).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    // A network read with no deadline hangs `yrd admin submodule init` forever.
+    expect(requests[0]?.timeoutMs).toBe(GIT_PLUMBING_TIMEOUT_MS)
+    expect(rejection).toBeInstanceOf(Error)
+    expect(failureFact(rejection)).toMatchObject({ kind: "infrastructure", code: "transport-read-failed" })
   })
 })
 

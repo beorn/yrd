@@ -125,6 +125,41 @@ describe("createGitWorkspace", () => {
     expect(request).toMatchObject({ timeoutMs: 30_000 })
   })
 
+  it("types a refused origin read during claim provisioning as transport-read-failed, not a generic provision failure", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["remote", "add", "origin", intake])
+    await git(repo, ["push", "-qu", "origin", "main"])
+    await using delegate = createProcess()
+    // The claim path (issue set, no snapshot, no local/tracking branch) must ask
+    // origin whether the branch exists; that one read is the transport under test.
+    const process: Pick<Process, "run"> = {
+      run: (request) =>
+        request.argv.includes("ls-remote")
+          ? Promise.resolve(processResult(128, "fatal: unable to access 'origin': Connection timed out"))
+          : delegate.run(request),
+    }
+    const adapter = await workspace(process, { repo, baysRoot: join(root, "bays") })
+
+    const provisioned = await adapter.provision(
+      {
+        bay: "B1",
+        name: "transport-read",
+        branch: "task/transport-read",
+        base: "main",
+        issue: "@km/test/transport-read",
+      },
+      { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(provisioned).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      // The typed transport code must survive the provision catch — a laundered
+      // "provision-failed" makes a retryable origin outage look like a content fault.
+      error: { code: "transport-read-failed" },
+    })
+  })
+
   it.each([
     { state: "without a recorded head", recordHead: false },
     { state: "with a recorded head", recordHead: true },
