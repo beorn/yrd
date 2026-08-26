@@ -9,13 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
-import {
-  createDeploymentJobDefs,
-  createGitDeploymentStore,
-  deploymentJobKey,
-  readDeploymentBySource,
-  readLiveDeployments,
-} from "../src/deployment.ts"
+import { createGitDeploymentStore, readDeploymentBySource, readLiveDeployments } from "../src/deployment.ts"
 
 const roots: string[] = []
 
@@ -221,88 +215,6 @@ describe("createGitDeploymentStore", () => {
     await expect(store.release(result)).resolves.toEqual({ released: true, path: result.path })
     expect(existsSync(result.path)).toBe(false)
     await expect(store.release(result)).resolves.toEqual({ released: true, path: result.path })
-  })
-
-  it("routes authorized release through a keyed Journal Job definition", async () => {
-    const { root, repo, sha } = await repository()
-    await using process = createProcess()
-    const store = await createGitDeploymentStore({ repo, deploymentsRoot: join(root, "deployments"), process })
-    const result = await store.materialize({ deploymentId: "D1", generation: "G1", sha, pin: "tip" })
-    const jobs = createDeploymentJobDefs(store)
-    const release = jobs["deployment.release"]
-    const context = {
-      id: "release-D1",
-      attempt: 1,
-      runner: "test",
-      signal: new AbortController().signal,
-    }
-    const habReleaseResult = {
-      schema: "hab-service-generation-release/1" as const,
-      jurisdiction: "single-habitat" as const,
-      habitatRoot: join(root, "habitat"),
-      retiredSource: { path: result.path, sha: result.sha, verification: "verified" as const },
-      replacementSource: {
-        path: join(root, "deployments", "roots", "D2"),
-        sha: "2".repeat(40),
-        verification: "verified" as const,
-      },
-      releasedAt: "2026-08-11T20:00:00.000Z",
-    }
-    const input = {
-      deploymentId: result.deploymentId,
-      generation: result.generation,
-      path: result.path,
-      sha: result.sha,
-      authorization: {
-        kind: "hab-generation-release" as const,
-        generation: result.generation,
-        path: result.path,
-        sha: result.sha,
-        receipt: habReleaseResult,
-      },
-    }
-
-    expect(release.request(input, { key: deploymentJobKey("release", result.deploymentId) })).toMatchObject({
-      data: { key: "deployment:D1:release" },
-    })
-    await expect(
-      release.execute({ ...input, authorization: { ...input.authorization, path: join(root, "wrong") } }, context),
-    ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
-    expect(existsSync(result.path)).toBe(true)
-    await expect(
-      release.execute(
-        {
-          ...input,
-          authorization: {
-            ...input.authorization,
-            receipt: {
-              ...habReleaseResult,
-              retiredSource: { path: join(root, "wrong"), sha: result.sha, verification: "verified" },
-            },
-          },
-        },
-        context,
-      ),
-    ).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
-    expect(existsSync(result.path)).toBe(true)
-    await expect(
-      release.execute(
-        {
-          ...input,
-          authorization: {
-            ...input.authorization,
-            receipt: { ...habReleaseResult, nonce: "strict-same-user-schema-has-no-nonce" },
-          },
-        },
-        context,
-      ),
-    ).rejects.toThrow(/unrecognized key.*nonce/iu)
-    expect(existsSync(result.path)).toBe(true)
-    await expect(release.execute(input, context)).resolves.toMatchObject({
-      status: "completed",
-      conclusion: "success",
-      output: { released: true, path: result.path },
-    })
   })
 
   it("leaves a failed preparation unpublished and supports exact-input reap", async () => {

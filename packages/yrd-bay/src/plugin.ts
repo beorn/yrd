@@ -25,6 +25,7 @@ import {
   type JobTransition,
   type RunJobOptions,
 } from "@yrd/job"
+import type { BayWorkspace } from "@yrd/grove"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -611,27 +612,7 @@ const ChangeReviewRequestFactSchema = z
   .object({ pr: PRIdSchema, reviewers: z.array(TextSchema), requestedBy: TextSchema })
   .strict()
 
-/** Two unrelated "checkpoint" concepts exist in yrd; this is the BAY one.
- * `BayWorkspace.checkpoint` preserves a bay's working tree (commit + push WIP
- * before recycle). The JOURNAL checkpoint — `projectionCheckpointIdentity` and
- * the checkpoint store in yrd-core/src/app.ts — is a projection-state snapshot
- * keyed by schema identity. They share nothing but the word. */
-export type BayWorkspace = Readonly<{
-  revision: string
-  provision(
-    input: ProvisionBayInput,
-    context: JobContext,
-  ): JobResult<ProvisionedBay> | Promise<JobResult<ProvisionedBay>>
-  refresh(input: RefreshBayInput, context: JobContext): JobResult<RefreshedBay> | Promise<JobResult<RefreshedBay>>
-  checkpoint(
-    input: CheckpointBayInput,
-    context: JobContext,
-  ): JobResult<CheckpointedBay> | Promise<JobResult<CheckpointedBay>>
-  deprovision(
-    input: DeprovisionBayInput,
-    context: JobContext,
-  ): JobResult<DeprovisionedBay> | Promise<JobResult<DeprovisionedBay>>
-}>
+export type { BayWorkspace } from "@yrd/grove"
 
 export type BayJobDefs = Readonly<{
   "bay.provision": JobDef<ProvisionBayInput, ProvisionedBay>

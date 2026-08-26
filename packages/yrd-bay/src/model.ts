@@ -9,9 +9,34 @@ import {
   type SelectorMatch,
 } from "@yrd/core"
 import { JobErrorSchema, type JobError } from "@yrd/job"
+import { GitRefSchema, GitShaSchema } from "@yrd/grove"
 import type { ChangeId } from "./change-identity.ts"
 
-export const BayIdSchema = z.string().trim().min(1)
+export {
+  BayIdSchema,
+  CheckpointBayInputSchema,
+  CheckpointedBaySchema,
+  DeprovisionBayInputSchema,
+  DeprovisionedBaySchema,
+  GitRefSchema,
+  GitShaSchema,
+  ProvisionBayInputSchema,
+  ProvisionedBaySchema,
+  RefreshBayInputSchema,
+  RefreshedBaySchema,
+  RemoteBranchSnapshotSchema,
+} from "@yrd/grove"
+export type {
+  CheckpointBayInput,
+  CheckpointedBay,
+  DeprovisionBayInput,
+  DeprovisionedBay,
+  ProvisionBayInput,
+  ProvisionedBay,
+  RefreshBayInput,
+  RefreshedBay,
+  RemoteBranchSnapshot,
+} from "@yrd/grove"
 /**
  * The shape the mint actually writes: `nextId("PR", state.prs)` produces `PR`
  * plus a decimal counter, and all 43,202 PR-id occurrences in the live journal
@@ -23,8 +48,6 @@ export const BayIdSchema = z.string().trim().min(1)
  * ids and are deliberately refused; {@link parseChangeSelector} is their grammar.
  */
 export const PRIdSchema = z.string().regex(/^PR\d+$/u, "expected a change id, e.g. PR182")
-export const GitRefSchema = z.string().trim().min(1)
-export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 /** Open key/value labels on a change revision. The same noun as km's node
  * `props`: each key is a fact — set once, idempotent to repeat, conflicting
  * values refuse. Plugins may interpret a namespaced key only through an
@@ -977,102 +1000,6 @@ export type BaysState = Readonly<{
   /** Live `refs/yrd/submit/<branch>` facts by branch — see {@link BranchSubmitSchema}. */
   submits: Readonly<Record<string, ProjectedBranchSubmit>>
 }>
-
-/** `headSha` absent used to mean two different facts — "origin has no such
- * branch" and "we could not establish one" — so a consumer could not tell a
- * finding from a failure. `headState` names which, and a snapshot that omits
- * it (any record written before this field existed) is treated as `unknown`,
- * the conservative reading. */
-export const RemoteBranchSnapshotSchema = z
-  .object({
-    branch: GitRefSchema,
-    headSha: GitShaSchema.optional(),
-    headState: z.enum(["resolved", "absent", "unknown"]).optional(),
-  })
-  .strict()
-export type RemoteBranchSnapshot = z.infer<typeof RemoteBranchSnapshotSchema>
-
-export const ProvisionBayInputSchema = z
-  .object({
-    bay: BayIdSchema,
-    name: z.string().trim().min(1),
-    branch: GitRefSchema,
-    base: GitRefSchema,
-    baseSha: GitShaSchema.optional(),
-    from: GitRefSchema.optional(),
-    issue: z.string().trim().min(1).optional(),
-    reuseBranch: z.boolean().optional(),
-    remoteBranch: RemoteBranchSnapshotSchema.optional(),
-  })
-  .strict()
-export type ProvisionBayInput = z.infer<typeof ProvisionBayInputSchema>
-
-export const ProvisionedBaySchema = z
-  .object({
-    path: z.string().min(1),
-    headSha: GitShaSchema,
-    baseSha: GitShaSchema,
-  })
-  .strict()
-export type ProvisionedBay = z.infer<typeof ProvisionedBaySchema>
-
-export const RefreshBayInputSchema = z
-  .object({
-    bay: BayIdSchema,
-    path: z.string().min(1).optional(),
-    branch: GitRefSchema,
-    from: GitRefSchema.optional(),
-    base: GitRefSchema,
-  })
-  .strict()
-export type RefreshBayInput = z.infer<typeof RefreshBayInputSchema>
-
-export const RefreshedBaySchema = z
-  .object({
-    path: z.string().min(1),
-    headSha: GitShaSchema,
-    baseSha: GitShaSchema,
-    dirty: z.boolean(),
-  })
-  .strict()
-export type RefreshedBay = z.infer<typeof RefreshedBaySchema>
-
-export const CheckpointBayInputSchema = z
-  .object({
-    bay: BayIdSchema,
-    path: z.string().min(1).optional(),
-    branch: GitRefSchema,
-    from: GitRefSchema.optional(),
-    claim: z.string().trim().min(1),
-  })
-  .strict()
-export type CheckpointBayInput = z.infer<typeof CheckpointBayInputSchema>
-
-export const CheckpointedBaySchema = z
-  .object({
-    headSha: GitShaSchema,
-    pushed: z.literal(true),
-    wip: z.boolean(),
-  })
-  .strict()
-export type CheckpointedBay = z.infer<typeof CheckpointedBaySchema>
-
-export const DeprovisionBayInputSchema = z
-  .object({
-    bay: BayIdSchema,
-    path: z.string().min(1).optional(),
-    branch: GitRefSchema,
-    headSha: GitShaSchema.optional(),
-  })
-  .strict()
-export type DeprovisionBayInput = z.infer<typeof DeprovisionBayInputSchema>
-
-/** `headSha` is optional only for replay compatibility with pre-lifecycle job
- * results. New workspace adapters return the exact preserved head. */
-export const DeprovisionedBaySchema = z
-  .object({ headSha: GitShaSchema.optional(), preservedRef: GitRefSchema.optional() })
-  .strict()
-export type DeprovisionedBay = z.infer<typeof DeprovisionedBaySchema>
 
 export function defaultBayBranch(name: string): string {
   return `issue/${name}`
