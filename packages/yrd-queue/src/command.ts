@@ -6252,6 +6252,28 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
               options.checkoutParent,
               async (scratchPath) => {
                 parentPath = scratchPath
+                // The scratch is a bare detached worktree: every gitlink is an
+                // empty directory until materialized. Where workspace members
+                // live in submodules, the parent command's own dependency
+                // install then dies on unresolvable `workspace:*` globs — the
+                // candidate leg never sees this because its pool checkout
+                // materializes (candidate-pool), as do the merge paths and the
+                // CLI pre-submit runner (22755). Borrowing from the primary
+                // checkout keeps this network-free, and a refusal throws into
+                // this step's parent execution-refusal catch below: running
+                // the parent command in an incomplete tree would report an
+                // environment artifact as the base's verdict.
+                const submodules = await materializeSubmodules(git, {
+                  worktree: scratchPath,
+                  referenceWorktree: repo,
+                })
+                if (submodules.code !== 0) {
+                  throw createFailure({
+                    kind: "infrastructure",
+                    code: "parent-submodules-failed",
+                    message: submodules.stderr || submodules.stdout || "could not materialize parent submodules",
+                  })
+                }
                 return configuredCommandStep(
                   configured(scratchPath, candidate.baseSha, join(artifactRoot, "parent"), true),
                 )({ ...input, targetSha: candidate.baseSha }, context)

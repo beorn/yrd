@@ -34,6 +34,8 @@ import {
   IntegrationProofSchema,
   configuredCommandStep,
   configuredMergeStep,
+  createCandidatePool,
+  createCandidatePoolGit,
   createGitChangeRemerger,
   findRepositoryChangeMerge,
   findRepositoryMergeRecords,
@@ -150,6 +152,30 @@ async function repository<const Names extends readonly string[]>(
     await git(repo, ["switch", "-q", "main"])
   }
   return { repo, ...shas } as { repo: string } & Record<Names[number], string>
+}
+
+/**
+ * A base whose tree carries a workspace member INSIDE a submodule. This is the
+ * PR2059 defect shape — the delta comparison's parent scratch was a bare
+ * `worktree add`, so `dep` stayed an empty directory there while the candidate
+ * leg's pool checkout was complete. The URL stays the module's real path: the
+ * candidate reachability proof fetches every pin from its recorded origin.
+ */
+async function submoduleMemberRepository(): Promise<{ repo: string; featureSha: string; baysRoot: string }> {
+  const { repo, feature: featureSha } = await repository("feature")
+  const module = join(repo, "..", "member-module")
+  await Bun.$`git init -q -b main ${module}`
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(module, "member.txt"), "workspace member\n")
+  await git(module, ["add", "member.txt"])
+  await git(module, ["commit", "-qm", "member"])
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["commit", "-qam", "add dep"])
+  const baysRoot = join(repo, "..", "bays")
+  await mkdir(baysRoot, { recursive: true })
+  return { repo, featureSha, baysRoot }
 }
 
 async function hookedSubmoduleRepository(options: {
@@ -3706,6 +3732,140 @@ describe("Queue command adapters", () => {
       ],
     })
   })
+
+  // 2026-08-26: the delta comparison's parent leg ran in a bare scratch
+  // worktree — no submodule materialization — while the candidate leg's pool
+  // checkout and both merge paths materialize. In a repository whose workspace
+  // members live in submodules, every parent command needing that content
+  // refused (`queue-environment-refused` phase parent; PR2059 r2-r5, PR2018:4,
+  // PR2047:2 — parent artifact dirs empty back to 2026-08-17), so the
+  // comparison rail never worked there. Same signature the CLI pre-submit
+  // path closed with its own materialization (22755).
+  it("materializes submodules in the parent comparison scratch so inherited failures stay inherited", async () => {
+    const { repo, featureSha, baysRoot } = await submoduleMemberRepository()
+    await using process = createProcess()
+    const pool = createCandidatePool({ repo, parent: baysRoot, capacity: 1, git: createCandidatePoolGit(process) })
+    try {
+      const outcome = await gitCheckStep({
+        inject: { process },
+        repo,
+        // An inherited red that needs the COMPLETE tree on both legs: a bare
+        // parent scratch exits 21 before printing the diagnostic, and the
+        // comparison then blames the candidate for output the base already
+        // produced.
+        command: shellCommand(
+          "test -f dep/member.txt || { echo 'workspace member missing' >&2; exit 21; }; " +
+            "printf 'src/inherited.ts:1:1 - inherited\\n'; exit 17",
+        ),
+        artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+        comparison: "diagnostics",
+        candidatePool: pool,
+      })(
+        {
+          run: "R-sub-parent",
+          step: "check",
+          index: 0,
+          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+          shape: { results: {} },
+        },
+        { id: "J-sub-parent", attempt: 1, runner: "test", signal: new AbortController().signal },
+      )
+
+      expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
+      if (outcome.status !== "completed" || outcome.conclusion !== "success") {
+        throw new Error("parent comparison did not pass")
+      }
+      const evidence = GitCheckEvidenceSchema.parse(outcome.output)
+      expect(evidence.exitCode).toBe(17)
+      expect(evidence.comparison).toMatchObject({
+        parent: { exitCode: 17 },
+        netNewDiagnostics: [],
+        resolvedDiagnostics: [],
+        unchangedDiagnosticCount: 1,
+      })
+      // The parent stdout carries the inherited diagnostic only when the
+      // command got PAST the member check inside the parent scratch — the
+      // direct proof `dep/member.txt` was materialized there.
+      const parentArtifacts = new Map(evidence.comparison?.parent.artifacts.map(({ name, path }) => [name, path]))
+      const parentStdout = parentArtifacts.get("stdout")
+      if (parentStdout === undefined) throw new Error("missing parent stdout artifact")
+      expect(await readFile(parentStdout, "utf8")).toContain("src/inherited.ts:1:1 - inherited")
+    } finally {
+      await pool.close()
+    }
+  }, 30_000)
+
+  it("refuses the parent comparison loudly when parent submodule materialization fails", async () => {
+    const { repo, featureSha, baysRoot } = await submoduleMemberRepository()
+    await using process = createProcess()
+    // Fail ONLY the parent scratch's `submodule update`: queue scratch roots
+    // live under `.git/yrd/scratch`, the pool's under the bays root, so the
+    // marker separates the legs. An incomplete parent tree must never run the
+    // parent command — that would report an environment artifact as the
+    // base's verdict — and the refusal must stay the retryable environment
+    // class, not a candidate-attributed failure.
+    const scratchMarker = join(".git", "yrd", "scratch")
+    const sabotaged: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          request.argv.includes("submodule") &&
+          request.argv.includes("update") &&
+          request.argv.some((argument) => argument.includes(scratchMarker))
+        ) {
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "injected: submodule store offline",
+            durationMs: 1,
+            timedOut: false,
+          } satisfies ProcessResult)
+        }
+        return process.run(request)
+      },
+    }
+    const pool = createCandidatePool({ repo, parent: baysRoot, capacity: 1, git: createCandidatePoolGit(process) })
+    try {
+      const outcome = await gitCheckStep({
+        inject: { process: sabotaged },
+        repo,
+        command: shellCommand(
+          "test -f dep/member.txt || { echo 'workspace member missing' >&2; exit 21; }; " +
+            "printf 'src/inherited.ts:1:1 - inherited\\n'; exit 17",
+        ),
+        artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+        comparison: "diagnostics",
+        candidatePool: pool,
+      })(
+        {
+          run: "R-sub-refused",
+          step: "check",
+          index: 0,
+          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+          shape: { results: {} },
+        },
+        { id: "J-sub-refused", attempt: 1, runner: "test", signal: new AbortController().signal },
+      )
+
+      expect(outcome).toMatchObject({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "check-execution-refusal",
+            phase: "parent",
+            retryable: true,
+            error: { code: "parent-submodules-failed", message: "injected: submodule store offline" },
+          },
+        },
+      })
+      if (outcome.status !== "completed" || outcome.conclusion !== "failure") throw new Error("expected a refusal")
+      expect(outcome.error.message).toContain("parent command could not run")
+    } finally {
+      await pool.close()
+    }
+  }, 30_000)
 
   it("aggregates structured child residual reports into one auditable delta certificate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
