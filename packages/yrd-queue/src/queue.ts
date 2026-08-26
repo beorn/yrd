@@ -7586,6 +7586,7 @@ export const YRD_REFUSAL_CODES = [
   "queue-progress-stalled",
   "queue-read-boundary-moved",
   "recut-base-missing",
+  "recut-branch-absent",
   "recut-current-changed",
   "recut-publish",
   "refusal-remedy-needs-withdraw",

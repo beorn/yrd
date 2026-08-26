@@ -1636,6 +1636,18 @@ async function resolveSubmitCommit(
     return resolveCommit(process, repo, `refs/heads/${branch}`)
   }
   const observed = await observeFreshRemoteBranch(process, repo, branch)
+  // Origin advertised the branch a moment ago and no longer does: it was deleted
+  // between the two observations. Naming the race is the whole remedy — retrying
+  // is right if the deletion was a mistake, and pointless if it was not.
+  if (!observed.ok && observed.phase === "absent") {
+    raiseFailure(
+      "refusal",
+      "submit-branch-deleted-during-submit",
+      `yrd: branch '${branch}' was deleted from origin while Yrd was submitting it (${observed.detail})\n` +
+        "remedy: restore the branch on origin if the deletion was unintended, then retry; " +
+        "Yrd did not submit the stale local ref",
+    )
+  }
   if (!observed.ok && observed.phase === "fetch") {
     raiseFailure(
       "configuration",

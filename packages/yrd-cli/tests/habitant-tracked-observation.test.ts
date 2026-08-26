@@ -199,16 +199,24 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
     // kind:"configuration" recut-branch-refresh-failed and killed the habitant.
     const outcomes = await runInternals.refreshTrackedQueueRevisions(cliApp, services, io)
 
-    // The unobservable PR carries a typed, loud, per-PR outcome…
-    const deferred = outcomes.find((outcome) => outcome.branch === DELETED)
-    expect(deferred).toMatchObject({ status: "deferred", pr: "PR1", code: "recut-branch-refresh-failed" })
-    if (deferred?.status !== "deferred") throw new Error("expected a deferred outcome for the unobservable branch")
-    expect(deferred.message).toContain(DELETED)
-    const deferralWarn = events.find(
-      (event) => (event.props as { action?: string } | undefined)?.action === "queue-track-observation-deferred",
+    // The unobservable PR carries a typed, loud, per-PR outcome. Origin answered
+    // authoritatively that the branch is gone, so the outcome is TERMINAL: no
+    // later cycle could observe it, and a member that can never recut is what
+    // wedged the queue behind PR1189 (@yrd/core/deleted-branch-head-wedges-queue).
+    const evicted = outcomes.find((outcome) => outcome.branch === DELETED)
+    expect(evicted).toMatchObject({ status: "evicted", pr: "PR1", code: "recut-branch-absent" })
+    if (evicted?.status !== "evicted") throw new Error("expected an evicted outcome for the unobservable branch")
+    expect(evicted.message).toContain(DELETED)
+    const evictionWarn = events.find(
+      (event) => (event.props as { action?: string } | undefined)?.action === "queue-track-branch-absent-evicted",
     )
-    expect(deferralWarn, "the deferral must be LOUD on the habitant's structured stream").toBeDefined()
-    expect(deferralWarn?.props).toMatchObject({ pr: "PR1", code: "recut-branch-refresh-failed", attempts: 1 })
+    expect(evictionWarn, "the eviction must be LOUD on the habitant's structured stream").toBeDefined()
+    expect(evictionWarn?.props).toMatchObject({ pr: "PR1", code: "recut-branch-absent", branch: DELETED })
+
+    // No human verb was required: PR1189 sat at the head until a person withdrew
+    // it by hand. The change is closed, unmerged, and carries its own reason.
+    const swept = submitted().find((pr) => pr.branch === DELETED)
+    expect(swept).toMatchObject({ state: "closed", merged: false })
 
     // …and the cycle CONTINUED past it: the healthy PR's drift was recorded, so
     // its live head is now the current revision.
@@ -239,14 +247,18 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
     log.end()
   })
 
-  it("backs off re-observing the same unobservable {pr, revision, head} instead of fetching every cycle", async () => {
-    // Observation is a live fetch at the HEAD of the cycle, so a branch that
-    // stays deleted must not spend one (or a 30s timeout) every 15 seconds.
+  it("backs off re-observing the same unreachable {pr, revision, head} instead of fetching every cycle", async () => {
+    // Observation is a live fetch at the HEAD of the cycle, so a branch behind
+    // an unreachable origin must not spend one (or a 30s timeout) every 15
+    // seconds. Unlike an ABSENT branch — origin says the ref is gone, which no
+    // retry changes, so it is evicted below — a transport fault IS cured by a
+    // later attempt, so this arm keeps retrying and only bounds the cost.
     const fixture = await repository()
+    await git(fixture.repo, ["remote", "set-url", "origin", join(fixture.repo, "no-such-origin.git")])
     const log = createLogger("yrd", [{ level: "silent" }])
     const app = await trackedApp(fixture.mainSha, log)
     const cliApp = app as unknown as YrdCliApp
-    await app.bays.submit({ branch: DELETED, headSha: fixture.deletedHead, base: "main", baseSha: fixture.mainSha })
+    await app.bays.submit({ branch: HEALTHY, headSha: fixture.healthyRecorded, base: "main", baseSha: fixture.mainSha })
     await app.bays.editPr({ pr: "PR1", track: true })
 
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
@@ -301,6 +313,44 @@ describe("habitant tracking pass — one unobservable branch never stops the oth
         props: expect.objectContaining({ action: "queue-track-observation-unavailable", prs: ["PR1"] }),
       }),
     )
+    log.end()
+  })
+})
+
+describe("a queue member whose source branch is gone from origin is evicted, never left to age", () => {
+  it("evicts on the first observation instead of spending a fetch every cycle forever", async () => {
+    // The backoff bounded the wasted fetch but always retried, so an absent
+    // branch stayed queued indefinitely. Absence is authoritative, so one
+    // observation settles it.
+    const fixture = await repository()
+    const log = createLogger("yrd", [{ level: "silent" }])
+    const app = await trackedApp(fixture.mainSha, log)
+    const cliApp = app as unknown as YrdCliApp
+    await app.bays.submit({ branch: DELETED, headSha: fixture.deletedHead, base: "main", baseSha: fixture.mainSha })
+    await app.bays.editPr({ pr: "PR1", track: true })
+    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-evict-once" })
+
+    await using process = createProcess({ env: { PATH: Bun.env.PATH } })
+    let fetches = 0
+    const counting = {
+      run: (request: Parameters<typeof process.run>[0]) => {
+        if (request.argv.includes("fetch")) fetches += 1
+        return process.run(request)
+      },
+    }
+    const services = { process: counting, recut: { recut: vi.fn() } } as unknown as YrdCliServices
+    const observation: runInternals.TrackedObservationBackoff = new Map()
+
+    const passes = []
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      passes.push(await runInternals.refreshTrackedQueueRevisions(cliApp, services, liveIO(fixture.repo), observation))
+    }
+
+    // One observation, one eviction, then nothing: the member left the candidate
+    // set, so later cycles have no work and spend no fetch.
+    expect(passes.map((outcomes) => outcomes.length)).toEqual([1, 0, 0, 0])
+    expect(passes[0]?.[0]).toMatchObject({ status: "evicted", code: "recut-branch-absent" })
+    expect(fetches).toBe(1)
     log.end()
   })
 })

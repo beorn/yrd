@@ -176,6 +176,7 @@ import type { QueueReadModel } from "./queue-read-model.ts"
 import {
   preflightRemerge,
   prunePrs,
+  withdrawOne,
   withdrawPrs,
   type RemergePreflightResult,
   type RemergePreflightVerdict,
@@ -191,6 +192,7 @@ import {
   type HabitantRefusalObservation,
   type HabitantRefusalStall,
 } from "./refusal-remedy.ts"
+import { unobservableBranchRemedy } from "./remedy-admissibility.ts"
 import { reconcileChangeMerges, type ChangeMerge } from "./pr-merged.ts"
 import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
@@ -6201,6 +6203,17 @@ async function viewPr(
         `yrd: cannot observe live branch '${pr.branch}' while viewing change '${pr.id}'; ${observed.detail}`,
       )
     }
+    if (!observed.ok && observed.phase === "absent") {
+      // `pr view` is the surface an operator reaches for while diagnosing a
+      // stuck head, so it must name the branch's absence and the verb that
+      // disposes of it — not send them to a `git rev-parse` that fails too.
+      raiseFailure(
+        "refusal",
+        "pr-view-branch-absent",
+        `yrd: change '${pr.id}' has no source: its branch '${pr.branch}' is gone from origin (${observed.detail})\n` +
+          unobservableBranchRemedy("absent", pr, changeDeliveryState(pr), currentChangeRev(pr), "").text,
+      )
+    }
     if (!observed.ok && observed.phase === "fetch") {
       raiseFailure(
         "configuration",
@@ -9638,9 +9651,57 @@ export type HabitantTrackedRevisionTransition =
       code: "refusal-remedy-needs-withdraw"
       message: string
     }>
+  /** The member stopped matching and was swept to a terminal state with a stated
+   * reason, rather than left to age at the head of the queue. */
+  | Readonly<{
+      status: "evicted"
+      pr: string
+      branch: string
+      revision: number
+      headSha: string
+      code: "recut-branch-absent"
+      message: string
+    }>
 
 function trackedPreflightSettlementRef(pr: Change, revision: Pick<ChangeRev, "n" | "head">): string {
   return `yrd:track-preflight-needs-person:${pr.id}:${revision.n}:${revision.head}`
+}
+
+/**
+ * Sweep one candidate whose source branch origin no longer advertises to a
+ * terminal state, with the refusal itself as the recorded reason.
+ *
+ * No human verb is required by design: the alternative — the behaviour this
+ * replaces — was to defer forever behind a doubling backoff, which reads as
+ * "still working on it" on every instrument while the queue head cannot move.
+ * The reason travels with the withdrawal, so `pr view` and the journal both
+ * answer why the change left without anyone reconstructing it.
+ */
+async function evictUnobservableCandidate(
+  app: YrdCliApp,
+  candidate: Change,
+  revision: Pick<ChangeRev, "n" | "head">,
+  code: "recut-branch-absent",
+  message: string,
+  io: YrdCliIO,
+  observation: TrackedObservationBackoff | undefined,
+): Promise<HabitantTrackedRevisionTransition> {
+  observation?.delete(trackedObservationKey(candidate, revision))
+  await withdrawOne(app, candidate.id, message, io)
+  const outcome: HabitantTrackedRevisionTransition = {
+    status: "evicted",
+    pr: candidate.id,
+    branch: candidate.branch,
+    revision: revision.n,
+    headSha: revision.head,
+    code,
+    message,
+  }
+  app.log.warn?.(`Evicted tracked change ${candidate.id}: its source branch is gone from origin.`, {
+    action: "queue-track-branch-absent-evicted",
+    ...outcome,
+  })
+  return outcome
 }
 
 function trackedPreflightNeedsPerson(pr: Change, revision: ChangeRev): boolean {
@@ -9763,6 +9824,17 @@ export async function refreshTrackedQueueRevisions(
       // await is wrapped, so a failure anywhere after it keeps the existing
       // refusal-only absorption below.
       const failure = failureFact(error)
+      if (failure?.kind === "refusal" && failure.code === "recut-branch-absent") {
+        // Origin answered authoritatively that the branch is gone, so no later
+        // cycle can observe it and no retry is progress. Deferring one of these
+        // is what wedged the queue behind PR1189 for 40 minutes and 19 PRs: the
+        // member could never recut and never land, yet the queue kept treating
+        // it as an ordinary waiting row. It leaves with its reason recorded.
+        outcomes.push(
+          await evictUnobservableCandidate(app, candidate, before, failure.code, failure.message, io, observation),
+        )
+        continue
+      }
       if (failure?.kind !== "configuration" || !TRACKED_OBSERVATION_CODES.has(failure.code)) throw error
       const attempts = (backoff?.failures ?? 0) + 1
       observation?.set(observationKey, { failures: attempts, skipped: 0 })

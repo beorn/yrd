@@ -54,8 +54,20 @@ function requiredLivePr(app: YrdCliApp, selector: string): Change {
 }
 
 /** Withdraw the selected live change revision: emit pr/withdrawn with the recorded
- * reason and terminalize any Queue work still holding that authority. */
-async function withdrawOne(app: YrdCliApp, id: string, reason: string | undefined, io: YrdCliIO): Promise<Change> {
+ * reason and terminalize any Queue work still holding that authority.
+ *
+ * Exported because the habitant sweeps a change whose source branch is gone from
+ * origin through this exact act (`run.ts`, @yrd/core/deleted-branch-head-wedges-queue)
+ * — one withdrawal mechanism, not a second one that could terminalize differently.
+ * The `--burn-payload` acknowledgement `withdrawPrs` demands is an OPERATOR gate on
+ * spending a payload that still exists; a branch origin no longer advertises has no
+ * payload left to spend, and the reason recorded here is the proof. */
+export async function withdrawOne(
+  app: YrdCliApp,
+  id: string,
+  reason: string | undefined,
+  io: YrdCliIO,
+): Promise<Change> {
   await app.bays.closePr({ pr: id, ...(reason === undefined ? {} : { reason }) })
   const withdrawn = app.bays.pr(id)
   if (withdrawn === undefined) throw new Error(`yrd: change '${id}' disappeared after withdraw`)

@@ -13,7 +13,7 @@ export type OriginBranchAdvertisement = Readonly<{ ok: true; advertised: boolean
 
 export type FreshRemoteBranch =
   | Readonly<{ ok: true; head: string; target: string }>
-  | Readonly<{ ok: false; phase: "fetch" | "resolve"; detail: string; target: string }>
+  | Readonly<{ ok: false; phase: "fetch" | "resolve" | "absent"; detail: string; target: string }>
 
 export type LiveBranchObservation =
   | FreshRemoteBranch
@@ -61,7 +61,14 @@ export async function observeOriginBranchAdvertisement(
 
 /** Fetch exactly one authored branch and resolve the remote-tracking commit.
  * Callers own the user-facing failure kind/code/remedy; this is the one Git
- * mechanism shared by submit and re-merge. */
+ * mechanism shared by submit and re-merge.
+ *
+ * A failed fetch is two different worlds wearing one exit code (128): the branch
+ * is GONE from origin — structural, and nothing about retrying changes it — or
+ * origin was unreachable this once, which a retry does fix. Collapsing them is
+ * what let a deleted branch head sit in the queue forever (PR1189), so the
+ * failure path asks origin the authoritative question before answering. Only
+ * the failure path pays for it; a healthy observation is one fetch as before. */
 export async function observeFreshRemoteBranch(
   process: Pick<Process, "run">,
   cwd: string,
@@ -78,7 +85,15 @@ export async function observeFreshRemoteBranch(
     `+${source}:${target}`,
   ])
   if (fetched.timedOut === true || fetched.code !== 0) {
-    return { ok: false, phase: "fetch", detail: gitFailure(fetched, GIT_PLUMBING_TIMEOUT_MS), target }
+    const detail = gitFailure(fetched, GIT_PLUMBING_TIMEOUT_MS)
+    const advertised = await observeOriginBranchAdvertisement(process, cwd, branch)
+    // Absence is claimed only on an authoritative answer (ls-remote exit 2). If
+    // the probe itself failed, origin never told us anything and the fetch
+    // failure stands as retryable — never absence inferred from a second silence.
+    if (advertised.ok && !advertised.advertised) {
+      return { ok: false, phase: "absent", detail: `origin no longer advertises '${source}' (${detail})`, target }
+    }
+    return { ok: false, phase: "fetch", detail, target }
   }
   const resolved = await runGit(process, cwd, [
     "rev-parse",

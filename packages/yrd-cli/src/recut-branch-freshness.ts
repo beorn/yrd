@@ -1,6 +1,7 @@
 import { changeDeliveryState, changeRevisionLineage, isTracked, type Change, type ChangeRev } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
+import { unobservableBranchRemedy, type UnobservableBranchReason } from "./remedy-admissibility.ts"
 import { observeLiveBranch, type LiveBranchObservation } from "./remote-branch.ts"
 import type { YrdCliIO, YrdCliServices } from "./types.ts"
 
@@ -15,7 +16,12 @@ function runGit(process: Pick<Process, "run">, cwd: string, args: readonly strin
   return adaptProcessGit(process, { timeoutMs: GIT_TIMEOUT_MS }).run({ repo: cwd, args })
 }
 
-function requireObservedBranch(observed: LiveBranchObservation, pr: Change, remedy: string, injected: boolean): string {
+function requireObservedBranch(
+  observed: LiveBranchObservation,
+  pr: Change,
+  remedy: (reason: UnobservableBranchReason) => string,
+  injected: boolean,
+): string {
   if (!observed.ok && observed.phase === "observer") {
     raiseFailure(
       "configuration",
@@ -23,11 +29,23 @@ function requireObservedBranch(observed: LiveBranchObservation, pr: Change, reme
       `yrd: cannot refresh live branch '${pr.branch}' before re-merging change '${pr.id}'; ${observed.detail}`,
     )
   }
+  if (!observed.ok && observed.phase === "absent") {
+    // A REFUSAL, not a configuration fault: origin answered authoritatively, so
+    // this is a settled fact about the change rather than weather that a later
+    // cycle could clear. The queue reads the kind to decide between retrying and
+    // evicting (@yrd/core/deleted-branch-head-wedges-queue).
+    raiseFailure(
+      "refusal",
+      "recut-branch-absent",
+      `yrd: change '${pr.id}' cannot be re-merged: its source branch '${pr.branch}' is gone from origin ` +
+        `(${observed.detail})\n${remedy("absent")}`,
+    )
+  }
   if (!observed.ok && observed.phase === "fetch") {
     raiseFailure(
       "configuration",
       "recut-branch-refresh-failed",
-      `yrd: could not refresh live branch '${pr.branch}' from origin: ${observed.detail}\n${remedy}`,
+      `yrd: could not refresh live branch '${pr.branch}' from origin: ${observed.detail}\n${remedy("unreachable")}`,
     )
   }
   if (!observed.ok) {
@@ -51,13 +69,9 @@ async function liveBranchHead(
 ): Promise<string> {
   const cwd = io.cwd ?? globalThis.process.cwd()
   const queueFlag = options.queue === true ? " --queue" : ""
-  const remedy =
-    `remedy: request credential-bearing Yrd publication for branch '${pr.branch}' on base '${recorded.base}' ` +
-    `at base SHA '${recorded.baseSha ?? "unrecorded"}' and recorded head '${recorded.head}':\n` +
-    `  yrd pr publish ${pr.id}${queueFlag}\n` +
-    `This records a durable publication Job; without a runner it remains visible as publication-required.\n` +
-    `if the publication Job cannot run: escalate to @chief for a credential-bearing publish — this branch is ` +
-    `never pushed by hand, not even as an emergency fallback.`
+  const delivery = changeDeliveryState(pr)
+  const remedy = (reason: UnobservableBranchReason): string =>
+    unobservableBranchRemedy(reason, pr, delivery, recorded, queueFlag).text
   const git = io.pruneGit?.(cwd)
   const observed = await observeLiveBranch(services.process, cwd, pr.branch, git?.resolveCommit)
   return requireObservedBranch(observed, pr, remedy, git !== undefined)
