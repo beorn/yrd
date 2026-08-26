@@ -2054,8 +2054,19 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // explicitly, once, exactly like `intents` above.
         const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
           queuesWithoutStoredPlan as typeof queuesWithoutStoredPlan & Readonly<{ terminalAssociations?: unknown }>
+        // The change-record fat cut (5e cut 4) also dropped the nested
+        // `bays.prs[*].regressions` field. Compact preserves unknown nested
+        // keys, so strip it explicitly at the same migration boundary.
+        const prsWithoutRegressions = Object.fromEntries(
+          Object.entries(withoutDeadIntents.bays.prs).map(([id, pr]) => {
+            const { regressions: _retiredRegressions, ...withoutRegressions } = pr as typeof pr &
+              Readonly<{ regressions?: unknown }>
+            return [id, withoutRegressions]
+          }),
+        )
         return {
           ...withoutDeadIntents,
+          bays: { ...withoutDeadIntents.bays, prs: prsWithoutRegressions },
           queues: {
             ...queuesWithoutBackfill,
             // Construction policy is not a journal fact. A retained checkpoint

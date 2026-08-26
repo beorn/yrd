@@ -1519,7 +1519,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(historicalRun === undefined ? undefined : restored.queue.get(historicalRun.id)?.batchSize).toBe(10)
   })
 
-  it("drops the retired intent rail's stale state slice while migrating a retained checkpoint", async () => {
+  it("durably drops retired top-level and nested state while migrating a retained checkpoint", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd")
     const config: ResolvedYrdProjectConfig = {
@@ -1554,6 +1554,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
       .parse(JSON.parse(checkpoint.checkpoint_json))
+    const bays = z
+      .object({ prs: z.record(z.string(), z.record(z.string(), z.unknown())) })
+      .passthrough()
+      .parse(checkpointValue.value.state["bays"])
+    const queues = z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["queues"])
+    const pr = bays.prs["PR1"]
+    if (pr === undefined) throw new Error("expected predecessor PR1 projection")
     // A checkpoint written before the intent rail's deletion (2026-08-18) still carries a
     // populated `intents` slice — the shape a real intents-v1/v2 checkpoint held. Nothing reads
     // it anymore; the migrate path must drop it rather than let it leak into every future
@@ -1565,10 +1572,38 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       tombstoneOrder: [],
       unreadable: [],
     }
-    const retainedIdentity = "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3"
+    const staleRegressions = [
+      {
+        pr: "PR1",
+        issueRef: "@yrd/regression",
+        revision: 1,
+        headSha: featureSha,
+        run: "run-1",
+        landingSha: featureSha,
+        detectedAt: "2026-08-25T00:00:00.000Z",
+        severity: "high",
+        evidence: "retired checkpoint-only state",
+        implementationRunRef: "run-1",
+        reviewRef: "review-1",
+        repairIssueRef: "@yrd/repair",
+        repairPr: "PR2",
+        repairRun: "run-2",
+        repairLandingSha: featureSha,
+        recordedAt: "2026-08-25T01:00:00.000Z",
+      },
+    ]
+    const retainedIdentity = "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839"
     const retainedCheckpoint = JSON.stringify({
       ...checkpointValue,
-      value: { ...checkpointValue.value, state: { ...checkpointValue.value.state, intents: staleIntents } },
+      value: {
+        ...checkpointValue.value,
+        state: {
+          ...checkpointValue.value.state,
+          intents: staleIntents,
+          bays: { ...bays, prs: { ...bays.prs, PR1: { ...pr, regressions: staleRegressions } } },
+          queues: { ...queues, terminalAssociations: { pending: {}, applied: {} } },
+        },
+      },
       identity: retainedIdentity,
     })
     database
@@ -1587,9 +1622,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    // Boot succeeds past the stale slice, and the surviving state carries no trace of it.
+    // Boot succeeds past the stale slices, and runtime state carries no trace of them.
     expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
     expect(restored.state()).not.toHaveProperty("intents")
+    expect(restored.state().bays.prs.PR1).not.toHaveProperty("regressions")
+    expect(restored.state().queues).not.toHaveProperty("terminalAssociations")
     await restored.close()
 
     // The drop is durable: the checkpoint THIS boot writes back to disk does not carry the
@@ -1605,6 +1642,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .passthrough()
       .parse(JSON.parse(rewritten.checkpoint_json))
     expect(rewrittenValue.value.state).not.toHaveProperty("intents")
+    expect(rewrittenValue.value.state).not.toHaveProperty("bays.prs.PR1.regressions")
+    expect(rewrittenValue.value.state).not.toHaveProperty("queues.terminalAssociations")
   })
 
   it("folds a correlation-era checkpoint's revision labels into props while migrating a retained checkpoint", async () => {
