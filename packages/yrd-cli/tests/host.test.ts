@@ -1986,6 +1986,94 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
   })
 
+  it("boots a host over ae0d2084, the identity /hh's live journal actually holds", async () => {
+    // THE CARRIER TEST. Reachability proves no checkpoint-migration-missing;
+    // it does NOT prove the migrate callbacks survive `validate()`. Advancing
+    // the /hh gitlink restarts the resident runner onto this source, which must
+    // migrate the stored checkpoint across two hops (ae0d2084 -> 36d85bbb ->
+    // current). Every other retained identity had a boot test; the one
+    // production actually holds did not, so the only untested edge was the
+    // load-bearing one.
+    //
+    // Measured read-only from /hh/dev/.git/yrd/journal.sqlite on 2026-08-26:
+    // journal_snapshot.checkpoint_identity = ae0d2084…, cursor 91579,
+    // history_evicted_through = 27609 — so rebuild from complete history is
+    // unavailable (app.ts takes that branch only at evictedThrough === 0) and
+    // this migration is the only thing carrying the deployment.
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+
+    // Each identity gets its OWN journal. Reusing one across both cases boots
+    // the second host on a store the first migration already rewrote, and the
+    // integrity assert that trips there says nothing about the identity graph.
+    const bootStoring = async (identity: string) => {
+      const { repo, featureSha } = await repository()
+      const stateDir = join(repo, ".git", "yrd")
+      const runtimeProcess = createProcess({ cwd: repo })
+      const host = () => ({
+        repo,
+        stateDir,
+        baysRoot: join(repo, ".bays"),
+        journal: testJournal(stateDir),
+        process: runtimeProcess,
+        config,
+      })
+
+      const predecessor = await createDefaultYrdApp(host())
+      await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await predecessor.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+      await predecessor.close()
+
+      using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+      const stored = database
+        .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton = 1")
+        .get()
+      if (stored === null) throw new Error("expected predecessor projection checkpoint")
+      const value = z.record(z.string(), z.unknown()).parse(JSON.parse(stored.checkpoint_json))
+      const json = JSON.stringify({ ...value, identity })
+      database
+        .query(
+          "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+        )
+        .run(identity, json, createHash("sha256").update(json).digest("hex"))
+      // Stand in for the live floor: history cannot support a rebuild, so a
+      // missing edge is terminal rather than silently repaired by replay.
+      database.query("DELETE FROM journal_history WHERE cursor <= ?").run(1)
+      database
+        .query(
+          "INSERT INTO journal_metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        )
+        .run("history_evicted_through", "1")
+      database.close()
+
+      return { open: () => createDefaultYrdApp(host()), runtimeProcess }
+    }
+
+    const live = await bootStoring("ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839")
+    const restored = await live.open()
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    await restored.close()
+    await live.runtimeProcess[Symbol.asyncDispose]()
+
+    // WHAT THIS TEST DOES NOT PROVE, and why there is no boot-level negative
+    // control beside it. Storing an unretained identity here does NOT produce a
+    // migration refusal: `history_evicted_through` written straight into the
+    // fixture's metadata does not reach `history.diagnostics().evictedThrough`
+    // at load, so app.ts reads 0, takes the rebuild-from-complete-history
+    // branch, replays over the history rows this fixture deleted, and dies on
+    // a journal integrity assert instead. Measured, not assumed: an identity of
+    // 64 zeroes — which has never existed anywhere — fails identically to a
+    // real unretained one, so the assertion would have discriminated nothing.
+    // Identity discrimination is proven at manifest level instead, by the
+    // stranded-identity loop in the bump-gate test above.
+  })
+
   it("boots past historical pin-intent and tombstone events, quarantining them by name, while the shape their ids mint still parses", async () => {
     // Positional replay proof (queue-member-id-no-discrimination discipline): raw, positional
     // frames in the intent rail's OLD shapes, copied verbatim as DATA from the deleted
