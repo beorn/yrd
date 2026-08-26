@@ -1869,6 +1869,14 @@ describe("runYrd", () => {
     expect(mrHelp.stdout()).not.toMatch(/^\s{2}publish/mu)
     expect(mrHelp.stdout()).not.toMatch(/^\s{2}ready/mu)
 
+    // A deleted verb has to leave the help SECTIONS too, and the census above
+    // cannot see them: it matches the two-space command list, so an example
+    // line ("$ yrd pr recut <PR> --preflight …") kept advertising the verb on
+    // `pr create --help` after the verb itself was gone.
+    const createHelp = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("pr", "create", "--help"), createHelp.io), createHelp.stderr()).toBe(0)
+    expect(createHelp.stdout()).not.toContain("pr recut")
+
     // recut is DELETED outright (the queue rebuilds by merge on its own);
     // publish/ready stay hidden-but-answering.
     const goneRecut = outputIO({ columns: 100 })
