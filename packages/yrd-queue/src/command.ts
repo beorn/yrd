@@ -8,6 +8,7 @@ import {
   cherryFfInstruction,
   parseCherryVerbose,
   createFailure,
+  digestCommandOutput,
   failureFact,
   type CherryDragged,
   type JsonValue,
@@ -635,11 +636,7 @@ function configuredCommand<Shape extends ChangeShape>(
 }
 
 function commandDetail(output: string): string {
-  const limit = 2_000
-  if (output.length <= limit) return output
-  const marker = "\n… output truncated …\n"
-  const headLength = 500
-  return `${output.slice(0, headLength)}${marker}${output.slice(-(limit - headLength - marker.length))}`
+  return digestCommandOutput(output, { limit: 2_000, head: 500 })
 }
 
 function commandGateReports(output: string): Readonly<{ values: readonly GateReport[]; error?: string }> {

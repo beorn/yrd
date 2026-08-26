@@ -256,4 +256,61 @@ describe("ensureWorkspaceDependencies", () => {
       expect(argvs).toEqual([FROZEN])
     })
   })
+
+  describe("a retry storm must not bury the status code that is the diagnosis", () => {
+    /** The reported six-hour outage, verbatim in shape: one 429, then the same
+     * dependency's resolve failure repeated once per retry. */
+    const RATE_LIMITED = [
+      "error: request failed - 429",
+      ...Array.from({ length: 6 }, () => "error: git-super@github:beorn/git-super#176fdb64 failed to resolve"),
+    ].join("\n")
+
+    async function failedInstallMessage(stderr: string): Promise<string> {
+      const root = await lockedWorkspace()
+      const process = {
+        run: (_request: ProcessRequest): Promise<ProcessResult> => Promise.resolve(result(1, stderr)),
+      } satisfies Pick<Process, "run">
+      let captured = ""
+      await expect(
+        ensureWorkspaceDependencies(process, {
+          path: root,
+          subject: "candidate workspace",
+          fail(message): never {
+            captured = message
+            throw new Error(message)
+          },
+        }),
+      ).rejects.toThrow()
+      return captured
+    }
+
+    it("leads with the status code beside the failing phase", async () => {
+      const message = await failedInstallMessage(RATE_LIMITED)
+      const [headline] = message.split("\n")
+      expect(headline).toContain("429")
+      expect(headline).toContain("child exited 1")
+    })
+
+    it("collapses the six retries into one counted line", async () => {
+      const message = await failedInstallMessage(RATE_LIMITED)
+      expect(message).toContain("failed to resolve (×6)")
+      // The old message spent its budget repeating one fact; six retries of ONE
+      // dependency read as six dependencies and produced three wrong readings.
+      expect(message.split("failed to resolve").length - 1).toBe(1)
+    })
+
+    it("keeps the cause when the output is far longer than the budget", async () => {
+      // Head-dropping truncation put the 429 at the edge of the ellipsis. The
+      // first error is the one that matters, so it survives.
+      const message = await failedInstallMessage(`${RATE_LIMITED}\n${"trailing noise\n".repeat(400)}`)
+      expect(message).toContain("429")
+      expect(message).not.toContain("trailing noise\ntrailing noise")
+    })
+
+    it("says nothing about a status code when the output names none", async () => {
+      const message = await failedInstallMessage("error: could not find package.json")
+      expect(message).toContain("child exited 1")
+      expect(message).not.toMatch(/\bHTTP\b/u)
+    })
+  })
 })
