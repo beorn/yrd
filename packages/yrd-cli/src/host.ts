@@ -308,6 +308,21 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // deployment really is sitting on it — a predecessor is whatever the journal
   // stores, not whatever merged on main.
   "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
+  // The PRODUCTION composition CURRENTLY stored in /hh's live journal —
+  // `journal_snapshot.checkpoint_identity` at cursor 91210, read-only
+  // 2026-08-26 03:45 PDT, cross-checked against the `identity` embedded in
+  // checkpoint_json (both 701431d5…) and its stored sha256 6175137241….
+  // The pinned composition cannot PRODUCE this identity — its target is
+  // ae0d2084…, the successor named in the entry above — so a differently
+  // composed writer advanced the deployment onto it, which is the same
+  // mechanism that entry records ("running the branch build against the
+  // deployment migrated its checkpoint"). Retained because the deployment
+  // really is sitting on it: a predecessor is whatever the journal stores,
+  // not whatever merged on main. Measured from the production journal, never
+  // a harness (the PR1305 / R2732 lesson above). history_evicted_through is
+  // still 27609, so rebuild from complete history is unavailable and only a
+  // retained edge can carry the deployment across.
+  "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
