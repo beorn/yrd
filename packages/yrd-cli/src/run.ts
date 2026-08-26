@@ -4860,8 +4860,8 @@ async function readyPr(
   const selected = requiredPr(app, selector)
   const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
   if (refusalExit !== undefined) return refusalExit
-  await runPreSubmitGuards(services, io)
-  await runRequiredChecks(services, io)
+  await runPreSubmitGuards(services, io, undefined, undefined, jsonEnabled(options))
+  await runRequiredChecks(services, io, undefined, undefined, false, jsonEnabled(options))
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after ready`)
@@ -5232,8 +5232,10 @@ async function changeChecks(
   if (selectors.length === 0) usage("pr checks requires at least one change selector")
   let checks: readonly ChangeCheckViewRecord[] = changeCheckRecords(app, selectors)
   if (options.follow === true) {
-    const missing = checks.find((check) => check.status === "not-requested")
-    if (missing !== undefined) refusal(`change '${missing.pr}' has no requested checks; submit it before following`)
+    // A just-submitted change's check request may not be observable yet.
+    // `--follow` means WAIT, so a not-yet-requested check enters the same 1s
+    // poll loop as a queued one instead of hard-refusing and making the
+    // submit→follow racer hand-retry. The loop stays abortable via io.scope.
     checks = await followCheckRecords(app, selectors, checks, io)
   }
   if (jsonEnabled(options)) {
@@ -5245,7 +5247,11 @@ async function changeChecks(
 }
 
 function checksTerminal(records: readonly ChangeCheckViewRecord[]): boolean {
-  return records.every((record) => record.status !== "queued" && record.status !== "checking")
+  // `not-requested` is followable: right after a submit the check request can
+  // simply not be observable yet, and --follow's contract is to wait for it.
+  return records.every(
+    (record) => record.status !== "queued" && record.status !== "checking" && record.status !== "not-requested",
+  )
 }
 
 async function followCheckRecords(
@@ -5687,13 +5693,14 @@ async function applyChangeSelectionVerb(
     for (const context of submitRequiredCheckContexts(app, selectors, io)) {
       // Guards first, and in the same loop, so the cheap verdict on THIS
       // carrier merges before its expensive one starts.
-      await runPreSubmitGuards(services, { ...io, cwd: context.cwd }, undefined, context.ref)
+      await runPreSubmitGuards(services, { ...io, cwd: context.cwd }, undefined, context.ref, jsonEnabled(options))
       await runRequiredChecks(
         services,
         { ...io, cwd: context.cwd },
         undefined,
         context.ref,
         options.keepOnFailure === true,
+        jsonEnabled(options),
       )
     }
   }
@@ -9292,6 +9299,7 @@ async function runPreSubmitGuards(
   io: YrdCliIO,
   selected?: readonly string[],
   ref?: string,
+  json = false,
 ): Promise<readonly YrdCliGuardOutcome[]> {
   const guards = services.guards
   if (guards === undefined) {
@@ -9309,7 +9317,9 @@ async function runPreSubmitGuards(
   const outcomes: YrdCliGuardOutcome[] = []
   for (const name of names) {
     const outcome = await guards.run(name, Object.keys(context).length === 0 ? undefined : context)
-    if (outcome.stdout !== undefined && outcome.stdout !== "") io.stdout(outcome.stdout)
+    // fd1 is a machine stream under --json; raw guard stdout would corrupt it
+    // (output.tsx protects every other path the same way).
+    if (!json && outcome.stdout !== undefined && outcome.stdout !== "") io.stdout(outcome.stdout)
     outcomes.push(outcome)
   }
   return outcomes
@@ -9321,6 +9331,7 @@ async function runRequiredChecks(
   selected?: readonly string[],
   ref?: string,
   keepOnFailure = false,
+  json = false,
 ): Promise<readonly Readonly<{ name: string; exitCode: number }>[]> {
   const checks = services.checks
   if (checks === undefined) configuration("required-check capability is not installed")
@@ -9337,7 +9348,6 @@ async function runRequiredChecks(
             ...(keepOnFailure ? { keepOnFailure: true } : {}),
           }
     const result = await checks.run(name, io.cwd ?? process.cwd(), context)
-    if (result.stdout !== "") io.stdout(result.stdout)
     if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
       const retained =
         result.retainedWorkspace === undefined ? "" : `; ${retainedWorkspaceNote(result.retainedWorkspace)}`
@@ -9359,6 +9369,13 @@ async function runRequiredChecks(
         `yrd: required check failed: '${name}' ${outcome}${diagnostic}${retained}`,
       )
     }
+    // Replay the child's buffered output only AFTER the verdict tests above:
+    // a failing check's entire stdout used to replay to fd1 before the exit
+    // code was even read, burying the raised diagnostic under check noise —
+    // and raw child stdout must never reach a --json stream at all
+    // (output.tsx protects every other path the same way). The failure
+    // diagnostic already carries the check's trimmed stderr.
+    if (!json && result.stdout !== "") io.stdout(result.stdout)
     if (result.stderr !== "") io.stderr(result.stderr)
     results.push({ name, exitCode: result.exitCode })
   }
@@ -9378,7 +9395,13 @@ async function guardRequired(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<void> {
-  const guards = await runPreSubmitGuards(services, io, names.length === 0 ? undefined : names)
+  const guards = await runPreSubmitGuards(
+    services,
+    io,
+    names.length === 0 ? undefined : names,
+    undefined,
+    jsonEnabled(options),
+  )
   const ran = guards.filter((guard) => guard.status === "passed")
   const skipped = guards.filter((guard) => guard.status === "skipped")
   await printResult(
@@ -9399,7 +9422,7 @@ async function checkRequired(
   io: YrdCliIO,
 ): Promise<void> {
   if (names.length === 0) usage("check requires at least one configured check name")
-  const checks = await runRequiredChecks(services, io, names)
+  const checks = await runRequiredChecks(services, io, names, undefined, false, jsonEnabled(options))
   await printResult(
     io,
     jsonEnabled(options),

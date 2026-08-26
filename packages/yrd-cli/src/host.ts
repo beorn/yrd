@@ -3723,11 +3723,31 @@ async function runYrdProcessHost(
       // process-exit hook flushes its buffer after host cleanup, preserving the
       // classified code instead of losing it to a hang or SIGILL.
       options.afterCommand?.()
-      if (processExit !== undefined && terminateAfterCleanup) globalThis.process.exit(processExit)
+      if (processExit !== undefined && terminateAfterCleanup) {
+        await flushProcessOutput()
+        globalThis.process.exit(processExit)
+      }
       log?.child("perf").debug?.("command stage breakdown", stageReport())
       log?.end()
     }
   }
+}
+
+/** Drain both stdio streams before `process.exit`. On pipe-backed stdio the
+ * runtime buffers writes asynchronously and `process.exit` drops whatever has
+ * not reached the fd yet — which is how a command's LAST line (typically the
+ * failure line) went missing or landed after later writers. A zero-length
+ * write's callback fires only after everything queued before it has flushed,
+ * so awaiting it is the barrier. */
+async function flushProcessOutput(): Promise<void> {
+  await Promise.all(
+    [globalThis.process.stdout, globalThis.process.stderr].map(
+      (stream) =>
+        new Promise<void>((resolve) => {
+          stream.write("", () => resolve())
+        }),
+    ),
+  )
 }
 
 /** Process-host seam for embedded callers and focused tests. */
@@ -3804,6 +3824,7 @@ export async function runYrdExecutable(): Promise<never> {
 
   if (invocation.args[0] === YRD_SETTLEMENT_COMMAND) {
     await runYrdSettlementWorker(env, { stderr: (text) => io.stderr(text) })
+    await flushProcessOutput()
     globalThis.process.exit(0)
   }
 
@@ -3845,6 +3866,7 @@ export async function runYrdExecutable(): Promise<never> {
         })
   } catch (error) {
     await diagnostic(io, error, { json: false })
+    await flushProcessOutput()
     globalThis.process.exit(classifyFailure(error).exitCode)
   }
 
@@ -3853,6 +3875,7 @@ export async function runYrdExecutable(): Promise<never> {
   if (plan?.kind === "all-repositories") {
     const exitCode = await runEveryComposedRepository(argv, io, options, plan)
     settlement?.spawn(false)
+    await flushProcessOutput()
     globalThis.process.exit(exitCode)
   }
 
@@ -3865,5 +3888,6 @@ export async function runYrdExecutable(): Promise<never> {
     ...(plan?.kind === "repository" ? { repositoryLabel: plan.repository.name } : {}),
     ...(settlement === undefined || habitant ? {} : { afterCommand: () => settlement?.spawn(false) }),
   })
+  await flushProcessOutput()
   globalThis.process.exit(exitCode)
 }

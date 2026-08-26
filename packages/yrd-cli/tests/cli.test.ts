@@ -5125,15 +5125,51 @@ describe("runYrd", () => {
     expect(JSON.parse(nonMatching.stdout())).toMatchObject({ command: "pr.list", prs: [] })
   })
 
-  it("keeps pr checks --follow read-only when no check fact was requested", async () => {
+  it("pr checks --follow waits for a not-yet-observable check request instead of refusing", async () => {
+    // A submit's check request may not be observable yet when the follower
+    // arrives; --follow means WAIT, so the not-requested state enters the same
+    // 1s poll loop as a queued one (it used to hard-refuse, forcing the
+    // submit→follow racer to hand-retry).
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
+    let polls = 0
+    const controller = new AbortController()
+    const following = outputIO({
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          polls += 1
+          // The request becomes observable between polls, then completes.
+          if (polls === 1) {
+            await app.bays.requestChecks({ pr: "PR1" })
+            await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+          }
+        },
+      },
+    })
+
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), following.io)).toBe(0)
+    expect(polls).toBeGreaterThan(0)
+    expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "passed" } })
+  })
+
+  it("keeps an aborted pr checks --follow read-only while nothing was requested", async () => {
+    // The poll loop itself must never write a fact: an aborted follow leaves
+    // the journal exactly as it found it and reports the not-requested rows.
     const app = await createApp()
     await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
     const before = await Array.fromAsync(app.events())
-    const checks = outputIO()
+    const controller = new AbortController()
+    const checks = outputIO({
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          controller.abort()
+        },
+      },
+    })
 
-    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io)).toBe(1)
-
-    expect(checks.stderr()).toContain("has no requested checks")
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io)).toBe(0)
     expect(await Array.fromAsync(app.events())).toEqual(before)
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "not-requested" } })
   })
