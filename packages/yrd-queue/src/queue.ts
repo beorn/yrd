@@ -2311,7 +2311,7 @@ function createQueue<Shape extends ChangeShape>(
                 pr: gap.pr,
                 code: `queue-${gap.kind}-authority-${gap.reason}`,
                 reason: gapReason,
-                remedy: `yrd pr recut ${gap.pr} --preflight --queue --apply`,
+                remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
               })
               // A `consumed` gap ejects with a durable `pr/needs-author` result,
               // so it leaves a trace and stops repeating. A `missing` gap leaves
@@ -2521,7 +2521,7 @@ function createQueue<Shape extends ChangeShape>(
                     code: fact.code,
                     kind: fact.kind,
                     reason: fact.message,
-                    remedy: `yrd pr recut ${guilty} --preflight --queue --apply`,
+                    remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
                   })
                   // Only the member that actually refused earns the durable record.
                   await noteCandidateRefusal([guilty], {
@@ -2564,7 +2564,7 @@ function createQueue<Shape extends ChangeShape>(
                   pr: refusal.pr,
                   code: refusal.receipt.code,
                   reason: refusal.receipt.message,
-                  remedy: `yrd pr recut ${refusal.pr} --preflight --queue --apply`,
+                  remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
                 })
                 continue
               }
@@ -3861,7 +3861,7 @@ function queueAuthorityNeedsAuthorEvent(
   const revision = pr.revs.find((candidate) => candidate.n === gap.revision && candidate.head === gap.headSha)
   if (revision === undefined) return undefined
   const code = `queue-${gap.kind}-authority-consumed`
-  const remedy = `yrd pr recut ${gap.pr} --preflight --queue --apply`
+  const remedy = "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'"
   const message =
     `yrd: change '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ` +
     `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'\nresolve: ${remedy}`
@@ -7779,7 +7779,7 @@ function admissionRefusalNext(
   needsPersonOwner: string,
 ): string {
   return settlement === undefined
-    ? `Next: yrd pr recut ${pr} --preflight --queue --apply`
+    ? `Next: tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>' (${pr})`
     : `Settled ${settlement.disposition} at ${settlement.settledAt}: ${settlement.reason}; ` +
         `decision owner: ${needsPersonOwner} — no mechanical remedy applies`
 }

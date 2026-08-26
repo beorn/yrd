@@ -5551,7 +5551,7 @@ describe("runYrd", () => {
 
     expect(once.stdout()).not.toContain("Queue idle")
     expect(once.stdout()).toContain("carrier-drops-landed")
-    expect(once.stdout()).toContain("yrd pr recut PR1 --preflight --queue --apply")
+    expect(once.stdout()).toContain("tracked changes re-merge implicitly")
 
     const json = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), json.io), json.stderr()).toBe(0)
@@ -5564,7 +5564,7 @@ describe("runYrd", () => {
           eligibility: {
             reason: {
               code: "admission-refused",
-              message: expect.stringContaining("yrd pr recut PR1 --preflight --queue --apply"),
+              message: expect.stringContaining("tracked changes re-merge implicitly"),
             },
           },
         },

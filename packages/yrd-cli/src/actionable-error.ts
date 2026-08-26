@@ -84,21 +84,22 @@ function quotedValue(message: string, pattern: RegExp): string | undefined {
   return pattern.exec(message)?.[1]
 }
 
-/** `yrd pr recut` refuses a terminal change outright (`terminal-target`): an
- * integrated/already-landed identity is frozen evidence and a
- * withdrawn/canceled one is reopened by resubmitting its branch, not re-merge. */
-const REMERGE_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
+/** Mechanical redelivery refuses a terminal change outright: an
+ * integrated/already-landed identity is frozen evidence, and reopening a
+ * withdrawn/canceled delivery by resubmitting its branch is a human act the
+ * runner must never take on its own. */
+const REDELIVERY_REFUSING_STATES: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
   "integrated",
   "already-landed",
   "withdrawn",
   "canceled",
 ])
 
-/** Whether `yrd pr recut` is refused outright by this delivery state. The one
- * home for the fact, so a caller that decides whether a printed remedy can be
- * applied mechanically reads the same answer the printer used. */
-export function remergeRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
-  return delivery !== undefined && REMERGE_REFUSING_STATES.has(delivery)
+/** Whether mechanical redelivery is refused outright by this delivery state.
+ * The one home for the fact, so a caller that decides whether a printed remedy
+ * can be applied mechanically reads the same answer the printer used. */
+export function redeliveryRefusedByDelivery(delivery: ChangeDeliveryState | undefined): boolean {
+  return delivery !== undefined && REDELIVERY_REFUSING_STATES.has(delivery)
 }
 
 function authoredGitlinkSubmodules(message: string): readonly string[] {
@@ -126,8 +127,14 @@ function authoredGitlinkSubmodules(message: string): readonly string[] {
 // the failure message itself, and `oneLineCause` already preserves that
 // prose into `cause` untouched (no quoted 'yrd ...' command follows it, so
 // nothing strips it) — so it is surfaced for free, without this function
-// re-deriving or discarding it. `resolution` carries only the one step that
-// is safe to print as a literal, mechanical command everywhere: submit.
+// re-deriving or discarding it.
+//
+// The resolution is deliberately PROSE, not a bare mechanical command line: a
+// bare `yrd pr submit <branch>` resolution now means "the runner may apply
+// this itself" (the retired recut spelling's replacement drill), and the pin
+// fast-forward is author-owned work that must happen FIRST — resubmitting the
+// unchanged branch would just refuse again. The fallback spelling rides
+// inside the prose for the human who has done the pin work.
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
   const submodules = authoredGitlinkSubmodules(failure.message)
   const submoduleModelChange = failure.message.includes("a change of min commits advances existing submodules only")
@@ -141,7 +148,10 @@ function authoredGitlinkFailure(failure: FailureLike, cause: string): Actionable
               "submodule, never adds or removes one.",
           ]
         : submodules.length > 0
-          ? ["yrd pr submit <branch>"]
+          ? [
+              "Get the named commit onto the component's own main first (see cause); " +
+                "then resubmit: 'yrd pr submit <branch>'.",
+            ]
           : [GENERIC_RESOLUTION],
     ),
     reference: "README.md#pr-eligibility-and-checks",
@@ -194,7 +204,7 @@ export function formatActionableFailure(failure: ActionableFailure, prefix = "")
 export function formatHumanFailure(failure: ActionableFailure): string {
   const remedies =
     failure.escalation === undefined
-      ? failure.resolution.filter((step) => /^(?:Inspect\b|git\s|rmdir\s|yrd\s)/u.test(step))
+      ? failure.resolution.filter((step) => /^(?:Inspect\b|Get\b|Escalate\b|git\s|rmdir\s|yrd\s)/u.test(step))
       : failure.resolution
   return [
     `error: ${failure.cause}`,

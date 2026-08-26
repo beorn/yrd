@@ -56,34 +56,30 @@ const ALL_DELIVERY_STATES: readonly ChangeDeliveryState[] = [
   "canceled",
 ]
 
-const RECUT_REFUSING: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
-  "integrated",
-  "already-landed",
-  "withdrawn",
-  "canceled",
-])
-
 /** Mirrors the CLI's own state guards, so the regression fails when the
  * projection drifts from them: `yrd pr create` is accepted only for a draft
- * (pushed) PR — applyPrSelectionVerb refuses every other state twice — and
- * `yrd pr recut` refuses a terminal change outright (executeRecutPr
- * `terminal-target`). `yrd pr submit <branch>` is refused by no state. */
+ * (pushed) PR — applyPrSelectionVerb refuses every other state twice.
+ * `yrd pr submit <branch>` is refused by no state, and a prose resolution is
+ * never a state-refusable command. */
 function refusedBy(delivery: ChangeDeliveryState, command: string): boolean {
   if (command.startsWith("yrd pr create")) return delivery !== "pushed"
-  if (command.startsWith("yrd pr recut")) return RECUT_REFUSING.has(delivery)
   return false
 }
 
 describe("actionable failure projection", () => {
-  it("turns authored-gitlink into a submit remedy, independent of PR delivery state", () => {
+  it("turns authored-gitlink into a pin-first prose remedy, independent of PR delivery state", () => {
+    const expectedResolution = [
+      "Get the named commit onto the component's own main first (see cause); " +
+        "then resubmit: 'yrd pr submit <branch>'.",
+    ]
     expect(actionableFailure(AUTHORED_GITLINK)).toEqual({
       code: "authored-gitlink",
       cause: "change 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr submit <branch>"],
+      resolution: expectedResolution,
       reference: "README.md#pr-eligibility-and-checks",
     } satisfies ActionableFailure)
     for (const delivery of ALL_DELIVERY_STATES) {
-      expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
+      expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(expectedResolution)
     }
   })
 
@@ -103,7 +99,10 @@ describe("actionable failure projection", () => {
       "change 'PR42' changes generated-only gitlinks [vendor/yrd]; get commit 'deadbeef' onto 'vendor/yrd''s own " +
         "main, then submit an ordinary change whose diff is the gitlink bump (issue @i/10-merge-queue/1)",
     )
-    expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
+    expect(failure.resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); " +
+        "then resubmit: 'yrd pr submit <branch>'.",
+    ])
   })
 
   it("preserves the cherry denominator the producer already named, never re-deriving it", () => {
@@ -118,7 +117,10 @@ describe("actionable failure projection", () => {
 
     expect(failure.cause).toMatch(/git cherry <estate-pin> <submodule-main>/u)
     expect(failure.cause).toMatch(/empty unique list = no-op/u)
-    expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
+    expect(failure.resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); " +
+        "then resubmit: 'yrd pr submit <branch>'.",
+    ])
   })
 
   it("does not project an unexecutable mechanical remedy for a submodule addition or deletion", () => {
@@ -143,13 +145,13 @@ describe("actionable failure projection", () => {
         "yrd: change 'PR42' root branch tip 'deadbeef' is a merge commit with 2 parents; " +
         "merge inside the affected submodule repository, fast-forward that submodule's main, rebuild the root " +
         "carrier as one linear pin-bump commit, then run 'yrd pr submit <branch>' and " +
-        "'yrd pr recut PR42 --preflight --queue --apply'",
+        "'yrd pr status'",
     })
 
     expect(failure).toMatchObject({
       code: "merge-tip-carrier",
       cause: expect.stringMatching(/merge inside.*submodule.*linear pin-bump/iu),
-      resolution: ["yrd pr submit <branch>", "yrd pr recut PR42 --preflight --queue --apply"],
+      resolution: ["yrd pr submit <branch>", "yrd pr status"],
     })
   })
 
@@ -216,20 +218,29 @@ describe("22396 — state-aware remedies", () => {
     }
   })
 
-  it("keeps the submit remedy available for an already-submitted authored-gitlink PR", () => {
+  it("keeps the pin-first remedy available for an already-submitted authored-gitlink PR", () => {
     const failure = actionableFailure(AUTHORED_GITLINK)
 
-    expect(failure.resolution).toEqual(["yrd pr submit <branch>"])
+    expect(failure.resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); " +
+        "then resubmit: 'yrd pr submit <branch>'.",
+    ])
   })
 
-  it("keeps the submit remedy available for a terminal change", () => {
+  it("keeps the pin-first remedy available for a terminal change", () => {
     for (const delivery of ["integrated", "already-landed", "withdrawn", "canceled"] as const) {
-      expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
+      expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); " +
+        "then resubmit: 'yrd pr submit <branch>'.",
+    ])
     }
   })
 
-  it("defaults to the submit remedy when no PR is in hand", () => {
-    expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual(["yrd pr submit <branch>"])
+  it("defaults to the pin-first remedy when no PR is in hand", () => {
+    expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); " +
+        "then resubmit: 'yrd pr submit <branch>'.",
+    ])
   })
 
 
@@ -242,11 +253,15 @@ describe("22396 — state-aware remedies", () => {
 
     const detail = ChangeDetailData(pr, [run])
     const projected = detail.runs[0]
-    expect(projected?.failure?.resolution).toEqual(["yrd pr submit <branch>"])
+    expect(projected?.failure?.resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); then resubmit: 'yrd pr submit <branch>'.",
+    ])
     expect(projected?.steps[0]?.failure?.resolution).toEqual(projected?.failure?.resolution)
 
     const draft = queueShowData(run)
-    expect(draft.failure?.resolution).toEqual(["yrd pr submit <branch>"])
+    expect(draft.failure?.resolution).toEqual([
+      "Get the named commit onto the component's own main first (see cause); then resubmit: 'yrd pr submit <branch>'.",
+    ])
   })
 })
 
@@ -267,11 +282,11 @@ describe("actionable failure output", () => {
       }),
     )
 
-    // A bare CLI diagnostic still points at the carrier-free submit remedy.
+    // A bare CLI diagnostic still points at the pin-first prose remedy.
     expect(stderr).toBe(
       [
         "error: change 'PR42' changes generated-only gitlinks [vendor/yrd]",
-        "resolve: yrd pr submit <branch>",
+        "resolve: Get the named commit onto the component's own main first (see cause); then resubmit: 'yrd pr submit <branch>'.",
         "reference: README.md#pr-eligibility-and-checks",
         "",
       ].join("\n"),
@@ -344,7 +359,9 @@ describe("actionable failure output", () => {
     expect(data.failure).toMatchObject({
       code: "authored-gitlink",
       cause: "change 'PR42' changes generated-only gitlinks [vendor/yrd]",
-      resolution: ["yrd pr submit <branch>"],
+      resolution: [
+        "Get the named commit onto the component's own main first (see cause); then resubmit: 'yrd pr submit <branch>'.",
+      ],
     })
     expect(data.steps[0]?.failure).toEqual(data.failure)
 

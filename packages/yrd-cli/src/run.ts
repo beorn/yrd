@@ -4968,7 +4968,8 @@ async function executeRemergeChange(
       "refusal",
       "recut-would-discard-green",
       `yrd: change '${pr.id}' revision ${currentRevision.n} already passed its checks; re-merge would discard that result. ` +
-        `Re-run with --force to override: 'yrd pr recut ${pr.id} --force'.`,
+        "Tracked changes re-merge implicitly when the branch moves; the runner applies force only when its own " +
+        "preflight verdict warrants discarding the green check.",
     )
   }
   const sourceReview = pr.reviews.findLast((review) => review.revision === source.n && review.headSha === source.head)
@@ -10227,9 +10228,9 @@ async function applyRedeliveryStep(
   if (!app.bays.checksRequested(submitted.id)) await app.bays.requestChecks({ pr: submitted.id })
 }
 
-/** Run the exact command `yrd pr recut --preflight` printed. The verdict IS the
- * decision — this never re-parses the printed string, so the runner and the
- * human who reads the same line can never diverge. */
+/** Execute the re-merge preflight's verdict in-process. The verdict IS the
+ * decision — this never re-parses a printed string, so the runner and the
+ * human who reads the same refusal can never diverge. */
 async function applyPreflightVerdict(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -10298,17 +10299,17 @@ async function applyRefusalRemedy(
   let verdict: RemergePreflightVerdict | undefined
   for (const step of steps) {
     commands.push(formatRemedyCommand(step))
-    if (step.verb !== "recut") {
+    // A create step, or a submit naming a DIFFERENT branch, is a plain
+    // redelivery. The submit step for the change under remedy is honoured
+    // through the implicit re-merge preflight instead of a blind re-record:
+    // tracked changes re-merge implicitly, and the runner takes the same
+    // queue-safe verdict path a moved head would (FRESH-NOOP re-readies,
+    // RECUT refreshes with certification, SUBSUMED refuses).
+    if (step.verb === "create" || step.branch !== plan.branch) {
       await applyRedeliveryStep(app, services, step, io)
       continue
     }
-    if (step.preflight !== true) {
-      await executeRemergeChange(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
-      continue
-    }
-    // The printed `--apply` command executes this exact verdict in-process, so
-    // a human and the habitant both consume the same preflight decision.
-    const preflight = await preflightRemerge(app, step.pr, { queue: step.queue }, io)
+    const preflight = await preflightRemerge(app, plan.pr, { queue: true }, io)
     commands.push(preflight.next)
     await applyPreflightVerdict(app, services, preflight, io)
     verdict = preflight.verdict
@@ -11504,8 +11505,8 @@ function addAuthoredCarrierWorkflow<
   command.addHelpSection("Authored root branch:", [
     [`$ ${name} pr create <branch>`, "record the authored root branch as a draft change"],
     [
-      `$ ${name} pr recut <PR> --preflight --queue --apply`,
-      "classify from pinned evidence and execute its queue-safe verdict; no composition manifest or manual triage",
+      `$ ${name} pr submit <branch>`,
+      "tracked changes re-merge implicitly when the branch moves; this is the explicit fallback spelling",
     ],
   ])
 }

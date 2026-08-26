@@ -16,15 +16,15 @@ function authoredGitlink(pr = Change): { code: string; message: string } {
 }
 
 describe("refusal remedy classification — self-applicable vs judgment-required", () => {
-  it("leaves authored-gitlink pin work to the author instead of auto-recutting", () => {
+  it("leaves authored-gitlink pin work to the author instead of auto-redelivering", () => {
     const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "submitted" })
 
     expect(remedy.kind).toBe("judgment")
     if (remedy.kind !== "judgment") return
-    // A submit never re-enters the merge queue by itself (no recut --queue
-    // step): the classifier correctly refuses to auto-apply it, same as
-    // before, just for a printed-remedy reason now instead of an unparseable one.
-    expect(remedy.reason).toContain("never re-enters the change into the merge queue")
+    // The pin-first prose resolution is deliberately not a bare mechanical
+    // command: the fast-forward must happen before any resubmit, so the
+    // classifier refuses to auto-apply it.
+    expect(remedy.reason).toContain("not a mechanical Yrd redelivery command")
   })
 
   it("does not resurrect the draft create path for a gitlink-bump remedy", () => {
@@ -73,12 +73,34 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     expect(remedy.kind).toBe("judgment")
   })
 
-  it("refuses to recut a terminal change — the printed remedy drops the step the state would refuse", () => {
-    const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "integrated" })
+  it("refuses to redeliver a terminal change mechanically", () => {
+    const remedy = classifyRefusalRemedy(
+      {
+        code: "composition-invalid",
+        message:
+          "yrd: change 'PR1791' needs a certified refresh; " +
+          "tracked changes re-merge implicitly; fallback: 'yrd pr submit <branch>'",
+      },
+      { branch: "task/22474", delivery: "integrated" },
+    )
 
-    // With the recut step gone the drill is incomplete: resubmitting alone would
-    // not compose the carrier, so this is not a loss-free mechanical remedy.
     expect(remedy.kind).toBe("judgment")
+    if (remedy.kind !== "judgment") return
+    expect(remedy.reason).toContain("cannot be redelivered mechanically")
+  })
+
+  it("self-applies the implicit re-merge drill for a live submitted change", () => {
+    const remedy = classifyRefusalRemedy(
+      {
+        code: "composition-invalid",
+        message:
+          "yrd: change 'PR1791' needs a certified refresh; " +
+          "tracked changes re-merge implicitly; fallback: 'yrd pr submit <branch>'",
+      },
+      { branch: "task/22474", delivery: "submitted" },
+    )
+
+    expect(remedy).toEqual({ kind: "self-applicable", steps: [{ verb: "submit", branch: "task/22474" }] })
   })
 
   it("never mechanises a remedy that names a non-yrd command", () => {
@@ -96,6 +118,18 @@ describe("refusal remedy classification — self-applicable vs judgment-required
   it("never mechanises a remedy that names an unknown yrd verb", () => {
     const remedy = classifyRefusalRemedy(
       { code: "queue-drift", message: `yrd: change '${Change}' is stale; run 'yrd queue deinit main' first` },
+      { branch: "task/22474", delivery: "submitted" },
+    )
+
+    expect(remedy.kind).toBe("judgment")
+  })
+
+  it("never mechanises the retired recut spelling a historical journal may still carry", () => {
+    const remedy = classifyRefusalRemedy(
+      {
+        code: "composition-invalid",
+        message: `yrd: change '${Change}' needs a certified refresh; run 'yrd pr recut ${Change} --preflight --queue --apply'`,
+      },
       { branch: "task/22474", delivery: "submitted" },
     )
 

@@ -241,7 +241,7 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
       pr: poisoned.id,
       receipt: {
         code: "queue-submit-authority-consumed",
-        message: expect.stringContaining(`yrd pr recut ${poisoned.id} --preflight --queue --apply`),
+        message: expect.stringContaining("tracked changes re-merge implicitly"),
       },
     })
     expect(app.state().bays.prs[poisoned.id]).toMatchObject({
@@ -368,7 +368,7 @@ describe("compose member isolation — one refusing member never zeroes its whol
       action: "compose-candidate-skip",
       code: "recut-certificate",
       pr: guilty.id,
-      remedy: `yrd pr recut ${guilty.id} --preflight --queue --apply`,
+      remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
     })
     // The warn names the guilty member ALONE — never the partition.
     expect(ejection?.props?.prs).toBeUndefined()

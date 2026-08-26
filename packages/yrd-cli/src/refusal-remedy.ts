@@ -1,7 +1,7 @@
 import { currentChangeRev, changeDeliveryState, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import { compareNatural } from "@yrd/core"
 import { ADMISSION_REFUSAL_LOOP_THRESHOLD, type QueueAdmissionRefusal } from "@yrd/queue"
-import { actionableFailure, remergeRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
+import { actionableFailure, redeliveryRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
 
 /**
  * One mechanically executable step of a printed refusal remedy.
@@ -12,9 +12,10 @@ import { actionableFailure, remergeRefusedByDelivery, type FailureLike } from ".
  */
 export type RemedyStep =
   /** Re-record the branch's corrected head onto the change. `create` keeps a draft a
-   * draft; `submit` is the state-agnostic spelling. */
-  | Readonly<{ verb: "submit" | "create"; branch: string }>
-  | Readonly<{ verb: "recut"; pr: string; preflight: boolean; apply: boolean; queue: boolean; force: boolean }>
+   * draft; `submit` is the state-agnostic spelling — and, for the change under
+   * remedy, the runner honours it through the implicit re-merge preflight
+   * rather than a blind re-record (tracked changes re-merge implicitly). */
+  Readonly<{ verb: "submit" | "create"; branch: string }>
 
 export type RefusalRemedy =
   | Readonly<{ kind: "self-applicable"; steps: readonly RemedyStep[] }>
@@ -31,23 +32,6 @@ export type RefusalRemedyContext = Readonly<{
  * does not need to name) the branch. */
 const BRANCH_PLACEHOLDER = "<branch>"
 
-function parseRemerge(argv: readonly string[]): RemedyStep | undefined {
-  const [pr, ...flags] = argv
-  if (pr === undefined || pr.startsWith("-")) return undefined
-  const parsed = { verb: "recut" as const, pr, preflight: false, apply: false, queue: false, force: false }
-  for (const flag of flags) {
-    if (flag === "--preflight") parsed.preflight = true
-    else if (flag === "--apply") parsed.apply = true
-    else if (flag === "--queue") parsed.queue = true
-    else if (flag === "--force") parsed.force = true
-    // An unrecognised flag makes the command something other than the drill this
-    // module knows how to run; refuse the whole remedy rather than run a
-    // silently different command.
-    else return undefined
-  }
-  return Object.freeze(parsed)
-}
-
 function parseRedelivery(verb: "submit" | "create", argv: readonly string[], branch: string): RemedyStep | undefined {
   const [target, ...rest] = argv
   if (target === undefined || rest.length > 0) return undefined
@@ -60,21 +44,11 @@ function parseRedelivery(verb: "submit" | "create", argv: readonly string[], bra
 export function parseRemedyCommand(command: string, context: RefusalRemedyContext): RemedyStep | undefined {
   const [binary, group, verb, ...argv] = command.trim().split(/\s+/u)
   if (binary !== "yrd" || group !== "pr") return undefined
-  if (verb === "recut") return parseRemerge(argv)
   if (verb === "submit" || verb === "create") return parseRedelivery(verb, argv, context.branch)
   return undefined
 }
 
 export function formatRemedyCommand(step: RemedyStep): string {
-  if (step.verb === "recut") {
-    return [
-      `yrd pr recut ${step.pr}`,
-      ...(step.preflight ? ["--preflight"] : []),
-      ...(step.queue ? ["--queue"] : []),
-      ...(step.apply ? ["--apply"] : []),
-      ...(step.force ? ["--force"] : []),
-    ].join(" ")
-  }
   return `yrd pr ${step.verb} ${step.branch}`
 }
 
@@ -91,9 +65,11 @@ export function formatRemedyCommand(step: RemedyStep): string {
  *      by construction (its recipe can conflict, and resolving a conflict is
  *      judgment);
  *   2. made ONLY of Yrd redelivery commands this module can execute; and
- *   3. able to put the change back in the queue — a drill that cannot end in a
- *      queued re-merge (a terminal change, or a refusal that merely says "correct the
- *      cause") leaves the wedge exactly where it was.
+ *   3. able to put the change back in the queue — a drill with no `submit`
+ *      step (a terminal change, or a refusal that merely says "correct the
+ *      cause") leaves the wedge exactly where it was. The runner honours the
+ *      submit step through the implicit re-merge preflight, so a mechanical
+ *      remedy and a tracked change's ordinary head-move take the same path.
  *
  * Everything else — re-merge/payload certificates, environment refusals, divergent
  * gitlink composes — is judgment-required and keeps printing its remedy for the
@@ -116,13 +92,13 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
     }
     steps.push(step)
   }
-  if (steps.some((step) => step.verb === "recut") && remergeRefusedByDelivery(context.delivery)) {
+  if (steps.length > 0 && redeliveryRefusedByDelivery(context.delivery)) {
     return Object.freeze({
       kind: "judgment",
-      reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be re-merge`,
+      reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be redelivered mechanically`,
     })
   }
-  if (!steps.some((step) => step.verb === "recut" && step.queue)) {
+  if (!steps.some((step) => step.verb === "submit")) {
     return Object.freeze({
       kind: "judgment",
       reason:
@@ -160,8 +136,8 @@ export function refusalRemedyKey(pr: string, revision: number, headSha: string):
  *
  * 2026-07-27 specimen 3: after a laptop-sleep network partition a habitant
  * refused EVERY candidate with `recut-certificate` 106 consecutive times over
- * 1h44m — zero admissions, main frozen 2.5h — while a by-hand `yrd pr recut
- * --preflight` reported FRESH-NOOP for the same PRs. SIGINT plus a fresh `yrd
+ * 1h44m — zero admissions, main frozen 2.5h — while a by-hand re-merge
+ * preflight reported FRESH-NOOP for the same PRs. SIGINT plus a fresh `yrd
  * queue run` integrated within 60s with no PR changed: the fault was the
  * runner INSTANCE, not the PRs. At the default 15s interval this bounds that
  * class at minutes instead of hours.

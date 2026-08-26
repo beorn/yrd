@@ -113,7 +113,7 @@ function refuseAuthoredGitlink(
         code,
         message:
           `yrd: change '${poisoned.id}' changes generated-only gitlinks [km]; authored root branches use ` +
-          `'yrd pr submit <branch>', then 'yrd pr recut ${poisoned.id} --preflight --queue --apply'`,
+          "tracked changes re-merge implicitly",
       })
     }
     const { prs: _prs, ...candidate } = input

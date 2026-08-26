@@ -610,7 +610,7 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
 
 type GitCapture = Readonly<{ code: number; stdout: string }>
 
-/** Real Git plumbing shared by `pr prune` and `pr recut --preflight`:
+/** Real Git plumbing shared by `pr prune` and the re-merge preflight:
  * reachability, exact merge-result tree identity, graph distance, and
  * attribution-only stable patch matching. Only documented exit codes are
  * tolerated; anything else fails loud. */

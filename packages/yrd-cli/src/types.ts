@@ -292,7 +292,7 @@ export type YrdCliIO = {
    * queue label run names lead with (watch redesign item 36). */
   repositoryLabel?: string
   /** Probe whether a habitant runner holds the drain lease in `cwd`. When it
-   * reports true, `pr recut --queue` dispatches admission enqueue-only for the
+   * reports true, the re-merge verdict path dispatches admission enqueue-only for the
    * habitant to settle instead of becoming a second driver. */
   habitantLeaseHeld?(cwd: string): Promise<boolean>
   /** Process-host-owned step artifact root used by the live read-only output projection. */
@@ -328,7 +328,7 @@ export type YrdCliIO = {
   /** Head commit subject + body used to default a submitted PR's title/description. */
   resolveCommitMeta?(ref: string, cwd: string): Promise<Readonly<{ subject: string; body?: string }> | undefined>
   currentBranch?(cwd: string): string | undefined
-  /** Git facts for `pr prune` and `pr recut --preflight`; defaults to real Git
+  /** Git facts for `pr prune` and the re-merge preflight; defaults to real Git
    * plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
   /** Git facts for the branch-state verbs; defaults to real Git plumbing in `cwd`. */

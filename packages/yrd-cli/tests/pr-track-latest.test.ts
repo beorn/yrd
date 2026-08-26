@@ -232,27 +232,6 @@ function failureMessage(stderr: string): string {
   return (JSON.parse(stderr) as { failure: { message: string } }).failure.message
 }
 
-/** The exact author-facing refusal an explicitly UNTRACKED moved branch must keep
- * printing. Tracking is the default; this text is the contract for everyone who
- * recorded the opt-out. */
-function staleHeadRefusal(revision: number, recordedHead: string): string {
-  return (
-    `yrd: change 'PR1' recorded revision ${String(revision)} head '${recordedHead}', but live branch ` +
-    `'${BRANCH}' is '${LIVE_HEAD}'. This change is explicitly untracked, so a re-merge will not silently ` +
-    "replay stale work.\n" +
-    "commits between: supplied observer did not enumerate the range\n" +
-    `inspect: git log --oneline ${recordedHead}..${LIVE_HEAD}\n` +
-    "To adopt tracking (the default), so moved heads are recorded as revisions:\n" +
-    "  yrd pr edit PR1 --track\n" +
-    "  yrd pr recut PR1 --queue\n" +
-    "To record the live head once while staying untracked:\n" +
-    `  yrd pr submit ${BRANCH}\n` +
-    "  yrd pr recut PR1 --queue\n" +
-    "To deliberately replay the recorded revision:\n" +
-    `  yrd pr recut PR1 --revision ${String(revision)} --preflight --queue`
-  )
-}
-
 async function submitBranch(app: CliApp, head: () => string, ...flags: string[]): Promise<void> {
   const output = outputIO(head)
   const exit = await runYrd(

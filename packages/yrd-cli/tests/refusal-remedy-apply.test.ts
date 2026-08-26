@@ -17,7 +17,7 @@ type Call = Readonly<{ op: string; detail?: string }>
 type LogCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
 function mechanicalRemergeReason(pr: string): string {
-  return `yrd: change '${pr}' needs a certified refresh; run 'yrd pr recut ${pr} --preflight --queue --apply'`
+  return `yrd: change '${pr}' needs a certified refresh; tracked changes re-merge implicitly; fallback: 'yrd pr submit <branch>'`
 }
 
 function harness(
@@ -182,7 +182,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
         revision: 1,
         code: "composition-invalid",
         count: 3,
-        commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr submit task/22474-carrier"],
+        commands: ["yrd pr submit task/22474-carrier", "yrd pr submit task/22474-carrier"],
         verdict: "RECUT",
       },
     ])
@@ -194,7 +194,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
           action: "queue-refusal-remedy-applied",
           pr: "PR1791",
           verdict: "RECUT",
-          commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr submit task/22474-carrier"],
+          commands: ["yrd pr submit task/22474-carrier", "yrd pr submit task/22474-carrier"],
         }),
       }),
     )
@@ -247,7 +247,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
       status: "failed",
       pr: "PR1791",
       code: "composition-invalid",
-      resolution: ["yrd pr recut PR1791 --preflight --queue --apply"],
+      resolution: ["yrd pr submit <branch>"],
     })
     expect(h.warns).toContainEqual(
       expect.objectContaining({ props: expect.objectContaining({ action: "queue-refusal-remedy-failed" }) }),
