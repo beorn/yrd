@@ -14115,6 +14115,56 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
+  it("a heartbeat-only advance reclocks the cached snapshot instead of freezing the runner's tick", async () => {
+    const app = await createApp()
+    const stateRoot = mkdtempSync(join(tmpdir(), "yrd-heartbeat-reclock-"))
+    const runnerDir = join(stateRoot, "resident-runner")
+    mkdirSync(runnerDir, { recursive: true })
+    const writeStatus = (lastTickAt: string) =>
+      writeFileSync(
+        join(runnerDir, "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt,
+          command: "yrd queue run",
+          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:55.000Z" },
+        }),
+      )
+    let now = Date.parse("2026-07-09T12:01:00.000Z")
+    const loader = runInternals.createQueueListSnapshotLoader(
+      app,
+      [],
+      {},
+      outputIO({ now: () => now, stateDir: stateRoot }).io,
+      { queueReadModel: testQueueReadModel(app) },
+      false,
+    )
+    try {
+      writeStatus("2026-07-09T12:00:58.000Z")
+      const first = await loader.load()
+      expect(first.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:58.000Z")
+
+      // The runner heartbeats on its 5s cadence; nothing else changed — no
+      // journal write, no progress observation. The cached snapshot must still
+      // reclock with the fresh tick: freezing lastTickAt while the RUNNER
+      // box's live clock keeps ticking made a healthy 5s heartbeat cross the
+      // 15s staleness threshold once per progress interval, so the box flapped
+      // healthy→stale→healthy about every 10 seconds (operator, 2026-08-25).
+      writeStatus("2026-07-09T12:01:03.000Z")
+      now += 5_000
+      const ticked = await loader.load()
+      expect(ticked.projection.runner?.lastTickAt, "a fresh heartbeat must reach the projection").toBe(
+        "2026-07-09T12:01:03.000Z",
+      )
+      // Durable facts stay cached — this must ride the cheap clock-only path.
+      expect(ticked.results).toBe(first.results)
+    } finally {
+      rmSync(stateRoot, { recursive: true, force: true })
+      await app.close()
+    }
+  })
+
   it("rebuilds on Journal cursor changes and reports clock-only cache hits in queue-read spans", async () => {
     const journal = createMemoryJournal()
     const logs: LoggerEvent[] = []

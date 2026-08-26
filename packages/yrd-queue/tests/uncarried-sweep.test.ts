@@ -219,6 +219,52 @@ describe("sweepUncarriedRefs", () => {
     expect(finding?.message).toContain("already applied")
   })
 
+  it("judges refs against the swept namespace's own base, and names the baseline it used", async () => {
+    // The habitant checkout's LOCAL main lags origin/main whenever nothing has
+    // pulled — 18 stale commits inflated the fleet's uncarried count 2.2x
+    // (@i/10-merge-queue/uncarried-stale-base). The refs being swept live in
+    // refs/remotes/origin, so the remote's own base ref is the honest
+    // yardstick: this ref's commits are all on origin/main (cherry is empty
+    // there) while the stale local main still calls one commit unmerged.
+    const git = fakeGit({
+      "for-each-ref": refLine("origin/task/landed", 3 * HOUR),
+      "rev-parse --verify --quiet refs/remotes/origin/main^{commit}": "feedfacefeedfacefeedfacefeedfacefeedface",
+      "ls-tree": "",
+      "rev-parse origin/task/landed^{commit}": "deadbeefcafe",
+      "diff --name-only refs/remotes/origin/main...origin/task/landed": "src/thing.ts",
+      "cherry refs/remotes/origin/main origin/task/landed": "",
+      // The stale-local-baseline answers, present so a regression that judges
+      // against `main` again produces a finding and fails LOUDLY here.
+      "diff --name-only main...origin/task/landed": "src/thing.ts",
+      "cherry main origin/task/landed": "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    expect(result.baseline).toBe("refs/remotes/origin/main")
+    expect(result.examined).toBe(1)
+    // Judged against the remote base the commits already landed on: no finding.
+    expect(result.findings).toEqual([])
+  })
+
+  it("falls back to the local base name when the namespace has no base ref, and says so", async () => {
+    const git = fakeGit({
+      "for-each-ref": refLine("origin/task/stranded", 3 * HOUR),
+      "ls-tree": "160000 commit abc\tvendor/yrd",
+      "rev-parse origin/task/stranded^{commit}": "deadbeefcafe",
+      "diff --name-only": "src/thing.ts",
+      cherry: "+ 1111111111111111111111111111111111111111",
+    })
+
+    const result = await sweepUncarriedRefs(git, OPTIONS)
+
+    // fakeGit answers the baseline probe with undefined (no response key), so
+    // the sweep must fall back to the caller's base — and still SAY which
+    // yardstick produced the counts.
+    expect(result.baseline).toBe("main")
+    expect(result.findings).toHaveLength(1)
+  })
+
   it("ages a newly observed ref from its reflog update rather than its old commit", async () => {
     const git = fakeGit({
       "for-each-ref": refLine("origin/task/old-commit-new-push", 40 * HOUR),

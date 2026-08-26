@@ -201,6 +201,15 @@ export type SweepResult = Readonly<{
    * the fleet was measured (@i/10-merge-queue/22925-watch-shows-every-pr).
    */
   measurable: number
+  /**
+   * The exact ref every survivor was judged against — the swept namespace's
+   * own base ref when it exists (e.g. `refs/remotes/origin/main`), else the
+   * caller's local base name. Reported so no reader has to guess which
+   * yardstick produced the counts: judging remote refs against a stale local
+   * `main` once inflated the fleet's uncarried count 2.2x
+   * (@i/10-merge-queue/uncarried-stale-base).
+   */
+  baseline: string
 }>
 
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
@@ -449,7 +458,22 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     survivors.push({ ref: candidate.ref, observedAtMs: updatedAtMs, absorbedRevisions })
   }
 
-  const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, base)
+  // The yardstick every survivor is judged against. The swept namespace's own
+  // base ref outranks the checkout-local branch name: judging remote refs
+  // against a stale local `main` counts every commit the checkout has not
+  // pulled as "unmerged" — a local main 18 commits behind origin/main inflated
+  // the fleet's uncarried count 2.2x (@i/10-merge-queue/uncarried-stale-base).
+  // Resolved once, only when something survived to be judged (the cheap-path
+  // cost pin allows exactly two git calls for a fully-disqualified sweep), and
+  // REPORTED in the result so no reader has to guess which baseline produced
+  // the counts.
+  const namespaceBase = `${namespace}/${base}`
+  const baseline =
+    survivors.length > 0 &&
+    (await git.optional(repo, ["rev-parse", "--verify", "--quiet", `${namespaceBase}^{commit}`])) !== undefined
+      ? namespaceBase
+      : base
+  const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, baseline)
   const findings: UncarriedFinding[] = []
   const skipped: UnenumerableRef[] = []
   for (const survivor of survivors) {
@@ -464,14 +488,14 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     // unrelated histories rather than "something around here is broken", so
     // the row can be reported as a fact instead of a shrug.
     const tipSha = await git.run(repo, ["rev-parse", `${survivor.ref}^{commit}`])
-    const mergeBase = await git.optional(repo, ["merge-base", base, survivor.ref])
+    const mergeBase = await git.optional(repo, ["merge-base", baseline, survivor.ref])
     if (mergeBase === undefined) {
-      skipped.push({ ref: survivor.ref, tipSha, reason: `no merge base with '${base}' — unrelated histories` })
+      skipped.push({ ref: survivor.ref, tipSha, reason: `no merge base with '${baseline}' — unrelated histories` })
       continue
     }
     const fact = await gatherPushedRefFact(git, survivor.ref, {
       repo,
-      base,
+      base: baseline,
       observedAtMs: survivor.observedAtMs,
       carriedBranches,
       gitlinkPaths,
@@ -496,5 +520,6 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     skipped,
     exempted,
     measurable: outsideAgeBound + examined,
+    baseline,
   }
 }

@@ -7698,6 +7698,13 @@ export function createQueueListSnapshotLoader(
         unchanged &&
         cached !== undefined &&
         (observed.runnerProjectionToken !== cached.observed.runnerProjectionToken ||
+          // A heartbeat is observed state too: leaving the snapshot "stable"
+          // freezes runner.lastTickAt while the RUNNER box's live clock keeps
+          // ticking, so a healthy 5s heartbeat crossed the 15s staleness
+          // threshold once per progress interval and the box flapped
+          // healthy→stale→healthy (operator, 2026-08-25). A tick rides the
+          // cheap clock-only reclock; durable projections stay cached.
+          observed.runnerToken !== cached.observed.runnerToken ||
           observed.now < cached.snapshot.now ||
           observed.now - cached.snapshot.now >= QUEUE_WATCH_CLOCK_INTERVAL_MS)
       const stable = unchanged && !clockDue && cached !== undefined
@@ -8544,9 +8551,24 @@ async function queueUncarried(
     // count is a floor — the same misreading the human branch already refuses
     // (@i/10-merge-queue/22925-watch-shows-every-pr).
     { command: "queue.uncarried", ...result, findings, exemptionLines: filtered.exemptionLines, floor, bounded },
+    // The baseline is named on BOTH paths: a count judged against a stale
+    // local base once over-reported 2.2x, and the only way a reader can rule
+    // that out is seeing which yardstick produced the numbers
+    // (@i/10-merge-queue/uncarried-stale-base).
     findings.length === 0
-      ? [...exemptionBlock, ...skippedBlock, `${bounded} uncarried refs (${floor}) — ${denominator}`].join("\n")
-      : [...exemptionBlock, ...lines, "", ...skippedBlock, `${bounded} findings (${floor})`, denominator].join("\n"),
+      ? [
+          ...exemptionBlock,
+          ...skippedBlock,
+          `${bounded} uncarried refs (${floor}) — ${denominator} · judged against ${result.baseline}`,
+        ].join("\n")
+      : [
+          ...exemptionBlock,
+          ...lines,
+          "",
+          ...skippedBlock,
+          `${bounded} findings (${floor})`,
+          `${denominator} · judged against ${result.baseline}`,
+        ].join("\n"),
   )
   return findings.length === 0 ? 0 : 1
 }
