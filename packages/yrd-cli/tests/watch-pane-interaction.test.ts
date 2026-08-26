@@ -262,20 +262,21 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // and selection is conveyed by colour, so row membership is the proof.
       expect(app.text, "the failed pill renders").toContain("failed")
 
-      // Run cells read `#N ✓` with the label elided on one visible queue
-      // (items 34/38); membership is proven by the glyph-suffixed cell so a
-      // detail-pane `RUN main#N` border can never satisfy the wait.
+      // The status renders once per row, as the STATUS cell's icon+text
+      // (amendment 2026-08-25 removed the run cell's icon-only duplicate);
+      // membership is proven by that glyph-prefixed status word, which a
+      // detail-pane `RUN main#N` border can never satisfy.
       await app.press("f")
-      await waitFor(() => app.text.includes("#5 ×") && !app.text.includes("#42 ◉") && !app.text.includes("#4 ✓"))
+      await waitFor(() => app.text.includes("× failed") && !app.text.includes("◉ checking") && !app.text.includes("✓ merged"))
 
       await app.press("a")
-      await waitFor(() => app.text.includes("#5 ×") && app.text.includes("#42 ◉") && app.text.includes("#4 ✓"))
+      await waitFor(() => app.text.includes("× failed") && app.text.includes("◉ checking") && app.text.includes("✓ merged"))
 
       await app.press("d")
-      await waitFor(() => app.text.includes("#4 ✓") && !app.text.includes("#5 ×") && !app.text.includes("#42 ◉"))
+      await waitFor(() => app.text.includes("✓ merged") && !app.text.includes("× failed") && !app.text.includes("◉ checking"))
 
       await app.press("o")
-      await waitFor(() => app.text.includes("× rev") && !app.text.includes("#4 ✓"))
+      await waitFor(() => app.text.includes("× rev") && !app.text.includes("✓ merged"))
       expect(app.text).not.toContain("PAUSED")
     } finally {
       app.unmount()
@@ -298,8 +299,8 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // Clicking a pill selects that court, matching the lowercase key path.
       await app.click(filterX + 1, filterY)
       await app.waitForLayoutStable()
-      expect(app.text).toContain("#42 ◉")
-      expect(app.text).not.toContain("#5 ×")
+      expect(app.text).toContain("◉ checking")
+      expect(app.text).not.toContain("× failed")
       expect(app.text).not.toContain("pr#4.1")
     } finally {
       app.unmount()

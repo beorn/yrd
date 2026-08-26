@@ -349,15 +349,17 @@ describe("queue timeline 21106 contract", () => {
     const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     // Row contract under the ratified display model (operator rulings
-    // 2026-08-18, items 28/38): the CHANGES cell is `pr#id.rev <title>` —
-    // never the branch — with the live step / failure code as its
-    // parenthesized suffix; the RUN cell is `label#N <glyph>` with the label
-    // ELIDED here (one visible queue), an em-dash pre-run, and a muted `·`
-    // continuation on a batch member behind its lead; BY stays left-aligned
-    // and the run duration is a bare dimmed time.
+    // 2026-08-18, items 28/38; amended 2026-08-25): the CHANGES cell is
+    // `pr#id.rev <title>` — never the branch — with the live step / failure
+    // code as its parenthesized suffix; the RUN cell is `label#N` with the
+    // label ELIDED here (one visible queue), an em-dash pre-run, and a muted
+    // `·` continuation on a batch member behind its lead — the status renders
+    // ONCE, as the STATUS cell's icon+text, never again as an icon-only run
+    // suffix; BY stays left-aligned and the run duration is a bare dimmed
+    // time.
     expect(pending?.trim()).toMatch(/^16:40:00 ○ ready\s+—\s+pr#1\.1 Prepare release notes\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ◉ checking\s+#42 ◉\s+pr#42\.1 Align host navigation.*\(2:check\)\s+@agent\/3\s+36:00 20:00$/u,
+      /^17:10:00 ◉ checking\s+#42\s+pr#42\.1 Align host navigation.*\(2:check\)\s+@agent\/3\s+36:00 20:00$/u,
     )
     // The convoy PARTNER keeps its own TIME/STATUS (a merged member and a
     // never-attempted PR must never print the same row of dashes —
@@ -368,10 +370,10 @@ describe("queue timeline 21106 contract", () => {
     )
     expect(revised?.trim()).toMatch(/^16:15:00 × rev\s+—\s+pr#5\.1 Reject broken payload\s+@agent\/2\s+1:15:00$/u)
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × failed\s+#5 ×\s+pr#5\.1 Reject broken payload \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
+      /^16:42:00 × failed\s+#5\s+pr#5\.1 Reject broken payload \(err=typecheck-failed\)\s+@agent\/2\s+27:00 12:00$/u,
     )
     expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ merged\s+#4 ✓\s+pr#4\.1 Merge the durable patch\s+@agent\/7\s+25:00 15:00$/u,
+      /^16:25:00 ✓ merged\s+#4\s+pr#4\.1 Merge the durable patch\s+@agent\/7\s+25:00 15:00$/u,
     )
 
     // No row carries the removed clock glyph; a not-yet-started run shows the

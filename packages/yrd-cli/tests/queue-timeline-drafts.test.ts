@@ -322,6 +322,25 @@ describe("queue timeline non-integrated rows", () => {
     expect(projection.rows.find((row) => row.pr === "PR5")).toBeUndefined()
   })
 
+  it("renders a run row's status exactly once — icon+text, with no icon-only duplicate in the RUN cell", async () => {
+    // The RUN cell used to append the row's own status glyph after `label#N`,
+    // so every run row showed its status twice: `× failed … #9 ×`. The STATUS
+    // cell (glyph + word) is the one rendering; the icon-only duplicate is
+    // removed (operator, 2026-08-25).
+    const projection = project([revisionPr()], [rejectedRun()])
+    const app = createRenderer({ cols: 120, rows: 30 })(createElement(QueueTimelineView, { projection, columns: 120 }))
+    try {
+      await app.waitForLayoutStable()
+      const runLine = app.text.split("\n").find((line) => line.includes("#9"))
+      expect(runLine, "the failed run row must render").toBeDefined()
+      expect(runLine).toContain("× failed")
+      const glyphs = [...runLine!.matchAll(/×/gu)]
+      expect(glyphs, `status glyph must appear exactly once per row: ${runLine!}`).toHaveLength(1)
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("renders a pre-run row's blocking-reason message instead of computing and discarding it", async () => {
     // The projection already folds the eligibility reason into the row (the
     // detail fell back to `position N` only when no blocker existed) — but the

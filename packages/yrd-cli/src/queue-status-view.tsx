@@ -4559,7 +4559,7 @@ type TimelineCellLayout = Readonly<{
 type TimelineRunCellModel =
   | Readonly<{ kind: "none" }>
   | Readonly<{ kind: "continuation" }>
-  | Readonly<{ kind: "run"; label: string; number: string; glyph: string; color: string }>
+  | Readonly<{ kind: "run"; label: string; number: string }>
 
 function timelineRunCellModel(
   row: QueueTimelineProjectedRow,
@@ -4570,19 +4570,16 @@ function timelineRunCellModel(
   if (row.run === undefined) return { kind: "none" }
   if (continuesRun) return { kind: "continuation" }
   const label = showQueueLabel ? (runLabels.get(row.base) ?? row.base) : ""
-  return {
-    kind: "run",
-    label,
-    number: `#${runIdValue(row.run)}`,
-    glyph: row.glyph,
-    color: timelineStatusColor(row),
-  }
+  // No state glyph here: the STATUS cell already renders this row's status as
+  // icon+text, and repeating the icon alone made every run row say its status
+  // twice (operator, 2026-08-25 — supersedes item 38's glyph clause).
+  return { kind: "run", label, number: `#${runIdValue(row.run)}` }
 }
 
 function timelineRunCellText(model: TimelineRunCellModel): string {
   if (model.kind === "none") return "—"
   if (model.kind === "continuation") return "·"
-  return `${model.label}${model.number} ${model.glyph}`
+  return `${model.label}${model.number}`
 }
 
 /** Config-handle (or base) run label per base, from the projection's queues (item 36). */
@@ -5435,10 +5432,12 @@ function TimelineProjectedRow({
         </>
       }
       run={
-        // Item 38: `label#N` + state glyph — the queue label muted, the run
-        // number bright, the glyph in the run's status color. Pre-run rows
-        // carry a muted em-dash; a batch member behind the first carries a
-        // muted `·` continuation instead of repeating the id.
+        // Item 38, amended 2026-08-25: `label#N` — the queue label muted, the
+        // run number bright. The run's state is NOT repeated here: the STATUS
+        // cell already carries it as icon+text, and the old icon-only glyph
+        // suffix said every row's status twice. Pre-run rows carry a muted
+        // em-dash; a batch member behind the first carries a muted `·`
+        // continuation instead of repeating the id.
         runCell.kind === "none" ? (
           <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
             —
@@ -5456,10 +5455,6 @@ function TimelineProjectedRow({
             )}
             <Text color={forcedFg} wrap="truncate" minWidth={0}>
               {runCell.number}
-            </Text>
-            <Text color={forcedFg ?? runCell.color} flexShrink={0}>
-              {" "}
-              {runCell.glyph}
             </Text>
           </Box>
         )
