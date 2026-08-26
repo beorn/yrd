@@ -206,4 +206,23 @@ describe("every printed remedy is executable in the state that emits it", () => 
     expect(remedy.text).not.toContain("yrd pr publish")
     expect(remedy.text).not.toContain("yrd pr withdraw")
   })
+
+  it("an absent branch on a terminal change never wears the transport remedy's clothes", () => {
+    // The PR2081 incoherence (@i/10-merge-queue/refsfor-withdrawn-carrier):
+    // `pr view` of the withdrawn change reported "its branch is gone from
+    // origin" and then a remedy claiming origin "could not be reached" and
+    // "still advertises" the branch — two contradictory clauses in one error.
+    // `absent` is origin's authoritative answer; every state must print a
+    // remedy whose clauses are true of it.
+    for (const delivery of ["integrated", "already-landed", "withdrawn", "canceled"] as const) {
+      const remedy = unobservableBranchRemedy("absent", { id: "PR2081", branch: "issue/x" }, delivery, RECORDED, "")
+      expect(remedy.verb).toBeUndefined()
+      expect(remedy.text).not.toContain("still advertises")
+      expect(remedy.text).not.toContain("could not be reached")
+      expect(remedy.text).toContain("origin no longer has branch 'issue/x'")
+      expect(remedy.text).toContain(`already ${delivery}`)
+      // ONE true remedy: restoring the branch, stated once, with no Yrd verb.
+      expect(remedy.text).toContain("restore it on origin")
+    }
+  })
 })

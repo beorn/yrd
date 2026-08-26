@@ -1,3 +1,4 @@
+import { join, resolve } from "node:path"
 import { adaptProcessGit, gitFailure, type Process } from "@yrd/process"
 import { GIT_PLUMBING_TIMEOUT_MS } from "./git-timeouts.ts"
 
@@ -59,9 +60,76 @@ export async function observeOriginBranchAdvertisement(
   return { ok: false, detail: gitFailure(result, GIT_PLUMBING_TIMEOUT_MS), timedOut: result.timedOut === true }
 }
 
+export type ReceiverStoreBranchObservation =
+  | Readonly<{ ok: true; owned: true; head: string; target: string }>
+  | Readonly<{ ok: true; owned: false }>
+  | GitFailure
+
+/** The receiver store's refs for one branch, longest-lived spelling first: a
+ * branch delivered straight to the receiver IS `refs/heads/<branch>` there,
+ * while a `refs/for/<base>/<change>` push mints its carrier as the accepted
+ * `refs/yrd/submit/<branch>` approval (@yrd/bay receiver model). */
+const RECEIVER_STORE_REF_PREFIXES = Object.freeze(["refs/heads/", "refs/yrd/submit/"])
+
+/**
+ * Ask the repository's own Yrd push receiver whether IT owns this branch,
+ * before any question goes to origin. A receiver-delivered branch — the
+ * `issue/…` carrier a `refs/for` push mints, or a branch pushed straight to
+ * the bay remote — lives in `<git-common-dir>/yrd/prs.git` (the layout
+ * `discoverYrdRepository`'s stateDir and the receiver default agree on) and is
+ * never advertised by the GitHub origin at all. Asking origin about one
+ * returns an authoritative-sounding "absent" that is true of the wrong remote:
+ * that answer is what auto-withdrew PR2081 seconds after its own intake
+ * (@i/10-merge-queue/refsfor-withdrawn-carrier).
+ *
+ * Absence of the store itself (exit 128: most repositories have no receiver)
+ * and absence of both refs (exit 1) both mean "not receiver-owned" — origin
+ * keeps its full authority there. Only a probe that TIMED OUT refuses to
+ * answer, because falling through to origin then could let a transport fault
+ * mature into a withdraw.
+ */
+export async function observeReceiverStoreBranch(
+  process: Pick<Process, "run">,
+  cwd: string,
+  branch: string,
+): Promise<ReceiverStoreBranchObservation> {
+  const common = await runGit(process, cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+  if (common.timedOut === true || common.code !== 0) {
+    return { ok: false, detail: gitFailure(common, GIT_PLUMBING_TIMEOUT_MS), timedOut: common.timedOut === true }
+  }
+  const store = join(resolve(cwd, common.stdout.trim()), "yrd", "prs.git")
+  for (const prefix of RECEIVER_STORE_REF_PREFIXES) {
+    const result = await runGit(process, cwd, [
+      `--git-dir=${store}`,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      `${prefix}${branch}^{commit}`,
+    ])
+    if (result.timedOut === true) {
+      return { ok: false, detail: gitFailure(result, GIT_PLUMBING_TIMEOUT_MS), timedOut: true }
+    }
+    if (result.code === 0) {
+      const head = result.stdout.trim().toLowerCase()
+      if (head !== "") return { ok: true, owned: true, head, target: `${prefix}${branch}` }
+    }
+    // Exit 1 is `--verify --quiet`'s "no such ref in this store" — the next
+    // spelling may still own it. Anything else says the store itself did not
+    // answer as a repository (128: no receiver store exists here), which ends
+    // the probe: origin is the only authority left.
+    if (result.code !== 0 && result.code !== 1) break
+  }
+  return { ok: true, owned: false }
+}
+
 /** Fetch exactly one authored branch and resolve the remote-tracking commit.
  * Callers own the user-facing failure kind/code/remedy; this is the one Git
  * mechanism shared by submit and re-merge.
+ *
+ * The receiver store is consulted FIRST: a branch the repository's own push
+ * receiver owns resolves there, never against origin — origin has no opinion
+ * about a carrier it never hosted (see {@link observeReceiverStoreBranch}).
  *
  * A failed fetch is two different worlds wearing one exit code (128): the branch
  * is GONE from origin — structural, and nothing about retrying changes it — or
@@ -76,6 +144,15 @@ export async function observeFreshRemoteBranch(
 ): Promise<FreshRemoteBranch> {
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
+  const stored = await observeReceiverStoreBranch(process, cwd, branch)
+  if (!stored.ok) {
+    // The store never answered, so branch ownership is unknown; treating that
+    // as origin's to judge could turn a local fault into a withdraw. Retryable.
+    return { ok: false, phase: "fetch", detail: `receiver store did not answer: ${stored.detail}`, target }
+  }
+  if (stored.owned) {
+    return { ok: true, head: stored.head, target: stored.target }
+  }
   const fetched = await runGit(process, cwd, [
     "fetch",
     "--quiet",
@@ -91,7 +168,12 @@ export async function observeFreshRemoteBranch(
     // the probe itself failed, origin never told us anything and the fetch
     // failure stands as retryable — never absence inferred from a second silence.
     if (advertised.ok && !advertised.advertised) {
-      return { ok: false, phase: "absent", detail: `origin no longer advertises '${source}' (${detail})`, target }
+      return {
+        ok: false,
+        phase: "absent",
+        detail: `origin no longer advertises '${source}' and the receiver store does not own '${branch}' (${detail})`,
+        target,
+      }
     }
     return { ok: false, phase: "fetch", detail, target }
   }

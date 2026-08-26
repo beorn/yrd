@@ -13336,6 +13336,22 @@ describe("PR metadata — title, description, and issue link", () => {
         process: {
           run: async (request) => {
             requests.push(request)
+            // This fixture's repository has no receiver store: the store probe
+            // reports no repository there, so the observation proceeds to the
+            // origin fetch this test pins.
+            if (request.argv.some((argument) => argument.startsWith("--git-dir="))) {
+              return {
+                stdout: "",
+                stderr: "fatal: not a git repository: '/repo/.git/yrd/prs.git'",
+                exitCode: 128,
+                signal: null,
+                durationMs: 0,
+                timedOut: false,
+              }
+            }
+            if (request.argv.includes("--git-common-dir")) {
+              return { stdout: "/repo/.git\n", stderr: "", exitCode: 0, signal: null, durationMs: 0, timedOut: false }
+            }
             return {
               stdout: request.argv.includes("rev-parse") ? `${liveHead}\n` : "",
               stderr: "",

@@ -81,6 +81,24 @@ function transportRemedy(pr: ChangeIdentity): BranchRemedy {
   })
 }
 
+/** Origin answered that the branch is gone AND the change is already terminal:
+ * there is nothing left to dispose of, so no Yrd verb applies. Before this
+ * branch existed, `absent` in a terminal state fell through to
+ * {@link transportRemedy}, whose every clause is false here — it claims origin
+ * could not be reached (it answered) and still advertises the branch (it does
+ * not) — the two contradictory sentences `pr view PR2081` printed side by side
+ * (@i/10-merge-queue/refsfor-withdrawn-carrier). */
+function settledAbsenceRemedy(pr: ChangeIdentity, delivery: ChangeDeliveryState): BranchRemedy {
+  return Object.freeze({
+    verb: undefined,
+    text:
+      `remedy: origin no longer has branch '${pr.branch}', and change '${pr.id}' is already ${delivery} — ` +
+      `nothing is left to dispose of and no Yrd verb applies. ` +
+      `if the branch was deleted by mistake: restore it on origin, and this change becomes observable again ` +
+      `without any Yrd verb.`,
+  })
+}
+
 /**
  * The one emitter of a remedy for an unobservable branch, chosen by the state
  * that is emitting it.
@@ -102,6 +120,11 @@ export function unobservableBranchRemedy(
   // either fault, publication is the genuine cure, and its guard admits exactly
   // this state.
   if (remedyAdmissibleIn("publish", delivery)) return publicationRemedy(pr, recorded, queueFlag)
-  if (reason === "absent" && remedyAdmissibleIn("withdraw", delivery)) return disposalRemedy(pr)
+  // `absent` is origin's authoritative answer, so it must NEVER print the
+  // transport remedy — that text asserts origin was unreachable and still
+  // advertises the branch, both false for this reason.
+  if (reason === "absent") {
+    return remedyAdmissibleIn("withdraw", delivery) ? disposalRemedy(pr) : settledAbsenceRemedy(pr, delivery)
+  }
   return transportRemedy(pr)
 }
