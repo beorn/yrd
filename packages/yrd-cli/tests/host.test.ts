@@ -28,6 +28,7 @@ import {
   createYrdHost as createYrdHostRaw,
   runYrdProcess,
 } from "../src/host.ts"
+import { checkpointBumpGateViolations, SHIPPED_CHECKPOINT_IDENTITIES } from "../src/checkpoint-bump-gate.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import { sourceRepositoryFor, takeImplementationSourceAttestation } from "../src/implementation-source.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
@@ -618,6 +619,86 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // beginning. The identity tracks the persisted event/state contract;
     // installed steps register no per-step schema and are not part of it.
     expect(changed.manifest.targetIdentity).toBe(first.manifest.targetIdentity)
+  })
+
+  it("gates a projection-version bump at the bump: every shipped identity keeps a migration path", async () => {
+    // 23217. The lock above catches that the identity MOVED; nothing until now
+    // caught shipping the move without retaining the value it superseded. That
+    // is a breaking change which passes every gate and stops the fleet days
+    // later, on a seat that did not write it — twice for `bays` alone (v14,
+    // then v15), and 7h09m of dead landing path on 2026-08-26.
+    const { repo } = await repository()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      process: runtimeProcess,
+      config: {
+        base: "main",
+        batch: 1,
+        steps: ["check", "merge"],
+        requires: [],
+        definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+        contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+      } satisfies ResolvedYrdProjectConfig,
+    }
+    const { manifest } = await createDefaultYrdCheckpointMigrationAttestation(options)
+
+    // The ledger's last entry is the identity this source computes, so the
+    // lock above and the ledger can never drift apart unnoticed.
+    expect(SHIPPED_CHECKPOINT_IDENTITIES.at(-1)).toBe(manifest.targetIdentity)
+    // THE GATE. Green means every identity we have shipped can still reach the
+    // current one. A bump that forgets its edge turns this red before it ships.
+    expect(checkpointBumpGateViolations(manifest)).toEqual([])
+
+    // A bump, simulated on the REAL manifest rather than a toy graph: the
+    // target moves, and the edges that carried no explicit `to` re-resolve onto
+    // the new target exactly as `checkpointMigrationManifest` resolves them.
+    // What does NOT follow is an edge out of the identity we just superseded —
+    // which is precisely the defect, and precisely what nothing refuses today.
+    const bumped = "9".repeat(64)
+    const afterBump = {
+      ...manifest,
+      targetIdentity: bumped,
+      edges: manifest.edges.map((edge) => (edge.to === manifest.targetIdentity ? { ...edge, to: bumped } : edge)),
+    }
+    const violations = checkpointBumpGateViolations(afterBump, [...SHIPPED_CHECKPOINT_IDENTITIES, bumped])
+    expect(violations).toHaveLength(1)
+    expect(violations[0]).toContain(`shipped checkpoint identity '${manifest.targetIdentity}'`)
+    expect(violations[0]).toContain("refuses at startup with checkpoint-migration-missing")
+
+    // And the gate accepts the fix it asks for: retain the superseded identity.
+    // That costs no identity change, because migrations are not an input to
+    // `projectionCheckpointIdentity` — which is why the remedy is always cheap
+    // and is only ever expensive once a deployment has already refused.
+    const repaired = {
+      ...afterBump,
+      edges: [...afterBump.edges, { from: manifest.targetIdentity, to: bumped }],
+    }
+    expect(checkpointBumpGateViolations(repaired, [...SHIPPED_CHECKPOINT_IDENTITIES, bumped])).toEqual([])
+
+    // A bump that is not recorded at all is the cheaper mistake, and is caught
+    // by the other half of the gate.
+    expect(checkpointBumpGateViolations(afterBump)[0]).toContain("SHIPPED_CHECKPOINT_IDENTITIES")
+
+    // The ledger's own documented gap, measured rather than asserted in prose.
+    // These five identities this composition shipped before the gate existed
+    // have no path today, which is exactly why they are not in the ledger — a
+    // gate seeded with them would be red on arrival and get switched off.
+    // WHEN ONE OF THESE BECOMES REACHABLE this goes red: that is the ratchet
+    // working. Move it into SHIPPED_CHECKPOINT_IDENTITIES, in date order, and
+    // delete it from here and from the ledger's gap comment.
+    for (const stranded of [
+      "b45cdd9c3cb1e83752bb472a0b1ecb50505abc6670786a4ee8e2f95fef30acd4",
+      "690704d679947c4814c3cbd024dc08f91f03959dc4a340f4d3f2ad24ea23f8c7",
+      "5d25a0aa9aeef5425421ce6d640804d360e5cfdb3b333ae4337d3e56513e5f5d",
+      "2267a28ea7be952a07e1d3fa351a7d8e2112a810af227229364617749518f32f",
+      "fe430448d3a1ce0f2af9d118335b8947a75a0e9b40684bedbbb2c77b12ef3744",
+    ]) {
+      expect(SHIPPED_CHECKPOINT_IDENTITIES).not.toContain(stranded)
+      expect(checkpointBumpGateViolations(manifest, [stranded, manifest.targetIdentity])).toHaveLength(1)
+    }
   })
 
   it("binds installed-step revisions to the host axes, not to the launcher's own version", () => {

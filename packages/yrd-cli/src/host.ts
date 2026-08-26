@@ -234,7 +234,16 @@ const RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY = "36d85bbb8b59e8a3c6c327b8f14f6
  * `intent/*` events) is gone as of this identity; every one of those events
  * is now unknown-name-quarantined at replay (`@yrd/core`'s unknown-event-name
  * tolerance), and the `intents` slice a checkpoint still carries is dropped
- * explicitly by `migrate` below rather than left to leak forever. */
+ * explicitly by `migrate` below rather than left to leak forever.
+ *
+ * ADDING AN ENTRY HERE IS HALF THE JOB. The other half is
+ * `SHIPPED_CHECKPOINT_IDENTITIES` in `./checkpoint-bump-gate.ts`, which records
+ * what this composition has ever ASKED a deployment to store and turns a
+ * version bump that forgets its edge red in the suite instead of red on the
+ * fleet's next startup (23217). Retaining costs nothing:
+ * `projectionCheckpointIdentity` hashes `v`, `initialState`, `events`,
+ * `replayEvents` and `projectionVersions` — migrations are not an input, so no
+ * entry added here can move the target identity. */
 const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
   "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
