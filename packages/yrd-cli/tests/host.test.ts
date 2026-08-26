@@ -553,8 +553,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // before its checkpoint's retired nested `regressions` field was found.
     // Bumping the bays projector version creates a real forward repair edge;
     // all earlier edges retain their historical 36d85bbb successor.
+    // Conscious update 2026-08-26 (22991 phase 2, first store-deletion door):
+    // `queues.authority.statuses` — the stored per-change copy of
+    // ChangeDeliveryState — leaves `initialState`, so the identity moves once
+    // and the production predecessor 701431d5 (measured from the live
+    // journal's stored checkpoint_identity, cursor 92592, read-only
+    // 2026-08-26) gains a retained edge below.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25")
+    expect(first.manifest.targetIdentity).toBe("381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -607,10 +613,20 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
       to: previousTargetIdentity,
     })
+    // Production journal stored identity 2026-08-26 (cursor 92592), the
+    // composition immediately before 22991 phase 2's statuses cut. Its edge
+    // is what carries the deployment across that cut.
+    expect(first.manifest.edges).toContainEqual({
+      from: "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
+      to: previousTargetIdentity,
+    })
     expect(first.manifest.edges).toContainEqual({
       from: previousTargetIdentity,
       to: first.manifest.targetIdentity,
     })
+    // The door cannot run twice: nothing migrates OUT of the current identity,
+    // so a checkpoint already at the target never takes an edge.
+    expect(first.manifest.edges.some((edge) => edge.from === first.manifest.targetIdentity)).toBe(false)
     // 23192: a queue-CONFIG change must NOT move the projection identity.
     // While the declared step list sat in `initialState` it did, and an
     // ordinary `.yrd.yml` checks edit then demanded a checkpoint migration
@@ -1734,6 +1750,115 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(rewrittenValue.value.state).not.toHaveProperty("intents")
     expect(rewrittenValue.value.state).not.toHaveProperty("bays.prs.PR1.regressions")
     expect(rewrittenValue.value.state).not.toHaveProperty("queues.terminalAssociations")
+  })
+
+  it("drops the stored authority.statuses copy from a 701431d5 checkpoint exactly once (22991 phase 2)", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string; cursor: number }, []>(
+        "SELECT checkpoint_json, cursor FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    const checkpointValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(checkpoint.checkpoint_json))
+    const queues = z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["queues"])
+    const authority = z.record(z.string(), z.unknown()).parse(queues["authority"])
+    // The shape the production journal holds at cursor 92592: a per-change
+    // ChangeDeliveryState copy beside the token facts. The live copy was
+    // proven congruent with the record derivation (2084/2084) before this
+    // door authored the drop.
+    const retainedIdentity = "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25"
+    const retainedCheckpoint = JSON.stringify({
+      ...checkpointValue,
+      value: {
+        ...checkpointValue.value,
+        state: {
+          ...checkpointValue.value.state,
+          queues: {
+            ...queues,
+            authority: { ...authority, statuses: { PR1: "submitted" } },
+          },
+        },
+      },
+      identity: retainedIdentity,
+    })
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+
+    // Boot succeeds past the stored copy; runtime state carries no trace of
+    // it, while the token facts and the change record survive untouched.
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expect(restored.state().queues.authority).not.toHaveProperty("statuses")
+    expect(restored.state().queues.authority.submits).toHaveProperty("PR1")
+    await restored.close()
+
+    // Durable, and exactly once: the checkpoint written back is at the target
+    // identity with no statuses key, and a SECOND boot takes no edge (nothing
+    // migrates out of the target identity — the door cannot run twice).
+    using redatabase = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const rewritten = redatabase
+      .query<{ checkpoint_json: string; checkpoint_identity: string }, []>(
+        "SELECT checkpoint_json, checkpoint_identity FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
+    expect(rewritten.checkpoint_identity).toBe("381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c")
+    const rewrittenValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(rewritten.checkpoint_json))
+    expect(rewrittenValue.value.state).not.toHaveProperty("queues.authority.statuses")
+    redatabase.close()
+
+    await using rebooted = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    expect(rebooted.state().queues.authority).not.toHaveProperty("statuses")
+    expect(rebooted.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
   })
 
   it("folds a correlation-era checkpoint's revision labels into props while migrating a retained checkpoint", async () => {
@@ -3282,6 +3407,9 @@ checks: [{check: {run: "true"}}]
       { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
       // The production composition's identity before branch-is-change 2a.
       { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },
+      // Production journal stored identity 2026-08-26 (cursor 92592), the
+      // composition immediately before 22991 phase 2's statuses cut.
+      { from: "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25", to: releasedHop },
       { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: releasedHop },
       // Production journal stored identity, read read-only from /hh's live
       // journal 2026-08-26 at cursor 91511 (evictedThrough 27609, so rebuild

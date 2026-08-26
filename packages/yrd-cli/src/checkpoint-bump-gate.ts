@@ -53,8 +53,16 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // predecessor converges here before taking one forward edge, which is what
   // `RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY` names in `host.ts`.
   "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691",
-  // 2026-08-25 c344e112 — forward checkpoint repair edge. Current.
+  // 2026-08-25 c344e112 — forward checkpoint repair edge. THE LIVE /hh
+  // JOURNAL STORES THIS ONE: journal_snapshot.checkpoint_identity at cursor
+  // 92592, read read-only 2026-08-26, history_evicted_through 27609 — the
+  // retained edge is the only thing carrying the deployment across.
   "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
+  // 2026-08-26 — 22991 phase 2, first store-deletion door: initialState no
+  // longer seeds queues.authority.statuses (the stored ChangeDeliveryState
+  // copy); delivery state derives from the change record and the submit
+  // facts at read time. Current.
+  "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

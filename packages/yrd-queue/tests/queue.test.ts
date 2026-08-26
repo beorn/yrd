@@ -2017,6 +2017,56 @@ describe("Queue", () => {
     },
   )
 
+  it("derives the no-token authority kind from the submit fact, never a stored status copy (22991 phase 2)", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/authority-kind-derivation")
+    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const seed = Queues.get(app.state().queues, "R1")
+    const snapshot = seed?.prs[0]
+    if (seed === undefined || snapshot === undefined) throw new Error("expected authority-kind fixture")
+    const token = { pr: snapshot.id, revision: snapshot.revision, headSha: snapshot.headSha }
+
+    // The stored per-change status copy is gone from the authority contract.
+    expect(app.state().queues.authority).not.toHaveProperty("statuses")
+
+    // Submit-level: a submit fact for this exact revision stands (consumed by
+    // an earlier run, so no token is AVAILABLE) — the member still operates
+    // under submit-level authority and a gap names the submit kind.
+    const submitted = {
+      ...app.state().queues,
+      authority: {
+        current: { [snapshot.id]: token },
+        submits: { [snapshot.id]: { ...token, consumedBy: "R1" } },
+        checks: {},
+        claims: {},
+        runs: {},
+      },
+    }
+    const submitGap = Queues.authorityRun(projectQueueStarted(submitted, { ...seed, id: "R7" }).authority, "R7")
+    expect(submitGap?.missingSubmits).toEqual([snapshot.id])
+    expect(submitGap?.missingChecks).toEqual([])
+
+    // Draft-level: no submit fact was ever recorded for the revision (its
+    // checks token was consumed) — the member can only hold checks-level
+    // authority, so the gap names the checks kind. The deleted status copy
+    // used to make this call from its stored label; a draft that recorded a
+    // passing admission was labeled "ready" and mis-demanded submit-level
+    // authority it could not hold without being submitted.
+    const draft = {
+      ...app.state().queues,
+      authority: {
+        current: { [snapshot.id]: token },
+        submits: {},
+        checks: { [snapshot.id]: { ...token, consumedBy: "R1" } },
+        claims: {},
+        runs: {},
+      },
+    }
+    const checksGap = Queues.authorityRun(projectQueueStarted(draft, { ...seed, id: "R8" }).authority, "R8")
+    expect(checksGap?.missingChecks).toEqual([snapshot.id])
+    expect(checksGap?.missingSubmits).toEqual([])
+  })
+
   it("rejects a Queue start whose execution result diverges from its Candidate", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/candidate-run-result")

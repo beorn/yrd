@@ -203,10 +203,15 @@ describe("native needs-author lifecycle", () => {
     expect(events.map(({ name }) => name)).toContain("pr/admission-recorded")
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
     expect(app.state().queues.authority).toMatchObject({
-      statuses: { PR1: "needs-author" },
       submits: { PR1: { revision: 1, headSha: HEAD } },
       checks: { PR1: { revision: 1, headSha: HEAD } },
     })
+    // The stored delivery-status copy is deleted (22991 phase 2): the
+    // needs-author fact lives on the change record, never in queue authority.
+    expect(app.state().queues.authority).not.toHaveProperty("statuses")
+    const needsAuthorRecord = app.state().bays.prs[pr]
+    if (needsAuthorRecord === undefined) throw new Error(`expected change record '${pr}'`)
+    expect(changeDeliveryState(needsAuthorRecord)).toBe("needs-author")
     expect(app.bays.prs().map(({ id }) => id)).toContain(pr)
 
     const props = { request: "needs-author-repair" }
