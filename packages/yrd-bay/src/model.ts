@@ -26,21 +26,6 @@ export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().regex(/^PR\d+$/u, "expected a change id, e.g. PR182")
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
-export const ChangeTerminalAssociationSchema = z
-  .object({
-    pr: PRIdSchema,
-    revision: z.number().int().positive(),
-    headSha: GitShaSchema,
-    run: z.string().trim().min(1),
-    provenance: z.literal("migration/21091"),
-    evidence: z.object({ terminalEvent: z.uuidv7(), run: z.string().trim().min(1) }).strict(),
-  })
-  .strict()
-  .refine(({ run, evidence }) => run === evidence.run, {
-    message: "association run must equal the evidence run",
-    path: ["evidence", "run"],
-  })
-export type ChangeTerminalAssociation = Readonly<z.infer<typeof ChangeTerminalAssociationSchema>>
 /** Open key/value labels on a change revision. The same noun as km's node
  * `props`: each key is a fact — set once, idempotent to repeat, conflicting
  * values refuse. Plugins may interpret a namespaced key only through an

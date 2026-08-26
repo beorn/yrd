@@ -6922,37 +6922,6 @@ function admissionBlockedChanges(
     .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
 }
 
-async function migrateTerminalAssociations(
-  app: YrdCliApp,
-  options: JsonOption & Readonly<{ apply?: boolean }>,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  let plan
-  if (options.apply === true) {
-    plan = await app.queue.migrateTerminalAssociations()
-  } else {
-    await app.refresh()
-    plan = app.queue.terminalAssociationPlan()
-  }
-  const mode = options.apply === true ? "apply" : "dry-run"
-  const rows = plan.rows.map((row) =>
-    row.status === "ready" ? row : { ...row, refusal: { ...row.refusal, ...actionableFailure(row.refusal) } },
-  )
-  const human =
-    rows.length === 0
-      ? `No unprojectable legacy PR terminals; ${mode} appended ${plan.summary.appended}.`
-      : [
-          ...rows.map((row) =>
-            row.status === "ready"
-              ? `READY ${row.terminal.pr} revision ${row.terminal.revision}@${row.terminal.headSha} -> ${row.association.run} (${row.terminal.event})`
-              : `BLOCKED ${row.terminal.pr} revision ${row.terminal.revision}\n${formatActionableFailure(row.refusal)}`,
-          ),
-          `${mode}: ${plan.summary.ready} ready, ${plan.summary.refused} blocked, ${plan.summary.appended} appended`,
-        ].join("\n")
-  await printResult(io, jsonEnabled(options), { command: "migrate.terminal-associations", mode, ...plan, rows }, human)
-  return plan.summary.refused === 0 ? 0 : 1
-}
-
 async function resumeQueue(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
   const target = await resolvedQueueTarget(selectedBase(stateOf(app), base ?? "main"), io)
   await app.queue.resume(target.base)
@@ -12442,12 +12411,6 @@ function buildProgram(
 
   const migrate = program.command("migrate").description("run explicit journal compatibility migrations")
   migrate.helpCommand(false)
-  migrate
-    .command("terminal-associations")
-    .description("prove and append legacy rejected-change Queue run associations")
-    .option("--apply", "append every uniquely proven association")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await migrateTerminalAssociations(installed(), options, io)))
 
   program
     .command("check <name...>")

@@ -308,6 +308,17 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // deployment really is sitting on it — a predecessor is whatever the journal
   // stores, not whatever merged on main.
   "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
+  // The PRODUCTION composition's identity immediately before the
+  // terminal-associations back-fill cut (5e cut 1) removed the
+  // pr/terminal-associated event and the queues.terminalAssociations state
+  // container. Measured from the production journal itself —
+  // journal_snapshot.checkpoint_identity at cursor 90900, read-only copy
+  // taken 2026-08-25 18:05 — never a harness value (the PR1305 / R2732
+  // lesson above). That checkpoint's terminalAssociations container is
+  // empty ({} pending, {} applied) and the history holds zero
+  // pr/terminal-associated and zero pr/rejected events, so the migrate
+  // callback below only has to drop the dead key.
+  "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -2042,10 +2053,17 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // library cannot assume its host ran this migration.
         const { defaultSteps: _retiredStepPlan, ...queuesWithoutStoredPlan } =
           compacted.queues as typeof compacted.queues & Readonly<{ defaultSteps?: unknown }>
+        // The terminal-associations back-fill cut (5e cut 1) dropped
+        // `queues.terminalAssociations` from the state contract entirely — no
+        // feature owns the key anymore, so compact would pass a stale (always
+        // empty in production) container through forever. Drop it here,
+        // explicitly, once, exactly like `intents` above.
+        const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
+          queuesWithoutStoredPlan as typeof queuesWithoutStoredPlan & Readonly<{ terminalAssociations?: unknown }>
         return {
           ...withoutDeadIntents,
           queues: {
-            ...queuesWithoutStoredPlan,
+            ...queuesWithoutBackfill,
             // Construction policy is not a journal fact. A retained checkpoint
             // keeps historical Run widths, but future candidates must use the
             // current config/default selected by this process.

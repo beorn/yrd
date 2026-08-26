@@ -10,7 +10,6 @@ import {
   ChangeRemergeProofSchema,
   ChangeRemergeSourceSchema,
   type ChangeDeliveryState,
-  type ChangeTerminalAssociation,
   baseIdentity,
   checkRequest,
   currentChangeRev,
@@ -567,21 +566,6 @@ export type RunAuthority = Readonly<{
   }>
 }>
 
-export type QueueUnassociatedTerminal = Readonly<{
-  event: string
-  at: string
-  pr: string
-  revision: number
-  headSha?: string
-}>
-
-export type QueueTerminalAssociation = ChangeTerminalAssociation
-
-export type QueueTerminalAssociations = Readonly<{
-  pending: Readonly<Record<string, QueueUnassociatedTerminal>>
-  applied: Readonly<Record<string, QueueTerminalAssociation>>
-}>
-
 export type QueueAuthorityState = Readonly<{
   // Same nine values as ChangeDeliveryState (@yrd/bay); imported rather than
   // re-spelled so the two authorities cannot drift apart silently.
@@ -736,7 +720,6 @@ export type QueuesState = Readonly<{
   records: QueueProjectionLookup<QueueRecord>
   index: QueueProjectionIndex
   authority: QueueAuthorityState
-  terminalAssociations: QueueTerminalAssociations
   admissionRefusals: Readonly<Record<PRId, QueueAdmissionRefusal>>
   retention: Readonly<{ terminalOrder: Readonly<Record<RunId, number>> }>
 }>
@@ -1250,7 +1233,6 @@ export const Queues = Object.freeze({
         plans: {},
       },
       authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
-      terminalAssociations: { pending: {}, applied: {} },
       admissionRefusals: {},
       retention: { terminalOrder: {} },
     }

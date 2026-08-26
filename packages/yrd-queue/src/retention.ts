@@ -74,15 +74,11 @@ export function compactQueuesState(
   const terminalOrder = Object.fromEntries(
     Object.entries(queues.retention.terminalOrder).filter(([root]) => retainedRoots.has(root)),
   )
-  const applied = Object.fromEntries(
-    Object.entries(queues.terminalAssociations.applied).filter(([, association]) => keep.has(association.run)),
-  )
   return {
     ...queues,
     records: recordsLookup,
     index,
     authority: { ...queues.authority, claims, runs },
-    terminalAssociations: { ...queues.terminalAssociations, applied },
     retention: { terminalOrder },
   }
 }

@@ -540,7 +540,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // every stored checkpoint and refused any Candidate carrying it with
     // `checkpoint-migration-certificate-missing`, so the declared check could
     // not be adopted at all.
-    expect(first.manifest.targetIdentity).toBe("ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839")
+    // Conscious update 2026-08-25 (5e cut 1): the terminal-associations
+    // back-fill cut removes the pr/terminal-associated event and the
+    // queues.terminalAssociations state container, so the identity moves and
+    // the production predecessor ae0d2084 (measured from the live journal's
+    // stored checkpoint_identity, cursor 90900) gains a retained edge below.
+    expect(first.manifest.targetIdentity).toBe("fe430448d3a1ce0f2af9d118335b8947a75a0e9b40684bedbbb2c77b12ef3744")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
@@ -584,6 +589,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // stores, not whatever merged on main.
     expect(first.manifest.edges).toContainEqual({
       from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
+      to: first.manifest.targetIdentity,
+    })
+    // Production journal stored identity 2026-08-25 (cursor 90900), the
+    // composition immediately before the terminal-associations back-fill cut
+    // (5e cut 1). Its edge is what carries the deployment across that cut.
+    expect(first.manifest.edges).toContainEqual({
+      from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
       to: first.manifest.targetIdentity,
     })
     // 23192: a queue-CONFIG change must NOT move the projection identity.
@@ -3072,6 +3084,12 @@ checks: [{check: {run: "true"}}]
       },
       {
         from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
+        to: attestation.manifest.targetIdentity,
+      },
+      {
+        // Production journal stored identity 2026-08-25 (cursor 90900), the
+        // composition before the terminal-associations back-fill cut (5e cut 1).
+        from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
         to: attestation.manifest.targetIdentity,
       },
       {

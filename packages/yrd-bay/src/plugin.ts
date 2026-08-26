@@ -49,7 +49,6 @@ import {
   ChangeReviewSchema,
   ChangeNeedsAuthorFactSchema,
   ChangeRejectedFactSchema,
-  ChangeTerminalAssociationSchema,
   ProvisionBayInputSchema,
   ProvisionedBaySchema,
   RefreshBayInputSchema,
@@ -1415,7 +1414,6 @@ export function withBays(options: WithBaysOptions) {
         "pr/withdrawn": journalEvent(1, ChangeWithdrawnSchema),
         "pr/needs-author": journalEvent(1, ChangeNeedsAuthorFactSchema),
         "pr/rejected": journalEvent(1, ChangeRejectedFactSchema),
-        "pr/terminal-associated": journalEvent(1, ChangeTerminalAssociationSchema),
         "pr/integrated": journalEvent(2, ChangeIntegratedSchema),
         "pr/already-landed": journalEvent(1, ChangeAlreadyMergedSchema),
         "pr/canceled": journalEvent(1, ChangeCanceledSchema),
@@ -3236,12 +3234,6 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ...(changed.detail === undefined ? {} : { detail: changed.detail }),
       }
       return patchPR(pr, "run" in changed ? associateRejectedTerminalRun(rejected, changed, changed.run) : rejected)
-    }
-    case "pr/terminal-associated": {
-      const associated = ChangeTerminalAssociationSchema.parse(data)
-      const pr = current.prs[associated.pr]
-      if (pr === undefined) throw new Error(`yrd: no change '${associated.pr}' for terminal association`)
-      return patchPR(pr, associateRejectedTerminalRun(pr, associated, associated.run))
     }
     case "pr/integrated": {
       const parsed = ChangeIntegratedSchema.safeParse(data)

@@ -1227,7 +1227,6 @@ lease out.
 yrd issue [--json]
 yrd issue view <issue> [--json]
 yrd issue ensure <issue> [--json]
-yrd migrate terminal-associations [--apply] [--json]
 yrd pr regression <pr> --run <run> --detected-at <timestamp>
   --severity <level> --evidence <ref> --implementation-run <ref>
   --review <ref> --repair-pr <pr> --repair-run <run> [--json]
@@ -1285,16 +1284,6 @@ The human `yrd issue view <issue>` surface projects those same typed facts: it
 prints exact PR revision/head, Queue runs, canonical projected status, landing
 or bounce, and the original/repair provenance of every recorded regression.
 Bare `yrd issue` keeps the compact multi-issue table.
-
-`yrd migrate terminal-associations` is the explicit compatibility cutover for
-legacy rejected-PR events that predate the typed Queue run field. Its default
-dry-run lists every unassociated terminal, either with one revision/head-bound
-failed-run proof or with a typed refusal such as missing, chronology-invalid,
-or ambiguous candidates. `--apply` appends one `pr/terminal-associated` event
-for each uniquely proven row and leaves every refused row untouched. It never
-rewrites committed journal facts, fabricates a run, or weakens new
-`pr/rejected` events; repeating
-`--apply` after the proven rows land appends nothing.
 
 `pr regression` records a completed repair without rewriting either integration.
 It accepts only the exact original and repair Queue runs named by their terminal

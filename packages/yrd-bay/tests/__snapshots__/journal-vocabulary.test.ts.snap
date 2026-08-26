@@ -338,17 +338,6 @@ exports[`bay journal vocabulary > pins every bay event's fields to the reader ve
     },
     "reader": 1,
   },
-  "pr/terminal-associated": {
-    "fields": {
-      "evidence": 1,
-      "headSha": 1,
-      "pr": 1,
-      "provenance": 1,
-      "revision": 1,
-      "run": 1,
-    },
-    "reader": 1,
-  },
   "pr/withdrawn": {
     "fields": {
       "headSha": 1,

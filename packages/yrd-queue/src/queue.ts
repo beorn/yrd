@@ -6,7 +6,6 @@ import {
   ChangeIntegratedSchema,
   PRIdSchema,
   ChangeNeedsAuthorFactSchema,
-  ChangeTerminalAssociationSchema,
   ChangeCheckabilityConflict,
   baseIdentity,
   checkRequest,
@@ -111,10 +110,8 @@ import {
   type RunAuthority,
   type RunId,
   type QueueSummary,
-  type QueueTerminalAssociation,
   type QueuesState,
   type QueueStep,
-  type QueueUnassociatedTerminal,
   type StepName,
   DeclaredStepPlanSchema,
   type DeclaredStepPlan,
@@ -591,20 +588,6 @@ const QueueRejectedTerminalFactSchema = z.object({
   headSha: GitShaSchema.optional(),
   run: RunIdSchema.optional(),
 })
-const AssociateTerminalsArgsSchema = z
-  .object({ associations: z.array(ChangeTerminalAssociationSchema) })
-  .strict()
-  .superRefine(({ associations }, context) => {
-    const seen = new Set<string>()
-    for (const [index, association] of associations.entries()) {
-      if (seen.has(association.evidence.terminalEvent)) {
-        context.addIssue({ code: "custom", message: "duplicate terminal event", path: ["associations", index] })
-      }
-      seen.add(association.evidence.terminalEvent)
-    }
-  })
-type AssociateTerminalsArgs = Readonly<z.infer<typeof AssociateTerminalsArgsSchema>>
-
 export type StepExecution<Shape extends ChangeShape = ChangeShape> = Readonly<{
   run: RunId
   step: string
@@ -841,62 +824,10 @@ export type QueueCommands = Readonly<{
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     quiesceLegacyRun: CommandHandler<QuiesceLegacyRunArgs, RuntimeState>
     settleOrphanedRun: CommandHandler<SettleOrphanedRunArgs, RuntimeState>
-    associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
     admissionRefused: CommandHandler<AdmissionRefusedArgs, RuntimeState>
     settleAdmissionRefusal: CommandHandler<SettleAdmissionRefusalArgs, RuntimeState>
     reconcileMerge: CommandHandler<z.infer<typeof ChangeIntegratedSchema>, RuntimeState>
   }>
-}>
-
-export type TerminalAssociationCandidate = Readonly<{
-  run: RunId
-  status: Run["status"]
-  conclusion?: RunConclusion
-  startedAt: string
-  finishedAt?: string
-  eligible: boolean
-  error?: JobError
-}>
-
-export type TerminalAssociationTerminal = Readonly<{
-  event: string
-  at: string
-  pr: string
-  revision: number
-  headSha?: string
-}>
-
-export type TerminalAssociationReady = Readonly<{
-  status: "ready"
-  terminal: TerminalAssociationTerminal & Readonly<{ headSha: string }>
-  association: QueueTerminalAssociation
-  proof: Readonly<{ candidates: readonly TerminalAssociationCandidate[] }>
-}>
-
-export type TerminalAssociationRefused = Readonly<{
-  status: "refused"
-  terminal: TerminalAssociationTerminal
-  refusal: Readonly<{
-    code:
-      | "terminal-pr-missing"
-      | "terminal-revision-missing"
-      | "terminal-revision-ambiguous"
-      | "terminal-state-mismatch"
-      | "terminal-run-missing"
-      | "terminal-run-not-failed"
-      | "terminal-run-chronology"
-      | "terminal-run-ambiguous"
-    message: string
-  }>
-  candidates: readonly TerminalAssociationCandidate[]
-}>
-
-export type TerminalAssociationRow = TerminalAssociationReady | TerminalAssociationRefused
-
-export type TerminalAssociationPlan = Readonly<{
-  provenance: "migration/21091"
-  rows: readonly TerminalAssociationRow[]
-  summary: Readonly<{ unprojectable: number; ready: number; refused: number; appended: number }>
 }>
 
 export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
@@ -940,8 +871,6 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   /** Live PR ids in the exact admission order used by a selectorless drain. */
   admissionOrder(): readonly string[]
   checks(selectors?: readonly string[]): readonly ChangeCheckRecord[]
-  terminalAssociationPlan(): TerminalAssociationPlan
-  migrateTerminalAssociations(): Promise<TerminalAssociationPlan>
   quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsResult>
   /** Journal a preparation refusal that happened outside Queue's own admission
    * dispatcher, so the same durable wedge oracle sees every compose robot. */
@@ -1114,7 +1043,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
               quiesceLegacyRun: (args) => yrd.dispatch(commands.queue.quiesceLegacyRun, args),
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
-              associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
               reconcileMerge: (args) => yrd.dispatch(commands.queue.reconcileMerge, args),
@@ -1168,184 +1096,12 @@ type QueueActions = Readonly<{
   cancelRun(args: CancelRunArgs): Promise<CommandResult>
   quiesceLegacyRun(args: QuiesceLegacyRunArgs): Promise<CommandResult>
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
-  associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
 }>
-
-function terminalIdentity(
-  terminal: DeepReadonly<QueueUnassociatedTerminal>,
-  headSha?: string,
-): TerminalAssociationTerminal {
-  const resolvedHeadSha = headSha ?? terminal.headSha
-  return {
-    event: terminal.event,
-    at: terminal.at,
-    pr: terminal.pr,
-    revision: terminal.revision,
-    ...(resolvedHeadSha === undefined ? {} : { headSha: resolvedHeadSha }),
-  }
-}
-
-function refusedTerminalAssociation(
-  terminal: DeepReadonly<QueueUnassociatedTerminal>,
-  code: TerminalAssociationRefused["refusal"]["code"],
-  message: string,
-  candidates: readonly TerminalAssociationCandidate[] = [],
-  headSha?: string,
-): TerminalAssociationRefused {
-  return {
-    status: "refused",
-    terminal: terminalIdentity(terminal, headSha),
-    refusal: { code, message },
-    candidates,
-  }
-}
-
-function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0): TerminalAssociationPlan {
-  const rows = Object.values(state.queues.terminalAssociations.pending)
-    .toSorted((left, right) => left.at.localeCompare(right.at) || left.event.localeCompare(right.event))
-    .map((terminal): TerminalAssociationRow => {
-      const pr = state.bays.prs[terminal.pr]
-      if (pr === undefined) {
-        return refusedTerminalAssociation(
-          terminal,
-          "terminal-pr-missing",
-          `yrd: legacy terminal '${terminal.event}' names missing change '${terminal.pr}'`,
-        )
-      }
-      const revisions = pr.revs.filter(
-        (revision) =>
-          revision.n === terminal.revision && (terminal.headSha === undefined || revision.head === terminal.headSha),
-      )
-      if (revisions.length === 0) {
-        return refusedTerminalAssociation(
-          terminal,
-          "terminal-revision-missing",
-          `yrd: legacy terminal '${terminal.event}' has no change '${terminal.pr}' revision ${terminal.revision}`,
-        )
-      }
-      if (revisions.length !== 1) {
-        return refusedTerminalAssociation(
-          terminal,
-          "terminal-revision-ambiguous",
-          `yrd: legacy terminal '${terminal.event}' matches ${revisions.length} revisions of change '${terminal.pr}'`,
-        )
-      }
-      const revision = revisions[0]
-      if (revision === undefined) throw new Error("yrd: terminal revision selection lost its only revision")
-      if (revision.terminal?.kind !== "rejected" || revision.terminal.at !== terminal.at) {
-        return refusedTerminalAssociation(
-          terminal,
-          "terminal-state-mismatch",
-          `yrd: legacy terminal '${terminal.event}' is not the projected rejection for ${terminal.pr} revision ${terminal.revision}@${revision.head}`,
-          [],
-          revision.head,
-        )
-      }
-      const runs = Queues.values(state.queues)
-        .filter((record) =>
-          record.prs.some(
-            (candidate) =>
-              candidate.id === terminal.pr &&
-              candidate.revision === terminal.revision &&
-              candidate.headSha === revision.head,
-          ),
-        )
-        .map((record) => materializeRun(record, state.jobs))
-        .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt) || compareNatural(left.id, right.id))
-      const candidates = runs.map(
-        (run): TerminalAssociationCandidate => ({
-          run: run.id,
-          status: run.status,
-          ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
-          startedAt: run.startedAt,
-          ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
-          eligible:
-            Queues.failed(run) &&
-            run.finishedAt !== undefined &&
-            run.startedAt <= run.finishedAt &&
-            run.finishedAt <= terminal.at,
-          ...(run.error === undefined ? {} : { error: { ...run.error } }),
-        }),
-      )
-      const eligible = candidates.filter((candidate) => candidate.eligible)
-      if (eligible.length === 0) {
-        const failed = candidates.filter(({ status, conclusion }) => status === "completed" && conclusion === "failure")
-        const code =
-          candidates.length === 0
-            ? "terminal-run-missing"
-            : failed.length === 0
-              ? "terminal-run-not-failed"
-              : "terminal-run-chronology"
-        const detail =
-          code === "terminal-run-missing"
-            ? "no matching Queue run exists"
-            : code === "terminal-run-not-failed"
-              ? `matching Queue runs are not failed: ${candidates.map(({ run, status }) => `${run}=${status}`).join(", ")}`
-              : `failed Queue run chronology does not end before the terminal: ${failed
-                  .map(({ run, startedAt, finishedAt }) => `${run}=${startedAt}..${finishedAt ?? "unterminated"}`)
-                  .join(", ")}`
-        return refusedTerminalAssociation(
-          terminal,
-          code,
-          `yrd: legacy terminal '${terminal.event}' cannot prove one failed Queue run for ${terminal.pr} revision ${terminal.revision}@${revision.head}: ${detail}`,
-          candidates,
-          revision.head,
-        )
-      }
-      if (eligible.length !== 1) {
-        return refusedTerminalAssociation(
-          terminal,
-          "terminal-run-ambiguous",
-          `yrd: legacy terminal '${terminal.event}' has ${eligible.length} failed Queue runs for ${terminal.pr} revision ${terminal.revision}@${revision.head}: ${eligible.map(({ run }) => run).join(", ")}`,
-          candidates,
-          revision.head,
-        )
-      }
-      const selected = eligible[0]
-      if (selected === undefined) throw new Error("yrd: terminal run selection lost its only run")
-      const association: QueueTerminalAssociation = {
-        pr: terminal.pr,
-        revision: terminal.revision,
-        headSha: revision.head,
-        run: selected.run,
-        provenance: "migration/21091",
-        evidence: { terminalEvent: terminal.event, run: selected.run },
-      }
-      return {
-        status: "ready",
-        terminal: { ...terminalIdentity(terminal, revision.head), headSha: revision.head },
-        association,
-        proof: { candidates },
-      }
-    })
-  const ready = rows.filter(({ status }) => status === "ready").length
-  const refused = rows.length - ready
-  return {
-    provenance: "migration/21091",
-    rows,
-    summary: { unprojectable: rows.length, ready, refused, appended },
-  }
-}
-
-function sameTerminalAssociation(
-  left: DeepReadonly<QueueTerminalAssociation>,
-  right: DeepReadonly<QueueTerminalAssociation>,
-): boolean {
-  return (
-    left.pr === right.pr &&
-    left.revision === right.revision &&
-    left.headSha === right.headSha &&
-    left.run === right.run &&
-    left.provenance === right.provenance &&
-    left.evidence.terminalEvent === right.evidence.terminalEvent &&
-    left.evidence.run === right.evidence.run
-  )
-}
 
 function createQueue<Shape extends ChangeShape>(
   state: ReadSignal<DeepReadonly<QueuesState>>,
@@ -3216,16 +2972,6 @@ function createQueue<Shape extends ChangeShape>(
             })
       return prs.flatMap((pr) => projectChangeChecks(snapshot, pr, steps))
     },
-    terminalAssociationPlan: () => terminalAssociationPlan(runtime()),
-    async migrateTerminalAssociations() {
-      await actions.refresh()
-      const plan = terminalAssociationPlan(runtime())
-      const associations = plan.rows.flatMap((row) => (row.status === "ready" ? [row.association] : []))
-      if (associations.length === 0) return plan
-      const result = await actions.associateTerminals({ associations })
-      const appended = result.events.filter(({ name }) => name === "pr/terminal-associated").length
-      return { ...plan, summary: { ...plan.summary, appended } }
-    },
     async quiesceLegacyRoots(options) {
       await actions.refresh()
       const now = Date.parse(options.now)
@@ -3902,54 +3648,6 @@ function createQueueCommands(
     },
   })
 
-  const associateTerminals = command({
-    title: "Associate legacy PR terminals with Queue runs",
-    params: AssociateTerminalsArgsSchema,
-    apply(state: DeepReadonly<RuntimeState>, args: AssociateTerminalsArgs) {
-      const plan = terminalAssociationPlan(state)
-      const ready = new Map(
-        plan.rows.flatMap((row) =>
-          row.status === "ready" ? [[row.association.evidence.terminalEvent, row] as const] : [],
-        ),
-      )
-      const events: EventDraft[] = []
-      for (const association of args.associations) {
-        const terminalEvent = association.evidence.terminalEvent
-        const prior = state.queues.terminalAssociations.applied[terminalEvent]
-        if (prior !== undefined) {
-          if (!sameTerminalAssociation(prior, association)) {
-            raiseFailure(
-              "refusal",
-              "terminal-association-conflict",
-              `yrd: legacy terminal '${terminalEvent}' is already associated with Queue run '${prior.run}'`,
-            )
-          }
-          continue
-        }
-        const row = ready.get(terminalEvent)
-        if (row === undefined) {
-          const refused = plan.rows.find((candidate) => candidate.terminal.event === terminalEvent)
-          raiseFailure(
-            "refusal",
-            refused?.status === "refused" ? refused.refusal.code : "terminal-association-unproven",
-            refused?.status === "refused"
-              ? refused.refusal.message
-              : `yrd: legacy terminal '${terminalEvent}' has no unassociated proof row`,
-          )
-        }
-        if (!sameTerminalAssociation(row.association, association)) {
-          raiseFailure(
-            "refusal",
-            "terminal-association-proof-mismatch",
-            `yrd: requested association for legacy terminal '${terminalEvent}' does not match its unique Queue proof`,
-          )
-        }
-        events.push(event("pr/terminal-associated", association))
-      }
-      return { events }
-    },
-  })
-
   const cancelRun = command({
     title: "Cancel queue run",
     visibility: "public",
@@ -4156,7 +3854,6 @@ function createQueueCommands(
       cancelRun,
       quiesceLegacyRun,
       settleOrphanedRun,
-      associateTerminals,
       admissionRefused,
       settleAdmissionRefusal,
       reconcileMerge,
@@ -4725,60 +4422,10 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     if (!terminalAuthorityMatches(state.queues.authority, rejected, applied.name, typeof rejected.run === "string")) {
       return state
     }
-    const terminalAssociations =
-      rejected.run !== undefined
-        ? state.queues.terminalAssociations
-        : {
-            ...state.queues.terminalAssociations,
-            pending: {
-              ...state.queues.terminalAssociations.pending,
-              [applied.id]: {
-                event: applied.id,
-                at: applied.ts,
-                pr: rejected.pr,
-                revision: rejected.revision,
-                ...(rejected.headSha === undefined ? {} : { headSha: rejected.headSha }),
-              },
-            },
-          }
     return {
       queues: {
         ...state.queues,
         authority: invalidateChangeAuthority(state.queues.authority, rejected.pr, "rejected"),
-        terminalAssociations,
-      },
-    }
-  }
-  if (applied.name === "pr/terminal-associated") {
-    const associated = ChangeTerminalAssociationSchema.parse(applied.data)
-    const terminalEvent = associated.evidence.terminalEvent
-    const prior = state.queues.terminalAssociations.applied[terminalEvent]
-    if (prior !== undefined) {
-      if (!sameTerminalAssociation(prior, associated)) {
-        throw new Error(`yrd: legacy terminal '${terminalEvent}' has conflicting Queue run associations`)
-      }
-      return state
-    }
-    const pending = state.queues.terminalAssociations.pending[terminalEvent]
-    if (pending === undefined) {
-      throw new Error(`yrd: terminal association references unknown legacy event '${terminalEvent}'`)
-    }
-    if (
-      pending.pr !== associated.pr ||
-      pending.revision !== associated.revision ||
-      (pending.headSha !== undefined && pending.headSha !== associated.headSha)
-    ) {
-      throw new Error(`yrd: terminal association does not match legacy event '${terminalEvent}'`)
-    }
-    const remaining = { ...state.queues.terminalAssociations.pending }
-    delete remaining[terminalEvent]
-    return {
-      queues: {
-        ...state.queues,
-        terminalAssociations: {
-          pending: remaining,
-          applied: { ...state.queues.terminalAssociations.applied, [terminalEvent]: associated },
-        },
       },
     }
   }
