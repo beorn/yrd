@@ -1,8 +1,9 @@
 /**
- * @failure Contest status hides held-out evaluator verdicts or evidence, or loses attempt identity when narrow.
+ * @failure Contest status hides held-out evaluator verdicts or evidence, or loses attempt identity when narrow — or the change-status table shows a blocked change's state with no WHY, discarding the eligibility reason message no other human surface carries.
  * @level l1
  * @consumer @yrd/cli contest status
  */
+import type { Change } from "@yrd/bay"
 import type {
   Contest,
   ContestArtifact,
@@ -12,10 +13,11 @@ import type {
   EvaluatorResult,
 } from "@yrd/contest"
 import type { Job } from "@yrd/job"
+import type { ChangeEligibility } from "@yrd/queue"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
-import { ContestStatusView } from "../src/status-view.tsx"
+import { ChangeStatusView, ContestStatusView } from "../src/status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const AT = "2026-07-09T12:01:00.000Z"
@@ -179,5 +181,88 @@ describe("ContestStatusView held-out evaluations", () => {
 
     expect(rows.filter((row) => /A1\s+passing/u.test(row))).toHaveLength(3)
     expect(rows.filter((row) => /A2\s+waiting/u.test(row))).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ChangeStatusView — the human table `pr submit`/`pr ready` results render.
+
+const HEAD_SHA = "1".repeat(40)
+
+function change(id: string, needsAuthorDetail?: string): Change {
+  return {
+    id,
+    name: `Change ${id}`,
+    branch: `topic/${id.toLowerCase()}`,
+    base: "main",
+    state: "open",
+    merged: false,
+    ...(needsAuthorDetail === undefined
+      ? {}
+      : {
+          needsAuthor: {
+            at: AT,
+            run: "R1",
+            step: "check",
+            receipt: { code: "composition-retired", message: needsAuthorDetail },
+            detail: needsAuthorDetail,
+          },
+        }),
+    revs: [
+      {
+        n: 1,
+        head: HEAD_SHA,
+        base: "main",
+        baseSha: BASE_SHA,
+        pushedAt: AT,
+        submittedAt: AT,
+        submitter: "author@example.test",
+      },
+    ],
+    reviews: [],
+    comments: [],
+    checkRequests: [],
+  }
+}
+
+function eligibility(pr: string, reason?: ChangeEligibility["reason"]): ChangeEligibility {
+  return {
+    pr,
+    revision: 1,
+    runnable: reason === undefined,
+    ...(reason === undefined ? {} : { reason }),
+    review: { required: false, approved: false, stale: false },
+    checks: { status: "not-requested" },
+  }
+}
+
+describe("ChangeStatusView eligibility reasons", () => {
+  it("renders a needs-author change's eligibility reason message", async () => {
+    const detail = "composition retired; resubmit the root change"
+    const output = await renderString(
+      createElement(ChangeStatusView, {
+        prs: [change("PR1", detail)],
+        eligibilities: [
+          eligibility("PR1", { code: "needs-author", message: detail, result: { code: "composition-retired", message: detail } }),
+        ],
+      }),
+      { width: 160, height: 100, plain: true },
+    )
+
+    expect(output).toContain("needs-author")
+    // The WHY the author must act on — without it the table names a state and
+    // hides the reason (the message reaches JSON but no human surface).
+    expect(output).toContain(detail)
+  })
+
+  it("keeps rendering without eligibilities exactly as before (no reason column)", async () => {
+    const output = await renderString(createElement(ChangeStatusView, { prs: [change("PR1")] }), {
+      width: 160,
+      height: 100,
+      plain: true,
+    })
+
+    expect(output).toContain("submitted")
+    expect(output).not.toContain("WHY")
   })
 })

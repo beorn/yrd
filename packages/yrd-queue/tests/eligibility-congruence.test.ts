@@ -8,16 +8,28 @@
  * congruence pin that turns the next divergence into a red test instead of an
  * outage: ONE fixture, BOTH surfaces, asserted equal per carrier, with the one
  * legitimate population difference stated rather than hidden.
+ *
+ * The final describe block discharges the UNSHIPPED half of the 22895 ruling
+ * (@i/10-merge-queue/22895): agreeing on the verdict is not enough — every
+ * blocking reason code must also REACH a human with its message. It is
+ * table-driven over the whole `ChangeEligibilityReason["code"]` union with a
+ * compile-time exhaustiveness pin, so a new code that renders nowhere is a red
+ * test (or a type error), not a silent `-` in a WHY column.
  * @level l2
  * @consumer @yrd/queue
  */
+import { createElement } from "react"
+import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { changeDeliveryState, createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { changeDeliveryState, createBayJobDefs, withBays, type BayWorkspace, type Change } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withQueue, withStep, type StepExecution } from "@yrd/queue"
+import { withQueue, withStep, type ChangeEligibility, type ChangeEligibilityReason, type StepExecution } from "@yrd/queue"
+// The human surface under test lives in @yrd/cli; tests may reach across the
+// package boundary the same way refusal-code-registry.test.ts already does.
+import { ChangeStatusView } from "../../yrd-cli/src/status-view.tsx"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -302,4 +314,73 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
     const direct = await app.dispatch(app.commands.queue.run, {})
     expect(direct.value).toMatchObject({ kind: "no-submitted-prs", population: {} })
   })
+})
+
+describe("eligibility congruence — every blocking reason reaches a human (22895, unshipped half)", () => {
+  /** Every member of `ChangeEligibilityReason["code"]`. The `satisfies` pins
+   * CODES ⊆ union; `_allCodesCovered` pins union ⊆ CODES, so growing the union
+   * without extending this fence is a compile error, not a silent gap. */
+  const CODES = [
+    "draft",
+    "checks-pending",
+    "admission-refused",
+    "required-check-failed",
+    "needs-author",
+    "candidate-conflicting",
+    "review-required",
+    "review-rejected",
+    "queue-paused",
+    "claimed",
+    "checking",
+    "rejected",
+    "terminal",
+  ] as const satisfies readonly ChangeEligibilityReason["code"][]
+  type UncoveredCode = Exclude<ChangeEligibilityReason["code"], (typeof CODES)[number]>
+  const _allCodesCovered: UncoveredCode extends never ? true : never = true
+  void _allCodesCovered
+
+  function viewChange(pr: string): Change {
+    return {
+      id: pr,
+      name: `Change ${pr}`,
+      branch: `topic/${pr.toLowerCase()}`,
+      base: "main",
+      state: "open",
+      merged: false,
+      revs: [
+        {
+          n: 1,
+          head: HEAD,
+          base: "main",
+          baseSha: BASE,
+          pushedAt: "2026-01-01T00:00:00.000Z",
+          submittedAt: "2026-01-01T00:00:00.000Z",
+          submitter: "author@example.test",
+        },
+      ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+    }
+  }
+
+  it.each(CODES.map((code) => ({ code })))(
+    "a change blocked with reason code '$code' renders its message on the change-status surface",
+    async ({ code }) => {
+      const message = `the human explanation for ${code}`
+      const eligibility: ChangeEligibility = {
+        pr: "PR1",
+        revision: 1,
+        runnable: false,
+        reason: { code, message },
+        review: { required: false, approved: false, stale: false },
+        checks: { status: "not-requested" },
+      }
+      const output = await renderString(
+        createElement(ChangeStatusView, { prs: [viewChange("PR1")], eligibilities: [eligibility] }),
+        { width: 200, height: 100, plain: true },
+      )
+      expect(output, `reason code '${code}' must reach a human surface with its message`).toContain(message)
+    },
+  )
 })

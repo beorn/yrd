@@ -3,7 +3,7 @@
 // @consumer @yrd/cli
 
 import { changeDeliveryState, type Change } from "@yrd/bay"
-import type { Run } from "@yrd/queue"
+import type { ChangeEligibility, Run } from "@yrd/queue"
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
@@ -119,7 +119,11 @@ function submittedPr(): Change {
   }
 }
 
-function result(prs: readonly Change[], finished: readonly Run[] = []): QueueStatusResult {
+function result(
+  prs: readonly Change[],
+  finished: readonly Run[] = [],
+  eligibilities?: readonly ChangeEligibility[],
+): QueueStatusResult {
   return {
     base: "main",
     running: [],
@@ -132,11 +136,12 @@ function result(prs: readonly Change[], finished: readonly Run[] = []): QueueSta
         return state === "submitted" || state === "ready"
       })
       .map((pr) => pr.id),
+    ...(eligibilities === undefined ? {} : { eligibilities }),
   }
 }
 
-function project(prs: readonly Change[], finished: readonly Run[] = []) {
-  const results = [result(prs, finished)]
+function project(prs: readonly Change[], finished: readonly Run[] = [], eligibilities?: readonly ChangeEligibility[]) {
+  const results = [result(prs, finished, eligibilities)]
   const options: QueueTimelineProjectionOptions = {
     now: NOW,
     windowMs: QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
@@ -315,6 +320,34 @@ describe("queue timeline non-integrated rows", () => {
     // the editable band: no retained run, no resurfaced row.
     const projection = project([rejectedPr()], [])
     expect(projection.rows.find((row) => row.pr === "PR5")).toBeUndefined()
+  })
+
+  it("renders a pre-run row's blocking-reason message instead of computing and discarding it", async () => {
+    // The projection already folds the eligibility reason into the row (the
+    // detail fell back to `position N` only when no blocker existed) — but the
+    // projection renderer never showed it, so the one human surface that lists
+    // pre-run work named the state and hid the WHY.
+    const message = "needs review approval"
+    const blocked: ChangeEligibility = {
+      pr: "PR3",
+      revision: 1,
+      runnable: false,
+      reason: { code: "review-required", message },
+      review: { required: true, approved: false, stale: false },
+      checks: { status: "passed" },
+    }
+    const projection = project([submittedPr()], [], [blocked])
+    const readyRow = projection.rows.find((row) => row.pr === "PR3")
+    expect(readyRow?.detail).toBe(message)
+    expect(readyRow?.whyMessage).toBe(message)
+
+    const app = createRenderer({ cols: 120, rows: 30 })(createElement(QueueTimelineView, { projection, columns: 120 }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text, "the blocking reason must reach the rendered timeline row").toContain(message)
+    } finally {
+      app.unmount()
+    }
   })
 })
 

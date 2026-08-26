@@ -14,16 +14,24 @@ import { join } from "node:path"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, withBays, type Change } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
-import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
+import {
+  withMerge,
+  withQueue,
+  withStep,
+  type ChangeEligibility,
+  type ChangeShape,
+  type SourceRewrite,
+  type StepExecution,
+} from "@yrd/queue"
 import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { createLogger } from "loggily"
 import { createPruneGitFacts } from "../src/pr-withdraw.ts"
-import { ChangeListView, type ChangeListRow } from "../src/queue-status-view.tsx"
+import { changeListRows, ChangeListView, type ChangeListRow } from "../src/queue-status-view.tsx"
 
 const WIDTH = 120
 const BASE_SHA = "a".repeat(40)
@@ -357,5 +365,66 @@ describe("pr list merge reconciliation (22376)", () => {
     expect((JSON.parse(json.stdout()) as { prs: readonly Readonly<{ status: string }>[] }).prs[0]).toMatchObject({
       status: "submitted",
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// WHY carries its human message on the row alongside the code token.
+
+describe("pr list WHY reason message", () => {
+  function blockedChange(): Change {
+    return {
+      id: "PR9",
+      name: "Blocked change",
+      branch: "topic/blocked",
+      base: "main",
+      state: "open",
+      merged: false,
+      revs: [
+        {
+          n: 1,
+          head: LIVE_HEAD,
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-15T11:00:00.000Z",
+          submittedAt: "2026-07-15T11:00:00.000Z",
+          submitter: "author@example.test",
+        },
+      ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+    }
+  }
+
+  it("the WHY code carries its message on the row, and the code token itself is unchanged", () => {
+    const message = "change 'PR9' review was rejected by @reviewer"
+    const eligibility: ChangeEligibility = {
+      pr: "PR9",
+      revision: 1,
+      runnable: false,
+      reason: { code: "review-rejected", message },
+      review: { required: true, approved: false, stale: false, decision: "reject", by: "@reviewer" },
+      checks: { status: "not-requested" },
+    }
+    const [row] = changeListRows([{ pr: blockedChange(), eligibility }], [], Date.parse("2026-07-15T12:01:00.000Z"))
+
+    // The code token is the WHY column's value — widths depend on it.
+    expect(row?.why).toBe("review-rejected")
+    // The human message rides alongside so a reader of the row model never
+    // has to re-derive it from a second eligibility lookup.
+    expect(row?.whyMessage).toBe(message)
+  })
+
+  it("a runnable row carries no whyMessage", () => {
+    const eligibility: ChangeEligibility = {
+      pr: "PR9",
+      revision: 1,
+      runnable: true,
+      review: { required: false, approved: false, stale: false },
+      checks: { status: "passed" },
+    }
+    const [row] = changeListRows([{ pr: blockedChange(), eligibility }], [], Date.parse("2026-07-15T12:01:00.000Z"))
+    expect(row?.whyMessage).toBeUndefined()
   })
 })
