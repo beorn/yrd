@@ -11575,8 +11575,8 @@ function addAuthoredCarrierWorkflow<
   command.addHelpSection("Authored root branch:", [
     [`$ ${name} pr create <branch>`, "record the authored root branch as a draft change"],
     [
-      `$ ${name} pr recut <PR> --preflight --queue --apply`,
-      "classify from pinned evidence and execute its queue-safe verdict; no composition manifest or manual triage",
+      `$ ${name} pr submit <branch>`,
+      "queue the recorded branch; the queue rebuilds it by merge when the base moves, and resubmitting from the branch tip is the one author-side recovery",
     ],
   ])
 }
