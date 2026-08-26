@@ -59,7 +59,13 @@ function workspace() {
 /** In-memory CLI app. `failingCheckCode` makes the carrier check fail with that
  * code; a code in the queue's needs-author bucket (e.g. `composition-retired`)
  * turns the failed run into a durable `pr/needs-author`. */
-async function createCliApp(options: { journal?: ReturnType<typeof createMemoryJournal<unknown>>; failingCheckCode?: string; idStart?: number } = {}) {
+async function createCliApp(
+  options: {
+    journal?: ReturnType<typeof createMemoryJournal<unknown>>
+    failingCheckCode?: string
+    idStart?: number
+  } = {},
+) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",

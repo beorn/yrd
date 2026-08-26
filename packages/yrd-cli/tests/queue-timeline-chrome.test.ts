@@ -376,7 +376,11 @@ describe("queue timeline chrome 21106", () => {
       },
     }
     const app = createRenderer({ cols: 120, rows: 40 })(
-      createElement(QueueTimelineView, { projection, state: { byId: {}, prs: {}, receipts: {}, submits: {} }, columns: 120 }),
+      createElement(QueueTimelineView, {
+        projection,
+        state: { byId: {}, prs: {}, receipts: {}, submits: {} },
+        columns: 120,
+      }),
     )
     try {
       await app.waitForLayoutStable()

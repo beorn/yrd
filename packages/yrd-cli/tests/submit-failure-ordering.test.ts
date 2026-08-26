@@ -73,7 +73,9 @@ describe("pr submit failure ordering", () => {
     // The check already failed; replaying its entire buffered stdout to fd1
     // (before the exit code was even tested) buries the failure line under
     // check noise on a real terminal. The diagnostic carries check stderr.
-    const noise = output.events.filter((event) => event.stream === "stdout" && event.text.includes("CHECK-STDOUT-NOISE"))
+    const noise = output.events.filter(
+      (event) => event.stream === "stdout" && event.text.includes("CHECK-STDOUT-NOISE"),
+    )
     expect(noise, "a failing check's raw stdout must not be replayed to fd1").toEqual([])
   })
 

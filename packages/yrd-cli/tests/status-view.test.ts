@@ -243,7 +243,11 @@ describe("ChangeStatusView eligibility reasons", () => {
       createElement(ChangeStatusView, {
         prs: [change("PR1", detail)],
         eligibilities: [
-          eligibility("PR1", { code: "needs-author", message: detail, result: { code: "composition-retired", message: detail } }),
+          eligibility("PR1", {
+            code: "needs-author",
+            message: detail,
+            result: { code: "composition-retired", message: detail },
+          }),
         ],
       }),
       { width: 160, height: 100, plain: true },

@@ -267,13 +267,19 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // membership is proven by that glyph-prefixed status word, which a
       // detail-pane `RUN main#N` border can never satisfy.
       await app.press("f")
-      await waitFor(() => app.text.includes("× failed") && !app.text.includes("◉ checking") && !app.text.includes("✓ merged"))
+      await waitFor(
+        () => app.text.includes("× failed") && !app.text.includes("◉ checking") && !app.text.includes("✓ merged"),
+      )
 
       await app.press("a")
-      await waitFor(() => app.text.includes("× failed") && app.text.includes("◉ checking") && app.text.includes("✓ merged"))
+      await waitFor(
+        () => app.text.includes("× failed") && app.text.includes("◉ checking") && app.text.includes("✓ merged"),
+      )
 
       await app.press("d")
-      await waitFor(() => app.text.includes("✓ merged") && !app.text.includes("× failed") && !app.text.includes("◉ checking"))
+      await waitFor(
+        () => app.text.includes("✓ merged") && !app.text.includes("× failed") && !app.text.includes("◉ checking"),
+      )
 
       await app.press("o")
       await waitFor(() => app.text.includes("× rev") && !app.text.includes("✓ merged"))

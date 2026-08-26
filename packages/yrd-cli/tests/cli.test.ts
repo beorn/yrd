@@ -1905,7 +1905,6 @@ describe("runYrd", () => {
     expect(JSON.parse(aliasJson.stdout())).toMatchObject({ command: "pr.list" })
   })
 
-
   it("queues ready's authoritative checks without minting a Run", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ waitingCheck: true, checkedRevisions })
@@ -1924,7 +1923,6 @@ describe("runYrd", () => {
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(app.bays.checksRequested("PR1")).toBe(true)
   })
-
 
   it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
     const app = await createApp({ waitingCheck: true })
@@ -1970,7 +1968,6 @@ describe("runYrd", () => {
     expect(cancel.stderr()).toContain("only a running or waiting run")
   })
 
-
   it("collapseRecomposedSources states a run of unchanged rebuilds and leaves a healthy carrier alone", () => {
     const frozen = "3".repeat(40)
     const other = "4".repeat(40)
@@ -2012,7 +2009,6 @@ describe("runYrd", () => {
     sparse.length = 1
     expect(() => collapseRecomposedSources(sparse)).toThrow("yrd: recomposed source 0 is missing")
   })
-
 
   it("mechanically recuts an admitted certificate across consecutive base advances (R1304/R1307)", async () => {
     const oldHead = "2".repeat(40)
@@ -2487,7 +2483,6 @@ describe("runYrd", () => {
     expect(remerge).toHaveBeenCalledTimes(5)
   })
 
-
   it("re-proves the baseline when freshness mutates the change before refusing it", async () => {
     const nextBase = "b".repeat(40)
     const nextHead = "3".repeat(40)
@@ -2852,7 +2847,6 @@ describe("runYrd", () => {
       { n: 3, head: authoredHead },
     ])
   })
-
 
   it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
     const revision = (
@@ -4299,7 +4293,6 @@ describe("runYrd", () => {
     expect(localChecks).toEqual(["typecheck"])
   })
 
-
   it("tells a bayless author which step is missing instead of that a lookup failed", async () => {
     const app = await createApp()
 
@@ -5296,7 +5289,6 @@ describe("runYrd", () => {
       error: { code: "base-red" },
     })
   })
-
 
   it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
     const app = await createApp()
@@ -12414,7 +12406,6 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     expect(tracked.sleeps).toEqual([])
     expect(run.stdout()).toContain("STATE")
   })
-
 
   it("a change selector is a single pass, not a follow loop", async () => {
     const app = await createApp()

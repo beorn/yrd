@@ -26,7 +26,12 @@ import {
   fixtureStep,
 } from "../dev/queue-timeline-fixtures.ts"
 import { HABITANT_RUNNER_HEARTBEAT_MS, QUEUE_WATCH_CLOCK_INTERVAL_MS } from "../src/run.ts"
-import { uncarriedObservation, queueHealthMarker, QueueTimelineView, RUNNER_VIEW_STALE_MS } from "../src/queue-status-view.tsx"
+import {
+  uncarriedObservation,
+  queueHealthMarker,
+  QueueTimelineView,
+  RUNNER_VIEW_STALE_MS,
+} from "../src/queue-status-view.tsx"
 
 // Matches dev/queue-timeline-fixtures.ts's own NOW — fixtureSnapshot embeds
 // it as `projection.now`, so the fake clock has to agree with it for the
