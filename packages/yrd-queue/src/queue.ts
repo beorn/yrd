@@ -26,12 +26,14 @@ import {
   resolveChange,
   reviewState,
   type BaysState,
+  type BranchUnsubmit,
   type HasBays,
   type Change,
   type ChangeAdmission,
   type ChangeAdmissionRecord,
   type ChangeAdmissionRecordedFact,
   type ChangeAdmissionStep,
+  type IntakeChangeArgs,
 } from "@yrd/bay"
 import {
   command,
@@ -360,8 +362,10 @@ function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submit
       code: "unrecorded-submit",
       message:
         `branch '${branch}' is submitted in git (${submit.sha.slice(0, 12)} for '${submit.base}', ` +
-        `since ${submit.at}) but no PR record carries it, so the queue cannot run it; ` +
-        `until the receiver intakes direct submits (phase 2b), submit it with 'yrd pr submit ${branch}'`,
+        `since ${submit.at}) but no PR record carries it, so the queue cannot run it yet; ` +
+        `the queue mints the record itself at its next compose (phase 2b) — a row that persists means ` +
+        `no runner is composing or the intake was refused (action 'compose-submit-intake-refused' in the ` +
+        `queue log says why); 'yrd pr submit ${branch}' remains the manual path`,
     },
   }
 }
@@ -1041,6 +1045,8 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
+              intakeSubmit: (args) => yrd.bays.intake(args),
+              recordBranchUnsubmit: (args) => yrd.bays.recordBranchUnsubmit(args),
             },
             steps,
             options.defaultBase,
@@ -1092,6 +1098,10 @@ type QueueActions = Readonly<{
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
+  /** `bay.intake` — how the compose sweep mints a record for a ref-only submit (phase 2b). */
+  intakeSubmit(args: IntakeChangeArgs): Promise<CommandResult>
+  /** Retires a projected submit-ref fact once an intaken record has taken over its approval. */
+  recordBranchUnsubmit(args: BranchUnsubmit): Promise<CommandResult>
 }>
 
 function createQueue<Shape extends ChangeShape>(
@@ -1246,6 +1256,105 @@ function createQueue<Shape extends ChangeShape>(
       if (result.events.length > 0) cleaned.push(id)
     }
     return cleaned
+  }
+
+  /**
+   * Branch-is-change phase 2b (@i/10-merge-queue/23005): the bridge that closes
+   * `unrecordedSubmit`'s refusal. Every live projected submit ref whose branch
+   * has NO change record — in any state — is intaken here, through the same
+   * `bay.intake` command a `refs/for/` push drains into: one dispatch mints
+   * `pr/pushed` + `pr/submitted` + `pr/checks-requested` under the durable
+   * PR-number mint, and the record — never the bare ref — is what selection
+   * runs. The author never writes the authorial store; the record is a
+   * queue-minted artifact, submitter-stamped `yrd/queue` so forensics can tell
+   * it from an authored submission.
+   *
+   * The reopen-vs-mint rule, stated (the refs/for PR2081 lesson): this sweep
+   * acts only on branches with no record AT ALL — `unrecordedSubmits` filters
+   * out a record in ANY state — so the sweep always MINTS a fresh identity and
+   * never reopens one. Reopening a withdrawn/canceled identity stays the
+   * author's own `pr submit` act (D2), and integrated identities stay frozen
+   * (Q1). If a record appears between this read and the dispatch,
+   * `bay.intake`'s own branch-path semantics govern deterministically: a live
+   * record absorbs an identical payload as a zero-event no-op (reported below,
+   * never superseded here), and a terminal record never reopens.
+   *
+   * After a successful mint the projected submit fact is retired with
+   * `branch/unsubmitted` reason `superseded` — the reserved 2b word: the
+   * intaken record has taken over the approval. The git ref itself stands
+   * untouched (only the receiver writes refs). A crash between the two
+   * dispatches leaves record + fact standing, which is the ordinary
+   * both-sources shape: the record wins everywhere and nothing re-intakes the
+   * branch.
+   *
+   * Failure policy, loud by construction: a DELIBERATE refusal or
+   * infrastructure fact (one `bay.intake` raised under its own code) is
+   * attributable to THIS submit — warn (`compose-submit-intake-refused`),
+   * keep sweeping, and the row survives into the considered rows and
+   * `queue audit`, so the refusal cannot go dark. Everything else PROPAGATES
+   * and fails the compose — `fact === undefined`, and equally the dispatch
+   * layer's `command-refused` wrapper, which is how an UNTYPED apply throw
+   * arrives here: the durable mint's store failure above all, and the
+   * duplicate-payload collision, both of which need a human, not a retry
+   * loop. `mintChangeId` commits the high-water before an id escapes, so a
+   * failed mint has minted nothing and the next compose retries from scratch.
+   */
+  const intakeUnrecordedSubmits = async (): Promise<void> => {
+    for (const submit of unrecordedSubmits(runtime().bays)) {
+      let result: CommandResult
+      try {
+        result = await actions.intakeSubmit({
+          branch: submit.branch,
+          headSha: submit.sha,
+          base: submit.base,
+          submit: true,
+          submitter: "yrd/queue",
+        })
+      } catch (error) {
+        const fact = failureFact(error)
+        if (
+          fact === undefined ||
+          fact.code === "command-refused" ||
+          (fact.kind !== "refusal" && fact.kind !== "infrastructure")
+        ) {
+          throw error
+        }
+        log.warn?.("queue compose could not intake a submitted branch; its refusal row stands", {
+          action: "compose-submit-intake-refused",
+          branch: submit.branch,
+          sha: submit.sha,
+          base: submit.base,
+          code: fact.code,
+          kind: fact.kind,
+          reason: fact.message,
+        })
+        continue
+      }
+      if (result.events.length === 0) {
+        // A record for this branch appeared between the projection read and
+        // the dispatch (another process's compose, or the author's own
+        // submission). That writer owns the takeover; recording `superseded`
+        // here would claim an approval this dispatch never absorbed.
+        log.info?.("queue compose found a submitted branch already recorded; nothing to intake", {
+          action: "compose-submit-intake-noop",
+          branch: submit.branch,
+          sha: submit.sha,
+          base: submit.base,
+        })
+        continue
+      }
+      const minted = result.events.find((event) => event.name === "pr/pushed")?.data as
+        | Readonly<{ pr?: string }>
+        | undefined
+      await actions.recordBranchUnsubmit({ branch: submit.branch, reason: "superseded" })
+      log.info?.("queue compose minted a change for a branch submitted only in git", {
+        action: "compose-submit-intaken",
+        branch: submit.branch,
+        sha: submit.sha,
+        base: submit.base,
+        ...(minted?.pr === undefined ? {} : { pr: minted.pr }),
+      })
+    }
   }
 
   const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
@@ -2249,6 +2358,12 @@ function createQueue<Shape extends ChangeShape>(
           await actions.refresh()
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
+          // Ref-only approvals become records BEFORE any snapshot feeds
+          // selection, so the same compose that would have refused them runs
+          // them (phase 2b). Unconditional on purpose: the encounter is the
+          // projection, not the selector, so an explicit run mints the same
+          // records a selectorless drain would — it just does not select them.
+          await intakeUnrecordedSubmits()
           // The intent lane that used to interleave here with a head-of-line
           // release (keyed by submodule) is retired along with the rest of the
           // intent rail — there is no longer a second lane of queue members to
