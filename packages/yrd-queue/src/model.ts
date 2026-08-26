@@ -9,7 +9,6 @@ import {
   ChangeRemergeCertificateSchema,
   ChangeRemergeProofSchema,
   ChangeRemergeSourceSchema,
-  type ChangeDeliveryState,
   baseIdentity,
   checkRequest,
   currentChangeRev,
@@ -570,9 +569,12 @@ export type RunAuthority = Readonly<{
 }>
 
 export type QueueAuthorityState = Readonly<{
-  // Same nine values as ChangeDeliveryState (@yrd/bay); imported rather than
-  // re-spelled so the two authorities cannot drift apart silently.
-  statuses: Readonly<Record<string, ChangeDeliveryState>>
+  // Deliberately NO per-change delivery-status copy here. ChangeDeliveryState
+  // is "derived, never stored" (@yrd/bay model.ts) and the queue used to store
+  // it anyway, as `statuses` — the second state copy 22991 phase 2 deletes.
+  // Delivery state derives from the change record (`changeDeliveryState`) and
+  // the live submit facts (`bays.submits`) at the moment it is read; the
+  // authority level a member runs under derives from the token facts below.
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
@@ -1235,7 +1237,7 @@ export const Queues = Object.freeze({
         rootsByMember: {},
         plans: {},
       },
-      authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
+      authority: { current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       admissionRefusals: {},
       retention: { terminalOrder: {} },
     }

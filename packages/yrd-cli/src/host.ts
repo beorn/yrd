@@ -329,6 +329,15 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // pr/terminal-associated and zero pr/rejected events, so the migrate
   // callback below only has to drop the dead key.
   "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
+  // The PRODUCTION composition's identity immediately before 22991 phase 2's
+  // first store-deletion door removed the queues.authority.statuses copy of
+  // ChangeDeliveryState from initialState. Measured from the production
+  // journal itself — journal_snapshot.checkpoint_identity at cursor 92592,
+  // read-only 2026-08-26 — never a harness value (the PR1305 / R2732 lesson
+  // above). Pre-flight parity for the drop: all 2084 stored statuses in that
+  // checkpoint equal changeDeliveryState of their change record exactly, so
+  // the forward callback below can drop the key with zero information loss.
+  "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -2106,11 +2115,21 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         )
         const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
           state.queues as typeof state.queues & Readonly<{ terminalAssociations?: unknown }>
+        // 22991 phase 2, first store-deletion door: the queue's stored copy of
+        // per-change delivery state (`authority.statuses`) is deleted from the
+        // contract — ChangeDeliveryState is "derived, never stored" and the
+        // copy was the drift surface. Every path into the current identity
+        // takes this edge last, so this single drop covers every retained
+        // predecessor; parity was proven against the live checkpoint before
+        // the cut (2084/2084 stored labels equal the record derivation).
+        const { statuses: _retiredStatusCopy, ...authorityWithoutStatusCopy } =
+          queuesWithoutBackfill.authority as typeof queuesWithoutBackfill.authority &
+            Readonly<{ statuses?: unknown }>
         const { intents: _deadIntents, ...withoutDeadIntents } = state as typeof state & Readonly<{ intents?: unknown }>
         return {
           ...withoutDeadIntents,
           bays: { ...withoutDeadIntents.bays, prs: prsWithoutRegressions },
-          queues: queuesWithoutBackfill,
+          queues: { ...queuesWithoutBackfill, authority: authorityWithoutStatusCopy },
         }
       },
     },

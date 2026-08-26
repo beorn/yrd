@@ -4042,7 +4042,14 @@ function authorityRequirement(
   if (alreadyIntegrated) return undefined
   if (availableAuthorityToken(authority.checks[pr.id], pr)) return "checks"
   if (availableAuthorityToken(authority.submits[pr.id], pr)) return "submit"
-  return authority.statuses[pr.id] === "pushed" ? "checks" : "submit"
+  // No token is available: the authority LEVEL still decides which kind this
+  // member must hold. A submit fact for this exact revision — consumed or not —
+  // means the member operates under submit-level authority (submit covers
+  // checks); without one it is a draft revision and can only ever hold
+  // checks-level authority. Derived from the token facts alone: the stored
+  // per-change status copy this used to read is deleted (22991 phase 2), and
+  // a projection-path caller has no cross-slice record to consult.
+  return sameAuthorityToken(authority.submits[pr.id], pr) ? "submit" : "checks"
 }
 
 function sameAuthorityToken(
@@ -4223,16 +4230,12 @@ function settleRunClaim(authority: DeepReadonly<QueueAuthorityState>, run: RunId
   return { ...authority, claims }
 }
 
-function invalidateChangeAuthority(
-  authority: DeepReadonly<QueueAuthorityState>,
-  pr: string,
-  status: DeepReadonly<QueueAuthorityState>["statuses"][string],
-): QueueAuthorityState {
+function invalidateChangeAuthority(authority: DeepReadonly<QueueAuthorityState>, pr: string): QueueAuthorityState {
   const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
   const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
   delete submits[pr]
   delete checks[pr]
-  return { ...authority, statuses: { ...authority.statuses, [pr]: status }, submits, checks }
+  return { ...authority, submits, checks }
 }
 
 function currentAuthorityMatches(
@@ -4421,7 +4424,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       applied.name === "pr/pushed"
         ? QueueAuthorityTokenFactSchema.parse(applied.data)
         : ((fact) => ({ pr: fact.pr, ...fact.successor }))(QueueRemergeAuthorityFactSchema.parse(applied.data))
-    const invalidated = invalidateChangeAuthority(state.queues.authority, token.pr, "pushed")
+    const invalidated = invalidateChangeAuthority(state.queues.authority, token.pr)
     return {
       queues: {
         // A push or re-merge is the operator's answer to the refusal: the old streak
@@ -4441,7 +4444,6 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
         ...state.queues,
         authority: {
           ...state.queues.authority,
-          statuses: { ...state.queues.authority.statuses, [token.pr]: "submitted" },
           current: { ...state.queues.authority.current, [token.pr]: token },
           submits: { ...state.queues.authority.submits, [token.pr]: token },
         },
@@ -4466,42 +4468,20 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   if (applied.name === "pr/admission-recorded") {
     const recorded = ChangeAdmissionRecordedFactSchema.parse(applied.data)
     if (!currentAuthorityMatches(state.queues.authority, recorded)) return state
-    const status: QueueAuthorityState["statuses"][string] =
-      recorded.admission.status === "passed"
-        ? "ready"
-        : recorded.admission.kind === "refusal"
-          ? "needs-author"
-          : "submitted"
-    const queues = {
-      ...state.queues,
-      authority: {
-        ...state.queues.authority,
-        statuses: { ...state.queues.authority.statuses, [recorded.pr]: status },
-      },
-    }
-    return { queues: status === "ready" ? clearAdmissionRefusals(queues, [recorded.pr]) : queues }
+    // The delivery-status label this used to store per change is derived at
+    // read time now (22991 phase 2); the queues slice keeps only its own
+    // authority consequence — a passing admission retires the refusal streak.
+    if (recorded.admission.status !== "passed") return state
+    return { queues: clearAdmissionRefusals(state.queues, [recorded.pr]) }
   }
-  if (applied.name === "pr/needs-author") {
-    const needsAuthor = ChangeNeedsAuthorFactSchema.parse(applied.data)
-    if (!currentAuthorityMatches(state.queues.authority, needsAuthor)) return state
-    if (
-      state.queues.authority.statuses[needsAuthor.pr] !== "submitted" &&
-      state.queues.authority.statuses[needsAuthor.pr] !== "ready"
-    ) {
-      throw new Error(
-        `yrd: queue authority for change '${needsAuthor.pr}' is ${state.queues.authority.statuses[needsAuthor.pr] ?? "missing"}; '${applied.name}' requires submitted`,
-      )
-    }
-    return {
-      queues: {
-        ...state.queues,
-        authority: {
-          ...state.queues.authority,
-          statuses: { ...state.queues.authority.statuses, [needsAuthor.pr]: "needs-author" },
-        },
-      },
-    }
-  }
+  // pr/needs-author no longer projects into the queues slice: the only thing
+  // it ever wrote here was the stored delivery-status copy deleted by 22991
+  // phase 2. The change record keeps the needs-author fact (@yrd/bay), and the
+  // submitted/ready precondition this slice used to re-assert at replay is
+  // enforced where the event is emitted, against the canonical record
+  // (`changeDeliveryState`) — see reconcileMerge and the settlement paths. A
+  // replay-time re-check against a second stored copy is exactly the drift
+  // surface being deleted.
   if (applied.name === "pr/rejected") {
     const rejected = QueueRejectedTerminalFactSchema.parse(applied.data)
     if (!terminalAuthorityMatches(state.queues.authority, rejected, applied.name, typeof rejected.run === "string")) {
@@ -4510,7 +4490,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     return {
       queues: {
         ...state.queues,
-        authority: invalidateChangeAuthority(state.queues.authority, rejected.pr, "rejected"),
+        authority: invalidateChangeAuthority(state.queues.authority, rejected.pr),
       },
     }
   }
@@ -4521,7 +4501,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     return {
       queues: {
         ...state.queues,
-        authority: invalidateChangeAuthority(state.queues.authority, integrated.pr, "integrated"),
+        authority: invalidateChangeAuthority(state.queues.authority, integrated.pr),
       },
     }
   }
@@ -4531,7 +4511,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     return {
       queues: {
         ...state.queues,
-        authority: invalidateChangeAuthority(state.queues.authority, alreadyMerged.pr, "already-landed"),
+        authority: invalidateChangeAuthority(state.queues.authority, alreadyMerged.pr),
       },
     }
   }
@@ -4546,11 +4526,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     return {
       queues: {
         ...state.queues,
-        authority: invalidateChangeAuthority(
-          state.queues.authority,
-          closed.pr,
-          applied.name === "pr/withdrawn" ? "withdrawn" : "canceled",
-        ),
+        authority: invalidateChangeAuthority(state.queues.authority, closed.pr),
       },
     }
   }
