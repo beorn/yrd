@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest"
 import { createYrdDef, journalEventVocabulary, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "../src/plugin.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -40,7 +40,11 @@ function workspaceAdapter(): BayWorkspace {
 describe("bay journal vocabulary", () => {
   it("pins every bay event's fields to the reader version that can read them", () => {
     const bayJobs = createBayJobDefs(workspaceAdapter())
-    const definition = pipe(createYrdDef(), withJobs({ definitions: [bayJobs] }), withBays({ jobs: bayJobs }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
 
     expect(journalEventVocabulary(definition.events)).toMatchSnapshot()
   })
@@ -51,7 +55,11 @@ describe("bay journal vocabulary", () => {
     // version because that version introduced it, and a second entry here means
     // someone declared an exception that has to be argued rather than inherited.
     const bayJobs = createBayJobDefs(workspaceAdapter())
-    const definition = pipe(createYrdDef(), withJobs({ definitions: [bayJobs] }), withBays({ jobs: bayJobs }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
 
     const asterisks = Object.entries(journalEventVocabulary(definition.events)).flatMap(([name, entry]) =>
       Object.entries(entry.grandfathered ?? {}).map(([field, mark]) => [`${name}.${field}`, mark.introducedAt]),
@@ -62,7 +70,11 @@ describe("bay journal vocabulary", () => {
 
   it("gives every field a version no lower than its own event's", () => {
     const bayJobs = createBayJobDefs(workspaceAdapter())
-    const definition = pipe(createYrdDef(), withJobs({ definitions: [bayJobs] }), withBays({ jobs: bayJobs }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
 
     for (const [name, entry] of Object.entries(journalEventVocabulary(definition.events))) {
       for (const [field, version] of Object.entries(entry.fields)) {

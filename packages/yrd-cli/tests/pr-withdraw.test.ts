@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentChangeRev, changeDeliveryState, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, changeDeliveryState, withBays, volatilePrNumberMint } from "@yrd/bay"
 import {
   createFailure,
   createMemoryJournal,
@@ -193,6 +193,7 @@ async function createCliApp(
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
+      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: options.resolveBase ?? ((ref) => ({ base: ref, baseSha: BASE_SHA })),

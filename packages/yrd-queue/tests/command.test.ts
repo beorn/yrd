@@ -16,6 +16,7 @@ import {
   changeAdmission,
   changeDeliveryState,
   withBays,
+  volatilePrNumberMint,
   type BayWorkspace,
   type Change,
 } from "@yrd/bay"
@@ -853,7 +854,11 @@ async function checkedQueue(
       : {}),
     recordMerge: gitMergeRecorder({ inject: { process }, repo }),
   })
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), log: options.log ?? createLogger("test", [{ level: "silent" }]) },
   })
@@ -1369,7 +1374,6 @@ describe("Queue command adapters", () => {
     expect(observed.mutations).toEqual([])
   })
 
-
   /**
    * A repository with gitlink "dep" pinned to `initialSha` on `main`, plus
    * three throwaway commit shas usable as gitlink VALUES. deriveFrozenCodeCarrier
@@ -1495,7 +1499,6 @@ describe("Queue command adapters", () => {
     )
   })
 
-
   it("certifies a no-gitlink recut exactly as before (gitlink obligations never engage)", async () => {
     const fixture = await gitlinkCertificateRepository()
     await git(fixture.repo, ["switch", "-qc", "issue/source", fixture.sourceBaseSha])
@@ -1533,7 +1536,6 @@ describe("Queue command adapters", () => {
     const directPatchId = await stablePatchId(fixture.repo, fixture.sourceBaseSha, sourceHeadSha)
     expect(result.patchId).toBe(directPatchId)
   })
-
 
   // A0 correction (2026-08-23): the prior commit on this branch (971b5a04)
   // deleted this test and the oversized-payload test below, citing a
@@ -1665,7 +1667,6 @@ describe("Queue command adapters", () => {
       unchanged: false,
     })
   })
-
 
   // A0 correction (2026-08-23): 971b5a04 deleted this test outright, citing
   // an unverified redundancy claim ("ordinary recut-correctness coverage
@@ -1907,7 +1908,6 @@ describe("Queue command adapters", () => {
     )
   })
 
-
   it("recuts a two-commit authored branch that preserves an authored root gitlink", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -2059,7 +2059,6 @@ describe("Queue command adapters", () => {
     await git(repo, ["fetch", "-q", "origin", "main"])
     expect(await git(repo, ["rev-parse", "origin/main"])).toBe(mainBefore)
   })
-
 
   it("rejects an uncertified authored gitlink wrapper with intent-submission guidance", async () => {
     // Characterization narrowed by the (b) fill-in, in the same change as the
@@ -2223,7 +2222,6 @@ describe("Queue command adapters", () => {
       },
     })
   }, 30_000)
-
 
   /**
    * REGRESSION PIN, not a red-then-green: the guard this asserts already works.
@@ -2415,7 +2413,6 @@ describe("Queue command adapters", () => {
     expect(tree).toContain("README.md")
     expect(tree).not.toContain("doomed.txt")
   })
-
 
   /**
    * The content residual, and the shape `d416a3179e` rode: both parents carry a
@@ -2676,7 +2673,6 @@ describe("Queue command adapters", () => {
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
-
   it("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
     type CheckedCommand = AddStepResult<ChangeShape, "check", z.infer<typeof CommandEvidenceSchema>>
     const encoder = new TextEncoder()
@@ -2726,7 +2722,7 @@ describe("Queue command adapters", () => {
       const base = pipe(
         createYrdDef(),
         withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-        withBays({ jobs: bayJobs }),
+        withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
       )
       const app = await createYrd(queue(base), {
         inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
@@ -6309,7 +6305,6 @@ describe("Queue command adapters", () => {
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
-
   it("runs remote push hooks without inheriting recursive submodule pushes", async () => {
     const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -6865,7 +6860,6 @@ describe("Queue command adapters", () => {
     expect(run).not.toMatchObject({ error: { code: "carrier-drops-landed" } })
   })
 
-
   it("refuses a stale resolved submodule pin and enumerates the submodule commits it would drop", async () => {
     const fixture = await submoduleMainMergeRepository()
     await git(fixture.submodule, ["switch", "-q", "main"])
@@ -6912,7 +6906,9 @@ describe("Queue command adapters", () => {
       conclusion: "failure",
       error: {
         code: "carrier-drops-landed",
-        message: expect.stringMatching(/protected submodule merge after resolution.*merge submodule target.*push and resubmit/isu),
+        message: expect.stringMatching(
+          /protected submodule merge after resolution.*merge submodule target.*push and resubmit/isu,
+        ),
       },
     })
     expect(await git(fixture.rootRemote, ["rev-parse", "main"])).toBe(fixture.rootBaseSha)
@@ -7247,7 +7243,11 @@ describe("Queue command adapters", () => {
       steps: [check, move, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    const base = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
@@ -7460,7 +7460,11 @@ describe("Queue command adapters", () => {
       steps: [check, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    const base = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
@@ -7579,7 +7583,11 @@ describe("Queue command adapters", () => {
       steps: [check, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    const base = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
@@ -7631,7 +7639,6 @@ describe("Queue command adapters", () => {
     })
   })
 
-
   it("fails a delegated merge command that exits zero without merging the change", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
@@ -7648,7 +7655,11 @@ describe("Queue command adapters", () => {
       steps: [check, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
     })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    const base = pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })

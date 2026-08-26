@@ -20,7 +20,7 @@
  * cannot see that class of bug at all.
  */
 import { beforeAll, describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
@@ -83,7 +83,12 @@ async function createCliApp() {
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      prNumberMint: volatilePrNumberMint(),
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: {

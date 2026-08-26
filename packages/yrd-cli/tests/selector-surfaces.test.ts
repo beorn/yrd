@@ -13,7 +13,7 @@
  * runs in a bare standalone clone.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -132,7 +132,12 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      prNumberMint: volatilePrNumberMint(),
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: {

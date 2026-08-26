@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "../src/plugin.ts"
 import { currentChangeRev, changeDeliveryState, type Change } from "../src/model.ts"
 
 const HEAD_1 = "1".repeat(40)
@@ -87,7 +87,11 @@ async function appWithIntegrated(
     },
   ])
   const jobs = createBayJobDefs(workspaceAdapter())
-  const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+  const definition = pipe(
+    createYrdDef(),
+    withJobs({ definitions: jobs }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+  )
   return createYrd(definition, {
     inject: { journal, clock: () => at, id: nextId, log: createLogger("test", [{ level: "silent" }]) },
   })

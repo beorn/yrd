@@ -31,7 +31,7 @@
  * instrument whose baseline drifts silently is worth nothing.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createLogger } from "loggily"
@@ -189,7 +189,11 @@ async function drainDrill(
 
   const bayJobs = createBayJobDefs(workspace())
   const definition = queue(
-    pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs })),
+    pipe(
+      createYrdDef(),
+      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    ),
   )
   await using app = await createYrd(definition, {
     inject: {

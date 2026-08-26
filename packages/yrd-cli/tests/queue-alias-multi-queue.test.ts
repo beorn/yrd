@@ -12,7 +12,7 @@
  * the listing answers, so the multi-queue directive (2026-08-13) is only real
  * if the rewritten argv still asks about the REPOSITORY.
  */
-import { withBays, createBayJobDefs } from "@yrd/bay"
+import { withBays, volatilePrNumberMint, createBayJobDefs } from "@yrd/bay"
 import { normalizeYrdRepositoryAliasInvocation, runYrd as runYrdRaw, type YrdCliIO } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestEvaluatorDef, type ContestGit, type ContestRunnerDef } from "@yrd/contest"
@@ -100,7 +100,12 @@ async function createCliApp() {
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      prNumberMint: volatilePrNumberMint(),
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
+    }),
   )
   const app = await createYrd(contests(queue(base)), {
     inject: { journal: createMemoryJournal(), clock: () => "2026-08-13T12:00:00.000Z", id: ids() },

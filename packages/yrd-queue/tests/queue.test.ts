@@ -12,6 +12,7 @@ import {
   changeAdmission,
   changeDeliveryState,
   withBays,
+  volatilePrNumberMint,
   type BayWorkspace,
   type Change,
 } from "@yrd/bay"
@@ -678,9 +679,7 @@ async function createQueueApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({
-      jobs: bayJobs,
-    }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
   )
   const definition = queue(base)
   return createYrd(definition, {
@@ -5782,7 +5781,11 @@ describe("Queue", () => {
 
     const bayJobs = createBayJobDefs(workspace())
     const withoutSteps = withQueue({ steps: [] as const })
-    const historyBase = pipe(createYrdDef(), withJobs({ definitions: bayJobs }), withBays({ jobs: bayJobs }))
+    const historyBase = pipe(
+      createYrdDef(),
+      withJobs({ definitions: bayJobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    )
     await using history = await createYrd(withoutSteps(historyBase), {
       inject: { journal, log: createLogger("test", [{ level: "silent" }]) },
     })

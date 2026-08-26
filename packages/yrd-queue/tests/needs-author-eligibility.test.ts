@@ -15,6 +15,7 @@ import {
   changeDeliveryState,
   changeNeedsAuthor,
   withBays,
+  volatilePrNumberMint,
   type BayWorkspace,
   type Change,
 } from "@yrd/bay"
@@ -94,7 +95,11 @@ async function createQueueApp(check?: StepRunner<ChangeShape, CheckResult>) {
   )
   const queue = withQueue({ steps: [checkStep] as const, batch: false, defaultSteps: ["check"] })
   const bayJobs = createBayJobDefs(workspace())
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: {
       journal: createMemoryJournal(),
@@ -124,7 +129,11 @@ async function createIntegratingApp(
   const mergeStep = withMerge(merge, { revision: "merge-v1" })
   const queue = withQueue({ steps: [checkStep, mergeStep] as const, batch: false, defaultSteps: ["check", "merge"] })
   const bayJobs = createBayJobDefs(workspace())
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: {
       journal: createMemoryJournal(),

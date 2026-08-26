@@ -33,7 +33,13 @@ import {
   type ProvisionedBay,
   type RefreshedBay,
 } from "../src/model.ts"
-import { createBayJobDefs, withBays, type BayWorkspace, type ResolveBayBase } from "../src/plugin.ts"
+import {
+  createBayJobDefs,
+  withBays,
+  volatilePrNumberMint,
+  type BayWorkspace,
+  type ResolveBayBase,
+} from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -57,6 +63,7 @@ async function createApp(
     createYrdDef(),
     withJobs({ definitions: jobs }),
     withBays({
+      prNumberMint: volatilePrNumberMint(),
       jobs,
       defaultBase: "main",
       ...(defaultSubmitter === undefined ? {} : { defaultSubmitter }),
@@ -346,7 +353,11 @@ describe("withBays", () => {
       },
     ])
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
-    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+    )
     await using app = await createYrd(definition, {
       inject: { journal, clock: () => at, id: nextId, log: silentLog },
     })
@@ -599,7 +610,11 @@ describe("withBays", () => {
       },
     ])
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
-    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+    )
     await using app = await createYrd(definition, {
       inject: { journal, clock: () => at, id: nextId },
     })
@@ -635,7 +650,7 @@ describe("withBays", () => {
     const definition = pipe(
       createYrdDef(),
       withJobs({ definitions: jobs }),
-      withBays({ jobs, defaultBase: "main" }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
     ).extend({ commands: { fixture: { staleWithdraw } } })
     await using app = await createYrd(definition, {
       inject: { journal, clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
@@ -856,7 +871,7 @@ describe("withBays", () => {
     const definition = pipe(
       createYrdDef(),
       withJobs({ definitions: jobs }),
-      withBays({ jobs, defaultBase: "main" }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
     ).extend({
       commands: {
         fixture: { legacyWithdraw, legacyReject, transitionalReject, legacyIntegrate, legacyPush, legacySubmit },
@@ -1353,7 +1368,7 @@ describe("withBays", () => {
     const definition = pipe(
       createYrdDef(),
       withJobs({ definitions: jobs }),
-      withBays({ jobs, defaultBase: "main" }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
     ).extend({ commands: { fixture: { integrate } } })
     await using app = await createYrd(definition, {
       inject: { journal: createMemoryJournal(), clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
@@ -1639,7 +1654,11 @@ describe("withBays", () => {
       },
     ])
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
-    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+    )
     await using app = await createYrd(definition, {
       inject: { journal, clock: () => at, id: nextId },
     })
@@ -1839,7 +1858,11 @@ describe("withBays", () => {
       },
     ])
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
-    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+    )
 
     await expect(createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })).rejects.toThrow(
       "rebuild carries a missing approval",
@@ -2376,7 +2399,7 @@ describe("withBays", () => {
     const jobs = createBayJobDefs(adapter)
     const invalid = () => {
       // @ts-expect-error Bay workspaces require the explicit Jobs capability.
-      return withBays({ jobs })(createYrdDef())
+      return withBays({ prNumberMint: volatilePrNumberMint(), jobs })(createYrdDef())
     }
     void invalid
   })
@@ -2563,7 +2586,11 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
       },
     ])
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
-    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
+    )
     await using app = await createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
 
     const before = await Array.fromAsync(app.events())

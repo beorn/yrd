@@ -11,7 +11,15 @@
  * "the branch moved" is a deterministic fact rather than a Git race.
  */
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentChangeRev, changeAdmission, changeDeliveryState, isTracked, withBays } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  currentChangeRev,
+  changeAdmission,
+  changeDeliveryState,
+  isTracked,
+  withBays,
+  volatilePrNumberMint,
+} from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -144,7 +152,12 @@ async function createCliApp(behavior: Readonly<{ failingCheck?: boolean }> = {})
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      prNumberMint: volatilePrNumberMint(),
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: {

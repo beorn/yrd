@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, changeDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, changeDeliveryState, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -68,7 +68,11 @@ function twoStepPlugin(secondRevision: string) {
 async function createApp(secondRevision: string, journal = createMemoryJournal(), id: () => string = ids()) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = twoStepPlugin(secondRevision)
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: {
       journal,

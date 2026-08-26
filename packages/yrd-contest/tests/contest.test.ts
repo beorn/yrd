@@ -3,7 +3,7 @@
  * @level l3
  * @consumer @yrd/contest orchestration
  */
-import { createBayJobDefs, changeDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, changeDeliveryState, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withIssues } from "@yrd/issue"
@@ -167,7 +167,7 @@ async function createApp(journal: Journal<unknown>, setup = fixtures()) {
     createYrdDef(),
     withJobs({ definitions: [bayJobs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Finish Yrd", revision: "r7" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main" }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs, defaultBase: "main" }),
   )
   return createYrd(contests(base), {
     inject: {

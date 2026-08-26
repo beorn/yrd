@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -53,7 +53,11 @@ async function createApp(
     { revision: "first-v1", output: z.object({ first: z.boolean() }).strict() },
   )
   const queue = withQueue({ steps: [first] as const, batch: false, defaultSteps: ["first"] })
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: {
       journal,

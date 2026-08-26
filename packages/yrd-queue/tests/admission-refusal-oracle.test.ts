@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, currentChangeRev, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -105,7 +105,11 @@ async function createApp(
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = checkOnlyPlugin(prepareCandidate, progress, needsPersonOwner)
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
@@ -139,7 +143,11 @@ async function createDeliveryApp(clock: () => string, waitForMerge = false, defa
     progress: { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
     ...(defaultSteps === undefined ? {} : { defaultSteps }),
   })
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), id: ids(), clock, log: createLogger("test", [{ level: "silent" }]) },
   })
@@ -260,7 +268,6 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       sameCodeCount: 1,
     })
   })
-
 
   it("names a configured needsPersonOwner on a needs-person finding instead of the unowned default", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
@@ -390,7 +397,6 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(finding?.message).not.toContain("undefined")
   })
 
-
   it("keeps an I/O-flavored recut certificate refusal on the ordinary retry threshold", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
@@ -429,7 +435,6 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
     expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
   })
-
 
   it("keeps a passed admission in the no-merge progress population until delivery", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")

@@ -19,7 +19,7 @@ import {
   type GitWorkspaceOptions,
 } from "../src/git.ts"
 import type { RemoteBranchSnapshot } from "../src/model.ts"
-import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "../src/plugin.ts"
 
 const roots: string[] = []
 
@@ -71,7 +71,11 @@ async function addSubmodule(root: string, repo: string): Promise<void> {
 
 async function createApp(adapter: BayWorkspace) {
   const jobs = createBayJobDefs(adapter)
-  const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs }))
+  const definition = pipe(
+    createYrdDef(),
+    withJobs({ definitions: jobs }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs }),
+  )
   return createYrd(definition, {
     inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
   })

@@ -11,7 +11,7 @@
  * prove what it does once history has been evicted
  * (`log-evicted-history.test.ts`). This module is that shared half.
  */
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO } from "@yrd/cli"
@@ -118,7 +118,12 @@ export async function createCliApp(journal: Journal<unknown>, id: () => string =
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
+    withBays({
+      prNumberMint: volatilePrNumberMint(),
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: {

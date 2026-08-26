@@ -13,7 +13,7 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentChangeRev, withBays } from "@yrd/bay"
+import { createBayJobDefs, currentChangeRev, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createProcess } from "@yrd/process"
@@ -137,7 +137,12 @@ async function trackedApp(mainSha: string, log: ReturnType<typeof createLogger>)
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: () => ({ base: "main", baseSha: mainSha }) }),
+    withBays({
+      prNumberMint: volatilePrNumberMint(),
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: () => ({ base: "main", baseSha: mainSha }),
+    }),
   )
   return createYrd(queue(base), {
     inject: {

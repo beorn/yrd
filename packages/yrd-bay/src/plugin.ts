@@ -25,6 +25,7 @@ import {
   type JobTransition,
   type RunJobOptions,
 } from "@yrd/job"
+import type { PrNumberMint } from "@yrd/persistence"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -1287,8 +1288,38 @@ export function createBays(
   })
 }
 
+export type { PrNumberMint } from "@yrd/persistence"
+
+/** An in-process `PrNumberMint` for tests and deliberately ephemeral
+ * compositions. The name is the warning: nothing survives the process, so a
+ * production composition wiring this recycles PR numbers on every restart —
+ * pass `createDurablePrNumberMint` (@yrd/persistence) there instead. */
+export function volatilePrNumberMint(initial = 0): PrNumberMint {
+  if (!Number.isSafeInteger(initial) || initial < 0) {
+    throw new TypeError(
+      `yrd: volatile PR-number mint requires a non-negative safe integer, got ${JSON.stringify(initial)}`,
+    )
+  }
+  let highWater = initial
+  return Object.freeze({
+    highWater: () => highWater,
+    commit(next: number): void {
+      if (!Number.isSafeInteger(next) || next <= highWater) {
+        throw new Error(
+          `yrd: volatile PR-number mint refuses to move its high-water from ${String(highWater)} to ${JSON.stringify(next)}`,
+        )
+      }
+      highWater = next
+    },
+  })
+}
+
 export type WithBaysOptions = Readonly<{
   jobs: BayJobDefs
+  /** Durable authority for new PR numbers. Deliberately not optional: an
+   * omitted mint would silently degrade to the record-set scan whose recycling
+   * this option exists to end (22986). */
+  prNumberMint: PrNumberMint
   defaultBase?: string
   defaultSubmitter?: string
   resolveBase?: ResolveBayBase
@@ -1297,7 +1328,7 @@ export type WithBaysOptions = Readonly<{
 export function withBays(options: WithBaysOptions) {
   const defaultBase = baseIdentity(options.defaultBase ?? "main")
   const defaultSubmitter = TextSchema.parse(options.defaultSubmitter ?? "operator")
-  const commands = createBayCommands(options.jobs, defaultBase, defaultSubmitter)
+  const commands = createBayCommands(options.jobs, defaultBase, defaultSubmitter, options.prNumberMint)
 
   return <State extends object, Commands extends CommandTree, Features extends HasJobs>(
     definition: YrdDef<State, Commands, Features>,
@@ -1426,7 +1457,12 @@ function jobDetail(job: DeepReadonly<Job>): string {
   return job.status
 }
 
-function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitter: string): BayCommands {
+function createBayCommands(
+  jobs: BayJobDefs,
+  defaultBase: string,
+  defaultSubmitter: string,
+  prNumberMint: PrNumberMint,
+): BayCommands {
   return {
     bay: {
       open: command({
@@ -1461,14 +1497,14 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         title: "Record pushed revision",
         params: IntakeChangeArgsSchema,
         apply: (state: BayState, args: IntakeChangeArgs, context) =>
-          intakePR(state, args, defaultBase, defaultSubmitter, context.command.id),
+          intakePR(state, args, defaultBase, defaultSubmitter, prNumberMint, context.command.id),
       }),
       submit: command({
         title: "Submit work",
         visibility: "public",
         params: SubmitArgsSchema,
         apply: (state: BayState, args: SubmitArgs, context) =>
-          submitWork(state, args, defaultBase, defaultSubmitter, context.command.id),
+          submitWork(state, args, defaultBase, defaultSubmitter, prNumberMint, context.command.id),
       }),
       close: command({
         title: "Close bay",
@@ -1511,7 +1547,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         title: "Mark a change ready",
         visibility: "public",
         params: ChangeReadyArgsSchema,
-        apply: (state: BayState, args: ChangeReadyArgs) => readyPr(state, args, defaultSubmitter),
+        apply: (state: BayState, args: ChangeReadyArgs) => readyPr(state, args, defaultSubmitter, prNumberMint),
       }),
       review: command({
         title: "Review a change revision",
@@ -1800,6 +1836,7 @@ function intakePR(
   args: IntakeChangeArgs,
   defaultBase: string,
   defaultSubmitter: string,
+  mint: PrNumberMint,
   commandId: string,
 ) {
   const current = state.bays
@@ -1863,7 +1900,7 @@ function intakePR(
   ) {
     return { events: [] }
   }
-  const id = existing?.id ?? nextId("PR", current.prs)
+  const id = existing?.id ?? mintChangeId(mint, current.prs)
   const changeId = changeIdForRevision(existing, commandId)
   const submitter = args.submitter ?? defaultSubmitter
   const revision = (existing === undefined ? 0 : changeRevisionNumber(existing)) + 1
@@ -1905,6 +1942,7 @@ function submitWork(
   args: SubmitArgs,
   defaultBase: string,
   defaultSubmitter: string,
+  mint: PrNumberMint,
   commandId?: string,
 ) {
   const current = state.bays
@@ -1976,10 +2014,10 @@ function submitWork(
       ))
       ? existing
       : undefined
-  const id = resubmitted?.id ?? nextId("PR", current.prs)
   if (commandId === undefined) {
     raiseFailure("infrastructure", "change-id-command-missing", "yrd: change creation requires its durable command id")
   }
+  const id = resubmitted?.id ?? mintChangeId(mint, current.prs)
   const changeId = changeIdForRevision(resubmitted, commandId)
   const revision = (resubmitted === undefined ? 0 : changeRevisionNumber(resubmitted)) + 1
   const issue = attachedIssue(resubmitted, args.issue)
@@ -2182,13 +2220,13 @@ function associateRejectedTerminalRun(
   return { ...pr, revs: revisions, ...(current ? { terminalRun: run } : {}) }
 }
 
-function readyPr(state: DeepReadonly<BayState>, args: ChangeReadyArgs, defaultSubmitter: string) {
+function readyPr(state: DeepReadonly<BayState>, args: ChangeReadyArgs, defaultSubmitter: string, mint: PrNumberMint) {
   const pr: LiveChange =
     args.expectedCurrent === undefined
       ? requireLiveChange(state.bays, args.pr)
       : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "ready")
   if (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready") return { events: [] }
-  return submitWork(state, args, "main", defaultSubmitter)
+  return submitWork(state, args, "main", defaultSubmitter, mint)
 }
 
 function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSupersededArgs) {
@@ -3327,11 +3365,28 @@ function sameComposition(left: CompositionV1 | undefined, right: CompositionV1 |
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-function nextId(prefix: string, records: Readonly<Record<string, unknown>>): string {
+function maxRecordNumber(prefix: string, records: Readonly<Record<string, unknown>>): number {
   const numbers = Object.keys(records)
     .filter((id) => id.startsWith(prefix) && /^\d+$/u.test(id.slice(prefix.length)))
     .map((id) => Number(id.slice(prefix.length)))
-  return `${prefix}${Math.max(0, ...numbers) + 1}`
+  return Math.max(0, ...numbers)
+}
+
+function nextId(prefix: string, records: Readonly<Record<string, unknown>>): string {
+  return `${prefix}${maxRecordNumber(prefix, records) + 1}`
+}
+
+/** Mint the next PR id against the durable high-water, never the record set
+ * alone: `max(existing) + 1` restarts at 1 whenever the store is
+ * re-initialized, re-issuing numbers that already name landed changes (22986).
+ * The record-set max still participates so a store whose mint file was lost
+ * but whose records survived keeps counting upward. The new high-water is
+ * committed BEFORE the id escapes — a crash between commit and use skips a
+ * number, which is reversible, where re-issuing one never is. */
+export function mintChangeId(mint: PrNumberMint, records: Readonly<Record<string, unknown>>): string {
+  const next = Math.max(mint.highWater(), maxRecordNumber("PR", records)) + 1
+  mint.commit(next)
+  return `PR${next}`
 }
 
 function isBayJob(name: string): name is keyof BayJobDefs {

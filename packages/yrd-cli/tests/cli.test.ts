@@ -30,6 +30,7 @@ import {
   changeDeliveryState,
   changeRevisionLineage,
   withBays,
+  volatilePrNumberMint,
   withDeployments,
   type BayWorkspace,
   type Change,
@@ -536,6 +537,7 @@ async function createApp(
     withDeployments({ jobs: deploymentJobs }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
+      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (base) => ({ base, baseSha: BASE_SHA }),

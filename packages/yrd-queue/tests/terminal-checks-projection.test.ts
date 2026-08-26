@@ -8,7 +8,14 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, changeAdmission, changeDeliveryState, withBays, type BayWorkspace } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  changeAdmission,
+  changeDeliveryState,
+  withBays,
+  volatilePrNumberMint,
+  type BayWorkspace,
+} from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -56,7 +63,11 @@ async function createQueueApp(check?: StepRunner<ChangeShape, CheckResult>) {
   )
   const queue = withQueue({ steps: [checkStep] as const, batch: false, defaultSteps: ["check"] })
   const bayJobs = createBayJobDefs(workspace())
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: {
       journal: createMemoryJournal(),

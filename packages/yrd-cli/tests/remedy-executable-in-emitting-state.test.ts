@@ -8,7 +8,7 @@
  * @consumer @yrd/cli refusal remedies
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace, type ChangeDeliveryState } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type ChangeDeliveryState } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withQueue, withStep, type StepExecution } from "@yrd/queue"
@@ -78,7 +78,11 @@ async function createApp() {
   )
   const queue = withQueue({ steps: [checkStep] as const, batch: false, defaultSteps: ["check"] })
   const bayJobs = createBayJobDefs(workspace())
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+  )
   return createYrd(queue(base), {
     inject: {
       journal: createMemoryJournal(),

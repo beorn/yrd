@@ -106,6 +106,7 @@ import {
   type QueuePlanDescriptor,
 } from "./plan-audit.ts"
 import {
+  createDurablePrNumberMint,
   createExclusive,
   createJournal,
   createReadOnlyJournal,
@@ -2017,6 +2018,9 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     }),
     withBays({
       jobs: bayJobs,
+      // Lives beside journal.sqlite, outside checkpoint-identity state: mint
+      // durability must survive the store re-initialization class (22986).
+      prNumberMint: createDurablePrNumberMint({ dir: options.stateDir }),
       defaultBase: baseIdentity(options.config.base),
       ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
       resolveBase: async (base, context) => {
