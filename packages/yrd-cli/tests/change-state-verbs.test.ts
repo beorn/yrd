@@ -21,13 +21,13 @@
  */
 import { beforeAll, describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, failureFact, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
 import { runYrd, type ChangeStateGitFacts, type YrdCliIO } from "@yrd/cli"
-import type { ProcessRequest } from "@yrd/process"
+import type { Process, ProcessRequest, ProcessResult } from "@yrd/process"
 import { createLogger } from "loggily"
 import { createChangeStateGitFacts } from "../src/change-state.ts"
 
@@ -191,6 +191,35 @@ describe("branch state verbs — default transport", () => {
       ["git", "-C", "/repo", "push", "--atomic", "origin", "task/alpha:refs/yrd/submit/task/alpha"],
     ])
     expect(calls.every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
+  })
+
+  it("raises the canonical transport-read-failed code when the origin read stalls or fails", async () => {
+    const process: Pick<Process, "run"> = {
+      async run(request): Promise<ProcessResult> {
+        const args = request.argv.slice(3)
+        if (args[0] === "ls-remote") {
+          return {
+            exitCode: 143,
+            signal: "SIGTERM",
+            stdout: "",
+            stderr: "",
+            durationMs: request.timeoutMs ?? 0,
+            timedOut: true,
+          }
+        }
+        return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
+      },
+    }
+    const facts = createChangeStateGitFacts("/repo", process)
+    if (facts.remoteRef === undefined) throw new Error("expected the Git facts to expose remoteRef")
+
+    const rejection = await Promise.resolve(facts.remoteRef("refs/yrd/submit/task/alpha")).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+
+    expect(rejection).toBeInstanceOf(Error)
+    expect(failureFact(rejection)).toMatchObject({ kind: "infrastructure", code: "transport-read-failed" })
   })
 })
 

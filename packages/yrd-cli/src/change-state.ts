@@ -259,9 +259,12 @@ export function createChangeStateGitFacts(cwd: string, process: Pick<Process, "r
     remoteRef: async (ref) => {
       const listed = await run(["ls-remote", "origin", ref])
       if (listed.code !== 0 || transportFailed(listed)) {
+        // Canonical transport-read code (registered in YRD_REFUSAL_CODES);
+        // the old "change-state-remote-unreadable" spelling survives as its
+        // registered alias for recorded data.
         raiseFailure(
           "infrastructure",
-          "change-state-remote-unreadable",
+          "transport-read-failed",
           `yrd: could not read '${ref}' from origin: ${gitFailure(listed, GIT_TIMEOUT_MS)}`,
         )
       }

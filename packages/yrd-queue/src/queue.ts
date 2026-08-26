@@ -7602,6 +7602,14 @@ export const YRD_REFUSAL_CODES = [
   "submodule-composition-conflict",
   "submodule-composition-unavailable",
   "terminal",
+  // The one canonical code for "a remote READ over git transport stalled or
+  // failed" — ls-remote/fetch probes whose fault is the wire, never the
+  // change: merge-record ref synchronization (command.ts), Bay claim
+  // provisioning's origin probe (@yrd/bay git.ts), the branch-state verbs'
+  // origin read and the submodule default-branch resolver (@yrd/cli).
+  // Same retryable-infrastructure disposition as queue-environment-refused;
+  // "change-state-remote-unreadable" registers as its alias below.
+  "transport-read-failed",
   "unauthored-path-deletion",
   "unexpected",
   "unisolable-stale-plan",
@@ -7632,6 +7640,9 @@ export const YRD_REFUSAL_CODE_ALIASES: Readonly<Record<string, RefusalCode>> = {
   "run-cancelled": "run-canceled",
   "environment-refused": "queue-environment-refused",
   "lease-timeout": "job-lease-expired",
+  // The branch-state verbs' pre-consolidation spelling for a failed origin
+  // read; the producer now raises the canonical code.
+  "change-state-remote-unreadable": "transport-read-failed",
 }
 
 /**

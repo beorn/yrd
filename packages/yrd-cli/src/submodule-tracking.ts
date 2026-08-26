@@ -1,5 +1,7 @@
-import { adaptProcessGit, createProcess, type GitSyncReadCommand } from "@yrd/process"
+import { raiseFailure } from "@yrd/core"
+import { adaptProcessGit, createProcess, type GitSyncReadCommand, type Process } from "@yrd/process"
 import { join } from "node:path"
+import { GIT_PLUMBING_TIMEOUT_MS } from "./git-timeouts.ts"
 
 /**
  * Submodule tracking: `.gitmodules` `submodule.<name>.branch` is the switch
@@ -47,11 +49,34 @@ function readGit(cwd: string, command: GitSyncReadCommand): GitCapture {
   return { code: result.code, stdout: result.stdout, stderr: result.stderr }
 }
 
-async function runGit(cwd: string, args: readonly string[]): Promise<GitCapture> {
+async function runGit(
+  cwd: string,
+  args: readonly string[],
+  options: Readonly<{ process?: Pick<Process, "run">; timeoutMs?: number }> = {},
+): Promise<GitCapture> {
+  const execute = async (process: Pick<Process, "run">): Promise<GitCapture> => {
+    const result = await adaptProcessGit(
+      process,
+      options.timeoutMs === undefined ? undefined : { timeoutMs: options.timeoutMs },
+    ).run({ repo: cwd, args })
+    // A timeout is a RESULT for tolerant callers (the same convention as the
+    // queue's git runner): a stalled remote becomes an ordinary failed capture
+    // its nonzero-code handling classifies, never a process-level throw.
+    if (result.timedOut === true) {
+      return {
+        code: result.code === 0 ? 124 : result.code,
+        stdout: result.stdout,
+        stderr: `git ${args[0] ?? ""} timed out after ${String(options.timeoutMs)}ms`.trim(),
+      }
+    }
+    if (result.failure !== undefined) throw new Error(result.failure)
+    return { code: result.code, stdout: result.stdout, stderr: result.stderr }
+  }
+  if (options.process !== undefined) return execute(options.process)
   await using process = createProcess()
-  const result = await adaptProcessGit(process).run({ repo: cwd, args })
-  if (result.failure !== undefined) throw new Error(result.failure)
-  return { code: result.code, stdout: result.stdout, stderr: result.stderr }
+  // `return await`, not `return`: the disposer SIGTERMs the pool's children,
+  // so an un-awaited promise here hands back a capture killed mid-flight.
+  return await execute(process)
 }
 
 const SUBMODULE_KEY = /^submodule\.(.+)\.(path|url|branch)$/u
@@ -220,9 +245,23 @@ export function superprojectOrigin(root: string): string | undefined {
  * and leave the submodule unset. Tests inject a resolver instead of reaching
  * the network.
  */
-export function createSubmoduleBranchResolver(cwd: string): SubmoduleBranchResolver {
+export function createSubmoduleBranchResolver(cwd: string, process?: Pick<Process, "run">): SubmoduleBranchResolver {
   return async (url: string): Promise<SubmoduleBranchResolution> => {
-    const result = await runGit(cwd, ["ls-remote", "--symref", url, "HEAD"])
+    // Bounded: an unreachable remote must become an "unreachable" row within
+    // the plumbing window, never an indefinite hang of `yrd admin submodule
+    // init`. A timeout surfaces as a nonzero exit and takes that soft path; a
+    // supervised-process failure (spawn, signal, sweep) is an environment
+    // fault and raises typed instead of escaping as a plain Error.
+    const result = await runGit(cwd, ["ls-remote", "--symref", url, "HEAD"], {
+      timeoutMs: GIT_PLUMBING_TIMEOUT_MS,
+      ...(process === undefined ? {} : { process }),
+    }).catch((cause: unknown) =>
+      raiseFailure(
+        "infrastructure",
+        "transport-read-failed",
+        `yrd: ls-remote for '${url}' could not run: ${cause instanceof Error ? cause.message : String(cause)}`,
+      ),
+    )
     if (result.code !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || `git ls-remote exited ${result.code}`
       return { status: "unreachable", detail }
