@@ -136,7 +136,6 @@ import {
   ChangeDetailView,
   ChangeListView,
   ChangeRunsView,
-  QueueRecoveryView,
   QueueRunsView,
   QueueTimelineView,
   QueueStatusView,
@@ -6780,44 +6779,6 @@ async function pauseQueue(
   )
 }
 
-async function recoverQueue(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  options: JsonOption & Readonly<{ reason?: string; runner?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.reason?.trim() === "") usage("--reason requires text")
-  if (options.runner?.trim() === "") usage("--runner requires a runner id")
-  // With `--runner` the operator asserts that runner is dead: recover force-settles
-  // its running Jobs regardless of lease expiry, so a fresh (unexpired) ghost from a
-  // known-dead runner clears immediately instead of waiting the lease out. Without
-  // it, recover settles only leases that have already lapsed.
-  const runs = await app.queue.recover({
-    recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
-    ...(options.reason === undefined ? {} : { reason: options.reason }),
-    ...(options.runner === undefined ? {} : { runner: options.runner }),
-  })
-  const findings = await queueAuditFindings(app, services)
-  const blocked = admissionBlockedChanges(app)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    {
-      command: "queue.recover",
-      results: runs.map(projectQueueRunTaskStatus),
-      ...(blocked.length === 0
-        ? {}
-        : {
-            blocked: blocked.map(({ pr, eligibility }) => ({
-              pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
-              eligibility: projectEligibilityTaskStatus(eligibility),
-            })),
-          }),
-    },
-    createElement(QueueRecoveryView, { runs, findings, blocked }),
-  )
-}
-
 async function queueAuditFindings(
   app: Pick<YrdCliApp, "queue">,
   services: YrdCliServices,
@@ -9413,6 +9374,30 @@ async function bumpJournal(
  * "initialized" without installing anything would be the silent no-op the
  * baseline itself turned out to be. The hook `init` also installed has its
  * own command. */
+/** Retired verb (5e cut 6): restart re-derives what `queue recover` did.
+ *
+ * The standing rails: a fresh runner's startup reclaim settles its dead
+ * predecessor's leases (pid-scoped), the habitant's per-tick sweep settles any
+ * lease that has lapsed (D1b), and an interrupted one-shot runner settles its
+ * own runs on the signal path. The one remainder restart cannot re-derive is
+ * the operator assertion `--runner <id>` carried — force-settling a known-dead
+ * runner's UNEXPIRED leases without waiting them out. That case now waits for
+ * lease expiry; it belongs to `yrd doctor` as a finding (a fresh lease whose
+ * runner pid is gone), not to a verb — the doctor fold is a separate carrier.
+ */
+function refuseRetiredQueueRecover(): never {
+  // The retired verb is deliberately NOT quoted: a quoted `yrd ...` in a
+  // failure message is lifted into its `resolution`, and the one command this
+  // must never recommend is itself.
+  raiseFailure(
+    "refusal",
+    "queue-recover-retired",
+    "yrd: queue recover is retired and does nothing. Restart re-derives it: a new runner start reclaims its " +
+      "dead predecessor's leases, the habitant sweep settles every expired lease each tick, and an interrupted " +
+      "one-shot runner settles its own runs. A known-dead runner's unexpired leases settle when they lapse.",
+  )
+}
+
 function refuseRetiredQueueAdministration(command: "init" | "deinit"): never {
   // The retired verb is deliberately NOT quoted: a quoted `yrd …` in a failure
   // message is lifted into its `resolution`, and the one command this must
@@ -11561,7 +11546,6 @@ function addQueueExamples(queue: CliCommand, name: string): void {
     [`$ ${name} log --base release/2.0`, "show completed work for a base"],
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
     [`$ ${repository} queue pause --reason maintenance --for 30m --allow PR7`, "pause all but selected PRs"],
-    [`$ ${repository} queue recover --json`, "recover expired runner leases"],
     [`$ ${repository} queue run`, "habitant follow-runner: keep the default queue moving"],
   ])
 }
@@ -12052,15 +12036,17 @@ function buildProgram(
     .description("resume a paused queue")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
+  // Retired verb (5e cut 6): stays registered, hidden, so an operator
+  // following an old runbook gets the reason and the replacements, not a
+  // silent timeline filter. Restart re-derives recovery; see
+  // refuseRetiredQueueRecover for the one remainder.
   queue
-    .command("recover")
-    .description(
-      "recover expired runner leases and settle orphaned runs whose step never started; --runner force-settles a known-dead runner's unexpired leases too",
-    )
-    .option("--reason <text>", "record the recovery reason")
-    .option("--runner <id>", "force-settle this known-dead runner's leases now, even if unexpired")
+    .command("recover", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--reason <text>", "ignored; the verb is retired")
+    .option("--runner <id>", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (options) => recoverQueue(installed(), installedServices(), options, io))
+    .action(() => refuseRetiredQueueRecover())
   queue
     .command("run [selector...]")
     .description("drain the queue — habitant follow by default; --once or change selectors for a single pass")

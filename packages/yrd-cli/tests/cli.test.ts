@@ -1037,6 +1037,13 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("admin", "queue", "--help"), adminQueue.io)).toBe(0)
     expect(adminQueue.stdout()).toContain("retired queue administration")
     expect(adminQueue.stdout()).not.toMatch(/^\s+(?:init|deinit)\b/mu)
+
+    // `queue recover` is retired (5e cut 6): still routable so an old runbook
+    // gets the reason and the standing rails, never a silent timeline filter.
+    const recover = outputIO()
+    expect(await runYrd(app, yrd("queue", "recover", "--json"), recover.io)).toBe(1)
+    expect(recover.stderr()).toContain("queue-recover-retired")
+    expect(recover.stderr()).toContain("Restart re-derives it")
   })
 
   it("names the question and tense of every pr list status vocabulary", async () => {
@@ -1195,7 +1202,7 @@ describe("runYrd", () => {
 
     const queue = outputIO()
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
-    for (const command of ["run", "pause", "resume", "recover", "finish", "audit"]) {
+    for (const command of ["run", "pause", "resume", "finish", "audit"]) {
       expect(queue.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
     const queueRun = outputIO()
@@ -5469,92 +5476,6 @@ describe("runYrd", () => {
     ])
   })
 
-  it("recovers only expired queue work through the public JSON command", async () => {
-    const mergeRuns: string[] = []
-    const app = await createApp({ mergeRuns, failingCheck: true })
-    await openAndSubmit(app)
-    const beforeNoop = await Array.fromAsync(app.events()).then((events) => events.length)
-    const noop = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
-    expect(await runYrd(app, yrd("queue", "recover", "--json"), noop.io), noop.stderr()).toBe(0)
-    expect(JSON.parse(noop.stdout())).toEqual({ command: "queue.recover", results: [] })
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeNoop)
-
-    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "first-runner", leaseMs: 60_000 }))[0]).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    const failedPr = app.state().bays.prs.PR1
-    if (failedPr === undefined) throw new Error("expected failed-Run PR")
-    await app.bays.intake({
-      branch: failedPr.branch,
-      headSha: MERGED_SHA,
-      base: failedPr.base,
-      ...(changeBaseSha(failedPr) === undefined ? {} : { baseSha: changeBaseSha(failedPr) }),
-    })
-    await app.bays.submit({ pr: "PR1" })
-    await app.dispatch(app.commands.queue.advance, { run: "R1" })
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: MERGED_SHA })
-    expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
-    const checkJob = revisionAdmissionJob(app, "PR1")
-    expect(checkJob?.status).toBe("queued")
-    if (checkJob === undefined) throw new Error("expected requested check job")
-    await app.dispatch(app.commands.job.transition, {
-      type: "start",
-      id: checkJob.id,
-      attempt: 1,
-      runner: "interrupted-runner",
-      leaseExpiresAt: "2026-07-09T12:00:01.000Z",
-    })
-    expect(app.jobs.get(checkJob.id)?.status).toBe("in_progress")
-
-    const beforeRecovery = await Array.fromAsync(app.events()).then((events) => events.length)
-    const recovery = outputIO({ now: () => Date.parse("2026-07-09T12:00:02.000Z") })
-    expect(
-      await runYrd(app, yrd("queue", "recover", "--reason", "runner interrupted", "--json"), recovery.io),
-      recovery.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(recovery.stdout())).toEqual({ command: "queue.recover", results: [] })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(app.jobs.get(checkJob.id)).toMatchObject({
-      status: "completed",
-      conclusion: "timed_out",
-      runner: "interrupted-runner",
-    })
-    expect(mergeRuns).toEqual([])
-    const events = (await Array.fromAsync(app.events())).slice(beforeRecovery)
-    expect(events.map(({ name }) => name)).toContain("job/transitioned")
-    expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
-  })
-
-  it("names unresolved step drift instead of reporting queue recovery idle", async () => {
-    const journal = createMemoryJournal()
-    const id = ids()
-
-    {
-      await using app = await createApp({ journal, id, waitingCheck: true, mergeRevision: "merge-v1" })
-      await openAndSubmit(app)
-      expect((await app.queue.run({ prs: ["PR1"] }, { runner: "first-runner", leaseMs: 60_000 }))[0]).toMatchObject({
-        id: "R1",
-        status: "waiting",
-      })
-    }
-
-    await using replayed = await createApp({ journal, id, waitingCheck: true, mergeRevision: "merge-v2" })
-    expect(replayed.queue.audit().findings).toContainEqual(
-      expect.objectContaining({ code: "step-revision-drift", run: "R1", step: "merge" }),
-    )
-
-    const recovery = outputIO({ now: () => Date.parse("2026-07-09T12:00:30.000Z") })
-    expect(await runYrd(replayed, yrd("queue", "recover"), recovery.io), recovery.stderr()).toBe(0)
-    expect(recovery.stdout()).not.toContain("Queue idle")
-    expect(recovery.stdout()).toContain("R1")
-    expect(recovery.stdout()).toContain("step-revision-drift")
-    expect(recovery.stdout()).toContain("requires step 'merge' revision 'merge-v1', installed 'merge-v2'")
-  })
-
   it("self-quarantines an immutable admission refusal instead of manufacturing a refusal loop", async () => {
     let now = "2026-07-09T12:00:00.000Z"
     await using app = await createApp({
@@ -5585,13 +5506,6 @@ describe("runYrd", () => {
       receipt: { code: "authored-gitlink" },
     })
     expect(app.queue.audit().findings).toEqual([])
-
-    const recovery = outputIO({ now: () => Date.parse("2026-07-09T17:46:30.000Z") })
-    expect(await runYrd(app, yrd("queue", "recover"), recovery.io), recovery.stderr()).toBe(0)
-    const text = stripAnsi(recovery.stdout())
-    expect(text).not.toContain("Queue idle")
-    expect(text).toContain("authored-gitlink")
-    expect(text).toContain("yrd pr recut PR1 --preflight --queue --apply")
   })
 
   it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
@@ -5701,75 +5615,6 @@ describe("runYrd", () => {
     const audit = outputIO({ now: () => Date.parse("2026-07-09T12:10:00.000Z") })
     expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(0)
     expect(JSON.parse(audit.stdout())).toMatchObject({ command: "queue.audit", findings: [] })
-  })
-
-  it("names environment audit blockers instead of reporting queue recovery idle", async () => {
-    const app = await createApp()
-    const services: YrdCliServices = {
-      queue: {
-        auditEnvironment: async () => ({
-          comparison: stubAuditComparison(),
-          findings: [
-            {
-              code: "installed-plan-stale",
-              message: "this process installed check→merge, but main tip 11111111 declares check→affected-tests→merge",
-            },
-          ],
-        }),
-      },
-    }
-    const recovery = outputIO()
-
-    expect(await runYrd(app, yrd("queue", "recover"), recovery.io, services), recovery.stderr()).toBe(0)
-    expect(recovery.stdout()).not.toContain("Queue idle")
-    expect(recovery.stdout()).toContain("installed-plan-stale")
-    expect(recovery.stdout()).toContain("main tip 11111111 declares check→affected-tests→merge")
-
-    const json = outputIO()
-    expect(await runYrd(app, yrd("queue", "recover", "--json"), json.io, services), json.stderr()).toBe(0)
-    expect(JSON.parse(json.stdout())).toEqual({ command: "queue.recover", results: [] })
-  })
-
-  it("force-recovers an unexpired ghost from a named dead runner via queue recover --runner (D2)", async () => {
-    const app = await createApp({ waitingCheck: true })
-    await openAndSubmit(app)
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
-    const check = revisionAdmissionJob(app, "PR1")
-    if (check === undefined) throw new Error("expected requested check")
-    // A known habitant started this check with a FUTURE lease, then died — a fresh
-    // (unexpired) ghost the lease-expiry sweep cannot yet settle.
-    await app.dispatch(app.commands.job.transition, {
-      type: "start",
-      id: check.id,
-      attempt: 1,
-      runner: "yrd-cli:4242",
-      leaseExpiresAt: "2026-07-09T13:00:00.000Z",
-    })
-    expect(app.jobs.get(check.id)?.status).toBe("in_progress")
-
-    // The unscoped public command, before the lease expires, is a no-op — nothing lapsed.
-    const noop = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
-    expect(await runYrd(app, yrd("queue", "recover", "--json"), noop.io), noop.stderr()).toBe(0)
-    expect(JSON.parse(noop.stdout())).toEqual({ command: "queue.recover", results: [] })
-    expect(app.jobs.get(check.id)).toMatchObject({
-      status: "in_progress",
-      runner: "yrd-cli:4242",
-    })
-
-    // --runner force-settles the unexpired ghost from that known-dead runner NOW,
-    // so an operator can clear a fresh ghost without waiting out the lease.
-    const forced = outputIO({ now: () => Date.parse("2026-07-09T12:00:05.000Z") })
-    expect(
-      await runYrd(app, yrd("queue", "recover", "--runner", "yrd-cli:4242", "--json"), forced.io),
-      forced.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(forced.stdout())).toEqual({ command: "queue.recover", results: [] })
-    expect(app.jobs.get(check.id)).toMatchObject({
-      status: "completed",
-      conclusion: "timed_out",
-      runner: "yrd-cli:4242",
-    })
   })
 
   it("records an external failing verdict successfully while the queue run becomes failed", async () => {

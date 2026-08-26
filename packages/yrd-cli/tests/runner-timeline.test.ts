@@ -505,11 +505,11 @@ describe("habitant runner notices", () => {
       ...RUNNER_SCOPE,
       signal: "SIGINT",
       mode: "drain",
-      recovery: ["yrd", "--repo", "/srv/code", "queue", "recover"],
+      repository: "/srv/code",
     })
     const plain = formatHabitantLogLine(drain, { color: false })
     expect(plain).toContain("graceful drain requested")
-    expect(plain).toContain('"recovery":["yrd","--repo","/srv/code","queue","recover"]')
+    expect(plain).toContain('"repository":"/srv/code"')
     expect(plain).not.toContain("yrd-cli:42")
   })
 

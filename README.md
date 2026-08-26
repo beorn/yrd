@@ -635,7 +635,7 @@ yrd bay                     list bays; open, run, in, path, refresh, submit, and
 yrd issue                   issue list/view plus Bay + tracked-draft ensure
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   render the queue timeline by default; list/ls is canonical;
-                            run, cancel, pause, resume, recover, finish, init, deinit, audit
+                            run, cancel, pause, resume, finish, init, deinit, audit
 yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   thin alias for yrd queue list --watch
 yrd branch                  move branches into a delivery state:
@@ -1065,7 +1065,6 @@ yrd queue run [selector...] [--steps [step...]] [--once] [--interval <seconds>] 
 yrd queue cancel <run> [--reason <text>] [--json]
 yrd queue pause [base] --reason <text> --for <duration> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
-yrd queue recover [--reason <text>] [--runner <id>] [--json]
 yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>
   --attempt <number> --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
@@ -1174,8 +1173,8 @@ force the existing hard shutdown and job-tree reap.
 A selector or `--once` run is a foreground one-shot, not a resident drain. On
 `SIGINT` or `SIGTERM`, Yrd first settles that process's PID-scoped active Job as
 `job-lost`, then reaps its process tree and preserves the native signal exit
-status (`130` or `143`). No other one-shot runner is touched, and a subsequent
-`yrd queue recover` is a no-op for the interrupted Run.
+status (`130` or `143`). No other one-shot runner is touched; the interrupted
+Run is already settled, so nothing is left to recover.
 
 The resident exit code is a supervisor contract, so `hab restart=on-failure` is
 meaningful. An operator-requested stop that DRAINS — the first signal, the active
@@ -1214,11 +1213,11 @@ step.
 The bare dashboard shows active and recent work. `AGE` is immutable queue
 lifetime—submission to terminal outcome—while `TOUCHED` is the latest state or
 step event and `RUN` is execution duration. `yrd pr runs <PR>` is the canonical
-drill into attempts, proofs, logs, and artifacts. `yrd queue recover` is the
-public repair path for expired runner leases; it never retries or executes work.
-Pass `--runner <id>` when a runner is known dead to force-settle its leases now,
-even ones that have not yet expired — clearing a fresh ghost without waiting the
-lease out.
+drill into attempts, proofs, logs, and artifacts. Recovery has no verb: restart
+re-derives it. A new runner start reclaims its dead predecessor's leases, the
+resident runner settles every expired lease each tick, and an interrupted
+one-shot runner settles its own runs on the way out. A known-dead runner's
+unexpired leases settle when they lapse.
 
 ### Issues and Contests
 
@@ -1715,8 +1714,7 @@ Job requests pin the definition revision used to create them. Pending execution
 is refused if current plugin code has a different revision. Before execution,
 Queue reconciles a queued current step against its pinned plan: revision drift
 retires that Run as `stale-steps`, releases its authority, and leaves its PR
-submitted for fresh checks under the installed plan. `queue recover` performs
-the same reconciliation explicitly. A waiting Job may still finish after
+submitted for fresh checks under the installed plan. A waiting Job may still finish after
 revision drift because its token, attempt, runner, and stable definition output
 contract fence that already-launched work. Queue runs also pin their complete
 ordered step descriptors, so historical status remains readable after config
@@ -1729,14 +1727,13 @@ an expiring, heartbeated runner lease; crashed work becomes `lost` and can be
 retried. A `waiting` Job has no launcher lease and remains durable until a
 token-matched finish arrives.
 
-`yrd queue recover` expires stale running leases, can force-settle a named
-known-dead runner, reconciles already-terminal failure facts, releases queued
+Recovery runs automatically, never by verb: runner startup reclaims a dead
+predecessor's leases, the resident runner's per-tick sweep expires stale
+running leases, reconciles already-terminal failure facts, releases queued
 current steps whose definition revision drifted, and retires other proven
 orphan/stale-plan states. Recovery never executes requested Jobs, creates
 batch-isolation work, or merges a PR; normal queue execution remains the only
-path that can advance those effects. If audit findings remain after recovery,
-the human result names each blocking Run and reason instead of reporting
-`Queue idle`; the JSON recovery result remains the stable list of settled Runs.
+path that can advance those effects.
 
 Execution is **at least once** across crashes: a runner may perform an
 external side effect before its settlement frame is committed. Yrd accepts only

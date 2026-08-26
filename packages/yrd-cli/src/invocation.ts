@@ -91,6 +91,9 @@ const QUEUE_SUBCOMMANDS = new Set([
   "uncarried",
   "pause",
   "resume",
+  // Retired verb (5e cut 6). Recognized here so both operand positions still
+  // normalize `recover` to the hidden tombstone's loud refusal instead of
+  // silently becoming a timeline filter term.
   "recover",
   "run",
   "cancel",

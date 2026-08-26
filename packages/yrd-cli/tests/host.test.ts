@@ -3123,7 +3123,7 @@ checks: [{check: {run: "true"}}]
     expect(stdout).toContain("Usage: yrd queue")
     expect(stdout).toContain("yrd --repo <repository> queue run PR7 --steps check,merge")
     expect(stdout).toContain("yrd --repo <repository> queue pause --reason maintenance --for 30m --allow PR7")
-    expect(stdout).toContain("yrd --repo <repository> queue recover --json")
+    expect(stdout).not.toContain("queue recover")
     expect(stdout).toContain("yrd --repo <repository> queue run")
     expect(stdout).not.toMatch(/\$ yrd queue (?:run|pause|recover)(?:\s|$)/u)
     expect(stderr).toBe("")
@@ -4483,7 +4483,6 @@ checks: [{check: {run: "true"}}]
       { args: ["pr", "list", "--json"], command: "pr.list" },
       { args: ["issue", "--json"], command: "issue.list" },
       { args: ["log", "--all", "--json"], command: "log" },
-      { args: ["queue", "recover", "--json"], command: "queue.recover" },
     ] as const
 
     for (const surface of surfaces) {

@@ -43,7 +43,7 @@ describe("graceful-drain notice", () => {
         signal: "SIGINT",
         mode: "drain",
         forceStop: expect.stringContaining("Ctrl-C"),
-        recovery: ["yrd", "--repo", "/srv/code repo", "queue", "recover"],
+        repository: "/srv/code repo",
       }),
     })
     expect(String(drain[0]?.message)).not.toContain("\n")

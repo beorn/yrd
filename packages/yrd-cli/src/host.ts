@@ -2821,20 +2821,18 @@ async function closeRuntime(
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 const ONE_SHOT_RECOVERY_CUTOFF = "1970-01-01T00:00:00.000Z"
 
-function queueRecoveryArgv(repositoryRoot: string): readonly string[] {
-  return ["yrd", "--repo", repositoryRoot, "queue", "recover"]
-}
-
 /** Announce a graceful drain as ONE structured loggily record — never a bare
  * wrapped stderr paragraph, since the habitant runner's stderr IS its log
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
- * viewer can surface them without parsing prose. */
+ * viewer can surface them without parsing prose. No recovery argv rides along
+ * (5e cut 6): restart re-derives recovery — the next runner start reclaims a
+ * dead predecessor's leases and the habitant sweep settles expired ones. */
 export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal, repositoryRoot: string): void {
   log.warn?.(`Stopping after the current run finishes (${signal}); press Ctrl-C again to stop immediately.`, {
     signal,
     mode: "drain",
     forceStop: "press Ctrl-C again to stop immediately",
-    recovery: queueRecoveryArgv(repositoryRoot),
+    repository: repositoryRoot,
   })
 }
 
@@ -2857,10 +2855,12 @@ async function settleOneShotQueueRun(
       log.warn?.(`Stopped queue run ${runs.map((run) => run.id).join(", ")} safely after ${signal}.`)
     }
   } catch (error) {
-    log.error?.(`Could not stop the queue run safely after ${signal}; run the recovery argv attached.`, {
-      error: error instanceof Error ? error.message : String(error),
-      recovery: queueRecoveryArgv(host.repository.repo),
-    })
+    // No recovery argv to attach (5e cut 6): the next runner start reclaims
+    // this runner's leases, and the habitant sweep settles them once expired.
+    log.error?.(
+      `Could not stop the queue run safely after ${signal}; the next runner start reclaims its leases.`,
+      { error: error instanceof Error ? error.message : String(error), repository: host.repository.repo },
+    )
     throw error
   }
 }
