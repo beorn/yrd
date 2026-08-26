@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path"
 import { cleanGitEnvironment, createProcess, type Process, type ProcessResult } from "@yrd/process"
+import { GIT_PLUMBING_TIMEOUT_MS as GIT_TIMEOUT_MS } from "./git-timeouts.ts"
 
 export type YrdRepository = Readonly<{
   repo: string
@@ -11,7 +12,6 @@ export type YrdRepository = Readonly<{
 }>
 
 type RepositoryProcess = Pick<Process, "run">
-const GIT_TIMEOUT_MS = 30_000
 
 async function git(
   process: RepositoryProcess,

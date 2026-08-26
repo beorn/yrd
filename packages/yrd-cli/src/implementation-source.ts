@@ -2,9 +2,9 @@ import { createHash } from "node:crypto"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { cleanGitEnvironment, type Process } from "@yrd/process"
+import { GIT_PLUMBING_TIMEOUT_MS as GIT_TIMEOUT_MS } from "./git-timeouts.ts"
 import { yrdSourceRoot } from "./version.ts"
 
-const GIT_TIMEOUT_MS = 30_000
 export const YRD_WRAPPER_IMPLEMENTATION_SOURCE_ENV = "YRD_WRAPPER_IMPLEMENTATION_SOURCE"
 
 export type ImplementationSourceRepository = Readonly<{

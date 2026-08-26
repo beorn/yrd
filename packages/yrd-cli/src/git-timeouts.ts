@@ -9,10 +9,11 @@
  * submodules inside the add, measured at 34.15s under load against the old
  * 30s kill (@yrd/core/21679-integration-model-v2/22648-checkout-timeout).
  *
- * Consolidation candidates: the sibling `GIT_TIMEOUT_MS = 30_000` consts in
- * `repository.ts`, `pr-withdraw.ts`, and `implementation-source.ts` are
- * plumbing-class callers of the same idea; fold them onto this module rather
- * than minting a fifth local constant.
+ * This module is the ONE definition of the plumbing bound: `repository.ts`,
+ * `pr-withdraw.ts`, `implementation-source.ts`, `remote-branch.ts`, and
+ * `submodule-tracking.ts` all import {@link GIT_PLUMBING_TIMEOUT_MS} rather
+ * than minting a local constant. A new plumbing-class caller imports it too;
+ * a new local `= 30_000` reintroduces the drift this fold removed.
  */
 
 /** Fast metadata git calls with no tree population and no hook execution. */

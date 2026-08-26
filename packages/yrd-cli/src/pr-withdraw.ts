@@ -11,6 +11,7 @@ import {
 } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
+import { GIT_PLUMBING_TIMEOUT_MS as GIT_TIMEOUT_MS } from "./git-timeouts.ts"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
@@ -20,7 +21,6 @@ import type { PruneGitFacts, YrdCliApp, YrdCliIO } from "./types.ts"
 type JsonOption = Readonly<{ json?: boolean }>
 
 const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
-const GIT_TIMEOUT_MS = 30_000
 /** Commits per `rev-list` invocation, so a listing with thousands of candidate
  * heads cannot overflow the argument vector. */
 const REV_LIST_BATCH = 400
