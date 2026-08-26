@@ -8406,7 +8406,7 @@ async function queueUncarried(
  * SAME inventory pass just proved reclaimable: a journaled Candidate owns the
  * ref, no live Run names it, the retention window has passed, and the ref still
  * resolves to the SHA the sweep read. Anything unknown, unclaimed or unclocked is
- * reported and kept — `docs/design.md` states that retaining beats guessing here,
+ * reported and kept — `/hh/docs/design/yrd.md` states that retaining beats guessing here,
  * because this namespace is the only evidence a merged composition ever existed.
  */
 /** The one candidate-ref actuator left (5e cut 7): `yrd admin candidate-refs
