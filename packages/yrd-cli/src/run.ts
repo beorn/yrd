@@ -2371,16 +2371,25 @@ function trackerDeliveryV2(
     runs,
     ...(revision.props === undefined ? {} : { props: revision.props }),
   }
+  // The needs-author DECISION belongs to the display-state projection
+  // (@yrd/queue), never re-derived here: `projectedChangeStatus` reads
+  // terminality first, so a closed change whose stored refusal outlived its
+  // close reports its closing state (integrated / already-landed / withdrawn /
+  // canceled) below instead of bouncing to the author. Only the refusal FACT
+  // (clock, run, receipt) is looked up locally, and only once the projection
+  // has ruled the state IS needs-author.
   const refusalFact =
-    changeNeedsAuthor(pr) ??
-    (eligibility.reason?.code === "needs-author" && eligibility.reason.result !== undefined
-      ? {
-          at: pr.rejectedAt ?? revision.submittedAt ?? revision.pushedAt,
-          run: pr.terminalRun ?? eligibility.checks.run ?? "unknown",
-          receipt: eligibility.reason.result,
-          detail: eligibility.reason.message,
-        }
-      : undefined)
+    projectedChangeStatus(pr, eligibility) !== "needs-author"
+      ? undefined
+      : (changeNeedsAuthor(pr) ??
+        (eligibility.reason?.code === "needs-author" && eligibility.reason.result !== undefined
+          ? {
+              at: pr.rejectedAt ?? revision.submittedAt ?? revision.pushedAt,
+              run: pr.terminalRun ?? eligibility.checks.run ?? "unknown",
+              receipt: eligibility.reason.result,
+              detail: eligibility.reason.message,
+            }
+          : undefined))
   if (refusalFact !== undefined) {
     return {
       ...identity,

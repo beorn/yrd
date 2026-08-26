@@ -1,18 +1,10 @@
 import { homedir } from "node:os"
 import { dirname } from "node:path"
 import { pathToFileURL } from "node:url"
-import {
-  changeDeliveryState,
-  changeHead,
-  changeNeedsAuthor,
-  changeRevisionNumber,
-  type Bay,
-  type Change,
-  type ChangeDeliveryState,
-} from "@yrd/bay"
+import { changeHead, changeRevisionNumber, type Bay, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import type { JobError } from "@yrd/job"
-import type { ChangeEligibility } from "@yrd/queue"
+import { projectedChangeStatus, type ChangeEligibility } from "@yrd/queue"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import {
   actionableFailure,
@@ -300,10 +292,12 @@ export function ChangeStatusView({
     const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)
     return {
       ...projectChangeTaskStatus(pr),
-      status:
-        changeNeedsAuthor(pr) !== undefined || eligibility?.reason?.code === "needs-author"
-          ? ("needs-author" as const)
-          : changeDeliveryState(pr),
+      // The one display-state derivation (@yrd/queue). The inline overlay this
+      // replaces consulted `changeNeedsAuthor` ahead of terminality, so a
+      // closed change whose stored refusal outlived its close rendered
+      // `needs-author` here while every sibling surface said
+      // withdrawn/integrated/canceled.
+      status: projectedChangeStatus(pr, eligibility),
       revision,
       head: changeHead(pr).slice(0, 12),
       why: eligibility?.reason?.message ?? "",

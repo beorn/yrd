@@ -1,6 +1,7 @@
 export * from "./alternates-audit.ts"
 export * from "./model.ts"
 export * from "./queue.ts"
+export * from "./queue-status-projection.ts"
 export * from "./candidate-pool.ts"
 export * from "./candidate-refs.ts"
 export * from "./command.ts"
