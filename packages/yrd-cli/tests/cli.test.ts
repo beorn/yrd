@@ -1516,6 +1516,11 @@ describe("runYrd", () => {
       surface: "pr checks",
       args: ["pr", "checks", "pr1", "--json"],
       expected: { kind: "pr.check", pr: "PR1" },
+      // This row's subject is the SELECTOR, and the canonical row it prints is
+      // unchanged. The exit moved because nothing has judged this PR yet, and
+      // `pr checks` no longer reads an absent verdict as a pass
+      // (@i/10-merge-queue/failed-check-erased).
+      exit: 1,
     },
     {
       surface: "pr close",
@@ -1547,15 +1552,18 @@ describe("runYrd", () => {
       args: ["log", "--pr", "pr1", "--json"],
       expected: { command: "log", rows: [{ pr: "PR1", run: "R1" }] },
     },
-  ])("resolves case-insensitive selectors on $surface and preserves canonical output", async ({ args, expected }) => {
-    const app = await createApp()
-    await openAndSubmit(app)
-    if (args[0] === "log") await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
-    const output = outputIO()
+  ])(
+    "resolves case-insensitive selectors on $surface and preserves canonical output",
+    async ({ args, expected, exit }: { args: readonly string[]; expected: object; exit?: number }) => {
+      const app = await createApp()
+      await openAndSubmit(app)
+      if (args[0] === "log") await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      const output = outputIO()
 
-    expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject(expected)
-  })
+      expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(exit ?? 0)
+      expect(JSON.parse(output.stdout())).toMatchObject(expected)
+    },
+  )
 
   it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
     const app = await createApp()
@@ -5137,6 +5145,12 @@ describe("runYrd", () => {
   it("keeps an aborted pr checks --follow read-only while nothing was requested", async () => {
     // The poll loop itself must never write a fact: an aborted follow leaves
     // the journal exactly as it found it and reports the not-requested rows.
+    //
+    // It also exits 1, and the two halves are separate claims. Read-only is
+    // this test's subject and is asserted on the journal below. The exit is
+    // the D1 rule: an aborted follow obtained NO verdict, and `pr checks` no
+    // longer spells that 0 (@i/10-merge-queue/failed-check-erased — `f35125b1`
+    // made `not-requested` followable, which entrenched exit-0-on-nothing).
     const app = await createApp()
     await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
     const before = await Array.fromAsync(app.events())
@@ -5150,7 +5164,7 @@ describe("runYrd", () => {
       },
     })
 
-    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io)).toBe(1)
     expect(await Array.fromAsync(app.events())).toEqual(before)
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "not-requested" } })
   })

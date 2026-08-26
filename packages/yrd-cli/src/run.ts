@@ -4862,7 +4862,9 @@ async function readyPr(
   const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
   if (refusalExit !== undefined) return refusalExit
   await runPreSubmitGuards(services, io, undefined, undefined, jsonEnabled(options))
-  await runRequiredChecks(services, io, undefined, undefined, false, jsonEnabled(options))
+  // Same gate, same erasure as `pr submit` had: the verdicts were awaited and
+  // dropped, so a `pr ready` that ran four checks left no evidence any ran.
+  const requiredChecks = await runRequiredChecks(services, io, undefined, undefined, false, jsonEnabled(options))
   await app.bays.ready({ pr: selector })
   let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after ready`)
@@ -4877,6 +4879,7 @@ async function readyPr(
       command: "pr.ready",
       pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
       eligibility: projectEligibilityTaskStatus(eligibility),
+      ...(requiredChecks.length === 0 ? {} : { requiredChecks }),
     },
     createElement(ChangeResultView, {
       prs: [pr],
@@ -5250,7 +5253,31 @@ async function changeChecks(
   } else {
     await printHuman(io, createElement(ChangeChecksView, { records: checks, now: io.now?.() ?? Date.now() }))
   }
-  return checks.some((check) => check.status === "failed") ? 1 : 0
+  return checksExit(checks)
+}
+
+/**
+ * The exit code of `yrd pr checks`, where 0 means EVERY selected change holds a
+ * recorded PASSING verdict — not merely that no record says failed.
+ *
+ * The old rule was `some(failed) ? 1 : 0`, which reads "no bad news" as "fine"
+ * and made a real failure unprovable. Measured on PR1970 (2026-08-23,
+ * @i/10-merge-queue/failed-check-erased): `yrd pr submit` ran four required
+ * checks, FAILED `affected-tests` and exited 1; minutes later this command
+ * reported `not-requested` and exited 0. No surface was lying about its own
+ * model — the pre-submit leg writes no verdict anywhere, so `not-requested`
+ * was an accurate reading of the queue-side record — but a caller who only had
+ * the exit code was told the change was clean.
+ *
+ * `not-requested`, `queued` and `checking` are the ABSENCE of a verdict, and an
+ * absent verdict is a refusal, never a silent nothing
+ * (@i/18-bare-metal/out-of-resource-doctrine D1). They join `failed` at exit 1;
+ * which of them it is stays legible in the rows this command already prints. An
+ * EMPTY record set is the same absence with nothing to print, so it refuses too
+ * rather than letting "we found nothing" pass for "we found everything green".
+ */
+function checksExit(records: readonly ChangeCheckViewRecord[]): YrdCliExitCode {
+  return records.length > 0 && records.every((record) => record.status === "passed") ? 0 : 1
 }
 
 function checksTerminal(records: readonly ChangeCheckViewRecord[]): boolean {
@@ -5693,6 +5720,7 @@ async function applyChangeSelectionVerb(
   io: YrdCliIO,
   command: ChangeSelectionCommand,
 ): Promise<YrdCliExitCode> {
+  const requiredChecks: PreSubmitCheckVerdict[] = []
   if (command === "pr.submit") {
     const unlandable = await refuseSubmitWithoutMergeAuthority(options, io, services)
     if (unlandable !== undefined) return unlandable
@@ -5701,13 +5729,17 @@ async function applyChangeSelectionVerb(
       // Guards first, and in the same loop, so the cheap verdict on THIS
       // carrier merges before its expensive one starts.
       await runPreSubmitGuards(services, { ...io, cwd: context.cwd }, undefined, context.ref, jsonEnabled(options))
-      await runRequiredChecks(
-        services,
-        { ...io, cwd: context.cwd },
-        undefined,
-        context.ref,
-        options.keepOnFailure === true,
-        jsonEnabled(options),
+      // Kept, never discarded: this used to be a bare `await`, so a green
+      // pre-submit gate left exactly as much evidence as a red one — none.
+      requiredChecks.push(
+        ...(await runRequiredChecks(
+          services,
+          { ...io, cwd: context.cwd },
+          undefined,
+          context.ref,
+          options.keepOnFailure === true,
+          jsonEnabled(options),
+        )),
       )
     }
   }
@@ -5780,6 +5812,7 @@ async function applyChangeSelectionVerb(
             eligibility: projectEligibilityTaskStatus(eligibility),
           }
         }),
+        ...(requiredChecks.length === 0 ? {} : { requiredChecks }),
       },
       createElement(ChangeResultView, {
         prs: refusedPrs,
@@ -5808,6 +5841,10 @@ async function applyChangeSelectionVerb(
           eligibility: projectEligibilityTaskStatus(eligibility),
         }
       }),
+      // A passing pre-submit gate is a fact about this submit that used to
+      // reach no surface at all. It rides the envelope rather than stderr,
+      // which stays silent on success (@i/10-merge-queue/failed-check-erased).
+      ...(requiredChecks.length === 0 ? {} : { requiredChecks }),
     },
     createElement(ChangeResultView, {
       prs: currentPrs,
@@ -9182,6 +9219,46 @@ async function runPreSubmitGuards(
   return outcomes
 }
 
+/**
+ * One pre-submit required check's SETTLED verdict — a check that ran to an exit
+ * code, pass or fail.
+ *
+ * A check killed before it produced an exit code has no verdict and gets no
+ * row here: reporting one would invent the very evidence D1 says must be
+ * refused. That absence is raised as `required-check-infrastructure-signal`
+ * instead.
+ */
+export type PreSubmitCheckVerdict = Readonly<{
+  name: string
+  status: "passed" | "failed"
+  exitCode: number
+  /** Present only when the check was killed by its own timeout. */
+  timedOut?: true
+}>
+
+/**
+ * `yrd pr submit`'s pre-submit required checks.
+ *
+ * `onVerdict` fires the instant each check settles and BEFORE any failure is
+ * raised, which is the whole anti-erasure contract: a check that ran cannot be
+ * un-run by a later throw. The return value is the same list, for callers that
+ * only need the all-passed case.
+ *
+ * Returning the verdicts alone was not enough. Measured on PR1970 (2026-08-23,
+ * @i/10-merge-queue/failed-check-erased): four checks ran, `affected-tests`
+ * failed, and the raise below unwound past a call site that discarded the
+ * return value — erasing the failure AND the three passes that preceded it.
+ * The bead asked which of the two was erased; the answer is both, and it is
+ * both because the ONLY report was a value the thrower never got to return.
+ *
+ * So the two endings report on different surfaces, because they have different
+ * survivors. A passing run returns its verdicts and the caller puts them in its
+ * result envelope, leaving stderr silent as a successful command must. A
+ * failing run produces no envelope at all, so its ledger rides the raised
+ * MESSAGE — the one artifact an unwind carries, and the one that reaches both
+ * human stderr and the single `--json` failure document without becoming a
+ * second document that `JSON.parse(stderr)` would choke on.
+ */
 async function runRequiredChecks(
   services: YrdCliServices,
   io: YrdCliIO,
@@ -9189,13 +9266,13 @@ async function runRequiredChecks(
   ref?: string,
   keepOnFailure = false,
   json = false,
-): Promise<readonly Readonly<{ name: string; exitCode: number }>[]> {
+): Promise<readonly PreSubmitCheckVerdict[]> {
   const checks = services.checks
   if (checks === undefined) configuration("required-check capability is not installed")
   const names = selected ?? checks.names
   if (names.length === 0) return []
   await checks.install(io.cwd ?? process.cwd())
-  const results: Array<Readonly<{ name: string; exitCode: number }>> = []
+  const results: PreSubmitCheckVerdict[] = []
   for (const name of names) {
     const context =
       ref === undefined && !keepOnFailure
@@ -9211,10 +9288,17 @@ async function runRequiredChecks(
       raiseFailure(
         "infrastructure",
         "required-check-infrastructure-signal",
-        `yrd: required check infrastructure failed: '${name}' ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict${retained}`,
+        `yrd: required check infrastructure failed: '${name}' ended by SIGKILL (exit ${result.exitCode}) before it produced a verdict${retained}${requiredCheckLedger(results)}`,
       )
     }
-    if (result.exitCode !== 0 || result.timedOut) {
+    const failed = result.exitCode !== 0 || result.timedOut
+    results.push({
+      name,
+      status: failed ? "failed" : "passed",
+      exitCode: result.exitCode,
+      ...(result.timedOut ? { timedOut: true as const } : {}),
+    })
+    if (failed) {
       const outcome = result.timedOut ? "timed out" : `exited ${String(result.exitCode)}`
       const checkDiagnostic = result.stderr.trim()
       const diagnostic = checkDiagnostic === "" ? "" : `; check stderr: ${checkDiagnostic}`
@@ -9223,7 +9307,7 @@ async function runRequiredChecks(
       raiseFailure(
         "refusal",
         "required-check-failed",
-        `yrd: required check failed: '${name}' ${outcome}${diagnostic}${retained}`,
+        `yrd: required check failed: '${name}' ${outcome}${diagnostic}${retained}${requiredCheckLedger(results)}`,
       )
     }
     // Replay the child's buffered output only AFTER the verdict tests above:
@@ -9234,9 +9318,35 @@ async function runRequiredChecks(
     // diagnostic already carries the check's trimmed stderr.
     if (!json && result.stdout !== "") io.stdout(result.stdout)
     if (result.stderr !== "") io.stderr(result.stderr)
-    results.push({ name, exitCode: result.exitCode })
   }
   return results
+}
+
+/**
+ * The clause that makes a FAILED required-check run readable after the fact,
+ * appended to the raised message — the one artifact that survives the unwind.
+ *
+ * It names the checks that already PASSED as well as the one that failed,
+ * because a failing gate erased both by the same mechanism and "which gates
+ * actually ran" is the question every audit of PR1970 had to answer from one
+ * agent's `/tmp` scratch file.
+ *
+ * A single-row ledger restates what the message already said, and it is kept
+ * anyway. On the SIGKILL path the killed check produced NO verdict and appears
+ * nowhere in this list, so the one row is a prior pass and the only record of
+ * it — and this bead is the standing evidence that a redundant line costs less
+ * than an omitted one.
+ */
+export function requiredCheckLedger(verdicts: readonly PreSubmitCheckVerdict[]): string {
+  if (verdicts.length === 0) return ""
+  const rows = verdicts
+    .map((verdict) =>
+      verdict.status === "passed"
+        ? `${verdict.name} passed`
+        : `${verdict.name} FAILED (${verdict.timedOut === true ? "timed out" : `exit ${String(verdict.exitCode)}`})`,
+    )
+    .join(", ")
+  return `; required checks run: ${rows}`
 }
 
 /**
@@ -9279,6 +9389,9 @@ async function checkRequired(
   io: YrdCliIO,
 ): Promise<void> {
   if (names.length === 0) usage("check requires at least one configured check name")
+  // The envelope below reports the verdicts only when every check passed; the
+  // ledger inside reports them on the failing path too, where the passes that
+  // preceded the failure used to vanish with the throw.
   const checks = await runRequiredChecks(services, io, names, undefined, false, jsonEnabled(options))
   await printResult(
     io,

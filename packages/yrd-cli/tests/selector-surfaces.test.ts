@@ -222,6 +222,11 @@ describe("case-insensitive CLI selector surfaces", () => {
       surface: "pr checks",
       args: ["pr", "checks", "pr1", "--json"],
       expected: { kind: "pr.check", pr: "PR1" },
+      // This row's subject is the SELECTOR, and the canonical row it prints is
+      // unchanged. The exit moved because nothing has judged this PR yet, and
+      // `pr checks` no longer reads an absent verdict as a pass
+      // (@i/10-merge-queue/failed-check-erased).
+      exit: 1,
     },
     {
       surface: "pr list base filter",
@@ -238,14 +243,17 @@ describe("case-insensitive CLI selector surfaces", () => {
       args: ["--base", "MAIN", "--json"],
       expected: { command: "dashboard", results: [{ base: "main", prs: [{ id: "PR1" }] }] },
     },
-  ])("$surface resolves the folded selector and preserves canonical output", async ({ args, expected }) => {
-    const app = await createCliApp()
-    await submitOnePR(app)
-    const output = outputIO()
+  ])(
+    "$surface resolves the folded selector and preserves canonical output",
+    async ({ args, expected, exit }: { args: readonly string[]; expected: object; exit?: number }) => {
+      const app = await createCliApp()
+      await submitOnePR(app)
+      const output = outputIO()
 
-    expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject(expected)
-  })
+      expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(exit ?? 0)
+      expect(JSON.parse(output.stdout())).toMatchObject(expected)
+    },
+  )
 
   it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
     const app = await createCliApp()
