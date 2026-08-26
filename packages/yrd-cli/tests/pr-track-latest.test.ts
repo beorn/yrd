@@ -271,8 +271,6 @@ describe("pr submit tracking default", () => {
 })
 
 describe("implicit recut of a moved branch", () => {
-
-
   it("certifies an equivalent tracked candidate instead of leaving the recorded head stale", async () => {
     const app = await createCliApp()
     let head = RECORDED_HEAD
@@ -317,8 +315,6 @@ describe("implicit recut of a moved branch", () => {
       { n: 2, head: LIVE_HEAD },
     ])
   })
-
-
 })
 
 describe("habitant merge-into-latest", () => {

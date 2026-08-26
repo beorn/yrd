@@ -743,7 +743,6 @@ describe("pr withdraw journal replay", () => {
   })
 })
 
-
 describe("pr prune", () => {
   it("does not trust --quiet when a sibling directory entry masks a content conflict", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-prune-quiet-false-negative-"))

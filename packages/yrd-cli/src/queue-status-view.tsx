@@ -4148,8 +4148,7 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
       <Text wrap="truncate">
         <Text bold>ACTIVE RUN </Text>
         <RunId base={active.base} run={active.run} /> <QueueChangeId pr={active.pr} revision={active.revision} />{" "}
-        {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} /> {active.steps}{" "}
-        {active.elapsed}
+        {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} /> {active.steps} {active.elapsed}
       </Text>
     </Box>
   )
@@ -8228,7 +8227,9 @@ export function QueueShowView({
             header: "STATUS",
             key: "status",
             minWidth: 15,
-            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={queueShowGlyph(row)} value={row.status} />,
+            render: (row) => (
+              <TaskStatusValue taskStatus={row.taskStatus} glyph={queueShowGlyph(row)} value={row.status} />
+            ),
           },
           { header: "OUTCOME", key: "outcome", minWidth: 11 },
           { header: "START", key: "started", grow: true },

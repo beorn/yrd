@@ -109,9 +109,9 @@ describe("Yrd v4 config", () => {
   // (always from the base ref) hit the newly-merged key.
   describe("validatePushedYrdConfig — the queue's own admission gate for a pushed .yrd.yml", () => {
     it("refuses the PR1337 shape: a comparison value the schema does not accept", () => {
-      expect(() =>
-        validatePushedYrdConfig("checks: [typecheck, {test-fast: {comparison: gate-residuals}}]\n"),
-      ).toThrow('yrd: config test-fast.comparison Invalid input: expected "diagnostics"')
+      expect(() => validatePushedYrdConfig("checks: [typecheck, {test-fast: {comparison: gate-residuals}}]\n")).toThrow(
+        'yrd: config test-fast.comparison Invalid input: expected "diagnostics"',
+      )
     })
 
     it("admits the current config unchanged", () => {

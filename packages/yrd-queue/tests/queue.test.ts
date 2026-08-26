@@ -795,7 +795,6 @@ describe("Queue", () => {
     expect(app.queue.audit().findings.filter(({ code }) => code === "candidate-revision-mismatch")).toEqual([])
   })
 
-
   // 22332, the C2465 shape: two composes that produce DIFFERENT trees are
   // published without either refusing the other. There is no retry here to make
   // that work — the ref is derived from the evidence, so the second compose
@@ -3718,7 +3717,6 @@ describe("Queue", () => {
     expect(integrated).toEqual([current.id])
     expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "canceled", canceledBy: "@chief" })
   })
-
 
   it("integrates the implicit queue in PR revision submission order", async () => {
     let tick = 0

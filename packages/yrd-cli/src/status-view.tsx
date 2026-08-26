@@ -400,8 +400,8 @@ export function IssueLensView({
         <Text bold>ISSUE</Text> {issue.issue}
       </Text>
       <Text wrap="wrap">
-        <TaskStatusValue taskStatus={issue.taskStatus} value={issue.taskStatus} /> BAYS {issue.bays}{" "}
-        PRS {issue.prs} CONTESTS {issue.contests}
+        <TaskStatusValue taskStatus={issue.taskStatus} value={issue.taskStatus} /> BAYS {issue.bays} PRS {issue.prs}{" "}
+        CONTESTS {issue.contests}
       </Text>
       <Text wrap="wrap">OUTCOME {issue.outcome}</Text>
       <Text bold>DELIVERIES</Text>

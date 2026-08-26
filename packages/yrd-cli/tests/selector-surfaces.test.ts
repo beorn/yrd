@@ -361,7 +361,6 @@ describe("case-insensitive CLI selector surfaces", () => {
     }
   }
 
-
   it("retries a required-check-failed PR through folded selectors without renaming it", async () => {
     let attempts = 0
     const app = await createCliApp({
@@ -388,7 +387,5 @@ describe("case-insensitive CLI selector surfaces", () => {
     const refused = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
     expect(refused.stderr()).toContain("change 'PR1' required check failed in R1")
-
   })
-
 })

@@ -1178,18 +1178,7 @@ describe("runYrd", () => {
     const root = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
     expect(root.stdout()).toContain("Pick an issue")
-    for (const command of [
-      "pr",
-      "bay",
-      "issue",
-      "contest",
-      "deployment",
-      "queue",
-      "check",
-      "admin",
-      "log",
-      "watch",
-    ]) {
+    for (const command of ["pr", "bay", "issue", "contest", "deployment", "queue", "check", "admin", "log", "watch"]) {
       expect(root.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
     const retiredQueueNoun = ["li", "ne"].join("")
@@ -10962,7 +10951,7 @@ describe("runYrd", () => {
           attempt: "1",
           status: "failed",
           taskStatus: "blocked",
-              duration: "3m42s",
+          duration: "3m42s",
           error: "merge stalled",
         }),
         expect.objectContaining({
@@ -14237,7 +14226,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
   })
 
   describe("doctor retention observability", () => {
-
     async function retentionDoctorFixture() {
       const repo = mkdtempSync(join(tmpdir(), "yrd-doctor-retention-"))
       execFileSync("git", ["init", "-q", "-b", "main", repo])
@@ -14636,7 +14624,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
   })
 
   describe("doctor --rebuild-index-from-repo", () => {
-
     const mergedRecord = (changeId: string) => ({
       merge: {
         id: "R-recovered",
@@ -14875,10 +14862,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       await using app = await createApp()
       const output = outputIO()
 
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {
-        } as YrdCliServices),
-      ).toBe(2)
+      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {} as YrdCliServices)).toBe(2)
       expect(output.stderr()).toContain("repository merge-record capability is not installed")
     })
 

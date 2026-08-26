@@ -1846,7 +1846,6 @@ describe("withBays", () => {
     )
   })
 
-
   it("atomically records admitted-to-refreshed recuts without overwriting a newer authored revision", async () => {
     await using app = (await createHarness()).app
     const nextBase = "b".repeat(40)

@@ -962,12 +962,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(
-    steps,
-    byName,
-    needsPersonOwner,
-    options.prepareCandidate !== undefined,
-  )
+  const commands = createQueueCommands(steps, byName, needsPersonOwner, options.prepareCandidate !== undefined)
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -2521,7 +2516,8 @@ function createQueue<Shape extends ChangeShape>(
                     code: fact.code,
                     kind: fact.kind,
                     reason: fact.message,
-                    remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+                    remedy:
+                      "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
                   })
                   // Only the member that actually refused earns the durable record.
                   await noteCandidateRefusal([guilty], {
@@ -2564,7 +2560,8 @@ function createQueue<Shape extends ChangeShape>(
                   pr: refusal.pr,
                   code: refusal.receipt.code,
                   reason: refusal.receipt.message,
-                  remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
+                  remedy:
+                    "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
                 })
                 continue
               }

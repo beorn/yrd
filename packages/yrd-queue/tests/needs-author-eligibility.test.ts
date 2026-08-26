@@ -154,7 +154,10 @@ describe("native needs-author lifecycle", () => {
     await using app = await createQueueApp(() => ({
       status: "completed",
       conclusion: "failure",
-      error: { code: "composition-retired", message: "change 'PR1' declares a source composition; composed revisions are retired" },
+      error: {
+        code: "composition-retired",
+        message: "change 'PR1' declares a source composition; composed revisions are retired",
+      },
     }))
     const pr = await submitWithChecks(app, "topic/authored-root")
 

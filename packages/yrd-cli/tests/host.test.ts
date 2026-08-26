@@ -4118,7 +4118,6 @@ checks: [{check: {run: "true"}}]
     expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
   })
 
-
   it("fails typed instead of submitting a stale branch when origin cannot be fetched", async () => {
     const { observer, branch, staleHead } = await staleRemoteBranchRepository()
     await git(observer, "remote", "set-url", "origin", join(observer, "missing-origin.git"))
@@ -4220,7 +4219,6 @@ checks: [{check: {run: "true"}}]
     // authored gitlink through (packages/yrd-cli/tests/authored-gitlink-admission.test.ts
     // covers that admission directly). This test stays scoped to the still-refusing case.
   })
-
 
   it("keeps publication durable and visible until queue run --once publishes and queues it", async () => {
     const { repo, rootRemote, moduleRemote, branch, pin } = await unpublishedSubmodulePinRepository()
@@ -5271,7 +5269,6 @@ checks: [{check: {run: "true"}}]
     expect(managedCwd).not.toBe(ambient)
     expect(managedCwd.startsWith(wrong.repo + sep)).toBe(false)
   })
-
 
   it("fails a check that emits then goes silent as a stall instead of wedging the queue behind a live child", async () => {
     const { repo, featureSha } = await repository()

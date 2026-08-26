@@ -2851,10 +2851,10 @@ async function settleOneShotQueueRun(
   } catch (error) {
     // No recovery argv to attach (5e cut 6): the next runner start reclaims
     // this runner's leases, and the habitant sweep settles them once expired.
-    log.error?.(
-      `Could not stop the queue run safely after ${signal}; the next runner start reclaims its leases.`,
-      { error: error instanceof Error ? error.message : String(error), repository: host.repository.repo },
-    )
+    log.error?.(`Could not stop the queue run safely after ${signal}; the next runner start reclaims its leases.`, {
+      error: error instanceof Error ? error.message : String(error),
+      repository: host.repository.repo,
+    })
     throw error
   }
 }
