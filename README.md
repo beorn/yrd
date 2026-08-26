@@ -630,7 +630,7 @@ yrd in                     attach a PID-addressed guest to an existing Bay
 yrd run                    act on individual queue runs
 yrd sh                     run $SHELL in a scoped Bay
 yrd pr                      list PRs; create, submit, view, runs, diff, checkout,
-                            status, edit, checks, regression, close, and merge teaching
+                            status, edit, checks, close, and merge teaching
 yrd bay                     list bays; open, run, in, path, refresh, submit, and close
 yrd issue                   issue list/view plus Bay + tracked-draft ensure
 yrd contest                 list; open, eval, view, finish, select, promote
@@ -1225,9 +1225,6 @@ unexpired leases settle when they lapse.
 yrd issue [--json]
 yrd issue view <issue> [--json]
 yrd issue ensure <issue> [--json]
-yrd pr regression <pr> --run <run> --detected-at <timestamp>
-  --severity <level> --evidence <ref> --implementation-run <ref>
-  --review <ref> --repair-pr <pr> --repair-run <run> [--json]
 yrd contest open <issue> --competitors <json> [--json]
 yrd contest eval <contest> [--retry] [--json]
 yrd contest view <contest> [--json]
@@ -1279,16 +1276,8 @@ bridge versions until it reaches a terminal outcome; a passing check is Queue
 evidence, not a tracker delivery status.
 
 The human `yrd issue view <issue>` surface projects those same typed facts: it
-prints exact PR revision/head, Queue runs, canonical projected status, landing
-or bounce, and the original/repair provenance of every recorded regression.
-Bare `yrd issue` keeps the compact multi-issue table.
-
-`pr regression` records a completed repair without rewriting either integration.
-It accepts only the exact original and repair Queue runs named by their terminal
-journal facts, and preserves detection time, severity, evidence, opaque
-implementation/review provenance, both issue/PR/run identities, and both landing
-SHAs. Consumers may derive flow metrics from this join; Yrd does not add a
-telemetry store or interpret opaque provenance.
+prints exact PR revision/head, Queue runs, canonical projected status, and
+landing or bounce. Bare `yrd issue` keeps the compact multi-issue table.
 
 The bridge contract is the journal plus JSON data, not a tracker plugin
 registry. Independent consumers checkpoint `trackerBridgeV2.asOf.cursor` (or

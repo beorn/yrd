@@ -23,10 +23,12 @@ const WORK_FOLD_GLYPHS = {
 
 export type StatusGlyph = (typeof WORK_STATUS_GLYPHS)[TaskStatus]
 
+/** The stored/emitted task-status envelope carries only the status word;
+ * the glyph is presentation and derives at render via {@link taskStatusGlyph}
+ * (5e cut 4 — glyph left the stored shape). */
 export type TaskStatusFields = Readonly<{
   /** answers: How does this object map to the shared work-state vocabulary? tense: current. */
   taskStatus: TaskStatus
-  glyph: StatusGlyph
 }>
 
 export function taskStatusGlyph(taskStatus: TaskStatus): StatusGlyph {
@@ -39,7 +41,7 @@ export function taskFoldGlyph(expanded: boolean): (typeof WORK_FOLD_GLYPHS)[keyo
 }
 
 export function taskStatusFields(taskStatus: TaskStatus): TaskStatusFields {
-  return { taskStatus, glyph: taskStatusGlyph(taskStatus) }
+  return { taskStatus }
 }
 
 export function changeTaskStatusOf(pr: Change): TaskStatus {

@@ -619,29 +619,6 @@ export type ChangeAlreadyMergedEvidence = Readonly<{
   }>
 }>
 
-export type ChangeRegressionSeverity = "low" | "medium" | "high" | "critical"
-
-/** One completed escaped-regression outcome. Implementation and review
- * provenance stay opaque; Yrd owns only their exact delivery join. */
-export type ChangeRegression = Readonly<{
-  pr: PRId
-  issueRef: string
-  revision: number
-  headSha: string
-  run: string
-  landingSha: string
-  detectedAt: string
-  severity: ChangeRegressionSeverity
-  evidence: string
-  implementationRunRef: string
-  reviewRef: string
-  repairIssueRef: string
-  repairPr: PRId
-  repairRun: string
-  repairLandingSha: string
-  recordedAt: string
-}>
-
 export type Change = Readonly<{
   id: PRId
   bay?: BayId
@@ -672,10 +649,9 @@ export type Change = Readonly<{
   checkRequests: readonly ChangeCheckRequest[]
   /** Current requested-reviewer set (latest pr/review-requested fact wins;
    * revision-independent, so re-merges and new revisions keep the request).
-   * Optional like `regressions`: absent means no request was ever recorded,
+   * Optional: absent means no request was ever recorded,
    * identical in meaning to the empty set. */
   requestedReviewers?: readonly string[]
-  regressions?: readonly ChangeRegression[]
   /** answers: Has this change ever recorded author-owned refusal evidence? tense: historical.
    * Legacy pre-revision-admission projection. New refusal evidence lives on
    * `currentChangeRev(pr).admission`; retained so old indexes remain readable. */
@@ -1287,9 +1263,6 @@ function projectChangeRevision(pr: Change, revision: ChangeRev): Change {
     reviews: pr.reviews.filter((review) => review.revision <= revision.n),
     comments: pr.comments.filter((comment) => comment.revision <= revision.n),
     checkRequests: pr.checkRequests.filter((request) => request.revision <= revision.n),
-    ...(pr.regressions === undefined
-      ? {}
-      : { regressions: pr.regressions.filter((regression) => regression.revision <= revision.n) }),
   }
 }
 

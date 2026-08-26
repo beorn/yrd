@@ -257,26 +257,6 @@ exports[`bay journal vocabulary > pins every bay event's fields to the reader ve
     },
     "reader": 3,
   },
-  "pr/regression-recorded": {
-    "fields": {
-      "detectedAt": 1,
-      "evidence": 1,
-      "headSha": 1,
-      "implementationRunRef": 1,
-      "issueRef": 1,
-      "landingSha": 1,
-      "pr": 1,
-      "repairIssueRef": 1,
-      "repairLandingSha": 1,
-      "repairPr": 1,
-      "repairRun": 1,
-      "reviewRef": 1,
-      "revision": 1,
-      "run": 1,
-      "severity": 1,
-    },
-    "reader": 1,
-  },
   "pr/rejected": {
     "fields": {
       "detail": 1,

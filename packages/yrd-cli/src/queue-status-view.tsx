@@ -925,7 +925,6 @@ export type QueueLogRow = Readonly<{
   branch: string
   subject: string
   taskStatus: TaskStatus
-  glyph: StatusGlyph
   revision: string
   headSha: string
   baseSha: string
@@ -1130,7 +1129,6 @@ export type HumanChangeProjection = Row &
     subject: string
     nativeStatus: ChangeDeliveryState
     taskStatus: TaskStatus
-    glyph: StatusGlyph
     candidateId?: string
     runId?: string
     submittedAt?: string
@@ -1161,7 +1159,6 @@ type QueueShowRow = Readonly<{
   revision: string
   status: string
   taskStatus: TaskStatus
-  glyph: StatusGlyph
   attempt: string
   uuid: string
   runner: string
@@ -1196,6 +1193,13 @@ type GateEvidence = Readonly<{
 /** Perfect-detector merge class for scripts (21801 / 22323). */
 export type MergeVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
 
+/** Render-side run glyph (5e cut 4 — glyph left the stored shape). Non-landing
+ * success must not share ✓ with real merges (21801), so it borrows the
+ * status-presentation "passed" ring instead of the work-vocabulary glyph. */
+export function queueShowGlyph(data: Readonly<{ taskStatus: TaskStatus; mergeVerdict: MergeVerdict }>): string {
+  return data.mergeVerdict === "non-landing" ? statusPresentation("passed").glyph : taskStatusGlyph(data.taskStatus)
+}
+
 export type QueueShowData = Readonly<{
   /** Typeable `path@branch#N` run address, stamped by the projection when
    * the repository root is known (items 34/36). */
@@ -1206,7 +1210,6 @@ export type QueueShowData = Readonly<{
   status: Run["status"]
   conclusion?: Run["conclusion"]
   taskStatus: TaskStatus
-  glyph: StatusGlyph
   outcome: string
   /** Perfect detector: merged only when merge/integration proof exists. */
   mergeVerdict: MergeVerdict
@@ -3508,7 +3511,7 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
           header: "STATE",
           key: "state",
           minWidth: 12,
-          render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.state} />,
+          render: (row) => <TaskStatusValue taskStatus={row.taskStatus} value={row.state} />,
         },
         { header: "STEPS", key: "steps", grow: true },
       ]}
@@ -3602,7 +3605,7 @@ export function changeListRows(
     // re-cut a branch that is already on the base branch (22376).
     const merge = merges.get(pr.id)
     const state = merge === undefined ? projectedChangeStatus(pr, eligibility) : "already-landed"
-    const glyph = merge === undefined ? projected.glyph : "✓"
+    const glyph = merge === undefined ? taskStatusGlyph(projected.taskStatus) : "✓"
     return {
       pr: projected.pr,
       state,
@@ -3788,7 +3791,7 @@ export function ChangeChecksView({
           {
             header: "STATE",
             key: "state",
-            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.state} />,
+            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} value={row.state} />,
           },
           { header: "CLASS", key: "classification" },
           { header: "AGE", key: "age" },
@@ -4000,7 +4003,7 @@ export function ChangeDetailView({
     <Box flexDirection="column">
       <Text>
         <QueueChangeId pr={pr.id} revision={revision.n} /> <Text bold>STATUS</Text> <StatusValue value={delivery} />{" "}
-        <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
+        <TaskStatusGlyph taskStatus={projectionFields.taskStatus} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
       {eligibility?.reason?.code === "needs-author" ? (
@@ -4145,7 +4148,7 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
       <Text wrap="truncate">
         <Text bold>ACTIVE RUN </Text>
         <RunId base={active.base} run={active.run} /> <QueueChangeId pr={active.pr} revision={active.revision} />{" "}
-        {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps}{" "}
+        {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} /> {active.steps}{" "}
         {active.elapsed}
       </Text>
     </Box>
@@ -4157,7 +4160,7 @@ function ProjectedChangeQueue({ row, position }: { row: HumanChangeProjection; p
     <Box height={1}>
       <Text wrap="truncate">
         {position === undefined ? "" : `${position}. `}
-        <TaskStatusGlyph taskStatus={row.taskStatus} glyph={row.glyph} />{" "}
+        <TaskStatusGlyph taskStatus={row.taskStatus} />{" "}
         {row.changeHref === undefined ? (
           <QueueChangeId pr={row.pr} revision={row.revision} />
         ) : (
@@ -4327,7 +4330,6 @@ export type WatchQueueRow = Readonly<{
   pos: number
   pr: string
   subject: string
-  glyph: StatusGlyph
   taskStatus: TaskStatus
   state: string
   step: string
@@ -4342,7 +4344,6 @@ export function watchQueueRows(result: QueueStatusResult, now: number): WatchQue
     pos: row.position,
     pr: row.pr,
     subject: row.subject,
-    glyph: row.glyph,
     taskStatus: row.taskStatus,
     state: row.state,
     step: row.step,
@@ -4363,7 +4364,6 @@ export type WatchActiveRow = Readonly<{
   steps: string
   status: Run["status"]
   taskStatus: TaskStatus
-  glyph: StatusGlyph
   elapsed: string
 }>
 
@@ -7100,9 +7100,6 @@ export function queueShowData(
   const outcome = queueOutcome(run)
   const mergeVerdict = mergeVerdictOfOutcome(outcome)
   const stepNames = stepNamesOfRun(run)
-  // Glyph for non-landing success must not share ✓ with real merges (21801).
-  const glyph =
-    mergeVerdict === "non-landing" ? (statusPresentation("passed").glyph as StatusGlyph) : taskStatusGlyph(taskStatus)
   const runFailure = failureFact(run, relevantStep(run))
   return {
     run: run.id,
@@ -7111,7 +7108,6 @@ export function queueShowData(
     status: run.status,
     ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
     taskStatus,
-    glyph,
     outcome,
     mergeVerdict,
     stepNames,
@@ -7644,9 +7640,6 @@ function changeMetadataGroups(
     ...(retained?.composition === undefined
       ? []
       : [{ key: "composition", value: boundedQueue(safeText(retained.composition), 160) }]),
-    ...(pr === undefined || (pr.regressions?.length ?? 0) === 0
-      ? []
-      : [{ key: "regressions", value: boundedQueue(safeText(pr.regressions), 160) }]),
   ]
   const revisionCount = pr?.revs.filter((candidate) => candidate.n <= member.revision).length ?? 1
   const dates: ChangeMetadataFact[] = [
@@ -8235,7 +8228,7 @@ export function QueueShowView({
             header: "STATUS",
             key: "status",
             minWidth: 15,
-            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.status} />,
+            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={queueShowGlyph(row)} value={row.status} />,
           },
           { header: "OUTCOME", key: "outcome", minWidth: 11 },
           { header: "START", key: "started", grow: true },
@@ -8276,7 +8269,7 @@ export function QueueShowView({
               header: "STATUS",
               key: "status",
               minWidth: 12,
-              render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.status} />,
+              render: (row) => <TaskStatusValue taskStatus={row.taskStatus} value={row.status} />,
             },
             { header: "ATT", key: "attempt", align: "right" },
             { header: "DUR", key: "duration", align: "right", minWidth: 8 },

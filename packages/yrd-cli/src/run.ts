@@ -40,8 +40,6 @@ import {
   type Change,
   type ChangeFreshnessTransition,
   type ChangeDeliveryState,
-  type ChangeRegression,
-  type ChangeRegressionSeverity,
   type ChangeRev,
   type ChangePublicationInput,
   type MaterializeDeploymentInput,
@@ -2321,8 +2319,7 @@ type TrackerBounce = Readonly<{ run: string; detail?: string }>
 type TrackerDeliveryV1 =
   | (TrackerDeliveryIdentity & Readonly<{ status: "pushed" | "submitted" | "withdrawn" | "canceled" }>)
   | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce: TrackerBounce }>)
-  | (TrackerDeliveryIdentity &
-      Readonly<{ status: "integrated"; landingSha: string; regressions?: readonly ChangeRegression[] }>)
+  | (TrackerDeliveryIdentity & Readonly<{ status: "integrated"; landingSha: string }>)
   | (TrackerDeliveryIdentity &
       Readonly<{
         status: "already-landed"
@@ -2430,7 +2427,6 @@ function trackerDeliveryV2(
         status: "integrated",
         at: merge.at,
         landingSha: merge.landingSha,
-        ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
       }
     }
     case "already-landed": {
@@ -2495,7 +2491,6 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
       ...identity,
       status,
       landingSha: delivery.landingSha,
-      ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
     }
   }
   if (status === "already-landed") {
@@ -2544,12 +2539,7 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
       status: delivery.status,
       runs: delivery.runs,
       ...taskStatusFields(taskStatus),
-      ...(delivery.status === "integrated"
-        ? {
-            landingSha: delivery.landingSha,
-            ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
-          }
-        : {}),
+      ...(delivery.status === "integrated" ? { landingSha: delivery.landingSha } : {}),
       ...(delivery.status === "already-landed"
         ? {
             baseSha: delivery.baseSha,
@@ -6461,54 +6451,6 @@ async function editPr(
     jsonEnabled(options),
     { command: "pr.edit", pr: projectChangeTaskStatus(edited) },
     createElement(ChangeResultView, { prs: [edited], runs: changeQueueRuns(app, edited) }),
-  )
-}
-
-type ChangeRegressionOptions = JsonOption &
-  Readonly<{
-    run: string
-    detectedAt: string
-    severity: ChangeRegressionSeverity
-    evidence: string
-    implementationRun: string
-    review: string
-    repairPr: string
-    repairRun: string
-  }>
-
-type ChangeRegressionFact = Omit<ChangeRegression, "recordedAt">
-
-async function recordChangeRegression(
-  app: YrdCliApp,
-  selector: string,
-  options: ChangeRegressionOptions,
-  io: YrdCliIO,
-): Promise<void> {
-  const result = await app.bays.recordRegression({
-    pr: selector,
-    run: options.run,
-    detectedAt: options.detectedAt,
-    severity: options.severity,
-    evidence: options.evidence,
-    implementationRunRef: options.implementationRun,
-    reviewRef: options.review,
-    repairPr: options.repairPr,
-    repairRun: options.repairRun,
-  })
-  if (
-    result.value === undefined ||
-    result.value === null ||
-    typeof result.value !== "object" ||
-    Array.isArray(result.value)
-  ) {
-    throw new Error("yrd: regression command returned no completed outcome")
-  }
-  const regression = result.value as unknown as ChangeRegressionFact
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.regression", regression },
-    `Recorded ${regression.severity} escaped regression for ${regression.pr}; repaired by ${regression.repairPr}.`,
   )
 }
 
@@ -12328,20 +12270,6 @@ function buildProgram(
     .option("--follow", "follow active checks to a terminal result")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await changeChecks(installed(), selectors, options, io)))
-  pr.command("regression <selector>")
-    .description("record one completed escaped regression and its integrated repair")
-    .requiredOption("--run <run>", "original integration run")
-    .requiredOption("--detected-at <timestamp>", "ISO-8601 detection timestamp")
-    .requiredOption("--severity <severity>", "low, medium, high, or critical")
-    .requiredOption("--evidence <ref>", "opaque regression evidence reference")
-    .requiredOption("--implementation-run <ref>", "opaque original implementation run reference")
-    .requiredOption("--review <ref>", "opaque original review reference")
-    .requiredOption("--repair-pr <pr>", "integrated repair PR")
-    .requiredOption("--repair-run <run>", "repair integration run")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      recordChangeRegression(installed(), selector, options as unknown as ChangeRegressionOptions, io),
-    )
   pr.command("close [selector...]")
     .description("close a live change without merging — records why, leaves the queue")
     .option("--reason <text>", "close rationale recorded on each pr/withdrawn event")

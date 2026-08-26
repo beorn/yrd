@@ -540,12 +540,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // every stored checkpoint and refused any Candidate carrying it with
     // `checkpoint-migration-certificate-missing`, so the declared check could
     // not be adopted at all.
-    // Conscious update 2026-08-25 (5e cut 1): the terminal-associations
+    // Conscious update 2026-08-25 (5e cuts 1+4): the terminal-associations
     // back-fill cut removes the pr/terminal-associated event and the
-    // queues.terminalAssociations state container, so the identity moves and
-    // the production predecessor ae0d2084 (measured from the live journal's
-    // stored checkpoint_identity, cursor 90900) gains a retained edge below.
-    expect(first.manifest.targetIdentity).toBe("fe430448d3a1ce0f2af9d118335b8947a75a0e9b40684bedbbb2c77b12ef3744")
+    // queues.terminalAssociations state container, and the change-record fat
+    // cut removes the never-written pr/regression-recorded event, so the
+    // identity moves and the production predecessor ae0d2084 (measured from
+    // the live journal's stored checkpoint_identity, cursor 90900) gains a
+    // retained edge below. The cut-1 interim identity fe430448 was never
+    // stored by any deployment, so it is deliberately NOT retained.
+    expect(first.manifest.targetIdentity).toBe("36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: first.manifest.targetIdentity,
@@ -2017,7 +2020,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "requestChecks",
       "recordAdmission",
       "requestReview",
-      "regression",
       "publish",
     ])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")

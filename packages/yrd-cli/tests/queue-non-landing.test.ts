@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest"
 import {
   mergeVerdictOfOutcome,
   queueShowData,
+  queueShowGlyph,
   queueTimelineProjection,
   queueTimelineStatusBucket,
 } from "../src/queue-status-view.tsx"
@@ -110,7 +111,7 @@ describe("21801 non-landing detector (perfect signals)", () => {
     expect(show.merge).toBe("-")
     expect(show.integration).toBeUndefined()
     expect(show.stepNames).toEqual(["bead-identity-admission"])
-    expect(show.glyph).toBe("◌")
+    expect(queueShowGlyph(show)).toBe("◌")
 
     const projection = queueTimelineProjection([fixtureResult([pr], [run])], {
       now: Date.parse("2026-07-25T05:10:00.000Z"),
@@ -146,7 +147,7 @@ describe("21801 non-landing detector (perfect signals)", () => {
     expect(show.outcome).toBe("integrated")
     expect(show.mergeVerdict).toBe("landed")
     expect(show.stepNames).toContain("merge")
-    expect(show.glyph).toBe("✓")
+    expect(queueShowGlyph(show)).toBe("✓")
 
     const projection = queueTimelineProjection([fixtureResult([pr], [run])], {
       now: Date.parse("2026-07-25T05:10:00.000Z"),

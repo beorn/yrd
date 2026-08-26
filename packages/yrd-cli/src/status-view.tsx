@@ -9,7 +9,6 @@ import {
   type Bay,
   type Change,
   type ChangeDeliveryState,
-  type ChangeRegression,
 } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import type { JobError } from "@yrd/job"
@@ -23,7 +22,7 @@ import {
 } from "./actionable-error.ts"
 import { formatDuration } from "./runner-timeline.ts"
 import { hasStatusPresentation, lifecyclePresentation, statusPresentation } from "./status-presentation.ts"
-import { projectChangeTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
+import { projectChangeTaskStatus, taskStatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
 
 type EvaluationRow = Readonly<{
   attempt: string
@@ -92,10 +91,13 @@ export function taskStatusColor(taskStatus: TaskStatus): string {
   return "$fg"
 }
 
-export function TaskStatusGlyph({ taskStatus, glyph }: TaskStatusFields) {
+/** Glyphs are presentation, derived here at render from the stored
+ * `taskStatus` (5e cut 4). `glyph` stays as an optional override for the few
+ * cells with a status the work vocabulary cannot spell (non-landing "\u25cc"). */
+export function TaskStatusGlyph({ taskStatus, glyph }: TaskStatusFields & Readonly<{ glyph?: string }>) {
   return (
     <Text color={taskStatusColor(taskStatus)} bold={taskStatus === "wip"}>
-      {glyph}
+      {glyph ?? taskStatusGlyph(taskStatus)}
     </Text>
   )
 }
@@ -106,9 +108,9 @@ export function TaskStatusValue({
   value,
   href,
   compact = false,
-}: TaskStatusFields & Readonly<{ value: string; href?: string; compact?: boolean }>) {
+}: TaskStatusFields & Readonly<{ glyph?: string; value: string; href?: string; compact?: boolean }>) {
   const color = taskStatusColor(taskStatus)
-  const label = `${glyph}${compact ? "" : " "}${value}`
+  const label = `${glyph ?? taskStatusGlyph(taskStatus)}${compact ? "" : " "}${value}`
   if (href !== undefined) {
     return (
       <Link href={href} bold color={color} minWidth={0} maxWidth="100%" wrap="truncate">
@@ -320,7 +322,7 @@ export function ChangeStatusView({
           header: "STATUS",
           key: "status",
           minWidth: 15,
-          render: (pr) => <TaskStatusValue taskStatus={pr.taskStatus} glyph={pr.glyph} value={pr.status} compact />,
+          render: (pr) => <TaskStatusValue taskStatus={pr.taskStatus} value={pr.status} compact />,
         },
         { header: "BRANCH", key: "branch", grow: true },
         { header: "BASE", key: "base", grow: true },
@@ -341,7 +343,6 @@ export function ChangeStatusView({
 export type IssueLensRow = Readonly<{
   issue: string
   taskStatus: TaskStatus
-  glyph: StatusGlyph
   bays: string
   prs: string
   contests: string
@@ -361,7 +362,6 @@ export type IssueDeliveryRow = Readonly<{
   baseTreeSha?: string
   bounce?: Readonly<{ run: string; detail?: string }>
   attributedResult?: JobError
-  regressions?: readonly ChangeRegression[]
 }> &
   TaskStatusFields
 
@@ -382,7 +382,7 @@ export function IssueLensView({
             header: "STATUS",
             key: "taskStatus",
             minWidth: 13,
-            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.taskStatus} />,
+            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} value={row.taskStatus} />,
           },
           { header: "BAYS", key: "bays" },
           { header: "PRS", key: "prs" },
@@ -400,7 +400,7 @@ export function IssueLensView({
         <Text bold>ISSUE</Text> {issue.issue}
       </Text>
       <Text wrap="wrap">
-        <TaskStatusValue taskStatus={issue.taskStatus} glyph={issue.glyph} value={issue.taskStatus} /> BAYS {issue.bays}{" "}
+        <TaskStatusValue taskStatus={issue.taskStatus} value={issue.taskStatus} /> BAYS {issue.bays}{" "}
         PRS {issue.prs} CONTESTS {issue.contests}
       </Text>
       <Text wrap="wrap">OUTCOME {issue.outcome}</Text>
@@ -418,7 +418,6 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
       <Text wrap="wrap">
         <TaskStatusValue
           taskStatus={delivery.taskStatus}
-          glyph={delivery.glyph}
           value={`${delivery.pr} rev${delivery.revision} ${delivery.status}`}
         />{" "}
         RUNS {delivery.runs.join(",") || "-"}
@@ -442,33 +441,6 @@ function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
           <Text bold>ATTRIBUTED</Text> {delivery.attributedResult.code} — {delivery.attributedResult.message}
         </Text>
       )}
-      {delivery.regressions?.map((regression) => (
-        <IssueRegressionView
-          key={`${regression.pr}:${regression.run}:${regression.repairPr}:${regression.repairRun}`}
-          regression={regression}
-        />
-      ))}
-    </Box>
-  )
-}
-
-function IssueRegressionView({ regression }: { regression: ChangeRegression }) {
-  return (
-    <Box flexDirection="column" paddingLeft={2}>
-      <Text color="$fg-warning">
-        <Text bold>REGRESSION {regression.severity}</Text> DETECTED {regression.detectedAt} RECORDED{" "}
-        {regression.recordedAt}
-      </Text>
-      <Text wrap="wrap">
-        ORIGINAL {regression.issueRef} {regression.pr} {regression.run} MERGE {regression.landingSha}
-      </Text>
-      <Text wrap="wrap">EVIDENCE {regression.evidence}</Text>
-      <Text wrap="wrap">IMPLEMENTATION {regression.implementationRunRef}</Text>
-      <Text wrap="wrap">REVIEW {regression.reviewRef}</Text>
-      <Text wrap="wrap">
-        REPAIR {regression.repairIssueRef} {regression.repairPr} {regression.repairRun} MERGE{" "}
-        {regression.repairLandingSha}
-      </Text>
     </Box>
   )
 }

@@ -177,7 +177,7 @@ describe("noun cutover ratchet", () => {
   it("documents public recovery and the command-event core model", () => {
     const readme = readFileSync(join(root, "README.md"), "utf8")
     const prose = readme.replaceAll(/\s+/gu, " ")
-    expect(prose).toContain("`yrd queue recover` is the public repair path")
+    expect(prose).toContain("Recovery has no verb: restart re-derives it")
     expect(prose).toContain("documents Commands, Events, projection, and the private Journal transaction contract")
     expect(readme).toContain("| `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal")
     expect(readme).not.toContain("Runner-lease recovery remains\nan embedded/API capability")

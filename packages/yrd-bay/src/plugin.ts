@@ -94,7 +94,6 @@ import {
   type Change,
   type ChangeAdmissionRecordedFact,
   type ChangeComment,
-  type ChangeRegression,
   type ChangeRemergeProof,
   type ChangeReview,
   type ChangeReviewState,
@@ -379,22 +378,6 @@ const ChangeCommentArgsSchema = z
   .strict()
 export type ChangeCommentArgs = z.infer<typeof ChangeCommentArgsSchema>
 
-const ChangeRegressionSeveritySchema = z.enum(["low", "medium", "high", "critical"])
-const ChangeRegressionArgsSchema = z
-  .object({
-    pr: TextSchema,
-    run: TextSchema,
-    detectedAt: z.iso.datetime({ offset: true }),
-    severity: ChangeRegressionSeveritySchema,
-    evidence: TextSchema,
-    implementationRunRef: TextSchema,
-    reviewRef: TextSchema,
-    repairPr: TextSchema,
-    repairRun: TextSchema,
-  })
-  .strict()
-export type ChangeRegressionArgs = z.infer<typeof ChangeRegressionArgsSchema>
-
 const BayOpenedSchema = z.preprocess(
   normalizeV2By,
   z
@@ -600,26 +583,6 @@ const LegacyChangeCanceledSchema = ChangeRevisionIdentitySchema.extend({
   by: TextSchema,
   reason: TextSchema,
 }).strict()
-type ChangeRegressionFact = Omit<ChangeRegression, "recordedAt">
-const ChangeRegressionSchema: z.ZodType<ChangeRegressionFact> = z
-  .object({
-    pr: PRIdSchema,
-    issueRef: TextSchema,
-    revision: RevisionSchema,
-    headSha: GitShaSchema,
-    run: TextSchema,
-    landingSha: GitShaSchema,
-    detectedAt: z.iso.datetime({ offset: true }),
-    severity: ChangeRegressionSeveritySchema,
-    evidence: TextSchema,
-    implementationRunRef: TextSchema,
-    reviewRef: TextSchema,
-    repairIssueRef: TextSchema,
-    repairPr: PRIdSchema,
-    repairRun: TextSchema,
-    repairLandingSha: GitShaSchema,
-  })
-  .strict()
 const ChangeReviewFactSchema = z.preprocess(
   normalizeV2By,
   ChangeReviewSchema.omit({ at: true, carriedFrom: true }).extend({ pr: PRIdSchema }).strict(),
@@ -763,7 +726,6 @@ export type BayCommands = Readonly<{
     requestChecks: CommandHandler<ChangeRequestChecksArgs, BayState>
     recordAdmission: CommandHandler<ChangeAdmissionRecordedFact, BayState>
     requestReview: CommandHandler<ChangeRequestReviewArgs, BayState>
-    regression: CommandHandler<ChangeRegressionArgs, BayState>
     publish: CommandHandler<ChangePublicationInput, BayState>
   }>
   branch: Readonly<{
@@ -803,7 +765,6 @@ export type Bays = Readonly<{
   requestChecks(args: ChangeRequestChecksArgs): Promise<CommandResult>
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestReview(args: ChangeRequestReviewArgs): Promise<CommandResult>
-  recordRegression(args: ChangeRegressionArgs): Promise<CommandResult>
   requestPublication(args: ChangePublicationInput): Promise<CommandResult>
   /** The receiver ACCEPTED a `refs/yrd/submit/<branch>` write — project the approval fact. */
   recordBranchSubmit(args: BranchSubmit): Promise<CommandResult>
@@ -833,7 +794,6 @@ type BayActions = Pick<
   | "requestChecks"
   | "recordAdmission"
   | "requestReview"
-  | "recordRegression"
   | "requestPublication"
   | "recordBranchSubmit"
   | "recordBranchUnsubmit"
@@ -1369,7 +1329,6 @@ export function createBays(
     requestChecks: actions.requestChecks,
     recordAdmission: actions.recordAdmission,
     requestReview: actions.requestReview,
-    recordRegression: actions.recordRegression,
     requestPublication: actions.requestPublication,
     recordBranchSubmit: actions.recordBranchSubmit,
     recordBranchUnsubmit: actions.recordBranchUnsubmit,
@@ -1417,7 +1376,6 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": journalEvent(2, ChangeIntegratedSchema),
         "pr/already-landed": journalEvent(1, ChangeAlreadyMergedSchema),
         "pr/canceled": journalEvent(1, ChangeCanceledSchema),
-        "pr/regression-recorded": journalEvent(1, ChangeRegressionSchema),
         "pr/edited": journalEvent(1, ChangeEditArgsSchema),
         "pr/reviewed": journalEvent(1, ChangeReviewFactSchema),
         "pr/commented": journalEvent(1, ChangeCommentFactSchema),
@@ -1485,7 +1443,6 @@ export function withBays(options: WithBaysOptions) {
               requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
               recordAdmission: (args) => yrd.dispatch(commands.pr.recordAdmission, args),
               requestReview: (args) => yrd.dispatch(commands.pr.requestReview, args),
-              recordRegression: (args) => yrd.dispatch(commands.pr.regression, args),
               requestPublication: (args) => yrd.dispatch(commands.pr.publish, args),
               recordBranchSubmit: (args) => yrd.dispatch(commands.branch.recordSubmit, args),
               recordBranchUnsubmit: (args) => yrd.dispatch(commands.branch.recordUnsubmit, args),
@@ -1627,11 +1584,6 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         visibility: "public",
         params: ChangeRequestReviewArgsSchema,
         apply: (state: BayState, args: ChangeRequestReviewArgs) => requestChangeReview(state, args, defaultSubmitter),
-      }),
-      regression: command({
-        title: "Record a completed escaped regression",
-        params: ChangeRegressionArgsSchema,
-        apply: (state: BayState, args: ChangeRegressionArgs) => recordChangeRegression(state, args),
       }),
       publish: command({
         title: "Request immutable PR publication",
@@ -2579,103 +2531,6 @@ function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmiss
   return { events: [event("pr/admission-recorded", args)] }
 }
 
-function recordChangeRegression(state: DeepReadonly<BayState>, args: ChangeRegressionArgs) {
-  const original: LiveChange = requireLiveChange(state.bays, args.pr)
-  const repair = resolveChange(state.bays, args.repairPr)
-  if (repair === undefined) throw new Error(`yrd: no repair change '${args.repairPr}'`)
-  if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
-  if (!original.merged || original.integration === undefined) {
-    throw new Error(`yrd: original change '${original.id}' is ${changeDeliveryState(original)}, not integrated`)
-  }
-  if (!repair.merged || repair.integration === undefined) {
-    throw new Error(`yrd: repair change '${repair.id}' is ${changeDeliveryState(repair)}, not integrated`)
-  }
-  if (original.issue === undefined) throw new Error(`yrd: original change '${original.id}' has no issue reference`)
-  if (repair.issue === undefined) throw new Error(`yrd: repair change '${repair.id}' has no issue reference`)
-  if (original.integratedAt === undefined || repair.integratedAt === undefined) {
-    throw new Error("yrd: integrated regression tuple is missing its journal timestamp")
-  }
-  const run = resolveSelector(
-    args.run,
-    original.terminalRun === undefined ? [] : [{ canonical: original.terminalRun, value: original.terminalRun }],
-    { kind: "queue run" },
-  )
-  if (run === undefined) {
-    raiseFailure(
-      "refusal",
-      "regression-run-mismatch",
-      `yrd: queue run '${args.run}' does not prove integrated revision ${changeRevisionNumber(original)} of change '${original.id}'`,
-    )
-  }
-  const repairRun = resolveSelector(
-    args.repairRun,
-    repair.terminalRun === undefined ? [] : [{ canonical: repair.terminalRun, value: repair.terminalRun }],
-    { kind: "queue run" },
-  )
-  if (repairRun === undefined) {
-    raiseFailure(
-      "refusal",
-      "regression-repair-run-mismatch",
-      `yrd: queue run '${args.repairRun}' does not prove integrated revision ${changeRevisionNumber(repair)} of repair change '${repair.id}'`,
-    )
-  }
-
-  const detectedAt = new Date(args.detectedAt).toISOString()
-  if (
-    Date.parse(original.integratedAt) > Date.parse(detectedAt) ||
-    Date.parse(detectedAt) > Date.parse(repair.integratedAt)
-  ) {
-    raiseFailure(
-      "refusal",
-      "regression-chronology-invalid",
-      `yrd: regression chronology must satisfy original integration <= detection <= repair integration ` +
-        `(${original.integratedAt} <= ${detectedAt} <= ${repair.integratedAt})`,
-    )
-  }
-
-  const fact = ChangeRegressionSchema.parse({
-    pr: original.id,
-    issueRef: original.issue,
-    revision: changeRevisionNumber(original),
-    headSha: changeHead(original),
-    run,
-    landingSha: original.integration.commit,
-    detectedAt,
-    severity: args.severity,
-    evidence: args.evidence,
-    implementationRunRef: args.implementationRunRef,
-    reviewRef: args.reviewRef,
-    repairIssueRef: repair.issue,
-    repairPr: repair.id,
-    repairRun,
-    repairLandingSha: repair.integration.commit,
-  })
-  if (original.regressions?.some((existing) => regressionKey(existing) === regressionKey(fact)) === true) {
-    return { events: [], value: fact }
-  }
-  return { events: [event("pr/regression-recorded", fact)], value: fact }
-}
-
-function regressionKey(fact: ChangeRegressionFact | ChangeRegression): string {
-  return JSON.stringify([
-    fact.pr,
-    fact.issueRef,
-    fact.revision,
-    fact.headSha,
-    fact.run,
-    fact.landingSha,
-    fact.detectedAt,
-    fact.severity,
-    fact.evidence,
-    fact.implementationRunRef,
-    fact.reviewRef,
-    fact.repairIssueRef,
-    fact.repairPr,
-    fact.repairRun,
-    fact.repairLandingSha,
-  ])
-}
-
 function reviewFact(
   pr: DeepReadonly<Change>,
   fact: z.infer<typeof ChangeReviewFactSchema> | z.infer<typeof ChangeCommentFactSchema>,
@@ -2965,7 +2820,6 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               comments: [],
               checkRequests: [],
               requestedReviewers: [],
-              regressions: [],
             }
           : {
               ...existing,
@@ -3313,43 +3167,6 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           terminal: { kind: "canceled", at: applied.ts, ...(run === undefined ? {} : { run }) },
         }),
       })
-    }
-    case "pr/regression-recorded": {
-      const fact = ChangeRegressionSchema.parse(data)
-      const pr = current.prs[fact.pr]
-      const repair = current.prs[fact.repairPr]
-      if (
-        pr === undefined ||
-        repair === undefined ||
-        !pr.merged ||
-        !repair.merged ||
-        pr.issue !== fact.issueRef ||
-        changeRevisionNumber(pr) !== fact.revision ||
-        changeHead(pr) !== fact.headSha ||
-        pr.terminalRun !== fact.run ||
-        pr.integration?.commit !== fact.landingSha ||
-        repair.issue !== fact.repairIssueRef ||
-        repair.terminalRun !== fact.repairRun ||
-        repair.integration?.commit !== fact.repairLandingSha
-      ) {
-        throw new Error(
-          `yrd: regression tuple does not match current integrated change '${fact.pr}' and repair '${fact.repairPr}'`,
-        )
-      }
-      if (pr.integratedAt === undefined || repair.integratedAt === undefined) {
-        throw new Error("yrd: regression tuple is missing an integration timestamp")
-      }
-      if (
-        Date.parse(pr.integratedAt) > Date.parse(fact.detectedAt) ||
-        Date.parse(fact.detectedAt) > Date.parse(repair.integratedAt) ||
-        Date.parse(repair.integratedAt) > Date.parse(applied.ts)
-      ) {
-        throw new Error(
-          `yrd: regression chronology must satisfy original integration <= detection <= repair integration <= recorded time`,
-        )
-      }
-      if (pr.regressions?.some((existing) => regressionKey(existing) === regressionKey(fact)) === true) return state
-      return patchPR(pr, { regressions: [...(pr.regressions ?? []), { ...fact, recordedAt: applied.ts }] })
     }
     case "pr/edited": {
       const changed = ChangeEditArgsSchema.parse(data)

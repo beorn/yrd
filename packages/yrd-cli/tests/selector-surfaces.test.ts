@@ -391,46 +391,4 @@ describe("case-insensitive CLI selector surfaces", () => {
 
   })
 
-  it("records a regression through folded PR and run selectors", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "Topic/One", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA, issue: "km:1" })
-    await app.bays.submit({
-      branch: "Topic/Two",
-      headSha: "2".repeat(40),
-      base: "main",
-      baseSha: BASE_SHA,
-      issue: "km:1",
-    })
-    const setup = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "PR2", "--json"), setup.io), setup.stderr()).toBe(0)
-
-    const output = outputIO()
-    const args = [
-      "pr",
-      "regression",
-      "pr1",
-      "--run",
-      "r1",
-      "--detected-at",
-      "2026-07-09T12:00:00.000Z",
-      "--severity",
-      "low",
-      "--evidence",
-      "evidence-1",
-      "--implementation-run",
-      "impl-1",
-      "--review",
-      "review-1",
-      "--repair-pr",
-      "pr2",
-      "--repair-run",
-      "r2",
-      "--json",
-    ]
-    expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "pr.regression",
-      regression: { pr: "PR1", run: "R1", repairPr: "PR2", repairRun: "R2" },
-    })
-  })
 })

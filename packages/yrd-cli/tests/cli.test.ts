@@ -1304,7 +1304,6 @@ describe("runYrd", () => {
             },
           ],
           taskStatus: "wip",
-          glyph: "▢",
         },
       ],
     })
@@ -1347,7 +1346,6 @@ describe("runYrd", () => {
         merged: false,
         revs: [{ n: 1, head: HEAD_SHA, submittedAt: expect.any(String) }],
         taskStatus: "wip",
-        glyph: "▢",
       },
     })
 
@@ -1754,12 +1752,12 @@ describe("runYrd", () => {
 
     const json = outputIO()
     expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), json.io), json.stderr()).toBe(0)
-    const projected = (JSON.parse(json.stdout()) as { pr: { taskStatus: string; glyph: string } }).pr
-    expect(projected).toMatchObject({ taskStatus: "wip", glyph: "▢" })
+    const projected = (JSON.parse(json.stdout()) as { pr: { taskStatus: string } }).pr
+    expect(projected).toMatchObject({ taskStatus: "wip" })
 
     const human = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain(projected.glyph)
+    expect(human.stdout()).toContain("▢")
     expect(human.stdout()).toContain("submitted")
   })
 
@@ -10227,16 +10225,14 @@ describe("runYrd", () => {
     expect(parsed.runs[0]?.run).toBe("R1")
     expect((parsed as { pr?: { taskStatus?: string; glyph?: string } }).pr).toMatchObject({
       taskStatus: "done",
-      glyph: "✓",
     })
-    expect(parsed.runs[0]).toMatchObject({ candidateId: "C1", taskStatus: "done", glyph: "✓" })
+    expect(parsed.runs[0]).toMatchObject({ candidateId: "C1", taskStatus: "done" })
     expect(parsed.runs[0]?.steps).toHaveLength(2)
     expect(parsed.runs[0]?.steps[0]).toMatchObject({
       step: "check",
       revision: "check-v1",
       status: "passed",
       taskStatus: "done",
-      glyph: "✓",
     })
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
@@ -10933,7 +10929,6 @@ describe("runYrd", () => {
     expect(show).toMatchObject({
       run: "R4",
       taskStatus: "done",
-      glyph: "✓",
       totalDuration: "48m07s",
       totalDurationMs: 2_887_405,
       activeDuration: "11m26s",
@@ -10947,7 +10942,6 @@ describe("runYrd", () => {
       attempt: 1,
       outcome: "failed",
       taskStatus: "blocked",
-      glyph: "⧗",
       startedAt: "2026-07-12T11:08:36.218Z",
       finishedAt: "2026-07-12T11:12:18.300Z",
       durationMs: 222_082,
@@ -10969,8 +10963,7 @@ describe("runYrd", () => {
           attempt: "1",
           status: "failed",
           taskStatus: "blocked",
-          glyph: "⧗",
-          duration: "3m42s",
+              duration: "3m42s",
           error: "merge stalled",
         }),
         expect.objectContaining({
@@ -10978,7 +10971,6 @@ describe("runYrd", () => {
           attempt: "2",
           status: "passed",
           taskStatus: "done",
-          glyph: "✓",
           duration: "25s",
         }),
       ]),
@@ -11015,9 +11007,9 @@ describe("runYrd", () => {
         activeDurationMs: 685_869,
         waitDurationMs: 2_201_536,
         attempts: [
-          { attempt: 1, taskStatus: "done", glyph: "✓" },
-          { attempt: 1, taskStatus: "blocked", glyph: "⧗" },
-          { attempt: 2, taskStatus: "done", glyph: "✓" },
+          { attempt: 1, taskStatus: "done" },
+          { attempt: 1, taskStatus: "blocked" },
+          { attempt: 2, taskStatus: "done" },
         ],
       },
     })
@@ -11341,7 +11333,6 @@ describe("runYrd", () => {
     expect(rows[0]).toMatchObject({
       branch: "fix(cli): bounded operator history",
       subject: "fix(cli): bounded operator history",
-      glyph: "⧗",
     })
 
     for (const width of [80, 120]) {
@@ -12910,124 +12901,6 @@ describe("typed issue merge bridge", () => {
     expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io)).toBe(1)
     expect(output.stdout()).toBe("")
     expect(output.stderr()).toContain("cannot project rejected change 'PR1' without a typed Queue bounce run")
-  })
-
-  it("records a completed escaped regression without rewriting either integration", async () => {
-    const originalIssue = "@yrd/core/21090-original"
-    const repairIssue = "@yrd/core/21091-repair"
-    const originalMerge = "c".repeat(40)
-    const repairMerge = "d".repeat(40)
-    const repairHead = "2".repeat(40)
-    let now = "2026-07-09T12:00:00.000Z"
-    await using app = await createApp({ mergeCommits: [originalMerge, repairMerge], clock: () => now })
-    await app.bays.submit({ branch: "topic/original", headSha: HEAD_SHA, base: "main", issue: originalIssue })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    now = "2026-07-09T14:00:00.000Z"
-    await app.bays.submit({ branch: "topic/repair", headSha: repairHead, base: "main", issue: repairIssue })
-    await app.queue.run({ prs: ["PR2"] }, { runner: "cli-test", leaseMs: 60_000 })
-    now = "2026-07-09T15:00:00.000Z"
-
-    const command = (run = "r1", repairRun = "r2", detectedAt = "2026-07-09T13:00:00.000Z") =>
-      yrd(
-        "pr",
-        "regression",
-        "pr1",
-        "--run",
-        run,
-        "--detected-at",
-        detectedAt,
-        "--severity",
-        "high",
-        "--evidence",
-        "artifact://tty/21091-red",
-        "--implementation-run",
-        "hab:turn/original-implementation",
-        "--review",
-        "wire:verdict/original-review",
-        "--repair-pr",
-        "pr2",
-        "--repair-run",
-        repairRun,
-        "--json",
-      )
-    const expected = {
-      pr: "PR1",
-      issueRef: originalIssue,
-      revision: 1,
-      headSha: HEAD_SHA,
-      run: "R1",
-      landingSha: originalMerge,
-      detectedAt: "2026-07-09T13:00:00.000Z",
-      severity: "high",
-      evidence: "artifact://tty/21091-red",
-      implementationRunRef: "hab:turn/original-implementation",
-      reviewRef: "wire:verdict/original-review",
-      repairIssueRef: repairIssue,
-      repairPr: "PR2",
-      repairRun: "R2",
-      repairLandingSha: repairMerge,
-    }
-    for (const impossible of ["2026-07-09T11:59:59.999Z", "2026-07-09T14:00:00.001Z"]) {
-      const refusedChronology = outputIO()
-      expect(await runYrd(app, command("R1", "R2", impossible), refusedChronology.io)).toBe(1)
-      expect(refusedChronology.stdout()).toBe("")
-      expect(refusedChronology.stderr()).toContain("regression chronology")
-    }
-
-    const recorded = outputIO()
-    expect(await runYrd(app, command(), recorded.io), recorded.stderr()).toBe(0)
-    expect(JSON.parse(recorded.stdout())).toEqual({ command: "pr.regression", regression: expected })
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
-    expect(app.bays.pr("PR1")).toMatchObject({
-      state: "closed",
-      merged: true,
-      integration: { commit: originalMerge },
-      regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
-    })
-    expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
-    expect(app.bays.pr("PR2")).toMatchObject({
-      state: "closed",
-      merged: true,
-      integration: { commit: repairMerge },
-    })
-
-    const repeated = outputIO()
-    expect(await runYrd(app, command(), repeated.io), repeated.stderr()).toBe(0)
-    expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/regression-recorded")).toHaveLength(
-      1,
-    )
-
-    const refused = outputIO()
-    expect(await runYrd(app, command("R2"), refused.io)).toBe(1)
-    expect(refused.stdout()).toBe("")
-
-    const issue = outputIO()
-    const runs = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", originalIssue, "--json"), issue.io), issue.stderr()).toBe(0)
-    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), runs.io), runs.stderr()).toBe(0)
-    expect(trackerBridge(issue.stdout())).toEqual(trackerBridge(runs.stdout()))
-    expect(trackerBridge(issue.stdout()).deliveries).toEqual([
-      expect.objectContaining({
-        issueRef: originalIssue,
-        pr: "PR1",
-        status: "integrated",
-        landingSha: originalMerge,
-        regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
-      }),
-    ])
-
-    const human = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io), human.stderr()).toBe(0)
-    for (const visibleFact of [
-      "REGRESSION high DETECTED 2026-07-09T13:00:00.000Z RECORDED 2026-07-09T15:00:00.000Z",
-      `ORIGINAL ${originalIssue} PR1 R1 MERGE ${originalMerge}`,
-      "artifact://tty/21091-red",
-      "hab:turn/original-implementation",
-      "wire:verdict/original-review",
-      `REPAIR ${repairIssue} PR2 R2 MERGE ${repairMerge}`,
-    ]) {
-      expect(human.stdout()).toContain(visibleFact)
-    }
   })
 
   it("retries a racing pr runs snapshot and refuses three exhausted cuts without partial JSON", async () => {
