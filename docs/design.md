@@ -166,8 +166,8 @@ type Candidate = Readonly<{
 - Root Candidate refs carry the **same minimum seven-day retention window after
   the owning Run reaches a terminal journal state** as the source-candidate refs
   below — one number for "how long is Candidate evidence kept", not two. The
-  namespace is bounded by a Yrd-owned collector (`yrd queue candidate-refs`,
-  deleting only under `--prune`), never by generic branch cleanup, and deletion
+  namespace is bounded by a Yrd-owned collector (`yrd admin candidate-refs
+  prune`; `yrd doctor` is the inventory), never by generic branch cleanup, and deletion
   requires POSITIVE proof from one fresh complete inventory: a journaled
   Candidate owns the ref, no live PR or Run names it or its SHA, the window has
   passed, and the ref still resolves to the exact SHA that inventory read.

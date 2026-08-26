@@ -87,6 +87,9 @@ const QUEUE_SUBCOMMANDS = new Set([
   "_list",
   "list",
   "audit",
+  // Retired verb (5e cut 7). Recognized here so both operand positions still
+  // normalize `candidate-refs` to the hidden tombstone's loud refusal instead
+  // of silently becoming a timeline filter term.
   "candidate-refs",
   "uncarried",
   "pause",

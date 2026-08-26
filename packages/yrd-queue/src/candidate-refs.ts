@@ -199,8 +199,8 @@ function liveCandidateOwners(
  * Judge `refs/yrd/candidates` and its source-tip mirror `refs/heads/yrd/candidates`
  * against the journal, together.
  *
- * Read-only by construction — it proposes, and `yrd queue candidate-refs
- * --prune` disposes. Deletion eligibility requires POSITIVE proof: a journaled
+ * Read-only by construction — it proposes, and `yrd admin candidate-refs
+ * prune` disposes. Deletion eligibility requires POSITIVE proof: a journaled
  * Candidate owns the ref, no live Run names it, the window has passed, and the
  * ref still resolves to the SHA this same inventory read. Unknown, unclaimed and
  * unclocked refs are reported and retained, per the retention ruling in

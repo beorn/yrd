@@ -8456,9 +8456,13 @@ async function queueUncarried(
  * reported and kept — `docs/design.md` states that retaining beats guessing here,
  * because this namespace is the only evidence a merged composition ever existed.
  */
-async function queueCandidateRefs(
+/** The one candidate-ref actuator left (5e cut 7): `yrd admin candidate-refs
+ * prune`. Inventory lives in `yrd doctor` (candidateRefDoctorFinding); this
+ * command sweeps the namespace and deletes exactly the refs that same pass
+ * proved reclaimable. Unclaimed and live refs are always retained. */
+async function adminPruneCandidateRefs(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ prune?: boolean; retentionDays?: string }>,
+  options: JsonOption & Readonly<{ retentionDays?: string }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const cwd = io.repositoryRoot ?? io.cwd ?? globalThis.process.cwd()
@@ -8480,28 +8484,23 @@ async function queueCandidateRefs(
   })
 
   const reclaimable = result.findings.filter((finding) => finding.disposition === "reclaimable")
-  const pruned =
-    options.prune === true ? await pruneCandidateRefs(git, { repo: cwd, findings: result.findings }) : undefined
-  const deleted = pruned?.deleted ?? []
-  const kept = pruned?.kept ?? []
+  const pruned = await pruneCandidateRefs(git, { repo: cwd, findings: result.findings })
+  const deleted = pruned.deleted
+  const kept = pruned.kept
 
   const denominator = candidateRefDenominator(result)
-  const headline =
-    options.prune === true
-      ? `deleted ${String(deleted.length)} of ${String(reclaimable.length)} reclaimable Candidate refs`
-      : reclaimable.length === 0
-        ? "no reclaimable Candidate refs"
-        : `${String(reclaimable.length)} Candidate refs are reclaimable (re-run with --prune to delete them)`
+  const headline = `deleted ${String(deleted.length)} of ${String(reclaimable.length)} reclaimable Candidate refs`
   const lines = result.findings.map((finding) => `${finding.ref}  ${finding.disposition}  ${finding.message}`)
   const keptLines = kept.map((entry) => `${entry.ref}  retained: ${entry.reason}`)
   await printResult(
     io,
     jsonEnabled(options),
     {
-      command: "queue.candidate-refs",
+      command: "admin.candidate-refs.prune",
       ...result,
       retentionMs,
-      ...(options.prune === true ? { deleted, kept } : {}),
+      deleted,
+      kept,
     },
     [...lines, ...keptLines, ...(lines.length === 0 && keptLines.length === 0 ? [] : [""]), headline, denominator].join(
       "\n",
@@ -8824,7 +8823,7 @@ async function candidateRefDoctorFinding(
       sweep,
       warning:
         `WARNING candidate-ref-orphans: ${parts.join(", ")} — ${candidateRefDenominator(sweep)}. ` +
-        `Run 'yrd queue candidate-refs' to inventory them, '--prune' to delete the reclaimable ones.`,
+        `Run 'yrd admin candidate-refs prune' to delete the reclaimable ones; this doctor report is the inventory.`,
     }
   } catch (error) {
     return {
@@ -9385,6 +9384,22 @@ async function bumpJournal(
  * lease expiry; it belongs to `yrd doctor` as a finding (a fresh lease whose
  * runner pid is gone), not to a verb — the doctor fold is a separate carrier.
  */
+/** Retired verb (5e cut 7): the Candidate-ref namespace is ephemeral
+ * post-item-2 evidence. `yrd doctor` is the inventory (it reports orphans with
+ * the denominator), and `yrd admin candidate-refs prune` is the one actuator.
+ */
+function refuseRetiredQueueCandidateRefs(): never {
+  // The retired verb is deliberately NOT quoted: a quoted `yrd ...` in a
+  // failure message is lifted into its `resolution`, and the one command this
+  // must never recommend is itself.
+  raiseFailure(
+    "refusal",
+    "queue-candidate-refs-retired",
+    "yrd: queue candidate-refs is retired. Run 'yrd doctor' to inventory the Candidate ref namespace and " +
+      "'yrd admin candidate-refs prune' to delete the refs a sweep proves reclaimable.",
+  )
+}
+
 function refuseRetiredQueueRecover(): never {
   // The retired verb is deliberately NOT quoted: a quoted `yrd ...` in a
   // failure message is lifted into its `resolution`, and the one command this
@@ -12009,13 +12024,16 @@ function buildProgram(
     .description("check queue state")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
+  // Retired verb (5e cut 7): stays registered, hidden, so an old runbook gets
+  // a loud typed refusal naming the replacements, never a silent timeline
+  // filter. Inventory: yrd doctor. Deletion: yrd admin candidate-refs prune.
   queue
-    .command("candidate-refs")
-    .description("inventory the synthetic Candidate ref namespace and age out terminal evidence")
-    .option("--prune", "delete the refs this same pass proved reclaimable")
-    .option("--retention-days <days>", "override the retention window (default 7)")
+    .command("candidate-refs", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--prune", "ignored; the verb is retired")
+    .option("--retention-days <days>", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await queueCandidateRefs(installed(), options, io)))
+    .action(() => refuseRetiredQueueCandidateRefs())
   queue
     .command("uncarried")
     .description("find refs pushed to the remote that no change carries")
@@ -12397,6 +12415,13 @@ function buildProgram(
     .option("--dry-run", "print every checked verdict without withdrawing")
     .option("--json", "emit stable JSON")
     .action(async (options) => prunePrs(installed(), options, io))
+  const adminCandidateRefs = admin.command("candidate-refs").description("administer synthetic Candidate refs")
+  adminCandidateRefs
+    .command("prune")
+    .description("sweep the Candidate ref namespace and delete the refs this same pass proved reclaimable")
+    .option("--retention-days <days>", "override the retention window (default 7)")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await adminPruneCandidateRefs(installed(), options, io)))
   const adminJournal = admin.command("journal").description("administer the durable journal")
   adminJournal
     .command("bump <version>")

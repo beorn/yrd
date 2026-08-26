@@ -14316,28 +14316,24 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         // And the operator is told, with the denominator and the remedy.
         const said = `${output.stdout()}${output.stderr()}`
         expect(said).toContain("candidate-ref-orphans")
-        expect(said).toContain("yrd queue candidate-refs")
+        expect(said).toContain("yrd admin candidate-refs prune")
       } finally {
         await app.close()
         safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
       }
     })
 
-    it("inventories the namespace without deleting anything by default", async () => {
+    it("refuses the retired queue candidate-refs spelling loudly, never as a filter term", async () => {
       const { repo, ref } = seededRepo()
       const app = await createApp()
       try {
         const output = outputIO({ cwd: repo, repositoryRoot: repo })
 
-        await expect(runYrd(app, yrd("queue", "candidate-refs", "--json"), output.io)).resolves.toBe(0)
-
-        expect(JSON.parse(output.stdout())).toMatchObject({
-          command: "queue.candidate-refs",
-          scanned: 1,
-          unclaimed: 1,
-          reclaimable: 0,
-        })
-        // A dry run is a dry run: the ref is still there.
+        // Retired verb (5e cut 7): the spelling stays routable so an old
+        // runbook gets the replacements, and the ref is untouched.
+        await expect(runYrd(app, yrd("queue", "candidate-refs", "--json"), output.io)).resolves.toBe(1)
+        expect(output.stderr()).toContain("queue-candidate-refs-retired")
+        expect(output.stderr()).toContain("yrd admin candidate-refs prune")
         expect(gitIn(repo, ["rev-parse", "--verify", ref])).not.toBe("")
       } finally {
         await app.close()
@@ -14345,7 +14341,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       }
     })
 
-    it("retains an unclaimed ref even under --prune, however old it is", async () => {
+    it("retains an unclaimed ref even under admin candidate-refs prune, however old it is", async () => {
       // The design ruling: unknown, unmatched and unpaired refs stay. An orphan
       // whose Run the journal has forgotten cannot be PROVEN terminal, so the
       // reaper must not take it — which is why the ~2000 legacy refs need a
@@ -14356,10 +14352,14 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         const output = outputIO({ cwd: repo, repositoryRoot: repo })
 
         await expect(
-          runYrd(app, yrd("queue", "candidate-refs", "--prune", "--retention-days", "0", "--json"), output.io),
+          runYrd(app, yrd("admin", "candidate-refs", "prune", "--retention-days", "0", "--json"), output.io),
         ).resolves.toBe(0)
 
-        expect(JSON.parse(output.stdout())).toMatchObject({ deleted: [], unclaimed: 1 })
+        expect(JSON.parse(output.stdout())).toMatchObject({
+          command: "admin.candidate-refs.prune",
+          deleted: [],
+          unclaimed: 1,
+        })
         expect(gitIn(repo, ["rev-parse", "--verify", ref])).not.toBe("")
       } finally {
         await app.close()
