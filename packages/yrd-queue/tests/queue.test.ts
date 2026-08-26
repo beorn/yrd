@@ -6326,3 +6326,46 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
     )
   })
 })
+
+describe("transport-read release parity", () => {
+  async function failedMergeRelease(code: string) {
+    await using app = await createQueueApp({
+      check: () => ({ status: "completed" as const, conclusion: "success" as const, output: { checked: true } }),
+      merge: () => ({
+        status: "completed" as const,
+        conclusion: "failure" as const,
+        error: { code, message: `merge step lost the wire (${code})` },
+      }),
+    })
+    const pr = await submitBranch(app, `topic/release-${code}`)
+    const before = await Array.fromAsync(app.events())
+    const runs = await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)
+    expect(runs).toMatchObject([{ id: "R1", status: "completed", conclusion: "failure" }])
+    const appended = (await Array.fromAsync(app.events())).slice(before.length)
+    expect(appended.map(({ name }) => name)).toContain("queue/run/failed")
+    return {
+      released: Queues.authorityRun(app.state().queues.authority, "R1")?.released,
+      rejected: appended.some(({ name }) => name === "pr/rejected"),
+      delivery: deliveryOf(app.state().bays.prs[pr.id]),
+    }
+  }
+
+  it("releases run authority for a transport read failure exactly like an environment refusal at base inspection", async () => {
+    // The asymmetry under test: a stalled remote read at live-base inspection
+    // already re-admits (queue-environment-refused releases the run's
+    // authority); the SAME wire fault surfacing from the merge-record ref
+    // synchronization must take the SAME disposition, not strand the change
+    // with its submit authority consumed by the failed run.
+    const environment = await failedMergeRelease("queue-environment-refused")
+    expect(environment.released).toMatchObject({ reason: "queue-environment-refused" })
+    expect(environment.rejected).toBe(false)
+    expect(environment.delivery).toBe("submitted")
+
+    const transport = await failedMergeRelease("transport-read-failed")
+    expect(transport.released, "a transport read failure must release run authority for re-admission").toMatchObject({
+      reason: "transport-read-failed",
+    })
+    expect(transport.rejected).toBe(false)
+    expect(transport.delivery).toBe("submitted")
+  })
+})

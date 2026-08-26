@@ -39,6 +39,7 @@ describe("shared queue-state presentation", () => {
     ["source-publish", "env", "auto-requeue", "queue"],
     ["scratch-cleanup-failed", "env", "auto-requeue", "queue"],
     ["queue-environment-refused", "env", "auto-requeue", "queue"],
+    ["transport-read-failed", "env", "auto-requeue", "queue"],
     ["job-lost", "timeout", "auto-requeue", "queue"],
     ["stale-base", "stale", "auto-re-merge", "queue"],
     ["stale-check", "stale", "auto-requeue", "queue"],
@@ -50,5 +51,12 @@ describe("shared queue-state presentation", () => {
     ["run-canceled", "canceled", "none", "queue"],
   ] as const)("classifies %s once for every watch/log consumer", (code, state, automation, owner) => {
     expect(failureDisposition(code)).toEqual({ state, automation, owner })
+  })
+
+  it("gives a transport read failure the same disposition as an environment refusal at base inspection", () => {
+    // The same wire fault must not classify as retryable at one site and
+    // terminal at another: the merge-record sync's typed code and the base
+    // inspection's queue-environment-refused are one disposition.
+    expect(failureDisposition("transport-read-failed")).toEqual(failureDisposition("queue-environment-refused"))
   })
 })
