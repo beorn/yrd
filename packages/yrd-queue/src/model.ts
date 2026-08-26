@@ -551,6 +551,10 @@ export type RunAuthority = Readonly<{
   released?: Readonly<{
     reason:
       | "queue-environment-refused"
+      // The same wire fault typed at the other remote-read sites (merge-record
+      // ref sync, Bay origin probes): released for re-admission exactly like an
+      // environment refusal at base inspection.
+      | "transport-read-failed"
       | "job-lost"
       | "run-canceled"
       | "stale-base"

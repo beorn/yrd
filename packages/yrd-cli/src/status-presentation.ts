@@ -217,6 +217,9 @@ export function failureDisposition(code: string): FailureDisposition {
   if (canonical === "stale-pr") return { state: "stale", automation: "none", owner: "queue" }
   if (
     canonical === "queue-environment-refused" ||
+    // The same wire fault, typed at the merge-record sync and origin probes;
+    // one disposition with the base-inspection refusal by construction.
+    canonical === "transport-read-failed" ||
     canonical === "orphaned-run" ||
     INFRA_RETRY_FAILURE_CODES.has(canonical)
   ) {

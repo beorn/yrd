@@ -3893,6 +3893,11 @@ function queueAuthorityReleaseReason(
   // PRs simply re-admit if still submitted).
   if (
     error?.code === "queue-environment-refused" ||
+    // The typed spelling of the SAME wire fault at the other remote-read
+    // sites (merge-record ref sync, Bay origin probes): a transport read that
+    // stalled or was refused is environmental, so the change re-admits
+    // instead of stranding with its authority consumed by the failed run.
+    error?.code === "transport-read-failed" ||
     error?.code === "job-lost" ||
     error?.code === "stale-base" ||
     error?.code === "stale-check" ||
