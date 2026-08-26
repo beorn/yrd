@@ -15,7 +15,12 @@ export type RemedyStep =
    * draft; `submit` is the state-agnostic spelling — and, for the change under
    * remedy, the runner honours it through the implicit re-merge preflight
    * rather than a blind re-record (tracked changes re-merge implicitly). */
-  Readonly<{ verb: "submit" | "create"; branch: string }>
+  | Readonly<{ verb: "submit" | "create"; branch: string }>
+  /** The R-b escape hatch: the `pr recut` spelling survives as the sanctioned
+   * drill for untracked changes, wedge repair, and pre-TD adoption — the bay's
+   * public `recut` command still dispatches it. Ordinary tracked-change
+   * remedies never print this spelling; they say submit (implicit re-merge). */
+  | Readonly<{ verb: "recut"; pr: string; preflight: boolean; apply: boolean; queue: boolean; force: boolean }>
 
 export type RefusalRemedy =
   | Readonly<{ kind: "self-applicable"; steps: readonly RemedyStep[] }>
@@ -32,6 +37,23 @@ export type RefusalRemedyContext = Readonly<{
  * does not need to name) the branch. */
 const BRANCH_PLACEHOLDER = "<branch>"
 
+function parseRemerge(argv: readonly string[]): RemedyStep | undefined {
+  const [pr, ...flags] = argv
+  if (pr === undefined || pr.startsWith("-")) return undefined
+  const parsed = { verb: "recut" as const, pr, preflight: false, apply: false, queue: false, force: false }
+  for (const flag of flags) {
+    if (flag === "--preflight") parsed.preflight = true
+    else if (flag === "--apply") parsed.apply = true
+    else if (flag === "--queue") parsed.queue = true
+    else if (flag === "--force") parsed.force = true
+    // An unrecognised flag makes the command something other than the drill this
+    // module knows how to run; refuse the whole remedy rather than run a
+    // silently different command.
+    else return undefined
+  }
+  return Object.freeze(parsed)
+}
+
 function parseRedelivery(verb: "submit" | "create", argv: readonly string[], branch: string): RemedyStep | undefined {
   const [target, ...rest] = argv
   if (target === undefined || rest.length > 0) return undefined
@@ -44,11 +66,21 @@ function parseRedelivery(verb: "submit" | "create", argv: readonly string[], bra
 export function parseRemedyCommand(command: string, context: RefusalRemedyContext): RemedyStep | undefined {
   const [binary, group, verb, ...argv] = command.trim().split(/\s+/u)
   if (binary !== "yrd" || group !== "pr") return undefined
+  if (verb === "recut") return parseRemerge(argv)
   if (verb === "submit" || verb === "create") return parseRedelivery(verb, argv, context.branch)
   return undefined
 }
 
 export function formatRemedyCommand(step: RemedyStep): string {
+  if (step.verb === "recut") {
+    return [
+      `yrd pr recut ${step.pr}`,
+      ...(step.preflight ? ["--preflight"] : []),
+      ...(step.queue ? ["--queue"] : []),
+      ...(step.apply ? ["--apply"] : []),
+      ...(step.force ? ["--force"] : []),
+    ].join(" ")
+  }
   return `yrd pr ${step.verb} ${step.branch}`
 }
 
@@ -98,7 +130,7 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
       reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be redelivered mechanically`,
     })
   }
-  if (!steps.some((step) => step.verb === "submit")) {
+  if (!steps.some((step) => step.verb === "submit" || (step.verb === "recut" && step.queue))) {
     return Object.freeze({
       kind: "judgment",
       reason:

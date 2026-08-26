@@ -1490,6 +1490,12 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultSubmitt
         params: ChangeEditArgsSchema,
         apply: (state: BayState, args: ChangeEditArgs) => editPr(state, args),
       }),
+      // The R-b escape hatch (5e unit 8): the CLI verb is retired, but this
+      // public command remains the sanctioned drill for untracked changes,
+      // wedge repair, and pre-TD adoption — the habitant's self-remedy
+      // machine and any surviving printed recut drill dispatch through it.
+      // Death condition: this command dies when the last pre-TD draft is
+      // adopted or withdrawn (adoption census 0). Comment only — no mechanism.
       recut: command({
         title: "Record a mechanically equivalent PR re-merge",
         visibility: "public",

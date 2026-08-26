@@ -42,10 +42,12 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     expect(remedy.kind).toBe("judgment")
   })
 
-
   it("leaves a recut certificate refusal to judgment — it prints no command to run", () => {
     const remedy = classifyRefusalRemedy(
-      { code: "recut-certificate", message: `yrd: change '${Change}' recut tree certificate does not match revision 3` },
+      {
+        code: "recut-certificate",
+        message: `yrd: change '${Change}' recut tree certificate does not match revision 3`,
+      },
       { branch: "task/22474", delivery: "submitted" },
     )
 
@@ -124,13 +126,31 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     expect(remedy.kind).toBe("judgment")
   })
 
-  it("never mechanises the retired recut spelling a historical journal may still carry", () => {
+  it("keeps the R-b escape-hatch recut drill parseable and self-applicable for a live change", () => {
+    // The CLI verb is retired, but the bay's public recut command remains the
+    // sanctioned drill for untracked changes, wedge repair, and pre-TD
+    // adoption; a refusal that prints it still self-applies.
     const remedy = classifyRefusalRemedy(
       {
         code: "composition-invalid",
         message: `yrd: change '${Change}' needs a certified refresh; run 'yrd pr recut ${Change} --preflight --queue --apply'`,
       },
       { branch: "task/22474", delivery: "submitted" },
+    )
+
+    expect(remedy).toEqual({
+      kind: "self-applicable",
+      steps: [{ verb: "recut", pr: Change, preflight: true, apply: true, queue: true, force: false }],
+    })
+  })
+
+  it("refuses the escape-hatch recut drill for a terminal change", () => {
+    const remedy = classifyRefusalRemedy(
+      {
+        code: "composition-invalid",
+        message: `yrd: change '${Change}' needs a certified refresh; run 'yrd pr recut ${Change} --preflight --queue --apply'`,
+      },
+      { branch: "task/22474", delivery: "integrated" },
     )
 
     expect(remedy.kind).toBe("judgment")

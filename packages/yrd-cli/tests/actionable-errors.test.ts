@@ -56,13 +56,23 @@ const ALL_DELIVERY_STATES: readonly ChangeDeliveryState[] = [
   "canceled",
 ]
 
+const RECUT_REFUSING: ReadonlySet<ChangeDeliveryState> = new Set<ChangeDeliveryState>([
+  "integrated",
+  "already-landed",
+  "withdrawn",
+  "canceled",
+])
+
 /** Mirrors the CLI's own state guards, so the regression fails when the
  * projection drifts from them: `yrd pr create` is accepted only for a draft
- * (pushed) PR — applyPrSelectionVerb refuses every other state twice.
- * `yrd pr submit <branch>` is refused by no state, and a prose resolution is
- * never a state-refusable command. */
+ * (pushed) PR — applyPrSelectionVerb refuses every other state twice — and
+ * the R-b escape-hatch recut drill refuses a terminal change outright
+ * (executeRemergeChange `terminal-target`). `yrd pr submit <branch>` is
+ * refused by no state, and a prose resolution is never a state-refusable
+ * command. */
 function refusedBy(delivery: ChangeDeliveryState, command: string): boolean {
   if (command.startsWith("yrd pr create")) return delivery !== "pushed"
+  if (command.startsWith("yrd pr recut")) return RECUT_REFUSING.has(delivery)
   return false
 }
 
@@ -155,7 +165,6 @@ describe("actionable failure projection", () => {
     })
   })
 
-
   it("extracts exact commands already embedded in a mechanical remedy", () => {
     const failure = actionableFailure({
       code: "queue-administration-retired",
@@ -230,9 +239,9 @@ describe("22396 — state-aware remedies", () => {
   it("keeps the pin-first remedy available for a terminal change", () => {
     for (const delivery of ["integrated", "already-landed", "withdrawn", "canceled"] as const) {
       expect(actionableFailure(AUTHORED_GITLINK).resolution).toEqual([
-      "Get the named commit onto the component's own main first (see cause); " +
-        "then resubmit: 'yrd pr submit <branch>'.",
-    ])
+        "Get the named commit onto the component's own main first (see cause); " +
+          "then resubmit: 'yrd pr submit <branch>'.",
+      ])
     }
   })
 
@@ -242,7 +251,6 @@ describe("22396 — state-aware remedies", () => {
         "then resubmit: 'yrd pr submit <branch>'.",
     ])
   })
-
 
   it("threads the change's delivery state through the pr view and run detail projections", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-18T18:00:00.000Z")

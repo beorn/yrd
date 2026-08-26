@@ -200,6 +200,24 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     )
   })
 
+  it("dispatches the R-b escape-hatch recut drill end to end when a refusal prints it", async () => {
+    const h = harness({
+      reason: "yrd: change 'PR1791' needs a certified refresh; run 'yrd pr recut PR1791 --preflight --queue --apply'",
+    })
+
+    const outcomes = await applyRefusalRemedies(h.app, h.services, h.io, new Set())
+
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        status: "applied",
+        pr: "PR1791",
+        verdict: "RECUT",
+        commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr submit task/22474-carrier"],
+      }),
+    ])
+    expect(h.ops()).toContain("services.recut")
+  })
+
   it("runs the FORCE spelling when the preflight verdict says a green check would be discarded", async () => {
     const h = harness({ verdict: "RECUT-FORCE" })
 
@@ -208,9 +226,7 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     expect(outcome).toMatchObject({ status: "applied", verdict: "RECUT-FORCE" })
     // The retired verb's --force spelling is gone; the verdict still applies
     // force internally, and the printed next is the resubmit spelling.
-    expect(outcome?.status === "applied" ? outcome.commands.at(-1) : undefined).toBe(
-      "yrd pr submit task/22474-carrier",
-    )
+    expect(outcome?.status === "applied" ? outcome.commands.at(-1) : undefined).toBe("yrd pr submit task/22474-carrier")
   })
 
   it("re-readies instead of recutting when the preflight verdict is FRESH-NOOP", async () => {
