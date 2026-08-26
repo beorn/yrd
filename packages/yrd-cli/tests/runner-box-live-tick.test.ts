@@ -25,14 +25,15 @@ import {
   fixtureSnapshot,
   fixtureStep,
 } from "../dev/queue-timeline-fixtures.ts"
-import { uncarriedObservation, QueueTimelineView } from "../src/queue-status-view.tsx"
+import { HABITANT_RUNNER_HEARTBEAT_MS, QUEUE_WATCH_CLOCK_INTERVAL_MS } from "../src/run.ts"
+import { uncarriedObservation, queueHealthMarker, QueueTimelineView, RUNNER_VIEW_STALE_MS } from "../src/queue-status-view.tsx"
 
 // Matches dev/queue-timeline-fixtures.ts's own NOW — fixtureSnapshot embeds
 // it as `projection.now`, so the fake clock has to agree with it for the
 // "X ago" math below to merge on round, checkable numbers.
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
 
-// 2s old at mount: fresh (well under RUNNER_STALE_MS=15s) and stays fresh
+// 2s old at mount: fresh (well under RUNNER_VIEW_STALE_MS) and stays fresh
 // through this file's 5s time advances, so the marker never flips to
 // stalled/down mid-test. Shared verbatim by the processing and idle
 // fixtures below — only whether a row is RUNNING differs between them.
@@ -180,5 +181,32 @@ describe("RUNNER box state-conditional coloring (@yrd/cli/runner-box-severity-ne
     } finally {
       processingApp.unmount()
     }
+  })
+})
+
+describe("RUNNER box staleness threshold clears the coalescing ceiling (operator, 2026-08-25)", () => {
+  it("the threshold exceeds the worst-case snapshot refresh, so a healthy runner cannot flap stale", () => {
+    // The box judges staleness on a LIVE clock (items 16/17) while the watch
+    // loader deliberately coalesces heartbeat-only advances out of snapshot
+    // identity ("a heartbeat alone must not rebuild durable queue facts"), so
+    // between progress-token changes the on-screen runner facts refresh only
+    // on the loader's clock pulse. A threshold below that ceiling GUARANTEES
+    // a healthy runner's on-screen age crosses it between refreshes — the
+    // RUNNER box flapped healthy→stale→healthy about every 10s.
+    expect(RUNNER_VIEW_STALE_MS).toBeGreaterThan(QUEUE_WATCH_CLOCK_INTERVAL_MS + HABITANT_RUNNER_HEARTBEAT_MS)
+  })
+
+  it("keeps a runner whose facts refreshed one clock pulse ago healthy, and calls a dead one down", () => {
+    const projection = processingSnapshot().projection
+    // Live now sits one full clock pulse plus one heartbeat past the tick the
+    // cached snapshot carries — the exact worst case for a HEALTHY runner
+    // under heartbeat coalescing.
+    const worstHealthyNow = NOW - 2000 + QUEUE_WATCH_CLOCK_INTERVAL_MS + HABITANT_RUNNER_HEARTBEAT_MS
+    expect(
+      queueHealthMarker(projection, worstHealthyNow).kind,
+      "a healthy runner at the coalescing ceiling must not read as down",
+    ).not.toBe("down")
+    // Past the threshold the runner really is gone: the box must say so.
+    expect(queueHealthMarker(projection, NOW - 2000 + RUNNER_VIEW_STALE_MS + 1000).kind).toBe("down")
   })
 })

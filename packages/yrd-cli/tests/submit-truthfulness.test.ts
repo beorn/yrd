@@ -186,7 +186,7 @@ async function rejectedApp(): Promise<CliApp> {
   const first = await createCliApp({ journal })
   await first.bays.submit({ branch: "topic/rejected", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
   let entries: unknown[] = []
-  for await (const chunk of journal.read()) entries = [...entries, ...(chunk as { values: unknown[] }).values]
+  for await (const chunk of journal.read()) entries = [...entries, ...(chunk as { values: readonly unknown[] }).values]
   const op = "queue.settled"
   const args = { run: "R1" }
   const rejectedFrame = {

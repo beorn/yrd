@@ -430,7 +430,7 @@ function readQueueGitDir(cwd: string): string | undefined {
   }
 }
 
-const HABITANT_RUNNER_HEARTBEAT_MS = 5_000
+export const HABITANT_RUNNER_HEARTBEAT_MS = 5_000
 
 /** How often the habitant follow loop runs its unscoped lease-expiry recovery
  * sweep (D1b). Startup reclaim is one-shot; this settles ghosts left by runners
@@ -7651,7 +7651,7 @@ type QueueListSnapshotLoader = Readonly<{
   load(focus?: QueueWatchFocus): Promise<QueueListSnapshot>
 }>
 
-const QUEUE_WATCH_CLOCK_INTERVAL_MS = 60_000
+export const QUEUE_WATCH_CLOCK_INTERVAL_MS = 60_000
 
 function sameQueueListFocus(left: QueueWatchFocus | undefined, right: QueueWatchFocus | undefined): boolean {
   return left?.pr === right?.pr && left?.revision === right?.revision && left?.run === right?.run
@@ -7698,13 +7698,6 @@ export function createQueueListSnapshotLoader(
         unchanged &&
         cached !== undefined &&
         (observed.runnerProjectionToken !== cached.observed.runnerProjectionToken ||
-          // A heartbeat is observed state too: leaving the snapshot "stable"
-          // freezes runner.lastTickAt while the RUNNER box's live clock keeps
-          // ticking, so a healthy 5s heartbeat crossed the 15s staleness
-          // threshold once per progress interval and the box flapped
-          // healthy→stale→healthy (operator, 2026-08-25). A tick rides the
-          // cheap clock-only reclock; durable projections stay cached.
-          observed.runnerToken !== cached.observed.runnerToken ||
           observed.now < cached.snapshot.now ||
           observed.now - cached.snapshot.now >= QUEUE_WATCH_CLOCK_INTERVAL_MS)
       const stable = unchanged && !clockDue && cached !== undefined

@@ -523,7 +523,9 @@ describe("queue timeline chrome 21106", () => {
         startedAt: new Date(NOW - 2 * 60 * 60_000).toISOString(),
         lastTickAt: new Date(NOW - 2_000).toISOString(),
         command: "habitant runner",
-        queueProgress: { state: "healthy", observedAt: new Date(NOW - 60_000).toISOString() },
+        // Two minutes: past RUNNER_STALE_MS (75s — the coalescing-ceiling
+        // bound, operator 2026-08-25), so the stale banner still renders.
+        queueProgress: { state: "healthy", observedAt: new Date(NOW - 120_000).toISOString() },
       },
     }
     const state = {
@@ -542,7 +544,7 @@ describe("queue timeline chrome 21106", () => {
         newestMerge.terminalAtMs,
       )
       expect(app.text).toContain("no merge for 1:05:00")
-      expect(app.text).toContain("PROGRESS STALE — last measured 1:00 ago")
+      expect(app.text).toContain("PROGRESS STALE — last measured 2:00 ago")
     } finally {
       app.unmount()
     }
@@ -745,8 +747,10 @@ describe("queue timeline chrome 21106", () => {
       ...story,
       runner: {
         pid: 342,
-        startedAt: new Date(NOW - 60_000).toISOString(),
-        lastTickAt: new Date(NOW - 60_000).toISOString(),
+        // Two minutes without a tick: past RUNNER_STALE_MS (75s — the
+        // coalescing-ceiling bound, operator 2026-08-25), so the box is red.
+        startedAt: new Date(NOW - 120_000).toISOString(),
+        lastTickAt: new Date(NOW - 120_000).toISOString(),
         command: "habitant runner",
       },
     }

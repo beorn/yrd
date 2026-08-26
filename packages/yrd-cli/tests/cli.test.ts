@@ -6657,7 +6657,10 @@ describe("runYrd", () => {
     }
     const first = rows.find((row) => row.includes("pr#1.1"))
     const second = rows.find((row) => row.includes("pr#2.1"))
-    expect(first).toContain("#1 ✓")
+    // The status renders once, in the STATUS cell; the RUN cell is identity
+    // only (amendment 2026-08-25 removed its icon-only duplicate).
+    expect(first).toContain("merged")
+    expect(first).toContain("#1 ")
     expect(first).toContain("@cto")
     // An adjacent member of the SAME run keeps its own TIME/STATUS cells —
     // Round 8 blanked them, making a co-merged PR print exactly like one that
@@ -6719,7 +6722,9 @@ describe("runYrd", () => {
 
       const stale = outputIO({
         cwd: repo,
-        now: () => Date.parse("2026-07-13T12:00:20.001Z"),
+        // 75.001s past the tick: beyond RUNNER_VIEW_STALE_MS (the
+        // coalescing-ceiling bound, operator 2026-08-25).
+        now: () => Date.parse("2026-07-13T12:01:10.001Z"),
         resolveQueueTarget,
       })
       expect(await runYrd(app, yrd("queue", "list"), stale.io), stale.stderr()).toBe(0)
@@ -8435,7 +8440,10 @@ describe("runYrd", () => {
     expect(rendered).toContain("TIME")
     expect(rendered).toContain("STATUS")
     expect(rendered).toContain("AGE")
-    expect(rendered).toContain("#4 ◉")
+    // RUN cell is identity only (amendment 2026-08-25): the run id renders
+    // without repeating the STATUS cell's glyph.
+    expect(rendered).toContain("#4 ")
+    expect(rendered).not.toContain("#4 ◉")
     expect(rendered).toContain("pr#5.1")
     expect(rendered).toContain("typecheck-failed")
     expect(rendered).not.toContain("R4·PR5")
@@ -14111,56 +14119,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const focusedTick = await load(focus)
       expect(focusedTick, "idle detail polling must not reload or repaint the selected row").toBe(focused)
     } finally {
-      await app.close()
-    }
-  })
-
-  it("a heartbeat-only advance reclocks the cached snapshot instead of freezing the runner's tick", async () => {
-    const app = await createApp()
-    const stateRoot = mkdtempSync(join(tmpdir(), "yrd-heartbeat-reclock-"))
-    const runnerDir = join(stateRoot, "resident-runner")
-    mkdirSync(runnerDir, { recursive: true })
-    const writeStatus = (lastTickAt: string) =>
-      writeFileSync(
-        join(runnerDir, "status.json"),
-        JSON.stringify({
-          pid: process.pid,
-          startedAt: "2026-07-09T12:00:00.000Z",
-          lastTickAt,
-          command: "yrd queue run",
-          queueProgress: { state: "healthy", observedAt: "2026-07-09T12:00:55.000Z" },
-        }),
-      )
-    let now = Date.parse("2026-07-09T12:01:00.000Z")
-    const loader = runInternals.createQueueListSnapshotLoader(
-      app,
-      [],
-      {},
-      outputIO({ now: () => now, stateDir: stateRoot }).io,
-      { queueReadModel: testQueueReadModel(app) },
-      false,
-    )
-    try {
-      writeStatus("2026-07-09T12:00:58.000Z")
-      const first = await loader.load()
-      expect(first.projection.runner?.lastTickAt).toBe("2026-07-09T12:00:58.000Z")
-
-      // The runner heartbeats on its 5s cadence; nothing else changed — no
-      // journal write, no progress observation. The cached snapshot must still
-      // reclock with the fresh tick: freezing lastTickAt while the RUNNER
-      // box's live clock keeps ticking made a healthy 5s heartbeat cross the
-      // 15s staleness threshold once per progress interval, so the box flapped
-      // healthy→stale→healthy about every 10 seconds (operator, 2026-08-25).
-      writeStatus("2026-07-09T12:01:03.000Z")
-      now += 5_000
-      const ticked = await loader.load()
-      expect(ticked.projection.runner?.lastTickAt, "a fresh heartbeat must reach the projection").toBe(
-        "2026-07-09T12:01:03.000Z",
-      )
-      // Durable facts stay cached — this must ride the cheap clock-only path.
-      expect(ticked.results).toBe(first.results)
-    } finally {
-      rmSync(stateRoot, { recursive: true, force: true })
       await app.close()
     }
   })

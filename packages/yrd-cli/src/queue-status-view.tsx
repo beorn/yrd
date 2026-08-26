@@ -5575,7 +5575,31 @@ export function QueueTopLine({
   )
 }
 
+/**
+ * Freshness bound for a DIRECTLY-read runner status file (health probes,
+ * retention observers). Those readers see the file at probe time with no
+ * cache in between, so three missed 5s heartbeats is honest staleness.
+ * The RUNNER box must NOT use this — see {@link RUNNER_VIEW_STALE_MS}.
+ */
 export const RUNNER_STALE_MS = 15_000
+
+/**
+ * How old the runner's observed facts may look on the WATCH VIEW before the
+ * box calls them stale. The bound is set by how often those facts can REACH
+ * the viewer, not by how often the runner produces them: the box judges
+ * staleness on a LIVE clock (items 16/17) while the watch loader deliberately
+ * coalesces heartbeat-only advances out of snapshot identity ("a heartbeat
+ * alone must not rebuild durable queue facts"), so between progress-token
+ * changes the cached `lastTickAt`/`observedAt` refresh only on the loader's
+ * 60s clock pulse (`QUEUE_WATCH_CLOCK_INTERVAL_MS`). Judging the view with
+ * the direct-read 15s bound put the threshold far below that ceiling, so a
+ * perfectly healthy runner's on-screen age crossed it between refreshes and
+ * the RUNNER box flapped healthy→stale→healthy on the observation cadence,
+ * roughly every 10s (operator, 2026-08-25). 75s = the 60s pulse + the 5s
+ * heartbeat + read-lag margin; runner-box-live-tick pins the inequality so
+ * no constant can drift back under the ceiling.
+ */
+export const RUNNER_VIEW_STALE_MS = 75_000
 
 /**
  * `nowMs` is the caller's — never re-derived from `projection.now` here
@@ -5725,7 +5749,7 @@ export type QueueHealthMarker = Readonly<{
  */
 export function queueHealthMarker(projection: QueueTimelineProjection, nowMs: number): QueueHealthMarker {
   const timing = runnerTiming(projection, nowMs)
-  if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
+  if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_VIEW_STALE_MS)) {
     return { kind: "down", color: "$fg-error", pulse: null }
   }
   const progress = projection.runner.queueProgress
@@ -5733,7 +5757,7 @@ export function queueHealthMarker(projection: QueueTimelineProjection, nowMs: nu
   if (
     progress === undefined ||
     progressAgeMs === undefined ||
-    progressAgeMs > RUNNER_STALE_MS ||
+    progressAgeMs > RUNNER_VIEW_STALE_MS ||
     progress.state === "stalled"
   ) {
     return { kind: "stalled", color: "$fg-error", pulse: null }
@@ -5848,7 +5872,7 @@ function RunnerProgressObservation({ progress, now }: { progress: QueueRunnerPro
       </Text>
     )
   }
-  if (ageMs > RUNNER_STALE_MS) {
+  if (ageMs > RUNNER_VIEW_STALE_MS) {
     return (
       <Text color="$fg-error" bold wrap="truncate">
         PROGRESS STALE — last measured {mediaDuration(ageMs)} ago
@@ -5964,7 +5988,7 @@ function TimelineRunnerBox({
   // re-deriving its own `Date.parse(projection.now)`.
   const now = useCoarseNow(Date.parse(projection.now), live)
   const timing = runnerTiming(projection, now)
-  const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
+  const runnerStale = timing !== null && timing.ageMs > RUNNER_VIEW_STALE_MS
   const marker = queueHealthMarker(projection, now)
   const pause = projection.pause
   const pauseHealth = pause === undefined || state === undefined ? undefined : queuePauseHealth(state, pause)

@@ -89,8 +89,8 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
       // Item 38: `label#N` + state glyph — the label is the queue's base
       // branch until config handles exist; digits never appear in names
       // (item 34 killed `1:main#1`).
-      expect(app.text).toContain("main#1 ✓")
-      expect(app.text).toContain("release/next#7 ✓")
+      expect(app.text).toContain("main#1 ")
+      expect(app.text).toContain("release/next#7 ")
       expect(app.text).not.toContain("1:main#1")
       expect(app.text).not.toContain("2:release/next#7")
     } finally {
@@ -169,7 +169,7 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
       await app.press("2")
       await app.waitForLayoutStable()
       expect(app.text, "queue 2 toggled off").not.toContain("release/next#7")
-      expect(app.text, "queue 1 still shown; its label elides as the only visible queue").toContain("#1 ✓")
+      expect(app.text, "queue 1 still shown; its label elides as the only visible queue").toContain("#1 ")
 
       await app.press("2")
       await app.waitForLayoutStable()
@@ -178,7 +178,7 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
       await app.press("1")
       await app.press("2")
       await app.waitForLayoutStable()
-      expect(app.text, "both toggled off leaves no queue rows").not.toContain("#1 ✓")
+      expect(app.text, "both toggled off leaves no queue rows").not.toContain("#1 ")
       expect(app.text).not.toContain("release/next#7")
 
       await app.press("a")
@@ -207,10 +207,13 @@ describe("multi-queue watch (@yrd/cli/watch-multi-queue)", () => {
     try {
       await app.waitForLayoutStable()
       // Exactly one queue visible: context supplies the label, the run CELL
-      // elides it (items 34/38) — `#1 ✓`, never `main#1 ✓`. The detail box
+      // elides it (items 34/38, amended 2026-08-25: the RUN cell is identity
+      // only, no status glyph) — `#1`, never `main#1`. The detail box
       // border legitimately keeps the full `RUN main#1` identity (item 39).
-      expect(app.text).toContain("#1 ✓")
-      expect(app.text).not.toContain("main#1 ✓")
+      const runRow = app.text.split("\n").find((row) => row.includes("pr#1"))
+      expect(runRow, "the run row renders").toBeDefined()
+      expect(runRow).toContain("#1 ")
+      expect(runRow).not.toContain("main#1")
       // The queue's identity still shows — on its top-line pill.
       expect(app.text.split("\n")[0]).toContain("1 ⎇ main")
     } finally {
