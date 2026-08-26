@@ -5,7 +5,7 @@ import { Database } from "bun:sqlite"
 import { EventSchema, type Event } from "@yrd/core"
 import { JobRequestSchema, parseJobTransitionForReplay, type JobTransition } from "@yrd/job"
 import type { JournalView, JournalViewEntry } from "@yrd/persistence"
-import type { QueueAttempt } from "./queue-status-view.tsx"
+import type { QueueAttempt } from "@yrd/queue"
 
 export type QueueReadModelSnapshot = Readonly<{
   cursor: number

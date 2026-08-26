@@ -39,11 +39,158 @@ import type {
   QueueSummary,
 } from "@yrd/queue"
 import {
+  ACTIVITY_PULSE_COLORS,
+  AG_PULSE_INTERVAL_MS,
+  attemptArtifacts,
+  boundedQueue,
+  BRANCH_ICON_COLOR,
+  byRunStarted,
+  CANCELED_CODES,
+  type ChangeActivityEntry,
+  type ChangeCheckViewRecord,
+  changeIdValue,
+  type ChangeListWindow,
+  changeRevisionClocks,
+  type ChangeRevisionHistoryClock,
+  type ChangeRunRevisionClock,
+  CHECK_REQUEST_ECHO_TOLERANCE_MS,
+  checkDiagnosticText,
+  collapseRecomposedSources,
+  descriptionWithoutDuplicatedIssue,
+  type DurationDistribution,
+  elapsedMs,
+  eligibilityForCurrentRevision,
+  evidenceDisplay,
+  explicitArtifactHref,
+  failedAttemptsByRun,
+  failureFact,
+  fitTimelineLabel,
+  FLOW_DAY_MS,
+  formatQueueChangeId,
   GateCertificateSchema,
+  type GateEvidence,
+  gateEvidenceFromOutput,
+  gateEvidenceLabel,
+  GENERIC_REJECTION_CODES,
+  type HabitantInstalledPlan,
+  integrationProofDetail,
+  isObjectValue,
+  isolationPartLabel,
+  issueHref,
+  jobCheckpoint,
+  jobStatus,
   lastFailedSubmission,
+  latest,
+  latestCandidateForCurrentRevision,
+  latestChangeRun,
+  latestRunForCurrentRevision,
+  mediaDuration,
+  type MergeVerdict,
+  mergeVerdictOfOutcome,
+  NO_ATTEMPTS,
+  NO_HOVER_SELECT,
+  parsedTimelineTimestamp,
+  parseRunIdSuffix,
+  preciseDuration,
+  presentFact,
   projectedChangeStatus,
+  propsField,
+  QUEUE_HEALTH_GLYPH,
+  QUEUE_ROW_LIMIT,
+  QUEUE_STATS_MIN_PANE_ROWS,
+  QUEUE_TIMELINE_STATUS_BUCKETS,
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  type QueueAttempt,
+  queueAttemptsByRun,
   queueDisplayState,
+  type QueueDriverEpoch,
+  type QueueFlowMetrics,
+  type QueueHeadBlockDetails,
+  type QueueHealthMarker,
+  queueIntegration,
+  type QueueLogAttempt,
+  type QueueLogCoverage,
+  queueLogLevel,
+  type QueueLogLocation,
+  type QueueLogLocationEntry,
+  type QueueLogResult,
+  queueLogSubmissionTime,
   queueMemberKind,
+  queueMerge,
+  queueMergeLabel,
+  queueOutcomeIntegration,
+  queuePauseAllowedText,
+  queuePauseHealth,
+  queueRetryPeers,
+  queueRetryPeersOf,
+  queueRevisionKey,
+  type QueueRunnerAbsence,
+  QueueRunnerProgress,
+  type QueueRunnerRefusal,
+  type QueueRunPresentationKind,
+  queueRunRevisionKey,
+  queueRunsByKey,
+  queueRunSteps,
+  queueShowRetries,
+  type QueueStatusResult,
+  queueTimelineAdmissionTimes,
+  queueTimelineFilterBuckets,
+  type QueueTimelineGroup,
+  type QueueTimelineQueue,
+  type QueueTimelineRepeat,
+  type QueueTimelineRevisionLineage,
+  type QueueTimelineRow,
+  type QueueTimelineStatusBucket,
+  type QueueTimelineStatusFilter,
+  type QueueWaitDistribution,
+  RECENT_ROW_LIMIT,
+  relativeAge,
+  relevantStep,
+  requiredQueuePosition,
+  retrySuffix,
+  revisionCheckRequests,
+  revisionSubmitter,
+  runIdValue,
+  RUNNER_VIEW_STALE_MS,
+  runnerBoxTimer,
+  runnerClock,
+  runnerMergeTimer,
+  type RunnerSourcePin,
+  runOutputQueueageIndex,
+  runRevisionClock,
+  safeText,
+  singleQueue,
+  STALE_CODES,
+  stepCheckpointText,
+  stepCommand,
+  stepDetail,
+  stepError,
+  stepErrorCode,
+  stepEvidence,
+  stepLost,
+  stepNamesOfRun,
+  stepOutput,
+  TIMELINE_CONTENT_CAP,
+  TIMELINE_STATE_CAP,
+  TIMELINE_STATUS_ORDER,
+  TIMELINE_WHY_CAP,
+  timelineAge,
+  type TimelineCellLayout,
+  timelineLocalCalendarDay,
+  timelineMemberSubject,
+  timelineQueueWaits,
+  timelineRevisionLineage,
+  type TimelineRunCellModel,
+  timelineRunCellText,
+  timelineShowQueueLabel,
+  type TimelineStatusCell,
+  type TimelineStepCell,
+  timestamp,
+  toIso,
+  uncarriedLine,
+  type UncarriedObservation,
+  uncarriedRailColor,
+  withTimelineLineage,
 } from "@yrd/queue"
 import {
   Box,
@@ -135,32 +282,66 @@ export type { QueueTerminalFact, QueueTerminalMemberFact, QueueTerminalOutcome }
 export { TitledBox, timelineMetric } from "./queue-view-primitives.tsx"
 // Moved to @yrd/queue (5a: one derivation per fact); re-exported so existing
 // `./queue-status-view.tsx` consumers keep one import site.
-export { projectedChangeStatus, queueDisplayState, type QueueDisplayState } from "@yrd/queue"
-
-const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
-
-function changeIdValue(pr: string): string {
-  return (parseChangeSelector(pr)?.pr ?? pr).replace(/^PR/iu, "")
-}
-
-/**
- * Retry — the SAME submission re-run N times by the queue (base moved, transient
- * fail) — rides the change identity as `×N`, distinct from the `.N` submission mark.
- * A single run (first try) is bare. Mirrors the timeline's storm `×N`
- * vocabulary; each retry is its own run id (see runOutputQueueageIndex).
- *
- * Note (submission/draft model, @yrd/core/21679): `.N` is the submission number
- * and is shown from `.1` — a bare `pr#324` is reserved to mean DRAFT (zero
- * submissions) once the draft state merges. Do NOT omit `.1`.
- */
-function retrySuffix(times: number | undefined): string {
-  return times !== undefined && times > 1 ? `×${times}` : ""
-}
-
-export function formatQueueChangeId(pr: string, revision: number | string, times?: number): string {
-  const parsedRevision = typeof revision === "number" ? revision : Number(revision)
-  return `${formatChangeRevisionSelector(pr, parsedRevision)}${retrySuffix(times)}`
-}
+export {
+  type ChangeCheckViewRecord,
+  type ChangeListWindow,
+  changeRevisionClocks,
+  type ChangeRevisionHistoryClock,
+  type ChangeRunRevisionClock,
+  collapseRecomposedSources,
+  type DurationDistribution,
+  formatQueueChangeId,
+  type HabitantInstalledPlan,
+  latestRunForCurrentRevision,
+  type MergeVerdict,
+  mergeVerdictOfOutcome,
+  projectedChangeStatus,
+  QUEUE_TIMELINE_STATUS_BUCKETS,
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  type QueueAttempt,
+  queueDisplayState,
+  type QueueDisplayState,
+  type QueueDriverEpoch,
+  type QueueFlowMetrics,
+  type QueueHealthKind,
+  type QueueHealthMarker,
+  type QueueLogAttempt,
+  queueLogAttempts,
+  type QueueLogCoverage,
+  queueMergeLabel,
+  queuePauseWarnings,
+  queueRevisionKey,
+  type QueueRunnerAbsence,
+  QueueRunnerProgress,
+  type QueueRunnerRefusal,
+  type QueueRunPresentationKind,
+  queueRunRevisionClocks,
+  queueRunRevisionKey,
+  type QueueStatusResult,
+  queueTimelineAdmissionTimes,
+  queueTimelineFilterBuckets,
+  type QueueTimelineGroup,
+  type QueueTimelineQueue,
+  type QueueTimelineRepeat,
+  type QueueTimelineRevisionLineage,
+  type QueueTimelineRow,
+  type QueueTimelineStatusBucket,
+  type QueueTimelineStatusFilter,
+  type QueueWaitDistribution,
+  RUNNER_STALE_MS,
+  RUNNER_VIEW_STALE_MS,
+  type RunnerSourcePin,
+  runRevisionClock,
+  stepNamesOfRun,
+  type UncarriedBuckets,
+  uncarriedCoverageFloor,
+  uncarriedDenominator,
+  uncarriedFloorCount,
+  uncarriedLine,
+  type UncarriedObservation,
+  uncarriedObservation,
+  uncarriedRailColor,
+} from "@yrd/queue"
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
 
@@ -191,80 +372,9 @@ function QueueChangeId({
   )
 }
 
-function runIdValue(run: string): string {
-  return run.replace(/^R(?=\d+$)/u, "")
-}
-
 function RunId({ base, run, ...props }: { base: string; run: string } & QueueNounIdProps) {
   return <NounId noun={base} value={runIdValue(run)} {...props} />
 }
-
-export type QueueStatusResult = QueueSummary &
-  Readonly<{
-    headSha?: string
-    prs: Change[]
-    admissionOrder: readonly string[]
-    candidates?: readonly Candidate[]
-    eligibilities?: readonly ChangeEligibility[]
-  }>
-
-type QueuePauseAllowListMember = Readonly<{
-  id: string
-  status: ChangeDeliveryState | "unknown"
-}>
-
-type QueuePauseHealth = Readonly<{
-  members: readonly QueuePauseAllowListMember[]
-  blocksAll: boolean
-}>
-
-function queuePauseHealth(state: BaysState, pause: NonNullable<QueueSummary["pause"]>): QueuePauseHealth {
-  const members = pause.allowedPRs.map((id) => {
-    const pr = resolveChange(state, id)
-    return { id, status: pr === undefined ? ("unknown" as const) : changeDeliveryState(pr) }
-  })
-  return {
-    members,
-    blocksAll:
-      members.length > 0 && members.every(({ status }) => status !== "unknown" && isNonCheckableChangeState(status)),
-  }
-}
-
-function queuePauseAllowedText(
-  pause: NonNullable<QueueSummary["pause"]>,
-  health: QueuePauseHealth | undefined,
-): string {
-  if (pause.allowedPRs.length === 0) return "none"
-  return health?.members.map(({ id, status }) => `${id} ${status}`).join(", ") ?? pause.allowedPRs.join(", ")
-}
-
-export function queuePauseWarnings(state: BaysState, results: readonly QueueStatusResult[]): string[] {
-  return results.flatMap((result) => {
-    if (result.pause === undefined) return []
-    const health = queuePauseHealth(state, result.pause)
-    if (!health.blocksAll) return []
-    return [
-      `[pause-blocks-all] queue '${result.base}' pause blocks every change: all allowed PRs are terminal (${queuePauseAllowedText(result.pause, health)})`,
-    ]
-  })
-}
-
-export type QueueTimelineRow = Readonly<{
-  key: string
-  pr: string
-  revision: number
-  candidateId?: string
-  run?: string
-  position?: number
-  base: string
-  status: string
-  subject: string
-  detail: string
-  clock: string
-  timestampMs: number
-}>
-
-export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "integrated" | "other"
 // `draft`, `rev`, and `ready` are display-only statuses for the
 // non-integrated PRs that are not (yet) run members — a registered-but-unsubmitted
 // PR (bay status `pushed`; `rev` when it carries failed-submission history)
@@ -273,15 +383,6 @@ export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "in
 // `timelineNonIntegratedRows`. (`pending` is retained as the shared pre-run
 // group/filter/bucket name; `ready` is the status it now renders.)
 export type QueueTimelineStatus = "draft" | "rev" | "ready" | "pending" | "running" | QueueTerminalOutcome
-export type QueueTimelineGroup = "draft" | "pending" | "running" | "completed"
-
-export type QueueTimelineRevisionLineage = Readonly<{
-  pr: string
-  revisions: readonly number[]
-  /** Draft/registration clock when retained; absent for legacy submissions. */
-  registeredAt?: string
-  sourceReadyAt?: string
-}>
 
 /**
  * One physical, selectable queue row. The list deliberately denormalizes one
@@ -349,14 +450,6 @@ export type QueueTimelineProjectedRow = Readonly<{
   stepNames?: readonly string[]
 }>
 
-export type QueueTimelineRepeat = Readonly<{
-  key: string
-  count: number
-  firstTimestamp: string
-  lastTimestamp: string
-  collapsed: boolean
-}>
-
 export type QueueTimelineDisplayRow = QueueTimelineProjectedRow & Readonly<{ repeat?: QueueTimelineRepeat }>
 
 /** The `path@branch#N` script-stable address for one run (items 34/36),
@@ -399,252 +492,6 @@ export function timelineRetainedRows(
     return false
   })
 }
-
-/** One canonical queue audit observation. Its time is independent from the
- * habitant heartbeat: ticking and measuring outcome progress are different facts. */
-export type QueueRunnerProgress = Readonly<{ observedAt: string }> &
-  (Readonly<{ state: "healthy" }> | Readonly<{ state: "stalled"; findings: readonly QueueAuditFinding[] }>)
-
-export const QueueRunnerProgress = Object.freeze({
-  ageMs(progress: QueueRunnerProgress, nowMs: number): number | undefined {
-    const observedAt = Date.parse(progress.observedAt)
-    const ageMs = Math.max(0, nowMs - observedAt)
-    return Number.isFinite(ageMs) ? ageMs : undefined
-  },
-})
-
-export type QueueDriverEpoch = Readonly<{
-  /** Repository-scoped queue identity; a service name is never a driver identity. */
-  queueId: string
-  /** One habitant lifetime. A same-PID exec reload mints a successor epoch. */
-  epoch: string
-  /** Latest proven queue merge, or null before this queue has merged anything.
-   * Optional for status written by older habitants (pre-2026-08-18 they wrote
-   * this field as `lastLanded`); absence is unknown, never "nothing merged". */
-  lastMerged?: Readonly<{ commit: string; at: string }> | null
-}>
-
-/** One uncarried sweep: what it found AND when it looked. The two travel
- * together because either alone is misleading. */
-export type UncarriedObservation = Readonly<{
-  /** Stranded refs the sweep confirmed — already past the mergedness filter. */
-  count: number
-  /** Refs enumerated, so a zero is readable rather than merely small. */
-  scanned: number
-  /** Legacy refs whose reflog clock was not retained. Optional for status
-   * written by older habitants; absence is unknown coverage, never zero. */
-  missingUpdateClocks?: number
-  /**
-   * Uncarried refs whose update clock WAS retained, so the sweep could judge
-   * them. With `missingUpdateClocks` this gives the coverage fraction, which
-   * `scanned` alone cannot: `scanned` counts carried and superseded refs the
-   * rail never had to measure. Optional for status written by older habitants;
-   * absence is unknown coverage, never full coverage.
-   */
-  measurable?: number
-  observedAt: string
-  /**
-   * The coverage sentence, and the count already bounded — carried as FIELDS so
-   * that no consumer can serialize this record without them.
-   *
-   * Five machine surfaces emit this object (`queue.uncarried --json`,
-   * `queue.list`, the watch stream, `RunnerHealthFacts`, the habitant
-   * heartbeat's `status.json`), and every one of them used to ship a bare
-   * `count` while the coverage stayed behind at the one call site that
-   * remembered to compute it. Making the derived half part of the record turns
-   * "remember to say it is a floor" from a rule into a type: they are minted
-   * once by {@link uncarriedObservation} and travel wherever the count goes.
-   */
-  floor: string
-  bounded: string
-}>
-
-/**
- * Mint an observation with its coverage attached. The ONLY constructor — both
- * the habitant's sweeper and the tolerant reader of an older `status.json` go
- * through here, so a record that reaches a renderer always knows how much of
- * its own population it managed to measure.
- */
-export function uncarriedObservation(
-  input: Readonly<{
-    count: number
-    scanned: number
-    measurable?: number
-    missingUpdateClocks?: number
-    observedAt: string
-  }>,
-): UncarriedObservation {
-  return {
-    count: input.count,
-    scanned: input.scanned,
-    ...(input.measurable === undefined ? {} : { measurable: input.measurable }),
-    ...(input.missingUpdateClocks === undefined ? {} : { missingUpdateClocks: input.missingUpdateClocks }),
-    observedAt: input.observedAt,
-    floor: uncarriedCoverageFloor(input.measurable, input.missingUpdateClocks),
-    bounded: uncarriedFloorCount(input.count, input.missingUpdateClocks),
-  }
-}
-
-/**
- * What the rail's COLOUR claims: that an action exists. Warning only when the
- * sweep actually found stranded work; muted otherwise, INCLUDING a zero drawn
- * from partial coverage.
- *
- * That last clause is a deliberate ruling (@chief, 2026-08-17), not an
- * oversight, and it is written down here because it looks like a bug to anyone
- * who has just read {@link uncarriedCoverageFloor}: a zero at 15% coverage
- * really is an unmeasured fleet rather than a clean one. The epistemics belong
- * in the rail TEXT, which now always carries `≥` and its coverage sentence.
- * Colouring partial coverage would leave the rail permanently lit on a real
- * fleet — 2211 of 2602 refs lack retained clocks — and a rail that is always
- * warning becomes noise and gets ignored, which is precisely how the previous
- * one died. Do not add a third colour here; strengthen the sentence instead.
- */
-export function uncarriedRailColor(observation: UncarriedObservation | undefined): string {
-  return observation !== undefined && observation.count > 0 ? "$fg-warning" : "$fg-muted"
-}
-
-/**
- * How much of the candidate population this sweep could actually judge.
- *
- * The rail is required to say this next to its count, because the count is a
- * FLOOR and reads exactly like a total. Measured 2026-08-14: 2,442 of 2,786
- * uncarried refs had no retained reflog clock, so the rail saw 12% of its
- * population — and a zero from a 12% reading is not a clean fleet, it is an
- * unmeasured one. One function, shared by the rail and the `queue uncarried`
- * command, so the two surfaces cannot phrase the same gap differently.
- */
-export function uncarriedCoverageFloor(
-  measurable: number | undefined,
-  missingUpdateClocks: number | undefined,
-  unenumerable = 0,
-): string {
-  // An absent clock count is unknown coverage, never full coverage — the
-  // distinction an older habitant's status cannot make for itself.
-  if (missingUpdateClocks === undefined) return "push-clock coverage unknown, so a floor"
-  // Two independent gaps, phrased separately. A ref with no merge base was not
-  // missing a clock, and folding it into that count would attribute the gap to
-  // a cause nobody measured.
-  const gaps: string[] = []
-  if (missingUpdateClocks > 0) gaps.push(`${String(missingUpdateClocks)} refs without retained update clocks`)
-  if (unenumerable > 0) {
-    gaps.push(`${String(unenumerable)} ref${unenumerable === 1 ? "" : "s"} with no merge base`)
-  }
-  // Full coverage is a claim about BOTH gaps. Returning it while refs went
-  // unenumerable is the under-count this whole helper exists to refuse.
-  if (gaps.length === 0) return "every candidate had a retained update clock"
-  const gap = gaps.join(" and ")
-  if (measurable === undefined) return `a floor — ${gap}, against an unknown candidate population`
-  const candidates = measurable + missingUpdateClocks + unenumerable
-  const percent = Math.round((measurable / candidates) * 100)
-  // A rail that rounds a real 0.4% down to a flat "0% measurable" says the
-  // sweep saw nothing, which is a different fact from seeing almost nothing.
-  const share = measurable > 0 && percent === 0 ? "<1%" : `${String(percent)}%`
-  return `a floor — ${share} of ${String(candidates)} candidates measurable, ${gap}`
-}
-
-/**
- * A sweep count printed with its floor bound: `≥N` whenever any candidate went
- * unmeasured, a bare `N` only when coverage was provably complete.
- *
- * Exported and shared by EVERY surface that prints one of these counts — the
- * runner-box rail and the `queue uncarried` command — because the bound is the
- * half a reader acts on: "33 uncarried" is a work item, "≥33 of a population
- * 15% of which we could measure" is an unknown, and the two were being phrased
- * differently on the two surfaces (@i/10-merge-queue/22925-watch-shows-every-pr).
- * Unknown coverage counts as partial: an older habitant that cannot report its
- * clock gap has not proven it had none.
- */
-export function uncarriedFloorCount(count: number, missingUpdateClocks: number | undefined, unenumerable = 0): string {
-  // A ref the sweep could not enumerate is unmeasured exactly like a ref with
-  // no retained clock: either one makes the count a floor rather than a total.
-  const partial = missingUpdateClocks === undefined || missingUpdateClocks > 0 || unenumerable > 0
-  return `${partial ? "≥" : ""}${String(count)}`
-}
-
-/** Every bucket a sweep sorted its refs into, in the order the ledger prints. */
-export type UncarriedBuckets = Readonly<{
-  scanned: number
-  carried: number
-  exempt: number
-  superseded: number
-  outsideAgeBound: number
-  examined: number
-  missingUpdateClocks: number
-  unenumerable: number
-}>
-
-/**
- * The ledger line that makes a zero believable.
- *
- * ONE function rather than a template at each call site, for the same reason
- * `uncarriedFloorCount` is: the identity
- *
- *   scanned = carried + exempt + superseded + clocks + aged + examined + unenumerable
- *
- * is only checkable by a reader if every term is on the line, and a term that
- * lives in a string literal is one careless edit from silently disappearing.
- * A dropped term does not look like a bug — it looks like a smaller fleet.
- */
-export function uncarriedDenominator(buckets: UncarriedBuckets): string {
-  return [
-    `scanned ${String(buckets.scanned)}`,
-    `${String(buckets.carried)} carried`,
-    // Policy exclusions sit with every other bucket, at zero as much as at
-    // seven: an exemption reported somewhere else is one a reader has to
-    // already suspect before they can find it.
-    `${String(buckets.exempt)} exempt by policy`,
-    `${String(buckets.superseded)} superseded revisions collapsed`,
-    `${String(buckets.outsideAgeBound)} outside the age bound`,
-    `${String(buckets.examined)} examined`,
-    `${String(buckets.missingUpdateClocks)} refs without retained update clocks`,
-    `${String(buckets.unenumerable)} unenumerable`,
-  ].join(" · ")
-}
-
-/**
- * How a rail must say what it measured, or that it did not measure.
- *
- * Exported and used by the renderer so the rule is one function rather than a
- * convention: there is no code path that can produce a bare count. An absent
- * observation says so in words — a missing measurement rendering as "0" would
- * claim a healthy queue that nobody looked at.
- */
-export function uncarriedLine(observation: UncarriedObservation | undefined, nowMs: number): string {
-  // Plain language, own label (operator ruling 2026-08-18, item 15): the old
-  // "uncarried not swept" was jargon-fused — two words with no verb between
-  // them reading as one compound term. This still says nothing was measured
-  // (never a bare 0, the same honest-absence rule the rest of this function
-  // upholds) and now names the sweep so the label cannot fuse with whatever
-  // renders next to it.
-  if (observation === undefined) return "UNCARRIED — stranded-refs sweep hasn't produced an observation yet"
-  const ageMs = Math.max(0, nowMs - Date.parse(observation.observedAt))
-  // Both halves are read off the record, not recomputed here: `≥` is not
-  // decoration — the count is a floor whenever any candidate went unmeasured,
-  // and an operator scanning the rail reads a bare number as a total long
-  // before they read the parenthetical that says otherwise.
-  return (
-    `uncarried ${observation.bounded} of ${String(observation.scanned)} refs (${observation.floor}), ` +
-    `as of ${humanAge(ageMs)} ago`
-  )
-}
-
-function humanAge(ageMs: number): string {
-  const minutes = Math.floor(ageMs / 60_000)
-  if (minutes < 1) return "under a minute"
-  if (minutes < 60) return `${String(minutes)}m`
-  const hours = Math.floor(minutes / 60)
-  const rest = minutes % 60
-  return rest === 0 ? `${String(hours)}h` : `${String(hours)}h${String(rest)}m`
-}
-
-/** The pin-relative states a runner's source line can render. `unpinned` never
- * reaches this type — an unpinned queue attaches no `sourcePin` at all — so
- * every present value is a positive claim about the RECORDED pin. */
-export type RunnerSourcePin =
-  | Readonly<{ state: "at" }>
-  | Readonly<{ state: "behind"; commits: number }>
-  | Readonly<{ state: "unknown"; reason: string }>
 
 export type QueueTimelineRunner = Readonly<{
   pid: number
@@ -744,61 +591,6 @@ export type QueueTimelineRunner = Readonly<{
   installedPlan?: HabitantInstalledPlan
 }>
 
-/** What a resident publishes about the plan it can execute. */
-export type HabitantInstalledPlan = Readonly<{
-  batchSize: number
-  steps: readonly InstalledStep[]
-}>
-
-export type QueueRunnerRefusal = Readonly<{
-  code: string
-  message: string
-  run?: string
-  step?: string
-}>
-
-/**
- * Why no runner is draining this queue, for the surfaces that must say so.
- *
- * Display collapses a departed runner to `runner: null` (run.ts
- * `activeHabitantRunner`), and that collapse threw away the one fact the
- * operator needs: whether the runner that was here is GONE, or whether none was
- * ever here. Both printed "NO RUNNER - no drained run in window" — cli.test.ts
- * asserted the identical string for a dead-pid runner and a missing status file
- * — so the banner could not tell a crash from a queue nobody ever staffed.
- *
- * `departed` carries the pid and the last moment the runner was known alive:
- * `clean` when it wrote its own exit marker (an operator or drain stop), false
- * when the marker is missing and only a dead pid proves it went (SIGKILL, OOM,
- * crash).
- */
-export type QueueRunnerAbsence =
-  | Readonly<{ kind: "departed"; pid: number; clean: boolean; lastAliveMs: number }>
-  | Readonly<{ kind: "never" }>
-
-/**
- * One queue the projection covers, under the three-tier naming model
- * (operator rulings 2026-08-18, items 32a/34/36):
- *
- * - `label` — the DIGIT filter accelerator: this queue's position in `queues`,
- *   stable for a given snapshot, primary base first. It toggles the queue's
- *   pill and never appears in a name (item 34 kills the `1:` run prefix).
- * - `base` + `path` — the identity pair; `path@base` is the canonical FQN.
- *   `path` is absent when the surface does not know its repository root.
- * - `name` — the short config handle (`code`, `pm`) when one is declared;
- *   run names lead with it (`code#23423`), falling back to `base`.
- */
-export type QueueTimelineQueue = Readonly<{
-  label: number
-  base: string
-  path?: string
-  name?: string
-  /** The typeable script-stable address: `path@branch` when the repository
-   * path is known, the bare branch otherwise (items 34/36 — scripts never
-   * re-derive it). */
-  address: string
-}>
-
 export type QueueTimelineProjection = Readonly<{
   now: string
   base: string
@@ -869,64 +661,6 @@ export type QueueTimelineProjectionOptions = Readonly<{
   queueNames?: ReadonlyMap<string, string>
 }>
 
-export type DurationDistribution = Readonly<{
-  n: number
-  minMs: number | null
-  avgMs: number | null
-  p50Ms: number | null
-  p90Ms: number | null
-  maxMs: number | null
-}>
-
-export type QueueWaitDistribution = Readonly<{
-  n: number
-  avgMs: number | null
-  p50Ms: number | null
-  p90Ms: number | null
-  maxMs: number | null
-}>
-
-export type QueueFlowMetrics = Readonly<{
-  windowMs: number
-  terminalAttempts: number
-  outcomes: Readonly<{
-    integrated: number
-    alreadyMerged: number
-    /** Completed without merge proof — not a merge (21801/22323). */
-    passed: number
-    rejected: number
-    environmentRefused: number
-    stale: number
-    lost: number
-    legacy: number
-    refused: number
-    canceled: number
-  }>
-  decisionRejection: Readonly<{
-    rejected: number
-    decisions: number
-    rate: number | null
-  }>
-  // Merged count over the window projected to a per-24h rate. per24h is null
-  // only for a zero-width window.
-  throughput: Readonly<{ merged: number; per24h: number | null }>
-  // Oldest OPEN queue age at snapshot time — a live-queue fact the caller
-  // supplies (it is not derivable from terminal facts). null when nothing is
-  // queued. Folded in so the aggregate is one self-contained JSON key.
-  oldestOpenMs: number | null
-  activeRun: Readonly<{
-    allTerminal: DurationDistribution
-    integratedOnly: DurationDistribution
-    alreadyLandedOnly: DurationDistribution
-    // Active duration of every unsuccessful terminal Run.
-    // Retained JSON aggregate excluding both successful terminal outcomes.
-    failedOnly: DurationDistribution
-  }>
-  queueWait: QueueWaitDistribution
-}>
-
-type QueueLogResult = QueueSummary & { prs?: readonly Change[] }
-
 export type QueueLogRow = Readonly<{
   run: string
   base: string
@@ -966,148 +700,6 @@ export type QueueLogRow = Readonly<{
   props?: ChangeProps
   merge: string
 }>
-
-export type QueueLogAttempt = Readonly<{
-  job: string
-  run: string
-  step: string
-  index: number
-  attempt: number
-  runner: string
-  outcome: "passed" | "failed" | "lost"
-  startedAt: string
-  finishedAt: string
-  durationMs: number
-}>
-
-type QueueAttemptResult =
-  | Readonly<{ status: "passed"; output: JsonValue }>
-  | Readonly<{ status: "failed"; error: JobError; output?: JsonValue }>
-  | Readonly<{ status: "lost"; reason: string }>
-
-export type QueueAttempt = QueueLogAttempt &
-  Readonly<{
-    requestedAt: string
-    revision: string
-    result: QueueAttemptResult
-  }>
-
-type RequestedJob = Readonly<{ run: string; step: string; index: number; requestedAt: string; revision: string }>
-type StartedAttempt = Readonly<{ attempt: number; runner: string; startedAt: string }>
-
-type PinnedChangeRevision = Readonly<{ id: string; revision: number; headSha: string; intent?: unknown }>
-
-export function queueRevisionKey(revision: PinnedChangeRevision): string {
-  return JSON.stringify([revision.id, revision.revision, revision.headSha])
-}
-
-export function queueRunRevisionKey(run: Pick<Run, "id">, revision: PinnedChangeRevision): string {
-  return JSON.stringify([run.id, revision.id, revision.revision, revision.headSha])
-}
-
-export function queueRunRevisionClocks(
-  prs: Iterable<Change>,
-  runs: Iterable<Run>,
-): Map<string, ChangeRunRevisionClock> {
-  const byId = new Map([...prs].map((pr) => [pr.id, pr]))
-  const clocks = new Map<string, ChangeRunRevisionClock>()
-  for (const run of runs) {
-    for (const revision of run.prs) {
-      const pr = byId.get(revision.id)
-      if (pr === undefined) {
-        // A carrier-free pin intent's member id is an intent id: the snapshot
-        // is the whole record and no revision clock exists. A change member with
-        // no retained PR is journal corruption and stays loud.
-        if (revision.intent !== undefined) continue
-        throw new Error(`yrd: run '${run.id}' has no retained change '${revision.id}'`)
-      }
-      clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
-    }
-  }
-  return clocks
-}
-
-/** Compatibility projector for injected/custom runtimes without the installed
- * Queue read-model service. Production CLI hosts query the transactionally
- * maintained SQLite view; this pure fold remains the parity oracle and the
- * explicit fallback for Journals that cannot contribute views. */
-export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
-  return stageAsync("history-scan", () => scanQueueLogAttempts(events))
-}
-
-async function scanQueueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
-  const requested = new Map<string, RequestedJob>()
-  const started = new Map<string, StartedAttempt>()
-  const attempts: QueueAttempt[] = []
-
-  for await (const event of events) {
-    if (event.name === "job/requested") {
-      const request = JobRequestSchema.parse(event.data)
-      const input = request.input
-      if (
-        typeof input === "object" &&
-        input !== null &&
-        "run" in input &&
-        typeof input.run === "string" &&
-        "step" in input &&
-        typeof input.step === "string" &&
-        "index" in input &&
-        typeof input.index === "number"
-      ) {
-        requested.set(event.id, {
-          run: input.run,
-          step: input.step,
-          index: input.index,
-          requestedAt: event.ts,
-          revision: request.revision,
-        })
-      }
-      continue
-    }
-
-    if (event.name !== "job/transitioned") continue
-    const transition = JobTransitionSchema.parse(event.data)
-    if (transition.type === "start") {
-      started.set(`${transition.id}:${transition.attempt}`, {
-        attempt: transition.attempt,
-        runner: transition.runner,
-        startedAt: event.ts,
-      })
-      continue
-    }
-    if (transition.type !== "finish" && transition.type !== "lose") continue
-
-    const request = requested.get(transition.id)
-    const start = started.get(`${transition.id}:${transition.attempt}`)
-    if (request === undefined || start === undefined) continue
-    const durationMs = elapsedMs(start.startedAt, event.ts, `queue attempt '${transition.id}:${transition.attempt}'`)
-    if (durationMs === undefined) {
-      throw new Error(`yrd: queue attempt '${transition.id}:${transition.attempt}' has invalid time`)
-    }
-    attempts.push({
-      job: transition.id,
-      ...request,
-      attempt: transition.attempt,
-      runner: start.runner,
-      outcome: transition.type === "lose" ? "lost" : transition.result.conclusion === "success" ? "passed" : "failed",
-      startedAt: start.startedAt,
-      finishedAt: event.ts,
-      durationMs,
-      result:
-        transition.type === "lose"
-          ? { status: "lost", reason: transition.reason }
-          : transition.result.conclusion === "success"
-            ? { status: "passed", output: transition.result.output }
-            : {
-                status: "failed",
-                error: transition.result.error,
-                ...(transition.result.output === undefined ? {} : { output: transition.result.output }),
-              },
-    })
-  }
-
-  return attempts
-}
 
 type Row = Readonly<{
   pr: string
@@ -1194,14 +786,6 @@ type QueueShowRow = Readonly<{
   locations: readonly QueueLogLocationEntry[]
 }>
 
-type GateEvidence = Readonly<{
-  mode: "delta" | "strict"
-  residualCount: number
-}>
-
-/** Perfect-detector merge class for scripts (21801 / 22323). */
-export type MergeVerdict = "landed" | "already-landed" | "non-landing" | "failed" | "running" | "canceled"
-
 /** Render-side run glyph (5e cut 4 — glyph left the stored shape). Non-landing
  * success must not share ✓ with real merges (21801), so it borrows the
  * status-presentation "passed" ring instead of the work-vocabulary glyph. */
@@ -1246,129 +830,16 @@ export type QueueShowData = Readonly<{
   steps: readonly QueueShowRow[]
 }>
 
-export type ChangeRevisionHistoryClock = Readonly<{
-  pr: string
-  revision: number
-  headSha: string
-}> &
-  ChangeRevClock
-
-export type ChangeRunRevisionClock =
-  | (ChangeRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
-  | (ChangeRevisionHistoryClock & Readonly<{ admittedBy: "check-request"; checkRequestedAt: string }>)
-
 export type ChangeRunsData = Readonly<{
   pr: Change
   eligibility?: ChangeEligibility
   runs: readonly QueueShowData[]
 }>
 
-type LegacyQueueCoverage = Readonly<{
-  path: string
-  frames: number
-}>
-
-export type QueueLogCoverage = Readonly<{
-  since: string
-  completeness: "queue-only"
-  legacy: readonly LegacyQueueCoverage[]
-}>
-
-type QueueLogLocation = Readonly<{ path: string }> | Readonly<{ url: string }>
-type QueueLogLocationEntry = Readonly<{ label: string; display?: string; location: QueueLogLocation }>
-
-function evidenceDisplay(label: string, location: QueueLogLocation): string {
-  if (!("path" in location)) return label
-  const normalized = location.path.replaceAll("\\", "/")
-  const git = normalized.indexOf("/.git/")
-  if (git >= 0) return normalized.slice(git + 1)
-  return label
-}
-
 function age(timestamp: string | undefined, now: number, subject: string): string {
   if (timestamp === undefined) return "-"
   const value = elapsedMs(timestamp, new Date(now).toISOString(), subject)
   return value === undefined ? "-" : formatDuration(value)
-}
-
-function latest(...timestamps: (string | undefined)[]): string | undefined {
-  return timestamps
-    .filter((value): value is string => value !== undefined)
-    .toSorted()
-    .at(-1)
-}
-
-export function latestRunForCurrentRevision(pr: Change, summary: QueueSummary): Run | undefined {
-  const revision = currentChangeRev(pr)
-  const current = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
-  const delivery = changeDeliveryState(pr)
-  const currentSubmission =
-    delivery === "submitted" || delivery === "ready" ? (revision.submittedAt ?? pr.submittedAt) : undefined
-  return [...summary.running, ...summary.waiting, ...summary.finished]
-    .filter((run) => run.prs.some((member) => queueRevisionKey(member) === current))
-    .filter(
-      (run) =>
-        currentSubmission === undefined ||
-        timestamp(run.startedAt, `run '${run.id}' start`) >=
-          timestamp(currentSubmission, `change '${pr.id}' current revision submit time`),
-    )
-    .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
-    .at(-1)
-}
-
-function latestCandidateForCurrentRevision(result: QueueStatusResult, pr: Change): Candidate | undefined {
-  const revision = currentChangeRev(pr)
-  return result.candidates
-    ?.filter((candidate) =>
-      candidate.revs.some((member) => member.pr === pr.id && member.n === revision.n && member.head === revision.head),
-    )
-    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-    .at(-1)
-}
-
-function eligibilityForCurrentRevision(result: QueueStatusResult, pr: Change): ChangeEligibility | undefined {
-  const revision = changeRevisionNumber(pr)
-  return result.eligibilities?.find((eligibility) => eligibility.pr === pr.id && eligibility.revision === revision)
-}
-
-/** The submitter handle recorded on one exact immutable PR revision, or
- * undefined for revisions journaled before submitter identity was recorded. */
-function revisionSubmitter(
-  pr: Change,
-  revision = changeRevisionNumber(pr),
-  headSha = changeHead(pr),
-): string | undefined {
-  return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.submitter
-}
-
-function currentTerminalFact(pr: Change): ChangeRevTerminal | undefined {
-  const delivery = changeDeliveryState(pr)
-  let at: string | undefined
-  switch (delivery) {
-    case "rejected":
-      at = pr.rejectedAt
-      break
-    case "integrated":
-      at = pr.integratedAt
-      break
-    case "already-landed":
-      at = pr.alreadyLandedAt
-      break
-    case "withdrawn":
-      at = pr.withdrawnAt
-      break
-    case "canceled":
-      at = pr.canceledAt
-      break
-    default:
-      return undefined
-  }
-  if (at === undefined) {
-    throw new Error(
-      `yrd: change '${pr.id}' current revision ${changeRevisionNumber(pr)}@${changeHead(pr)} has no ${delivery} timestamp`,
-    )
-  }
-  return { kind: delivery, at }
 }
 
 function durationDistribution(values: readonly number[]): DurationDistribution {
@@ -1387,8 +858,6 @@ function waitDistribution(values: readonly number[]): QueueWaitDistribution {
   const { n, avgMs, p50Ms, p90Ms, maxMs } = durationDistribution(values)
   return { n, avgMs, p50Ms, p90Ms, maxMs }
 }
-
-const FLOW_DAY_MS = 24 * 60 * 60_000
 
 export function queueFlowMetrics(
   facts: Iterable<QueueTerminalFact>,
@@ -1514,238 +983,9 @@ export function queueTimelineRows(
   })
 }
 
-function validateRevisionClock(pr: Change, clock: ChangeRevisionHistoryClock): ChangeRevisionHistoryClock {
-  const pushed = Date.parse(clock.pushedAt)
-  if (!Number.isFinite(pushed)) {
-    throw new Error(
-      `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid pushed clock '${clock.pushedAt}'`,
-    )
-  }
-  if (clock.submittedAt !== undefined) {
-    const submitted = elapsedMs(
-      clock.pushedAt,
-      clock.submittedAt,
-      `change '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-submitted age`,
-    )
-    if (submitted === undefined) {
-      throw new Error(
-        `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid submitted clock '${clock.submittedAt}'`,
-      )
-    }
-  }
-  if (clock.terminal !== undefined) {
-    const terminal = elapsedMs(
-      clock.submittedAt ?? clock.pushedAt,
-      clock.terminal.at,
-      `change '${pr.id}' revision ${clock.revision}@${clock.headSha} submitted-to-terminal age`,
-    )
-    if (terminal === undefined) {
-      throw new Error(
-        `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid terminal clock '${clock.terminal.at}'`,
-      )
-    }
-  }
-
-  if (clock.revision !== changeRevisionNumber(pr) || clock.headSha !== changeHead(pr)) return clock
-  const expected = currentTerminalFact(pr)
-  if (expected === undefined) {
-    if (clock.terminal !== undefined) {
-      throw new Error(
-        `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.kind} terminal clock`,
-      )
-    }
-    return clock
-  }
-  if (clock.terminal === undefined) {
-    throw new Error(
-      `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.kind} terminal clock`,
-    )
-  }
-  if (clock.terminal.kind !== expected.kind || clock.terminal.at !== expected.at) {
-    throw new Error(
-      `yrd: change '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.kind} terminal clock contradicts current PR state`,
-    )
-  }
-  return clock
-}
-
-function revisionHistoryClock(pr: Change, revision: Change["revs"][number]): ChangeRevisionHistoryClock {
-  return {
-    pr: pr.id,
-    revision: revision.n,
-    headSha: revision.head,
-    pushedAt: revision.pushedAt,
-    ...(revision.submittedAt === undefined ? {} : { submittedAt: revision.submittedAt }),
-    ...(revision.terminal === undefined ? {} : { terminal: revision.terminal }),
-  }
-}
-
-export function changeRevisionClocks(pr: Change): readonly ChangeRevisionHistoryClock[] {
-  const clocks = pr.revs.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
-  if (!clocks.some((clock) => clock.revision === changeRevisionNumber(pr) && clock.headSha === changeHead(pr))) {
-    throw new Error(
-      `yrd: change '${pr.id}' has no clock for current revision ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
-    )
-  }
-  return clocks
-}
-
-function revisionCheckRequests(
-  pr: Change,
-  clock: ChangeRevisionHistoryClock,
-): readonly Change["checkRequests"][number][] {
-  return pr.checkRequests
-    .filter((request) => request.revision === clock.revision && request.headSha === clock.headSha)
-    .map((request) => {
-      const elapsed = elapsedMs(
-        clock.pushedAt,
-        request.at,
-        `change '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-check-request age`,
-      )
-      if (elapsed === undefined) {
-        throw new Error(
-          `yrd: change '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid check-request clock '${request.at}'`,
-        )
-      }
-      return request
-    })
-}
-
-function timestamp(value: string, subject: string): number {
-  const parsed = Date.parse(value)
-  if (!Number.isFinite(parsed)) throw new Error(`yrd: ${subject} has invalid timestamp '${value}'`)
-  return parsed
-}
-
-export function runRevisionClock(pr: Change, run: Run): ChangeRunRevisionClock {
-  const pinned = run.prs.find((member) => member.id === pr.id)
-  if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain change '${pr.id}'`)
-  const revision = pr.revs.find((revision) => revision.n === pinned.revision && revision.head === pinned.headSha)
-  if (revision === undefined) {
-    throw new Error(
-      `yrd: run '${run.id}' has no retained revision clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
-    )
-  }
-  const historyClock = revisionHistoryClock(pr, revision)
-  const startedAt = timestamp(run.startedAt, `run '${run.id}' start`)
-  if (
-    revision.submittedAt !== undefined &&
-    timestamp(revision.submittedAt, `change '${pr.id}' revision ${pinned.revision}@${pinned.headSha} submit time`) <=
-      startedAt
-  ) {
-    const clock = validateRevisionClock(pr, historyClock)
-    return { ...clock, admittedBy: "submission", submittedAt: revision.submittedAt }
-  }
-  const checkRequest = revisionCheckRequests(pr, historyClock)
-    .filter((request) => timestamp(request.at, `change '${pr.id}' check request`) <= startedAt)
-    .toSorted((left, right) => left.at.localeCompare(right.at))
-    .at(-1)
-  if (checkRequest === undefined) {
-    throw new Error(
-      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
-    )
-  }
-  const clock = validateRevisionClock(pr, historyClock)
-  return { ...clock, admittedBy: "check-request", checkRequestedAt: checkRequest.at }
-}
-
-type JobDisplayStatus =
-  | "queued"
-  | "requested"
-  | "running"
-  | "waiting"
-  | "passed"
-  | "failed"
-  | "lost"
-  | "canceled"
-  | "skipped"
-
-function jobDisplayStatus(job: Job | undefined): JobDisplayStatus {
-  if (job === undefined) return "queued"
-  if (job.status === "queued") return "requested"
-  if (job.status === "in_progress") return "running"
-  if (job.status === "waiting") return "waiting"
-  if (job.conclusion === "success") return "passed"
-  if (job.conclusion === "failure") return "failed"
-  if (job.conclusion === "timed_out") return "lost"
-  if (job.conclusion === "cancelled") return "canceled"
-  return "skipped"
-}
-
-function jobStatus(step: QueueStep): JobDisplayStatus {
-  return jobDisplayStatus(step.job)
-}
-
-function isObjectValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
-}
-
-function safeText(value: unknown): string {
-  if (value === undefined) return "-"
-  if (value === "") return "-"
-  if (typeof value === "string") return value
-  return JSON.stringify(value)
-}
-
-function singleQueue(value: string): string {
-  const normalized = value.replace(/\s+/gu, " ").trim()
-  return normalized === "" ? "-" : normalized
-}
-
-function boundedQueue(value: string, limit = 120): string {
-  const normalized = singleQueue(value)
-  if (normalized.length <= limit) return normalized
-  return `${normalized.slice(0, Math.max(1, limit - 1)).trimEnd()}…`
-}
-
-function toIso(timestamp: string | undefined): string {
-  if (timestamp === undefined) return "-"
-  const when = new Date(timestamp)
-  return Number.isNaN(when.getTime()) ? "-" : when.toISOString()
-}
-
 function duration(started: string | undefined, finished: string | undefined): string {
   const value = elapsedMs(started, finished)
   return value === undefined ? "-" : formatDuration(value)
-}
-
-function elapsedMs(
-  started: string | undefined,
-  finished: string | undefined,
-  subject = "duration",
-): number | undefined {
-  if (started === undefined || finished === undefined) return undefined
-  const start = Date.parse(started)
-  const end = Date.parse(finished)
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined
-  if (end < start) throw new Error(`yrd: ${subject} finish '${finished}' precedes start '${started}'`)
-  return end - start
-}
-
-function preciseDuration(milliseconds: number, compact = false): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
-  const hours = Math.floor(seconds / 3_600)
-  const minutes = Math.floor((seconds % 3_600) / 60)
-  const remainder = seconds % 60
-  if (hours > 0) {
-    if (compact) return minutes === 0 ? `${hours}h` : `${hours}h${minutes}m`
-    return `${hours}h${String(minutes).padStart(2, "0")}m${String(remainder).padStart(2, "0")}s`
-  }
-  if (minutes > 0) return `${minutes}m${compact ? remainder : String(remainder).padStart(2, "0")}s`
-  return `${remainder}s`
-}
-
-function mediaDuration(milliseconds: number): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
-  const hours = Math.floor(seconds / 3_600)
-  const minutes = Math.floor((seconds % 3_600) / 60)
-  const remainder = String(seconds % 60).padStart(2, "0")
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`
-}
-
-function relativeAge(milliseconds: number): string {
-  if (milliseconds >= 3_600_000) return `${Math.round(milliseconds / 3_600_000)}h`
-  return preciseDuration(milliseconds, true)
 }
 
 function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean): string {
@@ -1758,18 +998,6 @@ function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean
   const clock = formatLocalClock(when, includeDate)
   if (includeDate) return clock
   return compact ? clock.slice(0, 5) : clock
-}
-
-function queueLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
-  if (["integrated", "submitted"].includes(outcome)) return "INFO"
-  if (["rejected", "paused", "resumed", "environment-refused", "stale", "legacy", "refused"].includes(outcome)) {
-    return "WARN"
-  }
-  if (["failed", "lost"].includes(outcome)) return "ERROR"
-  if (["passed", "canceled", "retired"].includes(outcome)) return "DEBUG"
-  // An unclassified failure code is deliberately loud instead of silently
-  // inheriting a neutral level. Its raw code remains the rendered outcome.
-  return "ERROR"
 }
 
 function runDurations(
@@ -1803,20 +1031,6 @@ function runDurations(
   }
 }
 
-function parseRunIdSuffix(run: string): number {
-  const match = /^R(\d+)$/u.exec(run)
-  if (match === null) return Number.MAX_SAFE_INTEGER
-  const suffix = match[1]
-  return suffix === undefined ? Number.MAX_SAFE_INTEGER : Number.parseInt(suffix, 10)
-}
-
-function byRunStarted(left: Run, right: Run): number {
-  const leftAt = Date.parse(left.startedAt)
-  const rightAt = Date.parse(right.startedAt)
-  if (leftAt !== rightAt) return leftAt - rightAt
-  return parseRunIdSuffix(left.id) - parseRunIdSuffix(right.id)
-}
-
 function artifactLocation(step: QueueStep | undefined): QueueLogLocation | undefined {
   return stepLocations(step)[0]?.location
 }
@@ -1842,11 +1056,6 @@ function stepLocations(step: QueueStep | undefined): QueueLogLocationEntry[] {
   return locations
 }
 
-function attemptArtifacts(attempt: QueueAttempt): readonly unknown[] {
-  if (attempt.result.status === "lost" || !isObjectValue(attempt.result.output)) return []
-  return Array.isArray(attempt.result.output.artifacts) ? attempt.result.output.artifacts : []
-}
-
 function attemptLocations(attempt: QueueAttempt): QueueLogLocationEntry[] {
   return attemptArtifacts(attempt).flatMap((artifact) => {
     const location = artifactPath(artifact)
@@ -1863,34 +1072,6 @@ function runLocations(run: Run): QueueLogLocationEntry[] {
 
 function runLocation(run: Run): QueueLogLocation | undefined {
   return run.steps.toReversed().flatMap(stepLocations).at(0)?.location
-}
-
-function jobCheckpoint(job: Job | undefined): unknown {
-  if (job === undefined) return undefined
-  if (
-    job.status === "waiting" ||
-    (job.status === "completed" && (job.conclusion === "success" || job.conclusion === "failure"))
-  ) {
-    return job.checkpoint
-  }
-  return undefined
-}
-
-function relevantStep(run: Run | undefined): QueueStep | undefined {
-  if (run === undefined) return undefined
-  const latestFirst = run.steps.toReversed()
-  return (
-    latestFirst.find((step) => jobStatus(step) === "failed") ??
-    latestFirst.find((step) => ["requested", "running", "waiting", "lost"].includes(jobStatus(step))) ??
-    latestFirst.find((step) => jobStatus(step) !== "queued")
-  )
-}
-
-function runOutputQueueageIndex(finished: readonly Run[], run: Run, revision: number, prId: string): number {
-  const related = finished
-    .filter((candidate) => candidate.prs.some((pr) => pr.id === prId && pr.revision === revision))
-    .toSorted(byRunStarted)
-  return related.findIndex((candidate) => candidate.id === run.id) + 1
 }
 
 function stepArtifacts(step: QueueStep | undefined): readonly unknown[] {
@@ -1932,18 +1113,6 @@ function artifactHref(artifact: unknown): string | undefined {
   return locationHref(location)
 }
 
-function stepOutput(step: QueueStep): string {
-  const job = step.job
-  if (job === undefined) return "-"
-  if (job.status === "completed" && job.conclusion === "failure") return safeText(job.output ?? job.error)
-  if (job.status === "completed" && job.conclusion === "success") return safeText(job.output)
-  if (job.status === "waiting" || job.status === "in_progress") {
-    const detail = job.status === "waiting" && typeof job.detail === "string" ? job.detail : undefined
-    return detail === undefined ? "waiting" : detail
-  }
-  return "-"
-}
-
 function queueOutcome(run: Run): string {
   if (run.status === "completed" && run.conclusion === "success") {
     const integration = queueIntegration(run)
@@ -1960,113 +1129,11 @@ function queueOutcome(run: Run): string {
   return run.status === "waiting" ? "waiting" : "running"
 }
 
-/** Diagnostic classification of a journal outcome for display/JSON (21801).
- * DESCRIBES the recorded outcome; does NOT adjudicate success. Exit code of the
- * merge step remains the sole success channel (CTO 2026-07-25: one test for
- * success). Maps: integrated/already-landed → landed*; passed without
- * integration proof → non-landing; duration is secondary and never drives this. */
-export function mergeVerdictOfOutcome(outcome: string): MergeVerdict {
-  if (outcome === "integrated") return "landed"
-  if (outcome === "already-landed") return "already-landed"
-  if (outcome === "passed") return "non-landing"
-  if (outcome === "running" || outcome === "waiting") return "running"
-  if (outcome === "canceled" || outcome === "retired") return "canceled"
-  return "failed"
-}
-
-export function stepNamesOfRun(run: Run): readonly string[] {
-  return run.steps.map((step) => step.name)
-}
-
-function queueIntegration(run: Run): IntegrationProof | undefined {
-  return run.integration ?? ("integration" in run.shape ? run.shape.integration : undefined)
-}
-
-function queueMerge(run: Run): string {
-  const proof = queueIntegration(run)
-  if (proof === undefined) return "-"
-  return `${proof.commit.slice(0, 12)}@${proof.baseSha.slice(0, 12)}`
-}
-
-function queueOutcomeIntegration(run: Run): IntegrationProof {
-  const proof = queueIntegration(run)
-  if (proof === undefined) throw new Error(`yrd: passed run '${run.id}' is missing integration proof`)
-  return proof
-}
-
-function isolationPartLabel(run: Run): "0" | "1" | "-" {
-  return run.isolationPart === undefined ? "-" : run.isolationPart === 0 ? "0" : "1"
-}
-
-function queueShowRetries(finished: readonly Run[], run: Run): number {
-  if (run.prs.length === 0) return 0
-  const first = run.prs[0]
-  if (first === undefined) return 0
-  return runOutputQueueageIndex(finished, run, first.revision, first.id)
-}
-
 function queueState(pr: Change, run: Run | undefined): string {
   if (run?.status === "queued" || run?.status === "in_progress") return "checking"
   if (run?.status === "waiting") return "waiting"
   if (run?.status === "completed") return terminalProjection(run).display
   return projectedChangeStatus(pr)
-}
-
-function stepError(step: QueueStep): string {
-  const job = step.job
-  if (job === undefined) return "-"
-  if (job.status === "completed" && job.conclusion === "failure") return job.error.message
-  return "-"
-}
-
-function stepErrorCode(step: QueueStep): string {
-  const job = step.job
-  return job?.status === "completed" && job.conclusion === "failure" ? job.error.code : "-"
-}
-
-function stepLost(step: QueueStep): string {
-  const job = step.job
-  if (job?.status !== "completed" || job.conclusion !== "timed_out") return "-"
-  return job.lostReason
-}
-
-function stepDetail(step: QueueStep): string {
-  const job = step.job
-  if (job === undefined) return "-"
-  const outputDetail =
-    job.status === "completed" &&
-    (job.conclusion === "success" || job.conclusion === "failure") &&
-    isObjectValue(job.output)
-      ? job.output.detail
-      : undefined
-  if (typeof outputDetail === "string" && outputDetail !== "") return outputDetail
-  const detail =
-    job.status === "waiting" ||
-    (job.status === "completed" && (job.conclusion === "success" || job.conclusion === "failure"))
-      ? "detail" in job
-        ? job.detail
-        : undefined
-      : undefined
-  if (typeof detail === "string" && detail !== "") return detail
-  if (job.status === "completed" && job.conclusion === "failure") return job.error.message
-  return "-"
-}
-
-function commandText(command: unknown): string | undefined {
-  if (typeof command === "string") return presentFact(command)
-  if (Array.isArray(command) && command.every((part): part is string => typeof part === "string")) {
-    if (command.length === 3 && command[0] === "sh" && command[1] === "-c") return presentFact(command[2])
-    return presentFact(command.join(" "))
-  }
-  return undefined
-}
-
-function stepCommand(step: QueueStep): string | undefined {
-  const output = step.job !== undefined && "output" in step.job ? step.job.output : undefined
-  const recorded = isObjectValue(output) ? commandText(output.command) : undefined
-  if (recorded !== undefined) return recorded
-  const input = step.job?.input
-  return isObjectValue(input) ? commandText(input.command) : undefined
 }
 
 function stepDuration(step: QueueStep): string {
@@ -2087,59 +1154,12 @@ function stepArtifactsText(step: QueueStep): string {
   return String(artifacts.length)
 }
 
-function stepCheckpointText(step: QueueStep): string {
-  const checkpoint = jobCheckpoint(step.job)
-  if (!isObjectValue(checkpoint)) return "-"
-  const value = [] as string[]
-  if (typeof checkpoint.baseSha === "string") value.push(`base:${checkpoint.baseSha.slice(0, 12)}`)
-  if (typeof checkpoint.candidateSha === "string") value.push(`candidate:${checkpoint.candidateSha.slice(0, 12)}`)
-  return value.length === 0 ? safeText(checkpoint) : value.join(" ")
-}
-
-function gateEvidenceFromOutput(output: unknown): GateEvidence | undefined {
-  if (!isObjectValue(output)) return undefined
-  const parsed = GateCertificateSchema.safeParse(output.certificate)
-  if (!parsed.success) return undefined
-  const certificate = parsed.data
-  return {
-    mode: certificate.mode,
-    residualCount: certificate.reports.reduce((total, report) => total + report.residual.count, 0),
-  }
-}
-
-function gateEvidenceLabel(gate: GateEvidence): string {
-  return `${gate.mode} residual:${gate.residualCount}`
-}
-
-function stepEvidence(step: QueueStep, gate: GateEvidence | undefined): string | Record<string, unknown> {
-  const job = step.job
-  if (job === undefined) return "-"
-  const evidence: Record<string, unknown> = {}
-
-  if ("token" in job && typeof job.token === "string" && job.token !== "") evidence.token = job.token
-  if ("url" in job && typeof job.url === "string" && job.url !== "") evidence.url = job.url
-  if ("detail" in job && typeof job.detail === "string" && job.detail !== "") evidence.detail = job.detail
-  if ("artifacts" in job && Array.isArray(job.artifacts) && job.artifacts.length > 0) evidence.artifacts = job.artifacts
-  if ("checkpoint" in job && job.checkpoint !== undefined) evidence.checkpoint = job.checkpoint
-  if (gate !== undefined) evidence.gate = gateEvidenceLabel(gate)
-  return Object.keys(evidence).length === 0 ? "-" : evidence
-}
-
 function CellLink({ href, children }: { href: string; children: string }) {
   return (
     <Link href={href} minWidth={0} maxWidth="100%" flexShrink={1} wrap="truncate">
       {children}
     </Link>
   )
-}
-
-/** An OSC 8 target for an issue reference. Path-form ids use km's canonical
- * internal URI shape; URLs and filesystem paths retain their native targets. */
-function issueHref(issue: string): string | undefined {
-  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(issue)) return issue
-  if (/^(?:\/|\.\.?\/)/u.test(issue)) return pathToFileURL(resolve(issue)).href
-  if (/^@[^/\s]+(?:\/[^/\s]+)+$/u.test(issue)) return `km:${issue}`
-  return undefined
 }
 
 /** An issue reference rendered as an OSC 8 hyperlink whenever it has a
@@ -2205,26 +1225,12 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
   )
 }
 
-const QUEUE_ROW_LIMIT = 5
-const RECENT_ROW_LIMIT = 3
-
 // Canonical queue marker vocabulary: working disc, neutral pending ring, red
 // failure cross, muted minus, and completion check. Each lifecycle class stays
 // distinguishable before color; color is foreground-only.
 // The status → glyph map lives in runner-timeline.ts (pure, no silvery) so the
 // headless habitant runner shares this exact vocabulary.
 const statusGlyph = timelineStatusGlyph
-
-function failureFact(run: Run | undefined, step: QueueStep | undefined): { code: string; message: string } | undefined {
-  const job = step?.job
-  if (job?.status === "completed" && job.conclusion === "failure") {
-    return { code: job.error.code, message: job.error.message }
-  }
-  if (job?.status === "completed" && job.conclusion === "timed_out") {
-    return { code: "job-lost", message: job.lostReason }
-  }
-  return run?.error
-}
 
 function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["evidence"]): HumanFailureProjection {
   const failure = actionableFailure(fact)
@@ -2234,36 +1240,6 @@ function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["ev
     ...(evidence === undefined ? {} : { evidence }),
   }
 }
-
-const STALE_CODES = new Set(["stale-pr", "stale-check", "stale-base"])
-// `check-failed` is the queue's generic decision wrapper, not a specific
-// failure taxonomy. Preserve its established `rejected` display; every
-// unrecognized/specific code remains lossless at the display boundary below.
-const GENERIC_REJECTION_CODES = new Set(["check-failed"])
-const CANCELED_CODES = new Set([
-  "canceled",
-  "cancelled",
-  "queue-canceled",
-  "queue-cancelled",
-  "run-canceled",
-  "run-cancelled",
-])
-const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
-  "pending",
-  "running",
-  "rejected",
-  "integrated",
-  "other",
-]
-
-/**
- * The default timeline window is unbounded — show everything, no `since=`
- * filter, unless the operator passes `--since` (user directive 2026-07-16).
- * 100 years dwarfs any real queue history while keeping `now - window` inside
- * the valid `Date` range (unlike `MAX_SAFE_INTEGER`, which overflows it). The
- * FILTER row hides `since=` and coverage reads complete at this window.
- */
-export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
 
 type QueueTerminalProjection = Readonly<{ outcome: QueueTerminalOutcome; display: string }>
 
@@ -2322,86 +1298,6 @@ function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusF
     return status
   }
   return "other"
-}
-
-function parsedTimelineTimestamp(timestamp: string | undefined, subject: string): number | null {
-  if (timestamp === undefined) return null
-  const value = Date.parse(timestamp)
-  if (!Number.isFinite(value)) throw new TypeError(`yrd: ${subject} has invalid timestamp '${timestamp}'`)
-  return value
-}
-
-function timelineAge(timestamp: string | undefined, nowIso: string, subject: string): number | null {
-  return elapsedMs(timestamp, nowIso, subject) ?? null
-}
-
-function timelineMemberSubject(
-  result: QueueStatusResult,
-  member: Run["prs"][number],
-  state: BaysState | undefined,
-): string {
-  const current = result.prs.find((candidate) => candidate.id === member.id)
-  const isCurrent =
-    current !== undefined && changeRevisionNumber(current) === member.revision && changeHead(current) === member.headSha
-  const bayPath = isCurrent && current?.bay !== undefined ? state?.byId[current.bay]?.path : undefined
-  return boundedQueue(
-    bayPath ??
-      (isCurrent ? (current?.title ?? current?.name) : undefined) ??
-      member.name ??
-      current?.title ??
-      current?.branch ??
-      member.branch,
-    80,
-  )
-}
-
-function timelineRevisionLineage(pr: Change, revision = changeRevisionNumber(pr)): QueueTimelineRevisionLineage {
-  const retained = pr.revs.some((candidate) => candidate.n === revision)
-  if (retained !== true) {
-    return {
-      pr: pr.id,
-      revisions: [revision],
-      ...(revision === changeRevisionNumber(pr) && pr.submittedAt !== undefined
-        ? { sourceReadyAt: pr.submittedAt }
-        : {}),
-    }
-  }
-  const revisions = changeRevisionLineage(pr, revision)
-  const registeredAt = revisions[0]?.pushedAt
-  const sourceReadyAt = changeSourceReadyAt(pr, revision)
-  return {
-    pr: pr.id,
-    revisions: revisions.map((candidate) => candidate.n),
-    ...(registeredAt === undefined ? {} : { registeredAt }),
-    ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
-  }
-}
-
-function timelineLineageLabel(lineages: readonly QueueTimelineRevisionLineage[]): string | undefined {
-  const remerges = lineages.filter(({ revisions }) => revisions.length > 1)
-  if (remerges.length === 0) return undefined
-  return remerges
-    .map(({ pr, revisions }) => {
-      const path = revisions.map((revision) => `rev${revision}`).join("→")
-      const currentRevision = revisions.at(-1) ?? 1
-      return remerges.length === 1 ? path : `${formatQueueChangeId(pr, currentRevision)} ${path}`
-    })
-    .join(" · ")
-}
-
-function withTimelineLineage(detail: string, lineages: readonly QueueTimelineRevisionLineage[]): string {
-  const lineage = timelineLineageLabel(lineages)
-  return lineage === undefined ? detail : `${detail} · ${lineage}`
-}
-
-function timelineQueueWaits(run: Run, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
-  return run.prs.map((member) => {
-    const runKey = queueRunRevisionKey(run, member)
-    const submittedAt = submissionTimes.has(runKey)
-      ? (submissionTimes.get(runKey) ?? undefined)
-      : (submissionTimes.get(queueRevisionKey(member)) ?? undefined)
-    return elapsedMs(submittedAt, run.startedAt, `change '${member.id}' queue wait`) ?? null
-  })
 }
 
 function timelineRunMemberRows(
@@ -2682,71 +1578,6 @@ function latestTimelineRows(rows: readonly QueueTimelineProjectedRow[]): QueueTi
   return rows.filter((row) => latestByPr.get(row.pr)?.id === row.id)
 }
 
-export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
-  const submissionTimes = new Map<string, string | null>()
-  for (const result of results) {
-    const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
-    for (const pr of result.prs) {
-      for (const revision of pr.revs) {
-        if (revision.submittedAt !== undefined) {
-          submissionTimes.set(
-            queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head }),
-            revision.submittedAt,
-          )
-        }
-      }
-      const current = currentChangeRev(pr)
-      const submittedAt = current?.submittedAt ?? pr.submittedAt
-      if (submittedAt !== undefined) {
-        submissionTimes.set(queueRevisionKey({ id: pr.id, revision: current.n, headSha: current.head }), submittedAt)
-      }
-    }
-    for (const run of [...result.running, ...result.waiting, ...result.finished]) {
-      for (const member of run.prs) {
-        const pr = byId.get(member.id)
-        if (pr === undefined) {
-          // Intent members have no submission: the run itself is the admission.
-          if (member.intent !== undefined) {
-            submissionTimes.set(queueRunRevisionKey(run, member), null)
-            continue
-          }
-          throw new Error(`yrd: run '${run.id}' has no retained change '${member.id}'`)
-        }
-        const runKey = queueRunRevisionKey(run, member)
-        if (pr.revs.length > 0) {
-          const clock = runRevisionClock(pr, run)
-          submissionTimes.set(runKey, clock.admittedBy === "submission" ? clock.submittedAt : null)
-          continue
-        }
-        const submittedAt = pr.submittedAt
-        submissionTimes.set(
-          runKey,
-          submittedAt !== undefined &&
-            timestamp(submittedAt, `change '${pr.id}' submit time`) <= timestamp(run.startedAt, `run '${run.id}' start`)
-            ? submittedAt
-            : null,
-        )
-      }
-    }
-  }
-  return submissionTimes
-}
-
-/**
- * Fold projected rows into one terminal fact per completed Run. Member rows of
- * one batched Run collapse to a single fact that carries every visible member's
- * queue wait. Pass the window-filtered rows for the single-window `metrics`, or
- * the raw rows for the windowed time-stats fact set.
- */
-function failedAttemptsByRun(attempts: readonly QueueAttempt[]): ReadonlyMap<string, number> {
-  const byRun = new Map<string, number>()
-  for (const attempt of attempts) {
-    if (attempt.outcome === "passed") continue
-    byRun.set(attempt.run, (byRun.get(attempt.run) ?? 0) + 1)
-  }
-  return byRun
-}
-
 function terminalMemberFact(
   row: QueueTimelineProjectedRow,
   run: string,
@@ -2814,71 +1645,6 @@ function foldTerminalFacts(
     })
   }
   return [...byRun.values()]
-}
-
-/** Group attempts by their Run once, so the projection can hand each Run only
- * its own attempts.
- *
- * Both hot loops of {@link queueTimelineProjection} — the row build and the
- * per-Run detail build — used to run `attempts.filter(a => a.run === run.id)`
- * for every Run, making the projection O(runs x attempts). On a real queue that
- * is 655 runs against 4356 attempts, ~2.9M comparisons per snapshot, and the
- * watch loop pays it once per 1s tick AND once per cursor movement. One pass
- * over the attempts makes the same work linear. */
-function queueAttemptsByRun(attempts: readonly QueueAttempt[]): ReadonlyMap<string, readonly QueueAttempt[]> {
-  const byRun = new Map<string, QueueAttempt[]>()
-  for (const attempt of attempts) {
-    const existing = byRun.get(attempt.run)
-    if (existing === undefined) byRun.set(attempt.run, [attempt])
-    else existing.push(attempt)
-  }
-  return byRun
-}
-
-const NO_ATTEMPTS: readonly QueueAttempt[] = Object.freeze([])
-const NO_RUNS: readonly Run[] = Object.freeze([])
-
-/** Index the Runs a detail row can name, keyed `base:id`.
- *
- * The detail build used to `allRuns.find(...)` per row — 677 rows against 655
- * Runs is ~443k comparisons per snapshot, on the same tick-and-keypress path as
- * the attempt scan. First-wins insertion preserves `find`'s exact semantics if a
- * base ever carries a duplicate Run id. */
-function queueRunsByKey(runs: readonly Run[]): ReadonlyMap<string, Run> {
-  const byKey = new Map<string, Run>()
-  for (const run of runs) {
-    const key = `${run.base}:${run.id}`
-    if (!byKey.has(key)) byKey.set(key, run)
-  }
-  return byKey
-}
-
-/** Group completed Runs by the change revision they carried, keyed `prId\0revision`.
- *
- * `queueShowData` uses the Run list it is handed for exactly one thing: the
- * retry ordinal, via `queueShowRetries` -> `runOutputQueueageIndex`, which keeps
- * only the completed Runs carrying this Run's first PR at the same revision.
- * Handing it that group directly is semantically identical — both of its filters
- * become no-ops over the already-matching set — and turns a per-detail-row scan
- * and sort of every finished Run into one pass. */
-function queueRetryPeers(finished: readonly Run[]): ReadonlyMap<string, readonly Run[]> {
-  const byRevision = new Map<string, Run[]>()
-  for (const run of finished) {
-    if (run.status !== "completed") continue
-    for (const member of run.prs) {
-      const key = `${member.id}\0${String(member.revision)}`
-      const peers = byRevision.get(key)
-      if (peers === undefined) byRevision.set(key, [run])
-      else peers.push(run)
-    }
-  }
-  return byRevision
-}
-
-function queueRetryPeersOf(peers: ReadonlyMap<string, readonly Run[]>, run: Run): readonly Run[] {
-  const first = run.prs[0]
-  if (first === undefined) return NO_RUNS
-  return peers.get(`${first.id}\0${String(first.revision)}`) ?? NO_RUNS
 }
 
 type QueueTimelineProjectionBuild = Readonly<{
@@ -3320,12 +2086,6 @@ function byTouchedNewest(left: HumanChangeProjection, right: HumanChangeProjecti
   return order === 0 ? compareNatural(left.pr, right.pr) : order
 }
 
-function requiredQueuePosition(positions: ReadonlyMap<string, number>, pr: string): number {
-  const position = positions.get(pr)
-  if (position === undefined) throw new Error(`yrd: submitted change '${pr}' is missing its queue position`)
-  return position
-}
-
 export function humanQueueProjection(
   result: QueueStatusResult,
   now: number,
@@ -3411,27 +2171,6 @@ export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
       ]}
     />
   )
-}
-
-function queueRunSteps(run: Run): string {
-  const selection = run.stepSelection
-  const omitted = selection !== undefined && "omittedSteps" in selection ? selection.omittedSteps : undefined
-  if (omitted === undefined) {
-    const steps = run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")
-    const legacyChecks = selection !== undefined && "omittedChecks" in selection ? selection.omittedChecks : undefined
-    return legacyChecks === undefined ? steps : `${steps} (configured checks omitted: ${legacyChecks.join(",")})`
-  }
-
-  const omittedByIndex = new Map(omitted.map((step) => [step.index, step] as const))
-  let selectedIndex = 0
-  return Array.from({ length: run.steps.length + omitted.length }, (_, index) => {
-    const skipped = omittedByIndex.get(index)
-    if (skipped !== undefined) return `${skipped.name}=${skipped.status}`
-    const selected = run.steps[selectedIndex]
-    if (selected === undefined) throw new Error(`yrd: Run '${run.id}' has invalid omitted-step positions`)
-    selectedIndex += 1
-    return `${selected.name}=${jobStatus(selected)}`
-  }).join(" ")
 }
 
 export type ChangeListRow = Readonly<{
@@ -3540,12 +2279,6 @@ function ChangeStateValue({ row }: { row: ChangeListRow }) {
   )
 }
 
-/** The one place that decides how much of the change list an operator is shown.
- * `hidden` is not decoration: a listing that withheld rows must say so and say
- * how many, because an inventory that reads complete and is not is worse than
- * an error (22376). */
-export type ChangeListWindow = Readonly<{ hidden: number; total: number }>
-
 export function ChangeListView({
   rows,
   columns: terminalColumns,
@@ -3628,25 +2361,6 @@ export function ChangeListView({
         </Text>
       )}
     </Box>
-  )
-}
-
-export type ChangeCheckViewRecord = ChangeCheckRecord
-
-function explicitArtifactHref(artifact: string): string {
-  return /^[a-z][a-z0-9+.-]*:\/\//iu.test(artifact) ? artifact : pathToFileURL(resolve(artifact)).href
-}
-
-function checkDiagnosticText(value: unknown): string {
-  if (!Array.isArray(value) || value.length === 0) return singleQueue(safeText(value))
-  const first = isObjectValue(value[0]) ? value[0] : undefined
-  const location =
-    typeof first?.file === "string" && typeof first[sourceRowKey] === "number"
-      ? `${first.file}:${first[sourceRowKey]}${typeof first.column === "number" ? `:${first.column}` : ""}`
-      : undefined
-  const detail = typeof first?.message === "string" ? first.message : safeText(value[0])
-  return singleQueue(
-    `${location === undefined ? "" : `${location} `}${detail}${value.length > 1 ? ` (+${value.length - 1})` : ""}`,
   )
 }
 
@@ -3748,13 +2462,6 @@ export function ChangeResultView({
   )
 }
 
-function latestChangeRun(pr: Change, runs: readonly Run[]): Run | undefined {
-  return runs
-    .filter((run) => run.prs.some((member) => member.id === pr.id))
-    .toSorted(byRunStarted)
-    .at(-1)
-}
-
 export type ChangeDetailData = Readonly<{
   pr: Change
   runs: readonly QueueShowData[]
@@ -3804,52 +2511,6 @@ function diagnosticBlocker(
   if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error))
   if (pr.detail !== undefined) return singleQueue(pr.detail)
   return undefined
-}
-
-/**
- * Collapse a run of rebuilds that changed nothing into the fact the run already
- * encodes (@i/10-merge-queue/a-counter-that-means-two-things).
- *
- * A re-merge whose source fingerprint is unchanged did no work. PR537 printed
- * `0d7566e4e3ae→0d7566e4e3ae` about forty times before changing once, and two
- * readers watched that carrier climb during an 89-minute stall and both called
- * it futile churn — while the revision named in the counter was merging. The
- * information needed to tell those apart was on screen the whole time. Forty
- * identical hashes are not a record a person can read.
- *
- * So this adds no field and drops no data. It states the run instead of
- * repeating its members, and it is self-limiting: a healthy carrier whose
- * content changes every re-merge has no run to collapse and renders as before
- * (PR645 and PR673, measured).
- */
-export function collapseRecomposedSources(
-  sources: readonly { repo: string; fromHeadSha: string; toHeadSha: string }[],
-): string[] {
-  const short = (sha: string): string => sha.slice(0, 12)
-  const out: string[] = []
-  let index = 0
-  while (index < sources.length) {
-    const entry = sources[index]
-    if (entry === undefined) throw new Error(`yrd: recomposed source ${index} is missing`)
-    if (entry.fromHeadSha !== entry.toHeadSha) {
-      out.push(`${entry.repo} ${short(entry.fromHeadSha)}→${short(entry.toHeadSha)}`)
-      index += 1
-      continue
-    }
-    let run = 0
-    while (index + run < sources.length) {
-      const next = sources[index + run]
-      if (next === undefined) throw new Error(`yrd: recomposed source ${index + run} is missing`)
-      if (next.repo !== entry.repo || next.fromHeadSha !== entry.fromHeadSha || next.toHeadSha !== entry.fromHeadSha) {
-        break
-      }
-      run += 1
-    }
-    const times = run === 1 ? "" : ` ×${run}`
-    out.push(`${entry.repo} ${short(entry.fromHeadSha)}${times} unchanged`)
-    index += run
-  }
-  return out
 }
 
 export function ChangeDetailView({
@@ -4339,82 +3000,11 @@ export function QueueWatchView({
     </Box>
   )
 }
-
-function queueLogSubmissionTime(
-  revisionClocks: ReadonlyMap<string, ChangeRunRevisionClock> | undefined,
-  run: Run,
-  pr: PinnedChangeRevision,
-): string | undefined {
-  if (revisionClocks === undefined) return undefined
-  const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
-  if (clock === undefined) {
-    // Intent members never mint a revision clock (no submission precedes the
-    // run); every change member must have one.
-    if (pr.intent !== undefined) return undefined
-    throw new Error(
-      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
-    )
-  }
-  return clock.admittedBy === "submission" ? clock.submittedAt : undefined
-}
-
-// The queue content surface is left-flush (15e killed the dead left gutter)
-// and capped at 160 cells on wide viewports.
-const TIMELINE_CONTENT_CAP = 160
-// Fixed cells never clip arbitrarily; labels longer than this shorten at a
-// semantic boundary via fitTimelineLabel.
-const TIMELINE_STATE_CAP = 20
 /**
  * Powerline branch glyph (U+E0A0), prefixed on every rendered branch name in
  * the watch UI (user directive 2026-07-16), matching ag-code's `BRANCH_ICON`.
  */
 const BRANCH_ICON = TIMELINE_BRANCH_ICON
-
-/**
- * The branch glyph renders dim/subtle everywhere (user directive 2026-07-16,
- * W2) — a quiet decoration on the branch name, never competing with it. On a
- * cursor-selected row the glyph follows the selection foreground instead, so
- * the whole row reads as one selected unit.
- */
-const BRANCH_ICON_COLOR = "$fg-muted"
-
-/**
- * Stable no-op passed as ListView `onItemHover` so hovering a queue row does
- * NOT move the cursor/selection (item P, 2026-07-16) — it overrides ListView's
- * default hover→cursor. Click still selects via the default onSelect path.
- */
-const NO_HOVER_SELECT = (): void => {}
-
-type TimelineCellLayout = Readonly<{
-  timeWidth: number
-  statusWidth: number
-  runWidth: number
-  /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
-  byWidth: number
-  ageWidth: number
-  runDurationWidth: number
-  compact: boolean
-  includeDate: boolean
-}>
-
-/**
- * The RUN cell under the label-primary naming model (items 34/36/38, killing
- * the digit-prefix `1:main#2173` form — digits are unstable filter
- * accelerators and never appear in names):
- *
- * - a run renders `label#N` plus its state glyph (`code#23423 ✓`); the label
- *   is the queue's config handle, base branch when none is declared, and it
- *   ELIDES when exactly one queue is visible (context supplies it) — never
- *   in the ALL view;
- * - batch members share one run: the id renders bright on the FIRST member
- *   row and the rest carry a muted `·` continuation (membership visible, no
- *   repetition noise);
- * - a pre-run row shows a muted em-dash, never blank.
- */
-type TimelineRunCellModel =
-  | Readonly<{ kind: "none" }>
-  | Readonly<{ kind: "continuation" }>
-  | Readonly<{ kind: "run"; label: string; number: string }>
 
 function timelineRunCellModel(
   row: QueueTimelineProjectedRow,
@@ -4431,21 +3021,9 @@ function timelineRunCellModel(
   return { kind: "run", label, number: `#${runIdValue(row.run)}` }
 }
 
-function timelineRunCellText(model: TimelineRunCellModel): string {
-  if (model.kind === "none") return "—"
-  if (model.kind === "continuation") return "·"
-  return `${model.label}${model.number}`
-}
-
 /** Config-handle (or base) run label per base, from the projection's queues (item 36). */
 function timelineRunLabels(queues: readonly QueueTimelineQueue[]): ReadonlyMap<string, string> {
   return new Map(queues.map((queue) => [queue.base, queueRunLabel(queue)]))
-}
-
-/** The label half elides only when exactly ONE queue is visible — context
- * supplies it; the ALL view always spells it (item 34). */
-function timelineShowQueueLabel(visibleQueueCount: number): boolean {
-  return visibleQueueCount !== 1
 }
 
 /** Adjacent rows sharing one run id are that run's batch members in display
@@ -4779,15 +3357,6 @@ export function queueRunStepFacts(data: Pick<QueueShowData, "steps">): readonly 
   })
 }
 
-/**
- * Generalized run presentation (operator ruling 2026-08-18, item 37m): the
- * data layer shapes runs around a KIND so a deployment run (rollout phases as
- * steps) or a future workflow run reuses the same status-box skeleton without
- * display-code changes. Today's journal only mints integration-queue runs;
- * the discriminant exists so the next kind is a data change, not a redesign.
- */
-export type QueueRunPresentationKind = "integration" | "deployment" | "workflow"
-
 export type QueueRunPresentation = Readonly<{
   kind: QueueRunPresentationKind
   /** Border identity, e.g. `RUN code#23423` (deploys would name their environment). */
@@ -4911,20 +3480,11 @@ export function RunStepLines({ steps, live = false }: { steps: readonly QueueRun
   )
 }
 
-// Preserve the leading semantic unit instead of clipping an arbitrary suffix.
-function fitTimelineLabel(label: string, max: number): string {
-  if (label.length <= max) return label
-  const boundary = Math.max(label.lastIndexOf("-", max), label.lastIndexOf(":", max))
-  return boundary > 0 ? label.slice(0, boundary) : label.slice(0, max)
-}
-
 // Marker + state colors (15d screenshot re-rule): running pulses blue,
 // success is GREEN semantic, pending is blue, failures keep semantic reds.
 function timelineStatusColor(row: QueueTimelineProjectedRow): string {
   return statusPresentation(row.status).color
 }
-
-type TimelineStatusCell = Readonly<{ word: string; color: string }>
 
 const TIMELINE_STATUS_WORDS = {
   draft: "draft",
@@ -4963,8 +3523,6 @@ export function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStat
   return { word, color: timelineStatusColor(row) }
 }
 
-type TimelineStepCell = Readonly<{ text: string; color?: string }>
-
 // The STEP cell carries the current `ordinal:name` while running, semantic
 // GREEN `integrated` on success (15d), or the failure CODE (the cause) on
 // failed terminals.
@@ -4990,10 +3548,6 @@ function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   }
   return { text: "" }
 }
-
-/** More room than the state cap: a reason message is a sentence fragment, and
- * the cell it renders in already truncates at the track edge. */
-const TIMELINE_WHY_CAP = 48
 
 function timelineAgeCell(row: QueueTimelineProjectedRow): string {
   return row.ageMs === null ? "" : mediaDuration(row.ageMs)
@@ -5054,22 +3608,6 @@ export function queueTimelineDefaultCursorId(
   }
   return (finished ?? rows[0])?.id
 }
-
-// The active-work glyph pulses only in the live pane; the one-shot projection has
-// no app scope (and a static print cannot pulse), so it renders the same
-// glyph statically — byte-identical plain output either way.
-/**
- * Live-activity pulse cadence, matched to ag-code's activity indicator (item O,
- * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
- * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
- * period (900 ms) reproduces ag's blink. Every activity indicator uses silvery's
- * `synchronized` Pulse (items 12-13) so they share ONE app-scope phase clock —
- * the exact-match shared phase the earlier per-node timer only approximated.
- */
-const AG_PULSE_INTERVAL_MS = 900
-
-/** The default "executing right now" pulse: blue against muted, shared phase. */
-const ACTIVITY_PULSE_COLORS: readonly [string, string] = ["$fg-info", "$fg-muted"]
 
 /**
  * A synchronized semantic activity pulse for "in progress right now" content
@@ -5431,32 +3969,6 @@ export function QueueTopLine({
 }
 
 /**
- * Freshness bound for a DIRECTLY-read runner status file (health probes,
- * retention observers). Those readers see the file at probe time with no
- * cache in between, so three missed 5s heartbeats is honest staleness.
- * The RUNNER box must NOT use this — see {@link RUNNER_VIEW_STALE_MS}.
- */
-export const RUNNER_STALE_MS = 15_000
-
-/**
- * How old the runner's observed facts may look on the WATCH VIEW before the
- * box calls them stale. The bound is set by how often those facts can REACH
- * the viewer, not by how often the runner produces them: the box judges
- * staleness on a LIVE clock (items 16/17) while the watch loader deliberately
- * coalesces heartbeat-only advances out of snapshot identity ("a heartbeat
- * alone must not rebuild durable queue facts"), so between progress-token
- * changes the cached `lastTickAt`/`observedAt` refresh only on the loader's
- * 60s clock pulse (`QUEUE_WATCH_CLOCK_INTERVAL_MS`). Judging the view with
- * the direct-read 15s bound put the threshold far below that ceiling, so a
- * perfectly healthy runner's on-screen age crossed it between refreshes and
- * the RUNNER box flapped healthy→stale→healthy on the observation cadence,
- * roughly every 10s (operator, 2026-08-25). 75s = the 60s pulse + the 5s
- * heartbeat + read-lag margin; runner-box-live-tick pins the inequality so
- * no constant can drift back under the ceiling.
- */
-export const RUNNER_VIEW_STALE_MS = 75_000
-
-/**
  * `nowMs` is the caller's — never re-derived from `projection.now` here
  * (operator ruling 2026-08-18, items 16/17: ONE derivation for every
  * relative age in the RUNNER box, fed by the box's own coarse re-render
@@ -5477,20 +3989,6 @@ function runnerTiming(
     throw new Error("yrd: queue runner projection contains an invalid timestamp")
   }
   return { ageMs: Math.max(0, nowMs - lastTickAt), uptimeMs: Math.max(0, nowMs - startedAt) }
-}
-
-/**
- * Adaptive runner clock (user directive 2026-07-21): `ss`, `m:ss`, or
- * `h:mm:ss` depending on magnitude — the RUNNER box always shows a timer.
- */
-function runnerClock(milliseconds: number): string {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
-  const seconds = totalSeconds % 60
-  const minutes = Math.floor(totalSeconds / 60) % 60
-  const hours = Math.floor(totalSeconds / 3600)
-  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
-  if (minutes > 0) return `${minutes}:${String(seconds).padStart(2, "0")}`
-  return `${seconds}s`
 }
 
 /** Newest terminal (completed-group) row timestamp — when the queue last drained anything. */
@@ -5527,17 +4025,6 @@ function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysSta
     null,
   )
 }
-
-type QueueHeadBlockDetails = Readonly<{
-  pr: string
-  subject: string
-  position?: number
-  queuedBehind?: number
-  blockedMs: number
-  retryCount?: number
-  refusal: string
-  resolution: readonly string[]
-}>
 
 function queueHeadBlockDetails(
   projection: QueueTimelineProjection,
@@ -5587,15 +4074,6 @@ function queueHeadBlockDetails(
   }
 }
 
-/** The RUNNER liveness reflected by the leading marker. */
-export type QueueHealthKind = "down" | "stalled" | "processing" | "idle"
-
-export type QueueHealthMarker = Readonly<{
-  kind: QueueHealthKind
-  color: string
-  pulse: readonly [string, string] | null
-}>
-
 /**
  * Missing, stale, or outcome-stalled is solid red; active is pulsing blue;
  * idle is pulsing grey. `nowMs` is the caller's coarse-ticking clock (items
@@ -5623,10 +4101,6 @@ export function queueHealthMarker(projection: QueueTimelineProjection, nowMs: nu
   return { kind: "idle", color: "$fg-muted", pulse: ["$fg-muted", "$bg-surface-default"] }
 }
 
-// The runner health marker is the shell prompt itself (user directive
-// 2026-07-21): a pulsing `$` leads the runner command instead of a disc.
-const QUEUE_HEALTH_GLYPH = "$"
-
 function RunnerActivity({
   marker,
   live,
@@ -5649,16 +4123,6 @@ function RunnerActivity({
       {children}
     </Text>
   )
-}
-
-function runnerBoxTimer(marker: QueueHealthMarker, downMs: number | null, uptimeMs: number): string | undefined {
-  if (marker.kind !== "down") return `uptime ${runnerClock(uptimeMs)}`
-  return downMs === null ? undefined : `downtime ${runnerClock(downMs)}`
-}
-
-function runnerMergeTimer(lastMerge: number | null, now: number, uptimeMs: number, hasRunner: boolean): string {
-  if (lastMerge !== null) return `no merge for ${runnerClock(Math.max(0, now - lastMerge))}`
-  return hasRunner ? `no merge for ${runnerClock(uptimeMs)}` : "no merge recorded"
 }
 
 /** The RUNNER box's source rail, pin-staleness flagged inline (@yrd/core/stale-runner-never-recycles
@@ -5991,14 +4455,6 @@ function TimelineRunnerBox({
   )
 }
 
-// The STATS panel projects the retained journal facts into width-adaptive local
-// hour buckets plus fixed calendar periods. It owns no parallel bookkeeping.
-
-/** The four operator-facing status buckets (user respec 2026-07-15). */
-export type QueueTimelineStatusBucket = "open" | "running" | "done" | "failed"
-
-export const QUEUE_TIMELINE_STATUS_BUCKETS: readonly QueueTimelineStatusBucket[] = ["open", "running", "done", "failed"]
-
 /** Bucket a row status onto the operator courts (user respec 2026-07-23):
  * `open` = the agents' court (draft/rev — editable, next action is the author);
  * `running` = the queue's court (ready/queued/running — next action is the
@@ -6008,24 +4464,6 @@ export function queueTimelineStatusBucket(status: QueueTimelineStatus): QueueTim
   if (status === "draft" || status === "rev") return "open"
   if (status === "ready" || status === "pending" || status === "running") return "running"
   return status === "integrated" || status === "already-landed" ? "done" : "failed"
-}
-
-/** Project CLI-level status filters onto the four display buckets. CLI
- * `pending` keeps its pre-court meaning (pre-run + queued work) and maps to
- * BOTH `open` and `running` so neither court silently vanishes. */
-export function queueTimelineFilterBuckets(
-  statuses: readonly QueueTimelineStatusFilter[],
-): ReadonlySet<QueueTimelineStatusBucket> {
-  const buckets = new Set<QueueTimelineStatusBucket>()
-  for (const status of statuses) {
-    if (status === "pending") {
-      buckets.add("open")
-      buckets.add("running")
-    } else if (status === "running") buckets.add("running")
-    else if (status === "integrated") buckets.add("done")
-    else buckets.add("failed")
-  }
-  return buckets
 }
 
 /**
@@ -6118,16 +4556,6 @@ export function queueTimelineVisibleDefaultCursorId(
 ): string | undefined {
   const rows = queueTimelineVisibleRows(projection, visibleBuckets, fill, visibleQueues)
   return queueTimelineDefaultCursorId(rows) ?? rows[0]?.id
-}
-
-/** The operator's own wall-clock YYYY-MM-DD, matching the local `getFullYear`
- * / `getMonth` / `getDate` treatment `queueLogClock` already uses for its
- * inline date fallback (UTC is never shown to the operator). */
-function timelineLocalCalendarDay(timestamp: string): string {
-  const when = new Date(timestamp)
-  if (Number.isNaN(when.getTime())) throw new Error(`yrd: invalid queue timeline timestamp '${timestamp}'`)
-  const pad = (value: number) => String(value).padStart(2, "0")
-  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
 }
 
 /**
@@ -6282,12 +4710,6 @@ function QueueUpdatedClock({ now }: { now: string }) {
     </Text>
   )
 }
-
-// Preserve fixed queue chrome plus at least two data rows. Below this pane
-// height, omit the secondary STATS panel instead of collapsing ListView to a
-// zero-height viewport. The below-split's default ratio (watch-pane.tsx) is
-// what actually delivers this budget at 40- and 45-row production geometries.
-const QUEUE_STATS_MIN_PANE_ROWS = 24
 
 function ProjectedQueueTimeline({
   repositoryRoot,
@@ -6831,12 +5253,6 @@ export function queueLogRows(
   })
 }
 
-function propsField(pr: Run["prs"][number] | Change | undefined): Readonly<{ props?: ChangeProps }> {
-  const props = pr === undefined ? undefined : "revs" in pr ? changeProps(pr) : pr.props
-  if (props === undefined) return {}
-  return { props }
-}
-
 function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
@@ -7178,16 +5594,6 @@ function QueueShowMembersLine({ data, highlightPr }: { data: QueueShowData; high
   )
 }
 
-/**
- * Detail facts render only PRESENT facts (user respec 2026-07-15) — the same
- * non-default-only rule as the FILTER row. `-` placeholders never render.
- */
-function presentFact(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined
-  const trimmed = value.trim()
-  return trimmed === "" || trimmed === "-" ? undefined : trimmed
-}
-
 function queueGateSummary(data: QueueShowData): string | undefined {
   const gates = data.steps.flatMap((step) => (step.gate === undefined ? [] : [step.gate]))
   const [first] = gates
@@ -7200,13 +5606,6 @@ function queueGateSummary(data: QueueShowData): string | undefined {
     })
   }
   return gates.map(gateEvidenceLabel).join(", ")
-}
-
-/** Dedupe `X@X` merges (commit == merge sha) to one SHA. */
-export function queueMergeLabel(merge: string): string {
-  const [commit, base, ...rest] = merge.split("@")
-  if (rest.length === 0 && commit !== undefined && base !== undefined && commit === base) return commit
-  return merge
 }
 
 /**
@@ -7265,19 +5664,6 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
   )
 }
 
-// Integration proof beyond the merged SHA (item J, 2026-07-16): the count of
-// source rewrites + submodule resolutions the queue carried into the merge.
-function integrationProofDetail(integration: IntegrationProof): string | undefined {
-  const parts: string[] = []
-  if (integration.sourceRewrites !== undefined && integration.sourceRewrites.length > 0) {
-    parts.push(`REWRITES ${integration.sourceRewrites.length}`)
-  }
-  if (integration.submoduleResolutions !== undefined && integration.submoduleResolutions.length > 0) {
-    parts.push(`SUBMODULES ${integration.submoduleResolutions.length}`)
-  }
-  return parts.length === 0 ? undefined : parts.join(" ")
-}
-
 /** Merge-owned merge facts shared by one-shot detail and the watch merge tab. */
 export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
   if (data.integration === undefined) return null
@@ -7301,13 +5687,6 @@ function changeCommentLine(comment: Change["comments"][number]): string {
   const note = presentFact(comment.note)
   return `COMMENT ${comment.by} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
 }
-
-type ChangeActivityEntry = Readonly<{
-  at: string
-  rank: number
-  text: string
-  detail?: string
-}>
 
 function runActivityState(data: QueueShowData): StatusNoticeState {
   if (data.status === "queued" || data.status === "in_progress" || data.status === "waiting") return "running"
@@ -7348,10 +5727,6 @@ function changeTerminalLineageEntries(
     (left, right) => right.at.localeCompare(left.at) || right.rank - left.rank || left.text.localeCompare(right.text),
   )
 }
-
-/** A check-request echo within this tolerance of its revision row is the same
- * journal act seen twice; only a LATER (re-)request earns its own line. */
-const CHECK_REQUEST_ECHO_TOLERANCE_MS = 1_000
 
 function changeActivityEntries(
   pr: Change,
@@ -7473,20 +5848,6 @@ function QueueChangeActivity({ entries }: { entries: readonly ChangeActivityEntr
         </Box>
       ))}
     </Box>
-  )
-}
-
-function descriptionWithoutDuplicatedIssue(
-  description: string | undefined,
-  issue: string | undefined,
-): string | undefined {
-  if (description === undefined || issue === undefined) return description
-  const duplicate = `issue: ${issue}`.toLocaleLowerCase()
-  return presentFact(
-    description
-      .split("\n")
-      .filter((line) => line.trim().toLocaleLowerCase() !== duplicate)
-      .join("\n"),
   )
 }
 
