@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import { createFailure, JournalCompatibilitySchema, type JournalCompatibility } from "@yrd/core"
 
 const NamePattern = /^[a-z][a-z0-9_-]*$/u
@@ -46,36 +45,9 @@ export type StepDef = Readonly<
   }
 >
 
-export type FlowDef = Readonly<{
-  name: string
-  rev: string
-  on: (submission: Submission) => boolean
-  steps: readonly StepDef[]
-}>
-
-export type FlowPin = Readonly<{
-  name: string
-  rev: string
-  fingerprint: string
-}>
-
 export type JournalConfigDef = Readonly<{
   kind: "journal"
   compatibility: JournalCompatibility
-}>
-
-export type YrdConfig = Readonly<{
-  flows: readonly FlowDef[]
-  journal?: JournalCompatibility
-}>
-export type SelectedFlow = Readonly<{ flow: FlowDef; pin: FlowPin }>
-
-export type FlowDiagnostic = Readonly<{
-  severity: "warning" | "refusal"
-  code: "flow-missing" | "flow-revision-drift" | "flow-fingerprint-drift"
-  message: string
-  expected: FlowPin
-  current?: FlowPin
 }>
 
 function configuration(code: string, message: string): never {
@@ -139,26 +111,24 @@ export function withMergeStep(options: StepOptions = {}): StepDef {
   return step("merge", "merge", options)
 }
 
-/** Extension-author spelling. */
-export function withFlow(definition: FlowDef): FlowDef {
-  const flowName = name(definition.name, "flow name")
-  const rev = text(definition.rev, `revision for flow '${flowName}'`)
-  if (typeof definition.on !== "function") {
-    configuration("invalid-flow", `yrd: flow '${flowName}' requires an on(Submission) predicate`)
-  }
-  if (definition.steps.length === 0) configuration("invalid-flow", `yrd: flow '${flowName}' has no steps`)
-  const steps = definition.steps.map((candidate) => step(candidate.kind, candidate.name, candidate))
+/** Validate and freeze the one declared step plan (5e cut 3 — exactly one
+ * flow ever existed, so the flow wrapper collapsed to its step list). The
+ * validation is the old flow validation: named steps, no duplicates, at most
+ * one merge step. */
+export function defineStepPlan(definitions: readonly StepDef[]): readonly StepDef[] {
+  if (definitions.length === 0) configuration("invalid-flow", "yrd: the step plan has no steps")
+  const steps = definitions.map((candidate) => step(candidate.kind, candidate.name, candidate))
   const duplicate = steps.find(
     (candidate, index) => steps.findIndex((other) => other.name === candidate.name) !== index,
   )
   if (duplicate !== undefined) {
-    configuration("invalid-flow", `yrd: flow '${flowName}' contains duplicate step '${duplicate.name}'`)
+    configuration("invalid-flow", `yrd: the step plan contains duplicate step '${duplicate.name}'`)
   }
   const merges = steps.filter((candidate) => candidate.kind === "merge")
   if (merges.length > 1) {
-    configuration("invalid-flow", `yrd: flow '${flowName}' permits at most one merge step; found ${merges.length}`)
+    configuration("invalid-flow", `yrd: the step plan permits at most one merge step; found ${merges.length}`)
   }
-  return Object.freeze({ name: flowName, rev, on: definition.on, steps: Object.freeze(steps) })
+  return Object.freeze(steps)
 }
 
 /** Declare the oldest reader contract that every writer must preserve. */
@@ -169,112 +139,11 @@ export function withJournalCompatibility(compatibility: JournalCompatibility): J
   })
 }
 
-/** One config constructor; the variadic form keeps author files declarative. */
-export function defineConfig(...definitions: readonly (FlowDef | JournalConfigDef)[]): YrdConfig {
-  const journalDefinitions = definitions.filter(
-    (definition): definition is JournalConfigDef => "kind" in definition && definition.kind === "journal",
-  )
-  if (journalDefinitions.length > 1) {
-    configuration("invalid-config", "yrd: config permits at most one journal compatibility floor")
-  }
-  const flows = definitions
-    .filter((definition): definition is FlowDef => !("kind" in definition && definition.kind === "journal"))
-    .map(withFlow)
-  if (flows.length === 0) configuration("invalid-config", "yrd: config requires at least one flow")
-  const duplicate = flows.find(
-    (candidate, index) => flows.findIndex((other) => other.name === candidate.name) !== index,
-  )
-  if (duplicate !== undefined) {
-    configuration("invalid-config", `yrd: config contains duplicate flow '${duplicate.name}'`)
-  }
-  const journal = journalDefinitions[0]?.compatibility
-  return Object.freeze({
-    flows: Object.freeze(flows),
-    ...(journal === undefined ? {} : { journal }),
-  })
-}
-
-/** Structural identity deliberately excludes executable text and predicates.
- * It changes only when the declared workflow graph changes. */
-export function flowFingerprint(flow: Pick<FlowDef, "steps">): string {
-  const structure = flow.steps.map(({ name: stepName, kind, runner }) => ({ name: stepName, kind, runner }))
-  return createHash("sha256").update(JSON.stringify(structure)).digest("hex")
-}
-
-export function flowPin(flow: FlowDef): FlowPin {
-  return Object.freeze({ name: flow.name, rev: flow.rev, fingerprint: flowFingerprint(flow) })
-}
-
-/** Exactly-one matching is an invariant, never array-order policy. */
-export function selectFlow(config: YrdConfig, submission: Submission): SelectedFlow {
-  const matches = config.flows.filter((flow) => flow.on(submission))
-  if (matches.length === 0) {
-    const available = config.flows
-      .map((flow) => flow.name)
-      .toSorted()
-      .join(", ")
-    configuration("flow-selection-zero", `yrd: this submit matched no flows; available flows: ${available}`)
-  }
-  if (matches.length !== 1) {
-    const names = matches
-      .map((flow) => flow.name)
-      .toSorted()
-      .join(", ")
-    configuration("flow-selection-ambiguous", `yrd: this submit matched multiple flows: ${names}`)
-  }
-  const selected = matches[0]
-  if (selected === undefined) throw new Error("yrd: exact-one flow selection lost its match")
-  return Object.freeze({ flow: selected, pin: flowPin(selected) })
-}
-
-/** Compare durable work with live base-authority config for `yrd doctor` and
- * resume gates. An unchanged-revision structural edit is warn-loud; a revision
- * mismatch is a hard refusal for pending/waiting work. */
-export function diagnoseFlowPin(expected: FlowPin, config: YrdConfig): readonly FlowDiagnostic[] {
-  const flow = config.flows.find((candidate) => candidate.name === expected.name)
-  if (flow === undefined) {
-    return [
-      Object.freeze({
-        severity: "refusal",
-        code: "flow-missing",
-        message: `yrd: pinned flow '${expected.name}' is absent from base-authority config`,
-        expected,
-      }),
-    ]
-  }
-  const current = flowPin(flow)
-  if (current.rev !== expected.rev) {
-    return [
-      Object.freeze({
-        severity: "refusal",
-        code: "flow-revision-drift",
-        message: `yrd: pinned flow '${expected.name}' revision ${expected.rev} cannot resume under revision ${current.rev}`,
-        expected,
-        current,
-      }),
-    ]
-  }
-  if (current.fingerprint !== expected.fingerprint) {
-    return [
-      Object.freeze({
-        severity: "warning",
-        code: "flow-fingerprint-drift",
-        message: `yrd: flow '${expected.name}' changed structure without bumping revision ${expected.rev}`,
-        expected,
-        current,
-      }),
-    ]
-  }
-  return []
-}
-
 /** Config-author spelling. The `with*` exports above are the same bindings for
  * extensions; neither surface introduces an object-schema DSL. */
 export const yrd = Object.freeze({
   check: withCheckStep,
   action: withActionStep,
   merge: withMergeStep,
-  flow: withFlow,
   journal: withJournalCompatibility,
-  config: defineConfig,
 })

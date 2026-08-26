@@ -23,7 +23,7 @@ import {
   type PRId,
 } from "@yrd/bay"
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
-import type { FlowPin, StepKind } from "@yrd/config"
+import type { StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -44,6 +44,8 @@ export type StepName = string
 export type BatchConfig = false | number
 export type QueueRequirement = "review"
 
+/** Stored fact from the retired flow rail (5e cut 3): journal rows written
+ * before the cut carry it; nothing consumes it. */
 const FlowPinSchema = z
   .object({
     name: z.string().trim().min(1),
@@ -51,6 +53,7 @@ const FlowPinSchema = z
     fingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
   })
   .strict()
+type FlowPin = Readonly<z.infer<typeof FlowPinSchema>>
 
 const ChangeSnapshotRemergeProofSchema = ChangeRemergeProofSchema.extend({
   /** Replay-only: certificate-era queue records carry these; nothing mints

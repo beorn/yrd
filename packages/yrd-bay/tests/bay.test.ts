@@ -16,7 +16,6 @@ import {
   type JsonValue,
 } from "@yrd/core"
 import { withJobs, type JobContext, type JobResult } from "@yrd/job"
-import { defineConfig, selectFlow, yrd, type FlowPin, type Submission } from "@yrd/config"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
   GitShaSchema,
@@ -51,7 +50,6 @@ async function createApp(
   workspace: BayWorkspace,
   log?: ConditionalLogger,
   defaultSubmitter?: string,
-  selectSubmissionFlow?: (submission: Submission) => FlowPin,
   resolveBase?: ResolveBayBase,
 ) {
   const jobs = createBayJobDefs(workspace)
@@ -62,7 +60,6 @@ async function createApp(
       jobs,
       defaultBase: "main",
       ...(defaultSubmitter === undefined ? {} : { defaultSubmitter }),
-      ...(selectSubmissionFlow === undefined ? {} : { selectFlow: selectSubmissionFlow }),
       ...(resolveBase === undefined ? {} : { resolveBase }),
     }),
   )
@@ -362,45 +359,6 @@ describe("withBays", () => {
       "pr/session-started",
       "pr/session-ended",
     ])
-  })
-
-  it("pins the exactly-one Flow revision and structural fingerprint at PR enrollment", async () => {
-    const config = defineConfig(
-      yrd.flow({
-        name: "docs",
-        rev: "5",
-        on: ({ branch }) => branch.startsWith("docs/"),
-        steps: [yrd.check("check"), yrd.merge()],
-      }),
-      yrd.flow({
-        name: "product",
-        rev: "8",
-        on: ({ branch }) => !branch.startsWith("docs/"),
-        steps: [yrd.check("check"), yrd.merge()],
-      }),
-    )
-    await using app = await createApp(
-      createWorkspaceHarness().adapter,
-      undefined,
-      undefined,
-      (submission) => selectFlow(config, submission).pin,
-    )
-
-    const submitted = await app.bays.submit({ branch: "docs/target-model", headSha: HEAD_1, baseSha: BASE })
-
-    expect(submitted.events).toContainEqual(
-      expect.objectContaining({
-        name: "pr/submitted",
-        data: expect.objectContaining({
-          flow: { name: "docs", rev: "5", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) },
-        }),
-      }),
-    )
-    expect(app.bays.pr("PR1")?.flow).toEqual({
-      name: "docs",
-      rev: "5",
-      fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u),
-    })
   })
 
   it("projects GitHub-shaped PR state with immutable submitted revisions", async () => {
@@ -2768,7 +2726,7 @@ describe("bay-base authority vs live queue", () => {
   async function createPinnedApp(liveSha: { current: string }) {
     const harness = createWorkspaceHarness()
     const resolveBase: ResolveBayBase = async (base) => ({ base, baseSha: liveSha.current })
-    const app = await createApp(harness.adapter, undefined, undefined, undefined, resolveBase)
+    const app = await createApp(harness.adapter, undefined, undefined, resolveBase)
     return { app, liveSha }
   }
 

@@ -76,7 +76,7 @@ import {
   type RunJobOptions,
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
-import { diagnoseFlowPin, type FlowPin, type StepKind, type YrdConfig } from "@yrd/config"
+import type { StepKind } from "@yrd/config"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { CandidateFailureResultEvidenceSchema, candidateFailureResultEvidence } from "./check-attribution.ts"
@@ -710,8 +710,6 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   /** Repository-truth sink for one immutable terminal merge record. */
   recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
   runner?: (jobs: Jobs) => Runner
-  /** Live base-authority flows used for drift warnings and resume refusal. */
-  flows?: YrdConfig
   /** Progress SLO declaration. Audit emits facts; paging remains a Hab concern. */
   progress?: QueueProgressPolicy
   /**
@@ -968,7 +966,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     steps,
     byName,
     needsPersonOwner,
-    options.flows,
     options.prepareCandidate !== undefined,
   )
 
@@ -1057,7 +1054,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.prepareCandidate,
             options.recordMerge,
             configuredRunner,
-            options.flows,
             progress,
             needsPersonOwner,
             yrd.log.child("queue"),
@@ -1115,7 +1111,6 @@ function createQueue<Shape extends ChangeShape>(
   prepareCandidate: CandidatePreparer | undefined,
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
   configuredRunner: Runner | undefined,
-  flows: YrdConfig | undefined,
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
   log: ConditionalLogger,
@@ -1233,22 +1228,6 @@ function createQueue<Shape extends ChangeShape>(
     const reported = await observeRunLifecycle(run, () => current(run.id))
     await markSettledRoot(run.id)
     return reported
-  }
-
-  const warnFlowDrift = (pins: readonly (DeepReadonly<FlowPin> | undefined)[]): void => {
-    if (flows === undefined) return
-    for (const pin of pins) {
-      if (pin === undefined) continue
-      for (const diagnostic of diagnoseFlowPin(pin, flows)) {
-        if (diagnostic.severity !== "warning") continue
-        log.warn?.(diagnostic.message, {
-          code: diagnostic.code,
-          flow: pin.name,
-          expectedFingerprint: pin.fingerprint,
-          currentFingerprint: diagnostic.current?.fingerprint,
-        })
-      }
-    }
   }
 
   const archived = (id: RunId): Run | undefined => {
@@ -1972,7 +1951,6 @@ function createQueue<Shape extends ChangeShape>(
         ) {
           continue
         }
-        warnFlowDrift([pr.flow])
         const baseSha = await resolveCandidateBaseSha([pr], resolveCycleBase)
         const outcome = await admitChangeRevision(pr, baseSha, runOptions)
         if (outcome.processed) admitted.push(pr.id)
@@ -2499,7 +2477,6 @@ function createQueue<Shape extends ChangeShape>(
             // carrier by hand.
             let members = candidate
             try {
-              warnFlowDrift(candidate.map((pr) => pr.flow))
               const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
               let facts: z.infer<typeof CandidateCreatedSchema> | undefined
               let prepared = false
@@ -2647,8 +2624,6 @@ function createQueue<Shape extends ChangeShape>(
         },
         async () => {
           const selected = waiting(selector, completion.step)
-          warnFlowDrift([selected.run.flow])
-          assertCurrentFlow(selected.run.flow, flows)
           if (selected.step.job.id !== completion.job) {
             raiseFailure(
               "refusal",
@@ -3278,7 +3253,6 @@ function createQueueCommands(
   steps: readonly RuntimeStep[],
   byName: ReadonlyMap<string, RuntimeStep>,
   needsPersonOwner: string,
-  flows?: YrdConfig,
   requiresPreparedCandidate = false,
 ): QueueCommands {
   const admissionStep = command({
@@ -3417,7 +3391,6 @@ function createQueueCommands(
               : queueRunNoRunnablePRs(rejected, selected, unrecorded),
         }
       }
-      for (const pr of prs) assertCurrentFlow(pr.flow, flows)
       const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
       if (base === undefined) throw new Error("yrd: a queue run requires at least one change")
       if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
@@ -3528,7 +3501,7 @@ function createQueueCommands(
     title: "Advance queue run",
     params: AdvanceArgsSchema,
     apply: (state: DeepReadonly<RuntimeState>, args) =>
-      advanceQueue(state, Queues.record(state.queues, args.run), byName, flows),
+      advanceQueue(state, Queues.record(state.queues, args.run), byName),
   })
 
   const settled = command({
@@ -5120,9 +5093,7 @@ function advanceQueue(
   state: DeepReadonly<RuntimeState>,
   record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
-  flows?: YrdConfig,
 ): Readonly<{ events: readonly EventDraft[] }> {
-  assertCurrentFlow(record.flow, flows)
   if (activeQueueFailure(record, state.jobs) !== undefined) return { events: [] }
   // A run-canceled record is terminal: never emit pr/canceled or pr/rejected for
   // its members. Their status is untouched (still submitted), so a future drain
@@ -5302,12 +5273,6 @@ function advanceQueue(
     events.push(requestStep(requirePlannedStep(steps, next), record, candidate, index + 1, shape))
   }
   return { events }
-}
-
-function assertCurrentFlow(flow: DeepReadonly<FlowPin> | undefined, config: YrdConfig | undefined): void {
-  if (flow === undefined || config === undefined) return
-  const refusal = diagnoseFlowPin(flow, config).find((diagnostic) => diagnostic.severity === "refusal")
-  if (refusal !== undefined) raiseFailure("refusal", refusal.code, refusal.message)
 }
 
 function samePayloadPRs(
@@ -7520,9 +7485,6 @@ export const YRD_REFUSAL_CODES = [
   "dropped-parent-contribution",
   "evaluator-missing-result",
   "exclusive-busy",
-  "flow-fingerprint-drift",
-  "flow-missing",
-  "flow-revision-drift",
   "gate-script-diff-failed",
   "gate-script-missing-at-base",
   "gate-script-overlay-failed",

@@ -8,7 +8,6 @@ import {
   type JsonValue,
   type SelectorMatch,
 } from "@yrd/core"
-import type { FlowPin } from "@yrd/config"
 import { JobErrorSchema, type JobError } from "@yrd/job"
 import type { ChangeId } from "./change-identity.ts"
 
@@ -619,6 +618,9 @@ export type ChangeAlreadyMergedEvidence = Readonly<{
   }>
 }>
 
+/** The flow pin shape old journals stored (5e cut 3 retired the writer). */
+export type StoredFlowPin = Readonly<{ name: string; rev: string; fingerprint: string }>
+
 export type Change = Readonly<{
   id: PRId
   bay?: BayId
@@ -642,7 +644,9 @@ export type Change = Readonly<{
    * one frozen recorded revision. Absent means untracked — the reproducibility
    * refusal stands. */
   track?: boolean
-  flow?: FlowPin
+  /** Stored fact from the retired flow rail (5e cut 3): journals and
+   * checkpoints written before the cut carry it; nothing consumes it. */
+  flow?: StoredFlowPin
   revs: readonly ChangeRev[]
   reviews: readonly ChangeReview[]
   comments: readonly ChangeComment[]

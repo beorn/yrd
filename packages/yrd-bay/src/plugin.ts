@@ -26,7 +26,6 @@ import {
   type RunJobOptions,
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
-import type { FlowPin, Submission } from "@yrd/config"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { ChangeIdSchema, changeIdForCommand, type ChangeId } from "./change-identity.ts"
@@ -828,7 +827,6 @@ export function createBays(
   options: Readonly<{
     defaultBase: string
     resolveBase?: ResolveBayBase
-    selectFlow?: (submission: Submission) => FlowPin
   }>,
   log?: ConditionalLogger,
 ): Bays {
@@ -918,55 +916,9 @@ export function createBays(
     )
   }
   const submitOperation = async (args: SubmitArgs): Promise<CommandResult> => {
-    if ("pr" in args) {
-      if (args.flow !== undefined || args.props !== undefined || options.selectFlow === undefined) {
-        return actions.submit(args)
-      }
-      const pr = required(resolveChange(state(), args.pr), "change", args.pr)
-      const selected = options.selectFlow({
-        base: pr.base,
-        branch: pr.branch,
-        head: changeHead(pr),
-        ...(changeComposition(pr) === undefined ? {} : { composition: changeComposition(pr) }),
-        ...(pr.bay === undefined ? {} : { bay: pr.bay }),
-        ...(pr.issue === undefined ? {} : { issue: pr.issue }),
-      })
-      const flow = pr.flow ?? selected
-      if (
-        pr.flow !== undefined &&
-        (pr.flow.name !== selected.name || pr.flow.rev !== selected.rev || pr.flow.fingerprint !== selected.fingerprint)
-      ) {
-        log?.warn?.(
-          pr.flow.name === selected.name && pr.flow.rev === selected.rev
-            ? `yrd: flow '${pr.flow.name}' changed structure without bumping revision ${pr.flow.rev}`
-            : `yrd: change '${pr.id}' remains pinned to flow ${pr.flow.name}@${pr.flow.rev}; base config selects ${selected.name}@${selected.rev}`,
-          {
-            code:
-              pr.flow.name === selected.name && pr.flow.rev === selected.rev
-                ? "flow-fingerprint-drift"
-                : "flow-revision-drift",
-            pr: pr.id,
-            expectedFlow: pr.flow.name,
-            expectedRevision: pr.flow.rev,
-            currentFlow: selected.name,
-            currentRevision: selected.rev,
-          },
-        )
-      }
-      return actions.submit({ ...args, flow })
-    }
+    if ("pr" in args) return actions.submit(args)
     const resolved = await target(args.base, args.baseSha)
-    const flow =
-      args.flow ??
-      (args.draft === true || options.selectFlow === undefined
-        ? undefined
-        : options.selectFlow({
-            base: resolved.base,
-            branch: args.branch,
-            head: args.headSha,
-            ...(args.issue === undefined ? {} : { issue: args.issue }),
-          }))
-    return actions.submit({ ...args, ...resolved, ...(flow === undefined ? {} : { flow }) })
+    return actions.submit({ ...args, ...resolved })
   }
   const submit = (args: SubmitArgs): Promise<CommandResult> => {
     const selector = "pr" in args ? args.pr : args.branch
@@ -1340,7 +1292,6 @@ export type WithBaysOptions = Readonly<{
   defaultBase?: string
   defaultSubmitter?: string
   resolveBase?: ResolveBayBase
-  selectFlow?: (submission: Submission) => FlowPin
 }>
 
 export function withBays(options: WithBaysOptions) {
@@ -1450,7 +1401,6 @@ export function withBays(options: WithBaysOptions) {
             {
               defaultBase,
               ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }),
-              ...(options.selectFlow === undefined ? {} : { selectFlow: options.selectFlow }),
             },
             yrd.log.child("bay"),
           ),

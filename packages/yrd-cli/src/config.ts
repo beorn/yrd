@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
-import { defineConfig, withActionStep, withCheckStep, withFlow, withMergeStep, type FlowDef } from "@yrd/config"
+import { defineStepPlan, withActionStep, withCheckStep, withMergeStep, type StepDef } from "@yrd/config"
 import { asFailure, createFailure } from "@yrd/core"
 import {
   DEFAULT_NEEDS_PERSON_OWNER,
@@ -326,8 +326,6 @@ export type ResolvedYrdProjectConfig = Readonly<{
    * built-in unowned default" — see {@link DEFAULT_NEEDS_PERSON_OWNER} —
    * never "no needs-person finding is ever owned". */
   needsPerson?: Readonly<{ owner: string }>
-  /** Programmatic flow authority. Optional only for direct legacy test/app construction. */
-  flows?: readonly FlowDef[]
 }>
 
 export function parseYrdConfig(value: unknown): YrdProjectConfig {
@@ -513,8 +511,8 @@ export async function loadYrdConfig(options: {
   definitions.merge = { runner: "local", kind: "merge" }
   const checks = parsed.checks.map(checkName)
   const steps = [...declaredStepNames(parsed)]
-  const flows = defineConfig(legacyFlow(steps, definitions))
-  const kinds = new Map(flows.flows[0]?.steps.map((step) => [step.name, step.kind] as const) ?? [])
+  const plan = declaredStepPlan(steps, definitions)
+  const kinds = new Map(plan.map((step) => [step.name, step.kind] as const))
   const resolvedDefinitions = Object.fromEntries(
     Object.entries(definitions).map(([name, definition]) => [
       name,
@@ -549,7 +547,6 @@ export async function loadYrdConfig(options: {
       needsPerson: {
         owner: parsed.needsPerson.owner ?? DEFAULT_NEEDS_PERSON_OWNER,
       },
-      flows: flows.flows,
     },
   }
 }
@@ -574,13 +571,16 @@ function authorityPath(repo: string, requested: string): string {
   return inside
 }
 
-function legacyFlow(steps: readonly string[], definitions: Readonly<Record<string, YrdStepConfig>>): FlowDef {
+/** The declared step plan (5e cut 3 — the one legacy flow collapsed to its
+ * validated step list). Kind inference is positional: `merge` is the merge
+ * step, everything after it is an action, everything before it a check. */
+function declaredStepPlan(
+  steps: readonly string[],
+  definitions: Readonly<Record<string, YrdStepConfig>>,
+): readonly StepDef[] {
   const mergeIndex = steps.indexOf("merge")
-  return withFlow({
-    name: "default",
-    rev: "legacy-v1",
-    on: () => true,
-    steps: steps.map((name, index) => {
+  return defineStepPlan(
+    steps.map((name, index) => {
       const definition = definitions[name] ?? { runner: "local" as const }
       const options = {
         ...(definition.run === undefined ? {} : { run: definition.run }),
@@ -595,7 +595,7 @@ function legacyFlow(steps: readonly string[], definitions: Readonly<Record<strin
       if (kind === "merge") return withMergeStep(options)
       return kind === "action" ? withActionStep(name, options) : withCheckStep(name, options)
     }),
-  })
+  )
 }
 
 /** The ordered step names a parsed config declares: its checks, then the

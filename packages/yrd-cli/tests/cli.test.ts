@@ -58,7 +58,6 @@ import {
   type JsonValue,
 } from "@yrd/core"
 import { withJobs, type Job, type JobResult } from "@yrd/job"
-import { defineConfig, yrd as yrdConfig } from "@yrd/config"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import {
@@ -14175,11 +14174,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       try {
         const output = outputIO({ cwd: repo, repositoryRoot: repo })
 
-        await runYrd(app, yrd("doctor", "--json"), output.io, {
-          config: defineConfig(
-            yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }),
-          ),
-        })
+        await runYrd(app, yrd("doctor", "--json"), output.io)
 
         const report = JSON.parse(output.stdout()) as Readonly<{ candidateRefs: CandidateRefSweepResult }>
         // The ref is counted, and counted in the bucket that says the journal
@@ -14242,9 +14237,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
   })
 
   describe("doctor retention observability", () => {
-    const doctorConfig = defineConfig(
-      yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }),
-    )
 
     async function retentionDoctorFixture() {
       const repo = mkdtempSync(join(tmpdir(), "yrd-doctor-retention-"))
@@ -14297,7 +14289,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const { repo, stateDir, app } = await retentionDoctorFixture()
       try {
         const output = outputIO({ cwd: repo, stateDir })
-        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(0)
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(0)
         expect(JSON.parse(output.stdout())).toMatchObject({
           retention: {
             advisory: true,
@@ -14347,7 +14339,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           }),
         )
         const output = outputIO({ cwd: repo, stateDir })
-        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
         expect(JSON.parse(output.stderr())).toMatchObject({
           failure: { kind: "infrastructure", code: "resident-retention-observation-missing" },
         })
@@ -14381,7 +14373,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           }),
         }
         const output = outputIO({ cwd: repo, stateDir })
-        expect(await runYrd(uncovered, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(await runYrd(uncovered, yrd("doctor", "--json"), output.io)).toBe(3)
         expect(JSON.parse(output.stderr())).toMatchObject({
           failure: { kind: "infrastructure", code: "journal-recovery-coverage-unavailable" },
         })
@@ -14414,7 +14406,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           }),
         }
         const output = outputIO({ cwd: repo, stateDir })
-        expect(await runYrd(uncovered, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(await runYrd(uncovered, yrd("doctor", "--json"), output.io)).toBe(3)
         expect(JSON.parse(output.stderr())).toMatchObject({
           failure: { kind: "infrastructure", code: "journal-recovery-coverage-invalid" },
         })
@@ -14447,7 +14439,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           }),
         }
         const output = outputIO({ cwd: repo, stateDir })
-        expect(await runYrd(inconsistent, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(await runYrd(inconsistent, yrd("doctor", "--json"), output.io)).toBe(3)
         expect(JSON.parse(output.stderr())).toMatchObject({
           failure: { kind: "infrastructure", code: "journal-retention-floor-invalid" },
         })
@@ -14470,7 +14462,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           }),
         )
         const output = outputIO({ cwd: repo, stateDir })
-        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
         expect(JSON.parse(output.stderr())).toMatchObject({
           failure: { kind: "infrastructure", code: "resident-retention-source-disagreement" },
         })
@@ -14499,7 +14491,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           },
           async () => {
             const output = outputIO({ cwd: repo, stateDir })
-            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
             expect(JSON.parse(output.stderr())).toMatchObject({
               failure: { kind: "infrastructure", code: "resident-retention-observation-stale" },
             })
@@ -14528,7 +14520,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           },
           async () => {
             const output = outputIO({ cwd: repo, stateDir })
-            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
             expect(JSON.parse(output.stderr())).toMatchObject({
               failure: { kind: "infrastructure", code: "resident-retention-observation-mismatch" },
             })
@@ -14559,7 +14551,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           },
           async () => {
             const output = outputIO({ cwd: repo, stateDir })
-            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
             expect(JSON.parse(output.stderr())).toMatchObject({
               failure: { kind: "infrastructure", code: "resident-retention-source-disagreement" },
             })
@@ -14588,7 +14580,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
           },
           async () => {
             const output = outputIO({ cwd: repo, stateDir })
-            expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+            expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
             expect(JSON.parse(output.stderr())).toMatchObject({
               failure: { kind: "infrastructure", code: "resident-runner-status-invalid" },
             })
@@ -14604,7 +14596,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       const { repo, stateDir, app } = await retentionDoctorFixture()
       try {
         const output = outputIO({ cwd: repo, stateDir, now: () => Number.NaN })
-        expect(await runYrd(app, yrd("doctor", "--json"), output.io, { config: doctorConfig })).toBe(3)
+        expect(await runYrd(app, yrd("doctor", "--json"), output.io)).toBe(3)
         expect(JSON.parse(output.stderr())).toMatchObject({
           failure: { kind: "infrastructure", code: "doctor-clock-invalid" },
         })
@@ -14620,14 +14612,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     try {
       let rebuilds = 0
       const services: YrdCliServices = {
-        config: defineConfig(
-          yrdConfig.flow({
-            name: "main",
-            rev: "1",
-            on: () => true,
-            steps: [yrdConfig.check("check")],
-          }),
-        ),
         journal: {
           async importOrphan() {
             throw new Error("not used")
@@ -14643,7 +14627,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       await expect(runYrd(app, yrd("doctor", "--rebuild-views", "--json"), output.io, services)).resolves.toBe(0)
       expect(JSON.parse(output.stdout())).toMatchObject({
         command: "doctor",
-        findings: [],
         rebuilt: { cursor: 7, frames: 6, views: 1 },
       })
       expect(rebuilds).toBe(1)
@@ -14653,8 +14636,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
   })
 
   describe("doctor --rebuild-index-from-repo", () => {
-    const doctorConfig = () =>
-      defineConfig(yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }))
 
     const mergedRecord = (changeId: string) => ({
       merge: {
@@ -14681,7 +14662,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
     const servicesFor = (records: readonly unknown[]): YrdCliServices =>
       ({
-        config: doctorConfig(),
         mergeRecords: {
           find: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
           all: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
@@ -14881,7 +14861,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
       expect(
         await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {
-          config: doctorConfig(),
           mergeRecords: {
             find: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
             all: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
@@ -14898,7 +14877,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
 
       expect(
         await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {
-          config: doctorConfig(),
         } as YrdCliServices),
       ).toBe(2)
       expect(output.stderr()).toContain("repository merge-record capability is not installed")
@@ -15017,7 +14995,6 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         },
       ]
       const services = {
-        config: doctorConfig(),
         mergeRecords: {
           find: async () => ({ status: "proven" as const, records: [], unverifiable: [], retracted: [] }),
           all: async () => ({ status: "proven" as const, records: [], unverifiable, retracted: [] }),

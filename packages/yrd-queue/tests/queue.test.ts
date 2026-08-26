@@ -29,7 +29,6 @@ import {
   type JournalFrame,
 } from "@yrd/core"
 import { localRunner, withJobs, type JobResult, type Jobs, type Runner, type RunnerSubmission } from "@yrd/job"
-import { defineConfig, selectFlow, yrd, type YrdConfig } from "@yrd/config"
 import * as z from "zod"
 import * as queueApi from "../src/index.ts"
 import {
@@ -612,7 +611,6 @@ function queuePlugin(
           }>
         >
     runner?: (jobs: Jobs) => Runner
-    flowConfig?: YrdConfig
   }> = {},
 ) {
   const check = withStep(
@@ -665,7 +663,6 @@ function queuePlugin(
     resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
     ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
     ...(options.runner === undefined ? {} : { runner: options.runner }),
-    ...(options.flowConfig === undefined ? {} : { flows: options.flowConfig }),
   })
 }
 
@@ -675,18 +672,14 @@ async function createQueueApp(
   clock: () => string = () => "2026-01-01T00:00:00.000Z",
   id: () => string = ids(),
   log?: ConditionalLogger,
-  flowConfig?: YrdConfig,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = queuePlugin({ ...options, ...(flowConfig === undefined ? {} : { flowConfig }) })
+  const queue = queuePlugin(options)
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
     withBays({
       jobs: bayJobs,
-      ...(flowConfig === undefined
-        ? {}
-        : { selectFlow: (submission: Parameters<typeof selectFlow>[1]) => selectFlow(flowConfig, submission).pin }),
     }),
   )
   const definition = queue(base)
@@ -1080,76 +1073,6 @@ describe("Queue", () => {
     expect(runs).toHaveLength(2)
     expect(runs.every((run) => run.status === "completed" && run.conclusion === "success")).toBe(true)
     expect(peakMerges).toBe(1)
-  })
-
-  it("pins the enrolled Flow on the change revision snapshot and every Run", async () => {
-    const config = defineConfig(
-      yrd.flow({
-        name: "docs",
-        rev: "5",
-        on: () => true,
-        steps: [yrd.check("check"), yrd.merge()],
-      }),
-    )
-    await using app = await createQueueApp({}, undefined, undefined, undefined, undefined, config)
-    await submitBranch(app, "docs/target-model")
-
-    const [run] = await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
-
-    expect(run).toMatchObject({
-      queueId: "docs/main",
-      flow: { name: "docs", rev: "5", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) },
-      prs: [
-        {
-          id: "PR1",
-          flow: { name: "docs", rev: "5", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) },
-        },
-      ],
-    })
-    expect(app.state().queues.candidates.C1?.queueId).toBe("docs/main")
-  })
-
-  it("refuses to finish waiting work across a base-authority Flow revision change", async () => {
-    const flow = (rev: string) =>
-      defineConfig(yrd.flow({ name: "main", rev, on: () => true, steps: [yrd.check("check"), yrd.merge()] }))
-    const journal = createMemoryJournal()
-    const original = await createQueueApp(
-      { check: () => ({ status: "waiting", token: "remote-flow" }) },
-      journal,
-      undefined,
-      undefined,
-      undefined,
-      flow("1"),
-    )
-    await submitBranch(original, "topic/flow-revision")
-    const [waiting] = await original.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
-    const job = waiting?.steps[0]?.job
-    if (job?.status !== "waiting") throw new Error("expected waiting Flow Job")
-    await original.close()
-
-    await using resumed = await createQueueApp(
-      { check: () => ({ status: "waiting", token: "remote-flow" }) },
-      journal,
-      undefined,
-      ids(20),
-      undefined,
-      flow("2"),
-    )
-    await expect(
-      resumed.queue.finish(
-        "R1",
-        {
-          job: job.id,
-          step: "check",
-          attempt: job.attempt,
-          runner: job.runner,
-          token: job.token,
-          result: { status: "completed", conclusion: "success", output: { checked: true } },
-        },
-        runtime,
-      ),
-    ).rejects.toThrow("revision 1 cannot resume under revision 2")
-    expect(resumed.queue.get("R1")?.steps[0]?.job?.status).toBe("waiting")
   })
 
   it("projects immutable Candidates separately from GitHub-shaped Runs", async () => {

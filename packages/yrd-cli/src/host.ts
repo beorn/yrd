@@ -54,7 +54,6 @@ import {
   type JournalCompatibility,
   type CheckpointMigrationManifest,
 } from "@yrd/core"
-import { defineConfig, selectFlow } from "@yrd/config"
 import { localRunner, withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
@@ -1863,7 +1862,6 @@ function contestAdapters(options: DefaultYrdDefinitionOptions): {
 /** Compose the built-in workflow from immutable plugins and injected resources. */
 async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) {
   validateConfig(options.config)
-  const flowConfig = options.config.flows === undefined ? undefined : defineConfig(...options.config.flows)
   const mergeCommand =
     options.config.definitions.merge?.run === undefined ? undefined : shellCommand(options.config.definitions.merge.run)
   const workspace =
@@ -1930,7 +1928,6 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     requires: options.config.requires,
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
-    ...(flowConfig === undefined ? {} : { flows: flowConfig }),
     resolveBaseSha: async (base) =>
       (
         await resolveGitQueueTarget({
@@ -2012,9 +2009,6 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
           ...(target.remoteBranch === undefined ? {} : { remoteBranch: target.remoteBranch }),
         }
       },
-      ...(flowConfig === undefined
-        ? {}
-        : { selectFlow: (submission: Parameters<typeof selectFlow>[1]) => selectFlow(flowConfig, submission).pin }),
     }),
   )
   const definition = contests(queue(base))
@@ -3204,7 +3198,6 @@ async function createYrdRuntimeHost(
         })
       ).sha
     const services = Object.freeze({
-      ...(loaded.config.flows === undefined ? {} : { config: defineConfig(...loaded.config.flows) }),
       queue: queueAdministration(process, repository, {
         base: loaded.config.base,
         configAuthority: loaded.path === undefined ? ".yrd.yml" : relative(repository.repo, loaded.path),

@@ -35,7 +35,9 @@ describe("Yrd v4 config", () => {
       progress: { noLandingMs: 1_800_000, refusalCount: 3 },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["typecheck"] },
     })
-    expect(loaded.config.flows?.[0]?.steps.map(({ name, kind }) => ({ name, kind }))).toEqual([
+    expect(
+      Object.entries(loaded.config.definitions).map(([name, definition]) => ({ name, kind: definition.kind })),
+    ).toEqual([
       { name: "typecheck", kind: "check" },
       { name: "merge", kind: "merge" },
     ])

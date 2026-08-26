@@ -24,7 +24,6 @@ import type { Scope } from "@silvery/scope"
 import type { QueueReadModel } from "./queue-read-model.ts"
 import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 import type { RetainedWorkspace } from "./workspace-retention.ts"
-import type { YrdConfig } from "@yrd/config"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
@@ -202,8 +201,6 @@ export type YrdCliServices = Readonly<{
   process?: Pick<Process, "run" | "reapPath">
   /** Resolve the live workspace path when a durable Bay record predates a repository move. */
   resolveBayWorkspacePath?(bay: string, recordedPath?: string): string | undefined
-  /** Live base-authority flow config for deterministic doctor diagnostics. */
-  config?: YrdConfig
   /** Configured base branch. */
   base?: string
   /** Exact host environment inherited by Bay child processes. */

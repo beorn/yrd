@@ -47,8 +47,8 @@ The objects above operate on plain records:
 | `CommandResult`        | Dispatched command, committed events, and optional JSON result value                    |
 | `Issue`                | Versioned unit of intent from a configured issue source                                 |
 | `Bay`                  | Isolated worktree and its current Git facts                                             |
-| `FlowDef`              | Named submission predicate plus revision-pinned ordered steps                           |
-| `PR`                   | GitHub-shaped open/closed state, merged fact, flow pin, and immutable revision history  |
+| `StepDef[]` (plan)     | The one validated ordered step list `.yrd.yml` declares (flows retired, 5e cut 3)       |
+| `PR`                   | GitHub-shaped open/closed state, merged fact, and immutable revision history            |
 | `PRRev`                | One immutable submitted head, composition, timing, and terminal evidence                |
 | `Candidate`            | Immutable queue/base plus ordered PR revision content selected for one or more attempts |
 | `Job`                  | Durable executable lifecycle and evidence                                               |

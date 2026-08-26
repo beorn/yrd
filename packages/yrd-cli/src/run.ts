@@ -101,7 +101,6 @@ import {
   renderYrdConfigScaffold,
   type ResolvedYrdProjectConfig,
 } from "./config.ts"
-import { diagnoseYrdFlows } from "./config-doctor.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import { INSTALLED_PLAN_STALE_RESOLUTION, RUN_PLAN_MISMATCH_RESOLUTION } from "./plan-audit.ts"
 import {
@@ -9037,34 +9036,25 @@ async function configDoctor(
         }) ?? configuration("repository merge-record capability is not installed"))
       : undefined
   const indexRebuild = options.rebuildIndexFromRepo === true ? await rebuildIndexFromRepo(app, services) : undefined
-  const config = services.config
-  if (config === undefined) configuration("config doctor capability is not installed")
   await app.refresh()
   const state = stateOf(app)
-  const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
   const retention = await retentionDoctor(app, io)
   const candidateRefs = await candidateRefDoctorFinding(state.queues, io)
   const warnings = [
     ...submoduleTrackingWarnings(io.cwd ?? process.cwd()),
     ...(candidateRefs.warning === undefined ? [] : [candidateRefs.warning]),
   ]
-  const clean = findings.length === 0 && warnings.length === 0
-  const doctorLine =
-    findings.length === 0
-      ? clean
-        ? rebuilt === undefined
-          ? "yrd doctor clean"
-          : `yrd doctor rebuilt ${String(rebuilt.views)} views at cursor ${String(rebuilt.cursor)}`
-        : `yrd doctor found ${String(warnings.length)} repository warning${warnings.length === 1 ? "" : "s"}`
-      : findings
-          .map((finding) => `${finding.severity.toUpperCase()} ${finding.code} ${finding.owner}: ${finding.message}`)
-          .join("\n")
+  const clean = warnings.length === 0
+  const doctorLine = clean
+    ? rebuilt === undefined
+      ? "yrd doctor clean"
+      : `yrd doctor rebuilt ${String(rebuilt.views)} views at cursor ${String(rebuilt.cursor)}`
+    : `yrd doctor found ${String(warnings.length)} repository warning${warnings.length === 1 ? "" : "s"}`
   await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
       command: "doctor",
-      findings,
       retention,
       ...(candidateRefs.sweep === undefined ? {} : { candidateRefs: candidateRefs.sweep }),
       ...(rebuilt === undefined ? {} : { rebuilt }),
@@ -9097,8 +9087,7 @@ async function configDoctor(
   // the exit code a constant 1 there, and made the gap above, however precisely it
   // is now computed, unobservable through it. Warnings are still printed; they just
   // no longer decide the verdict.
-  const defects = findings.filter((finding) => finding.severity === "refusal")
-  return defects.length === 0 && !unrebuilt ? 0 : 1
+  return unrebuilt ? 1 : 0
 }
 
 async function journalImportOrphan(
@@ -11649,7 +11638,7 @@ function buildProgram(
     .action(async (options) => dashboard(installed(), options, io))
   program
     .command("doctor")
-    .description("diagnose Flow drift and repository configuration warnings")
+    .description("diagnose repository configuration and retention warnings")
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
     .option(
       "--rebuild-index-from-repo",

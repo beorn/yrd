@@ -47,7 +47,7 @@ Repository
 Config defines capabilities and procedures; events produce runtime state; the
 two never mix. Event sourcing remains persistence, not the domain model.
 
-### B2. FlowDef and flow selection
+### B2. The step plan (flows retired, 5e cut 3)
 
 ```ts
 type Submission = Readonly<{
@@ -69,27 +69,16 @@ type SourceComposition = Readonly<{
     payload: readonly string[] // exact --no-renames path set
   }>[]
 }>
-
-type FlowDef = Readonly<{
-  name: string
-  rev: string // human-bumped semantic revision label
-  on: (s: Submission) => boolean
-  steps: readonly StepDef[]
-}>
 ```
 
-- `on` receives a `Submission`, **not a PR** — at first submit the PR does not
-  exist yet; selection input is the submission facts.
-- Selection must produce **exactly one** matching Flow. Zero and ambiguous
-  matches are loud errors that list every matched flow name. First-match-wins
-  is rejected: it makes shadowing silent, and loud-at-submit beats
-  silent-wrong-lane. Exclusive predicates are cheap to write in TypeScript.
-- The selected flow `name` + `rev` is pinned on the PR's enrollment and on
-  every Run, so historical runs stay explainable after `.yrd.yml` edits.
-- **Drift guard**: the runtime also fingerprints the flow's structural content
-  (step names, kinds, order, runner bindings). If the fingerprint changes
-  while `rev` does not, submit/doctor warn loudly. Pending/waiting work refuses
-  to resume across a rev change, as today.
+- Exactly one flow ever existed, so the FlowDef/selection/fingerprint rail was
+  retired (5e cut 3): the declared `.yrd.yml` step list, validated by
+  `defineStepPlan` (named steps, no duplicates, at most one merge step), IS the
+  plan. Each Run records the plan git declares at its own base sha
+  (`stepSelection`), which is what keeps historical runs explainable after
+  `.yrd.yml` edits and what retires drifted pending work (`stale-steps`).
+- Journals and checkpoints written before the cut still carry `flow` pins on
+  changes and runs; they replay as inert stored facts.
 
 ### B3. PR and PRRev
 
@@ -100,7 +89,7 @@ type PR = Readonly<{
   branch: string
   state: "open" | "closed" // GitHub verbatim
   merged: boolean // GitHub verbatim; merged implies closed
-  flow?: { name: string; rev: string } // pinned at enrollment
+  flow?: { name: string; rev: string } // stored fact from the retired flow rail
   revs: readonly PRRev[]
 }>
 

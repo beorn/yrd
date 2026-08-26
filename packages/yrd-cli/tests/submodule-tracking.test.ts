@@ -7,7 +7,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { defineConfig, yrd as yrdConfig } from "@yrd/config"
 import { createProcess } from "@yrd/process"
 import { createJournal } from "@yrd/persistence"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
@@ -90,10 +89,6 @@ const config: ResolvedYrdProjectConfig = {
   definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
   contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
 }
-const doctorConfig = defineConfig(
-  yrdConfig.flow({ name: "main", rev: "1", on: () => true, steps: [yrdConfig.check("check")] }),
-)
-
 async function appFor(repo: string): Promise<YrdCliApp> {
   const stateDir = join(repo, ".git", "yrd")
   const log = createLogger("yrd", [{ level: "silent" }])
@@ -331,9 +326,9 @@ describe("pinned-submodule warning surface", () => {
     // fires on ANY unbranched submodule, so a nonzero exit here would be a
     // constant inside every superproject and would mask the real signals the
     // exit code carries.
-    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(0)
-    const payload = JSON.parse(out.stdout()) as { command: string; findings: unknown[]; warnings?: string[] }
-    expect(payload).toMatchObject({ command: "doctor", findings: [] })
+    expect(await runYrd(app, yrd("doctor", "--json"), out.io), out.stderr()).toBe(0)
+    const payload = JSON.parse(out.stdout()) as { command: string; warnings?: string[] }
+    expect(payload).toMatchObject({ command: "doctor" })
     expect(payload.warnings).toEqual([
       "warn: 1 submodule not tracking a branch (pinned — upstream changes won't refresh PRs): vendor/foo — run 'yrd admin submodule init' to set",
     ])
@@ -381,7 +376,6 @@ describe("pinned-submodule warning surface", () => {
 
     expect(
       await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), out.io, {
-        config: doctorConfig,
         mergeRecords: {
           find: async () => proven,
           all: async () => proven,
@@ -442,7 +436,7 @@ describe("pinned-submodule warning surface", () => {
     // throws -> the advisory must degrade to a warning, never take down doctor.
     await writeFile(join(root, ".gitmodules"), '[submodule "x"\n\tpath = x\n')
     const out = outputIO({ cwd: root })
-    expect(await runYrd(app, yrd("doctor", "--json"), out.io, { config: doctorConfig }), out.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("doctor", "--json"), out.io), out.stderr()).toBe(0)
     const payload = JSON.parse(out.stdout()) as { warnings?: string[] }
     expect(payload.warnings?.[0]).toContain("could not read .gitmodules")
     // The degraded warning is a single row (no raw multi-row git diagnostic).

@@ -1,173 +1,42 @@
 /**
- * @failure Flow selection shadows submissions or silently changes durable workflow identity.
+ * @failure The declared step plan silently accepts an invalid shape (blank or
+ *          duplicate steps, several merge steps) or loses its declared options.
  * @level l1
  * @consumer @yrd/config authors and the Yrd runtime
  */
 import { describe, expect, it } from "vitest"
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import {
-  defineConfig,
-  diagnoseFlowPin,
-  flowPin,
-  loadConfigModule,
-  selectFlow,
-  withActionStep,
-  withCheckStep,
-  withFlow,
-  withMergeStep,
-  yrd,
-} from "../src/index.ts"
+import { defineStepPlan, withActionStep, withCheckStep, withMergeStep, yrd } from "../src/index.ts"
 
 const check = withCheckStep("check", { run: "bun test" })
 const merge = withMergeStep({ run: "git merge" })
 
-describe("flow configuration", () => {
-  it("selects exactly one FlowDef from immutable Submission facts", () => {
-    const config = defineConfig(
-      withFlow({
-        name: "docs",
-        rev: "3",
-        on: ({ branch }) => branch.startsWith("docs/"),
-        steps: [check, merge],
-      }),
-      yrd.flow({
-        name: "product",
-        rev: "7",
-        on: ({ branch }) => !branch.startsWith("docs/"),
-        steps: [yrd.check("check", { run: "bun test" }), yrd.action("pack"), yrd.merge()],
-      }),
-    )
-
-    const selected = selectFlow(config, {
-      base: "main",
-      branch: "docs/target-model",
-      head: "a".repeat(40),
-      bay: "B4",
-      issue: "@yrd/core/21085-target-model",
-    })
-
-    expect(selected.flow.name).toBe("docs")
-    expect(selected.pin).toEqual({
-      name: "docs",
-      rev: "3",
-      fingerprint: flowPin(selected.flow).fingerprint,
-    })
-  })
-
-  it("refuses zero and ambiguous matches loudly instead of using first-match-wins", () => {
-    const neither = defineConfig(
-      withFlow({ name: "docs", rev: "1", on: () => false, steps: [check, merge] }),
-      withFlow({ name: "code", rev: "1", on: () => false, steps: [check, merge] }),
-    )
-    expect(() => selectFlow(neither, { base: "main", branch: "topic", head: "b".repeat(40) })).toThrow(
-      "matched no flows; available flows: code, docs",
-    )
-
-    const both = defineConfig(
-      withFlow({ name: "docs", rev: "1", on: () => true, steps: [check, merge] }),
-      withFlow({ name: "code", rev: "1", on: () => true, steps: [check, merge] }),
-    )
-    expect(() => selectFlow(both, { base: "main", branch: "topic", head: "b".repeat(40) })).toThrow(
-      "matched multiple flows: code, docs",
-    )
-  })
-
-  it("fingerprints structural step identity, order, kinds, and runner bindings", () => {
-    const original = withFlow({
-      name: "main",
-      rev: "9",
-      on: () => true,
-      steps: [withCheckStep("check", { run: "bun test", runner: "local" }), merge],
-    })
-    const executableOnly = withFlow({
-      name: "main",
-      rev: "9",
-      on: () => true,
-      steps: [withCheckStep("check", { run: "bun test --changed", runner: "local" }), merge],
-    })
-    const rebound = withFlow({
-      name: "main",
-      rev: "9",
-      on: () => true,
-      steps: [withCheckStep("check", { run: "bun test", runner: "waiting" }), merge],
-    })
-    const reordered = withFlow({
-      name: "main",
-      rev: "9",
-      on: () => true,
-      steps: [withActionStep("announce"), check, merge],
-    })
-
-    expect(flowPin(executableOnly).fingerprint).toBe(flowPin(original).fingerprint)
-    expect(flowPin(rebound).fingerprint).not.toBe(flowPin(original).fingerprint)
-    expect(flowPin(reordered).fingerprint).not.toBe(flowPin(original).fingerprint)
-  })
-
-  it("reports unchanged-revision drift loudly and revision drift as a resume refusal", () => {
-    const original = withFlow({ name: "main", rev: "2", on: () => true, steps: [check, merge] })
-    const structuralDrift = withFlow({
-      name: "main",
-      rev: "2",
-      on: () => true,
-      steps: [withCheckStep("check", { runner: "waiting" }), merge],
-    })
-    const revisionDrift = withFlow({ name: "main", rev: "3", on: () => true, steps: [check, merge] })
-
-    expect(diagnoseFlowPin(flowPin(original), defineConfig(structuralDrift))).toEqual([
-      expect.objectContaining({ code: "flow-fingerprint-drift", severity: "warning" }),
+describe("step plan configuration", () => {
+  it("validates and freezes the declared step plan", () => {
+    const plan = defineStepPlan([check, withActionStep("announce"), merge])
+    expect(plan.map(({ name, kind }) => ({ name, kind }))).toEqual([
+      { name: "check", kind: "check" },
+      { name: "announce", kind: "action" },
+      { name: "merge", kind: "merge" },
     ])
-    expect(diagnoseFlowPin(flowPin(original), defineConfig(revisionDrift))).toEqual([
-      expect.objectContaining({ code: "flow-revision-drift", severity: "refusal" }),
-    ])
+    expect(Object.isFrozen(plan)).toBe(true)
+    expect(plan[0]).toMatchObject({ run: "bun test", runner: "local" })
   })
 
-  it("declares one journal reader floor alongside flows", () => {
+  it("refuses an empty plan, duplicate steps, and more than one merge step loudly", () => {
+    expect(() => defineStepPlan([])).toThrow("has no steps")
+    expect(() => defineStepPlan([check, check])).toThrow("duplicate step 'check'")
+    // The merge boundary has one canonical name, so a second merge step is
+    // always a duplicate of it; the at-most-one-merge rule stays as defense.
+    expect(() => defineStepPlan([check, merge, withMergeStep()])).toThrow("duplicate step 'merge'")
+  })
+
+  it("refuses blank and malformed step names loudly", () => {
+    expect(() => withCheckStep(" ")).toThrow("cannot be blank")
+    expect(() => withCheckStep("Check")).toThrow("must match")
+  })
+
+  it("declares one journal reader floor", () => {
     const compatibility = { version: 1 }
-    const config = defineConfig(
-      yrd.journal(compatibility),
-      yrd.flow({ name: "main", rev: "1", on: () => true, steps: [check, merge] }),
-    )
-
-    expect(config.journal).toEqual(compatibility)
-    expect(() =>
-      defineConfig(
-        yrd.journal(compatibility),
-        yrd.journal({ version: 2 }),
-        yrd.flow({ name: "main", rev: "1", on: () => true, steps: [check, merge] }),
-      ),
-    ).toThrow("at most one journal compatibility floor")
-  })
-})
-
-describe("programmatic config module loading", () => {
-  it("evaluates the supplied base-authority source rather than reading candidate content", async () => {
-    const root = await mkdtemp(join(tmpdir(), "yrd-config-"))
-    try {
-      const loaded = await loadConfigModule({
-        path: join(root, ".yrd.ts"),
-        cacheDir: join(root, "cache"),
-        source: `
-          import { defineConfig, yrd } from "@yrd/config"
-          export default defineConfig(
-            yrd.journal({ version: 1 }),
-            yrd.flow({
-              name: "base-authority",
-              rev: "4",
-              on: ({ base }) => base === "main",
-              steps: [yrd.check("check"), yrd.merge()],
-            }),
-          )
-        `,
-      })
-      expect(loaded.journal).toEqual({ version: 1 })
-      expect(selectFlow(loaded, { base: "main", branch: "topic", head: "d".repeat(40) }).pin).toMatchObject({
-        name: "base-authority",
-        rev: "4",
-      })
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
+    expect(yrd.journal(compatibility)).toEqual({ kind: "journal", compatibility })
   })
 })
