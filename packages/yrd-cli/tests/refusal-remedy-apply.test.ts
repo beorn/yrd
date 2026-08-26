@@ -200,7 +200,10 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
     )
   })
 
-  it("dispatches the R-b escape-hatch recut drill end to end when a refusal prints it", async () => {
+  it("escalates end to end when a refusal still prints the retired recut spelling", async () => {
+    // The verb is gone and no projection emits it. A refusal that still names
+    // it must escalate to a person, naming the exact unrunnable step — and
+    // must NOT reach the re-merge service by guessing at an equivalent drill.
     const h = harness({
       reason: "yrd: change 'PR1791' needs a certified refresh; run 'yrd pr recut PR1791 --preflight --queue --apply'",
     })
@@ -209,13 +212,13 @@ describe("habitant refusal remedies — only PR-local drills are self-applied", 
 
     expect(outcomes).toEqual([
       expect.objectContaining({
-        status: "applied",
+        status: "escalated",
         pr: "PR1791",
-        verdict: "RECUT",
-        commands: ["yrd pr recut PR1791 --preflight --queue --apply", "yrd pr submit task/22474-carrier"],
+        reason:
+          "remedy step 'yrd pr recut PR1791 --preflight --queue --apply' is not a mechanical Yrd redelivery command",
       }),
     ])
-    expect(h.ops()).toContain("services.recut")
+    expect(h.ops()).not.toContain("services.recut")
   })
 
   it("runs the FORCE spelling when the preflight verdict says a green check would be discarded", async () => {
