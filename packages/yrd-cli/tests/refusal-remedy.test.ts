@@ -126,10 +126,10 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     expect(remedy.kind).toBe("judgment")
   })
 
-  it("keeps the R-b escape-hatch recut drill parseable and self-applicable for a live change", () => {
-    // The CLI verb is retired, but the bay's public recut command remains the
-    // sanctioned drill for untracked changes, wedge repair, and pre-TD
-    // adoption; a refusal that prints it still self-applies.
+  it("escalates a retired recut spelling instead of executing it", () => {
+    // The `pr recut` verb is gone and no projection prints it any more. A
+    // stored or hand-written remedy still naming it must escalate loudly by
+    // name — never be silently skipped, and never be run as some other drill.
     const remedy = classifyRefusalRemedy(
       {
         code: "composition-invalid",
@@ -138,21 +138,9 @@ describe("refusal remedy classification — self-applicable vs judgment-required
       { branch: "task/22474", delivery: "submitted" },
     )
 
-    expect(remedy).toEqual({
-      kind: "self-applicable",
-      steps: [{ verb: "recut", pr: Change, preflight: true, apply: true, queue: true, force: false }],
-    })
-  })
-
-  it("refuses the escape-hatch recut drill for a terminal change", () => {
-    const remedy = classifyRefusalRemedy(
-      {
-        code: "composition-invalid",
-        message: `yrd: change '${Change}' needs a certified refresh; run 'yrd pr recut ${Change} --preflight --queue --apply'`,
-      },
-      { branch: "task/22474", delivery: "integrated" },
-    )
-
     expect(remedy.kind).toBe("judgment")
+    if (remedy.kind !== "judgment") return
+    expect(remedy.reason).toContain(`yrd pr recut ${Change} --preflight --queue --apply`)
+    expect(remedy.reason).toContain("not a mechanical Yrd redelivery command")
   })
 })

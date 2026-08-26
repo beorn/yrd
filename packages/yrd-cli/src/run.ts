@@ -10382,20 +10382,6 @@ async function applyRefusalRemedy(
   let verdict: RemergePreflightVerdict | undefined
   for (const step of steps) {
     commands.push(formatRemedyCommand(step))
-    // The R-b escape hatch: a printed recut drill (untracked changes, wedge
-    // repair, pre-TD adoption) executes exactly as before — the verdict is
-    // consumed in-process, never re-parsed from the printed string.
-    if (step.verb === "recut") {
-      if (step.preflight !== true) {
-        await executeRemergeChange(app, services, step.pr, { queue: step.queue, force: step.force, admit: false }, io)
-        continue
-      }
-      const preflight = await preflightRemerge(app, step.pr, { queue: step.queue }, io)
-      commands.push(preflight.next)
-      await applyPreflightVerdict(app, services, preflight, io)
-      verdict = preflight.verdict
-      continue
-    }
     // A create step, or a submit naming a DIFFERENT branch, is a plain
     // redelivery. The submit step for the change under remedy is honoured
     // through the implicit re-merge preflight instead of a blind re-record:
