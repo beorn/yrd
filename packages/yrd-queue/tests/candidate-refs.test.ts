@@ -210,7 +210,7 @@ describe("candidate refs", () => {
   it("reports a ref no journaled Candidate claims, and never calls it reclaimable", async () => {
     // The ~2000-ref case: `compactQueuesState` bounds terminal run trees, so the
     // journal can no longer explain an old ref at all. Terminality is unprovable,
-    // so the ruling in docs/design.md keeps it.
+    // so the ruling in /hh/docs/design/yrd.md keeps it.
     const orphan = sha("4")
     const result = await sweepCandidateRefs(
       fakeGit([{ ref: `${CANDIDATE_REF_NAMESPACE}/C17`, sha: orphan, ageMs: 900 * DAY_MS }]),

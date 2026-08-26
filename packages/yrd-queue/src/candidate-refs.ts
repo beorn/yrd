@@ -61,7 +61,7 @@ export function sourceCandidateRefFor(sha: string): string {
 /**
  * Retention for root Candidate refs.
  *
- * Seven days, deliberately the SAME window `docs/design.md` already states for
+ * Seven days, deliberately the SAME window `/hh/docs/design/yrd.md` already states for
  * content-addressed source-candidate refs. Operators should learn one number for
  * "how long is Candidate evidence kept", not two.
  */
@@ -204,7 +204,7 @@ function liveCandidateOwners(
  * Candidate owns the ref, no live Run names it, the window has passed, and the
  * ref still resolves to the SHA this same inventory read. Unknown, unclaimed and
  * unclocked refs are reported and retained, per the retention ruling in
- * `docs/design.md`.
+ * `/hh/docs/design/yrd.md`.
  */
 export async function sweepCandidateRefs(
   git: RefGit,
@@ -304,7 +304,7 @@ export type CandidateRefPruneResult = Readonly<{
  *
  * Anything not classified `reclaimable` is ignored outright: unclaimed, live,
  * within-retention and unclocked refs are never candidates for deletion, per the
- * retention ruling in `docs/design.md`.
+ * retention ruling in `/hh/docs/design/yrd.md`.
  */
 export async function pruneCandidateRefs(
   git: RefGit,

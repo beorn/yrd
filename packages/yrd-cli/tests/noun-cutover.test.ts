@@ -88,7 +88,6 @@ describe("noun cutover ratchet", () => {
     const violations = [
       join(root, "README.md"),
       join(root, "ARCHITECTURE.md"),
-      join(root, "TODO.md"),
       ...scannedFiles(join(root, "packages", "yrd-cli", "src")),
     ].flatMap((file) =>
       readFileSync(file, "utf8")
@@ -225,11 +224,9 @@ describe("noun cutover ratchet", () => {
     for (const file of [
       join(root, "README.md"),
       join(root, "ARCHITECTURE.md"),
-      join(root, "TODO.md"),
       join(root, "package.json"),
       join(root, "bun.lock"),
       ...scannedFiles(join(root, "bin")),
-      ...scannedFiles(join(root, "docs")),
       ...scannedFiles(join(root, "packages")),
       ...scannedFiles(join(root, "scripts")),
     ]) {

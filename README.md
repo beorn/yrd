@@ -1,4 +1,4 @@
-<!-- README-as-spec: this document describes the intended shipped state as present fact. Open gaps are acceptance work in TODO.md. -->
+<!-- README-as-spec: this document describes the intended shipped state as present fact. Open gaps are acceptance work in /hh/hub/yrd/TODO.md. -->
 
 # Yrd
 
@@ -1795,5 +1795,5 @@ When Yrd is source-linked as a submodule inside a larger monorepo, use `bun chec
 that explicit config supplies sibling source declarations without leaking them
 into standalone package resolution.
 The focused Vitest files under each package are executable contracts for the
-same public flows. [TODO.md](TODO.md) contains only open acceptance work and
+same public flows. [/hh/hub/yrd/TODO.md](/hh/hub/yrd/TODO.md) contains only open acceptance work and
 post-cutover fixes; background research stays outside the public repository.
