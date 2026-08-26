@@ -133,7 +133,7 @@ import {
   sourceRepositoryFor,
   takeImplementationSourceAttestation,
 } from "./implementation-source.ts"
-import { ensureWorkspaceDependencies, type LockfileRegenerationEvidence } from "./workspace-provisioning.ts"
+import { ensureWorkspaceDependencies, type LockfileRegenerationEvidence } from "@yrd/grove"
 import { submoduleManifestDrift } from "./submodule-manifest-drift.ts"
 import { withGitIndexLockRetry } from "./git-index-lock-retry.ts"
 import {
@@ -179,7 +179,7 @@ import {
   yrdQueueRunnerCheckRequested,
 } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
-import { retainedWorkspaceNote, type RetainedWorkspace } from "./workspace-retention.ts"
+import { retainedWorkspaceNote, type RetainedWorkspace } from "@yrd/grove"
 import type {
   YrdCliApp,
   YrdCliCheckResult,

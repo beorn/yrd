@@ -1,3 +1,5 @@
 export * from "./model.ts"
 export * from "./git.ts"
 export * from "./deployment.ts"
+export * from "./workspace-provisioning.ts"
+export * from "./workspace-retention.ts"

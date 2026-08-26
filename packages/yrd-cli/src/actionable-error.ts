@@ -1,7 +1,7 @@
 import { dirname } from "node:path"
 import type { ChangeDeliveryState } from "@yrd/bay"
 import { failureSlug } from "./failure-slug.ts"
-import { retainedWorkspaceFromMessage, type RetainedWorkspace } from "./workspace-retention.ts"
+import { retainedWorkspaceFromMessage, type RetainedWorkspace } from "@yrd/grove"
 
 export type FailureLike = Readonly<{ code: string; message: string; resolution?: readonly string[] }>
 

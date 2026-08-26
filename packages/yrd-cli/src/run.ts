@@ -257,8 +257,7 @@ import {
   type HabitantSourceRecycle,
   type HabitantSourceStall,
 } from "./source-staleness.ts"
-import { ensureWorkspaceDependencies } from "./workspace-provisioning.ts"
-import { retainedWorkspaceNote } from "./workspace-retention.ts"
+import { ensureWorkspaceDependencies, retainedWorkspaceNote } from "@yrd/grove"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import {
   addedSubmodulePins,

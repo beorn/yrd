@@ -28,6 +28,7 @@
         "@silvery/signals": "^0.24.0",
         "@yrd/config": "workspace:*",
         "@yrd/core": "workspace:*",
+        "@yrd/grove": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/persistence": "workspace:*",
         "@yrd/process": "workspace:*",
@@ -46,6 +47,7 @@
         "@yrd/config": "workspace:*",
         "@yrd/contest": "workspace:*",
         "@yrd/core": "workspace:*",
+        "@yrd/grove": "workspace:*",
         "@yrd/issue": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/persistence": "workspace:*",
@@ -97,6 +99,17 @@
         "canonicalize": "^3.0.0",
         "loggily": "^0.10.2",
         "uuid": "^11.1.0",
+        "zod": "^4.4.3",
+      },
+    },
+    "packages/yrd-grove": {
+      "name": "@yrd/grove",
+      "version": "0.0.1",
+      "dependencies": {
+        "@yrd/core": "workspace:*",
+        "@yrd/job": "workspace:*",
+        "@yrd/process": "workspace:*",
+        "git-super": "^0.1.0",
         "zod": "^4.4.3",
       },
     },
@@ -327,6 +340,8 @@
     "@yrd/contest": ["@yrd/contest@workspace:packages/yrd-contest"],
 
     "@yrd/core": ["@yrd/core@workspace:packages/yrd-core"],
+
+    "@yrd/grove": ["@yrd/grove@workspace:packages/yrd-grove"],
 
     "@yrd/issue": ["@yrd/issue@workspace:packages/yrd-issue"],
 
