@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
-import { Fragment, createElement } from "react"
+import { createElement } from "react"
 import * as z from "zod"
 import {
   CompositionV1Schema,
@@ -45,7 +45,6 @@ import {
   type MaterializeDeploymentInput,
   type ReleaseDeploymentJobInput,
 } from "@yrd/bay"
-import { CompetitorDefSchema, type CompetitorDef, type Contest } from "@yrd/contest"
 import {
   compareNatural,
   createFailure,
@@ -75,8 +74,6 @@ import {
   InstalledStepSchema,
   IntentRecordIdSchema,
   MERGE_RECORD_REF,
-  mergeJoinedNothing,
-  mergeRecordToStatement,
   Queues,
   pruneCandidateRefs,
   sweepCandidateRefs,
@@ -85,7 +82,6 @@ import {
   sweepUncarriedRefs,
   type CandidateRefSweepResult,
   type QueuesState,
-  type InTotoStatement,
   type MergeRecordBody,
   type ChangeEligibility,
   type UnverifiableMergeRecord,
@@ -106,7 +102,6 @@ import { INSTALLED_PLAN_STALE_RESOLUTION, RUN_PLAN_MISMATCH_RESOLUTION } from ".
 import {
   MAX_CONSECUTIVE_RUNTIME_RELOADS,
   YRD_RUNTIME_RELOADS_ENV,
-  runtimeReloadLineage,
   withRuntimeReloads,
   type RuntimeReloadLineage,
 } from "./runtime-reload.ts"
@@ -116,7 +111,6 @@ import {
   configuration,
   normalizeYrdInvocation,
   refusal,
-  refuseShadowedQueueFilterTerms,
   resolveYrdContext,
   stableJson,
   usage,
@@ -126,11 +120,9 @@ import {
 } from "./invocation.ts"
 import { requireUnqualifiedRunSelector, resolveCanonicalRunSelector } from "./qualified-run-ref.ts"
 import { observeLiveBranch } from "./remote-branch.ts"
-import { getLiveRenderer } from "./live-renderer.ts"
 import {
   type ChangeCheckViewRecord,
   type QueueLogCoverage,
-  latestRunForCurrentRevision,
   projectedChangeStatus,
   queuePauseWarnings,
   queueRunRevisionClocks,
@@ -173,13 +165,7 @@ import {
   type QueueTimelineRunner,
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
-import {
-  preflightRemerge,
-  prunePrs,
-  withdrawPrs,
-  type RemergePreflightResult,
-  type RemergePreflightVerdict,
-} from "./pr-withdraw.ts"
+import { preflightRemerge, type RemergePreflightResult, type RemergePreflightVerdict } from "./pr-withdraw.ts"
 import {
   foldRefusalStall,
   formatRemedyCommand,
@@ -194,7 +180,6 @@ import {
 import { reconcileChangeMerges, type ChangeMerge } from "./pr-merged.ts"
 import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
-import { applyChangeState, changeStateDeps, type ChangeState } from "./change-state.ts"
 import { lifecycleStatus } from "./status-presentation.ts"
 import {
   classifyBayStatus,
@@ -221,13 +206,7 @@ import {
   unbranchedSubmodules,
   type SubmoduleEntry,
 } from "./submodule-tracking.ts"
-import {
-  BayStatusView,
-  ContestStatusView,
-  IssueLensView,
-  type IssueDeliveryRow,
-  type IssueLensRow,
-} from "./status-view.tsx"
+import { BayStatusView, IssueLensView, type IssueDeliveryRow, type IssueLensRow } from "./status-view.tsx"
 import {
   checkTaskStatusOf,
   issueTaskStatusOf,
@@ -274,6 +253,16 @@ import { queueReadFailureMessage, type QueueReadFailure } from "./queue-read-fai
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
 // load. Types are erased, so they stay as a static type-only import.
 import type { QueueArtifactOutput, QueueChangeDiff, QueueWatchFocus, QueueWatchSnapshot } from "./watch-pane.tsx"
+import { registerAdminCommands } from "./commands/admin.ts"
+import { registerBayCommands, registerRootBayCommands } from "./commands/bay.ts"
+import { registerBranchStateCommands } from "./commands/branch-state.ts"
+import { registerChangeCommands } from "./commands/change.ts"
+import { registerCheckCommands } from "./commands/checks.ts"
+import type { CommandRegistrationContext } from "./commands/context.ts"
+import { registerContestCommands } from "./commands/contest.ts"
+import { registerIssueCommands } from "./commands/issue.ts"
+import { registerObserveCommands } from "./commands/observe.ts"
+import { registerQueueCommands, registerQueueLensCommands } from "./commands/queue.ts"
 
 const GIT_TIMEOUT_MS = 30_000
 const GIT_TIMEOUT_CODE = "ETIMEDOUT"
@@ -1838,7 +1827,7 @@ async function runClientDeadMan(
   }
 }
 
-async function checkQueueRunner(
+export async function checkQueueRunner(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
   options: JsonOption,
@@ -2204,7 +2193,7 @@ type RuntimeOptions = {
   continueAdmissions?: () => boolean
 }
 
-type QueueListOptions = Readonly<{
+export type QueueListOptions = Readonly<{
   base?: string
   pr?: string
   status?: string
@@ -2216,9 +2205,9 @@ type QueueListOptions = Readonly<{
   term?: readonly string[]
 }>
 
-type WatchOptions = QueueListOptions
+export type WatchOptions = QueueListOptions
 
-type JsonOption = { json?: boolean }
+export type JsonOption = { json?: boolean }
 
 // Flow metrics default to a 24h horizon (median/p90 wait, run durations,
 // rejection rate, throughput) independent of the tighter listing window; an
@@ -2241,7 +2230,7 @@ const QUEUE_TIMELINE_STATUS_ALIASES: Readonly<Record<string, QueueTimelineStatus
   merged: "integrated",
 }
 
-const QUEUE_TIMELINE_STATUS_HELP =
+export const QUEUE_TIMELINE_STATUS_HELP =
   "comma-separated queued|pending, checking|running, failed|rejected, merged|integrated, other"
 
 function queueTimelineRowLimit(io: YrdCliIO): number {
@@ -2568,13 +2557,13 @@ function issueDeliveryRows(bridge: TrackerBridgeV2): IssueDeliveryRow[] {
 
 export type { RuntimePosture } from "./invocation.ts"
 const RuntimeInvocationCwd = Symbol("yrd.runtime-invocation-cwd")
-const RuntimeChildArgv = Symbol("yrd.runtime-child-argv")
-type RuntimeInvocationIO = YrdCliIO & {
+export const RuntimeChildArgv = Symbol("yrd.runtime-child-argv")
+export type RuntimeInvocationIO = YrdCliIO & {
   [RuntimeInvocationCwd]?: string
   [RuntimeChildArgv]?: readonly string[]
 }
 
-type RuntimeBootstrap = Readonly<{
+export type RuntimeBootstrap = Readonly<{
   ambientCwd: string
   env: NodeJS.ProcessEnv
   /** Lightweight supervisor probe; must not instantiate or replay the Yrd app journal. */
@@ -2591,7 +2580,7 @@ type RuntimeBootstrap = Readonly<{
   >
 }>
 
-function runtimeOptions(io: YrdCliIO): RuntimeOptions {
+export function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   const drainSignal = io.drainSignal
   return {
     runner: io.runner ?? "yrd-cli",
@@ -2601,7 +2590,7 @@ function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   }
 }
 
-function stateOf(app: YrdCliApp): YrdCliState {
+export function stateOf(app: YrdCliApp): YrdCliState {
   return app.state()
 }
 
@@ -2861,7 +2850,7 @@ function selectedBays(state: BaysState, selectors: readonly string[], cwd: strin
   return live
 }
 
-function csv(value: unknown): string[] | undefined {
+export function csv(value: unknown): string[] | undefined {
   if (value === undefined) return undefined
   if (value === true) return []
   const values = Array.isArray(value) ? value : [value]
@@ -2875,7 +2864,12 @@ function csv(value: unknown): string[] | undefined {
   return result
 }
 
-function oneOfAliases(primary: unknown, alias: unknown, primaryName: string, aliasName: string): string | undefined {
+export function oneOfAliases(
+  primary: unknown,
+  alias: unknown,
+  primaryName: string,
+  aliasName: string,
+): string | undefined {
   if (primary !== undefined && alias !== undefined && primary !== alias) {
     usage(`--${primaryName} and --${aliasName} disagree`)
   }
@@ -2926,7 +2920,7 @@ function parseProps(values: unknown): ChangeProps | undefined {
   }
 }
 
-function jsonEnabled(options: JsonOption): boolean {
+export function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
 }
 
@@ -2939,7 +2933,7 @@ function projectQueueSummaryTaskStatus(summary: QueueSummary) {
   }
 }
 
-function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
+export function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
   return {
     ...projectQueueSummaryTaskStatus(result),
     prs: result.prs.map(projectChangeTaskStatus),
@@ -2950,7 +2944,7 @@ function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
   }
 }
 
-function projectEligibilityTaskStatus(eligibility: ChangeEligibility) {
+export function projectEligibilityTaskStatus(eligibility: ChangeEligibility) {
   return {
     ...eligibility,
     checks: { ...eligibility.checks, ...taskStatusFields(checkTaskStatusOf(eligibility.checks)) },
@@ -2967,7 +2961,7 @@ type ChangeListStatusProjection = Omit<ReturnType<typeof projectChangeTaskStatus
     mergedOnBase?: Readonly<Pick<ChangeMerge, "baseSha" | "headSha" | "code">>
   }>
 
-function projectChangeTaskStatusWithEligibility(
+export function projectChangeTaskStatusWithEligibility(
   pr: Change,
   eligibility: ChangeEligibility,
   merge?: ChangeMerge,
@@ -3383,7 +3377,7 @@ function childSucceeded(child: ProcessResult): boolean {
   )
 }
 
-function defaultRunArgv(services: YrdCliServices): readonly string[] {
+export function defaultRunArgv(services: YrdCliServices): readonly string[] {
   const shell = services.environment?.SHELL?.trim()
   return [shell === undefined || shell === "" ? "/bin/sh" : shell]
 }
@@ -3419,7 +3413,7 @@ function guestArgv(services: YrdCliServices, argv: readonly string[]): readonly 
   return argv.length === 0 ? defaultRunArgv(services) : argv
 }
 
-async function enterBay(
+export async function enterBay(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string | undefined,
@@ -3453,7 +3447,7 @@ function exactOperands(left: readonly string[], right: readonly string[]): boole
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
-function bayRunOperands(
+export function bayRunOperands(
   config: string | undefined,
   command: readonly string[] | undefined,
   io: YrdCliIO,
@@ -3473,7 +3467,7 @@ function bayRunOperands(
   usage("bay run could not separate its config from the child command; place the command after --")
 }
 
-function bayInOperands(
+export function bayInOperands(
   selector: string | undefined,
   command: readonly string[] | undefined,
   io: YrdCliIO,
@@ -3611,7 +3605,7 @@ async function prepareResolvedIssueBay(
   return { ...opened, bay: { ...opened.bay, path } }
 }
 
-async function openPersistentBay(
+export async function openPersistentBay(
   app: YrdCliApp,
   services: YrdCliServices,
   arg: string | undefined,
@@ -3632,7 +3626,7 @@ async function openPersistentBay(
   return 0
 }
 
-async function runBaySession(
+export async function runBaySession(
   app: YrdCliApp,
   services: YrdCliServices,
   arg: string | undefined,
@@ -3714,7 +3708,7 @@ async function ensureIssueDraft(
   return { pr, warnings: result.warnings }
 }
 
-async function refreshBays(
+export async function refreshBays(
   app: YrdCliApp,
   selectors: readonly string[],
   options: JsonOption,
@@ -3758,7 +3752,7 @@ export function handoffBayMissingRemedy(selector: string, branch: string): strin
   )
 }
 
-async function certifyBayHandoff(
+export async function certifyBayHandoff(
   app: YrdCliApp,
   selector: string,
   options: Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
@@ -3877,7 +3871,7 @@ async function closeBayWithProcessReap(
   return closed
 }
 
-async function closeBays(
+export async function closeBays(
   app: YrdCliApp,
   services: YrdCliServices,
   selectors: readonly string[],
@@ -4202,7 +4196,7 @@ function activeBayProtections(io: YrdCliIO): readonly YrdBayProtection[] {
   return io.bayProtections ?? parseYrdBayProtections(process.env[YRD_BAY_PROTECTIONS_ENV])
 }
 
-async function bayStatusCommand(
+export async function bayStatusCommand(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { json?: boolean },
@@ -4348,7 +4342,7 @@ function validateBayPruneOptions(options: BayPruneCommandOptions): void {
 }
 
 /** Sweep open bays via the status oracle. Dry-run is the default (22290). */
-async function bayPruneCommand(
+export async function bayPruneCommand(
   app: YrdCliApp,
   services: YrdCliServices,
   options: BayPruneCommandOptions,
@@ -4750,7 +4744,7 @@ function publicationJob(app: YrdCliApp, pr: Change): Job | undefined {
     .toSorted((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0]
 }
 
-function projectPublication(job: Job | undefined): PublicationProjection | undefined {
+export function projectPublication(job: Job | undefined): PublicationProjection | undefined {
   if (job?.definition !== "pr.publish") return undefined
   const input = ChangePublicationInputSchema.parse(job.input)
   if (job.status === "queued") {
@@ -4790,7 +4784,7 @@ function projectPublication(job: Job | undefined): PublicationProjection | undef
   }
 }
 
-async function publishPr(
+export async function publishPr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
@@ -4849,7 +4843,7 @@ async function publishPr(
   )
 }
 
-async function readyPr(
+export async function readyPr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
@@ -5135,7 +5129,7 @@ async function executeRemergeChange(
   return { current, output, result, unchanged, settlement: undefined }
 }
 
-async function reviewPr(
+export async function reviewPr(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ approve?: boolean; reject?: boolean; by?: string; ref?: string; note?: string }>,
@@ -5169,7 +5163,7 @@ async function reviewPr(
   )
 }
 
-async function requestReviewPr(
+export async function requestReviewPr(
   app: YrdCliApp,
   selector: string,
   reviewers: readonly string[],
@@ -5202,7 +5196,7 @@ async function requestReviewPr(
   )
 }
 
-async function commentPr(
+export async function commentPr(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ by?: string; ref?: string; note?: string }>,
@@ -5228,7 +5222,7 @@ async function commentPr(
   )
 }
 
-async function changeChecks(
+export async function changeChecks(
   app: YrdCliApp,
   selectors: readonly string[],
   options: JsonOption & Readonly<{ follow?: boolean }>,
@@ -5393,9 +5387,9 @@ async function resolveSubmitMetadata(
 /** One spelling of the tracking surface across every verb that records it.
  * Tracking is the DEFAULT (tracked-delivery, 2026-08-25); `--track` is the
  * explicit affirmation and `--no-track` the recorded opt-out. */
-const TRACK_OPTION_DESCRIPTION =
+export const TRACK_OPTION_DESCRIPTION =
   "merge into latest (default): the habitant records, preflights, and queues later branch pushes as frozen revisions"
-const NO_TRACK_OPTION_DESCRIPTION =
+export const NO_TRACK_OPTION_DESCRIPTION =
   "opt out of tracking: a moved branch head then refuses instead of being recorded as a revision"
 
 type ChangeSelectionOptions = {
@@ -5683,7 +5677,7 @@ async function refuseSubmitWithoutMergeAuthority(
   refusal(message)
 }
 
-async function applyChangeSelectionVerb(
+export async function applyChangeSelectionVerb(
   app: YrdCliApp,
   services: YrdCliServices,
   selectors: readonly string[],
@@ -5845,7 +5839,7 @@ async function readComposition(path: string | undefined, io: YrdCliIO): Promise<
   }
 }
 
-function requiredPr(app: YrdCliApp, selector: string): Change {
+export function requiredPr(app: YrdCliApp, selector: string): Change {
   return app.bays.pr(selector) ?? requireLiveChange(stateOf(app).bays, selector)
 }
 
@@ -5919,7 +5913,7 @@ function changeQueueRuns(app: YrdCliApp, pr: Change): Run[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
 }
 
-async function listBays(
+export async function listBays(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ all?: boolean; check?: boolean; closed?: boolean }>,
   io: YrdCliIO,
@@ -5993,7 +5987,7 @@ async function listBays(
   )
 }
 
-function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): void {
+export function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): void {
   const bay = resolveBay(stateOf(app).bays, selector)
   if (bay === undefined) refusal(`no bay '${selector}'; run 'yrd bay' to list available Bays`)
   if (bay.status !== "active") {
@@ -6038,7 +6032,7 @@ function changeListRetainedRows<T extends Readonly<{ id: string; state: string }
 // "is the change record open or closed?". `--state open` and `--state closed`
 // filter it directly.
 const CHANGE_LIST_RECORD_STATES: readonly Change["state"][] = ["open", "closed"]
-const CHANGE_LIST_RECORD_STATE_HELP = CHANGE_LIST_RECORD_STATES.join(", ")
+export const CHANGE_LIST_RECORD_STATE_HELP = CHANGE_LIST_RECORD_STATES.join(", ")
 
 // `status` is the derived delivery label — the ChangeDeliveryState union in
 // yrd-bay/src/model.ts — and this is every value the row filter below tests
@@ -6059,9 +6053,9 @@ const CHANGE_LIST_STATES: readonly ChangeDeliveryState[] = [
   "withdrawn",
   "canceled",
 ]
-const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
+export const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
 
-async function listPrs(
+export async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
     Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string }>,
@@ -6179,7 +6173,7 @@ async function listPrs(
   )
 }
 
-async function viewPr(
+export async function viewPr(
   app: YrdCliApp,
   selector: string,
   options: JsonOption,
@@ -6259,7 +6253,7 @@ async function viewPr(
   )
 }
 
-async function viewChangeRuns(
+export async function viewChangeRuns(
   app: YrdCliApp,
   selector: string,
   options: JsonOption,
@@ -6303,7 +6297,7 @@ async function viewChangeRuns(
   )
 }
 
-async function diffPr(
+export async function diffPr(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ stat?: boolean }>,
@@ -6347,7 +6341,7 @@ async function diffPr(
   )
 }
 
-async function checkoutPr(
+export async function checkoutPr(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ bay?: string }>,
@@ -6374,7 +6368,7 @@ async function checkoutPr(
   )
 }
 
-function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
+export function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
   const injected = io.currentBranch?.(cwd)
   if (injected !== undefined) return injected
   try {
@@ -6398,7 +6392,7 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): Change {
   return pr as Change
 }
 
-async function queuedChangePosition(app: YrdCliApp, pr: Change, io: YrdCliIO): Promise<number | undefined> {
+export async function queuedChangePosition(app: YrdCliApp, pr: Change, io: YrdCliIO): Promise<number | undefined> {
   const delivery = changeDeliveryState(pr)
   if (delivery !== "submitted" && delivery !== "ready") return undefined
   return (await queuedChangePositions(app, pr.base, io)).get(pr.id)
@@ -6417,12 +6411,17 @@ async function queuedChangePositions(app: YrdCliApp, base: string, io: YrdCliIO)
   return new Map(ordered.map((id, index) => [id, index + 1]))
 }
 
-async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO, services: YrdCliServices): Promise<void> {
+export async function statusPr(
+  app: YrdCliApp,
+  options: JsonOption,
+  io: YrdCliIO,
+  services: YrdCliServices,
+): Promise<void> {
   const pr = currentPr(app, io)
   await viewPr(app, pr.id, options, io, services, "pr.status")
 }
 
-async function editPr(
+export async function editPr(
   app: YrdCliApp,
   selector: string,
   options: JsonOption &
@@ -6530,7 +6529,7 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
     })
 }
 
-async function ensureIssueDelivery(
+export async function ensureIssueDelivery(
   app: YrdCliApp,
   issue: string,
   options: JsonOption,
@@ -6556,7 +6555,7 @@ async function ensureIssueDelivery(
   return 0
 }
 
-async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
+export async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
   // journalSnapshot is already one immutable state+cursor cut. Re-reading the
   // journal to prove that nobody appended after that cut made an ordinary
   // snapshot query refuse under a live writer even though the first answer was
@@ -6592,7 +6591,7 @@ function resolveRuntimeContext(globals: RuntimeGlobalOptions, bootstrap: Runtime
   return resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
 }
 
-async function runQueues(
+export async function runQueues(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { steps?: unknown },
@@ -6615,7 +6614,7 @@ function queuedPublicationJobs(app: YrdCliApp): readonly Job[] {
   )
 }
 
-async function preparePublicationQueueCycle(
+export async function preparePublicationQueueCycle(
   app: YrdCliApp,
   services: YrdCliServices,
   io: YrdCliIO,
@@ -6662,7 +6661,7 @@ async function preparePublicationQueueCycle(
  * cancel that run; members re-queue and the change stays open. Cancel
  * never withdraws — "stop delivering this" is `mr close --reason`; run both
  * for both effects. A run selector passes through unchanged. */
-async function cancelAttempt(
+export async function cancelAttempt(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ reason?: string }>,
@@ -6684,7 +6683,7 @@ async function cancelAttempt(
   return cancelQueueRun(app, selector, options, io)
 }
 
-async function cancelQueueRun(
+export async function cancelQueueRun(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ reason?: string }>,
@@ -6707,7 +6706,7 @@ async function cancelQueueRun(
   return 0
 }
 
-async function pauseQueue(
+export async function pauseQueue(
   app: YrdCliApp,
   base: string | undefined,
   options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown; for?: unknown }>,
@@ -6819,7 +6818,7 @@ function isPlanFinding(finding: Readonly<{ code: string }>): boolean {
   return finding.code === "installed-plan-stale" || finding.code === "run-plan-mismatch"
 }
 
-function admissionBlockedChanges(
+export function admissionBlockedChanges(
   app: YrdCliApp,
   selectedChangeIds?: ReadonlySet<string>,
 ): Array<Readonly<{ pr: Change; eligibility: ChangeEligibility }>> {
@@ -6836,7 +6835,12 @@ function admissionBlockedChanges(
     .toSorted((left, right) => compareNatural(left.pr.id, right.pr.id))
 }
 
-async function resumeQueue(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
+export async function resumeQueue(
+  app: YrdCliApp,
+  base: string | undefined,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
   const target = await resolvedQueueTarget(selectedBase(stateOf(app), base ?? "main"), io)
   await app.queue.resume(target.base)
   await printResult(
@@ -6926,7 +6930,7 @@ function queueBases(state: YrdCliState): string[] {
   ].toSorted()
 }
 
-type QueueListSnapshot = QueueWatchSnapshot &
+export type QueueListSnapshot = QueueWatchSnapshot &
   Readonly<{ projection: QueueTimelineProjection; state: YrdCliState["bays"] }>
 
 function queueRunnerRefusal(app: Pick<YrdCliApp, "queue">): QueueRunnerRefusal | undefined {
@@ -7653,7 +7657,7 @@ export function createQueueListSnapshotLoader(
   }
 }
 
-async function listQueues(
+export async function listQueues(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
@@ -7687,7 +7691,7 @@ async function listQueues(
   )
 }
 
-async function dashboard(
+export async function dashboard(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ base?: string }>,
   io: YrdCliIO,
@@ -7741,7 +7745,7 @@ function renderInitTable(rows: readonly InitRow[]): string {
  * and left unset. Existing branch values are never overwritten. The edit is
  * left uncommitted for the operator to review. `--dry-run` writes nothing.
  */
-async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+export async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const dryRun = options.dryRun === true
   const json = jsonEnabled(options)
   const cwd = io.cwd ?? process.cwd()
@@ -7980,7 +7984,7 @@ async function resolveQueueLogSubjects(
   return subjects
 }
 
-async function logRuns(
+export async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
   options: QueueLogOptions,
@@ -8174,7 +8178,7 @@ export function isYrdRuntimeReloadRequest(error: unknown): error is YrdRuntimeRe
   return error instanceof YrdRuntimeReloadRequest
 }
 
-async function queueAudit(
+export async function queueAudit(
   app: YrdCliApp,
   services: YrdCliServices,
   options: JsonOption,
@@ -8309,7 +8313,7 @@ function createUncarriedSweeper(
   }
 }
 
-async function queueUncarried(
+export async function queueUncarried(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ base?: string; namespace?: string }>,
   io: YrdCliIO,
@@ -8413,7 +8417,7 @@ async function queueUncarried(
  * prune`. Inventory lives in `yrd doctor` (candidateRefDoctorFinding); this
  * command sweeps the namespace and deletes exactly the refs that same pass
  * proved reclaimable. Unclaimed and live refs are always retained. */
-async function adminPruneCandidateRefs(
+export async function adminPruneCandidateRefs(
   app: YrdCliApp,
   options: JsonOption & Readonly<{ retentionDays?: string }>,
   io: YrdCliIO,
@@ -8516,7 +8520,7 @@ type MergeRepair =
  * `2026-08-12T21:30:00.000+02:00` are 30 minutes apart, and neither string order
  * nor `localeCompare` puts them in that order. Compare the instants.
  */
-function mergeInstant(record: MergeRecordBody): number {
+export function mergeInstant(record: MergeRecordBody): number {
   const at = Date.parse(record.merge.finishedAt)
   if (Number.isNaN(at)) {
     configuration(`merge-record '${record.merge.id}' has an unparseable finishedAt '${record.merge.finishedAt}'`)
@@ -8534,7 +8538,7 @@ function mergeInstant(record: MergeRecordBody): number {
  * reporting: the bulk path names every skip, the selector path stays quiet, and
  * only the bulk path treats a merged record with no merged commit as a refusal.
  */
-function mergeRepair(record: MergeRecordBody, pr: JournalPR): MergeRepair {
+export function mergeRepair(record: MergeRecordBody, pr: JournalPR): MergeRepair {
   const revision = currentChangeRev(pr)
   const change = record.changes.find((entry) => entry.pr === pr.id)
   if (change?.changeId === undefined) {
@@ -9015,7 +9019,7 @@ async function retentionDoctor(app: YrdCliApp, io: YrdCliIO): Promise<RetentionD
   }
 }
 
-async function configDoctor(
+export async function configDoctor(
   app: YrdCliApp,
   services: YrdCliServices,
   options: JsonOption &
@@ -9102,7 +9106,7 @@ async function configDoctor(
   return unrebuilt ? 1 : 0
 }
 
-async function journalImportOrphan(
+export async function journalImportOrphan(
   services: YrdCliServices,
   sourcePath: string,
   options: JsonOption,
@@ -9233,7 +9237,7 @@ async function runRequiredChecks(
  * reproduce by hand and what the hook enforces cannot drift into two different
  * rules. Bare `yrd guard` runs every configured guard; naming one runs only it.
  */
-async function guardRequired(
+export async function guardRequired(
   services: YrdCliServices,
   names: readonly string[],
   options: JsonOption,
@@ -9259,7 +9263,7 @@ async function guardRequired(
   )
 }
 
-async function checkRequired(
+export async function checkRequired(
   services: YrdCliServices,
   names: readonly string[],
   options: JsonOption,
@@ -9275,7 +9279,7 @@ async function checkRequired(
   )
 }
 
-async function initYrdConfig(services: YrdCliServices, options: JsonOption, io: YrdCliIO): Promise<void> {
+export async function initYrdConfig(services: YrdCliServices, options: JsonOption, io: YrdCliIO): Promise<void> {
   const cwd = io.cwd ?? process.cwd()
   const path = join(cwd, ".yrd.yml")
   if (existsSync(path)) refusal(`'${path}' already exists`)
@@ -9289,7 +9293,7 @@ async function initYrdConfig(services: YrdCliServices, options: JsonOption, io: 
   )
 }
 
-async function bumpJournal(
+export async function bumpJournal(
   services: YrdCliServices,
   version: number,
   options: JsonOption,
@@ -9331,7 +9335,7 @@ async function bumpJournal(
  * post-item-2 evidence. `yrd doctor` is the inventory (it reports orphans with
  * the denominator), and `yrd admin candidate-refs prune` is the one actuator.
  */
-function refuseRetiredQueueCandidateRefs(): never {
+export function refuseRetiredQueueCandidateRefs(): never {
   // The retired verb is deliberately NOT quoted: a quoted `yrd ...` in a
   // failure message is lifted into its `resolution`, and the one command this
   // must never recommend is itself.
@@ -9343,7 +9347,7 @@ function refuseRetiredQueueCandidateRefs(): never {
   )
 }
 
-function refuseRetiredQueueRecover(): never {
+export function refuseRetiredQueueRecover(): never {
   // The retired verb is deliberately NOT quoted: a quoted `yrd ...` in a
   // failure message is lifted into its `resolution`, and the one command this
   // must never recommend is itself.
@@ -9356,7 +9360,7 @@ function refuseRetiredQueueRecover(): never {
   )
 }
 
-function refuseRetiredQueueAdministration(command: "init" | "deinit"): never {
+export function refuseRetiredQueueAdministration(command: "init" | "deinit"): never {
   // The retired verb is deliberately NOT quoted: a quoted `yrd …` in a failure
   // message is lifted into its `resolution`, and the one command this must
   // never recommend is itself.
@@ -9381,7 +9385,7 @@ function positiveInteger(value: unknown, label: string): number | undefined {
   return value as number
 }
 
-function artifacts(values: unknown): readonly { name: string; uri: string }[] | undefined {
+export function artifacts(values: unknown): readonly { name: string; uri: string }[] | undefined {
   const items = csv(values)
   if (items === undefined) return undefined
   return items.map((item) => {
@@ -9399,7 +9403,7 @@ function jsonRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-async function finishQueue(
+export async function finishQueue(
   app: YrdCliApp,
   selector: string,
   options: {
@@ -10956,522 +10960,8 @@ async function sleepUntilDrain(sleep: Promise<void>, signal: AbortSignal | undef
   })
 }
 
-async function watchQueue(
-  app: YrdCliApp,
-  filters: readonly string[],
-  options: WatchOptions,
-  io: YrdCliIO,
-  services: YrdCliServices,
-): Promise<YrdCliExitCode> {
-  const interval = 15_000
-  const scope = io.scope ?? app.scope
-  const query = createQueueListSnapshotLoader(app, filters, options, io, services, !jsonEnabled(options))
-  const load = (focus?: QueueWatchFocus): Promise<QueueListSnapshot> => query.load(focus)
-
-  if (!jsonEnabled(options)) {
-    io.stderr(`yrd watch runtime: ${formatYrdRuntimeVersion()}\n`)
-    const renderLive = getLiveRenderer(io)
-    if (renderLive === undefined) {
-      refusal("watch requires an interactive terminal; use --json for streaming output")
-    }
-    const initial = await load()
-    const { QueueWatchPane } = await import("./watch-pane.tsx")
-    await renderLive(
-      createElement(QueueWatchPane, {
-        initial,
-        load,
-        intervalMs: interval,
-        ...(options.pr === undefined ? {} : { pr: options.pr }),
-        // The watch `x`+confirm affordance shares the CLI's cancel path exactly:
-        // cancel journals a run cancellation whose PRs re-queue (not reject), and
-        // the pane's poll loop reflects it on the next cycle.
-        onCancelRun: async (run: string) => {
-          await app.queue.cancelRun({ run, by: io.runner ?? "operator", reason: "run canceled from watch" })
-        },
-      }),
-      {
-        signal: scope.signal,
-      },
-    )
-    return 0
-  }
-
-  while (true) {
-    const snapshot = await load()
-    await printResultWithWarnings(
-      io,
-      true,
-      {
-        command: "queue.list",
-        projection: snapshot.projection,
-        results: snapshot.results.map(projectQueueStatusResultTaskStatus),
-        ...(snapshot.readFailure === undefined ? {} : { readFailure: snapshot.readFailure }),
-      },
-      createElement(QueueTimelineView, {
-        repositoryRoot: snapshot.repositoryRoot,
-        projection: snapshot.projection,
-        runnerRefusal: snapshot.runnerRefusal,
-        results: snapshot.results,
-        state: snapshot.state,
-        columns: io.columns ?? 120,
-      }),
-      [
-        ...queuePauseWarnings(snapshot.state, snapshot.results),
-        ...staleDraftWarnings(snapshot.staleDrafts ?? []),
-        ...needsPersonWarnings(snapshot.needsPerson ?? []),
-        ...(snapshot.readFailure === undefined ? [] : [queueReadFailureMessage(snapshot.readFailure, true)]),
-      ],
-    )
-    if (scope.signal.aborted) return 0
-    await scope.sleep(interval)
-    if (scope.signal.aborted) return 0
-  }
-}
-
-function competitors(input: string): readonly CompetitorDef[] {
-  let value: unknown
-  try {
-    value = JSON.parse(input)
-  } catch {
-    usage("--competitors must be JSON")
-  }
-  const parsed = CompetitorDefSchema.array().min(2).safeParse(value)
-  if (!parsed.success) {
-    usage("--competitors must be a JSON array with at least two {id,runner,config} entries")
-  }
-  return parsed.data
-}
-
-async function advanceContest(app: YrdCliApp, contest: string, io: YrdCliIO, retry = false): Promise<Contest> {
-  const concurrency = io.concurrency ?? 8
-  if (!Number.isInteger(concurrency) || concurrency < 1) usage("contest concurrency must be a positive integer")
-  return app.contests.evaluate(contest, { ...runtimeOptions(io), concurrency, retry })
-}
-
-async function openContest(
-  app: YrdCliApp,
-  issueInput: string,
-  options: { competitors?: string; evaluators?: unknown; base?: string; queue?: string; json?: boolean },
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  if (options.competitors === undefined) usage("contest open requires --competitors <json>")
-  const issue = await app.issues.resolve(app.issues.ref(issueInput))
-  const requestedBase = oneOfAliases(options.base, options.queue, "base", "queue")
-  const base = await app.contests.resolveBase(requestedBase)
-  const opened = await app.contests.compete({
-    issue,
-    competitors: competitors(options.competitors),
-    ...(csv(options.evaluators) === undefined ? {} : { evaluators: csv(options.evaluators) }),
-    base: base.base,
-    baseSha: base.sha,
-  })
-  const contest = await advanceContest(app, opened.id, io)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "contest.open", contest },
-    createElement(ContestStatusView, { contest }),
-  )
-  return contest.status === "failed" ? 1 : 0
-}
-
-async function viewContest(app: YrdCliApp, id: string, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const contest = app.contests.get(id)
-  if (contest === undefined) refusal(`no contest '${id}'`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "contest.view", contest },
-    createElement(ContestStatusView, { contest }),
-  )
-}
-
-async function evalContest(
-  app: YrdCliApp,
-  id: string,
-  options: { retry?: boolean; json?: boolean },
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  const contest = await advanceContest(app, id, io, options.retry === true)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "contest.eval", contest },
-    createElement(ContestStatusView, { contest }),
-  )
-  return contest.status === "failed" ? 1 : 0
-}
-
-async function finishContest(
-  app: YrdCliApp,
-  id: string,
-  options: {
-    attempt?: string
-    evaluator?: string
-    ok?: boolean
-    fail?: boolean
-    error?: string
-    token?: string
-    detail?: string
-    artifact?: unknown
-    json?: boolean
-  },
-  io: YrdCliIO,
-): Promise<void> {
-  const errorCode = options.error?.trim()
-  if (options.error !== undefined && errorCode === "") usage("contest finish --error requires a non-empty code")
-  const outcomes = Number(options.ok === true) + Number(options.fail === true) + Number(errorCode !== undefined)
-  if (outcomes !== 1) usage("contest finish requires exactly one of --ok, --fail, or --error")
-  if (options.token === undefined || options.token === "") usage("contest finish requires --token <token>")
-  const recordedArtifacts = artifacts(options.artifact)?.map(({ name, uri }) => ({ kind: name, uri })) ?? []
-  if (errorCode !== undefined && recordedArtifacts.length > 0) {
-    usage("contest finish --artifact records evaluator verdict evidence and cannot be used with --error")
-  }
-  const contest = await app.contests.finish({
-    contest: id,
-    ...(options.attempt === undefined ? {} : { attempt: options.attempt }),
-    ...(options.evaluator === undefined ? {} : { evaluator: options.evaluator }),
-    token: options.token,
-    result:
-      errorCode === undefined
-        ? {
-            status: "completed",
-            conclusion: "success",
-            output: {
-              verdict: options.ok === true ? "passed" : "failed",
-              ...(options.detail === undefined ? {} : { summary: options.detail }),
-              artifacts: recordedArtifacts,
-            },
-          }
-        : {
-            status: "completed",
-            conclusion: "failure",
-            error: {
-              code: errorCode,
-              message: options.detail?.trim() || `remote evaluator failed (${errorCode})`,
-            },
-          },
-  })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "contest.finish", contest },
-    createElement(ContestStatusView, { contest }),
-  )
-}
-
-async function selectContest(
-  app: YrdCliApp,
-  id: string,
-  options: { winner?: string; by?: string; reason?: string; json?: boolean },
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.winner === undefined || options.winner === "") usage("contest select requires --winner <attempt>")
-  const contest = await app.contests.select({
-    contest: id,
-    attempt: options.winner,
-    ...(options.by === undefined ? {} : { selectedBy: options.by }),
-    ...(options.reason === undefined ? {} : { reason: options.reason }),
-  })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "contest.select", contest },
-    createElement(ContestStatusView, { contest }),
-  )
-}
-
-async function promoteContest(app: YrdCliApp, id: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const concurrency = io.concurrency ?? 8
-  if (!Number.isInteger(concurrency) || concurrency < 1) usage("contest concurrency must be a positive integer")
-  const contest = await app.contests.promote({ contest: id }, { ...runtimeOptions(io), concurrency })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "contest.promote", contest },
-    createElement(ContestStatusView, { contest }),
-  )
-  return contest.status === "promotion-failed" ? 1 : 0
-}
-
-async function listContests(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const contests = app.contests.list()
-  const human =
-    contests.length === 0
-      ? "No contests."
-      : [
-          "CONTEST ISSUE STATUS",
-          ...contests.map(
-            (contest) => `${contest.id} ${contest.issue.ref.source}:${contest.issue.ref.id} ${contest.status}`,
-          ),
-        ].join("\n")
-  await printResult(io, jsonEnabled(options), { command: "contest.list", contests }, human)
-}
-
-async function refuseChangeMerge(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) {
-    const next = `yrd pr submit ${selector}`
-    const message = `the queue is the only merger; branch '${selector}' is not submitted; submit it: ${next}`
-    const guidance = {
-      command: "pr.merge",
-      branch: selector,
-      status: "not-submitted",
-      next,
-      guidance: { submit: next },
-      failure: { kind: "refusal", code: "queue-only-merger", message },
-    }
-    if (jsonEnabled(options)) {
-      io.stderr(stableJson(guidance))
-      return 1
-    }
-    refusal(message)
-  }
-
-  const position = await queuedChangePosition(app, pr, io)
-  const detail = changeMergeRefusalDetail(pr, position, latestRunForCurrentRevision(pr, app.queue.status(pr.base)))
-  const message = `the queue is the only merger; ${detail.message}`
-  const guidance = {
-    command: "pr.merge",
-    pr: pr.id,
-    status: changeDeliveryState(pr),
-    ...(detail.run === undefined ? {} : { run: detail.run, outcome: detail.outcome }),
-    ...(position === undefined ? {} : { position }),
-    next: detail.next,
-    guidance: detail.guidance,
-    failure: { kind: "refusal", code: "queue-only-merger", message },
-  }
-  if (jsonEnabled(options)) {
-    io.stderr(stableJson(guidance))
-    return 1
-  }
-  refusal(message)
-}
-
-function changeMergeRefusalDetail(
-  pr: Change,
-  position: number | undefined,
-  latestRun: Run | undefined,
-): Readonly<{
-  next: string
-  guidance: Readonly<Record<string, string>>
-  message: string
-  run?: string
-  outcome?: "rejected"
-}> {
-  const delivery = changeDeliveryState(pr)
-  const projectedStatus = projectedChangeStatus(pr)
-  if (latestRun?.status === "completed" && latestRun.conclusion === "failure") {
-    const inspect = `yrd pr runs ${pr.id}`
-    const resubmit = "fix the branch and run yrd pr submit again"
-    return {
-      next: inspect,
-      guidance: { inspect, resubmit },
-      message: `change '${pr.id}' latest Run '${latestRun.id}' was rejected; see: ${inspect}; then ${resubmit}`,
-      run: latestRun.id,
-      outcome: "rejected",
-    }
-  }
-  if (currentChangeRev(pr).admission?.status === "refused") {
-    const inspect = `yrd pr checks ${pr.id}`
-    const resubmit = "fix the branch and run yrd pr submit again"
-    return {
-      next: inspect,
-      guidance: { inspect, resubmit },
-      message: `change '${pr.id}' current revision failed required checks; see: ${inspect}; then ${resubmit}`,
-    }
-  }
-  if (delivery === "submitted" || delivery === "ready") {
-    const watch = `yrd watch --pr ${pr.id}`
-    return {
-      next: watch,
-      guidance: { watch },
-      message: `change '${pr.id}' is queued${position === undefined ? "" : ` at position ${position}`}; watch: ${watch}`,
-    }
-  }
-  if (delivery === "rejected") {
-    const inspect = `yrd pr runs ${pr.id}`
-    const fixPush = "fix the branch and push; the same PR resumes automatically"
-    return {
-      next: inspect,
-      guidance: { inspect, fixPush },
-      message: `change '${pr.id}' ${projectedStatus === "needs-author" ? "needs author changes" : "was rejected"}; see: ${inspect}; then ${fixPush}`,
-    }
-  }
-  if (delivery === "pushed") {
-    const submit = `yrd pr submit ${pr.branch}`
-    return { next: submit, guidance: { submit }, message: `change '${pr.id}' is not queued; submit it: ${submit}` }
-  }
-  const view = `yrd pr view ${pr.id}`
-  return { next: view, guidance: { view }, message: `change '${pr.id}' is ${delivery}; see: ${view}` }
-}
-
 function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
-}
-
-/**
- * The in-toto Statement projection over a durable merge record, for `--json`
- * consumers that want the merge in attestation shape.
- *
- * `builderId` is the queue that produced the merge. It is deliberately not a
- * `MergeRecordBody` field — the record is checksummed and the projection is free
- * to change — so it comes from the journal's own run. Both ways the projection
- * can be absent are named rather than dropped from the payload: a refused or
- * canceled attempt minted no merged commit to be the Statement's subject, and a
- * record whose run the journal has never seen has no builder to attribute.
- */
-function mergeStatement(
-  app: YrdCliApp,
-  record: MergeRecordBody,
-): Readonly<{ statement: InTotoStatement }> | Readonly<{ statementUnavailable: string }> {
-  const run = Queues.resolve(stateOf(app).queues, record.merge.id)
-  if (run === undefined) {
-    return {
-      statementUnavailable: `run '${record.merge.id}' is not in the journal, so the attesting queue is unknown`,
-    }
-  }
-  const statement = mergeRecordToStatement(record, run.queueId)
-  return statement === undefined
-    ? {
-        statementUnavailable: `merge '${record.merge.id}' is ${record.merge.result}, so it minted no merged commit to attest`,
-      }
-    : { statement }
-}
-
-async function explainMerge(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  selector: string,
-  options: JsonOption & Readonly<{ repair?: boolean }>,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  if (services.mergeRecords !== undefined) {
-    const proof = await services.mergeRecords.find(selector)
-    if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
-      // The refusal is correct — a single answer must not come from a partially
-      // verified estate — but it was indistinguishable from "your merge is
-      // broken", and for two days it was the SAME text for every selector. So say
-      // the one thing that separates those: whether THIS selector's own record
-      // verified, and how many records the estate could not prove.
-      const isolated = await services.mergeRecords.all()
-      const own =
-        isolated.status === "proven"
-          ? isolated.records.some((entry) =>
-              entry.record.changes.some((change) => change.pr === selector || entry.record.merge.id === selector),
-            )
-          : undefined
-      const unprovable = isolated.status === "proven" ? isolated.unverifiable.length : undefined
-      await printResult(
-        io,
-        jsonEnabled(options),
-        {
-          command: "why",
-          selector,
-          verdict: proof.status,
-          reason: proof.reason,
-          repaired: false,
-          ...(own === undefined ? {} : { selectorRecordVerified: own }),
-          ...(unprovable === undefined ? {} : { unprovableRecords: unprovable }),
-        },
-        [
-          `${proof.status.toUpperCase()} — ${selector}: ${proof.reason}`,
-          own === undefined
-            ? "  the estate could not be enumerated, so this selector's own record is unknown"
-            : own
-              ? `  this selector's OWN record verified — the refusal is the estate's, not this merge's`
-              : `  this selector's own record did not verify either`,
-          unprovable === undefined
-            ? ""
-            : `  ${String(unprovable)} record(s) in the estate cannot prove themselves; ` +
-              "a single answer is not given from a partially verified estate — " +
-              "run `yrd doctor --retract-unprovable` to see them by cause",
-        ]
-          .filter((line) => line !== "")
-          .join("\n"),
-      )
-      return 2
-    }
-    if (proof.status === "proven") {
-      const attempts = [...proof.records].sort((left, right) => mergeInstant(left.record) - mergeInstant(right.record))
-      const latest = attempts.at(-1)
-      if (latest === undefined) configuration("repository merge-record query returned no proven records")
-      const verdict = latest.record.merge.result
-      const reason = latest.record.reason
-      const fix = latest.record.fix
-      let repaired = false
-      const pr = app.bays.pr(selector)
-      if (verdict === "merged" && options.repair === true && pr !== undefined) {
-        const repair = mergeRepair(latest.record, pr)
-        if (repair.status === "repairable") {
-          await app.queue.reconcileMerge(repair.input)
-          repaired = true
-        }
-      }
-      // Nothing-new is a first-class outcome, not a defect: the change was already
-      // contained, so "at <commit>" would print the BASE and read as a fresh merge.
-      // Derived here by predicate — the record stores the facts, never the label.
-      const nothingNew = mergeJoinedNothing(latest.record)
-      const human =
-        verdict === "merged"
-          ? nothingNew
-            ? `MERGED — ${selector} via ${latest.record.merge.id}: already up to date — ` +
-              `joined nothing new to '${latest.record.merge.base}' at ${latest.record.merge.baseSha}`
-            : `MERGED — ${selector} via ${latest.record.merge.id} at ${latest.record.merge.mergedCommit}`
-          : `${verdict.toUpperCase()} — ${latest.record.merge.id}: ${reason?.code ?? "unknown"}: ${reason?.message ?? "no reason recorded"}${fix === undefined ? "" : ` — fix: ${fix}`}`
-      await printResult(
-        io,
-        jsonEnabled(options),
-        {
-          command: "why",
-          selector,
-          verdict,
-          ...(nothingNew ? { nothingNew } : {}),
-          repaired,
-          record: latest.record,
-          pointer: latest.pointer,
-          attempts,
-          ...mergeStatement(app, latest.record),
-        },
-        human,
-      )
-      return verdict === "merged" ? 0 : 1
-    }
-  }
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command: "why", selector, verdict: "not-proven", reason: "merge-record-missing", repaired: false },
-      `NOT-PROVEN — ${selector}: merge-record-missing`,
-    )
-    return 1
-  }
-  const revision = currentChangeRev(pr)
-  if (revision.changeId === undefined) {
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command: "why", pr: pr.id, verdict: "legacy-unprovable", repaired: false },
-      `LEGACY-UNPROVABLE — ${pr.id} predates stable Change-Id identity`,
-    )
-    return 1
-  }
-  const indexed = changeDeliveryState(pr) === "integrated"
-  const verdict = indexed ? "index-corrupt" : "not-proven"
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "why", selector, verdict, reason: "merge-record-missing", repaired: false },
-    `${verdict.toUpperCase()} — ${pr.id}: merge-record-missing`,
-  )
-  return indexed ? 2 : 1
 }
 
 type CommanderOutput = { errorCommand?: CliCommand }
@@ -11508,76 +10998,6 @@ function addExamples(program: CliCommand, name: string): void {
     [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
   )
   program.addHelpSection("Examples:", examples)
-}
-
-function addQueueExamples(queue: CliCommand, name: string): void {
-  const repository = `${name} --repo <repository>`
-  queue.addHelpSection("Examples:", [
-    [`$ ${name} queue`, "list active queues"],
-    [`$ ${repository} queue run PR7 --steps check,merge`, "run selected steps for one change"],
-    [`$ ${name} log --base release/2.0`, "show completed work for a base"],
-    [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
-    [`$ ${repository} queue pause --reason maintenance --for 30m --allow PR7`, "pause all but selected PRs"],
-    [`$ ${repository} queue run`, "habitant follow-runner: keep the default queue moving"],
-  ])
-}
-
-function addAuthoredCarrierWorkflow<
-  Options extends Record<string, unknown>,
-  Arguments extends unknown[],
-  ArgumentRecord extends Record<string, unknown>,
->(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
-  command.addHelpSection("Authored root branch:", [
-    [`$ ${name} pr create <branch>`, "record the authored root branch as a draft change"],
-    [
-      `$ ${name} pr submit <branch>`,
-      "tracked changes re-merge implicitly when the branch moves; this is the explicit fallback spelling",
-    ],
-  ])
-}
-
-function addRootBayCommands(
-  program: CliCommand,
-  installed: () => YrdCliApp,
-  installedServices: () => YrdCliServices,
-  io: YrdCliIO,
-  setExit: (code: YrdCliExitCode) => void,
-): void {
-  program
-    .command("in [bay] [command...]")
-    .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
-    .action(async (bay, command) => {
-      const request = bayInOperands(bay, command, io)
-      setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
-    })
-  program
-    .command("sh [config]")
-    .description("run $SHELL in a scoped Bay")
-    .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
-    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
-    .option("--keep", "leave a successful run open")
-    .action(async (config, options) =>
-      setExit(
-        await runBaySession(
-          installed(),
-          installedServices(),
-          config,
-          defaultRunArgv(installedServices()),
-          options,
-          io,
-          { keep: options.keep },
-        ),
-      ),
-    )
-  const run = program.command("run").description("act on individual queue runs")
-  run.helpCommand(false)
-  run
-    .command("cancel <selector>")
-    .description("cancel a waiting or running run; its PRs re-queue for a future drain, they are NOT rejected")
-    .option("--reason <text>", "human-readable cancellation reason")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
 }
 
 function buildProgram(
@@ -11657,245 +11077,21 @@ function buildProgram(
     "Boundaries:",
     "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge only teaches the correct next command.\nThe tracker holds the pen; yrd never creates or edits issues.",
   )
-  program
-    .command("_dashboard", { isDefault: true, hidden: true })
-    .option("--base <branch>", "scope the dashboard to one base")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => dashboard(installed(), options, io))
-  program
-    .command("doctor")
-    .description("diagnose repository configuration and retention warnings")
-    .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
-    .option(
-      "--rebuild-index-from-repo",
-      "rebuild missing pr/integrated index rows for PRs the journal already knows, from every proven " +
-        "merge record in the repository (cannot recreate a change entity the journal has never seen)",
-    )
-    .option(
-      "--retract-unprovable",
-      "list EVERY merge record the repository cannot prove, by cause; add --apply to append a retraction " +
-        "beside each one so the estate verifies again (records are never edited — a retraction is a new " +
-        "note on its own ref, and the original stays byte-identical)",
-    )
-    .option("--apply", "with --retract-unprovable, actually append the retractions instead of listing them")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await configDoctor(installed(), installedServices(), options, io)))
-  program
-    .command("why <selector>")
-    .description("prove one change merge from repository truth and its journal index")
-    .option("--repair", "append a missing pr/integrated index row from repository proof")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      setExit(
-        await explainMerge(
-          installed(),
-          installedServices(),
-          // `yrd why` accepts the canonical `path@branch#N` run address and
-          // the bare `#N` form (items 34/36); the resolver validates the
-          // path half against this repository before stripping it.
-          resolveCanonicalRunSelector(selector, io.repositoryRoot),
-          options,
-          io,
-        ),
-      ),
-    )
-
-  const bay = program
-    .command("bay")
-    .description("manage work bays — a Git worktree plus a lease, an issue, and a managed lifecycle")
-  bay.helpCommand(false)
-  bay
-    .command("_list", { isDefault: true, hidden: true })
-    .option("--json", "emit stable JSON")
-    .option("--all", "include open and terminal Bays")
-    .option("--closed", "show terminal Bays only")
-    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
-    .action(async (options) => listBays(installed(), options, io))
-  bay
-    .command("list")
-    .description("list work bays")
-    .option("--json", "emit stable JSON")
-    .option("--all", "include open and terminal Bays")
-    .option("--closed", "show terminal Bays only")
-    .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
-    .action(async (options) => listBays(installed(), options, io))
-  bay
-    .command("open")
-    .argument("[config]", "issue to link; omit for an anonymous Bay")
-    .description("open and keep a Bay")
-    .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
-    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
-    .action(async (config, options) => {
-      if ((io as RuntimeInvocationIO)[RuntimeChildArgv] !== undefined) {
-        usage("bay open does not run commands; use 'yrd bay run <config> -- <command>'")
-      }
-      setExit(await openPersistentBay(installed(), installedServices(), config, options, io))
-    })
-  bay
-    .command("run [config] [command...]")
-    .description("run one scoped command (defaults to $SHELL)")
-    .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
-    .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
-    .option("--keep", "leave a successful run open")
-    .action(async (config, command, options) => {
-      const request = bayRunOperands(config, command, io)
-      setExit(
-        await runBaySession(installed(), installedServices(), request.arg, request.argv, options, io, {
-          keep: options.keep,
-        }),
-      )
-    })
-  bay
-    .command("in [bay] [command...]")
-    .description("join an open Bay as a guest; defaults to $SHELL, or pass opaque argv after --")
-    .action(async (selector, command) => {
-      const request = bayInOperands(selector, command, io)
-      setExit(await enterBay(installed(), installedServices(), request.selector, request.argv, io))
-    })
-  bay
-    .command("path <selector>")
-    .description("print an active bay path")
-    .option("--json", "emit stable JSON")
-    .action((selector, options) => pathBay(installed(), selector, options, io))
-  bay
-    .command("refresh [selector...]")
-    .description("refresh work bays")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => refreshBays(installed(), selectors, options, io))
-  bay
-    .command("handoff <selector>")
-    .description("certify a materialized exact-head handoff")
-    .requiredOption("--branch <branch>", "exact branch recorded in the handoff packet")
-    .requiredOption("--head <sha>", "exact head recorded in the handoff packet")
-    .requiredOption("--evidence <ref>", "opaque materialized handoff reference")
-    .option("--check", "resolve and validate the bay without certifying (read-only preflight)")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      certifyBayHandoff(
-        installed(),
-        selector,
-        options as Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
-        io,
-      ),
-    )
-  bay
-    .command("submit [selector...]")
-    .description("submit bays or branches")
-    .option("--base <branch>", "base branch for a direct branch submit")
-    .option("--queue <branch>", "alias for --base")
-    .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option(
-      "--prop <key>=<value>",
-      "set a prop on the submitted revision — an opaque key=value label (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--composition <path>", "immutable version-1 source composition JSON")
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) =>
-      setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "bay.submit")),
-    )
-  bay
-    .command("close [selector...]")
-    .description("close work bays (checks bay status first; needs --force to override)")
-    .option("--withdraw", "withdraw a live change before closing")
-    .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => {
-      await closeBays(installed(), installedServices(), selectors, options, io)
-    })
-  bay
-    .command("status [selector...]")
-    .description("safety oracle: is this bay safe to remove? (exit 0=safe 1=not-safe 2=unknown)")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await bayStatusCommand(installed(), selectors, options, io)))
-  program
-    .command("log")
-    .description("show queue history, newest first")
-    .option("--base <branch>", "scope log to one base branch")
-    .option("--pr <pr>", "scope log to one change")
-    .option("--failed", "show rejected history only")
-    .option("--since <duration>", "show history within a duration")
-    .option("-L, --limit <count>", "limit history rows", int, 20)
-    .option("--all", "show all rows; include lossless queue and run records in JSON")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => logRuns(installed(), [], options, io, installedServices()))
-
-  program
-    .command("watch [filter...]")
-    .description("alias for queue ls --watch")
-    .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope watch to one change")
-    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
-    .option("--latest", "show only the latest Run for each change")
-    .option("--json", "emit stable JSON")
-    .action(async (filters, options) => {
-      setExit(await watchQueue(installed(), filters, options, io, installedServices()))
-    })
-
-  program
-    .command("cancel <selector>")
-    .description(
-      "stop the current attempt for a change or run — members re-queue and the change stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
-    )
-    .option("--reason <text>", "human-readable cancellation reason")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await cancelAttempt(installed(), selector, options, io)))
-
-  // The branch-state verbs. `yrd branch <state>` is the complete quartet, and
-  // all four states are bare top-level verbs too.
-  //
-  // Root `yrd submit` IS this verb (@cto 2026-08-19, cliverbs ruling-a): it
-  // used to be an alias for `yrd pr submit`, which stays untouched as the change
-  // path. The two are the same user intent at two phases — the receiver
-  // already dual-writes `refs/yrd/submit/<branch>` on carrier push
-  // (`writeSubmitRefForCarrier`, commented "phase 2 re-points readers at this
-  // ref alone") — so the everyday spelling now names the phase-2 act directly.
-  // `change`/`mr`/`pr` remain one noun for the merge-request RECORD.
-  const CHANGE_STATE_HELP = {
-    draft: "move branches into draft — the default state, and how a submitted branch is unsubmitted",
-    submit: "approve branches to merge, naming each branch's current tip as the approved commit",
-    archive: "shelve branches — deletes each branch, which the receiver files under refs/yrd/archive/",
-    ignore: "keep branches out of the queue's view without archiving them",
-  } as const satisfies Record<ChangeState, string>
-
-  const registerChangeStateVerb = (target: CliCommand, state: ChangeState): void => {
-    const verb = target
-      .command(`${state} [selector...]`)
-      .description(CHANGE_STATE_HELP[state])
-      .option("--dry-run", "print the resolved branches and the exact git command without pushing")
-    if (state === "archive") {
-      verb
-        .option("-m, --message <text>", "why this branch is being archived")
-        .option("-F, --file <path>", "read the message from a file, or from stdin with '-'")
-    }
-    type ChangeStateVerbOptions = Readonly<{ dryRun?: boolean; message?: string; file?: string }>
-    verb.action(async (selectors: readonly string[], options: ChangeStateVerbOptions) =>
-      setExit(
-        await applyChangeState(
-          state,
-          selectors,
-          { dryRun: options.dryRun, message: options.message, messageFile: options.file },
-          io,
-          changeStateDeps(io, () => currentGitBranch(io.cwd ?? process.cwd(), io), installedServices().process),
-        ),
-      ),
-    )
+  const context: CommandRegistrationContext = {
+    program,
+    name,
+    io,
+    installed,
+    installedServices,
+    runtimeApp: () => runtimeApp,
+    setExit,
+    invocation,
+    bootstrap,
   }
-
-  const branch = program.command("branch").description("move a branch into a delivery state")
-  branch.helpCommand(false)
-  for (const state of ["draft", "submit", "archive", "ignore"] as const) {
-    registerChangeStateVerb(branch, state)
-    registerChangeStateVerb(program, state)
-  }
+  registerObserveCommands(context)
+  registerBayCommands(context)
+  registerQueueLensCommands(context)
+  registerBranchStateCommands(context)
 
   const deployment = program.command("deployment").description("manage immutable runtime deployments")
   deployment.helpCommand(false)
@@ -11930,533 +11126,13 @@ function buildProgram(
       releaseDeployment(installed(), deploymentResult, habReleaseResult, options, io),
     )
 
-  const queue = program.command("queue").description("manage integration queues")
-  queue.helpCommand(false)
-  const listQueue = async (positional: string[], options: QueueListOptions): Promise<void> => {
-    // A positional term spelled like a subcommand is the one shape this surface
-    // cannot read: `queue list list` could be either. `--term` is the reading
-    // that has to be asked for; everything else refuses rather than searching.
-    refuseShadowedQueueFilterTerms(positional)
-    const filters = [...positional, ...(options.term ?? [])]
-    if (options.check === true) {
-      if (options.watch === true || filters.length > 0) usage("queue list --check does not accept --watch or filters")
-      setExit(await checkQueueRunner(runtimeApp, installedServices(), options, io))
-      return
-    }
-    if (options.watch === true) {
-      setExit(await watchQueue(installed(), filters, options, io, installedServices()))
-      return
-    }
-    await listQueues(installed(), filters, options, io, installedServices())
-  }
-  const TERM_OPTION_HELP = "filter the timeline by a literal word, including one spelled like a subcommand (repeatable)"
-  const collectTerm = (value: string, previous: readonly string[]): readonly string[] => [...previous, value]
-  queue
-    .command("_list [filter...]", { isDefault: true, hidden: true })
-    .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
-    .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope the queue timeline to one change")
-    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
-    .option("--latest", "show only the latest Run for each change")
-    .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
-    .option("--json", "emit stable JSON")
-    .action(listQueue)
-  queue
-    .command("list [filter...]")
-    .description("show the queue timeline")
-    .option("--term <word>", TERM_OPTION_HELP, collectTerm, [] as readonly string[])
-    .option("--base <branch>", "select one base queue")
-    .option("--pr <pr>", "scope the queue timeline to one change")
-    .option("--status <statuses>", QUEUE_TIMELINE_STATUS_HELP)
-    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
-    .option("--latest", "show only the latest Run for each change")
-    .option("--watch", "keep this projection live and interactive")
-    .option("--check", "probe habitant lease, heartbeat, declared-plan freshness, and Git distance")
-    .option("--json", "emit stable JSON")
-    .action(listQueue)
-  queue
-    .command("audit")
-    .description("check queue state")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
-  // Retired verb (5e cut 7): stays registered, hidden, so an old runbook gets
-  // a loud typed refusal naming the replacements, never a silent timeline
-  // filter. Inventory: yrd doctor. Deletion: yrd admin candidate-refs prune.
-  queue
-    .command("candidate-refs", { hidden: true })
-    .description("retired: refuses and names why")
-    .option("--prune", "ignored; the verb is retired")
-    .option("--retention-days <days>", "ignored; the verb is retired")
-    .option("--json", "emit stable JSON")
-    .action(() => refuseRetiredQueueCandidateRefs())
-  queue
-    .command("uncarried")
-    .description("find refs pushed to the remote that no change carries")
-    .option("--base <branch>", "base branch the refs are judged against")
-    .option("--namespace <ref>", "ref namespace to sweep")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await queueUncarried(installed(), options, io)))
-  queue
-    .command("pause [base]")
-    .description("pause new queue runs")
-    .option("--reason <text>", "record the pause reason")
-    .option("--for <duration>", "required hold TTL, such as 30m, 6h, or 1d")
-    .option("--allow [pr...]", "PR ids allowed through the pause")
-    .option("--json", "emit stable JSON")
-    .action(async (base, options) => pauseQueue(installed(), base, options, io))
-  queue
-    .command("resume [base]")
-    .description("resume a paused queue")
-    .option("--json", "emit stable JSON")
-    .action(async (base, options) => resumeQueue(installed(), base, options, io))
-  // Retired verb (5e cut 6): stays registered, hidden, so an operator
-  // following an old runbook gets the reason and the replacements, not a
-  // silent timeline filter. Restart re-derives recovery; see
-  // refuseRetiredQueueRecover for the one remainder.
-  queue
-    .command("recover", { hidden: true })
-    .description("retired: refuses and names why")
-    .option("--reason <text>", "ignored; the verb is retired")
-    .option("--runner <id>", "ignored; the verb is retired")
-    .option("--json", "emit stable JSON")
-    .action(() => refuseRetiredQueueRecover())
-  queue
-    .command("run [selector...]")
-    .description("drain the queue — habitant follow by default; --once or change selectors for a single pass")
-    .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--once", "drain the default queue exactly once, then exit")
-    .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => {
-      const mode = invocation.queueRunMode
-      if (mode === undefined) throw new Error("yrd: normalized queue run mode is missing")
-      // One lineage per process: the count this process was exec'd with, reset
-      // by a clean gate pass, carried forward by the next reload request.
-      const lineage = bootstrap === undefined ? undefined : runtimeReloadLineage(bootstrap.env)
-      const gate = () =>
-        requireInstalledDeclaredPlan(
-          installedServices(),
-          mode === "follow"
-            ? {
-                reloadInPlace:
-                  bootstrap === undefined || lineage === undefined ? {} : { request: requestYrdRuntimeReload, lineage },
-              }
-            : {},
-        )
-      if (mode === "follow") {
-        setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
-        return
-      }
-      await gate()
-      const app = installed()
-      const publications = await preparePublicationQueueCycle(app, installedServices(), io)
-      if (publications.length > 0) await gate()
-      const runs = await runQueues(app, selectors, options, io)
-      const selectedChangeIds =
-        selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
-      const blocked = admissionBlockedChanges(app, selectedChangeIds)
-      const blockerText = blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n")
-      const human =
-        blocked.length === 0
-          ? createElement(QueueRunsView, { runs })
-          : runs.length === 0
-            ? blockerText
-            : createElement(Fragment, null, createElement(QueueRunsView, { runs }), "\n", blockerText)
-      await printResult(
-        io,
-        jsonEnabled(options),
-        {
-          command: "queue.run",
-          publications: publications.map((job) => ({ ...job, projection: projectPublication(job) })),
-          results: runs.map(projectQueueRunTaskStatus),
-          ...(blocked.length === 0
-            ? {}
-            : {
-                blocked: blocked.map(({ pr, eligibility }) => ({
-                  pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
-                  eligibility: projectEligibilityTaskStatus(eligibility),
-                })),
-              }),
-        },
-        human,
-      )
-      const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
-      setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)
-    })
-  queue
-    .command("cancel <run>")
-    .description("cancel a running or waiting queue run and leave its PRs submitted")
-    .option("--reason <text>", "record the cancellation reason")
-    .option("--json", "emit stable JSON")
-    .action(async (run, options) => setExit(await cancelQueueRun(installed(), run, options, io)))
-  queue
-    .command("finish <selector>")
-    .description("resume a waiting step")
-    .option("--step <name>", "waiting step name")
-    .option("--ok", "record a passing result")
-    .option("--fail", "record a failing result")
-    .option("--job <id>", "waiting-job id")
-    .option("--runner <runner>", "waiting-job runner identity")
-    .option("--attempt <attempt>", "waiting-job attempt number")
-    .option("--token <token>", "waiting-job props token")
-    .option("--detail <text>", "human-readable result detail")
-    .option("--url <url>", "external runner URL")
-    .option("--artifact [artifact...]", "artifact name=path-or-url")
-    .option("--exit-code <code>", "external process exit code", int)
-    .option("--duration-ms <milliseconds>", "external duration", int)
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => finishQueue(installed(), selector, options, io))
-  addQueueExamples(queue, name)
-
-  addRootBayCommands(program, installed, installedServices, io, setExit)
-
-  // `change` is the printed name (operator ruling 2026-08-18, superseding
-  // I23's `mr`-primary call); `mr` and `pr` are permanent taught aliases --
-  // ids keep printing as PRnnn (a pure label) and both spellings keep
-  // working forever.
-  const pr = program
-    .command("change")
-    .alias("mr")
-    .alias("pr")
-    .description(
-      "manage changes (a branch selector targets the live delivery; address a terminal change by its id, printed as PRnnn; mr/pr accepted)",
-    )
-  pr.helpCommand(false)
-  const list = pr
-    .command("list")
-    .description("list changes")
-    .option("--base <branch>", "scope changes to one base")
-    .option(
-      "--state <state>",
-      `scope changes to one record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
-        `or one native or projected delivery status (${CHANGE_LIST_STATE_HELP})`,
-    )
-    .option("--issue <ref>", "scope changes to one issue reference")
-    .option("--needs-review", "show revisions needing approval")
-    .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => listPrs(installed(), options, io))
-  list.addHelpSection(
-    "Status fields:",
-    [
-      "state — answers: is the change record open or closed? tense: current",
-      "status — answers: what delivery result should a reader act on? tense: current",
-      "nativeStatus — answers: what delivery status did the rebuildable index record? tense: historical",
-      "taskStatus — answers: how does this delivery map to the shared work-state vocabulary? tense: current",
-      "eligibility.reason.code — answers: why can the current revision not run now? tense: current",
-      "mergedOnBase.code — answers: why did repository proof override nativeStatus? tense: current",
-      "--state needs-author — answers: does this change currently need author action? tense: current",
-    ].join("\n"),
-  )
-  const create = pr
-    .command("create [selector]")
-    .description("create a draft change without requesting required checks")
-    .option("--base <branch>", "base branch for a direct branch create")
-    .option("--queue <branch>", "alias for --base")
-    .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option(
-      "--prop <key>=<value>",
-      "set a prop on the draft revision — an opaque key=value label (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
-    .option(
-      "--reviewer <reviewer>",
-      "request a review from <reviewer> right after create (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      setExit(
-        await applyChangeSelectionVerb(
-          installed(),
-          installedServices(),
-          selector === undefined ? [] : [selector],
-          options,
-          io,
-          "pr.create",
-        ),
-      ),
-    )
-  addAuthoredCarrierWorkflow(create, name)
-  pr.command("submit [selector...]")
-    .description("submit change revisions after the managed local required-check hook")
-    .option("--base <branch>", "base branch for a direct branch submit")
-    .option("--queue <branch>", "alias for --base")
-    .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
-    .option(
-      "--prop <key>=<value>",
-      "set a prop on the submitted revision — an opaque key=value label (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
-    .option(
-      "--reviewer <reviewer>",
-      "request a review from <reviewer> right after submit (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
-    .option("--keep-on-failure", "retain a failed client-side required-check workspace for inspection")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) =>
-      setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
-    )
-  pr.command("view <selector>")
-    .description("show a change and its runs")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => viewPr(installed(), selector, options, io, installedServices()))
-  pr.command("runs <selector>")
-    .description("show run, step, attempt, proof, and artifact detail")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => viewChangeRuns(installed(), selector, options, io, installedServices()))
-  pr.command("diff <selector>")
-    .description("show the candidate diff")
-    .option("--stat", "show diff statistics")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => diffPr(installed(), selector, options, io))
-  pr.command("checkout <selector>")
-    .description("materialize a bay from a change revision head (detached HEAD)")
-    .option("--bay <name>", "name the new bay")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => checkoutPr(installed(), selector, options, io))
-  pr.command("status")
-    .description("show the current bay or branch change")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => statusPr(installed(), options, io, installedServices()))
-  pr.command("edit <selector>")
-    .description("edit the issue link, note, title, description, or branch tracking")
-    .option("--issue <ref>", "set the tracker-neutral issue reference")
-    .option("--note <text>", "set the delivery note")
-    .option("--title <text>", "set the change subject")
-    .option("--description <text>", "set the change description body")
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--untrack", "stop tracking: a stale head again blocks the re-merge")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => editPr(installed(), selector, options, io))
-  // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
-  pr.command("publish <selector>", { hidden: true })
-    .description("request credential-bearing publication of one immutable change revision")
-    .option("--queue", "re-merge and queue the revision after publishing succeeds")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
-  pr.command("ready <selector>", { hidden: true })
-    .description("submit a pushed change revision and request configured checks")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      setExit(await readyPr(installed(), installedServices(), selector, options, io)),
-    )
-  pr.command("review <selector>")
-    .description("record a revision-bound review verdict")
-    .option("--approve", "approve the current revision")
-    .option("--reject", "reject the current revision")
-    .option("--by <identity>", "reviewer identity")
-    .option("--ref <id>", "idempotency reference")
-    .option("--note <text>", "review note")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => reviewPr(installed(), selector, options, io))
-  pr.command("request-review <selector> [reviewers...]")
-    .description("replace the requested reviewers for a change (declarative set)")
-    .option("--clear", "clear the requested reviewer set")
-    .option("--by <identity>", "requesting identity")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, reviewers, options) => requestReviewPr(installed(), selector, reviewers, options, io))
-  pr.command("comment <selector>")
-    .description("record a non-gating revision comment")
-    .option("--by <identity>", "commenter identity")
-    .option("--ref <id>", "idempotency reference")
-    .requiredOption("--note <text>", "comment text")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => commentPr(installed(), selector, options, io))
-  pr.command("checks <selector...>")
-    .description("show required-check evidence for current change revisions")
-    .option("--follow", "follow active checks to a terminal result")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await changeChecks(installed(), selectors, options, io)))
-  pr.command("close [selector...]")
-    .description("close a live change without merging — records why, leaves the queue")
-    .option("--reason <text>", "close rationale recorded on each pr/withdrawn event")
-    .option("--burn-payload", "acknowledge that closing spends the payload identity permanently")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io, "pr.close"))
-  // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
-  // keeps its stable pr.withdraw name for journal consumers.
-  pr.command("withdraw <selector...>", { hidden: true })
-    .description("withdraw live changes from delivery, recording the reason")
-    .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
-    .option("--burn-payload", "acknowledge that withdrawing spends the payload identity permanently")
-    .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io))
-  pr.command("merge <selector>")
-    .description("teach that the queue is the only merger")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await refuseChangeMerge(installed(), selector, options, io)))
-
-  program
-    .command("check <name...>")
-    .description("run configured required checks in the current working tree")
-    .option("--json", "emit stable JSON")
-    .action(async (names, options) => checkRequired(installedServices(), names, options, io))
-
-  program
-    .command("guard [name...]")
-    .description("run configured pre-submit guards against the current head; omit names for all")
-    .option("--json", "emit stable JSON")
-    .action(async (names, options) => guardRequired(installedServices(), names, options, io))
-
-  const admin = program.command("admin").description("perform infrequent repository and state administration")
-  admin.helpCommand(false)
-  admin
-    .command("init")
-    .description("scaffold .yrd.yml and install the managed pre-submit hook")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => initYrdConfig(installedServices(), options, io))
-  // Retired verbs stay registered so an operator following an old runbook
-  // gets the reason and the replacement, not "unknown command".
-  const adminQueue = admin.command("queue", { hidden: true }).description("retired queue administration")
-  adminQueue
-    .command("init [base]", { hidden: true })
-    .description("retired: refuses and names why")
-    .option("--json", "emit stable JSON")
-    .action(() => refuseRetiredQueueAdministration("init"))
-  adminQueue
-    .command("deinit [base]", { hidden: true })
-    .description("retired: refuses and names why")
-    .option("--json", "emit stable JSON")
-    .action(() => refuseRetiredQueueAdministration("deinit"))
-  const adminBay = admin.command("bay").description("administer work bays")
-  adminBay
-    .command("prune")
-    .description("census prunable bays and write an approval, or apply one exact approved set")
-    .option("--apply", "close the exact set in --approval")
-    .option("--approval <path>", "approval artifact to verify and apply")
-    .option("--save-approval <path>", "write the dry-run census as a new approval artifact")
-    .option(
-      "--exclude <bay>",
-      "exclude a bay from the dry-run approval (repeatable)",
-      (value: string, previous: readonly string[]) => [...previous, value],
-      [] as readonly string[],
-    )
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
-  const adminPr = admin.command("pr").description("administer changes")
-  adminPr
-    .command("prune")
-    .description("withdraw live PRs whose content their base branch already contains")
-    .option("--dry-run", "print every checked verdict without withdrawing")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => prunePrs(installed(), options, io))
-  const adminCandidateRefs = admin.command("candidate-refs").description("administer synthetic Candidate refs")
-  adminCandidateRefs
-    .command("prune")
-    .description("sweep the Candidate ref namespace and delete the refs this same pass proved reclaimable")
-    .option("--retention-days <days>", "override the retention window (default 7)")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await adminPruneCandidateRefs(installed(), options, io)))
-  const adminJournal = admin.command("journal").description("administer the durable journal")
-  adminJournal
-    .command("bump <version>")
-    .description("one-way raise the journal version floor after a tested snapshot restore")
-    .option("--json", "emit stable JSON")
-    .action(async (version, options) => {
-      const parsed = Number(version)
-      if (!Number.isSafeInteger(parsed) || parsed < 1) usage("journal bump version must be a positive integer")
-      await bumpJournal(installedServices(), parsed, options, io)
-    })
-  adminJournal
-    .command("import-orphan <source>")
-    .description("archive preserved v3 rows without replaying them as live entries")
-    .option("--json", "emit stable JSON")
-    .action(async (source, options) => journalImportOrphan(installedServices(), source, options, io))
-  const adminSubmodule = admin.command("submodule").description("administer submodule tracking")
-  adminSubmodule
-    .command("init")
-    .description("set submodule.<name>.branch for submodules not yet tracking one")
-    .option("--dry-run", "print what would be set without writing .gitmodules")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await initSubmoduleTracking(options, io)))
-
-  const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
-  issue.helpCommand(false)
-  issue
-    .command("_list", { isDefault: true, hidden: true })
-    .option("--json", "emit stable JSON")
-    .action(async (options) => listIssues(installed(), options, io))
-  issue
-    .command("view <issue>")
-    .description("show Yrd delivery records joined to an issue")
-    .option("--json", "emit stable JSON")
-    .action(async (issueId, options) => listIssues(installed(), options, io, issueId))
-  issue
-    .command("ensure <issue>")
-    .description("ensure one issue-owned Bay and one tracked draft change")
-    .option("--json", "emit stable JSON")
-    .action(async (issueId, options) => setExit(await ensureIssueDelivery(installed(), issueId, options, io)))
-
-  const contest = program.command("contest").description("inspect and select contest attempts")
-  contest.helpCommand(false)
-  contest
-    .command("_list", { isDefault: true, hidden: true })
-    .option("--json", "emit stable JSON")
-    .action(async (options) => listContests(installed(), options, io))
-  contest
-    .command("open <issue>")
-    .description("compare implementations of one real issue")
-    .option("--competitors <json>", "opaque competitor id, runner port, and config entries")
-    .option("--evaluators [evaluator...]", "evaluator ids, comma-separated or repeated")
-    .option("--base <branch>", "base branch")
-    .option("--queue <branch>", "alias for --base")
-    .option("--json", "emit stable JSON")
-    .action(async (issueId, options) => setExit(await openContest(installed(), issueId, options, io)))
-  contest
-    .command("eval <contest>")
-    .description("run pending work and evaluators")
-    .option("--retry", "retry failed work or re-evaluate failed verdicts")
-    .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => setExit(await evalContest(installed(), contestId, options, io)))
-  contest
-    .command("finish <contest>")
-    .description("finish a waiting evaluator")
-    .option("--attempt <attempt>", "contest attempt id")
-    .option("--evaluator <evaluator>", "evaluator id")
-    .option("--ok", "record a passing evaluator verdict")
-    .option("--fail", "record a failing evaluator verdict")
-    .option("--error <code>", "record an evaluator infrastructure failure")
-    .option("--token <token>", "waiting-job props token")
-    .option("--detail <text>", "human-readable result summary")
-    .option("--artifact [artifact...]", "artifact name=path-or-url")
-    .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => finishContest(installed(), contestId, options, io))
-  contest
-    .command("view <contest>")
-    .description("show attempts, metrics, and evidence")
-    .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => viewContest(installed(), contestId, options, io))
-  contest
-    .command("select <contest>")
-    .description("select a winner")
-    .option("--winner <attempt>", "winning attempt id")
-    .option("--by <identity>", "selector identity")
-    .option("--reason <text>", "selection rationale")
-    .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => selectContest(installed(), contestId, options, io))
-  contest
-    .command("promote <contest>")
-    .description("submit the selected submodule commit")
-    .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
+  registerQueueCommands(context)
+  registerRootBayCommands(context)
+  registerChangeCommands(context)
+  registerCheckCommands(context)
+  registerAdminCommands(context)
+  registerIssueCommands(context)
+  registerContestCommands(context)
 
   const order = new Map(
     ["mr", "bay", "issue", "contest", "queue", "check", "doctor", "why", "admin", "log", "watch"].map(

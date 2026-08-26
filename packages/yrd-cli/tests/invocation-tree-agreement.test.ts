@@ -20,7 +20,7 @@ const src = join(import.meta.dirname, "..", "src")
  * red.
  */
 function registeredQueueSubcommands(): ReadonlySet<string> {
-  const run = readFileSync(join(src, "run.ts"), "utf8")
+  const run = readFileSync(join(src, "commands", "queue.ts"), "utf8")
   // Bound to the RECEIVER, not to a region. A region needs an end anchor, and
   // the first version's end anchor never matched — the source writes
   // `const pr = program\n    .command("mr")`, so the literal `program.command("`
