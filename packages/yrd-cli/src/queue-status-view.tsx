@@ -1534,27 +1534,32 @@ function timelineNonIntegratedRows(
   })
 }
 
-function timelineSort(left: QueueTimelineProjectedRow, right: QueueTimelineProjectedRow): number {
+type QueueTimelineSortableRow = Readonly<{
+  row: QueueTimelineProjectedRow
+  calendarDay: string | null
+}>
+
+function timelineSort(left: QueueTimelineSortableRow, right: QueueTimelineSortableRow): number {
   // Round 6: date headers describe contiguous calendar-day groups. Grouping by
   // status before time could interleave days across midnight (07-18 / 07-19 /
   // 07-18), so calendar day is the outer ordering key. Within one day the
   // queue's status/position ordering remains unchanged.
-  if (left.timestamp !== null && right.timestamp !== null) {
-    const leftDay = timelineLocalCalendarDay(left.timestamp)
-    const rightDay = timelineLocalCalendarDay(right.timestamp)
-    if (leftDay !== rightDay) return rightDay.localeCompare(leftDay)
+  if (left.calendarDay !== null && right.calendarDay !== null && left.calendarDay !== right.calendarDay) {
+    return right.calendarDay.localeCompare(left.calendarDay)
   }
+  const leftRow = left.row
+  const rightRow = right.row
   const groupOrder: Record<QueueTimelineGroup, number> = { draft: 0, pending: 1, running: 2, completed: 3 }
-  const group = groupOrder[left.group] - groupOrder[right.group]
+  const group = groupOrder[leftRow.group] - groupOrder[rightRow.group]
   if (group !== 0) return group
-  if (left.group === "pending" && right.group === "pending") {
-    const position = (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER)
+  if (leftRow.group === "pending" && rightRow.group === "pending") {
+    const position = (leftRow.position ?? Number.MAX_SAFE_INTEGER) - (rightRow.position ?? Number.MAX_SAFE_INTEGER)
     if (position !== 0) return position
   }
-  const leftAt = left.timestampMs ?? Number.NEGATIVE_INFINITY
-  const rightAt = right.timestampMs ?? Number.NEGATIVE_INFINITY
-  if (leftAt !== rightAt) return left.group === "completed" ? rightAt - leftAt : leftAt - rightAt
-  return compareNatural(left.id, right.id)
+  const leftAt = leftRow.timestampMs ?? Number.NEGATIVE_INFINITY
+  const rightAt = rightRow.timestampMs ?? Number.NEGATIVE_INFINITY
+  if (leftAt !== rightAt) return leftRow.group === "completed" ? rightAt - leftAt : leftAt - rightAt
+  return compareNatural(leftRow.id, rightRow.id)
 }
 
 function timelineMatches(row: QueueTimelineProjectedRow, terms: readonly string[]): boolean {
@@ -1731,14 +1736,20 @@ function buildQueueTimelineProjection(
   // single-queue watch changes shape when the feature ships. Every
   // run-bearing row also carries its typeable `path@branch#N` address when
   // the repository root is known (items 34/36).
-  const rows = displayed.toSorted(timelineSort).map((row) => {
-    const address = row.run === undefined ? undefined : timelineRunAddress(options.repositoryRoot, row.base, row.run)
-    return {
-      ...row,
-      ...(queues.length > 1 && labelsByBase.has(row.base) ? { queueLabel: labelsByBase.get(row.base) } : {}),
-      ...(address === undefined ? {} : { address }),
-    }
-  })
+  const rows = displayed
+    .map((row) => ({
+      row,
+      calendarDay: row.timestamp === null ? null : timelineLocalCalendarDay(row.timestamp),
+    }))
+    .toSorted(timelineSort)
+    .map(({ row }) => {
+      const address = row.run === undefined ? undefined : timelineRunAddress(options.repositoryRoot, row.base, row.run)
+      return {
+        ...row,
+        ...(queues.length > 1 && labelsByBase.has(row.base) ? { queueLabel: labelsByBase.get(row.base) } : {}),
+        ...(address === undefined ? {} : { address }),
+      }
+    })
   // Terminal facts drive the flow aggregate over the metrics window, which may
   // reach further back than the listing window; reuse the display set when the
   // windows coincide.
@@ -2099,7 +2110,8 @@ export function humanQueueProjection(
   const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
-    .toSorted((left, right) => requiredQueuePosition(positions, left.pr) - requiredQueuePosition(positions, right.pr))
+    .map((row) => ({ ...row, position: requiredQueuePosition(positions, row.pr) }))
+    .toSorted((left, right) => left.position - right.position)
   const historical = result.finished.flatMap((run) =>
     run.prs.flatMap((member) => {
       const pr = result.prs.find((candidate) => candidate.id === member.id)
@@ -2122,9 +2134,7 @@ export function humanQueueProjection(
         : selected.has(row.pr) && row.nativeStatus !== "submitted" && row.nativeStatus !== "ready"
     }),
   ]
-  const queue = queueRows
-    .slice(0, QUEUE_ROW_LIMIT)
-    .map((row) => ({ ...row, position: requiredQueuePosition(positions, row.pr) }))
+  const queue = queueRows.slice(0, QUEUE_ROW_LIMIT)
   const active = activeWatchRow(result, now, selected)
   return {
     target: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
