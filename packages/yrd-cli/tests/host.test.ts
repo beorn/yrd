@@ -3087,68 +3087,40 @@ checks: [{check: {run: "true"}}]
     // checkpoint-migration-path-missing refusal (2026-08-18: the intents-v2
     // identity change shipped without one; the intent rail's deletion, same
     // day, is the second edge this same lock caught).
+    //
+    // Since 42ef9a27 / c344e112 (2026-08-25) that path is TWO HOPS, not one:
+    // every historical predecessor converges on the released change-record
+    // identity, which then takes a single real forward edge to the target. This
+    // expectation read `to: targetIdentity` for a whole day after the graph
+    // stopped being shaped that way, so the lock was red on main and asserting
+    // nothing anyone could act on.
+    const releasedHop = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
     expect(attestation.manifest.edges).toEqual([
-      {
-        from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        from: "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        from: "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        // The production composition's correlation-era identity (props cut).
-        from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        // The interim step-plan identity the live journal advanced to while
-        // this work was in flight, measured from its own refusal.
-        from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        // The production identity before the declared step list left
-        // `initialState` (23192), measured from the live journal's refusal.
-        from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        // The production composition's identity before branch-is-change 2a.
-        from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        // Production journal stored identity 2026-08-25 (cursor 90900), the
-        // composition before the terminal-associations back-fill cut (5e cut 1).
-        from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        // Production journal stored identity 2026-08-22 (evictedThrough 27609).
-        from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
-        to: attestation.manifest.targetIdentity,
-      },
-      {
-        from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
-        to: attestation.manifest.targetIdentity,
-      },
+      { from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3", to: releasedHop },
+      { from: "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657", to: releasedHop },
+      { from: "063c12e0029825f80853c78e29a4c23cde4e992f3257b806b37ee256b260f691", to: releasedHop },
+      { from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25", to: releasedHop },
+      // The production composition's correlation-era identity (props cut).
+      { from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5", to: releasedHop },
+      // The interim step-plan identity the live journal advanced to while
+      // this work was in flight, measured from its own refusal.
+      { from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817", to: releasedHop },
+      // The production identity before the declared step list left
+      // `initialState` (23192), measured from the live journal's refusal.
+      { from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598", to: releasedHop },
+      // The one real forward edge: the released identity above to the target.
+      { from: releasedHop, to: attestation.manifest.targetIdentity },
+      { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
+      // The production composition's identity before branch-is-change 2a.
+      { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },
+      { from: "9697d38f2755d391287f82d8fa976c8eb8177d429a09e151eae087f526e859e7", to: releasedHop },
+      // Production journal stored identity, read read-only from /hh's live
+      // journal 2026-08-26 at cursor 91511 (evictedThrough 27609, so rebuild
+      // from complete history is unavailable and this edge is load-bearing).
+      { from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839", to: releasedHop },
+      // Production journal stored identity 2026-08-22 (evictedThrough 27609).
+      { from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd", to: releasedHop },
+      { from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8", to: releasedHop },
     ])
     expect(existsSync(join(repo, ".git", "yrd"))).toBe(false)
   })
