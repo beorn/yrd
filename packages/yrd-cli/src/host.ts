@@ -224,6 +224,7 @@ export function createPostureQueueTargetResolver(
 type RuntimeStep = StepDef<ChangeShape, ChangeShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
+const RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
 /** Durable production predecessors: the pre-restore two-check checkpoint, the
  * three-check checkpoint rewritten by the recovery before this protocol
  * shipped, the pre-quarantine intent contract (intents-v1, no `unreadable`
@@ -322,14 +323,13 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
 
 /** Fill state fields a stored checkpoint predates with their initial values.
  *
- * Retained predecessors migrate straight to the CURRENT identity, so every
- * field the state contract gained since the predecessor's writer ran is
- * simply absent from its checkpoint — and replay resumes AFTER the stored
- * cursor, so nothing ever rewrites the missing container. Recurses through
- * plain objects only: a populated container keeps its stored entries (an
- * empty initial Record contributes no keys), arrays and scalars keep the
- * stored value, and only a key with no stored value at all takes the
- * initial one.
+ * Historical predecessors first migrate to the released 36d85bbb identity,
+ * so every field gained before that writer is simply absent from its
+ * checkpoint — and replay resumes AFTER the stored cursor, so nothing ever
+ * rewrites the missing container. Recurses through plain objects only: a
+ * populated container keeps its stored entries (an empty initial Record
+ * contributes no keys), arrays and scalars keep the stored value, and only a
+ * key with no stored value at all takes the initial one.
  */
 export function fillMissingStateFromInitial<T>(initial: unknown, stored: T): T {
   if (stored === undefined) return initial as T
@@ -2012,18 +2012,18 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     }),
   )
   const definition = contests(queue(base))
-  return withCheckpointMigrations(
-    definition,
-    RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES.map((from) => ({
+  return withCheckpointMigrations(definition, [
+    ...RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES.map((from) => ({
       from,
-      migrate: (state) => {
+      to: RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY,
+      migrate: (state: Parameters<typeof definition.compact>[0]) => {
         // Correlation-era checkpoints spell revision labels
         // `correlation: {namespace, id}`; fold them to `props` FIRST, at this
         // read boundary, so everything downstream — fill, compact, the process
         // that runs on the migrated state — sees only the current vocabulary.
         const folded = foldLegacyCorrelationDeep(state) as typeof state
-        // Every retained edge merges on the CURRENT identity, so a stored
-        // checkpoint predates every state field added since its writer ran.
+        // Every historical retained edge merges on the released 36d85bbb
+        // identity, so a checkpoint predates fields added since its writer ran.
         // Fill those from initial values BEFORE compacting — compaction and
         // validation both assume the current contract (2026-08-18: intents-v2
         // added `unreadable`, absent from every intents-v1 checkpoint).
@@ -2054,19 +2054,8 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // explicitly, once, exactly like `intents` above.
         const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
           queuesWithoutStoredPlan as typeof queuesWithoutStoredPlan & Readonly<{ terminalAssociations?: unknown }>
-        // The change-record fat cut (5e cut 4) also dropped the nested
-        // `bays.prs[*].regressions` field. Compact preserves unknown nested
-        // keys, so strip it explicitly at the same migration boundary.
-        const prsWithoutRegressions = Object.fromEntries(
-          Object.entries(withoutDeadIntents.bays.prs).map(([id, pr]) => {
-            const { regressions: _retiredRegressions, ...withoutRegressions } = pr as typeof pr &
-              Readonly<{ regressions?: unknown }>
-            return [id, withoutRegressions]
-          }),
-        )
         return {
           ...withoutDeadIntents,
-          bays: { ...withoutDeadIntents.bays, prs: prsWithoutRegressions },
           queues: {
             ...queuesWithoutBackfill,
             // Construction policy is not a journal fact. A retained checkpoint
@@ -2077,7 +2066,30 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         }
       },
     })),
-  )
+    {
+      from: RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY,
+      migrate: (state) => {
+        // The live deployment already wrote a 36d85bbb checkpoint before
+        // this retired nested field was noticed. A real forward edge is the
+        // only opportunity to remove it from runtime and durable state.
+        const prsWithoutRegressions = Object.fromEntries(
+          Object.entries(state.bays.prs).map(([id, pr]) => {
+            const { regressions: _retiredRegressions, ...withoutRegressions } = pr as typeof pr &
+              Readonly<{ regressions?: unknown }>
+            return [id, withoutRegressions]
+          }),
+        )
+        const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
+          state.queues as typeof state.queues & Readonly<{ terminalAssociations?: unknown }>
+        const { intents: _deadIntents, ...withoutDeadIntents } = state as typeof state & Readonly<{ intents?: unknown }>
+        return {
+          ...withoutDeadIntents,
+          bays: { ...withoutDeadIntents.bays, prs: prsWithoutRegressions },
+          queues: queuesWithoutBackfill,
+        }
+      },
+    },
+  ])
 }
 
 /** Derive the data-only projection contract from the exact production

@@ -548,21 +548,26 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // the live journal's stored checkpoint_identity, cursor 90900) gains a
     // retained edge below. The cut-1 interim identity fe430448 was never
     // stored by any deployment, so it is deliberately NOT retained.
-    expect(first.manifest.targetIdentity).toBe("36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691")
+    // Conscious update 2026-08-25: the live deployment reached 36d85bbb
+    // before its checkpoint's retired nested `regressions` field was found.
+    // Bumping the bays projector version creates a real forward repair edge;
+    // all earlier edges retain their historical 36d85bbb successor.
+    const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
+    expect(first.manifest.targetIdentity).toBe("701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     expect(first.manifest.edges).toContainEqual({
       from: "0a3476ef91823d46f19770047a4e6462c970c5afc250cba9dd82eb31c5febc25",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     // The PRODUCTION composition's correlation-era identity (measured from the
     // live journal's stored checkpoint, 2026-08-19 — see the retained list's
     // own comment). Its edge is what lets a deployment cross the props cut.
     expect(first.manifest.edges).toContainEqual({
       from: "227fed2369cdf2a8f3c6a0b63a61bff97d7a46dd60a1fdd7c782ed3b4f69f5e5",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     // The PRODUCTION composition's identity immediately before branch-is-change
     // phase 2a (measured from the live journal 2026-08-21 — see the retained
@@ -570,14 +575,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // `branch/*` events and `bays.submits`.
     expect(first.manifest.edges).toContainEqual({
       from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     // Production journal stored identity 2026-08-22 (cursor 76950,
     // evictedThrough 27609). Missing this edge is the live
     // checkpoint-migration-missing pair f41d7eff→0150a374.
     expect(first.manifest.edges).toContainEqual({
       from: "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     // Production journal stored identity 2026-08-23, measured from the live
     // refusal 348ade4e→288eb203 (history evicted through cursor 27609). Its
@@ -585,20 +590,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // list out of `initialState`.
     expect(first.manifest.edges).toContainEqual({
       from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     // The interim identity the live journal then ADVANCED TO, measured from its
     // own refusal 288eb203→ae0d2084. A predecessor is whatever the deployment
     // stores, not whatever merged on main.
     expect(first.manifest.edges).toContainEqual({
       from: "288eb2031f0ae914db51e4fca58add50aa39397abd773be99e81d9a35c06e817",
-      to: first.manifest.targetIdentity,
+      to: previousTargetIdentity,
     })
     // Production journal stored identity 2026-08-25 (cursor 90900), the
     // composition immediately before the terminal-associations back-fill cut
     // (5e cut 1). Its edge is what carries the deployment across that cut.
     expect(first.manifest.edges).toContainEqual({
       from: "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839",
+      to: previousTargetIdentity,
+    })
+    expect(first.manifest.edges).toContainEqual({
+      from: previousTargetIdentity,
       to: first.manifest.targetIdentity,
     })
     // 23192: a queue-CONFIG change must NOT move the projection identity.
@@ -1519,7 +1528,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(historicalRun === undefined ? undefined : restored.queue.get(historicalRun.id)?.batchSize).toBe(10)
   })
 
-  it("durably drops retired top-level and nested state while migrating a retained checkpoint", async () => {
+  it("forward-repairs retired state from the deployed 36d85bbb checkpoint", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd")
     const config: ResolvedYrdProjectConfig = {
@@ -1592,7 +1601,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         recordedAt: "2026-08-25T01:00:00.000Z",
       },
     ]
-    const retainedIdentity = "ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839"
+    const retainedIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
     const retainedCheckpoint = JSON.stringify({
       ...checkpointValue,
       value: {

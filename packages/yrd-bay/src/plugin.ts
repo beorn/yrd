@@ -1366,7 +1366,7 @@ export function withBays(options: WithBaysOptions) {
         ),
         "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v14-branch-submits",
+      projectionVersion: "bays-v15-retired-regressions",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
