@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { digestCommandOutput, outputStatusCode } from "@yrd/core"
 import type { Process, ProcessResult } from "@yrd/process"
 
 /**
@@ -175,9 +176,12 @@ function childFailureReason(result: ProcessResult): string {
   return `child exited ${result.exitCode}`
 }
 
-function commandOutputTail(result: ProcessResult, limit = 600): string {
-  const output = `${result.stdout}\n${result.stderr}`.trim()
-  return output.length <= limit ? output : `…${output.slice(-limit)}`
+function commandOutput(result: ProcessResult): string {
+  return `${result.stdout}\n${result.stderr}`
+}
+
+function commandOutputDigest(result: ProcessResult, limit = 600): string {
+  return digestCommandOutput(commandOutput(result), { limit })
 }
 
 type InstallAttempt =
@@ -355,12 +359,18 @@ export async function ensureWorkspaceDependencies(
     // matched nothing; only the path says WHICH checkout was in that state, and
     // it is right here in options. Without it an operator hunts through every
     // Bay looking for the cold one (@yrd/submit-check-workspace-cannot-install).
+    // The STATUS CODE joins the headline when the output states one. A rate
+    // limit is the whole diagnosis and it used to appear only inside the
+    // captured output, where a retry storm pushed it past the truncation.
+    const output = commandOutput(result)
+    const status = outputStatusCode(output)
     return {
       status: "failed",
-      output: `${result.stdout}\n${result.stderr}`,
+      output,
       message:
         `${options.subject} could not install its dependencies in ${options.path}; ` +
-        `${argv.join(" ")} ${childFailureReason(result)}\n${commandOutputTail(result)}`,
+        `${argv.join(" ")} ${childFailureReason(result)}` +
+        `${status === undefined ? "" : ` (HTTP ${status})`}\n${commandOutputDigest(result)}`,
     }
   }
 
