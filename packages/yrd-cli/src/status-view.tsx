@@ -282,7 +282,17 @@ export function BayStatusView({
   )
 }
 
-export function ChangeStatusView({ prs, eligibilities }: { prs: readonly Change[]; eligibilities?: readonly ChangeEligibility[] }) {
+export function ChangeStatusView({
+  prs,
+  eligibilities,
+  columns,
+}: {
+  prs: readonly Change[]
+  eligibilities?: readonly ChangeEligibility[]
+  /** Terminal width, when the caller knows it — narrow tables drop WHY the
+   * same way ChangeListView drops BY/AGE below its width thresholds. */
+  columns?: number
+}) {
   const rows = prs.map((pr) => {
     const revision = changeRevisionNumber(pr)
     const eligibility = eligibilities?.find((candidate) => candidate.pr === pr.id && candidate.revision === revision)
@@ -294,8 +304,13 @@ export function ChangeStatusView({ prs, eligibilities }: { prs: readonly Change[
           : changeDeliveryState(pr),
       revision,
       head: changeHead(pr).slice(0, 12),
+      why: eligibility?.reason?.message ?? "",
     }
   })
+  // The WHY column exists only when a row carries a reason (so eligibility-less
+  // renders and every runnable result stay byte-identical to the old table),
+  // and only when the table is wide enough that it cannot starve BRANCH/BASE.
+  const why = rows.some((row) => row.why !== "") && (columns === undefined || columns >= 100)
   return (
     <Table
       data={rows}
@@ -311,6 +326,12 @@ export function ChangeStatusView({ prs, eligibilities }: { prs: readonly Change[
         { header: "BASE", key: "base", grow: true },
         { header: "REV", key: "revision", align: "right" },
         { header: "HEAD", key: "head" },
+        // The reason the change cannot proceed, in the author's language — the
+        // eligibility message every JSON envelope already carried while no
+        // human surface showed it (22895's unshipped half). Capped so it can
+        // never starve BRANCH/BASE at narrow widths; the full message stays in
+        // `pr view` and every JSON envelope.
+        ...(why ? [{ header: "WHY", key: "why" as const, grow: true, maxWidth: 56 }] : []),
       ]}
       padding={1}
     />

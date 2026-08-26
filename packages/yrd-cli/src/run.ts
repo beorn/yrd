@@ -4877,7 +4877,12 @@ async function readyPr(
       pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
       eligibility: projectEligibilityTaskStatus(eligibility),
     },
-    createElement(ChangeResultView, { prs: [pr], runs: [], eligibilities: [eligibility] }),
+    createElement(ChangeResultView, {
+      prs: [pr],
+      runs: [],
+      eligibilities: [eligibility],
+      ...(io.columns === undefined ? {} : { columns: io.columns }),
+    }),
   )
   return changeDeliveryState(pr) === "needs-author" ? 1 : 0
 }
@@ -5779,6 +5784,7 @@ async function applyChangeSelectionVerb(
         runs: [],
         eligibilities: refused.map(({ eligibility }) => eligibility),
         now: io.now?.() ?? Date.now(),
+        ...(io.columns === undefined ? {} : { columns: io.columns }),
       }),
       warnings,
     )
@@ -5806,6 +5812,7 @@ async function applyChangeSelectionVerb(
       runs: [],
       eligibilities: current.map(({ eligibility }) => eligibility),
       now: io.now?.() ?? Date.now(),
+      ...(io.columns === undefined ? {} : { columns: io.columns }),
     }),
     warnings,
   )

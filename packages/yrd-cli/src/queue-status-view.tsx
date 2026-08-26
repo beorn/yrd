@@ -320,6 +320,11 @@ export type QueueTimelineProjectedRow = Readonly<{
   submitter?: string
   step?: string
   detail: string
+  /** The blocking eligibility reason's human message on a pre-run row. The
+   * detail above folds it into presentation text (with lineage decoration);
+   * this is the raw message the renderer shows, so the WHY a change is not
+   * running reaches the timeline instead of being computed and discarded. */
+  whyMessage?: string
   position?: number
   sourceReadyAt?: string
   revisionLineage: readonly QueueTimelineRevisionLineage[]
@@ -2685,6 +2690,7 @@ function timelineNonIntegratedRows(
           subject,
           ...(submitter === undefined ? {} : { submitter }),
           detail: readyDetail,
+          ...(blockingReason === undefined ? {} : { whyMessage: blockingReason.message }),
           ...(position === undefined ? {} : { position }),
           ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
           revisionLineage,
@@ -2719,6 +2725,7 @@ function timelineNonIntegratedRows(
         subject,
         ...(submitter === undefined ? {} : { submitter }),
         detail: withTimelineLineage(detail, revisionLineage),
+        ...(blockingReason === undefined ? {} : { whyMessage: blockingReason.message }),
         ...(registeredAt === undefined ? {} : { sourceReadyAt: registeredAt }),
         revisionLineage,
         ...(blockingReason === undefined
@@ -3581,6 +3588,11 @@ export type ChangeListRow = Readonly<{
   review: "n/a" | "need" | "ok" | "reject"
   checks: "n/a" | "wait" | "run" | "pass" | "fail"
   why: string
+  /** The human message behind the `why` code, when the eligibility carries one.
+   * The code token stays the column's VALUE — table widths are computed from
+   * it — while the message rides alongside for the cell renderer and any row
+   * consumer, so nobody re-derives it from a second eligibility lookup. */
+  whyMessage?: string
   age: string
   touched: string
 }>
@@ -3642,6 +3654,12 @@ export function changeListRows(
       review: reviewLabel(eligibility),
       checks: checkLabels[eligibility.checks.status],
       why: merge?.code ?? eligibility.reason?.code ?? "-",
+      // Only when the eligibility reason is what the WHY column shows: a
+      // proven merge outranks it (above), and pairing its code with the
+      // eligibility's unrelated message would caption one fact with another.
+      ...(merge === undefined && eligibility.reason?.message !== undefined
+        ? { whyMessage: eligibility.reason.message }
+        : {}),
       age: projected.age,
       touched: projected.touched,
     }
@@ -3721,7 +3739,22 @@ export function ChangeListView({
     ...(terminalColumns >= 100 ? [base] : []),
     { header: "REVIEW", key: "review", minWidth: 8, maxWidth: 8 },
     { header: "CHECKS", key: "checks", minWidth: 8, maxWidth: 8 },
-    { header: "WHY", key: "why", minWidth: 5, maxWidth: whyWidth, grow: true },
+    {
+      header: "WHY",
+      key: "why",
+      minWidth: 5,
+      maxWidth: whyWidth,
+      grow: true,
+      // The code token, then whatever of the human message fits — same
+      // single-line truncation contract as ChangeStateValue above. Width
+      // policy stays computed from the CODE alone.
+      render: (row: ChangeListRow) => (
+        <Text minWidth={0} maxWidth="100%" wrap="truncate">
+          {row.why}
+          {row.whyMessage === undefined ? "" : <Text color="$fg-muted"> {row.whyMessage}</Text>}
+        </Text>
+      ),
+    },
     ...(terminalColumns >= 110 ? [ageColumn] : []),
     ...(terminalColumns >= 120 ? [changed] : []),
   ]
@@ -3829,16 +3862,19 @@ export function ChangeResultView({
   checks,
   eligibilities,
   now,
+  columns,
 }: {
   prs: readonly Change[]
   runs: readonly Run[]
   checks?: readonly ChangeCheckViewRecord[]
   eligibilities?: readonly ChangeEligibility[]
   now?: number
+  /** Terminal width, when known — forwarded so narrow tables can drop WHY. */
+  columns?: number
 }) {
   return (
     <Box flexDirection="column">
-      <ChangeStatusView prs={prs} eligibilities={eligibilities} />
+      <ChangeStatusView prs={prs} eligibilities={eligibilities} columns={columns} />
       {checks === undefined && runs.length > 0 && (
         <Box marginTop={1}>
           <QueueRunsView runs={runs} />
@@ -5093,8 +5129,19 @@ function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
           : "$fg-error",
     }
   }
+  // A pre-run row blocked for a typed reason shows the reason's human message
+  // (draft/rev rows carry a failure above and keep their err= code). Without
+  // this the projection computed the message into `detail` and rendered it
+  // nowhere — the timeline named the state and hid the WHY.
+  if (row.whyMessage !== undefined && row.whyMessage !== "") {
+    return { text: fitTimelineLabel(row.whyMessage, TIMELINE_WHY_CAP), color: "$fg-warning" }
+  }
   return { text: "" }
 }
+
+/** More room than the state cap: a reason message is a sentence fragment, and
+ * the cell it renders in already truncates at the track edge. */
+const TIMELINE_WHY_CAP = 48
 
 function timelineAgeCell(row: QueueTimelineProjectedRow): string {
   return row.ageMs === null ? "" : mediaDuration(row.ageMs)
