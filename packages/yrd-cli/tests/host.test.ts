@@ -2904,7 +2904,6 @@ checks: [{check: {run: "true"}}]
       "admin",
       "log",
       "watch",
-      "prime",
       "cancel",
       // The branch-state quartet: `yrd branch <state>` is the complete set,
       // and every state is also a bare verb. Root `submit` is one of them
@@ -4484,7 +4483,6 @@ checks: [{check: {run: "true"}}]
       { args: ["pr", "list", "--json"], command: "pr.list" },
       { args: ["issue", "--json"], command: "issue.list" },
       { args: ["log", "--all", "--json"], command: "log" },
-      { args: ["prime", "--json"], command: "prime" },
       { args: ["queue", "recover", "--json"], command: "queue.recover" },
     ] as const
 

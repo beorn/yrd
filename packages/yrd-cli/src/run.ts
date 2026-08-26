@@ -7781,56 +7781,6 @@ async function dashboard(
   await renderDashboard(app, options.base === undefined ? [] : [options.base], options, io)
 }
 
-async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const state = stateOf(app)
-  const cwd = io.cwd ?? process.cwd()
-  const bay = currentBay(state.bays, cwd)
-  const branch = bay?.branch ?? currentGitBranch(cwd, io)
-  const pr = Object.values(state.bays.prs).find(
-    (candidate) => (bay !== undefined && candidate.bay === bay.id) || candidate.branch === branch,
-  )
-  const queue = pr === undefined ? undefined : app.queue.status(pr.base)
-  const briefing = {
-    model: "issue -> bay -> pr -> queue -> integrated or parked for author",
-    loop: [
-      "yrd pr submit",
-      "yrd pr status",
-      "yrd pr runs <PR>",
-      "fix the branch and push; the same PR resumes automatically",
-    ],
-    live: {
-      bay: bay?.id,
-      pr: pr?.id,
-      base: pr?.base ?? bay?.base,
-      position: pr === undefined ? undefined : await queuedChangePosition(app, pr, io),
-      pause: queue?.pause,
-    },
-    boundaries: [
-      "the queue is the only merger",
-      "the tracker owns issue content; issue ensure creates only Git delivery facts",
-    ],
-    json: "add --json to every read or mutation",
-  }
-  const live = [
-    `bay=${briefing.live.bay ?? "-"}`,
-    `pr=${briefing.live.pr ?? "-"}`,
-    `base=${briefing.live.base ?? "-"}`,
-    `position=${briefing.live.position && briefing.live.position > 0 ? briefing.live.position : "-"}`,
-    `pause=${briefing.live.pause?.reason ?? "active"}`,
-  ].join(" ")
-  const human = [
-    "Yrd delivery briefing",
-    "Pick an issue -> work in a bay -> submit a change -> the queue runs checks and merges it.",
-    "Loop:",
-    ...briefing.loop.map((step, index) => `${index + 1}. ${step}`),
-    `Live: ${live}`,
-    "The queue is the only merger; pr merge only teaches the correct next command.",
-    "The tracker holds the pen; issue list/view are read-only, while issue ensure creates only Git delivery facts.",
-    "Use --json for lossless machine-readable output.",
-  ].join("\n")
-  await printResult(io, jsonEnabled(options), { command: "prime", ...briefing }, human)
-}
-
 type InitOptions = JsonOption & Readonly<{ dryRun?: boolean }>
 
 type InitAction = "set" | "would-set" | "unreachable"
@@ -11736,6 +11686,10 @@ function buildProgram(
     "Model:",
     "Pick an issue -> work it in a bay -> create a draft -> submit it ->\nchanges queue per base -> a run verifies and merges each one ->\nmerged, or parked for the author with a typed result.",
   )
+  program.addHelpSection(
+    "Loop:",
+    `1. ${name} pr submit\n2. ${name} pr status  (live bay, change, queue position, pause)\n3. ${name} pr runs <PR>\n4. fix the branch and push; the same PR resumes automatically.`,
+  )
   program.addHelpSection("Objects:", [
     ["issue", "tracker-owned intent; delivery lens plus Git-side ensure"],
     ["bay", "isolated Git workspace managed through the yrd bay subtree"],
@@ -11938,12 +11892,6 @@ function buildProgram(
     .option("--reason <text>", "human-readable cancellation reason")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await cancelAttempt(installed(), selector, options, io)))
-
-  program
-    .command("prime")
-    .description("brief the current Yrd delivery state")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => primeYrd(installed(), options, io))
 
   // The branch-state verbs. `yrd branch <state>` is the complete quartet, and
   // all four states are bare top-level verbs too.
@@ -12569,7 +12517,6 @@ function buildProgram(
       "admin",
       "log",
       "watch",
-      "prime",
     ].map((command, index) => [command, index]),
   )
   const orderedCommands = program.commands as unknown as CliCommand[]

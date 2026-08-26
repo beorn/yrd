@@ -638,7 +638,6 @@ yrd queue                   render the queue timeline by default; list/ls is can
                             run, cancel, pause, resume, recover, finish, init, deinit, audit
 yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   thin alias for yrd queue list --watch
-yrd prime                   delivery briefing plus current context
 yrd branch                  move branches into a delivery state:
                             draft, submit, archive, ignore
 yrd draft                   shorthand for yrd branch draft

@@ -1183,7 +1183,6 @@ describe("runYrd", () => {
       "admin",
       "log",
       "watch",
-      "prime",
     ]) {
       expect(root.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
@@ -1344,13 +1343,6 @@ describe("runYrd", () => {
         glyph: "▢",
       },
     })
-
-    const prime = outputIO({ currentBranch: () => "topic/direct" })
-    expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    const briefing = JSON.parse(prime.stdout()) as Readonly<{ loop: readonly string[] }>
-    expect(briefing).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
-    expect(briefing.loop).toContain("fix the branch and push; the same PR resumes automatically")
-    expect(briefing.loop.join("\n")).not.toMatch(/\bretry\b/u)
 
     const checkout = outputIO()
     expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
@@ -1785,10 +1777,6 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { id: "PR6" }, position: 6 })
 
-    const prime = outputIO({ currentBranch: () => "topic/6" })
-    expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR6", position: 6 } })
-
     const refusal = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR6", "--json"), refusal.io)).toBe(1)
     expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR6", position: 6 })
@@ -1848,7 +1836,6 @@ describe("runYrd", () => {
       { args: ["pr", "list", "--json"], command: "pr.list" },
       { args: ["issue", "--json"], command: "issue.list" },
       { args: ["log", "--json"], command: "log" },
-      { args: ["prime", "--json"], command: "prime" },
     ] as const
 
     for (const surface of surfaces) {
@@ -10247,10 +10234,6 @@ describe("runYrd", () => {
     expect.soft(status.stdout()).toContain("STATUS submitted")
     expect.soft(status.stdout()).toContain("POSITION 2")
     expect.soft(status.stdout()).toContain("▢")
-
-    const prime = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
-    expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    expect.soft(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR2", position: 2 } })
 
     const refusal = outputIO({ now, resolveQueueTarget })
     expect(await runYrd(app, yrd("pr", "merge", "PR2", "--json"), refusal.io)).toBe(1)
