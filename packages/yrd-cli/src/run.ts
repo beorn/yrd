@@ -5747,20 +5747,42 @@ async function applyChangeSelectionVerb(
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
   if (selected.length === 0) {
-    await printResult(
+    // Nothing was admitted, but the selection can still have handed back
+    // author-owned work (a needs-author or rejected change returned
+    // unmodified). This refusal exit carries the SAME envelope as the success
+    // exit below — refresh first, per-change eligibility, warnings on the
+    // human stream — and bills the author instead of reporting success.
+    await app.refresh()
+    const refusedPrs = prs.map((pr) => requiredPr(app, pr.id))
+    const refused = refusedPrs.map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
+    await printResultWithWarnings(
       io,
       jsonEnabled(options),
-      { command, prs: prs.map(projectChangeTaskStatus), ...(warnings.length > 0 ? { warnings } : {}) },
-      createElement(ChangeResultView, { prs, runs: [] }),
+      {
+        command,
+        prs: refused.map(({ pr, eligibility }) => {
+          return {
+            ...projectChangeTaskStatusWithEligibility(pr, eligibility),
+            eligibility: projectEligibilityTaskStatus(eligibility),
+          }
+        }),
+      },
+      createElement(ChangeResultView, {
+        prs: refusedPrs,
+        runs: [],
+        eligibilities: refused.map(({ eligibility }) => eligibility),
+        now: io.now?.() ?? Date.now(),
+      }),
+      warnings,
     )
-    return 0
+    return changeSelectionExitCode(refusedPrs)
   }
   // A selection action may commit through another live writer. Fold those
-  // durable transitions before exit 0 so the result cannot trail `pr view`.
+  // durable transitions before exit so the result cannot trail `pr view`.
   await app.refresh()
   const currentPrs = selected.map((selector) => requiredPr(app, selector))
   const current = currentPrs.map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
-  await printResult(
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
@@ -5771,7 +5793,6 @@ async function applyChangeSelectionVerb(
           eligibility: projectEligibilityTaskStatus(eligibility),
         }
       }),
-      ...(warnings.length > 0 ? { warnings } : {}),
     },
     createElement(ChangeResultView, {
       prs: currentPrs,
@@ -5779,8 +5800,22 @@ async function applyChangeSelectionVerb(
       eligibilities: current.map(({ eligibility }) => eligibility),
       now: io.now?.() ?? Date.now(),
     }),
+    warnings,
   )
-  return 0
+  return changeSelectionExitCode(currentPrs)
+}
+
+/** Truthful exit for a submit-family result: an outcome the AUTHOR must act on
+ * (needs-author, rejected) bills exit 1, exactly as narrow as `readyPr`'s
+ * needs-author mapping. Integrated/already-landed resubmits stay informational
+ * exit 0 (Q1 — the frozen merged identity), and a staged draft is a success. */
+function changeSelectionExitCode(prs: readonly Change[]): YrdCliExitCode {
+  return prs.some((pr) => {
+    const delivery = changeDeliveryState(pr)
+    return delivery === "needs-author" || delivery === "rejected"
+  })
+    ? 1
+    : 0
 }
 
 async function readComposition(path: string | undefined, io: YrdCliIO): Promise<CompositionV1 | undefined> {
