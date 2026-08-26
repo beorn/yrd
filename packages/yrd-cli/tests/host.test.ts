@@ -2902,7 +2902,6 @@ checks: [{check: {run: "true"}}]
       "doctor",
       "why",
       "admin",
-      "migrate",
       "log",
       "watch",
       "prime",

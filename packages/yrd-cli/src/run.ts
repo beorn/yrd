@@ -12409,9 +12409,6 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await refuseChangeMerge(installed(), selector, options, io)))
 
-  const migrate = program.command("migrate").description("run explicit journal compatibility migrations")
-  migrate.helpCommand(false)
-
   program
     .command("check <name...>")
     .description("run configured required checks in the current working tree")
@@ -12570,7 +12567,6 @@ function buildProgram(
       "doctor",
       "why",
       "admin",
-      "migrate",
       "log",
       "watch",
       "prime",
