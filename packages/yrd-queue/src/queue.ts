@@ -6604,13 +6604,26 @@ function checkFactRun(
   return record === undefined ? undefined : materializeRun(record, state.jobs)
 }
 
-function checkRunStatus(run: Run, selectedCount: number): ChangeEligibility["checks"]["status"] {
-  const selected = run.steps.slice(0, selectedCount)
-  if (selected.every((step) => step.job !== undefined && jobSucceeded(step.job))) return "passed"
-  if (selected.some((step) => step.job !== undefined && jobFailed(step.job))) {
-    return "failed"
-  }
-  return Queues.failed(run) ? "failed" : "checking"
+/**
+ * Run-level checks status: a pure fold of {@link checkStatus} over the selected
+ * step prefix — "passed" only when every selected step passed, "failed" as soon
+ * as any step failed, "checking" otherwise. An empty selection folds to
+ * "passed" (vacuous truth), exactly as the ladder it replaced did.
+ *
+ * This function holds NO ladder of its own (5a: one derivation per fact). It
+ * used to: a second ladder here consulted `Queues.failed` LAST while the
+ * per-step ladder consulted it FIRST, and the two only agreed because a
+ * completed job is exactly a succeeded-or-failed one. The old trailing
+ * `Queues.failed(run)` consult is subsumed: inside {@link checkStatus} a failed
+ * run settles every step without a terminal outcome as "failed", so no
+ * selected step of a failed run can fold to "checking".
+ *
+ * Exported for the tests that pin the fold (check-status-ladder.test.ts).
+ */
+export function checkRunStatus(run: Run, selectedCount: number): ChangeEligibility["checks"]["status"] {
+  const statuses = run.steps.slice(0, selectedCount).map((step) => checkStatus(step.job, run))
+  if (statuses.every((status) => status === "passed")) return "passed"
+  return statuses.includes("failed") ? "failed" : "checking"
 }
 
 const AUTOMATIC_ADMISSION_RETRIES = 1
@@ -6984,7 +6997,26 @@ function checkError(job: Job | undefined, run: Run): JobError | undefined {
   return run.error
 }
 
-function checkStatus(job: Job | undefined, run: Run): ChangeCheckRecord["status"] {
+/**
+ * THE check-status tie-break ladder — the one place the priority between a
+ * step's own job outcome and its run's failure is written (5a: one derivation
+ * per fact). The rule, in priority order:
+ *
+ * 1. A terminal job outcome is the strongest fact. A completed job reads
+ *    "passed" on success and "failed" on any other conclusion, and no
+ *    run-level signal overrides either. (Terminal ⇔ completed ⇔ exactly one
+ *    of succeeded/failed, so the run-failure guard below never shadows a
+ *    terminal outcome.)
+ * 2. A failed RUN settles every step with no terminal outcome of its own —
+ *    job absent, queued, in progress, or waiting reads "failed", never
+ *    "checking": the run's failure is the reason the step will not finish.
+ * 3. Otherwise the step is still "checking".
+ *
+ * {@link checkRunStatus} is a pure fold of this ladder — it holds no ladder of
+ * its own, so the per-step and run-level surfaces cannot disagree on a tie.
+ * Exported for the tests that pin this rule (check-status-ladder.test.ts).
+ */
+export function checkStatus(job: Job | undefined, run: Run): ChangeCheckRecord["status"] {
   if (Queues.failed(run) && (job === undefined || !Job.terminal(job))) return "failed"
   if (job !== undefined && jobSucceeded(job)) return "passed"
   if (job !== undefined && jobFailed(job)) return "failed"
