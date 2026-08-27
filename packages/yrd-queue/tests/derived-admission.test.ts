@@ -636,6 +636,35 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
     expect([...spellings]).toEqual(["record-mint-retired"])
   })
 
+  it("no refs/for cure or resolution string sends its push to origin (class guard 55b0d841 lacked: it fixed the observation arm's one call site, not every printed cure)", () => {
+    // A `refs/for` push is read by the repository's own receiver alone (the
+    // prs.git store) — origin never hears of it (RECEIVER_REMOTE_NAME,
+    // yrd-bay/src/git.ts). Three production cure/resolution strings named
+    // `origin` here regardless and sent a reader who followed them to a
+    // remote that silently discards the submission.
+    const roots = readdirSync(packagesRoot).flatMap((pkg) => {
+      const src = join(packagesRoot, pkg, "src")
+      return existsSync(src) ? [src] : []
+    })
+    const cures: string[] = []
+    const originCures: string[] = []
+    for (const root of roots) {
+      for (const entry of readdirSync(root, { recursive: true }) as string[]) {
+        if (!entry.endsWith(".ts") && !entry.endsWith(".tsx")) continue
+        const path = join(root, entry)
+        for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
+          if (!/git\s+push\s+\S+[^\n]*refs\/for\//u.test(line)) continue
+          cures.push(`${path}:${line.trim()}`)
+          if (/git\s+push\s+origin\b/u.test(line)) originCures.push(`${path}:${line.trim()}`)
+        }
+      }
+    }
+    // Proves the scan is live rather than vacuously empty — an empty `cures`
+    // walk would pass `originCures` for the wrong reason.
+    expect(cures.length).toBeGreaterThanOrEqual(3)
+    expect(originCures).toEqual([])
+  })
+
   it("the receiver's lane rule: intake dispatches only for a branch a LIVE record owns", async () => {
     await using app = await createApp()
     // No record: derived lane.

@@ -30,6 +30,7 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { ChangeIdSchema, changeIdForCommand, type ChangeId } from "./change-identity.ts"
+import { RECEIVER_REMOTE_NAME } from "./git.ts"
 import {
   BayIdSchema,
   CheckpointBayInputSchema,
@@ -1913,7 +1914,7 @@ function intakePR(
       "record-mint-retired",
       `yrd: record creation is retired (S6 door): branch '${branch}' has a live submit ref and no live change ` +
         `record — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
-        `('git push origin HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
+        `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
     )
   }
   const id = existing?.id ?? mintChangeId(mint, current.prs)
@@ -2042,7 +2043,7 @@ function submitWork(
       "record-mint-retired",
       `yrd: record creation is retired (S6 door): branch '${args.branch}' has a live submit ref and no change ` +
         `record to reopen — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
-        `('git push origin HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
+        `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
     )
   }
   const id = resubmitted?.id ?? mintChangeId(mint, current.prs)
