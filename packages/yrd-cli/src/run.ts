@@ -255,6 +255,7 @@ import { formatYrdRuntimeVersion, YRD_VERSION, yrdSourceRoot } from "./version.t
 import {
   decideHabitantSource,
   foldSourceStaleness,
+  HABITANT_SOURCE_RECYCLE_RETRY_MS,
   HABITANT_SOURCE_STALE_BEHIND,
   type HabitantSourceRecycle,
   type HabitantSourceStall,
@@ -10745,9 +10746,12 @@ async function writeHabitantSourceRecycle(
 }
 
 /**
- * Fold one settled cycle into the source-staleness window and say whether this
+ * Fold one loop boundary into the source-staleness window and say whether this
  * habitant should recycle itself onto the code its own checkout now holds —
- * box 1 of @yrd/core/stale-runner-never-recycles.
+ * box 1 of @yrd/core/stale-runner-never-recycles. Evaluated at EVERY loop
+ * boundary, idle short-circuits included, never only after a run cycle: a
+ * stale habitant whose old code sees nothing to do is exactly the one that
+ * must not be allowed to skip its own check (the 2026-08-27 silent hold).
  *
  * Gated on `habitant`, not merely on the selectorless loop: exiting is only an
  * actuator when something re-execs us. A one-shot `yrd queue run code --once`
@@ -10766,7 +10770,7 @@ export async function habitantSourceHealth(
   stall: HabitantSourceStall | undefined,
   habitant: boolean,
   threshold: number,
-): Promise<Readonly<{ stall: HabitantSourceStall | undefined; recycle: boolean }>> {
+): Promise<Readonly<{ stall: HabitantSourceStall | undefined; recycle: boolean; exitMessage?: string }>> {
   if (!habitant || threshold === 0) return { stall: undefined, recycle: false }
   const bootedSha = habitantBootedSha(io.implementationSource)
   const sourceRoot = io.sourceCheckout ?? yrdSourceCheckout()
@@ -10774,17 +10778,22 @@ export async function habitantSourceHealth(
     bootedSha === undefined || sourceRoot === undefined ? undefined : readSourceAdvance(sourceRoot, bootedSha)
   const next = foldSourceStaleness(stall, { bootedSha, headSha: advance?.headSha, behind: advance?.behind }, threshold)
   const cwd = io.cwd ?? process.cwd()
-  const action = decideHabitantSource(next, await readHabitantSourceRecycle(cwd, io.stateDir))
+  const now = io.now?.() ?? Date.now()
+  const action = decideHabitantSource(next, await readHabitantSourceRecycle(cwd, io.stateDir), now)
   if (action.kind === "serve") return { stall: next, recycle: false }
   if (action.kind === "checkout-behind") {
-    // The one case a recycle cannot fix, and the reason this is not a bare
-    // restart-on-drift: we already restarted for this exact gap and came back
-    // running the same commit. Whatever the habitant boots from is not the
+    // The one case an IMMEDIATE recycle cannot fix, and the reason this is not
+    // a bare restart-on-drift: we already restarted for this exact gap and came
+    // back running the same commit. Whatever the habitant boots from is not the
     // checkout that moved — a custody freeze holding the source back, a
     // launcher attesting a stale identity, a shim resolving another tree — so
     // name the checkout and the remedy instead of burning the restart budget.
+    // The hold is bounded: once the attempt ages past the retry window the
+    // decide retries, since the common cause is a recycle that raced the
+    // checkout projection and the freeze has long since lifted.
+    const retryAt = new Date(Date.parse(action.attemptedAt) + HABITANT_SOURCE_RECYCLE_RETRY_MS).toISOString()
     app.log.warn?.(
-      `Restarting did not refresh the queue runner's source: it is running git:${action.bootedSha} again while its source checkout '${sourceRoot ?? "unknown"}' is ${String(action.behind)} commits ahead at git:${action.headSha}. Not restarting again — advance the checkout the runner boots from and restart it by hand.`,
+      `Restarting did not refresh the queue runner's source: it is running git:${action.bootedSha} again while its source checkout '${sourceRoot ?? "unknown"}' is ${String(action.behind)} commits ahead at git:${action.headSha}. Not restarting again yet — the restart attempted at ${action.attemptedAt} changed nothing, so another exit would not either; retrying the restart after ${retryAt} in case the checkout catches up. Advance the checkout the runner boots from and restart it by hand to recover sooner.`,
       {
         action: "resident-source-stale-checkout-behind",
         bootedSha: action.bootedSha,
@@ -10792,6 +10801,7 @@ export async function habitantSourceHealth(
         behind: action.behind,
         sourceRoot,
         previousAttemptAt: action.attemptedAt,
+        retryAt,
       },
     )
     return { stall: next, recycle: false }
@@ -10799,20 +10809,25 @@ export async function habitantSourceHealth(
   await writeHabitantSourceRecycle(cwd, io.stateDir, {
     bootedSha: action.bootedSha,
     headSha: action.headSha,
-    attemptedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
+    attemptedAt: new Date(now).toISOString(),
   })
-  app.log.warn?.(
-    `Queue runner source is ${String(action.behind)} commits behind its checkout '${sourceRoot ?? "unknown"}' after ${String(action.observations)} consecutive observations; recycling onto git:${action.headSha}.`,
-    {
-      action: "resident-source-stale-restart",
-      bootedSha: action.bootedSha,
-      headSha: action.headSha,
-      behind: action.behind,
-      observations: action.observations,
-      sourceRoot,
-    },
-  )
-  return { stall: next, recycle: true }
+  // ONE loud line naming the drift by both shas and the cure. It is the log
+  // record, and it rides into the terminal heartbeat as the stalled finding —
+  // the RUNNER panel renders it verbatim while the pid is away.
+  const exitMessage =
+    `Queue runner source drifted: booted from git:${action.bootedSha} but its source checkout ` +
+    `'${sourceRoot ?? "unknown"}' has advanced ${String(action.behind)} commit(s) to git:${action.headSha} ` +
+    `(${String(action.observations)} consecutive observations). Exiting unclean so the ` +
+    `supervisor restart brings the runner up on the new source.`
+  app.log.warn?.(exitMessage, {
+    action: "resident-source-stale-restart",
+    bootedSha: action.bootedSha,
+    headSha: action.headSha,
+    behind: action.behind,
+    observations: action.observations,
+    sourceRoot,
+  })
+  return { stall: next, recycle: true, exitMessage }
 }
 
 /**
@@ -10969,6 +10984,31 @@ export async function followQueueRuns(
   let firstCycle = true
   let lastMaintenanceAt = 0
 
+  // Box 1 of @yrd/core/stale-runner-never-recycles, at EVERY loop boundary.
+  // The 2026-08-27 silent hold: this check used to run only after `runQueues`,
+  // and a stale habitant whose old code saw nothing to do took the idle
+  // short-circuit every cycle — so the runner that most needed to recycle was
+  // exactly the one that never re-checked, holding the queue for 20+ minutes
+  // with a healthy heartbeat until an operator restarted it by hand. A
+  // boundary is by construction outside any Run, so exiting here abandons no
+  // in-flight work; the operator-drain path keeps its own exclusion. The
+  // terminal stalled record survives the exit in status.json (the same seam
+  // the reload findings use), so the RUNNER panel names WHY the pid went away
+  // instead of rendering a bare unclean exit.
+  const sourceExitAtBoundary = async (): Promise<YrdCliExitCode | null> => {
+    const source = await habitantSourceHealth(app, io, sourceStall, habitant, sourceStaleThreshold)
+    sourceStall = source.stall
+    if (!source.recycle) return null
+    if (heartbeat !== undefined && source.exitMessage !== undefined) {
+      await heartbeat.recordProgress({
+        state: "stalled",
+        observedAt: new Date(io.now?.() ?? Date.now()).toISOString(),
+        findings: [{ code: "resident-source-stale-restart", message: source.exitMessage }],
+      })
+    }
+    return HABITANT_SOURCE_STALE_EXIT
+  }
+
   const runCycle = async (): Promise<YrdCliExitCode | null> => {
     try {
       heartbeat?.check()
@@ -10984,6 +11024,8 @@ export async function followQueueRuns(
         starting || cycleNow < lastMaintenanceAt || cycleNow - lastMaintenanceAt >= HABITANT_MAINTENANCE_INTERVAL_MS
       if (!starting && !refreshed && !holdExpired && !maintenanceDue && !drainRequested()) {
         if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
+        const sourceExit = await sourceExitAtBoundary()
+        if (sourceExit !== null) return sourceExit
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
         return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
@@ -11019,6 +11061,8 @@ export async function followQueueRuns(
       }
       if (!runRequired && !drainRequested()) {
         if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
+        const sourceExit = await sourceExitAtBoundary()
+        if (sourceExit !== null) return sourceExit
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()
         return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null
@@ -11049,14 +11093,13 @@ export async function followQueueRuns(
       // operator performed by hand, minus the 2.5h wait. The heartbeat's
       // close(cleanShutdown=false) in the finally releases the lease.
       if (health.restart) return HABITANT_POISONED_EXIT
-      // Box 1 of @yrd/core/stale-runner-never-recycles. Same boundary and same
-      // reasoning as the poisoned-observer exit above, one step further out: the
-      // in-flight run has just finished, so exiting here drains cleanly rather
-      // than abandoning work, and the unclean code makes the supervisor re-exec
-      // a process that reads the source the checkout has since moved to.
-      const source = await habitantSourceHealth(app, io, sourceStall, habitant, sourceStaleThreshold)
-      sourceStall = source.stall
-      if (source.recycle) return HABITANT_SOURCE_STALE_EXIT
+      // Same boundary and same reasoning as the poisoned-observer exit above,
+      // one step further out: the in-flight run has just finished, so exiting
+      // here drains cleanly rather than abandoning work, and the unclean code
+      // makes the supervisor re-exec a process that reads the source the
+      // checkout has since moved to.
+      const sourceExit = await sourceExitAtBoundary()
+      if (sourceExit !== null) return sourceExit
       if (drainRequested()) {
         if (runs.every(Queues.terminal)) {
           // Operator drain finished with no in-flight work left — the one clean stop.
@@ -11093,6 +11136,12 @@ export async function followQueueRuns(
         return null
       }
       if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
+      // A recovered cycle is a loop boundary too — the thrown error has already
+      // unwound whatever the cycle was doing. A stale habitant spinning through
+      // losable per-cycle failures is the same silent hold as an idle one, and
+      // must not be able to skip the self-check either.
+      const sourceExit = await sourceExitAtBoundary()
+      if (sourceExit !== null) return sourceExit
       await sleepUntilDrain(scope.sleep(interval), drainSignal)
       heartbeat?.check()
       return scope.signal.aborted ? HABITANT_INTERRUPTED_EXIT : null

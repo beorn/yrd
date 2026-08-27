@@ -34,6 +34,19 @@ export const HABITANT_SOURCE_STALE_BEHIND = 2
  */
 export const HABITANT_SOURCE_STALE_OBSERVATIONS = 2
 
+/**
+ * How long a recorded recycle attempt suppresses ANOTHER attempt for the same
+ * (booted, head) pair. Within the window, a relaunch that came back on the
+ * same commit proves exiting again would change nothing — hold instead of
+ * crash-looping. Past it, retry: the common cause is a recycle that raced the
+ * checkout projection (the freeze lifts seconds-to-minutes later), and a hold
+ * with no expiry turned that race into serving stale until an operator
+ * noticed by hand. A genuinely frozen checkout now costs one supervised
+ * restart per window — bounded, and each one re-logs the cure — instead of a
+ * silent forever-hold.
+ */
+export const HABITANT_SOURCE_RECYCLE_RETRY_MS = 5 * 60_000
+
 /** One cycle's answer to "how far has my source checkout moved past me?". */
 export type HabitantSourceObservation = Readonly<{
   /** The sha this process booted from, or undefined when the source identity is
@@ -79,10 +92,12 @@ export type HabitantSourceAction =
   | Readonly<{ kind: "recycle"; bootedSha: string; headSha: string; behind: number; observations: number }>
   /**
    * We already recycled for exactly this gap and came back running exactly the
-   * same code. Restarting again cannot help — whatever the habitant boots from
-   * is not the checkout that moved — so it must NOT be tried again. Serving
-   * stale beats a runner that spends its restart budget flapping and leaves the
-   * queue with no runner at all.
+   * same code. Restarting again right now cannot help — whatever the habitant
+   * boots from is not the checkout that moved — so it is not tried again until
+   * the attempt ages past {@link HABITANT_SOURCE_RECYCLE_RETRY_MS}. Serving
+   * stale for one bounded window beats a runner that spends its restart budget
+   * flapping and leaves the queue with no runner at all; retrying after it
+   * beats holding forever on a freeze that has since lifted.
    */
   | Readonly<{ kind: "checkout-behind"; bootedSha: string; headSha: string; behind: number; attemptedAt: string }>
 
@@ -123,19 +138,36 @@ export function foldSourceStaleness(
  * not — a frozen checkout during a custody hold, a launcher whose source
  * identity is misrecorded, a shim resolving a different tree — the re-exec
  * comes back at the same sha with the same gap, and a mechanism that only knew
- * how to exit would exit forever. One attempt per (booted, head) pair is the
- * bound; the supervisor's restart budget is the outer guard behind it, not the
- * first line of defense.
+ * how to exit would exit forever. One attempt per (booted, head) pair per
+ * {@link HABITANT_SOURCE_RECYCLE_RETRY_MS} window is the bound — a FRESH
+ * attempt holds, an aged one is retried, since a hold with no expiry turned a
+ * recycle that merely raced the checkout projection into serving stale until
+ * an operator restarted by hand. An attempt whose timestamp cannot be read
+ * (corrupt, or future-stamped by a skewed clock) counts as aged: it costs at
+ * most one supervised restart, where reading it as fresh could hold forever.
+ * The supervisor's restart budget is the outer guard behind all of this, not
+ * the first line of defense.
  */
 export function decideHabitantSource(
   stall: HabitantSourceStall | undefined,
   lastRecycle: HabitantSourceRecycle | undefined,
+  now: number,
   observations: number = HABITANT_SOURCE_STALE_OBSERVATIONS,
 ): HabitantSourceAction {
   if (stall === undefined || stall.observations < observations) return { kind: "serve" }
   const { bootedSha, headSha, behind } = stall
   if (lastRecycle?.bootedSha === bootedSha && lastRecycle.headSha === headSha) {
-    return Object.freeze({ kind: "checkout-behind", bootedSha, headSha, behind, attemptedAt: lastRecycle.attemptedAt })
+    const age = now - Date.parse(lastRecycle.attemptedAt)
+    const fresh = Number.isFinite(age) && age >= 0 && age < HABITANT_SOURCE_RECYCLE_RETRY_MS
+    if (fresh) {
+      return Object.freeze({
+        kind: "checkout-behind",
+        bootedSha,
+        headSha,
+        behind,
+        attemptedAt: lastRecycle.attemptedAt,
+      })
+    }
   }
   return Object.freeze({ kind: "recycle", bootedSha, headSha, behind, observations: stall.observations })
 }

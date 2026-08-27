@@ -8133,6 +8133,13 @@ export const YRD_REFUSAL_CODES = [
   "rejected",
   "repository-corrupt",
   "required-check-failed",
+  // The habitant's terminal heartbeat finding for a source-drift exit
+  // (@yrd/core/stale-runner-never-recycles box 1): the runner exited unclean
+  // so its supervisor restart boots the new source. A runner-owned lifecycle
+  // record, never a Run failure a disposition would route — registered so the
+  // closed vocabulary covers it, default classification like its siblings
+  // `queue-progress-stalled` and `installed-plan-stale`.
+  "resident-source-stale-restart",
   "retired-command",
   "review-rejected",
   "review-required",
