@@ -66,6 +66,27 @@ async function commit(repo: string, name: string, content = `${name}\n`): Promis
   return await git(repo, "rev-parse", "HEAD")
 }
 
+/**
+ * A well-formed Change-Id trailer value. The content is arbitrary — only the
+ * `I` + 40-hex SHAPE is validated anywhere — keyed on `seed` so two changes
+ * in one test never coincide.
+ */
+function changeId(seed: string): string {
+  return `I${createHash("sha1").update(seed).digest("hex")}`
+}
+
+/**
+ * A commit whose message carries the trailer the push-time derived-identity
+ * gate requires of every recordless `refs/for/` tip. Pass `trailer` to plant
+ * a deliberately malformed one.
+ */
+async function submitCommit(repo: string, name: string, trailer = `Change-Id: ${changeId(name)}`): Promise<string> {
+  await writeFile(join(repo, name), `${name}\n`)
+  await git(repo, "add", name)
+  await git(repo, "commit", "-qm", `add ${name}\n\n${trailer}`)
+  return await git(repo, "rev-parse", "HEAD")
+}
+
 // The BASE's own .yrd.yml (never a feature branch's) is scope-classification
 // authority — readBaseBlob reads it off 'main' in f.mainRepo specifically, so
 // fixture setup for a classification test must merge it there, not on
@@ -180,6 +201,13 @@ async function installHookHost(
   // untracked, regardless of `autoConfig` — proving the receiver passes
   // absence through rather than treating "no file" as "match everything".
   autoConfig?: AutoConfig,
+  // Carrier branches a LIVE record supposedly owns, standing in for the
+  // production `recordLaneOwnsBranch` predicate over the bays state (@yrd/cli
+  // wires the real one; @yrd/bay cannot read record state itself — same
+  // no-cycle reasoning as the two fakes above). Proves the RECEIVER'S
+  // plumbing: a record-owned carrier is exempt from the push-time Change-Id
+  // gate, and everything else is not.
+  recordBranches?: string[],
 ): Promise<Env> {
   const bin = join(root, "bin")
   const targetFile = join(root, "targets.json")
@@ -209,7 +237,7 @@ async function installHookHost(
       '  const body = pattern.split("**").map((seg) =>',
       '    seg.split("*").map((lit) => lit.replace(/[.+^${}()|[\\]\\\\]/g, "\\\\$&")).join("[^/]*"),',
       '  ).join(".*")',
-      '  return new RegExp(`^${body}$`).test(text)',
+      "  return new RegExp(`^${body}$`).test(text)",
       "}",
       "const classifyBranch = autoConfigRaw === undefined ? undefined : (yaml, branch) => {",
       "  if (yaml === undefined) return undefined",
@@ -226,7 +254,9 @@ async function installHookHost(
       'import { appendFile } from "node:fs/promises"',
       "const factsFile = process.env.YRD_TEST_BRANCH_FACTS",
       "const record = (kind) => factsFile === undefined ? undefined : async (fact) => { await appendFile(factsFile, `${JSON.stringify({ kind, ...fact })}\\n`) }",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch, branchSubmitted: record('submitted'), branchUnsubmitted: record('unsubmitted') })",
+      "const recordBranchesRaw = process.env.YRD_TEST_RECORD_BRANCHES",
+      "const recordOwnsBranch = recordBranchesRaw === undefined ? undefined : (branch) => JSON.parse(recordBranchesRaw).includes(branch)",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch, recordOwnsBranch, branchSubmitted: record('submitted'), branchUnsubmitted: record('unsubmitted') })",
       "",
     ].join("\n"),
   )
@@ -239,6 +269,7 @@ async function installHookHost(
     ...(intakePolicy === undefined ? {} : { YRD_TEST_INTAKE_POLICY: intakePolicy }),
     ...(rejectConfigContaining === undefined ? {} : { YRD_TEST_REJECT_CONFIG_CONTAINING: rejectConfigContaining }),
     ...(autoConfig === undefined ? {} : { YRD_TEST_AUTO_CONFIG: JSON.stringify(autoConfig) }),
+    ...(recordBranches === undefined ? {} : { YRD_TEST_RECORD_BRANCHES: JSON.stringify(recordBranches) }),
   }
 }
 
@@ -561,12 +592,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // just staged above. This test needs to commit exactly what was written.
     await git(f.mainRepo, "commit", "-qm", "bad config")
     const headSha = await git(f.mainRepo, "rev-parse", "HEAD")
-    const env = await installHookHost(
-      f.root,
-      { "issue/bad-config": target(f.baseSha) },
-      undefined,
-      "FORBIDDEN-marker",
-    )
+    const env = await installHookHost(f.root, { "issue/bad-config": target(f.baseSha) }, undefined, "FORBIDDEN-marker")
 
     const refused = await push(f, "issue/bad-config:refs/heads/issue/bad-config", env)
     expect(refused.code, refused.stderr).not.toBe(0)
@@ -738,7 +764,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("admits a push to refs/for/<base>/<name> with no bay tracking the branch", async () => {
     const f = await fixture("submit-ref")
     await git(f.mainRepo, "switch", "-qc", "work")
-    const headSha = await commit(f.mainRepo, "submitted.txt")
+    const headSha = await submitCommit(f.mainRepo, "submitted.txt")
 
     // No entry keyed by any BRANCH — only by the parsed intent. A resolver that
     // could only answer branch questions would refuse this push, which is the
@@ -787,7 +813,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("refuses a rewritten submit patchset before it can strand a receiver result", async () => {
     const f = await fixture("submit-rewrite")
     await git(f.mainRepo, "switch", "-qc", "work")
-    const firstHead = await commit(f.mainRepo, "first.txt")
+    const firstHead = await submitCommit(f.mainRepo, "first.txt")
     const env = await installHookHost(f.root, {
       "for:main/my-change": target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
     })
@@ -820,7 +846,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("does not mistake a descendant ref for the exact submit carrier", async () => {
     const f = await fixture("submit-prefix")
     await git(f.mainRepo, "switch", "-qc", "work")
-    const headSha = await commit(f.mainRepo, "prefix.txt")
+    const headSha = await submitCommit(f.mainRepo, "prefix.txt")
     await git(f.mainRepo, "switch", "-qc", "descendant-ref", f.baseSha)
     const descendantHead = await commit(f.mainRepo, "descendant-only.txt")
     await git(f.mainRepo, "update-ref", "refs/heads/issue/my-change/child", descendantHead)
@@ -837,7 +863,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("refuses at drain when the carrier branch moved since the push", async () => {
     const f = await fixture("submit-drift")
     await git(f.mainRepo, "switch", "-qc", "work")
-    await commit(f.mainRepo, "drift.txt")
+    await submitCommit(f.mainRepo, "drift.txt")
     const env = await installHookHost(f.root, {
       "for:main/my-change": target(f.baseSha, { branch: "issue/my-change" }),
     })
@@ -862,7 +888,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("resolves the base by longest existing branch, so a slashed change name is not read as a base", async () => {
     const f = await fixture("submit-split")
     await git(f.mainRepo, "switch", "-qc", "work")
-    await commit(f.mainRepo, "split.txt")
+    await submitCommit(f.mainRepo, "split.txt")
 
     // `main/@yrd/core/p2` splits four ways. Only `main` exists, so `main` is the
     // base and the whole remainder is the change name. A greedy first-slash
@@ -917,6 +943,93 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const result = await push(f, "work:refs/for/main/orphan", env)
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain("carrier branch")
+  })
+
+  // ── push-time Change-Id gate (S6 derived identity) ────────────────────────
+  //
+  // Post-S6 a refs/for push with no live record IS the whole submission, and
+  // the derived member's identity is read from the tip commit's `Change-Id`
+  // trailer at admission. The receiver doc promises every refusal at push
+  // time, before the ref is accepted — so a tip that admission would refuse
+  // for a missing or malformed trailer must refuse HERE, with the cure,
+  // never after the pusher has already seen success.
+
+  it("refuses a refs/for push whose tip has no Change-Id trailer, at push time, with the amend cure", async () => {
+    const f = await fixture("submit-no-changeid")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const headSha = await commit(f.mainRepo, "no-identity.txt")
+    const env = await installHookHost(f.root, {
+      "for:main/no-identity": target(f.baseSha, { branch: "issue/no-identity", issue: "no-identity" }),
+    })
+    const result = await push(f, "work:refs/for/main/no-identity", env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain(`tip commit ${headSha.slice(0, 12)}`)
+    expect(result.stderr).toContain("no 'Change-Id' trailer")
+    // The cure shows the exact trailer line to add and names the amend.
+    expect(result.stderr).toContain("Change-Id: I<40 hex>")
+    expect(result.stderr).toContain("--amend")
+    // Push time means BEFORE the ref is accepted: nothing stored, nothing queued.
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/for/")).toBe("")
+    expect(await inboxFiles(f.receiver)).toEqual([])
+  })
+
+  it("refuses a malformed Change-Id trailer — wrong length or prefix — naming what it found", async () => {
+    const f = await fixture("submit-bad-changeid")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await submitCommit(f.mainRepo, "too-short.txt", "Change-Id: Ideadbeef")
+    const env = await installHookHost(f.root, {
+      "for:main/bad-identity": target(f.baseSha, { branch: "issue/bad-identity", issue: "bad-identity" }),
+    })
+    const short = await push(f, "work:refs/for/main/bad-identity", env)
+    expect(short.code).not.toBe(0)
+    expect(short.stderr).toContain("no valid 'Change-Id' trailer")
+    expect(short.stderr).toContain("'Ideadbeef'")
+    expect(short.stderr).toContain("Change-Id: I<40 hex>")
+    expect(short.stderr).toContain("--amend")
+
+    // Only the TIP identifies the change: its malformed trailer refuses even
+    // though the parent commit's is malformed differently.
+    const wrongPrefix = `J${"0".repeat(40)}`
+    await submitCommit(f.mainRepo, "wrong-prefix.txt", `Change-Id: ${wrongPrefix}`)
+    const prefixed = await push(f, "work:refs/for/main/bad-identity", env)
+    expect(prefixed.code).not.toBe(0)
+    expect(prefixed.stderr).toContain(`'${wrongPrefix}'`)
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/for/")).toBe("")
+    expect(await inboxFiles(f.receiver)).toEqual([])
+  })
+
+  it("accepts a valid Change-Id trailer with no Bead trailer — the ref path carries the issue", async () => {
+    const f = await fixture("submit-changeid-ok")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const headSha = await submitCommit(f.mainRepo, "identified.txt")
+    // Identity, deliberately, is the ONLY trailer obligation: no `Bead` here.
+    expect(await git(f.mainRepo, "show", "-s", "--format=%(trailers:key=Bead,valueonly)", headSha)).toBe("")
+    const env = await installHookHost(f.root, {
+      "for:main/identified": target(f.baseSha, { branch: "issue/identified", issue: "identified" }),
+    })
+    const result = await push(f, "work:refs/for/main/identified", env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/identified")).toBe(headSha)
+  })
+
+  it("exempts a carrier a live record already owns: a grandfathered re-push needs no trailer", async () => {
+    const f = await fixture("submit-grandfathered")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    const headSha = await commit(f.mainRepo, "grandfathered.txt")
+    const targets = {
+      "for:main/grandfathered": target(f.baseSha, { branch: "issue/grandfathered", issue: "grandfathered" }),
+    }
+    // Positive control: with NO record owning the carrier the same push
+    // refuses on the missing trailer — proving the exemption below is what
+    // admits it, not a gate that never ran.
+    const strict = await push(f, "work:refs/for/main/grandfathered", await installHookHost(f.root, targets))
+    expect(strict.code).not.toBe(0)
+    expect(strict.stderr).toContain("no 'Change-Id' trailer")
+
+    const env = await installHookHost(f.root, targets, undefined, undefined, undefined, ["issue/grandfathered"])
+    const result = await push(f, "work:refs/for/main/grandfathered", env)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/grandfathered")).toBe(headSha)
   })
 
   // ── branch-is-change: refs/yrd/submit/* and refs/yrd/archive/* ─────────────
@@ -1168,7 +1281,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("re-points refs/yrd/submit/<branch> at the pushed tip on every refs/for push, creating then updating it", async () => {
     const f = await fixture("submit-dual-write")
     await git(f.mainRepo, "switch", "-qc", "work")
-    const firstHead = await commit(f.mainRepo, "first.txt")
+    const firstHead = await submitCommit(f.mainRepo, "first.txt")
     const env = await installHookHost(f.root, {
       "for:main/dual-write": target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
     })
@@ -1193,7 +1306,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // this), then add a commit that descends from it — "every refs/for push
     // RE-submits", not just the first.
     await git(f.mainRepo, "update-ref", "refs/heads/issue/dual-write", firstHead)
-    const secondHead = await commit(f.mainRepo, "second.txt")
+    const secondHead = await submitCommit(f.mainRepo, "second.txt")
     expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
     expect((await f.receiver.drain(drainOptions)).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(secondHead)
@@ -1278,7 +1391,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // Deliberately overlapping: this branch's name matches BOTH ignore and
     // submit. Only the precedence rule decides the outcome.
     const autoConfig = { ignore: ["task/straight-*"], submit: ["task/straight-*"], draft: ["task/**"] }
-    const env = await installHookHost(f.root, { "task/straight-1": target(f.baseSha) }, undefined, undefined, autoConfig)
+    const env = await installHookHost(
+      f.root,
+      { "task/straight-1": target(f.baseSha) },
+      undefined,
+      undefined,
+      autoConfig,
+    )
     await git(f.mainRepo, "switch", "-qc", "task/straight-1")
     const headSha = await commit(f.mainRepo, "work.txt")
     expect((await push(f, "task/straight-1:refs/heads/task/straight-1", env)).code).toBe(0)
@@ -1381,7 +1500,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const f = await fixture("auto-submit-lane")
     await commitOnMain(f, ".yrd.yml", "checks: [typecheck]\n")
     const autoConfig = { submit: ["task/straight-*"] }
-    const env = await installHookHost(f.root, { "task/straight-2": target(f.baseSha) }, undefined, undefined, autoConfig)
+    const env = await installHookHost(
+      f.root,
+      { "task/straight-2": target(f.baseSha) },
+      undefined,
+      undefined,
+      autoConfig,
+    )
     const resolveTarget = async () => target(f.baseSha)
     const classifyBranch = fakeClassifier(autoConfig)
     await git(f.mainRepo, "switch", "-qc", "task/straight-2")

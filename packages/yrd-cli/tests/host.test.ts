@@ -130,7 +130,9 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   await git(repo, "switch", "-qc", "issue/feature")
   await writeFile(join(repo, "feature.txt"), "feature\n")
   await git(repo, "add", "feature.txt")
-  await git(repo, "commit", "-qm", "feature")
+  // The Change-Id trailer is what the receiver's push-time gate requires of a
+  // recordless refs/for tip (S6 derived identity); the value is arbitrary.
+  await git(repo, "commit", "-qm", `feature\n\nChange-Id: I${"cafe".repeat(10)}`)
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
