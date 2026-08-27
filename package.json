@@ -23,6 +23,9 @@
     "scripts/verify-public-dependencies.ts"
   ],
   "type": "module",
+  "exports": {
+    "./hab-projects": "./hab.projects.ts"
+  },
   "scripts": {
     "yrd": "bun ./bin/yrd",
     "git-yrd": "bun ./bin/git-yrd",
