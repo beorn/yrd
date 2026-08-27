@@ -257,45 +257,37 @@ function consumingRun(
 
 /**
  * Is this retained run member a derived member — recordless BY DESIGN — rather
- * than a record the store lost (the `missing-pr` audit invariant)? Mechanical
- * discriminator: derived ids mint strictly above the frozen store's max and no
- * record ever mints again post-door (A9), so a recordless, non-intent member
- * whose number exceeds every record's is derived. During an S6 rollback the
- * re-adopting sweep can mint records above old derived runs and transiently
- * re-arm `missing-pr` for them — accepted: the design names S6 soft-reversible
- * and the finding is then pointing at exactly the runs the rollback orphaned.
+ * than something the reader should refuse to render?
+ *
+ * The original discriminator compared the member's number to the record
+ * store's max ("derived ids mint strictly above the frozen store's max", A9).
+ * That assumption is FALSE while A2's fact-keyed grandfather lives: a factless
+ * `yrd pr submit` still mints a legacy RECORD, so both lanes mint post-door
+ * and their numbers interleave. Measured 2026-08-27: record PR2135 minted
+ * after derived members PR2131-2134, moving the "frontier" past them and
+ * reclassifying every earlier derived member as corruption — which crashed
+ * every status view the moment the fix that relied on the number test landed.
+ *
+ * The sound rule needs no numbers: post-S6 records are never DELETED (the
+ * grandfathered drain freezes them terminal, it does not remove them), so a
+ * record the store "lost" is not a representable state. A recordless,
+ * non-intent member retained by a run IS a derived member — or a member whose
+ * record predates the store's own S4-certified history, which reads the same
+ * way. Corruption detection belongs to the journal's hash chain, not to a
+ * number heuristic that legacy mints invalidate.
  */
 export function isDerivedRunMember(bays: DeepReadonly<Pick<BaysState, "prs">>, pr: ChangeSnapshot): boolean {
-  if (pr.intent !== undefined || bays.prs[pr.id] !== undefined) return false
-  return isDerivedMemberId(pr.id, recordNumberFrontier(Object.keys(bays.prs)))
+  return pr.intent === undefined && bays.prs[pr.id] === undefined
 }
 
-/**
- * The frozen store's mint frontier: the highest PR number any retained record
- * carries. Ids minted strictly above it are the derived lane's (A9: no record
- * ever mints again post-door). Exposed separately from `isDerivedRunMember` so
- * status projections that hold record LISTS rather than `BaysState` apply the
- * same discriminator instead of re-spelling it.
- */
-export function recordNumberFrontier(recordIds: Iterable<string>): number {
-  let max = 0
-  for (const id of recordIds) {
-    const number = changeIdNumber(id)
-    if (number !== undefined && number > max) max = number
-  }
-  return max
+/** A recordless, non-intent run member, for callers that hold a record id SET
+ * rather than `BaysState` (status projections over result lists). Same rule as
+ * `isDerivedRunMember`; see its doc for why there is deliberately no number
+ * test here. */
+export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): boolean {
+  return !recordIds.has(id)
 }
 
-/** The id half of `isDerivedRunMember`'s rule, against a precomputed frontier. */
-export function isDerivedMemberId(id: string, frontier: number): boolean {
-  const number = changeIdNumber(id)
-  return number !== undefined && number > frontier
-}
-
-function changeIdNumber(id: string): number | undefined {
-  const match = /^PR(\d+)$/u.exec(id)
-  return match === null ? undefined : Number(match[1])
-}
 
 /**
  * Every branch the DERIVED lane currently owns: a live submit fact whose

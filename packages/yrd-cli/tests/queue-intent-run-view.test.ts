@@ -84,42 +84,34 @@ describe("intent-integrated runs in the queue read views", () => {
     expect(() => queueTimelineAdmissionTimes(withIntentRun(contractResults()))).not.toThrow()
   })
 
-  it("revision clocks survive an intent member and keep sub-frontier orphans loud", () => {
+  it("revision clocks tolerate EVERY recordless member — number-independent, because legacy mints interleave", () => {
     const results = withIntentRun(contractResults())
     const first = results[0]
     if (first === undefined) throw new Error("missing result")
     expect(() => queueRunRevisionClocks(first.prs, first.finished)).not.toThrow()
 
-    // PR9 is below the fixture's record frontier (PR77) and retained by no
-    // record: that is a record the store LOST, and it stays loud.
-    const orphanPR: Run = {
-      ...first.finished[first.finished.length - 1]!,
-      id: "R9999",
-      prs: [{ ...intentMember(), id: "PR9", intent: undefined } as Member],
+    // Post-S6 a recordless, non-intent run member IS a derived member: records
+    // are never deleted, so "a record the store lost" is not a representable
+    // state. The rule is deliberately number-independent — an earlier revision
+    // classified by number-above-the-record-max, and one record-lane submit
+    // (grandfathered A2 legacy mint) moved the max past live derived members
+    // and crashed every status view (PR2135 vs PR2131, 2026-08-27). Both a
+    // low id (PR9) and a high id (PR777) must tolerate identically.
+    for (const id of ["PR9", "PR777"]) {
+      const derivedRun: Run = {
+        ...first.finished[first.finished.length - 1]!,
+        id: "R9999",
+        prs: [{ ...intentMember(), id, intent: undefined } as Member],
+      }
+      expect(() => queueRunRevisionClocks(first.prs, [derivedRun])).not.toThrow()
+      expect(queueRunRevisionClocks(first.prs, [derivedRun]).size).toBe(0)
+      // And its admission clock derives from the run itself, like an intent's.
+      const derivedResults = [{ ...first, finished: [...first.finished, derivedRun] }]
+      const times = queueTimelineAdmissionTimes(derivedResults)
+      expect(
+        times.get(JSON.stringify(["R9999", id, derivedRun.prs[0]!.revision, derivedRun.prs[0]!.headSha])),
+      ).toBe(null)
     }
-    expect(() => queueRunRevisionClocks(first.prs, [orphanPR])).toThrow(/has no retained change 'PR9'/)
-  })
-
-  it("revision clocks tolerate a derived member — recordless above the frontier is the S6 lane, not corruption", () => {
-    const results = withIntentRun(contractResults())
-    const first = results[0]
-    if (first === undefined) throw new Error("missing result")
-    // PR777 mints above every retained record (fixture max PR77): post-S6 that
-    // is a derived member, which has no record BY DESIGN. Its clock is simply
-    // absent; nothing throws.
-    const derivedRun: Run = {
-      ...first.finished[first.finished.length - 1]!,
-      id: "R9999",
-      prs: [{ ...intentMember(), id: "PR777", intent: undefined } as Member],
-    }
-    expect(() => queueRunRevisionClocks(first.prs, [derivedRun])).not.toThrow()
-    expect(queueRunRevisionClocks(first.prs, [derivedRun]).size).toBe(0)
-    // And its admission clock derives from the run itself, like an intent's.
-    const derivedResults = [{ ...first, finished: [...first.finished, derivedRun] }]
-    const times = queueTimelineAdmissionTimes(derivedResults)
-    expect(times.get(JSON.stringify(["R9999", "PR777", derivedRun.prs[0]!.revision, derivedRun.prs[0]!.headSha]))).toBe(
-      null,
-    )
   })
 
   it("the timeline projection renders a row for the intent run instead of crashing", () => {
