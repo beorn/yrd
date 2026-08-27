@@ -2490,6 +2490,22 @@ describe("withBays", () => {
     expect(quiet).toEqual([])
   })
 
+  it("stage stops where draft stops on a record path: the staging pass never runs the real submit", async () => {
+    await using app = (await createHarness()).app
+    // The CLI's pre-submit staging pass sends stage:true through the same
+    // selection. On a pushed record that pass once fell through to the real
+    // submit — mutating delivery state BEFORE gates ran (the PR1128 window).
+    await app.bays.submit({ branch: "topic/staged", headSha: HEAD_1, draft: true })
+    const staged = record(await app.bays.submitSelection("topic/staged", {
+      resolveRevision: async () => HEAD_1,
+      run: runtime,
+      base: "main",
+      stage: true,
+    }))
+    expect(changeFacts(staged)).toMatchObject({ delivery: "pushed", current: { n: 1, head: HEAD_1 } })
+    expect(changeFacts(app.bays.pr("topic/staged"))).toMatchObject({ delivery: "pushed" })
+  })
+
   it("carries title and description forward across a resubmitted revision", async () => {
     await using app = (await createHarness()).app
     // Seed the record (record lane), then exercise the record resubmit path.

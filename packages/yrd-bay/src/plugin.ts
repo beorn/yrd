@@ -240,9 +240,11 @@ export type SubmitSelectionOptions = Readonly<{
    * governs future revisions, which a terminal change no longer has. */
   track?: boolean
   draft?: boolean
-  /** Pre-submit staging pass: resolve what WOULD submit without writing. On a
-   * recordless branch this returns the derived preview instead of minting or
-   * writing the fact; record paths keep their draft-stage behavior. */
+  /** Pre-submit staging pass. On a recordless branch it is a pure preview:
+   * the derived acceptance returns and nothing writes. On record paths it
+   * stops exactly where a draft stops — the pass may record a moved tip as a
+   * revision (intake, draft semantics) but never runs the real submit, so
+   * gates that run between staging and submit see an unsubmitted change. */
   stage?: boolean
   props?: ChangeProps
   resolveRevision(ref: string): Promise<string | undefined>
@@ -1166,7 +1168,10 @@ export function createBays(
     }
     if (pr !== undefined && changeDeliveryState(pr) === "pushed") {
       pr = await bindProps(pr, options.props)
-      if (options.draft === true) return pr
+      // stage stops exactly where draft stops: the staging pass may record a
+      // revision (intake above, draft semantics) but must never run the real
+      // submit — that write reopened the pre-gate mutation window (PR1128).
+      if (options.draft === true || options.stage === true) return pr
       await submitOperation({ pr: pr.id })
       const submitted = resolveChange(state(), pr.id)
       if (submitted === undefined) {
@@ -1196,7 +1201,7 @@ export function createBays(
         if (changeDeliveryState(correlated) === "submitted" || changeDeliveryState(correlated) === "ready") {
           return correlated
         }
-        if (options.draft === true) return correlated
+        if (options.draft === true || options.stage === true) return correlated
         await submitOperation({ pr: correlated.id })
         const submitted = resolveChange(state(), live.id)
         if (submitted === undefined) {

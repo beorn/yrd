@@ -757,12 +757,13 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     expect(refusal).toMatchObject({ kind: "refusal", code: "derived-change-id-missing" })
     expect(refusal?.message).toMatch(/carries no Change-Id trailer/)
     expect(refusal?.message).toMatch(/amend the tip commit with a Change-Id trailer/)
-    expect(refusal?.message).toMatch(/'yrd pr submit issue\/corrupt' accepts the branch as-is/)
+    expect(refusal?.message).toMatch(/amend the tip commit with a Change-Id trailer and re-push/)
+    expect(refusal?.message).not.toMatch(/record lane/)
     // Commit-free refusal: the number mint never burned.
     expect(mint.highWater()).toBe(7)
   })
 
-  it("with no PR-number mint configured the compose says so loudly, names the record-lane cure, and every row stands", async () => {
+  it("with no PR-number mint configured the compose says so loudly, names the mint cure, and every row stands", async () => {
     const events: LogEvent[] = []
     await using app = await createApp({
       steps: [passingCheck()],
@@ -776,7 +777,7 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
         event.kind === "log" && event.level === "warn" && event.props?.action === "compose-derived-mint-missing",
     )
     expect(warn).toBeDefined()
-    expect(warn?.message).toMatch(/'yrd pr submit <branch>' accepts the branch as-is/)
+    expect(warn?.message).toMatch(/every row stands until the mint exists/)
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/unadmittable"])
   })
 })

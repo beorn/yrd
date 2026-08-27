@@ -372,8 +372,8 @@ export function alreadyLandedSubmits(
  * revision of the branch — the terminal `pr/integrated` always has an
  * identity to emit, and the lane serves pushes no tooling stamped.
  * `derived-change-id-missing` remains only for submit facts too non-canonical
- * to mint from, and its cure names both outs: add the trailer, or record-lane
- * `yrd pr submit <branch>` accepts the branch as-is.
+ * to mint from, and its cure is the trailer: amend the tip commit and re-push
+ * (the record lane no longer accepts recordless branches — the mint retired).
  */
 export function deriveRunMemberArgs(
   options: Readonly<{
@@ -439,8 +439,8 @@ export function deriveRunMemberArgs(
  * never burns on a refused branch — only when the facts are not canonical (a
  * malformed ref or non-hex sha): an identity minted from a non-canonical fact
  * would not be stable across re-derivations, which is the mint's entire
- * contract. The cure names both outs because both genuinely work: a Change-Id
- * trailer bypasses this mint, and the record lane accepts the branch as-is.
+ * contract. The cure is the trailer — amend the tip commit and re-push (the
+ * record-lane out retired with the legacy mint).
  */
 function mintSyntheticChangeId(branch: string, sha: string): string {
   if (!GitRefSchema.safeParse(branch).success || !GitShaSchema.safeParse(sha).success) {
@@ -449,8 +449,7 @@ function mintSyntheticChangeId(branch: string, sha: string): string {
       "derived-change-id-missing",
       `yrd: branch '${branch}' tip ${sha} carries no Change-Id trailer, and its submit facts are not ` +
         `canonical (a well-formed ref and a full hex sha) to mint a synthetic identity from — amend the tip ` +
-        `commit with a Change-Id trailer and re-push branch + submit ref, or use the record lane: ` +
-        `'yrd pr submit ${branch}' accepts the branch as-is`,
+        `commit with a Change-Id trailer and re-push branch + submit ref`,
     )
   }
   return changeIdForDerivedSubmit({ branch, sha })

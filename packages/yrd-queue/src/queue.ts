@@ -1369,8 +1369,8 @@ function createQueue<Shape extends ChangeShape>(
     if (derivedMint === undefined) {
       log.warn?.(
         "queue compose cannot admit ref-only branches: no PR-number mint is configured for derived admission " +
-          "— configure the queue plugin's prNumberMint (the durable pr-mint.json store the bays plugin shares), " +
-          "or land each branch through the record lane: 'yrd pr submit <branch>' accepts the branch as-is",
+          "— configure the queue plugin's prNumberMint (the durable pr-mint.json store the bays plugin shares); " +
+          "the derived lane is the only submission path, so every row stands until the mint exists",
         {
           action: "compose-derived-mint-missing",
           branches,
