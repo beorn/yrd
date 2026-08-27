@@ -739,6 +739,46 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(heads).toEqual([first, second])
   })
 
+  it("tells the second result for a branch where its blocking failure is", async () => {
+    // The follow-on message, not a failure of its own. It used to say only
+    // "blocked by an earlier failed result", sending the reader hunting for a
+    // cause that is sitting in the SAME drain result they are already holding.
+    // And because a failed result stays pending and retries, it reappears
+    // every drain until the first one is dealt with — which reads like a stuck
+    // queue rather than one waiting on a fix.
+    const f = await fixture("blocked-cure")
+    await git(f.mainRepo, "switch", "-qc", "issue/blocked")
+    const first = await commit(f.mainRepo, "one.txt")
+    const second = await commit(f.mainRepo, "two.txt")
+    await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${second}:refs/yrd/test/blocked`)
+    const ref = "refs/heads/issue/blocked"
+    const resolveTarget = async () => target(f.baseSha)
+
+    for (const [oldSha, headSha] of [
+      [zero, first],
+      [first, second],
+    ] as const) {
+      const update = `${oldSha} ${headSha} ${ref}\n`
+      await f.receiver.prepare(update, { resolveTarget })
+      await git(f.receiver.receiverPath, "update-ref", ref, headSha, oldSha)
+      await f.receiver.finalize(update, { resolveTarget })
+    }
+
+    const result = await f.receiver.drain({
+      resolveTarget,
+      intake: async () => {
+        throw new Error("the real cause")
+      },
+    })
+
+    expect(result.failed).toHaveLength(2)
+    // The first carries the real error; the second must point AT it.
+    expect(result.failed[0]?.error).toBe("the real cause")
+    expect(result.failed[1]?.error).toContain("blocked by an earlier failed result")
+    expect(result.failed[1]?.error).toContain("that earlier result failed in this same drain")
+    expect(result.failed[1]?.error).toContain("fix that one, and this retries on the next drain")
+  })
+
   it("retains and reports malformed result data", async () => {
     const f = await fixture("malformed")
     const id = "a".repeat(64)

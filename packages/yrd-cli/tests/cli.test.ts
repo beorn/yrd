@@ -4989,7 +4989,37 @@ describe("runYrd", () => {
     const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
     expect(create.stderr()).toContain("create is only for a draft change")
+    // A LIVE change: the way past this refusal is another revision, not a new
+    // change. The Bay-bound sibling of this refusal says "pass a branch", which
+    // would be nonsense here — this path fires only when no Bay resolved, i.e.
+    // the caller already passed one. Asserting the rendered `resolve:` line,
+    // since that is where the CLI puts a quoted command.
+    expect(create.stderr()).toContain("add a revision to the live change instead")
+    expect(create.stderr()).toContain("resolve: yrd pr submit <branch>")
+    expect(create.stderr()).not.toContain("yrd pr create <branch>")
     expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
+  })
+
+  it("sends a terminal change to a fresh ref, not to another revision of a spent branch", async () => {
+    // The other half of the same refusal. A live change takes another
+    // revision; a terminal one cannot — resubmitting a withdrawn/integrated
+    // identity is refused outright (REDELIVERY_REFUSING_STATES), so printing
+    // the live cure here would be a wrong instruction rather than a thin one.
+    // The discriminator is redeliveryRefusedByDelivery, shared with the remedy
+    // planner so the two answers cannot drift apart.
+    const app = await createApp()
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/spent", "--json"), submit.io), submit.stderr()).toBe(0)
+    await app.bays.closePr({ pr: "PR1" })
+    expect(changeDeliveryState(app.bays.pr("topic/spent")!)).toBe("withdrawn")
+
+    const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "create", "topic/spent"), create.io)).toBe(1)
+    expect(create.stderr()).toContain("is terminal and its branch is spent")
+    expect(create.stderr()).toContain("move the work onto a fresh ref")
+    expect(create.stderr()).toContain("resolve: yrd pr create <new-branch>")
+    // The live cure must NOT appear here — that is the wrong instruction.
+    expect(create.stderr()).not.toContain("add a revision to the live change")
   })
 
   it("resubmits a required-check-failed branch as a fresh revision through pr submit", async () => {

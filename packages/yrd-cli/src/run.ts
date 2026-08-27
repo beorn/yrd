@@ -101,7 +101,7 @@ import {
   renderYrdConfigScaffold,
   type ResolvedYrdProjectConfig,
 } from "./config.ts"
-import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
+import { actionableFailure, formatActionableFailure, redeliveryRefusedByDelivery } from "./actionable-error.ts"
 import { INSTALLED_PLAN_STALE_RESOLUTION, RUN_PLAN_MISMATCH_RESOLUTION } from "./plan-audit.ts"
 import {
   MAX_CONSECUTIVE_RUNTIME_RELOADS,
@@ -5461,7 +5461,17 @@ function bayBindingRefusal(
  * binding — a bare `pr create` resolving the cwd Bay, or a Bay selector — the
  * caller never named the change, so the refusal must say which binding produced it
  * and that a branch selector is the way past it (B94, 2026-08-19: two bare
- * `pr create` refusals named only the finished PR). */
+ * `pr create` refusals named only the finished PR).
+ *
+ * The BARE path needs a different cure, and reusing the Bay path's would be
+ * worse than silence: it fires only when no Bay resolved, which means the
+ * caller ALREADY named a branch. "Pass a branch" sends that reader in a circle.
+ * What is past the refusal depends on whether the change is still live —
+ * `redeliveryRefusedByDelivery` is the same discriminator the remedy planner
+ * uses, so both answers cannot drift apart. Spelled as quoted `yrd ...`
+ * commands because the renderer lifts those onto `resolve:` and discards the
+ * prose around them (actionable-error.ts `embeddedYrdCommands`).
+ */
 function createOnlyRefusal(
   bay: Readonly<{ id: string }> | undefined,
   pr: Readonly<{ id: string }>,
@@ -5470,7 +5480,10 @@ function createOnlyRefusal(
   if (bay !== undefined) {
     bayBindingRefusal(bay, pr, delivery, "pass a branch — yrd pr create <branch>")
   }
-  refusal(`change '${pr.id}' is already ${delivery}; create is only for a draft change`)
+  const remedy = redeliveryRefusedByDelivery(delivery as ChangeDeliveryState)
+    ? `'${delivery}' is terminal and its branch is spent — move the work onto a fresh ref, then 'yrd pr create <new-branch>'`
+    : `add a revision to the live change instead — 'yrd pr submit <branch>'`
+  refusal(`change '${pr.id}' is already ${delivery}; create is only for a draft change; ${remedy}`)
 }
 
 type ChangeSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"

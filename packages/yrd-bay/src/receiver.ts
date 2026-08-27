@@ -543,9 +543,18 @@ async function drainReceiverInbox(
     const blocked = new Set<string>()
     for (const { path, result } of await pendingResults(receiver, drain)) {
       if (blocked.has(result.branch)) {
+        // Not a failure of its own: an earlier result for this same branch
+        // threw in this same drain pass (`blocked.add` sits in that catch,
+        // beside the real error). Saying only "blocked" sends the reader
+        // hunting for a cause that is already in front of them, in this very
+        // result set — and because a failed result stays pending and retries,
+        // this line reappears every drain until that first one is dealt with,
+        // which reads like a stuck queue rather than one waiting on a fix.
         drain.failed.push({
           id: result.id,
-          error: `blocked by an earlier failed result for branch '${result.branch}'`,
+          error:
+            `blocked by an earlier failed result for branch '${result.branch}'; that earlier result failed in ` +
+            "this same drain and carries the real error — fix that one, and this retries on the next drain",
         })
         continue
       }
