@@ -190,10 +190,20 @@ function selectedQueueWatchFocus(
   row: Readonly<{ pr: string; run?: string }> | undefined,
   projectedRow: QueueTimelineProjectedRow | undefined,
   prs: readonly Change[],
+  results: readonly QueueStatusResult[] = [],
 ): QueueWatchFocus | undefined {
   if (row === undefined) return undefined
   const pr = prs.find((candidate) => candidate.id === row.pr)
-  const revision = projectedRow?.revision ?? (pr === undefined ? undefined : changeRevisionNumber(pr))
+  // Revision resolution, derived world first after the row itself: the
+  // projected row, the run-member snapshot, then the record (legacy arm). A
+  // recordless (derived) member used to fall out here and silently never
+  // report focus — so its detail diffs never loaded (NSE-6).
+  const member = results
+    .flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
+    .filter((run) => row.run === undefined || run.id === row.run)
+    .flatMap((run) => run.prs)
+    .find((candidate) => candidate.id === row.pr)
+  const revision = projectedRow?.revision ?? member?.revision ?? (pr === undefined ? undefined : changeRevisionNumber(pr))
   if (revision === undefined) return undefined
   return { pr: row.pr, revision, ...(row.run === undefined ? {} : { run: row.run }) }
 }
@@ -1298,10 +1308,14 @@ function staleDraftFooterNotice(findings: readonly QueueAuditFinding[]): string 
   if (first === undefined) return undefined
   const more = rest.length === 0 ? "" : `, +${rest.length} more`
   if (first.code === "unrecorded-submit") {
-    // A branch approved in git that no record carries (branch-is-change 2a):
-    // it has no PR and no recorded submitter; the specimen names the branch.
+    // A submitted branch the queue has not served yet (branch-is-change): on
+    // the derived lane the git submit fact IS the submission — nothing needs
+    // re-submitting, and the S5-era "yrd pr submit to carry it" remedy would
+    // mint the parallel record lane this finding exists to retire. What is
+    // actually pending is the COMPOSE: the next queue pass admits the branch,
+    // so a persistent row means the runner is not draining.
     const branch = first.specimen?.replace(/^branch:/u, "") ?? "a branch"
-    return `${branch} submitted in git but unrecorded${more} — yrd queue audit for detail, yrd pr submit to carry it`
+    return `${branch} submitted, awaiting compose${more} — next queue pass picks it up; if it stays, the runner is not draining (yrd queue audit)`
   }
   const owner = first.submitter === undefined ? "no recorded owner" : first.submitter
   const pr = first.pr === undefined ? "a draft" : `PR ${first.pr}`
@@ -1626,11 +1640,19 @@ export function QueueWatchFrame({
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
   // Revision A makes DETAIL run-scoped: resolve every immutable run member for
   // the change blocks, while pending rows retain the same one-template shape.
+  // S7: this is the LEGACY enrichment arm (record title/description/history).
+  // The change blocks themselves render from `detailData.prs` member
+  // snapshots, so a recordless (derived) member keeps its full box when this
+  // join comes back empty — the join going empty post-purge is expected, not
+  // a blank-detail bug (NSE-6).
   const allFullPrs = snapshot.results.flatMap((result) => result.prs)
   // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity and the
   // status-parameterized template need the full projected row at this index.
   const selectedProjectedRow = projectedRows?.[cursor]
-  useReportQueueWatchFocus(selectedQueueWatchFocus(selectedRow, selectedProjectedRow, allFullPrs), onFocusChange)
+  useReportQueueWatchFocus(
+    selectedQueueWatchFocus(selectedRow, selectedProjectedRow, allFullPrs, snapshot.results),
+    onFocusChange,
+  )
   const detailRunRows =
     selectedRow?.run === undefined
       ? selectedProjectedRow === undefined
