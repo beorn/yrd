@@ -91,6 +91,8 @@ import {
   ReplayQueueRecordSchema,
   Queues,
   ChangeSnapshotSchema,
+  arbitrateDerivedChange,
+  resolveMemberById,
   type AddStepResult,
   type BatchConfig,
   type Candidate,
@@ -124,6 +126,7 @@ import {
   type ChangeShape,
   type ChangeSnapshot,
   type DerivedChange,
+  type ResolvedMember,
   type UnrecordedSubmit,
 } from "./model.ts"
 import {
@@ -862,8 +865,14 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
    * The record wins when one exists for the branch (branch-is-change 2a).
    */
   unrecordedSubmits(snapshot?: DeepReadonly<QueueRuntimeState>): readonly UnrecordedSubmit[]
-  /** One branch, both sources (record + submit ref), one answer. */
+  /** One branch, both sources (record + submit ref), one answer — including
+   * the S6 newest-truth arbitration verdict (`authority`), advisory while
+   * record writes still flow. */
   deriveChange(branch: string, snapshot?: DeepReadonly<QueueRuntimeState>): DerivedChange
+  /** Store-first by id (the S6 id-seam): a record answers when one exists;
+   * otherwise the newest retained run snapshot naming the id does — the only
+   * home a post-door derived member's identity has. */
+  resolveMember(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): ResolvedMember | undefined
   /** PR batches whose revisions may be refreshed before the next selectorless drain.
    * Queue owns this projection because it must preserve the same candidate
    * partitioning, batch size, and FIFO order as compose. */
@@ -3027,7 +3036,11 @@ function createQueue<Shape extends ChangeShape>(
     },
     deriveChange(branch, projected) {
       const snapshot = projected ?? runtime()
-      const record = Object.values(snapshot.bays.prs).find((pr) => pr.branch === branch)
+      const records = Object.values(snapshot.bays.prs).filter((pr) => pr.branch === branch)
+      // Legacy first-match, deliberately NOT the arbitration's newest-truth
+      // pick: every pre-S6 consumer keeps its exact answer while writes still
+      // flow. The door cuts consumers over to `authority`, not the reverse.
+      const record = records[0]
       const submit = snapshot.bays.submits[branch]
       return {
         branch,
@@ -3036,7 +3049,12 @@ function createQueue<Shape extends ChangeShape>(
           : { record, eligibility: ChangeEligibility(snapshot, record, steps, needsPersonOwner) }),
         ...(submit === undefined ? {} : { submit }),
         ...(record !== undefined || submit === undefined ? {} : { unrecorded: unrecordedSubmit(branch, submit) }),
+        authority: arbitrateDerivedChange(records, submit),
       }
+    },
+    resolveMember(selector, projected) {
+      const snapshot = projected ?? runtime()
+      return resolveMemberById(snapshot.bays, snapshot.queues, selector)
     },
     freshnessCandidateBatches() {
       const snapshot = runtime()

@@ -278,6 +278,7 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
       branch: "issue/ref-only",
       submit: { sha: SHA, base: "main", at: "2026-01-01T00:00:00.000Z" },
       unrecorded: unrecorded[0],
+      authority: { lane: "derived", cell: { record: "none", submit: "different-sha" } },
     })
     expect(derived.record).toBeUndefined()
     expect(derived.eligibility).toBeUndefined()
@@ -322,7 +323,10 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
     await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: SHA, base: "main" })
     await app.bays.recordBranchUnsubmit({ branch: "issue/gone", reason: "deleted" })
     expect(app.queue.unrecordedSubmits()).toEqual([])
-    expect(app.queue.deriveChange("issue/gone")).toEqual({ branch: "issue/gone" })
+    expect(app.queue.deriveChange("issue/gone")).toEqual({
+      branch: "issue/gone",
+      authority: { lane: "none", cell: { record: "none", submit: "none" } },
+    })
 
     const before = app.state()
     await app.bays.recordBranchUnsubmit({ branch: "issue/never", reason: "archived" })

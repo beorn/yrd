@@ -18,8 +18,13 @@ import {
   changeHead,
   changeRemerge,
   changeRevisionNumber,
+  isLiveChange,
+  parseChangeSelector,
+  resolveChange,
+  type BaysState,
   type Change,
   type PRId,
+  type ProjectedBranchSubmit,
 } from "@yrd/bay"
 import { compareNatural, JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { StepKind } from "@yrd/config"
@@ -800,6 +805,13 @@ export type UnrecordedSubmit = Readonly<{
  * present when a change record exists for the branch; `submit` is the projected
  * live submit ref when one stands; `unrecorded` is the row rendered for a
  * submit with no record. Never both `eligibility` and `unrecorded`.
+ *
+ * `authority` is the S6 newest-truth arbitration verdict over the same two
+ * sources ({@link arbitrateDerivedChange}). While record writes still flow it
+ * is advisory — no consumer is cut over — and the legacy fields keep their
+ * exact pre-S6 semantics (`record` stays the first store match, `unrecorded`
+ * stays hidden by a record in ANY state). The S6 door flips consumers onto the
+ * verdict; it never changes the verdict.
  */
 export type DerivedChange = Readonly<{
   branch: string
@@ -807,7 +819,154 @@ export type DerivedChange = Readonly<{
   eligibility?: ChangeEligibility
   submit?: Readonly<{ sha: string; base: string; at: string }>
   unrecorded?: UnrecordedSubmit
+  authority: DerivedChangeAuthority
 }>
+
+/**
+ * The record×submit corner a branch occupies — the 9-cell matrix of the S6
+ * door design (@i/10-merge-queue/s6-door-design §3 leg 3). Both axes are
+ * mechanical: `record` is the newest-truth record's liveness
+ * ({@link newestTruthRecord}); `submit` compares the live submit fact's sha to
+ * that record's CURRENT head. With no record there is no head to equal, so
+ * every live submit on a recordless branch classifies as `different-sha` and
+ * the none×same-sha cell is zero by construction — counted as zero, never
+ * omitted, by the door-2 preflight.
+ */
+export type DerivedChangeCell = Readonly<{
+  record: "none" | "live" | "terminal"
+  submit: "none" | "same-sha" | "different-sha"
+}>
+
+/**
+ * Which regime answers for a branch. Exactly one lane per branch — never both,
+ * which is the A4 "never both lanes for one push" guarantee made structural.
+ */
+export type DerivedChangeLane = "record" | "derived" | "none"
+
+export type DerivedChangeAuthority = Readonly<{
+  lane: DerivedChangeLane
+  cell: DerivedChangeCell
+  /** The newest-truth record the verdict arbitrated over: the live record when
+   * one exists, else the newest terminal one (highest number — the mint is
+   * monotone, so number order is creation order). May differ from
+   * `DerivedChange.record` (legacy FIRST store match) on a multi-record
+   * branch, e.g. an integrated record plus the live record a re-submission of
+   * the same branch minted. */
+  record?: Change
+}>
+
+/**
+ * The newest-truth record for one branch: live beats terminal, then highest
+ * number wins within each class. A branch acquires multiple records when it is
+ * re-submitted after integration (intake mints a fresh id for a terminal
+ * branch), so "the" record for a branch is an arbitration, not a lookup.
+ */
+export function newestTruthRecord(records: readonly Change[]): Change | undefined {
+  const ordered = records.toSorted((left, right) => compareNatural(left.id, right.id))
+  return ordered.findLast(isLiveChange) ?? ordered.at(-1)
+}
+
+export function classifyDerivedChangeCell(
+  record: Change | undefined,
+  submit: ProjectedBranchSubmit | undefined,
+): DerivedChangeCell {
+  const recordAxis = record === undefined ? "none" : isLiveChange(record) ? "live" : "terminal"
+  const submitAxis =
+    submit === undefined
+      ? "none"
+      : record !== undefined && changeHead(record) === submit.sha
+        ? "same-sha"
+        : "different-sha"
+  return { record: recordAxis, submit: submitAxis }
+}
+
+/**
+ * S6 newest-truth-by-branch arbitration (@i/10-merge-queue/s6-door-design §2):
+ *
+ * - live record ⇒ `record` lane, whatever the submit fact says: a live submit
+ *   sha differing from a live record's head is the record's pending revision,
+ *   resolved AT WRITE TIME by the receiver's conditional intake dispatch, so
+ *   the read side never owns that ambiguity.
+ * - terminal record + live submit whose sha is NOT the record's current head ⇒
+ *   `derived` lane: a post-door re-submission of a pre-door branch. The
+ *   derived member is the live truth and the record is history — the one cell
+ *   where the legacy "a record in ANY state wins" filter is wrong and S6 flips
+ *   it (the branch is NOT shadowed).
+ * - terminal record + same-sha submit ⇒ `record` lane: the standing ref names
+ *   exactly the head the record already accounts for; nothing new exists to
+ *   run.
+ * - no record ⇒ `derived` when a live submit fact stands, else `none`.
+ */
+export function arbitrateDerivedChange(
+  records: readonly Change[],
+  submit: ProjectedBranchSubmit | undefined,
+): DerivedChangeAuthority {
+  const record = newestTruthRecord(records)
+  const cell = classifyDerivedChangeCell(record, submit)
+  const lane =
+    cell.record === "live"
+      ? "record"
+      : cell.record === "terminal"
+        ? cell.submit === "different-sha"
+          ? "derived"
+          : "record"
+        : cell.submit === "none"
+          ? "none"
+          : "derived"
+  return { lane, cell, ...(record === undefined ? {} : { record }) }
+}
+
+/**
+ * The store-first-by-id half of the S6 seam: `PRnnn` selectors answer from the
+ * record store when a record exists (the frozen store is complete for its own
+ * era), else from the newest retained `ChangeSnapshot` naming that id (the
+ * only home a post-door derived member's identity has). The two sources cannot
+ * disagree about one id: post-door ids are minted strictly above the frozen
+ * store's max (mint monotonicity, pr-mint commit-before-escape), so an id has
+ * a record or snapshots, never a record AND recordless snapshots.
+ */
+export type ResolvedMember =
+  | Readonly<{ source: "record"; id: PRId; record: Change }>
+  | Readonly<{ source: "snapshot"; id: string; snapshot: ChangeSnapshot }>
+
+export function resolveMemberById(bays: BaysState, queues: QueuesState, selector: string): ResolvedMember | undefined {
+  const record = resolveChange(bays, selector)
+  if (record !== undefined) return { source: "record", id: record.id, record }
+  const id = parseChangeSelector(selector)?.pr ?? selector
+  const snapshot = latestChangeSnapshot(queues, (candidate) => candidate.id === id)
+  return snapshot === undefined ? undefined : { source: "snapshot", id: snapshot.id, snapshot }
+}
+
+/**
+ * Newest retained `ChangeSnapshot` matching `match`: Queue run records in
+ * natural run-id order, the latest run's snapshot winning. Intent members are
+ * pin-advance materializations, not changes, and never match. Retention bounds
+ * the walk to retained runs — a pruned member simply stops resolving, which is
+ * the design's accepted re-mint case (number skip, never recycle).
+ */
+export function latestChangeSnapshot(
+  state: QueuesState,
+  match: (snapshot: ChangeSnapshot) => boolean,
+): ChangeSnapshot | undefined {
+  let latest: ChangeSnapshot | undefined
+  for (const record of queueRecordValues(state)) {
+    for (const snapshot of record.prs) {
+      if (snapshot.intent === undefined && match(snapshot)) latest = snapshot
+    }
+  }
+  return latest
+}
+
+/** Highest revision any retained snapshot records for `id`; 0 when none does. */
+export function maxChangeSnapshotRevision(state: QueuesState, id: string): number {
+  let max = 0
+  for (const record of queueRecordValues(state)) {
+    for (const snapshot of record.prs) {
+      if (snapshot.intent === undefined && snapshot.id === id && snapshot.revision > max) max = snapshot.revision
+    }
+  }
+  return max
+}
 
 export type ChangeCheckRecord = Readonly<{
   pr: string
