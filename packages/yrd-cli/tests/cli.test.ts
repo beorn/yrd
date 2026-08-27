@@ -1397,6 +1397,25 @@ describe("runYrd", () => {
         failure: { kind: "refusal", code: "no-merge-authority" },
       })
 
+      // ...and a THIRD fact: the cure, in the message itself. Naming the route
+      // only in a document is what made this recur — the component-main writer
+      // bead closed 2026-08-14, acceptance verified against documents on 08-17,
+      // and a seat hit this same wall again on 08-27 because the tool's own
+      // refusal still read as a dead end. These assertions are the fence: a
+      // future edit may reword the message freely, but it cannot silently strip
+      // the two actionable steps back out and stay green.
+      const { failure } = JSON.parse(refused.stderr()) as Readonly<{ failure: Readonly<{ message: string }> }>
+      // Step 1 — the component's own main is the landing path, by design.
+      expect(failure.message).toContain("own main")
+      // Step 2 — then the pin advance, submitted from the superproject.
+      expect(failure.message).toContain("gitlink bump")
+      expect(failure.message).toContain("superproject")
+      expect(failure.message).toContain("yrd pr submit")
+      // The cure must not be spelled as a raw push to a submodule's branch ref;
+      // remedy-banned-actions-guard.test.ts bans that shape across this surface,
+      // so the prose above is the deliberate spelling, not an approximation.
+      expect(failure.message).not.toMatch(/\bpush\b[^\n]*refs\/heads\//u)
+
       // The process host has already resolved the selected config from the
       // named base. Mutable worktree bytes cannot override that authority.
       const baseAuthority = await submitInto("merge: expected\n", "none")

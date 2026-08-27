@@ -5691,14 +5691,27 @@ async function refuseSubmitWithoutMergeAuthority(
     mergeAuthorityBoundary(services) ??
     (await loadYrdConfig({ repo, defaultBase: options.base ?? options.queue ?? "main" })).config.merge
   if (merge !== "none") return undefined
-  // Both halves are load-bearing. WHICH repository, because a seat working
-  // across two of them reads this message with no other clue; and that no
-  // runner is coming, because "submit failed" invites a retry and a retry
-  // cannot help.
+  // Three facts are load-bearing. WHICH repository, because a seat working
+  // across two of them reads this message with no other clue; that no runner is
+  // coming, because "submit failed" invites a retry and a retry cannot help;
+  // and THE CURE, because without it this reads as a dead end. It is not one —
+  // a component with no queue is the design, and the work still lands, by the
+  // route named below. Said only in a document, that route was rediscovered the
+  // hard way 13 days after the document was written; a refusal that withholds
+  // its own cure buys the same rediscovery every time it fires.
+  //
+  // The fast-forward step is prose, not a literal push command, for the reason
+  // `authoredGitlinkFailure` (actionable-error.ts) spells out and
+  // `intentSubmissionWorkflow` (yrd-queue) already follows: printing a raw
+  // push-to-a-submodule's-branch-ref line is banned across this tool surface
+  // (remedy-banned-actions-guard.test.ts). Match that wording; do not spell the
+  // command.
   const message =
     `'${repo}' declares no merge authority (selected config 'merge: none'), so its queue has no runner and ` +
-    "nothing will ever drain this change; merge the work through whatever authority that repository does " +
-    "have, or set 'merge: expected' once a runner exists"
+    "nothing will ever drain this change. A component without a queue is the design, not a dead end: get " +
+    "this commit onto this repository's own main, then submit the gitlink bump as an ordinary change from " +
+    "the superproject that pins it ('yrd pr submit <branch>' there). Set 'merge: expected' instead only " +
+    "once this repository has a runner of its own."
   if (jsonEnabled(options)) {
     io.stderr(
       stableJson({
