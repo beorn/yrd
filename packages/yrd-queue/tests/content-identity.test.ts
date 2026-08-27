@@ -8,12 +8,18 @@
  * Every case runs over a real repository: `exactDelta` is a read of git's own
  * tree facts, so the fixtures are genuine trees, not canned strings.
  */
-import { mkdtemp, rm, symlink, unlink } from "node:fs/promises"
+import { chmod, mkdtemp, rm, symlink, unlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { exactDelta, formatExactDelta } from "../src/content-identity.ts"
-import { bothSidesMovedGitlinkFixture, fixtureRefGit } from "./support/remerge-fixtures.ts"
+import {
+  crossBaseDeltaEquality,
+  exactDelta,
+  formatExactDelta,
+  resolveAbsorbedPaths,
+  resolveMissingAgainstCandidate,
+} from "../src/content-identity.ts"
+import { bothSidesMovedGitlinkFixture, fixtureRefGit, movedBaseFixture } from "./support/remerge-fixtures.ts"
 
 const git = fixtureRefGit()
 const roots: string[] = []
@@ -204,5 +210,244 @@ describe("formatExactDelta", () => {
     expect(rendered).toContain(delta.candidateTree)
     expect(rendered).toContain("1 changed path(s)")
     expect(rendered).toContain("  modified blob a.txt")
+  })
+})
+
+/**
+ * The cross-base equality clause, corrected per the 2026-08-26 burn-in
+ * (hub/yrd/2026-08-26-patch-equivalence-burn-in.md § exactDelta disagreements):
+ * comparing RESULTING BLOBS across bases refuses every ordinary rebase over a
+ * touched file (24 false positives on real history), while path-set + mode +
+ * gitlink-target comparison admits all 24 and still refuses the 18 real
+ * divergences (17 absorbed pins, 1 empty landing).
+ */
+describe("crossBaseDeltaEquality", () => {
+  it("admits a clean rebase whose blobs moved with the base — same paths, different resulting blobs", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "overlapping-path-mergeable" })
+    roots.push(fixture.root)
+    const variantTree = await git.run(fixture.repo, ["merge-tree", "--write-tree", fixture.baseTwo, fixture.authorTip])
+
+    const authored = await exactDelta(git, fixture.repo, fixture.baseOne, fixture.authorTip)
+    const landed = await exactDelta(git, fixture.repo, fixture.baseTwo, variantTree)
+
+    // The drift is real: the resulting blob differs between the two deltas.
+    expect(landed.entries[0]?.candidateOid).not.toBe(authored.entries[0]?.candidateOid)
+
+    const comparison = crossBaseDeltaEquality(authored, landed)
+    expect(comparison.equal).toBe(true)
+    expect(comparison.differing).toEqual([])
+  })
+
+  it("ignores landed paths outside the authored set — the merge machinery's own contributions are invisible", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "disjoint-paths" })
+    roots.push(fixture.root)
+    const variantTree = await git.run(fixture.repo, ["merge-tree", "--write-tree", fixture.baseTwo, fixture.authorTip])
+
+    const authored = await exactDelta(git, fixture.repo, fixture.baseOne, fixture.authorTip)
+    // Landed measured against the OLD base carries main's own file too.
+    const landed = await exactDelta(git, fixture.repo, fixture.baseOne, variantTree)
+    expect(landed.entries.length).toBeGreaterThan(authored.entries.length)
+
+    const comparison = crossBaseDeltaEquality(authored, landed)
+    expect(comparison.equal).toBe(true)
+  })
+
+  it("refuses an absorbed gitlink: the landed pin is not the authored pin", async () => {
+    const fixture = await bothSidesMovedGitlinkFixture()
+    roots.push(fixture.root)
+
+    const authored = await exactDelta(git, fixture.superRepo, fixture.baseSha, fixture.authorTip)
+    const landed = await exactDelta(git, fixture.superRepo, fixture.baseSha, fixture.mainTip)
+
+    const comparison = crossBaseDeltaEquality(authored, landed)
+    expect(comparison.equal).toBe(false)
+    expect(comparison.differing).toHaveLength(1)
+    expect(comparison.differing[0]).toMatchObject({ path: fixture.gitlinkPath, reason: "gitlink-target" })
+  })
+
+  it("refuses when an authored path is missing from the landed delta — the base absorbed the whole file's change", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "overlapping-path-mergeable" })
+    roots.push(fixture.root)
+    // Main lands the author's exact edit, so the rebased candidate adds nothing.
+    await git.run(fixture.repo, ["checkout", "main"])
+    const absorbing = await git.run(fixture.repo, ["commit-tree", `${fixture.authorTip}^{tree}`, "-p", fixture.baseTwo, "-m", "main absorbs the change"])
+    const variantTree = await git.run(fixture.repo, ["merge-tree", "--write-tree", absorbing, fixture.authorTip])
+
+    const authored = await exactDelta(git, fixture.repo, fixture.baseOne, fixture.authorTip)
+    const landed = await exactDelta(git, fixture.repo, absorbing, variantTree)
+
+    expect(landed.entries).toEqual([])
+    const comparison = crossBaseDeltaEquality(authored, landed)
+    expect(comparison.equal).toBe(false)
+    expect(comparison.landedEmpty).toBe(true)
+    expect(comparison.differing[0]).toMatchObject({ path: fixture.authorPath, reason: "missing-from-landed" })
+  })
+
+  it("refuses a kind disagreement on a shared path", async () => {
+    const repo = await makeRepo()
+    const base = await commitFile(repo, "f.txt", "one\n", "base")
+    const edited = await commitFile(repo, "f.txt", "two\n", "edit f")
+    await git.run(repo, ["checkout", "-b", "task/delete-f", base])
+    await unlink(join(repo, "f.txt"))
+    await git.run(repo, ["add", "--all"])
+    await git.run(repo, ["commit", "-m", "delete f"])
+    const deleted = await git.run(repo, ["rev-parse", "HEAD"])
+
+    const authored = await exactDelta(git, repo, base, edited)
+    const landed = await exactDelta(git, repo, base, deleted)
+
+    const comparison = crossBaseDeltaEquality(authored, landed)
+    expect(comparison.equal).toBe(false)
+    expect(comparison.differing[0]).toMatchObject({ path: "f.txt", reason: "kind" })
+  })
+
+  it("compares the mode DELTA, refusing a dropped chmod but never an inherited base mode", async () => {
+    const repo = await makeRepo()
+    const base = await commitFile(repo, "run.sh", "#!/bin/sh\n", "base")
+    await git.run(repo, ["checkout", "-b", "task/chmod-and-edit", base])
+    await Bun.write(join(repo, "run.sh"), "#!/bin/sh\nset -e\n")
+    await chmod(join(repo, "run.sh"), 0o755)
+    await git.run(repo, ["add", "--", "run.sh"])
+    await git.run(repo, ["commit", "-m", "edit and mark executable"])
+    const chmodTip = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.run(repo, ["checkout", "main"])
+    const plainTip = await commitFile(repo, "run.sh", "#!/bin/sh\nset -e\n", "edit only")
+
+    const authored = await exactDelta(git, repo, base, chmodTip)
+    const landedKeepingChmod = await exactDelta(git, repo, base, chmodTip)
+    const landedDroppingChmod = await exactDelta(git, repo, base, plainTip)
+
+    expect(crossBaseDeltaEquality(authored, landedKeepingChmod).equal).toBe(true)
+    const dropped = crossBaseDeltaEquality(authored, landedDroppingChmod)
+    expect(dropped.equal).toBe(false)
+    expect(dropped.differing[0]).toMatchObject({ path: "run.sh", reason: "mode-delta" })
+  })
+
+  it("resolves a base-absorbed path as agreement, and keeps a genuinely dropped path refused", async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, "one.txt", "one\n", "seed one")
+    const base = await commitFile(repo, "two.txt", "two\n", "seed two")
+    await git.run(repo, ["checkout", "-b", "task/edit-both", base])
+    await Bun.write(join(repo, "one.txt"), "one edited\n")
+    await Bun.write(join(repo, "two.txt"), "two edited\n")
+    await git.run(repo, ["add", "--all"])
+    await git.run(repo, ["commit", "-m", "edit both files"])
+    const authorTip = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.run(repo, ["checkout", "main"])
+    // Main absorbs the one.txt edit; the rebased candidate then contributes
+    // only two.txt, so one.txt is missing from the landed delta.
+    const absorbingBase = await commitFile(repo, "one.txt", "one edited\n", "main: absorb the one.txt edit")
+    const variantTree = await git.run(repo, ["merge-tree", "--write-tree", absorbingBase, authorTip])
+
+    const authored = await exactDelta(git, repo, base, authorTip)
+    const landed = await exactDelta(git, repo, absorbingBase, variantTree)
+
+    const strict = crossBaseDeltaEquality(authored, landed)
+    expect(strict.equal).toBe(false)
+    expect(strict.differing[0]).toMatchObject({ path: "one.txt", reason: "missing-from-landed" })
+
+    const resolved = await resolveAbsorbedPaths(git, repo, authored, landed, strict)
+    expect(resolved.equal).toBe(true)
+    expect(resolved.differing).toEqual([])
+
+    // The same missing path against a base that did NOT absorb it is a real
+    // drop and must stay refused.
+    const unabsorbed = await exactDelta(git, repo, base, variantTree)
+    const landedDropping = { ...unabsorbed, entries: unabsorbed.entries.filter((entry) => entry.path !== "one.txt") }
+    const dropped = crossBaseDeltaEquality(authored, landedDropping)
+    const droppedResolved = await resolveAbsorbedPaths(git, repo, authored, landedDropping, dropped)
+    expect(droppedResolved.equal).toBe(false)
+    expect(droppedResolved.differing[0]).toMatchObject({ path: "one.txt", reason: "missing-from-landed" })
+  })
+
+  it("resolves an absorbed deletion — the path already absent from the landed base", async () => {
+    const repo = await makeRepo()
+    await commitFile(repo, "keep.txt", "keep\n", "seed keep")
+    const base = await commitFile(repo, "gone.txt", "gone\n", "seed gone")
+    await git.run(repo, ["checkout", "-b", "task/delete-and-edit", base])
+    await unlink(join(repo, "gone.txt"))
+    await Bun.write(join(repo, "keep.txt"), "keep edited\n")
+    await git.run(repo, ["add", "--all"])
+    await git.run(repo, ["commit", "-m", "delete gone.txt, edit keep.txt"])
+    const authorTip = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.run(repo, ["checkout", "main"])
+    await unlink(join(repo, "gone.txt"))
+    await git.run(repo, ["add", "--all"])
+    await git.run(repo, ["commit", "-m", "main: delete gone.txt too"])
+    const absorbingBase = await git.run(repo, ["rev-parse", "HEAD"])
+    const variantTree = await git.run(repo, ["merge-tree", "--write-tree", absorbingBase, authorTip])
+
+    const authored = await exactDelta(git, repo, base, authorTip)
+    const landed = await exactDelta(git, repo, absorbingBase, variantTree)
+
+    const strict = crossBaseDeltaEquality(authored, landed)
+    expect(strict.differing[0]).toMatchObject({ path: "gone.txt", reason: "missing-from-landed" })
+    const resolved = await resolveAbsorbedPaths(git, repo, authored, landed, strict)
+    expect(resolved.equal).toBe(true)
+  })
+
+  it("resolves an absorbed-then-further-edited path against the candidate tree, and keeps a real drop refused", async () => {
+    const repo = await makeRepo()
+    const rows = (first: string, last: string): string => `${[first, "b", "c", "d", "e", "f", "g", last].join("\n")}\n`
+    await commitFile(repo, "one.txt", rows("a", "h"), "seed one")
+    const base = await commitFile(repo, "two.txt", "two\n", "seed two")
+    await git.run(repo, ["checkout", "-b", "task/edit-both-2", base])
+    await Bun.write(join(repo, "one.txt"), rows("a (authored)", "h"))
+    await Bun.write(join(repo, "two.txt"), "two edited\n")
+    await git.run(repo, ["add", "--all"])
+    await git.run(repo, ["commit", "-m", "edit both files"])
+    const authorTip = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.run(repo, ["checkout", "main"])
+    // Main absorbs the one.txt edit byte-for-byte AND keeps editing a distant
+    // region of the same file, so the base's blob is not byte-identical to the
+    // authored candidate yet the rebase stays conflict-free.
+    const absorbingBase = await commitFile(repo, "one.txt", rows("a (authored)", "h (moved by main)"), "main: absorb and extend")
+    const candidateTree = await git.run(repo, ["merge-tree", "--write-tree", absorbingBase, authorTip])
+
+    const authored = await exactDelta(git, repo, base, authorTip)
+    const landed = await exactDelta(git, repo, absorbingBase, candidateTree)
+    expect(landed.entries.map((entry) => entry.path)).toEqual(["two.txt"])
+
+    const strict = crossBaseDeltaEquality(authored, landed)
+    expect(strict.differing[0]).toMatchObject({ path: "one.txt", reason: "missing-from-landed" })
+    // Byte-equality cannot resolve this shape — the base kept editing.
+    const byteResolved = await resolveAbsorbedPaths(git, repo, authored, landed, strict)
+    expect(byteResolved.equal).toBe(false)
+
+    const resolved = await resolveMissingAgainstCandidate(git, repo, landed, strict, candidateTree)
+    expect(resolved.equal).toBe(true)
+    expect(resolved.differing).toEqual([])
+
+    // A merged tree that DROPPED the one.txt work disagrees with the candidate
+    // at that path and must stay refused: merge two.txt only, onto the
+    // unabsorbing base, and compare against the candidate that carries both.
+    await git.run(repo, ["checkout", "-b", "task/drops-one", base])
+    const droppedTip = await commitFile(repo, "two.txt", "two edited\n", "merge that lost the one.txt work")
+    const fullCandidate = await git.run(repo, ["merge-tree", "--write-tree", base, authorTip])
+    const landedDropping = await exactDelta(git, repo, base, droppedTip)
+    expect(landedDropping.entries.map((entry) => entry.path)).toEqual(["two.txt"])
+    const strictDropped = crossBaseDeltaEquality(authored, landedDropping)
+    const still = await resolveMissingAgainstCandidate(git, repo, landedDropping, strictDropped, fullCandidate)
+    expect(still.equal).toBe(false)
+    expect(still.differing[0]).toMatchObject({ path: "one.txt", reason: "missing-from-landed" })
+  })
+
+  it("never calls an empty delta equal to anything — an empty key is an absence, not a value", async () => {
+    const repo = await makeRepo()
+    const sha = await commitFile(repo, "a.txt", "one\n", "base")
+    const changed = await commitFile(repo, "a.txt", "two\n", "change")
+
+    const empty = await exactDelta(git, repo, sha, sha)
+    const full = await exactDelta(git, repo, sha, changed)
+
+    const bothEmpty = crossBaseDeltaEquality(empty, empty)
+    expect(bothEmpty.equal).toBe(false)
+    expect(bothEmpty.authoredEmpty).toBe(true)
+    expect(bothEmpty.landedEmpty).toBe(true)
+
+    const authoredEmpty = crossBaseDeltaEquality(empty, full)
+    expect(authoredEmpty.equal).toBe(false)
+    expect(authoredEmpty.authoredEmpty).toBe(true)
+    expect(authoredEmpty.landedEmpty).toBe(false)
   })
 })
