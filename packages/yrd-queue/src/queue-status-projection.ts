@@ -1513,13 +1513,21 @@ export function queueLogSubmissionTime(
   revisionClocks: ReadonlyMap<string, ChangeRunRevisionClock> | undefined,
   run: Run,
   pr: PinnedChangeRevision,
+  recordIds: ReadonlySet<string>,
 ): string | undefined {
   if (revisionClocks === undefined) return undefined
   const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
   if (clock === undefined) {
     // Intent members never mint a revision clock (no submission precedes the
-    // run); every change member must have one.
+    // run). Derived members (recordless post-S6) never mint one either: their
+    // admission is the run-journaled git submit fact, not a record-lane
+    // submission event, so queueRunRevisionClocks deliberately skips them and
+    // this lookup misses. Records are never deleted post-S6, so a recordless
+    // member IS derived — the same membership rule as isDerivedMemberId, never
+    // a number frontier (PR2135 vs PR2131, 2026-08-27). Every RECORD change
+    // member must still have a clock; that absence stays a loud failure.
     if (pr.intent !== undefined) return undefined
+    if (isDerivedMemberId(pr.id, recordIds)) return undefined
     throw new Error(
       `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
     )

@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
+  queueLogRows,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
@@ -112,6 +113,27 @@ describe("intent-integrated runs in the queue read views", () => {
         times.get(JSON.stringify(["R9999", id, derivedRun.prs[0]!.revision, derivedRun.prs[0]!.headSha])),
       ).toBe(null)
     }
+  })
+
+  it("yrd log rows tolerate a derived member's missing revision clock — a record's absence stays loud", () => {
+    const results = contractResults()
+    const first = results[0]
+    if (first === undefined) throw new Error("missing result")
+    const seed = first.finished.find((run) => run.status === "completed")
+    if (seed === undefined) throw new Error("no completed run to clone")
+    // A derived member: recordless (absent from the summary's prs) and not an
+    // intent. Post-S6 its admission is the git submit fact; no record-lane
+    // clock exists, so the clocks builder skips it and the log reader's lookup
+    // misses. That miss must render (age "-"), never throw — the live crash
+    // this pins was `yrd log` failing on PR2131 after the clock join was
+    // reached once the retained-change join was cured (2026-08-27).
+    const derivedRun: Run = { ...seed, id: "R9999", prs: [{ ...intentMember(), id: "PR9", intent: undefined } as Member] }
+    const summary = { ...first, finished: [derivedRun] }
+    const rows = queueLogRows([summary], new Set<string>(), undefined, new Map(), [], new Map(), new Map())
+    const row = rows.find((candidate) => candidate.pr === "PR9")
+    expect(row).toBeDefined()
+    expect(row?.age).toBe("-")
+    expect(row?.submittedAt).toBeUndefined()
   })
 
   it("the timeline projection renders a row for the intent run instead of crashing", () => {

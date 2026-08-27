@@ -5086,6 +5086,9 @@ export function queueLogRows(
 ): QueueLogRow[] {
   const rows: QueueLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
+  // Record membership decides derived-member clock tolerance in
+  // queueLogSubmissionTime — the set-membership rule, never a number frontier.
+  const recordIds = new Set(results.flatMap((result) => result.prs ?? []).map((record) => record.id))
 
   for (const result of results) {
     for (const run of result.finished) {
@@ -5134,7 +5137,7 @@ export function queueLogRows(
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
-        const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr)
+        const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr, recordIds)
         const ageMs = elapsedMs(submittedAt, finishedAt, `change '${pr.id}' submitted-to-terminal age`)
         const showLocation = changeStatus?.get(pr.id) === "withdrawn" ? undefined : location
         const taskStatus = runTaskStatusOf(run)

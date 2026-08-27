@@ -9947,7 +9947,9 @@ describe("runYrd", () => {
 
     expect(() =>
       queueLogRows(
-        [fakeSummary([run])],
+        // prs marks PR-clock as a RECORD member: a record with no clock stays a
+        // loud failure, while a recordless (derived) member tolerates instead.
+        [{ ...fakeSummary([run]), prs: [pr] }],
         new Set<string>(),
         undefined,
         new Map([[pr.id, changeDeliveryState(pr)]]),
