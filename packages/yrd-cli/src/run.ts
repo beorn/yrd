@@ -5406,12 +5406,25 @@ async function resolveSubmitMetadata(
   io: YrdCliIO,
 ): Promise<Readonly<{ title?: string; description?: string }>> {
   const existing = app.bays.pr(selector)
+  const bay = app.bays.get(selector)
+  // Commit-derived defaults exist to BIND onto a change record, so they only
+  // travel where a record will take them: a bay selector, or a branch whose
+  // LIVE record the submit revises. Everything else routes to the DERIVED
+  // lane, where the head commit itself is the metadata — forwarding a
+  // commit-derived copy there only trips the record-only-drop warning,
+  // telling the author to amend a commit to carry the title it was read
+  // from. Explicit flags still travel (and warn) so the drop stays loud.
+  if (bay === undefined && (existing === undefined || !isLiveChange(existing))) {
+    return {
+      ...(options.title === undefined ? {} : { title: options.title }),
+      ...(options.description === undefined ? {} : { description: options.description }),
+    }
+  }
   const needTitle = options.title === undefined && existing?.title === undefined
   const needDescription = options.description === undefined && existing?.description === undefined
   const issue = options.issue ?? existing?.issue
   let commit: Readonly<{ subject: string; body?: string }> | undefined
   if (needTitle || needDescription) {
-    const bay = app.bays.get(selector)
     commit = await optionalCommitMeta(bay?.branch ?? existing?.branch ?? selector, io)
   }
   const title = options.title ?? existing?.title ?? commit?.subject

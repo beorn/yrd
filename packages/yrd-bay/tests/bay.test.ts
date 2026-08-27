@@ -2473,6 +2473,21 @@ describe("withBays", () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain("title/description")
     expect(warnings[0]).toContain("amend the commit")
+
+    // The fence for the warning's own noise floor: a bare derived submit —
+    // no metadata options — must warn NOTHING. (The CLI once forwarded
+    // commit-derived title/description into this path, tripping the drop
+    // warning on every plain submit: "amend the commit to carry" a title
+    // that was read FROM the commit.)
+    const quiet: string[] = []
+    const bare = await app.bays.submitSelection("topic/derived-quiet", {
+      resolveRevision: async () => HEAD_2,
+      run: runtime,
+      base: "main",
+      warnings: quiet,
+    })
+    expect(bare).toMatchObject({ lane: "derived", branch: "topic/derived-quiet", sha: HEAD_2 })
+    expect(quiet).toEqual([])
   })
 
   it("carries title and description forward across a resubmitted revision", async () => {
