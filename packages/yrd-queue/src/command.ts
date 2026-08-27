@@ -683,7 +683,10 @@ function commandDiagnostics(
   const diagnostics: CommandDiagnostic[] = []
   for (const row of output.split(/\r?\n/u)) {
     const text = row.trim()
-    const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(row)
+    // A porcelain status pair always has at least one non-space character;
+    // without that requirement every line indented by two-plus spaces (vitest's
+    // own test rows, for one) minted a phantom working-tree diagnostic.
+    const changed = /^(?![ ]{2})[ MADRCU?!]{2}\s+(.+)$/u.exec(row)
     if (changed?.[1] !== undefined) {
       if (diagnostics.length >= limit) return { values: diagnostics, truncated: true }
       diagnostics.push({ file: changed[1], [sourceRowKey]: 1, message: "working tree changed during check" })
