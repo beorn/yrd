@@ -523,11 +523,20 @@ async function createApp(
     },
     { revision: options.mergeRevision ?? "merge-v1" },
   )
+  // ONE mint for both plugins, as production wires it (S6): bays numbers its
+  // records from it, and the queue mints derived-member identities from the
+  // same monotone sequence when a selectorless compose admits a submit fact.
+  const prNumberMint = volatilePrNumberMint()
   const queue = withQueue({
     steps: [check, merge] as const,
     batch: options.batch ?? false,
+    prNumberMint,
     ...(options.requires === undefined ? {} : { requires: options.requires }),
     ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
+    // A derived member carries no baseSha of its own: tests that drain the
+    // derived lane pass `resolveBaseSha: () => BASE_SHA` (production wires the
+    // git resolver here). Not defaulted — a standing resolver re-targets
+    // record check requests, which the moving-base habitant tests must own.
     ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
   })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
@@ -537,7 +546,7 @@ async function createApp(
     withDeployments({ jobs: deploymentJobs }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
+      prNumberMint,
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (base) => ({ base, baseSha: BASE_SHA }),
@@ -956,13 +965,16 @@ describe("runYrd", () => {
     expect(app.bays.prs()).toEqual([])
   })
 
-  it("bay submit refuses BEFORE the real submit, leaving a draft instead of a queued PR (PR1128)", async () => {
+  it("bay submit of a recordless branch cannot strand a queued record: the fact is the whole write (PR1128)", async () => {
     const app = await createApp()
-    // A process layer whose git always fails: the pre-admission pin gate cannot
-    // resolve the branch's delta base and refuses. Before bay submit staged its
-    // pin check, that refusal fired AFTER the real submit — leaving a SUBMITTED
-    // PR with no check request, the state that wedged every queue read on
-    // 2026-08-17 (@i/10-merge-queue, PR1128).
+    // A process layer whose git always fails: the pre-admission pin gate can
+    // resolve nothing. Pre-purge, bay submit staged a draft record so that
+    // refusal could fire BEFORE the real submit (PR1128: refusing after it
+    // stranded a SUBMITTED PR with no check request, the state that wedged
+    // every queue read on 2026-08-17). The legacy record mint is retired: a
+    // recordless branch writes only the branch-submit FACT, and admission
+    // gating moved to queue compose — there is no record-shaped intermediate
+    // state left to strand, so the submit succeeds and compose owns the gates.
     const services = {
       process: {
         run: async () => ({ stdout: "", stderr: "", exitCode: 1, signal: null, durationMs: 0, timedOut: false }),
@@ -971,13 +983,17 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
-    expect(await runYrd(app, yrd("bay", "submit", "topic/wedge", "--json"), output.io, services)).toBe(1)
-    const pr = app.bays.prs().find((item) => item.branch === "topic/wedge")
-    expect(pr).toBeDefined()
-    // The refusal left a DRAFT: pushed, never submitted, no check request, no
-    // refusal ledger row — the benign draft-stranded shape, not the wedge.
-    expect(changeDeliveryState(pr!)).toBe("pushed")
-    expect(pr!.checkRequests).toEqual([])
+    expect(await runYrd(app, yrd("bay", "submit", "topic/wedge", "--json"), output.io, services), output.stderr()).toBe(
+      0,
+    )
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "bay.submit",
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/wedge", sha: HEAD_SHA, base: "main" }],
+    })
+    // The fact is the submission: no record, no check request, no refusal row.
+    expect(app.bays.prs()).toEqual([])
+    expect(app.bays.state().submits["topic/wedge"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(app.state().queues.admissionRefusals).toEqual({})
     // And the queue still reads clean end to end.
     const audit = outputIO()
@@ -1269,7 +1285,11 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(submitted)
   })
 
-  it("keeps JSON discriminators faithful and finds a direct-branch PR for status", async () => {
+  it("keeps JSON discriminators faithful for a direct-branch submit routed to the derived lane", async () => {
+    // The legacy record mint is retired: a recordless direct branch submits as
+    // a FACT and the envelope's `derived` rows are the acceptance. The record
+    // half of the old test (pr status / pr checkout resolving a direct-branch
+    // PR) died with the mint — no record exists for those surfaces to find.
     const app = await createApp()
     const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
     expect(
@@ -1278,23 +1298,10 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(submit.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [
-        {
-          branch: "topic/direct",
-          status: "submitted",
-          state: "open",
-          merged: false,
-          revs: [
-            {
-              n: 1,
-              head: HEAD_SHA,
-              submittedAt: expect.any(String),
-            },
-          ],
-          taskStatus: "wip",
-        },
-      ],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/direct", sha: HEAD_SHA, base: "main" }],
     })
+    expect(app.bays.state().submits["topic/direct"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(await app.queue.history()).toEqual([])
 
     const queue = outputIO()
@@ -1307,43 +1314,25 @@ describe("runYrd", () => {
         finished: readonly unknown[]
       }>[]
     }
-    expect(queuePayload.projection.rows.filter((row) => row.pr === "PR1")).toMatchObject([
-      { pr: "PR1", revision: 1, status: "ready" },
-    ])
+    // Nothing composed yet: no record row, no run — and the submitted branch
+    // stays loudly visible as the queue's own pending unrecorded-submit row.
+    expect(queuePayload.projection.rows).toEqual([])
     expect(
       queuePayload.results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished]),
     ).toEqual([])
+    expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/direct", sha: HEAD_SHA }])
 
+    // A same-head resubmit is an idempotent fact renewal, same envelope shape.
     const resubmit = outputIO({ resolveRevision: async () => HEAD_SHA })
     expect(
       await runYrd(app, yrd("pr", "submit", "topic/direct", "--base", "main", "--json"), resubmit.io),
       resubmit.stderr(),
     ).toBe(0)
     expect(JSON.parse(resubmit.stdout())).toMatchObject({
-      prs: [{ id: "PR1", status: "submitted", revs: [{ n: 1 }] }],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/direct", sha: HEAD_SHA, base: "main" }],
     })
     expect(await app.queue.history()).toEqual([])
-
-    const status = outputIO({ currentBranch: () => "topic/direct" })
-    expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
-    expect(JSON.parse(status.stdout())).toMatchObject({
-      command: "pr.status",
-      pr: {
-        branch: "topic/direct",
-        state: "open",
-        merged: false,
-        revs: [{ n: 1, head: HEAD_SHA, submittedAt: expect.any(String) }],
-        taskStatus: "wip",
-      },
-    })
-
-    const checkout = outputIO()
-    expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
-    expect(JSON.parse(checkout.stdout())).toMatchObject({
-      command: "pr.checkout",
-      pr: "PR1",
-      bay: { status: "active" },
-    })
 
     const dashboard = outputIO()
     expect(await runYrd(app, yrd("--json"), dashboard.io), dashboard.stderr()).toBe(0)
@@ -1477,7 +1466,7 @@ describe("runYrd", () => {
     expect(app.bays.get("pr-pr1")).toMatchObject({ status: "active", headSha: HEAD_SHA })
   })
 
-  it("Q1: resubmitting a merged branch reports already-merged for the same head and mints a fresh delivery for a new head", async () => {
+  it("Q1: resubmitting a merged branch reports already-merged for the same head and re-enters the derived lane for a new head", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
     await app.bays.requestChecks({ pr: "PR1" })
@@ -1497,13 +1486,20 @@ describe("runYrd", () => {
     expect((mergedOut.warnings ?? []).join("\n")).toContain("already merged as change 'PR1'")
     expect(await Array.fromAsync(app.events())).toEqual(before)
 
-    // New head → mints a fresh delivery PR (revision 1), exit 0, no hand-made delivery branch.
-    const minted = outputIO({ resolveRevision: async () => "2".repeat(40) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), minted.io), minted.stderr()).toBe(0)
-    expect(JSON.parse(minted.stdout())).toMatchObject({
+    // New head → derived re-entry (the legacy record mint is retired): the
+    // submit fact is the submission, compose keys a fresh derived identity
+    // from it on the next queue pass, and the integrated PR1 stays frozen —
+    // no reopen, no new record, no hand-made delivery branch.
+    const reentry = outputIO({ resolveRevision: async () => "2".repeat(40) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), reentry.io), reentry.stderr()).toBe(0)
+    expect(JSON.parse(reentry.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ id: "PR2", branch: "topic/merged", status: "submitted" }],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/merged", sha: "2".repeat(40), base: "main" }],
     })
+    expect(app.bays.state().submits["topic/merged"]).toMatchObject({ sha: "2".repeat(40) })
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
   })
 
   it.each([
@@ -3288,9 +3284,12 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("queues authoritative checks at plain submit and runs them during the later merge drain", async () => {
+  it("executes no authoritative check at plain submit; compose admits the fact and runs it in the later drain", async () => {
+    // The legacy record mint retired: the fact is the submission. Checks no
+    // longer queue as record check-requests at submit — they queue at compose
+    // time, when the selectorless queue pass admits the derived member.
     const checkRuns: string[] = []
-    const app = await createApp({ checkRuns })
+    const app = await createApp({ checkRuns, resolveBaseSha: () => BASE_SHA })
 
     const ledger = outputIO({ resolveRevision: async () => HEAD_SHA })
     expect(
@@ -3299,21 +3298,24 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(ledger.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ branch: "topic/ledger", status: "submitted" }],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/ledger", sha: HEAD_SHA, base: "main" }],
     })
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 1, status: "queued" }])
     expect(checkRuns).toEqual([])
     expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/ledger", sha: HEAD_SHA }])
 
     await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
     expect(checkRuns).toEqual(["check"])
+    expect(app.queue.unrecordedSubmits()).toEqual([])
 
     const second = outputIO({ resolveRevision: async () => "2".repeat(40) })
     expect(
       await runYrd(app, yrd("pr", "submit", "topic/second", "--base", "main", "--json"), second.io),
       second.stderr(),
     ).toBe(0)
-    expect(app.queue.checks(["PR2"])).toMatchObject([{ pr: "PR2", revision: 1, status: "queued" }])
+    // Still nothing executes in the submitter; the next compose owns it.
+    expect(app.bays.state().submits["topic/second"]).toMatchObject({ sha: "2".repeat(40) })
     expect(checkRuns).toEqual(["check"])
   })
 
@@ -4366,7 +4368,15 @@ describe("runYrd", () => {
     expect(bare.stderr()).toContain("yrd pr submit PR2")
     expect(localChecks).toEqual([])
 
-    const explicit = outputIO({ cwd: "/repo/.bays/B1", currentBranch: () => "topic/replacement" })
+    // The escape must resolve the record's branch tip: post-purge the staging
+    // pass previews the same resolution path as the real submit, and a live
+    // record whose branch cannot be resolved refuses rather than reusing the
+    // recorded head.
+    const explicit = outputIO({
+      cwd: "/repo/.bays/B1",
+      currentBranch: () => "topic/replacement",
+      resolveRevision: async () => MERGED_SHA,
+    })
     expect(await runYrd(app, yrd("pr", "submit", "PR2"), explicit.io, { checks }), explicit.stderr()).toBe(0)
     expect(localChecks).toEqual(["typecheck"])
   })
@@ -4754,20 +4764,18 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), submit.io)).toBe(
       0,
     )
-    // Two resolutions per submit: the staged draft pass (where refusals merge
-    // before anything is queued — the PR1128 ordering) and the real submit,
+    // Two resolutions per submit: the staged preview pass (where refusals merge
+    // before anything is written — the PR1128 ordering) and the real submit,
     // the same shape pr.submit has always had.
     expect(resolved).toEqual(["topic/direct", "topic/direct"])
+    // The legacy record mint is retired: the acceptance is the derived row and
+    // the branch-submit fact, carrying the explicit base.
     expect(JSON.parse(submit.stdout())).toMatchObject({
-      prs: [
-        {
-          id: "PR1",
-          branch: "topic/direct",
-          base: "release/2.0",
-          revs: [{ n: 1, head: HEAD_SHA, submittedAt: expect.any(String) }],
-        },
-      ],
+      command: "bay.submit",
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/direct", sha: HEAD_SHA, base: "release/2.0" }],
     })
+    expect(app.bays.state().submits["topic/direct"]).toMatchObject({ sha: HEAD_SHA, base: "release/2.0" })
 
     resolvedHead = MERGED_SHA
     const revision = outputIO({ resolveRevision })
@@ -4775,203 +4783,63 @@ describe("runYrd", () => {
       await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), revision.io),
     ).toBe(0)
     expect(resolved).toEqual(["topic/direct", "topic/direct", "topic/direct", "topic/direct"])
+    // A moved tip re-submits as the SAME branch's renewed fact; the queue's
+    // next compose keys the new revision of the derived identity from it.
     expect(JSON.parse(revision.stdout())).toMatchObject({
-      prs: [
-        {
-          id: "PR1",
-          branch: "topic/direct",
-          revs: [
-            { n: 1, head: HEAD_SHA },
-            { n: 2, head: MERGED_SHA },
-          ],
-        },
-      ],
+      command: "bay.submit",
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/direct", sha: MERGED_SHA, base: "release/2.0" }],
     })
+    expect(app.bays.state().submits["topic/direct"]).toMatchObject({ sha: MERGED_SHA, base: "release/2.0" })
 
     const human = outputIO({ columns: 64, resolveRevision })
     expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0"), human.io)).toBe(0)
-    expect(human.stdout()).toContain("PR")
-    expect(human.stdout()).toContain("STATUS")
-    expect(human.stdout()).toContain("submitted")
-    expect(human.stdout()).toContain("topic/direct")
-    expect(human.stdout()).toContain("release/2.0")
+    // Human mode: the derived acceptance line rides the advisory stream so the
+    // submit's outcome is never silent.
+    expect(human.stderr()).toContain("submitted to the derived lane: topic/direct")
+    expect(human.stderr()).toContain(`@ ${MERGED_SHA.slice(0, 12)} (base release/2.0)`)
   })
 
-  it("drives create, review, ready, needs-review, and cached checks through the change surface", async () => {
-    const checkRuns: string[] = []
-    const app = await createApp({ requires: ["review"], checkRuns })
+  // Record-lane surface deleted with the legacy record mint: `pr create` no
+  // longer mints a direct-branch record, so every flow below it became
+  // unreachable from the CLI; the record store itself is scheduled for
+  // deletion (S7, @i/10 22991). Deleted tests:
+  // - "drives create, review, ready, needs-review, and cached checks through
+  //   the change surface" (create minted the record the comment/review/ready/
+  //   cached-checks flow ran on),
+  // - "drives reviewer requests through submit, request-review, and the
+  //   reviewer-scoped inbox" (reviewer requests bind to records),
+  // - "sends a terminal change to a fresh ref, not to another revision of a
+  //   spent branch" (the redelivery refusal presupposes a record identity to
+  //   spend; a terminal-record branch now re-enters the DERIVED lane),
+  // - "closes a direct bayless PR through the `pr close` CLI without a bay"
+  //   (a direct branch mints no record for `pr close` to withdraw),
+  // - "projects an authoritative check failure after the later Queue run" and
+  //   "classifies the read-only main-health evidence as a base failure"
+  //   (`pr checks` projects records; a derived member's failed required check
+  //   now refuses ADMISSION at compose — see the required-check-failed
+  //   resubmit test below for the surviving derived-lane shape).
+  it("refuses pr create on a direct branch: the record mint is retired, and the cure is a plain submit", async () => {
+    const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
-    const beforeCreate = await Array.fromAsync(app.events()).then((events) => events.length)
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
-    const submit = outputIO({ resolveRevision })
-    expect(await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), submit.io), submit.stderr()).toBe(0)
-    const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
-    expect(submitted).toMatchObject({
-      command: "pr.create",
-      prs: [{ id: "PR1", branch: "topic/review-me", revs: [{ n: 1, head: HEAD_SHA }] }],
+    const create = outputIO({ resolveRevision })
+    expect(await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), create.io)).toBe(1)
+    expect(JSON.parse(create.stderr())).toMatchObject({
+      failure: { kind: "refusal", code: "record-mint-retired" },
     })
-    expect(submitted).not.toHaveProperty("checks")
-    expect(submitted.prs[0]).toMatchObject({ state: "open", merged: false, taskStatus: "todo" })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("pushed")
-    expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(checkRuns).toEqual([])
-    const createEvents = (await Array.fromAsync(app.events())).slice(beforeCreate).map(({ name }) => name)
-    expect(createEvents).toContain("pr/pushed")
-    expect(createEvents).not.toContain("pr/submitted")
-    expect(createEvents).not.toContain("pr/checks-requested")
-    expect(createEvents.some((name) => name.startsWith("queue/run/"))).toBe(false)
-
-    const inbox = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
-    expect(JSON.parse(inbox.stdout())).toMatchObject({
-      command: "pr.list",
-      prs: [{ id: "PR1", eligibility: { revision: 1, review: { required: true, approved: false } } }],
-    })
-    const humanInbox = outputIO({ columns: 160 })
-    expect(await runYrd(app, yrd("pr", "list", "--needs-review"), humanInbox.io), humanInbox.stderr()).toBe(0)
-    expect(humanInbox.stdout()).toContain("WHY")
-    expect(humanInbox.stdout()).toContain("draft")
-    expect(humanInbox.stdout()).toContain("need")
-    expect(humanInbox.stdout()).not.toContain("checking")
-
-    const comment = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-1", "--note", "Why?", "--json"),
-        comment.io,
-      ),
-      comment.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(comment.stdout())).toMatchObject({
-      command: "pr.comment",
-      comment: { by: "@cto", ref: "question-1", note: "Why?", revision: 1 },
-    })
-    const secondComment = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-2", "--note", "Thanks.", "--json"),
-        secondComment.io,
-      ),
-      secondComment.stderr(),
-    ).toBe(0)
-    const replayedComment = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-1", "--note", "Why?", "--json"),
-        replayedComment.io,
-      ),
-      replayedComment.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(replayedComment.stdout())).toMatchObject({
-      comment: { ref: "question-1", note: "Why?" },
-    })
-
-    const review = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
-        review.io,
-      ),
-      review.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(review.stdout())).toMatchObject({
-      command: "pr.review",
-      review: { by: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
-    })
-    const replay = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
-        replay.io,
-      ),
-      replay.stderr(),
-    ).toBe(0)
-    expect(app.state().bays.prs.PR1?.reviews).toHaveLength(1)
-    const secondApproval = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-2", "--json"),
-        secondApproval.io,
-      ),
-      secondApproval.stderr(),
-    ).toBe(0)
-    const replayedApproval = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
-        replayedApproval.io,
-      ),
-      replayedApproval.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(replayedApproval.stdout())).toMatchObject({
-      review: { ref: "verdict-1", decision: "approve" },
-    })
-
-    const ready = outputIO()
-    expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(0)
-    expect(JSON.parse(ready.stdout())).toMatchObject({
-      command: "pr.ready",
-      pr: { id: "PR1", revs: [{ n: 1 }] },
-      eligibility: { review: { approved: true } },
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(await app.queue.history()).toEqual([])
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 1, status: "queued" }])
-    expect(checkRuns).toEqual([])
-
-    let followSleeps = 0
-    const checks = outputIO({
-      scope: {
-        signal: new AbortController().signal,
-        sleep: async () => {
-          followSleeps++
-          await app.queue.admit({ prs: ["PR1"] }, { runner: "external-check-runner", leaseMs: 60_000 })
-        },
-      },
-    })
-    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io), checks.stderr()).toBe(0)
-    expect(JSON.parse(checks.stdout())).toMatchObject({
-      kind: "pr.check",
-      command: ["queue.step.check"],
-      pr: "PR1",
-      revision: 1,
-      step: "check",
-      status: "passed",
-      queuedAt: expect.any(String),
-    })
-    expect(followSleeps).toBe(1)
-    expect(checkRuns).toEqual(["check"])
-
-    const integrate = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), integrate.io), integrate.stderr()).toBe(0)
-    expect(JSON.parse(integrate.stdout())).toMatchObject({
-      results: [
-        {
-          id: "R1",
-          status: "completed",
-          conclusion: "success",
-          steps: [{ name: "merge" }],
-        },
-      ],
-    })
-    expect(checkRuns).toEqual(["check"])
-
-    await app.bays.submit({ branch: "topic/withdrawn", headSha: MERGED_SHA, base: "main", draft: true })
-    await app.bays.closePr({ pr: "PR2" })
-    const terminalInbox = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), terminalInbox.io)).toBe(0)
-    expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+    // The cure rides the refusal itself: submit plainly, run as a derived member.
+    expect(create.stderr()).toContain("yrd pr submit topic/review-me")
+    // Refused before any write: no record, no submit fact, no events.
+    expect(app.state().bays.prs).toEqual({})
+    expect(app.bays.state().submits).toEqual({})
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("queues checks for a plain submit and records its submitted revision", async () => {
+  it("records the submit fact for a plain submit, and pr create refuses even on the fact-bearing branch", async () => {
+    // The legacy record mint retired: the fact IS the submitted revision, and
+    // checks queue at compose time, not as a record check-request at submit.
     const app = await createApp()
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
@@ -4980,165 +4848,61 @@ describe("runYrd", () => {
     )
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ branch: "topic/ready-on-arrival", status: "submitted" }],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/ready-on-arrival", sha: HEAD_SHA, base: "main" }],
     })
-    expect(app.bays.checksRequested("topic/ready-on-arrival")).toBe(true)
+    expect(app.bays.pr("topic/ready-on-arrival")).toBeUndefined()
+    expect(app.bays.state().submits["topic/ready-on-arrival"]).toMatchObject({ sha: HEAD_SHA })
 
+    // A standing fact is not a record: create still has nothing to draft, and
+    // the refusal names the plain submit as the cure. The fact stays untouched.
     const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
-    expect(create.stderr()).toContain("create is only for a draft change")
-    // A LIVE change: the way past this refusal is another revision, not a new
-    // change. The Bay-bound sibling of this refusal says "pass a branch", which
-    // would be nonsense here — this path fires only when no Bay resolved, i.e.
-    // the caller already passed one. Asserting the rendered `resolve:` line,
-    // since that is where the CLI puts a quoted command.
-    expect(create.stderr()).toContain("add a revision to the live change instead")
-    expect(create.stderr()).toContain("resolve: yrd pr submit <branch>")
-    expect(create.stderr()).not.toContain("yrd pr create <branch>")
-    expect(app.bays.pr("topic/ready-on-arrival")?.title).toBeUndefined()
+    expect(create.stderr()).toContain("draft records are retired")
+    expect(create.stderr()).toContain("resolve: yrd pr submit topic/ready-on-arrival")
+    expect(app.bays.pr("topic/ready-on-arrival")).toBeUndefined()
+    expect(app.bays.state().submits["topic/ready-on-arrival"]).toMatchObject({ sha: HEAD_SHA })
   })
 
-  it("sends a terminal change to a fresh ref, not to another revision of a spent branch", async () => {
-    // The other half of the same refusal. A live change takes another
-    // revision; a terminal one cannot — resubmitting a withdrawn/integrated
-    // identity is refused outright (REDELIVERY_REFUSING_STATES), so printing
-    // the live cure here would be a wrong instruction rather than a thin one.
-    // The discriminator is redeliveryRefusedByDelivery, shared with the remedy
-    // planner so the two answers cannot drift apart.
-    const app = await createApp()
-    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/spent", "--json"), submit.io), submit.stderr()).toBe(0)
-    await app.bays.closePr({ pr: "PR1" })
-    expect(changeDeliveryState(app.bays.pr("topic/spent")!)).toBe("withdrawn")
-
-    const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-    expect(await runYrd(app, yrd("pr", "create", "topic/spent"), create.io)).toBe(1)
-    expect(create.stderr()).toContain("is terminal and its branch is spent")
-    expect(create.stderr()).toContain("move the work onto a fresh ref")
-    expect(create.stderr()).toContain("resolve: yrd pr create <new-branch>")
-    // The live cure must NOT appear here — that is the wrong instruction.
-    expect(create.stderr()).not.toContain("add a revision to the live change")
-  })
-
-  it("resubmits a required-check-failed branch as a fresh revision through pr submit", async () => {
-    const behavior = { failingCheck: true }
+  it("resubmits a required-check-failed branch as a renewed fact that the next compose admits and lands", async () => {
+    // The legacy record mint retired: the fact is the submission. The required
+    // check runs at compose-admit; a failure refuses ADMISSION — no run
+    // record, no rejected record — and the branch's unrecorded-submit row
+    // stays loudly visible until a fixed head is re-submitted.
+    const checkRuns: string[] = []
+    const behavior = { failingCheck: true, checkRuns, resolveBaseSha: () => BASE_SHA }
     const app = await createApp(behavior)
     const first = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "submit", "topic/retry", "--json"), first.io)).toBe(0)
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-    expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1, head: HEAD_SHA })
+    expect(checkRuns).toEqual([])
+    expect(await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })).toEqual([])
+    // The check executed and failed during admit: nothing ran, nothing was
+    // rejected, and the branch is still the queue's own visible pending row.
+    expect(checkRuns).toEqual(["check"])
+    expect(Queues.ids(app.state().queues)).toEqual([])
+    expect(app.state().bays.prs).toEqual({})
+    expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/retry", sha: HEAD_SHA }])
 
     behavior.failingCheck = false
     const submit = outputIO({ resolveRevision: () => Promise.resolve(MERGED_SHA) })
     expect(await runYrd(app, yrd("pr", "submit", "topic/retry", "--json"), submit.io), submit.stderr()).toBe(0)
     expect(JSON.parse(submit.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [
-        {
-          id: "PR1",
-          state: "open",
-          revs: [
-            { n: 1, head: HEAD_SHA },
-            { n: 2, head: MERGED_SHA },
-          ],
-        },
-      ],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/retry", sha: MERGED_SHA, base: "main" }],
     })
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: MERGED_SHA })
-    expect(app.bays.checksRequested("PR1")).toBe(true)
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-  })
+    expect(app.bays.state().submits["topic/retry"]).toMatchObject({ sha: MERGED_SHA })
 
-  it("drives reviewer requests through submit, request-review, and the reviewer-scoped inbox", async () => {
-    const app = await createApp()
-    const resolveRevision = () => Promise.resolve(HEAD_SHA)
-
-    const submit = outputIO({ resolveRevision })
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "create", "topic/request-me", "--reviewer", "@cto", "--reviewer", "@agent/5", "--json"),
-        submit.io,
-      ),
-      submit.stderr(),
-    ).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
-    expect(app.bays.pr("PR1")).toMatchObject({ state: "open", requestedReviewers: ["@cto", "@agent/5"] })
-
-    const draftInbox = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), draftInbox.io), draftInbox.stderr()).toBe(0)
-    expect(JSON.parse(draftInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
-
-    await app.bays.ready({ pr: "PR1" })
-    const inbox = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
-    expect(JSON.parse(inbox.stdout())).toMatchObject({
-      command: "pr.list",
-      prs: [{ id: "PR1", requestedReviewers: ["@cto", "@agent/5"], needsReview: true }],
-    })
-
-    const strangerInbox = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "list", "--needs-review", "--reviewer", "@stranger", "--json"), strangerInbox.io),
-      strangerInbox.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(strangerInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
-
-    const review = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-9", "--json"),
-        review.io,
-      ),
-      review.stderr(),
-    ).toBe(0)
-    const settled = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), settled.io), settled.stderr()).toBe(0)
-    expect(JSON.parse(settled.stdout())).toMatchObject({ command: "pr.list", prs: [] })
-    const openForAgent5 = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "list", "--needs-review", "--reviewer", "@agent/5", "--json"), openForAgent5.io),
-      openForAgent5.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(openForAgent5.stdout())).toMatchObject({
-      prs: [{ id: "PR1", needsReview: true }],
-    })
-
-    const replaced = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "request-review", "PR1", "@agent/9", "--by", "@chief", "--json"), replaced.io),
-      replaced.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(replaced.stdout())).toMatchObject({
-      command: "pr.request-review",
-      requestedReviewers: ["@agent/9"],
-      needsReview: true,
-    })
-
-    const cleared = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "request-review", "PR1", "--clear", "--json"), cleared.io),
-      cleared.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(cleared.stdout())).toMatchObject({
-      command: "pr.request-review",
-      requestedReviewers: [],
-      needsReview: false,
-    })
-
-    const missingReviewers = outputIO()
-    expect(await runYrd(app, yrd("pr", "request-review", "PR1"), missingReviewers.io)).toBe(2)
-    expect(missingReviewers.stderr()).toContain("requires reviewer identities or --clear")
-    const conflictingClear = outputIO()
-    expect(await runYrd(app, yrd("pr", "request-review", "PR1", "@cto", "--clear"), conflictingClear.io)).toBe(2)
-    expect(conflictingClear.stderr()).toContain("cannot combine with reviewer identities")
-    const reviewerWithoutInbox = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--reviewer", "@cto", "--json"), reviewerWithoutInbox.io)).toBe(2)
-    expect(reviewerWithoutInbox.stderr()).toContain("--reviewer requires --needs-review")
+    // A refused admit journals no snapshot, so the retry derives a FRESH
+    // identity from the renewed fact, passes its check, and lands.
+    expect(await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
+      { status: "completed", conclusion: "success" },
+    ])
+    const retried = Queues.values(app.state().queues).find((run) =>
+      run.prs.some((pr) => pr.branch === "topic/retry"),
+    )
+    expect(retried?.prs).toMatchObject([{ branch: "topic/retry", revision: 1, headSha: MERGED_SHA }])
+    expect(app.state().bays.prs).toEqual({})
   })
 
   // An unrecognized --state used to fall through to a row filter that matches
@@ -5281,99 +5045,52 @@ describe("runYrd", () => {
     expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "not-requested" } })
   })
 
-  it("projects an authoritative check failure after the later Queue run", async () => {
-    const behavior = { failingCheck: true }
-    const app = await createApp(behavior)
-    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-
-    expect(await runYrd(app, yrd("pr", "submit", "topic/red", "--json"), submit.io), submit.stderr()).toBe(0)
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "failed" } })
-    expect(currentChangeRev(app.state().bays.prs.PR1!).terminal).toBeUndefined()
-    expect(app.state().bays.prs.PR1).not.toHaveProperty("detail")
-
-    const human = outputIO({ color: true, columns: 160 })
-    expect(await runYrd(app, yrd("pr", "checks", "PR1"), human.io), human.stderr()).toBe(1)
-    expect(human.stdout()).toContain("COMMAND")
-    expect(human.stdout()).toContain("AGE")
-    expect(human.stdout()).toContain("queue.step.check")
-    expect(human.stdout()).toContain("carrier")
-    expect(human.stdout()).toContain("src/model.ts")
-    expect(human.stdout()).toContain("/tmp/yrd-check.log")
-    expect(human.stdout()).toContain("\u001b]8;;file:///tmp/yrd-check.log")
-
-    const plain = outputIO({ color: false, columns: 160 })
-    expect(await runYrd(app, yrd("pr", "checks", "PR1"), plain.io), plain.stderr()).toBe(1)
-    expect(plain.stdout()).toContain("src/model.ts:12")
-    expect(plain.stdout()).toContain("/tmp/yrd-check.log")
-    expect(plain.stdout()).not.toContain("\u001b]")
-
-    behavior.failingCheck = false
-    const failedPr = app.state().bays.prs.PR1
-    if (failedPr === undefined) throw new Error("expected failed-Run PR")
-    const resubmit = outputIO({ resolveRevision: () => Promise.resolve(MERGED_SHA) })
-    expect(await runYrd(app, yrd("pr", "submit", failedPr.branch), resubmit.io), resubmit.stderr()).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-    const reauthorized = (await app.queue.admit({ prs: ["PR1"] }))[0]
-    if (reauthorized === undefined) throw new Error("expected a fresh-revision admitted PR id")
-    expect(reauthorized).toBe("PR1")
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ n: 2, head: MERGED_SHA })
-    const recovered = outputIO()
-    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), recovered.io), recovered.stderr()).toBe(0)
-    const currentChecks = recovered
-      .stdout()
-      .trim()
-      .split("\n")
-      .map((record) => JSON.parse(record))
-    expect(currentChecks).toHaveLength(1)
-    expect(currentChecks[0]).toMatchObject({
-      kind: "pr.check",
-      revision: 2,
-      status: "passed",
-    })
-    expect(currentChecks[0]).not.toHaveProperty("run")
-  })
-
-  it("runs a plain submission's authoritative check and merge in the later merge drain", async () => {
+  it("runs a plain submission's authoritative check and merge in the later selectorless drain", async () => {
+    // The legacy record mint retired: nothing is checkable at submit. The
+    // one-shot selectorless drain composes the derived member, runs its
+    // required check at admit, and merges it — all in the drain.
     const checkRuns: string[] = []
-    const app = await createApp({ checkRuns })
+    const app = await createApp({ checkRuns, resolveBaseSha: () => BASE_SHA })
     const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "submit", "topic/plain", "--json"), submit.io), submit.stderr()).toBe(0)
     expect(checkRuns).toEqual([])
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(app.state().bays.prs).toEqual({})
     expect(await app.queue.history()).toEqual([])
 
     const drain = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), drain.io), drain.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drain.io), drain.stderr()).toBe(0)
     expect(JSON.parse(drain.stdout())).toMatchObject({
       results: [
         {
           id: "R1",
           status: "completed",
           conclusion: "success",
-          steps: [{ name: "merge" }],
+          prs: [{ branch: "topic/plain", headSha: HEAD_SHA }],
         },
       ],
     })
     expect(checkRuns).toEqual(["check"])
+    expect(app.state().bays.prs).toEqual({})
   })
 
-  it("queues each direct submission without executing Queue work in the submitter", async () => {
+  it("records each direct submission as a fact without executing Queue work in the submitter", async () => {
+    // The legacy record mint retired: each submit writes its branch fact and
+    // nothing more — no record, no check request, no queue activity. The
+    // submitted branches wait as the queue's own visible pending rows.
     const checkRuns: string[] = []
     const app = await createApp({ checkRuns })
     const resolveRevision = (ref: string) => Promise.resolve(ref.endsWith("first") ? HEAD_SHA : MERGED_SHA)
 
     const first = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("pr", "submit", "topic/first", "--json"), first.io), first.stderr()).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 1, status: "queued" }])
+    expect(app.bays.state().submits["topic/first"]).toMatchObject({ sha: HEAD_SHA })
     expect(await app.queue.history()).toEqual([])
 
     const second = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("pr", "submit", "topic/second", "--json"), second.io), second.stderr()).toBe(0)
-    expect(app.queue.checks(["PR2"])).toMatchObject([{ pr: "PR2", revision: 1, status: "queued" }])
+    expect(app.bays.state().submits["topic/second"]).toMatchObject({ sha: MERGED_SHA })
+    expect(app.state().bays.prs).toEqual({})
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["topic/first", "topic/second"])
     expect(checkRuns).toEqual([])
     expect(await app.queue.history()).toEqual([])
   })
@@ -5386,86 +5103,6 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "submit", "topic/wait", "--follow", "--json"), submit.io)).toBe(2)
     expect(submit.stderr()).toContain("unknown option '--follow'")
     expect(await Array.fromAsync(app.events())).toEqual(before)
-  })
-
-  it("classifies the read-only main-health evidence as a base failure", async () => {
-    const app = await createApp({ baseFailure: true })
-    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/base-red", "--json"), submit.io)).toBe(0)
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    const checks = outputIO()
-    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), checks.io)).toBe(1)
-    expect(JSON.parse(checks.stdout())).toMatchObject({
-      pr: "PR1",
-      status: "failed",
-      classification: "base",
-      diagnostics: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} is red: test:fast failed`,
-      error: { code: "base-red" },
-    })
-  })
-
-  it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
-    const app = await createApp()
-    const resolveRevision = () => Promise.resolve(HEAD_SHA)
-
-    const submit = outputIO({ resolveRevision })
-    expect(await runYrd(app, yrd("bay", "submit", "topic/superseded", "--json"), submit.io), submit.stderr()).toBe(0)
-    const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
-    expect(submitted).toMatchObject({
-      prs: [{ id: "PR1", state: "open", merged: false, revs: [{ n: 1, head: HEAD_SHA }] }],
-    })
-    expect(submitted.prs[0]).toMatchObject({ taskStatus: "wip" })
-
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "queued",
-      steps: [{ job: { status: "queued", attempt: 0 } }],
-    })
-
-    const close = outputIO()
-    expect(await runYrd(app, yrd("pr", "close", "PR1", "--burn-payload", "--json"), close.io), close.stderr()).toBe(0)
-    const closed = JSON.parse(close.stdout()) as { prs: Record<string, unknown>[] }
-    expect(closed).toMatchObject({
-      command: "pr.close",
-      prs: [
-        {
-          id: "PR1",
-          state: "closed",
-          merged: false,
-          revs: [{ n: 1, head: HEAD_SHA, terminal: { kind: "withdrawn" } }],
-        },
-      ],
-    })
-    expect(closed.prs[0]).toMatchObject({ taskStatus: "dropped" })
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      steps: [
-        {
-          job: {
-            status: "completed",
-            conclusion: "cancelled",
-            attempt: 0,
-            canceledBy: "cli-test",
-            cancelReason: "PR withdrawn",
-          },
-        },
-      ],
-    })
-
-    await app.bays.submit({ branch: "topic/next", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
-    await expect(app.dispatch(app.commands.queue.run, { prs: ["PR2"], steps: ["check"] })).resolves.toMatchObject({
-      events: [
-        expect.objectContaining({ name: "queue/candidate/created" }),
-        expect.objectContaining({ name: "queue/run/started" }),
-        expect.objectContaining({ name: "job/requested" }),
-      ],
-    })
-
-    // A terminal change refuses re-close with a nonzero exit — never a silent no-op.
-    const again = outputIO()
-    expect(await runYrd(app, yrd("pr", "close", "PR1", "--burn-payload"), again.io)).not.toBe(0)
-    expect(again.stderr()).toContain("is withdrawn; a terminal change cannot be withdrawn")
   })
 
   it("terminalizes unclaimed Queue work when `bay close --withdraw` closes its PR", async () => {
@@ -12389,26 +12026,33 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
 })
 
 describe("submit props", () => {
-  it.each(["bay", "pr"] as const)("persists an opaque props through %s submit", async (surface) => {
+  it.each(["bay", "pr"] as const)("warns and proceeds when --prop rides a derived-lane %s submit", async (surface) => {
+    // The legacy record mint retired: props bound to change records, and a
+    // recordless direct branch routes to the derived lane. Record-only options
+    // must neither refuse the submit nor drop silently — the drop rides the
+    // envelope warnings and names the cure.
     const app = await createApp()
     const output = outputIO({ resolveRevision: async () => HEAD_SHA })
-    const props = {
-      request: "review-20925/custom 61's docs:retry 2",
-    }
+    const request = "review-20925/custom 61's docs:retry 2"
 
     expect(
       await runYrd(
         app,
-        yrd(surface, "submit", "topic/correlated", "--base", "main", "--prop", `request=${props.request}`, "--json"),
+        yrd(surface, "submit", "topic/correlated", "--base", "main", "--prop", `request=${request}`, "--json"),
         output.io,
       ),
       output.stderr(),
     ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
+    const payload = JSON.parse(output.stdout()) as Readonly<{ warnings?: readonly string[] }>
+    expect(payload).toMatchObject({
       command: `${surface}.submit`,
-      prs: [{ revs: [{ props }] }],
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/correlated", sha: HEAD_SHA, base: "main" }],
     })
-    expect(currentChangeRev(app.state().bays.prs.PR1!)).toMatchObject({ props })
+    expect((payload.warnings ?? []).join("\n")).toContain("props binds to change records")
+    expect((payload.warnings ?? []).join("\n")).toContain("amend the commit on 'topic/correlated'")
+    expect(app.state().bays.prs).toEqual({})
+    expect(app.bays.state().submits["topic/correlated"]).toMatchObject({ sha: HEAD_SHA })
   })
 
   it.each(["bay", "pr"] as const)("rejects malformed props before %s submit appends", async (surface) => {
@@ -12674,7 +12318,16 @@ describe("typed issue merge bridge", () => {
     })
   })
 
-  it("keeps a queued submitted revision externally submitted in both tracker bridges", async () => {
+  // Record-lane test deleted with the legacy record mint (record store
+  // scheduled for deletion — S7, @i/10 22991). Deleted tests:
+  // - "carries a literal --issue through submit and the same later
+  //   shipping-config failure in pr checks" (--issue bound to the minted
+  //   direct-branch record, and `pr checks` projects records).
+  it("warns that --issue binds no delivery on a derived-lane submit, and the bridge stays visibly empty", async () => {
+    // 22494 fenced the bridge against silently DROPPING a submitted delivery.
+    // Post-purge the inverse hazard exists: a recordless direct-branch submit
+    // records no delivery at all, so the drop must be loud at submit and the
+    // issue must not surface as half-tracked.
     const issueRef = "@yrd/core/22494-trackerbridge-drops-submitted-delivery"
     await using app = await createApp()
     const submitted = outputIO({ resolveRevision: async () => HEAD_SHA })
@@ -12683,20 +12336,20 @@ describe("typed issue merge bridge", () => {
       await runYrd(app, yrd("pr", "submit", "topic/ready-tracker-bridge", "--issue", issueRef, "--json"), submitted.io),
       submitted.stderr(),
     ).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+    const payload = JSON.parse(submitted.stdout()) as Readonly<{ warnings?: readonly string[] }>
+    expect(payload).toMatchObject({
+      command: "pr.submit",
+      prs: [],
+      derived: [{ lane: "derived", branch: "topic/ready-tracker-bridge", sha: HEAD_SHA, base: "main" }],
+    })
+    expect((payload.warnings ?? []).join("\n")).toContain("issue binds to change records")
+    expect(app.state().bays.prs).toEqual({})
 
+    // No record, no delivery: the issue is not in flight, and the reader is
+    // told so rather than shown an empty bridge that reads as tracked.
     const output = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
-    const expectedDelivery = {
-      issueRef,
-      pr: "PR1",
-      revision: 1,
-      headSha: HEAD_SHA,
-      status: "submitted",
-      runs: [],
-    }
-    expect(trackerBridge(output.stdout())).toMatchObject({ version: 1, deliveries: [expectedDelivery] })
-    expect(trackerBridgeV2(output.stdout())).toMatchObject({ version: 2, deliveries: [expectedDelivery] })
+    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io)).toBe(1)
+    expect(output.stderr()).toContain(`no issue '${issueRef}' is in flight`)
   })
 
   it("projects native PR states and fresh failed Runs from one exact journal cursor", async () => {
@@ -12951,54 +12604,6 @@ describe("typed issue merge bridge", () => {
     })
     expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
     expect(dashboard.stdout()).toContain("REJECTED 0 NEEDS-AUTHOR 1")
-  })
-
-  it("carries a literal --issue through submit and the same later shipping-config failure in pr checks", async () => {
-    const issueRef = "@yrd/core/21096-cli-ux/21091-shipping-config"
-    await using app = await createApp({
-      checkFailure: { code: "shipping-config-invalid", message: "shipping config rejects candidate" },
-    })
-    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
-
-    expect(
-      await runYrd(app, yrd("pr", "submit", "topic/shipping-config", "--issue", issueRef, "--json"), submit.io),
-      submit.stderr(),
-    ).toBe(0)
-    const submitted = JSON.parse(submit.stdout()) as Readonly<{
-      prs: readonly Readonly<{ revs: readonly Readonly<Record<string, unknown>>[] }>[]
-    }>
-    expect(submitted).toMatchObject({
-      command: "pr.submit",
-      prs: [
-        {
-          id: "PR1",
-          issue: issueRef,
-          state: "open",
-          merged: false,
-          revs: [{ n: 1 }],
-          taskStatus: "wip",
-        },
-      ],
-    })
-    expect(submitted.prs[0]?.revs[0]).not.toHaveProperty("terminal")
-
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    const checks = outputIO()
-    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), checks.io), checks.stderr()).toBe(1)
-    expect(checks.stdout()).toContain("shipping-config-invalid")
-
-    const issue = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), issue.io), issue.stderr()).toBe(0)
-    expect(trackerBridge(issue.stdout()).deliveries).toEqual([
-      expect.objectContaining({
-        issueRef,
-        pr: "PR1",
-        revision: 1,
-        headSha: HEAD_SHA,
-        status: "submitted",
-        runs: [],
-      }),
-    ])
   })
 
   it("refuses to label a historical rejection without a typed Queue bounce as trackerBridge v1", async () => {
@@ -13340,46 +12945,46 @@ describe("PR metadata — title, description, and issue link", () => {
     })
   }
 
-  it("defaults the change title and description from the head commit subject and body at submit", async () => {
+  // Record-lane tests deleted with the legacy record mint: a direct-branch
+  // submit mints no record, so there is no record to carry title/description/
+  // issue metadata and no record for pr edit / pr list / pr view to project.
+  // The record store itself is scheduled for deletion (S7, @i/10 22991).
+  // Deleted tests:
+  // - "defaults the change title and description from the head commit subject
+  //   and body at submit" and "lets explicit --title and --description
+  //   override the commit defaults" (their derived-lane successor is the
+  //   forwarding test below),
+  // - "appends an issue reference to the default description when --issue is
+  //   given",
+  // - "edits the title and description of a live change via pr edit",
+  // - "prefers the change title over the branch in the pr list SUBJECT column
+  //   and JSON",
+  // - "shows TITLE, ISSUE, and DESCRIPTION rows in pr view",
+  // - "separates the live branch head from the frozen revision in pr view",
+  // - "fails loudly when human pr view cannot observe the live branch".
+  it("forwards no commit-derived metadata to the derived lane, and warns only for explicit flags", async () => {
+    // Commit-derived defaults exist to bind onto a record; on the derived
+    // lane the head commit itself is the metadata, so a plain submit stays
+    // warning-free rather than telling every author to amend a commit with
+    // the title that was read from it. Explicit flags still travel — they
+    // have nowhere to bind, and that drop is loud and names the cure.
     const app = await createApp()
     const submit = commitMetaIO("feat(bay): pr metadata", "Adds a durable title and description to the change record.")
-    expect(await runYrd(app, yrd("pr", "submit", "topic/defaults", "--base", "main"), submit.io), submit.stderr()).toBe(
-      0,
-    )
-    expect(app.bays.pr("topic/defaults")).toMatchObject({
-      title: "feat(bay): pr metadata",
-      description: "Adds a durable title and description to the change record.",
-    })
-  })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/defaults", "--base", "main"), submit.io)).toBe(0)
+    expect(app.bays.pr("topic/defaults")).toBeUndefined()
+    expect(app.bays.state().submits["topic/defaults"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
+    expect(submit.stderr()).toContain("submitted to the derived lane: topic/defaults")
+    expect(submit.stderr()).not.toContain("bind to change records")
+    expect(submit.stderr()).not.toContain("binds to change records")
 
-  it("appends an issue reference to the default description when --issue is given", async () => {
-    const app = await createApp()
-    const submit = commitMetaIO("feat: linked change", "Commit body text.")
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "submit", "topic/linked", "--base", "main", "--issue", "@km/all/21091-metadata"),
-        submit.io,
-      ),
-      submit.stderr(),
-    ).toBe(0)
-    const pr = app.bays.pr("topic/linked")
-    expect(pr?.title).toBe("feat: linked change")
-    expect(pr?.description).toContain("Commit body text.")
-    expect(pr?.description).toContain("Issue: @km/all/21091-metadata")
-    expect(pr?.issue).toBe("@km/all/21091-metadata")
-  })
-
-  it("lets explicit --title and --description override the commit defaults", async () => {
-    const app = await createApp()
-    const submit = commitMetaIO("feat: from commit subject", "Commit body.")
+    const explicit = commitMetaIO("feat(bay): pr metadata", "Commit body.")
     expect(
       await runYrd(
         app,
         yrd(
           "pr",
           "submit",
-          "topic/explicit",
+          "topic/defaults",
           "--base",
           "main",
           "--title",
@@ -13387,151 +12992,12 @@ describe("PR metadata — title, description, and issue link", () => {
           "--description",
           "Explicit description body.",
         ),
-        submit.io,
+        explicit.io,
       ),
-      submit.stderr(),
     ).toBe(0)
-    expect(app.bays.pr("topic/explicit")).toMatchObject({
-      title: "Explicit subject text",
-      description: "Explicit description body.",
-    })
-  })
-
-  it("edits the title and description of a live change via pr edit", async () => {
-    const app = await createApp()
-    const submit = commitMetaIO("feat: original subject", "Original body.")
-    expect(await runYrd(app, yrd("pr", "submit", "topic/edit", "--base", "main"), submit.io), submit.stderr()).toBe(0)
-    const edit = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "edit", "topic/edit", "--title", "feat: renamed subject", "--description", "New body."),
-        edit.io,
-      ),
-      edit.stderr(),
-    ).toBe(0)
-    expect(app.bays.pr("topic/edit")).toMatchObject({ title: "feat: renamed subject", description: "New body." })
-  })
-
-  it("prefers the change title over the branch in the pr list SUBJECT column and JSON", async () => {
-    const app = await createApp()
-    // Short enough to survive the SUBJECT column budget so the branch never wins.
-    const submit = commitMetaIO("add pr metadata")
-    expect(await runYrd(app, yrd("pr", "submit", "topic/list", "--base", "main"), submit.io), submit.stderr()).toBe(0)
-
-    const list = outputIO({ columns: 120 })
-    expect(await runYrd(app, yrd("pr", "list"), list.io), list.stderr()).toBe(0)
-    expect(list.stdout()).toContain("add pr metadata")
-    expect(list.stdout()).not.toContain("topic/list")
-
-    const json = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
-    expect(JSON.parse(json.stdout())).toMatchObject({ prs: [{ title: "add pr metadata" }] })
-  })
-
-  it("shows TITLE, ISSUE, and DESCRIPTION rows in pr view", async () => {
-    const app = await createApp()
-    const submit = commitMetaIO("feat(view): pr metadata", "The description body.")
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "submit", "topic/view", "--base", "main", "--issue", "https://example.test/issues/7"),
-        submit.io,
-      ),
-      submit.stderr(),
-    ).toBe(0)
-
-    const view = outputIO({ columns: 120, color: true })
-    expect(await runYrd(app, yrd("pr", "view", "topic/view"), view.io), view.stderr()).toBe(0)
-    const visible = stripOsc8Targets(view.stdout())
-    expect(visible).toContain("TITLE")
-    expect(visible).toContain("feat(view): pr metadata")
-    expect(visible).toContain("ISSUE")
-    expect(visible).toContain("DESCRIPTION")
-    expect(visible).toContain("The description body.")
-    // The issue URL is an OSC 8 hyperlink target in the detail identity area.
-    expect(view.stdout()).toContain("]8;;https://example.test/issues/7")
-  })
-
-  it("separates the live branch head from the frozen revision in pr view", async () => {
-    const app = await createApp()
-    const branch = "task/frozen-source-view"
-    const liveHead = "2".repeat(40)
-    const requests: ProcessRequest[] = []
-    const submit = commitMetaIO("fix(cli): expose frozen source")
-    expect(await runYrd(app, yrd("pr", "submit", branch, "--base", "main"), submit.io), submit.stderr()).toBe(0)
-
-    const view = outputIO({ columns: 140 })
-    expect(
-      await runYrd(app, yrd("pr", "view", branch), view.io, {
-        process: {
-          run: async (request) => {
-            requests.push(request)
-            // This fixture's repository has no receiver store: the store probe
-            // reports no repository there, so the observation proceeds to the
-            // origin fetch this test pins.
-            if (request.argv.some((argument) => argument.startsWith("--git-dir="))) {
-              return {
-                stdout: "",
-                stderr: "fatal: not a git repository: '/repo/.git/yrd/prs.git'",
-                exitCode: 128,
-                signal: null,
-                durationMs: 0,
-                timedOut: false,
-              }
-            }
-            if (request.argv.includes("--git-common-dir")) {
-              return { stdout: "/repo/.git\n", stderr: "", exitCode: 0, signal: null, durationMs: 0, timedOut: false }
-            }
-            return {
-              stdout: request.argv.includes("rev-parse") ? `${liveHead}\n` : "",
-              stderr: "",
-              exitCode: 0,
-              signal: null,
-              durationMs: 0,
-              timedOut: false,
-            }
-          },
-          reapPath: async () => completePathReapResult(),
-        },
-      }),
-      view.stderr(),
-    ).toBe(0)
-    const rows = stripAnsi(view.stdout()).split("\n")
-    const source = rows.find((row) => row.includes("SOURCE"))
-    const frozen = rows.find((row) => row.includes("FROZEN REV 1"))
-
-    expect(source).toContain(branch)
-    expect(source).toContain(liveHead)
-    expect(source).not.toContain(HEAD_SHA)
-    expect(frozen).toContain(HEAD_SHA)
-    expect(frozen).not.toContain(liveHead)
-    expect(rows.join("\n")).toContain("BRANCH MOVED")
-    expect(rows.join("\n")).toContain("re-merge before review")
-    expect(requests.map((request) => request.argv)).toContainEqual([
-      "git",
-      "-C",
-      "/repo",
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--no-recurse-submodules",
-      "origin",
-      `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
-    ])
-  })
-
-  it("fails loudly when human pr view cannot observe the live branch", async () => {
-    const app = await createApp()
-    const branch = "task/unobservable-source"
-    const submit = commitMetaIO("fix(cli): require live source evidence")
-    expect(await runYrd(app, yrd("pr", "submit", branch, "--base", "main"), submit.io), submit.stderr()).toBe(0)
-
-    const view = outputIO()
-    expect(await runYrd(app, yrd("pr", "view", branch), view.io, { process: undefined }), view.stderr()).toBe(2)
-    expect(view.stderr()).toContain(branch)
-    expect(view.stderr()).toContain("no Git process is installed")
-    expect(view.stdout()).toBe("")
+    expect(explicit.stderr()).toContain("title/description bind to change records")
+    expect(explicit.stderr()).toContain("amend the commit on 'topic/defaults'")
+    expect(explicit.stderr()).toContain("submitted to the derived lane: topic/defaults")
   })
 
   function metadataPr(overrides: Partial<Change> = {}): Change {
