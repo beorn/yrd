@@ -587,12 +587,15 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
 })
 
 describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", () => {
-  it("bay.intake refuses record-mint-retired for a branch a live submit fact owns and no record does", async () => {
+  it("bay.intake refuses record-mint-retired for a branch a live submit fact owns and no record does, and the message names the surviving path", async () => {
     await using app = await createApp()
     await app.bays.recordBranchSubmit({ branch: "issue/facted", sha: SHA, base: "main" })
-    await expect(
-      app.bays.intake({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE }),
-    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "record-mint-retired" } })
+    const refusal = await app.bays
+      .intake({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE })
+      .then(() => undefined)
+      .catch((error: unknown) => failureFact(error))
+    expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
+    expect(refusal?.message).toMatch(/refs\/for\/main\/<issue>/)
     expect(app.state().bays.prs).toEqual({})
   })
 
