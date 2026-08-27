@@ -885,7 +885,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
                   "checkpoint-migration-missing",
                   `yrd: no checkpoint migration path exists from '${predecessor.identity}' to '${checkpointIdentity}'; ` +
                     `rebuild from history is unavailable because history through cursor ${evictedThrough} was evicted. ` +
-                    checkpointMigrationRemedy(definition[checkpointMigrations], predecessor.identity, checkpointIdentity),
+                    checkpointMigrationRemedy(
+                      definition[checkpointMigrations],
+                      predecessor.identity,
+                      checkpointIdentity,
+                    ),
                 )
               }
               throw error
