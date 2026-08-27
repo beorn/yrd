@@ -6,6 +6,7 @@ import { systemClock } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
+import { CHANGE_ID_TRAILER_KEY, changeIdTrailerCandidates, findChangeId } from "./change-identity.ts"
 import { GitRefSchema, GitShaSchema } from "./model.ts"
 
 const RECEIVER_VERSION = 1 as const
@@ -208,6 +209,18 @@ export type ReceiverHookOptions = {
    */
   classifyBranch?: ReceiverAutoClassifier
   /**
+   * Whether a LIVE change record already owns this carrier branch — the S6
+   * record lane (the production predicate is `recordLaneOwnsBranch` over the
+   * bays state, which this receiver cannot read itself). Consulted only by
+   * the push-time Change-Id gate on a `refs/for/` push: a record-owned
+   * branch derives its identity from the record internally, so its
+   * grandfathered re-pushes stay exempt from the tip-trailer requirement.
+   * Omit and NO branch is exempt — post-S6 a recordless refs/for push IS the
+   * whole submission, so strict is the only safe default for a caller that
+   * wired no record state in.
+   */
+  recordOwnsBranch?: (branch: string) => boolean | Promise<boolean>
+  /**
    * Project an ACCEPTED `refs/yrd/submit/<branch>` write as a journal fact
    * (branch-is-change phase 2a; @cto efd1fa9a). Called only after git has
    * applied the ref — at post-receive for a direct push, after the drain-time
@@ -271,9 +284,7 @@ export function declaredReceiverHookEntry(mainRepo: string): string {
   const nested = join(repo, "vendor", "yrd", "bin", "yrd")
   if (existsSync(direct)) return direct
   if (existsSync(nested)) return nested
-  throw new Error(
-    `yrd: receiver: declared mainRepo '${repo}' has no bin/yrd (looked at '${direct}' and '${nested}')`,
-  )
+  throw new Error(`yrd: receiver: declared mainRepo '${repo}' has no bin/yrd (looked at '${direct}' and '${nested}')`)
 }
 
 export function receiverHookSource(mode: HookMode, entry: string): string {
@@ -496,8 +507,7 @@ async function finalizeReceiverUpdates(
         if (ZERO_SHA.test(update.oldSha) && authorized.intent === undefined) {
           await applyCreationClassification(receiver, update, authorized.branch, authorized.target.base, options)
         }
-      }
-      else if (authorized.kind === "submit-ref") {
+      } else if (authorized.kind === "submit-ref") {
         // git's own ref update already applied the write (or the delete); the
         // only post-receive duty is to project the accepted fact so the queue
         // can see it — before 2a this branch did nothing and a direct submit
@@ -1043,6 +1053,48 @@ async function validateSubmitCarrier(
 }
 
 /**
+ * Push-time half of the derived lane's identity contract (S6): a
+ * `refs/for/<base>/<change>` push with no live record IS the whole
+ * submission, and the derived member's identity is read at admission from
+ * the tip commit's `Change-Id` trailer — so a tip without a valid trailer
+ * refuses HERE, where every other refs/for refusal fires, never at admission
+ * after the pusher has already seen success (the receiver doc's standing
+ * promise). A carrier a live record owns is exempt: the record lane derives
+ * identity internally, and a grandfathered re-push carries none of the
+ * derived lane's obligations. Trailer shape and parsing are shared with the
+ * enrichment reader via `change-identity.ts` — one source of truth, so the
+ * gate can never accept a trailer admission would then fail to read.
+ * `includeMainObjects` for the same reason as the ancestry checks above: at
+ * pre-receive the pushed commit lives only in the receiver's quarantine.
+ */
+async function validateChangeIdTrailer(
+  receiver: GitPushReceiver,
+  update: ReceiverRefUpdate,
+  branch: string,
+  options: ReceiverHookOptions,
+): Promise<void> {
+  if ((await options.recordOwnsBranch?.(branch)) === true) return
+  const raw = (
+    await receiverGit(
+      receiver,
+      ["show", "-s", `--format=%(trailers:key=${CHANGE_ID_TRAILER_KEY},valueonly,separator=%x2c)`, update.newSha],
+      { env: options.env, includeMainObjects: true },
+    )
+  ).stdout
+  const candidates = changeIdTrailerCandidates(raw)
+  if (findChangeId(candidates) !== undefined) return
+  const found =
+    candidates.length === 0
+      ? `has no '${CHANGE_ID_TRAILER_KEY}' trailer, which is the change's identity at admission`
+      : `has no valid '${CHANGE_ID_TRAILER_KEY}' trailer — found '${candidates.join("', '")}', not 'I' followed by 40 hex digits`
+  check(
+    false,
+    `refs/for submit '${update.ref}': tip commit ${update.newSha.slice(0, 12)} ${found}; amend the commit ` +
+      `message to end with a trailer line 'Change-Id: I<40 hex>' (\`git commit --amend\`) and push again`,
+  )
+}
+
+/**
  * The pushed head's `.yrd.yml`, or undefined when that revision's tree has
  * none. `includeMainObjects` matters here exactly as it does for the ancestry
  * checks above: at pre-receive the pushed blob lives only in the receiver's
@@ -1580,7 +1632,10 @@ async function authorize(
   )
   await checkNotStale(receiver, update, stage, options.env)
   await validatePin(receiver, update, target, options.env)
-  if (intent !== undefined) await validateSubmitCarrier(receiver, update, branch, options.env)
+  if (intent !== undefined) {
+    await validateSubmitCarrier(receiver, update, branch, options.env)
+    await validateChangeIdTrailer(receiver, update, branch, options)
+  }
   await validateQueueConfig(receiver, update, options)
   return intent === undefined ? { kind: "intake", branch, target } : { kind: "intake", branch, target, intent }
 }
@@ -1788,9 +1843,7 @@ async function recoverPrepared(
 }
 
 function resultOrder(left: StoredResult, right: StoredResult): number {
-  return (
-    left.result.receivedAt.localeCompare(right.result.receivedAt) || left.result.id.localeCompare(right.result.id)
-  )
+  return left.result.receivedAt.localeCompare(right.result.receivedAt) || left.result.id.localeCompare(right.result.id)
 }
 
 function orderBranch(results: StoredResult[]): StoredResult[] {
