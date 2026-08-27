@@ -3412,6 +3412,69 @@ describe("runYrd", () => {
     expect(checkContexts).toEqual([{ cwd: "/repo", ref: branch }])
   })
 
+  it("submits a live change after its Bay workspace directory is deleted, never touching the missing path", async () => {
+    // Mirrors PR1855/PR1856/PR1826 (@i/10-merge-queue/23160, 2026-08-22): a
+    // prune closed each Bay whose content was already integrated, but a live
+    // change record kept pointing at the now-gone `.bays/<id>` directory, and
+    // a later `pr submit` crashed with "working directory ... does not exist"
+    // instead of succeeding. The test above proves the CONTEXT SHAPE submit
+    // computes; this one proves the OUTCOME against a directory that is
+    // actually gone from disk.
+    const bayRoot = mkdtempSync(join(tmpdir(), "yrd-carrier-bay-"))
+    const cwdRoot = mkdtempSync(join(tmpdir(), "yrd-carrier-cwd-"))
+    try {
+      const app = await createApp({ bayPath: bayRoot })
+      await openTestBay(app, { name: "carrier", branch: "task/carrier" })
+      await submitBayFixture(app, "B1")
+      const branch = app.bays.get("B1")?.branch
+      expect(branch).toBeDefined()
+      expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
+      const originalHead = currentChangeRev(app.bays.pr("PR1")!).head
+
+      // The exact fact the fix relies on: the Bay's own workspace is gone.
+      safeRemoveSync(bayRoot, { within: tmpdir(), allowMissing: true })
+      expect(existsSync(bayRoot)).toBe(false)
+
+      // A real, non-mocked stand-in for yrd-process's requireSpawnDirectory
+      // (packages/yrd-process/src/index.ts): it fails for the same reason a
+      // real spawn would — the directory it was handed does not exist —
+      // rather than a canned mock that cannot tell a real cwd from a fake one.
+      const seenCwds: string[] = []
+      const realWorkspaceChecks: YrdCliServices["checks"] = {
+        names: ["typecheck"],
+        run: async (_name, cwd) => {
+          seenCwds.push(cwd)
+          if (!existsSync(cwd)) {
+            throw new Error(`yrd: cannot run 'typecheck' — its working directory '${cwd}' does not exist`)
+          }
+          return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
+        },
+        install: async (cwd) => {
+          if (!existsSync(cwd)) {
+            throw new Error(`yrd: cannot install — its working directory '${cwd}' does not exist`)
+          }
+          return join(cwd, ".git/yrd/hooks/pre-submit")
+        },
+      }
+      const output = outputIO({ cwd: cwdRoot, currentBranch: () => "main" })
+
+      const exit = await runYrd(app, yrd("pr", "submit", "B1"), output.io, { checks: realWorkspaceChecks })
+      expect(exit, output.stderr()).toBe(0)
+
+      // Required checks ran in the invoking tree against the durable branch
+      // ref — never once in the deleted Bay path.
+      expect(seenCwds).toEqual([cwdRoot])
+
+      const resubmitted = app.bays.pr("PR1")
+      expect(changeDeliveryState(resubmitted!)).toBe("submitted")
+      expect(resubmitted?.branch).toBe(branch)
+      expect(currentChangeRev(resubmitted!).head).toBe(originalHead)
+    } finally {
+      safeRemoveSync(bayRoot, { within: tmpdir(), allowMissing: true })
+      safeRemoveSync(cwdRoot, { within: tmpdir(), allowMissing: true })
+    }
+  })
+
   it("leaves a direct submission predecessor for the Queue driver and queues the fresh revision", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ checkedRevisions })
