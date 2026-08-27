@@ -758,8 +758,9 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   /** Read a DERIVED member's admission enrichment from git — the tip commit's
    * Change-Id trailer and any props/issue/title the host derives (S6 door:
    * records no longer mint, so admission is where identity/props enter).
-   * Absent, admission still reuses retained snapshot identities; a branch
-   * needing a fresh Change-Id refuses `derived-change-id-missing` loudly. */
+   * Absent, admission still reuses retained snapshot identities and mints a
+   * fresh branch's change id synthetically from its submit facts (branch, tip
+   * sha) — only the props/issue/title enrichment is lost. */
   readSubmitEnrichment?(
     input: Readonly<{ branch: string; sha: string }>,
   ): DerivedSubmitEnrichment | Promise<DerivedSubmitEnrichment>
@@ -1328,7 +1329,8 @@ function createQueue<Shape extends ChangeShape>(
    *
    * Loud-edge policy, carried from the sweep it replaces: a typed refusal or
    * infrastructure fact attributable to ONE branch (vanished/moved fact,
-   * record-lane collision, missing Change-Id trailer) is warned and skipped —
+   * record-lane collision, submit facts too non-canonical to mint a synthetic
+   * change id from) is warned and skipped —
    * the branch keeps its unrecorded-submit row, so the refusal cannot go dark
    * — while a mint-store failure and any untyped throw PROPAGATE and fail the
    * compose: those need a human, not a retry loop. A duplicate payload
@@ -1343,7 +1345,9 @@ function createQueue<Shape extends ChangeShape>(
     if (branches.length === 0) return []
     if (derivedMint === undefined) {
       log.warn?.(
-        "queue compose cannot admit ref-only branches: no PR-number mint is configured for derived admission",
+        "queue compose cannot admit ref-only branches: no PR-number mint is configured for derived admission " +
+          "— configure the queue plugin's prNumberMint (the durable pr-mint.json store the bays plugin shares), " +
+          "or land each branch through the record lane: 'yrd pr submit <branch>' accepts the branch as-is",
         {
           action: "compose-derived-mint-missing",
           branches,
@@ -8034,7 +8038,10 @@ export const YRD_REFUSAL_CODES = [
   "deletion-inspection",
   // S6 derived-member admission (derived-admission.ts): the re-homed loud
   // edges of the retired 2b sweep. All four are author-curable in the git
-  // regime — re-push the branch/submit ref, or add the Change-Id trailer.
+  // regime — re-push the branch/submit ref, add the Change-Id trailer, or
+  // take the record lane. change-id-missing now fires only for submit facts
+  // too non-canonical to mint a synthetic identity from: a trailerless tip
+  // with canonical facts mints (changeIdForDerivedSubmit) instead of refusing.
   "derived-change-id-missing",
   // The host's enrichment reader raises this when the submitted commit is not
   // in the repository (R2's vanished-commit edge, attributable to one branch).

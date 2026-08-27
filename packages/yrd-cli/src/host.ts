@@ -2471,8 +2471,9 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  * at exactly the submitted sha — the `Change-Id` trailer (stable identity),
  * the `Bead` trailer (issue linkage plus the settlement-visible `bead` prop),
  * and the subject as the display title. Missing trailers come back absent;
- * the derived admission decides what absence refuses (a missing Change-Id
- * does, loudly, unless a retained snapshot already supplies the identity).
+ * the derived admission fills a missing Change-Id itself, minting a synthetic
+ * identity from the submission's stable facts (a retained snapshot's identity
+ * or a present trailer wins over that mint).
  */
 export async function readDerivedSubmitEnrichment(
   process: Pick<Process, "run">,

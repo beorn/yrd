@@ -23,6 +23,7 @@
 import {
   changeComposition,
   changeHead,
+  changeIdForDerivedSubmit,
   baseIdentity,
   isLiveChange,
   ChangeIdSchema,
@@ -60,7 +61,9 @@ import { projectionLookupGet } from "./projection-lookup.ts"
  *
  * `changeId` is required: 22991 makes branch+Change-Id the identity, and the
  * re-sourced `pr/integrated` cannot be emitted without one — a tip commit
- * missing its `Change-Id` trailer refuses at derivation, never silently later.
+ * missing its `Change-Id` trailer runs under a synthetic id minted at
+ * derivation from the submission's stable facts (branch, tip sha), so the
+ * terminal emitters never go dark and a trailerless push still lands.
  */
 export const DerivedRunMemberSchema = z
   .object({
@@ -288,7 +291,6 @@ export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): b
   return !recordIds.has(id)
 }
 
-
 /**
  * Every branch the DERIVED lane currently owns: a live submit fact whose
  * arbitration verdict is "derived" (no record, or only a terminal one at a
@@ -314,10 +316,15 @@ export function derivedLaneBranches(bays: DeepReadonly<BaysState>): string[] {
  * `Bead:`-style props, issue — because this layer never reads git itself.
  *
  * A branch whose tip carries no `Change-Id` trailer (and whose identity was
- * not reused from a retained snapshot that recorded one) refuses
- * `derived-change-id-missing`: without it the terminal `pr/integrated` could
- * never be emitted and settlement would go dark — the exact silence the
- * re-sourced emitters exist to prevent.
+ * not reused from a retained snapshot that recorded one) runs under a
+ * SYNTHETIC change id minted from the submission's stable facts (branch, tip
+ * sha): deterministic, so re-composing the same push derives the same
+ * identity, and the journaled snapshot then carries it to every later
+ * revision of the branch — the terminal `pr/integrated` always has an
+ * identity to emit, and the lane serves pushes no tooling stamped.
+ * `derived-change-id-missing` remains only for submit facts too non-canonical
+ * to mint from, and its cure names both outs: add the trailer, or record-lane
+ * `yrd pr submit <branch>` accepts the branch as-is.
  */
 export function deriveRunMemberArgs(
   options: Readonly<{
@@ -349,26 +356,19 @@ export function deriveRunMemberArgs(
         `a derived member (record '${verdict.record?.id ?? "?"}' answers for it)`,
     )
   }
-  // Refuse a missing Change-Id BEFORE the mint can commit a number: without
-  // this order every compose would burn one number per still-unenriched
-  // branch. The reuse path is pure (no commit), so peeking it first is free.
+  // Identity source order: a retained snapshot's change id (branch continuity
+  // across re-pushes) > the tip commit's Change-Id trailer > a synthetic id
+  // minted from the submission's stable facts (branch, tip sha). The change id
+  // settles BEFORE the number mint can commit: the one remaining refusal —
+  // facts too non-canonical to mint a STABLE identity from — must not burn a
+  // number per compose retry. The snapshot peek and both mint arms are pure.
   const reusable = latestChangeSnapshot(
     queues as QueuesState,
     (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
   )
-  if (reusable?.changeId === undefined && enrichment?.changeId === undefined) {
-    raiseFailure(
-      "refusal",
-      "derived-change-id-missing",
-      `yrd: branch '${branch}' tip ${submit.sha} carries no Change-Id trailer and no retained snapshot ` +
-        `supplies one — amend the commit with a Change-Id trailer and re-push branch + submit ref`,
-    )
-  }
+  const settledChangeId = reusable?.changeId ?? enrichment?.changeId ?? mintSyntheticChangeId(branch, submit.sha)
   const identity = mintDerivedMemberIdentity({ mint, bays, queues, branch })
-  const changeId = identity.changeId ?? enrichment?.changeId
-  if (changeId === undefined) {
-    throw new Error(`yrd: derived member for '${branch}' lost its change id between peek and mint`)
-  }
+  const changeId = identity.changeId ?? settledChangeId
   return {
     branch,
     id: identity.id,
@@ -379,4 +379,30 @@ export function deriveRunMemberArgs(
     ...(enrichment?.issue === undefined ? {} : { issue: enrichment.issue }),
     ...(enrichment?.title === undefined ? {} : { title: enrichment.title }),
   }
+}
+
+/**
+ * The synthetic arm of the identity ladder: mint a trailerless tip's change id
+ * from the submission's stable facts via {@link changeIdForDerivedSubmit} —
+ * deterministic, so a re-compose of the same push derives the same identity,
+ * and the run's journaled `ChangeSnapshot` then anchors it for every later
+ * revision of the branch. Refuses — commit-free, so the caller's number mint
+ * never burns on a refused branch — only when the facts are not canonical (a
+ * malformed ref or non-hex sha): an identity minted from a non-canonical fact
+ * would not be stable across re-derivations, which is the mint's entire
+ * contract. The cure names both outs because both genuinely work: a Change-Id
+ * trailer bypasses this mint, and the record lane accepts the branch as-is.
+ */
+function mintSyntheticChangeId(branch: string, sha: string): string {
+  if (!GitRefSchema.safeParse(branch).success || !GitShaSchema.safeParse(sha).success) {
+    raiseFailure(
+      "refusal",
+      "derived-change-id-missing",
+      `yrd: branch '${branch}' tip ${sha} carries no Change-Id trailer, and its submit facts are not ` +
+        `canonical (a well-formed ref and a full hex sha) to mint a synthetic identity from — amend the tip ` +
+        `commit with a Change-Id trailer and re-push branch + submit ref, or use the record lane: ` +
+        `'yrd pr submit ${branch}' accepts the branch as-is`,
+    )
+  }
+  return changeIdForDerivedSubmit({ branch, sha })
 }
