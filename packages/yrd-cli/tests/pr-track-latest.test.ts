@@ -261,7 +261,7 @@ describe("pr submit tracking default", () => {
     // track binds to change records; on the derived lane it is dropped LOUDLY
     // in the envelope warnings while the submit succeeds.
     expect(envelope.warnings).toEqual([
-      `track bind to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${BRANCH}' to carry them`,
+      `track binds to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${BRANCH}' to carry them`,
       DERIVED_ACCEPTANCE_LINE,
     ])
     expect(app.bays.prs()).toEqual([])

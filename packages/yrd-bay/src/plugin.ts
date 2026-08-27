@@ -1235,7 +1235,7 @@ export function createBays(
       if (recordOnly.length > 0) {
         const dropped = recordOnly.join("/")
         options.warnings?.push(
-          `${dropped} bind to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${selector}' to carry them`,
+          `${dropped} ${recordOnly.length > 1 ? "bind" : "binds"} to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${selector}' to carry them`,
         )
         log?.warn?.("record-only submit options dropped on the derived lane", {
           action: "submit-derived-metadata-dropped",
