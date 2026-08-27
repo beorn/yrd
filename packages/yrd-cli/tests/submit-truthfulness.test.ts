@@ -1,17 +1,19 @@
 /**
- * @failure `pr submit` exits 0 while the change it returns needs its author (needs-author/rejected), emits a poorer envelope on the refused branch than on success, or keeps advisory warnings --json-only so a human resubmitting a merged branch reads silence.
+ * @failure `pr submit` exits 0 while the change it returns needs its author (needs-author), reports success for a submission that wrote nothing, emits a poorer envelope on the refused branch than on success, or keeps advisory warnings --json-only so a human resubmitting a merged branch reads silence.
  * @level l2
  * @consumer @yrd/cli pr submit
  *
  * The reproduction needs no concurrency: `@yrd/bay` submitSelection short-
- * circuits an already-refused change back unmodified without throwing
- * (needs-author via the live-change early return; rejected via the identical-
- * payload `{ events: [] }` no-op), so the submit result set carries a change
- * the author must act on while the command exits 0.
+ * circuits a needs-author change back unmodified without throwing (the
+ * live-change early return), so the submit result set carries a change the
+ * author must act on while the command exits 0. A REJECTED record is terminal
+ * post-purge: its branch falls through to the derived lane instead, and exit 0
+ * is truthful only because the branch-submit fact was actually written.
  *
  * Q1 fence (cli.test.ts "Same merged head -> informational already merged,
- * exit 0"): only needs-author and rejected bill exit 1 — integrated/
- * already-landed resubmits stay informational exit 0.
+ * exit 0"): only needs-author bills exit 1 — integrated/already-landed
+ * resubmits stay informational exit 0, and a rejected-record branch re-enters
+ * the derived lane (exit 0, no reopen).
  */
 import { describe, expect, it } from "vitest"
 import { changeDeliveryState, createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
@@ -251,15 +253,24 @@ describe("pr submit exit truthfulness", () => {
     expect(exit, "needs-author submit must bill the author with exit 1").toBe(1)
   })
 
-  it("a same-head resubmit of a rejected change exits 1", async () => {
+  it("a same-head resubmit of a rejected change re-enters the derived lane with exit 0 and a written fact", async () => {
     await using app = await rejectedApp()
     const output = outputIO({ resolveRevision: async () => HEAD_SHA })
 
     const exit = await runYrd(app, yrd("pr", "submit", "topic/rejected", "--json"), output.io, services(app))
+    // The record is terminal and stays terminal: the resubmit must not reopen
+    // it (the legacy record mint's reopen door is retired).
     expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("rejected")
-    const envelope = JSON.parse(output.stdout()) as { prs: readonly { id: string; status: string }[] }
-    expect(envelope.prs).toMatchObject([{ id: "PR1", status: "rejected" }])
-    expect(exit, "rejected submit must bill the author with exit 1").toBe(1)
+    const envelope = JSON.parse(output.stdout()) as {
+      prs: readonly { id: string; status: string }[]
+      derived?: readonly { lane: string; branch: string; sha: string; base: string }[]
+    }
+    expect(envelope.prs).toEqual([])
+    expect(envelope.derived).toEqual([{ lane: "derived", branch: "topic/rejected", sha: HEAD_SHA, base: "main" }])
+    // Exit 0 is truthful only because the submission DID something durable:
+    // the branch-submit fact is written, so the next queue pass composes it.
+    expect(app.state().bays.submits["topic/rejected"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
+    expect(exit, "a derived acceptance is a success and exits 0").toBe(0)
   })
 
   it("Q1: a same-head resubmit of an integrated branch still exits 0", async () => {

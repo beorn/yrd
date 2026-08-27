@@ -468,20 +468,32 @@ describe("observable CLI exemplar", () => {
       .split("\n")
       .map((entry) => JSON.parse(entry) as Record<string, unknown>)
     const evidence = records.filter((record) =>
-      ["yrd:bay:submit", "yrd:storage:append", "yrd:storage:lock", "yrd:process:run"].includes(String(record.name)),
+      ["yrd:bay", "yrd:bay:submit", "yrd:storage:append", "yrd:storage:lock", "yrd:process:run"].includes(
+        String(record.name),
+      ),
     )
-    expect(evidence.find((record) => record.level === "info" && record.name === "yrd:bay:submit")).toEqual(
+    // A recordless direct branch routes to the derived lane: the submit
+    // lifecycle succeeds on the branch identity (no pr/revision — no record
+    // mints), and the routing record carries the exact head the fact recorded.
+    const submitted = evidence.find((record) => record.level === "info" && record.name === "yrd:bay:submit")
+    expect(submitted).toEqual(
       expect.objectContaining({
         outcome: "succeeded",
-        pr: "PR1",
-        revision: 1,
-        headSha,
+        branch: "issue/observable",
         durationMs: expect.any(Number),
       }),
     )
+    const routed = evidence.find(
+      (record) => record.name === "yrd:bay" && record.action === "submit-derived-routed",
+    )
+    expect(routed).toEqual(
+      expect.objectContaining({ branch: "issue/observable", sha: headSha, base: "main" }),
+    )
+    expect(routed?.trace_id, "derived routing must correlate with the submit lifecycle").toBe(submitted?.trace_id)
     expect(
       evidence.find(
-        (record) => record.level === "info" && record.name === "yrd:storage:append" && record.op === "bay.submit",
+        (record) =>
+          record.level === "info" && record.name === "yrd:storage:append" && record.op === "branch.recordSubmit",
       ),
     ).toEqual(expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }))
     expect(
