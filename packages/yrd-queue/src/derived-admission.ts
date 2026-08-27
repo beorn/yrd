@@ -290,19 +290,61 @@ export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): b
 
 
 /**
- * Every branch the DERIVED lane currently owns: a live submit fact whose
- * arbitration verdict is "derived" (no record, or only a terminal one at a
- * different sha). This is the door compose's selection universe — the exact
- * population the retired 2b sweep used to mint records for, plus the
- * terminal-branch re-submissions the sweep could never see.
+ * Every branch the DERIVED lane currently owns: a live submit fact on a
+ * branch with NO record — in any state. This is the door compose's selection
+ * universe — the exact population the retired 2b sweep used to mint records
+ * for.
+ *
+ * Recordless-ness is a hard criterion on top of the arbitration verdict, not
+ * a restatement of it. The verdict's terminal×different-sha cell still reads
+ * "derived" (it is a status statement: the standing fact is newer truth than
+ * the terminal record), but ADMISSION requires more — one submit fact must be
+ * consumed by exactly one lane, and a branch with record history already has
+ * the record lane as its consumer. Measured 2026-08-27 (PR2139): the record
+ * lane merged revision 1, the submit fact survived at the merge commit's sha,
+ * the terminal×different-sha cell arbitrated "derived", and the next compose
+ * minted and merged an empty revision 2 — one approval, two merges. A
+ * re-submission of a branch with record history re-enters through the record
+ * lane (`yrd pr submit` mints a fresh identity beside the terminal record);
+ * the branches this filter newly excludes stay loud via
+ * {@link recordShadowedSubmits}.
  */
 export function derivedLaneBranches(bays: DeepReadonly<BaysState>): string[] {
   return Object.keys(bays.submits)
     .filter((branch) => {
       const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
+      if (records.length > 0) return false
       return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
     })
     .toSorted()
+}
+
+/**
+ * The submits the derived lane may NOT serve and the record lane is not
+ * serving either: a live submit fact on a branch with record HISTORY whose
+ * newest-truth arbitration would still rule "derived" (terminal record,
+ * different sha). Under the one-lane-consumes invariant (PR2139 double-merge,
+ * 2026-08-27) these branches are excluded from {@link derivedLaneBranches};
+ * this is the reporting surface that keeps the exclusion loud — the compose
+ * warns one row per branch, and the cure is the record lane: `yrd pr submit
+ * <branch>` mints a fresh identity beside the terminal record.
+ *
+ * A branch whose record is LIVE does not appear: its standing fact is the
+ * record's own pending-revision signal, not an orphaned approval.
+ */
+export function recordShadowedSubmits(
+  bays: DeepReadonly<BaysState>,
+): Readonly<{ branch: string; sha: string; record: string }>[] {
+  return Object.keys(bays.submits)
+    .flatMap((branch) => {
+      const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
+      if (records.length === 0) return []
+      const verdict = arbitrateDerivedChange(records as Change[], bays.submits[branch])
+      if (verdict.lane !== "derived" || verdict.record === undefined) return []
+      const submit = bays.submits[branch]
+      return submit === undefined ? [] : [{ branch, sha: submit.sha, record: verdict.record.id }]
+    })
+    .toSorted((left, right) => left.branch.localeCompare(right.branch))
 }
 
 /**
