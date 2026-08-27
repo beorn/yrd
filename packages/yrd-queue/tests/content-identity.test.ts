@@ -270,7 +270,14 @@ describe("crossBaseDeltaEquality", () => {
     roots.push(fixture.root)
     // Main lands the author's exact edit, so the rebased candidate adds nothing.
     await git.run(fixture.repo, ["checkout", "main"])
-    const absorbing = await git.run(fixture.repo, ["commit-tree", `${fixture.authorTip}^{tree}`, "-p", fixture.baseTwo, "-m", "main absorbs the change"])
+    const absorbing = await git.run(fixture.repo, [
+      "commit-tree",
+      `${fixture.authorTip}^{tree}`,
+      "-p",
+      fixture.baseTwo,
+      "-m",
+      "main absorbs the change",
+    ])
     const variantTree = await git.run(fixture.repo, ["merge-tree", "--write-tree", absorbing, fixture.authorTip])
 
     const authored = await exactDelta(git, fixture.repo, fixture.baseOne, fixture.authorTip)
@@ -401,7 +408,12 @@ describe("crossBaseDeltaEquality", () => {
     // Main absorbs the one.txt edit byte-for-byte AND keeps editing a distant
     // region of the same file, so the base's blob is not byte-identical to the
     // authored candidate yet the rebase stays conflict-free.
-    const absorbingBase = await commitFile(repo, "one.txt", rows("a (authored)", "h (moved by main)"), "main: absorb and extend")
+    const absorbingBase = await commitFile(
+      repo,
+      "one.txt",
+      rows("a (authored)", "h (moved by main)"),
+      "main: absorb and extend",
+    )
     const candidateTree = await git.run(repo, ["merge-tree", "--write-tree", absorbingBase, authorTip])
 
     const authored = await exactDelta(git, repo, base, authorTip)
