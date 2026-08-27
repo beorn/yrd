@@ -137,6 +137,7 @@ import {
   derivedLaneBranches,
   isDerivedRunMember,
   materializeDerivedRunMembers,
+  recordShadowedSubmits,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
   type DerivedSubmitEnrichment,
@@ -1318,14 +1319,18 @@ function createQueue<Shape extends ChangeShape>(
 
   /**
    * S6 door — DERIVED admission of ref-only approvals, replacing the retired
-   * 2b intake sweep (census #3): every live projected submit ref whose branch
-   * the arbitration rules DERIVED becomes a derived run member — identity
-   * minted here at admission time under the durable PR-number mint
-   * (commit-before-escape), enrichment (Change-Id trailer, props, issue) read
-   * from git through the host's configured reader, and the ChangeSnapshot the
-   * run journals is the identity's only durable home. No record is minted, no
-   * submit fact is retired: the fact IS the submission, and it stands until
-   * the receiver sweeps the ref (branch delete) or a re-push renews it.
+   * 2b intake sweep (census #3): every live projected submit ref on a
+   * RECORDLESS branch ({@link derivedLaneBranches} — one lane consumes one
+   * push; a branch with record history is the record lane's, warned per
+   * compose below) becomes a derived run member — identity minted here at
+   * admission time under the durable PR-number mint (commit-before-escape),
+   * enrichment (Change-Id trailer, props, issue) read from git through the
+   * host's configured reader, and the ChangeSnapshot the run journals is the
+   * identity's only durable home. No record is minted, and the DERIVED lane
+   * retires no submit fact: the fact IS the submission, and it stands until
+   * the receiver sweeps the ref (branch delete) or a re-push renews it. (The
+   * RECORD lane's merge does retire its own branch's fact —
+   * {@link submitFactRetirement}.)
    *
    * Loud-edge policy, carried from the sweep it replaces: a typed refusal or
    * infrastructure fact attributable to ONE branch (vanished/moved fact,
@@ -1341,6 +1346,23 @@ function createQueue<Shape extends ChangeShape>(
    */
   const deriveRefOnlyMembers = async (skip: ReadonlySet<string>): Promise<DerivedRunMember[]> => {
     const snapshot = runtime()
+    // One lane consumes one push: a standing fact on a branch with record
+    // history is OUTSIDE the derived universe (PR2139 double-merge,
+    // 2026-08-27), and an exclusion nobody can see is a stranded approval —
+    // say so, once per compose per branch, with the way back in.
+    for (const shadowed of recordShadowedSubmits(snapshot.bays)) {
+      if (skip.has(shadowed.branch)) continue
+      log.warn?.(
+        "queue compose will not derive an admission for a branch with record history; " +
+          "re-enter through the record lane: 'yrd pr submit " + shadowed.branch + "'",
+        {
+          action: "compose-derived-record-shadowed",
+          branch: shadowed.branch,
+          sha: shadowed.sha,
+          record: shadowed.record,
+        },
+      )
+    }
     const branches = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
     if (branches.length === 0) return []
     if (derivedMint === undefined) {
@@ -4196,6 +4218,9 @@ function createQueueCommands(
               ? {}
               : { submitter: revision.submitter }),
           }),
+          // A repository-proven merge consumed the branch approval exactly as
+          // a live one does — reconcile the fact with the terminal.
+          ...submitFactRetirement(state.bays, pr.branch, revision.head),
         ],
       }
     },
@@ -5647,6 +5672,7 @@ export function advanceQueue(
             ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
             ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
           }),
+          ...submitFactRetirement(state.bays, current.branch, revision.head),
         )
         continue
       }
@@ -5677,6 +5703,7 @@ export function advanceQueue(
           ...(revision.props === undefined ? {} : { props: revision.props }),
           ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
         }),
+        ...submitFactRetirement(state.bays, current.branch, revision.head),
       )
     }
   }
@@ -5716,6 +5743,29 @@ function payloadIdentity(pr: DeepReadonly<Change> | DeepReadonly<ChangeSnapshot>
     return `${baseIdentity(pr.base)}\0${changeHead(pr)}\0${JSON.stringify(changeComposition(pr))}`
   }
   return `${baseIdentity(pr.base)}\0${pr.headSha}\0${JSON.stringify(pr.composition)}`
+}
+
+/**
+ * The record lane's takeover of a branch approval, at the one moment it is
+ * unambiguous: the merge that lands `mergedHead` consumes the standing submit
+ * fact for exactly that sha, and the retirement rides the SAME journal batch
+ * as the terminal it belongs to. `reason: "superseded"` is the enum member
+ * reserved for precisely this act (@yrd/bay receiver contract: "an intaken
+ * record takes over the approval; the receiver never emits it") — before this
+ * emitter existed, nothing emitted it, the fact outlived the merge, and the
+ * derived lane consumed it a second time (PR2139 double-merge, 2026-08-27).
+ *
+ * A fact at a DIFFERENT sha is a mid-run re-push — consent for content this
+ * merge did not land — and stands untouched. Derived members retire nothing
+ * here: their fact deliberately outlives the run (consumption is derived from
+ * run history; a re-push renews authority), and this helper is only reachable
+ * for RECORD terminals. The projection's application is idempotent (a missing
+ * fact no-ops), so a replayed batch cannot double-retire.
+ */
+function submitFactRetirement(bays: DeepReadonly<BaysState>, branch: string, mergedHead: string): EventDraft[] {
+  return bays.submits[branch]?.sha === mergedHead
+    ? [event("branch/unsubmitted", { branch, reason: "superseded" })]
+    : []
 }
 
 function queueLifecycleRun(applied: Event): RunId | undefined {
@@ -8631,8 +8681,10 @@ function pinnedChangeError(
       // pin's referent. Standing at exactly the pinned sha ⇒ fresh; moved or
       // vanished ⇒ the author superseded the member mid-run (re-push or branch
       // delete), which is the same stale-pr the record lane reports. A
-      // record-era member can never alias in here: intake retires the branch's
-      // submit fact (`superseded`), so no standing fact matches its pin.
+      // record-era member can never alias in here: post-S6 records are never
+      // deleted, so its id always resolves its record above — and the record
+      // lane's merge retires the branch's submit fact (`superseded`,
+      // submitFactRetirement) the moment it consumes the approval.
       if (state.bays.submits[snapshot.branch]?.sha === snapshot.headSha) continue
       return {
         code: "stale-pr",

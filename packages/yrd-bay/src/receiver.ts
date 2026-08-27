@@ -231,8 +231,10 @@ export type ReceiverHookOptions = {
   branchSubmitted?: (fact: Readonly<{ branch: string; sha: string; base: string }>) => Promise<void>
   /**
    * The inverse fact: a submit ref was deleted by its author (`deleted`) or
-   * swept by archival (`archived`). `superseded` belongs to 2b, when an
-   * intaken record takes over the approval; the receiver never emits it.
+   * swept by archival (`archived`). `superseded` is the record lane's takeover
+   * of the approval — emitted by the queue's merge bookkeeping
+   * (@yrd/queue submitFactRetirement) when a record-lane merge consumes the
+   * standing fact; the receiver never emits it.
    */
   branchUnsubmitted?: (fact: Readonly<{ branch: string; reason: "deleted" | "archived" }>) => Promise<void>
 }

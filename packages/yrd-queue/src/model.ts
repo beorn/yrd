@@ -896,7 +896,12 @@ export function classifyDerivedChangeCell(
  *   `derived` lane: a post-door re-submission of a pre-door branch. The
  *   derived member is the live truth and the record is history — the one cell
  *   where the legacy "a record in ANY state wins" filter is wrong and S6 flips
- *   it (the branch is NOT shadowed).
+ *   it (the branch is NOT shadowed). NOTE: this cell is a STATUS statement
+ *   only. Compose ADMISSION additionally requires the branch to be recordless
+ *   (`derivedLaneBranches` — one lane consumes one push): the same cell also
+ *   describes a branch the record lane just merged whose fact survived, and
+ *   admitting it re-merged one approval twice (PR2139, 2026-08-27). The
+ *   excluded branches stay loud via `recordShadowedSubmits`.
  * - terminal record + same-sha submit ⇒ `record` lane: the standing ref names
  *   exactly the head the record already accounts for; nothing new exists to
  *   run.
