@@ -1920,6 +1920,26 @@ function createQueue<Shape extends ChangeShape>(
       }
       if (job.conclusion !== "success") {
         const result = jobFailure(job)
+        // Machinery failure, not a check verdict: a lost/canceled Job (the
+        // classes admissionFailureKind marks "infrastructure") or a THROWN
+        // callback (the job layer's registered `runner-error`). The record lane
+        // absorbs these into a durable admission-refused record; a DERIVED
+        // member has no record to carry that verdict (recordRevisionAdmission
+        // deliberately skips it) and no run exists yet to attribute a ledger
+        // row to, so the same absorb would leave the failure recorded NOWHERE
+        // while the compose resolves clean. Propagate instead — the door's own
+        // policy for infrastructure: it needs a human, not a retry loop.
+        if (
+          runtime().bays.prs[pr.id] === undefined &&
+          (job.conclusion !== "failure" || result.code === "runner-error")
+        ) {
+          raiseFailure(
+            "infrastructure",
+            result.code,
+            `yrd: derived member '${pr.id}' required check '${step.name}' failed without a verdict ` +
+              `(${result.code}): ${result.message}`,
+          )
+        }
         const failed: ChangeAdmissionStep = {
           name: step.name,
           revision: step.revision,
@@ -2636,7 +2656,13 @@ function createQueue<Shape extends ChangeShape>(
             )
           } catch (error) {
             const fact = failureFact(error)
-            if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
+            // Refusals only. A typed INFRASTRUCTURE fact reaching this boundary
+            // must fail the compose — admitChangeRevision already rethrows its
+            // candidate-preparation infra errors on purpose, and swallowing
+            // them here let the compose proceed to merge selection without a
+            // step's verdict, with a TYPED infra error quieter than an untyped
+            // throw.
+            if (!selectorless || fact?.kind !== "refusal") {
               throw error
             }
             log.warn?.("queue compose skipped required-check work lost to a losable failure", {
@@ -2851,6 +2877,13 @@ function createQueue<Shape extends ChangeShape>(
               if (!selectorless || fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
                 throw error
               }
+              // The installed set and the base-declared plan disagree (23192):
+              // a PROCESS fault every candidate of this compose shares, not a
+              // fact about this candidate — skipped, it drains the whole queue
+              // to a clean [] with the disagreement recorded nowhere, while the
+              // explicit path rejects. Same by-code carve-out shape as
+              // settleCandidate's stale-plan above.
+              if (fact.code === "declared-step-not-installed") throw error
               // Same attribution rule as preparation: a failure that names one
               // member is that member's alone. `members`, not `candidate`, so a
               // member already ejected above is not stained a second time.
@@ -7684,13 +7717,23 @@ function reusableRevisionAdmission(
 ): Readonly<{ count: number; shape: ChangeShape }> | undefined {
   const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
   if (snapshot?.baseSha === undefined) return undefined
-  const pr = state.bays.prs[snapshot.id]
-  if (pr === undefined || changeRevisionNumber(pr) !== snapshot.revision || changeHead(pr) !== snapshot.headSha) {
-    return undefined
-  }
   const boundary = selected.findIndex((step) => step.kind === "merge")
   const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
   if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
+  const pr = state.bays.prs[snapshot.id]
+  if (pr === undefined) {
+    // DERIVED member (recordless): reuse only when a merge step REMAINS. A
+    // fully-covered plan would return the zero-event reuse-covered no-op, and
+    // a derived identity's only durable home is the run/started snapshot — the
+    // minted number would escape nowhere and burn, and the next compose would
+    // re-derive and mint again. A check-only derived plan therefore executes
+    // its steps inside the run it must start anyway.
+    if (boundary < 0) return undefined
+    return derivedRevisionAdmissionReuse(state, snapshot, snapshot.baseSha, prefix)
+  }
+  if (changeRevisionNumber(pr) !== snapshot.revision || changeHead(pr) !== snapshot.headSha) {
+    return undefined
+  }
   const admission = changeAdmission(pr)
   if (
     admission?.status !== "passed" ||
@@ -7712,6 +7755,35 @@ function reusableRevisionAdmission(
       results: Object.fromEntries(admission.steps.map((evidence) => [evidence.name, evidence.output as JsonValue])),
     },
   }
+}
+
+/**
+ * The DERIVED half of {@link reusableRevisionAdmission}: a recordless member's
+ * admission verdict lives ONLY in its standalone admission Jobs —
+ * `recordRevisionAdmission` deliberately skips the record-side copy — so the
+ * record-backed read above can never see it, and every derived root run
+ * re-executed the admission prefix its own drain had just run, invoking each
+ * pre-merge step callback twice per admission. Same contract as the record
+ * read: every pre-merge step of the plan, completed successfully at exactly
+ * this pinned base, with its output present to seed the run's shape; anything
+ * less reuses nothing.
+ */
+function derivedRevisionAdmissionReuse(
+  state: DeepReadonly<RuntimeState>,
+  snapshot: DeepReadonly<ChangeSnapshot>,
+  baseSha: string,
+  prefix: readonly RuntimeStep[],
+): Readonly<{ count: number; shape: ChangeShape }> | undefined {
+  const results: Record<string, JsonValue> = {}
+  for (const [index, step] of prefix.entries()) {
+    const id =
+      state.jobs.byKey[admissionJobKey(snapshot, baseSha, index, step.revision)] ??
+      state.jobs.byKey[admissionJobKey(snapshot, baseSha, index)]
+    const job = id === undefined ? undefined : (state.jobs.byId[id] as Job | undefined)
+    if (job === undefined || !jobSucceeded(job) || job.output === undefined) return undefined
+    results[step.name] = job.output
+  }
+  return { count: prefix.length, shape: { results } }
 }
 
 function reusablePrefix(
