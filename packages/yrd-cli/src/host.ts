@@ -30,6 +30,8 @@ import {
   type ReceiverRefUpdate,
   type ReceiverSubmitIntent,
   type ReceiverTarget,
+  changeIdTrailerCandidates,
+  findChangeId,
   recordLaneOwnsBranch,
 } from "@yrd/bay"
 import {
@@ -2508,10 +2510,9 @@ export async function readDerivedSubmitEnrichment(
     )
   }
   const [changeIds = "", beads = "", subject = ""] = result.stdout.split("\n")[0]?.split("\t") ?? []
-  const changeId = changeIds
-    .split(",")
-    .map((value) => value.trim())
-    .find((value) => /^I[0-9a-f]{40}$/u.test(value))
+  // Shared with the receiver's push-time gate (@yrd/bay change-identity.ts):
+  // what this reader accepts and what the gate admitted are the same rule.
+  const changeId = findChangeId(changeIdTrailerCandidates(changeIds))
   const bead = beads
     .split(",")
     .map((value) => value.trim())
@@ -3505,6 +3506,11 @@ async function runReceiverHook(
       // loadYrdConfig reads. See validatePushedYrdConfig's doc for the PR1337
       // incident this closes.
       validateConfig: validatePushedYrdConfig,
+      // Push-time half of the derived lane's Change-Id contract: exempt only
+      // carriers a LIVE record owns — the same predicate the S6 door dispatch
+      // (`intakeResult`) consults, so the gate and the lane never disagree
+      // about which branch owes a tip trailer.
+      recordOwnsBranch: (branch) => recordLaneOwnsBranch(runtimeApp.state().bays, branch),
       // branch-is-change phase 2a: an accepted refs/yrd/submit/<branch> write
       // becomes a journal fact the queue projects; before this the ref stood
       // in git and no reader could see it (@yrd/core/22991).
