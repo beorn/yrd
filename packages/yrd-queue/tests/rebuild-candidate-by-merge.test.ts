@@ -17,6 +17,7 @@
  */
 import { rm } from "node:fs/promises"
 import { afterEach, describe, expect, it } from "vitest"
+import { ChangeIdSchema, changeIdForDerivedSubmit } from "@yrd/bay"
 import { createProcess } from "@yrd/process"
 import { rebuildCandidateByMerge } from "@yrd/queue"
 import { exactDelta } from "../src/content-identity.ts"
@@ -593,5 +594,84 @@ describe("rebuildCandidateByMerge — content conflict beside a gitlink conflict
         message: expect.stringContaining(contentPath),
       },
     })
+  })
+})
+
+/**
+ * S7: merged-truth (the Change-Id trailer index over main's first-parent line)
+ * is the history authority once the record store is gone, and a synthesis
+ * commit without a readable Change-Id is a SPECIMEN — `merged-truth.ts`'s loud
+ * unknown — that turns every lookup in its walked window into
+ * `unknown: trailer-absent`. A rebuilt candidate's merge commit lands on that
+ * line, so its trailers must be total: the threaded lineage identity when the
+ * caller holds one, else the deterministic synthetic identity admission would
+ * mint for the same push. Asserted on the RENDERED commit bytes, not the
+ * message the builder was handed.
+ */
+describe("rebuildCandidateByMerge — synthesis-commit lineage identity", () => {
+  it("13. stamps a threaded changeId verbatim into the Change-Id and Merge-Change-Id trailers", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "disjoint-paths" })
+    roots.push(fixture.root)
+    const changeId = `I${"d".repeat(40)}`
+
+    const result = await rebuildCandidateByMerge(
+      options(fixture.repo),
+      { sha: fixture.baseTwo },
+      {
+        id: "PR1",
+        branch: fixture.authorBranch,
+        headSha: fixture.authorTip,
+        changeId,
+      },
+    )
+
+    const trailer = await git.run(fixture.repo, [
+      "show",
+      "-s",
+      "--format=%(trailers:key=Change-Id,valueonly)",
+      result.sha,
+    ])
+    expect(trailer.trim()).toBe(changeId)
+    const mergeTrailer = await git.run(fixture.repo, [
+      "show",
+      "-s",
+      "--format=%(trailers:key=Merge-Change-Id,valueonly)",
+      result.sha,
+    ])
+    expect(mergeTrailer.trim()).toBe(`${changeId}-merge`)
+  })
+
+  it("14. a changeId-less rebuild stamps the deterministic synthetic identity — never a trailer-less synthesis commit", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "disjoint-paths" })
+    roots.push(fixture.root)
+
+    const result = await rebuildCandidateByMerge(
+      options(fixture.repo),
+      { sha: fixture.baseTwo },
+      {
+        id: "PR1",
+        branch: fixture.authorBranch,
+        headSha: fixture.authorTip,
+      },
+    )
+
+    // The same identity any reader holding the snapshot re-derives from the
+    // submission's stable facts (branch, authored tip) — canonical grammar.
+    const expected = changeIdForDerivedSubmit({ branch: fixture.authorBranch, sha: fixture.authorTip })
+    expect(ChangeIdSchema.parse(expected)).toBe(expected)
+    const trailer = await git.run(fixture.repo, [
+      "show",
+      "-s",
+      "--format=%(trailers:key=Change-Id,valueonly)",
+      result.sha,
+    ])
+    expect(trailer.trim()).toBe(expected)
+    const mergeTrailer = await git.run(fixture.repo, [
+      "show",
+      "-s",
+      "--format=%(trailers:key=Merge-Change-Id,valueonly)",
+      result.sha,
+    ])
+    expect(mergeTrailer.trim()).toBe(`${expected}-merge`)
   })
 })

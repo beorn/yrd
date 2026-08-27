@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, join, resolve, sep } from "node:path"
-import { authoredDeltaBase } from "@yrd/bay"
+import { authoredDeltaBase, changeIdForDerivedSubmit } from "@yrd/bay"
 import {
   CheckpointMigrationManifestSchema,
   checkpointMigrationManifestHash,
@@ -2759,10 +2759,14 @@ async function prepareCandidateMembers(
   const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const changes: CandidateChange[] = []
   const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string): void => {
-    if (pr.intent !== undefined || pr.changeId === undefined) return
+    if (pr.intent !== undefined) return
+    // Same effective identity as the commit trailers: a member the snapshot
+    // left changeId-less still gets its note row, under the re-derivable
+    // synthetic id — the notes index and the stamped trailers must never
+    // disagree about which lineage a generated commit serves.
     changes.push(
       CandidateChangeSchema.parse({
-        changeId: pr.changeId,
+        changeId: effectiveCandidateChangeId(pr),
         pr: pr.id,
         revision: pr.revision,
         submittedHead: pr.headSha,
@@ -3190,6 +3194,12 @@ export type RebuildByMergeInput = Readonly<{
   branch: string
   /** The unchanged authored tip. Never rewritten. */
   headSha: string
+  /** The change's lineage identity, when the caller holds one. Stamped into
+   * the rebuilt candidate's synthesis-commit trailers and merge-record note;
+   * omitted, the rebuild stamps the deterministic synthetic identity for
+   * (branch, headSha) instead — a rebuild must never land a trailer-less
+   * synthesis commit (a merged-truth specimen). */
+  changeId?: string
 }>
 
 export type RebuildByMergeOptions = Readonly<{
@@ -3418,6 +3428,7 @@ export async function rebuildCandidateByMerge(
   }
   const pr = ChangeSnapshotSchema.parse({
     id: input.id,
+    ...(input.changeId === undefined ? {} : { changeId: input.changeId }),
     branch: input.branch,
     base: input.branch,
     revision: 1,
@@ -3599,6 +3610,7 @@ async function remergeDirectChangeByMerge(
     id: input.id,
     branch: input.branch,
     headSha: input.headSha,
+    ...(input.changeId === undefined ? {} : { changeId: input.changeId }),
   })
   // `built.unchanged` (from `exactDelta`) means the candidate carries no delta
   // against `target.sha` — the author's tip is either a literal ancestor or its
@@ -4224,10 +4236,22 @@ function mergeChangeIdFor(operation: "compose" | "merge", changeId: string): str
   return `${changeId}-${operation}`
 }
 
+/** The lineage identity a synthesis act stamps and records for one member: the
+ * member's own change id, else the deterministic identity admission would mint
+ * for the same push (`changeIdForDerivedSubmit` over branch + authored tip), so
+ * any reader holding the snapshot re-derives the same value. Never undefined:
+ * a synthesis commit on main's first-parent line without a readable Change-Id
+ * is a merged-truth SPECIMEN (`merged-truth.ts` "THE LOUD UNKNOWN") that turns
+ * every lookup in its walked window into `unknown: trailer-absent` — and the
+ * merged-truth index is the history authority once the record store is gone. */
+export function effectiveCandidateChangeId(pr: StepExecution["prs"][number]): string {
+  return pr.changeId ?? changeIdForDerivedSubmit({ branch: pr.branch, sha: pr.headSha })
+}
+
 function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepExecution["prs"][number]): string {
   const subject = `yrd: ${operation} ${pr.id} revision ${String(pr.revision)}`
-  if (pr.changeId === undefined) return subject
-  return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
+  const changeId = effectiveCandidateChangeId(pr)
+  return `${subject}\n\nChange-Id: ${changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, changeId)}`
 }
 
 const SUBMODULE_MODEL_CHANGE_PROP = "component-model-change"
