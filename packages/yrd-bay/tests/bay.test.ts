@@ -507,27 +507,21 @@ describe("withBays", () => {
     await app.close()
   })
 
-  it("re-resolves a moved branch tip when re-submitting a bay-less pushed (draft) PR", async () => {
+  it("refuses a bay-less draft: draft records retired with the legacy mint", async () => {
     await using app = (await createHarness()).app
-    let tip = HEAD_1
-    const submitOptions = () => ({ resolveRevision: async () => tip, run: runtime, base: "main" })
-
-    const drafted = record(await app.bays.submitSelection("topic/moving-draft", { ...submitOptions(), draft: true }))
-    expect(changeFacts(drafted)).toMatchObject({ delivery: "pushed", current: { n: 1, head: HEAD_1 } })
-
-    // The branch advances to a new commit after the draft was pushed. A non-draft
-    // re-submit must register the moved head, not reuse the stored revision-1 head.
-    tip = HEAD_2
-    const resubmitted = record(await app.bays.submitSelection("topic/moving-draft", submitOptions()))
-    expect(changeFacts(resubmitted)).toMatchObject({ delivery: "submitted", current: { n: 2, head: HEAD_2 } })
-    expect(resubmitted.revs).toMatchObject([
-      { n: 1, head: HEAD_1 },
-      { n: 2, head: HEAD_2 },
-    ])
-
-    // A further re-submit with the branch unmoved must not manufacture a spurious revision.
-    const stable = record(await app.bays.submitSelection("topic/moving-draft", submitOptions()))
-    expect(changeFacts(stable)).toMatchObject({ delivery: "submitted", current: { n: 2, head: HEAD_2 } })
+    // Bay-less drafts were record-lane creatures; a recordless branch now
+    // routes to the derived lane and a draft has nothing to draft. The
+    // moved-tip re-resolution the old draft flow proved lives on in the
+    // closed-Bay sibling below, whose id-addressed retry still reads the
+    // CURRENT tip from a record draft.
+    await expect(
+      app.bays.submitSelection("topic/moving-draft", {
+        base: "main",
+        resolveRevision: async () => HEAD_1,
+        run: runtime,
+        draft: true,
+      }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "record-mint-retired" } })
   })
 
   it("re-resolves a moved branch tip for a closed-Bay draft addressed by PR id or Bay id", async () => {
@@ -566,7 +560,7 @@ describe("withBays", () => {
     expect(stable.bay).toBe("B1")
   })
 
-  it("mints a fresh delivery PR for a new head on a merged branch (Q1), no delivery-nonce branch", async () => {
+  it("re-enters a new head on a merged branch through the derived lane (Q1), no record minted", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
     const at = "2026-01-01T00:00:00.000Z"
@@ -630,19 +624,17 @@ describe("withBays", () => {
       resolveRevision: async () => HEAD_2,
       run: runtime,
     }
-    // Q1: resubmitting the merged branch with a NEW head mints a fresh delivery
-    // PR (revision 1) automatically — no hand-made `-delivery-<nonce>` branch,
-    // no refusal. The integrated PR1 stays frozen.
-    const minted = record(await app.bays.submitSelection("topic/merged", submitOptions))
-    expect(changeFacts(minted)).toMatchObject({
-      id: "PR2",
-      branch: "topic/merged",
-      delivery: "submitted",
-      current: { head: HEAD_2, n: 1 },
-    })
+    // Q1: resubmitting the merged branch with a NEW head re-enters through the
+    // DERIVED lane — the submit fact is the submission, the queue composes it
+    // under a fresh derived identity, and no record mints. The integrated PR1
+    // stays frozen.
+    const reentered = await app.bays.submitSelection("topic/merged", submitOptions)
+    expect(reentered).toMatchObject({ lane: "derived", branch: "topic/merged", sha: HEAD_2, base: "main" })
+    expect(app.bays.state().submits["topic/merged"]).toMatchObject({ sha: HEAD_2 })
+    expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "integrated", current: { head: HEAD_1 } })
-    // The branch selector now resolves to the live delivery, not the frozen change.
-    expect(changeFacts(app.bays.pr("topic/merged"))).toMatchObject({ id: "PR2", delivery: "submitted" })
+    // With no live record the branch selector read-resolves the frozen change.
+    expect(changeFacts(app.bays.pr("topic/merged"))).toMatchObject({ id: "PR1", delivery: "integrated" })
   })
 
   it("refuses a terminal result that does not transition the current PR revision", async () => {
@@ -2357,17 +2349,20 @@ describe("withBays", () => {
     })
     expect(workspace.calls).toEqual([`provision:B1:current`, "refresh:B1"])
 
-    const branchPR = record(await app.bays.submitSelection("release/fix", {
+    // A recordless direct branch routes to the derived lane: the submit fact
+    // is the submission, and the explicit base rides the fact.
+    const branchSubmission = await app.bays.submitSelection("release/fix", {
       base: "release/2.0",
       resolveRevision,
       run: runtime,
-    }))
-    expect(changeFacts(branchPR)).toMatchObject({
+    })
+    expect(branchSubmission).toMatchObject({
+      lane: "derived",
       branch: "release/fix",
-      delivery: "submitted",
-      current: { head: HEAD_1 },
+      sha: HEAD_1,
       base: "release/2.0",
     })
+    expect(app.bays.state().submits["release/fix"]).toMatchObject({ sha: HEAD_1, base: "release/2.0" })
     expect(resolved).toEqual(["release/fix"])
     // Dirty-worktree submit is a D3 door disposition covered by its own test in
     // "submit ledger-write door dispositions" (warn + committed-head submit).
@@ -2439,6 +2434,10 @@ describe("withBays", () => {
 
   it("binds a title and description at submit through submitSelection options", async () => {
     await using app = (await createHarness()).app
+    // Metadata binds to change RECORDS. Seed the record first (the record
+    // lane still writes through explicit submit until S7), then resubmit
+    // through submitSelection with the metadata options.
+    await app.bays.submit({ branch: "topic/submit-metadata", headSha: HEAD_1, draft: true })
     const submitted = record(await app.bays.submitSelection("topic/submit-metadata", {
       resolveRevision: async () => HEAD_1,
       run: runtime,
@@ -2453,8 +2452,33 @@ describe("withBays", () => {
     })
   })
 
+  it("warns when record-only metadata is dropped on a derived-lane submit — loud, never refused", async () => {
+    await using app = (await createHarness()).app
+    // Pre-purge these options bound to the minted record. The CLI derives
+    // title/description from the head commit on EVERY submit, so refusing
+    // would break every direct-branch flow; dropping silently would be a
+    // silent error. D3-style: proceed, and the drop rides the warnings sink
+    // naming the cure.
+    const warnings: string[] = []
+    const submitted = await app.bays.submitSelection("topic/derived-metadata", {
+      resolveRevision: async () => HEAD_1,
+      run: runtime,
+      base: "main",
+      title: "feat: from the commit anyway",
+      description: "Commit-derived body.",
+      warnings,
+    })
+    expect(submitted).toMatchObject({ lane: "derived", branch: "topic/derived-metadata", sha: HEAD_1 })
+    expect(app.bays.state().submits["topic/derived-metadata"]).toMatchObject({ sha: HEAD_1 })
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain("title/description")
+    expect(warnings[0]).toContain("amend the commit")
+  })
+
   it("carries title and description forward across a resubmitted revision", async () => {
     await using app = (await createHarness()).app
+    // Seed the record (record lane), then exercise the record resubmit path.
+    await app.bays.submit({ branch: "topic/carry-forward", headSha: HEAD_1, draft: true })
     let tip = HEAD_1
     const submit = (extra: Record<string, unknown> = {}) =>
       app.bays.submitSelection("topic/carry-forward", {
@@ -2466,7 +2490,7 @@ describe("withBays", () => {
 
     await submit({ title: "feat: carried title", description: "Carried description body." })
     tip = HEAD_2
-    const resubmitted = await submit()
+    const resubmitted = record(await submit())
     expect(changeFacts(resubmitted)).toMatchObject({
       current: { n: 2, head: HEAD_2 },
       title: "feat: carried title",
@@ -2510,7 +2534,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     run: runtime,
   })
 
-  it("routes a closed Bay branch through direct draft creation", async () => {
+  it("routes a closed Bay branch to the derived lane; drafts refuse with the retirement cure", async () => {
     await using app = (await createHarness()).app
     await finishJob(app, await app.bays.open({ name: "retired", by: "test" }))
     const branch = app.bays.get("B1")?.branch
@@ -2518,21 +2542,21 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     await finishJob(app, await app.bays.close({ bay: "B1" }))
     expect(app.bays.get("B1")?.status).toBe("closed")
 
-    const drafted = record(await app.bays.submitSelection(branch, { ...directOptions(HEAD_2), draft: true }))
+    // A closed Bay owns no workspace and left no record here: its branch is a
+    // plain branch, and a plain branch submits as a derived member.
+    await expect(
+      app.bays.submitSelection(branch, { ...directOptions(HEAD_2), draft: true }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "record-mint-retired" } })
 
-    expect(changeFacts(drafted)).toMatchObject({
-      id: "PR1",
-      branch,
-      delivery: "pushed",
-      current: { n: 1, head: HEAD_2 },
-    })
-    expect(drafted.bay).toBeUndefined()
+    const submitted = await app.bays.submitSelection(branch, directOptions(HEAD_2))
+    expect(submitted).toMatchObject({ lane: "derived", branch, sha: HEAD_2 })
+    expect(app.bays.state().submits[branch]).toMatchObject({ sha: HEAD_2 })
   })
 
-  it("D2: reopens a withdrawn branch's PR as the next revision, no terminal-branch refusal", async () => {
+  it("D2 retired: a withdrawn branch's resubmit re-enters through the derived lane; the record stays withdrawn", async () => {
     await using app = (await createHarness()).app
-    const submitted = record(await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_1)))
-    expect(changeFacts(submitted)).toMatchObject({
+    await app.bays.submit({ branch: "topic/redeliver", headSha: HEAD_1 })
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
       id: "PR1",
       branch: "topic/redeliver",
       delivery: "submitted",
@@ -2542,24 +2566,16 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     await app.bays.closePr({ pr: "PR1", reason: "pulled back" })
     expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "withdrawn" })
 
-    // Resubmitting the SAME branch mints the next revision in place — same PR
-    // identity, no hand-made `-delivery-<nonce>` branch, no refusal.
-    const reopened = record(await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_2)))
-    expect(changeFacts(reopened)).toMatchObject({
-      id: "PR1",
-      branch: "topic/redeliver",
-      delivery: "submitted",
-      current: { n: 2, head: HEAD_2 },
-    })
-    // Branch → PR stays 1:1 (unambiguous) and history is preserved with the
-    // withdrawn marker cleared by the reopen.
+    // The reopen door retired with the legacy mint: resubmitting the branch
+    // writes the submit fact and the queue composes it as a derived member
+    // (Q1 re-entry). The withdrawn record keeps its frozen history — direct
+    // branches derive identity from content now, not from record continuity.
+    const reentered = await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_2))
+    expect(reentered).toMatchObject({ lane: "derived", branch: "topic/redeliver", sha: HEAD_2 })
+    expect(app.bays.state().submits["topic/redeliver"]).toMatchObject({ sha: HEAD_2 })
     expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
-    expect(changeFacts(app.bays.pr("topic/redeliver"))).toMatchObject({ id: "PR1", current: { n: 2 } })
-    expect(reopened.revs).toMatchObject([
-      { n: 1, head: HEAD_1 },
-      { n: 2, head: HEAD_2 },
-    ])
-    expect(reopened.withdrawnAt).toBeUndefined()
+    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "withdrawn", current: { n: 1, head: HEAD_1 } })
+    expect(app.bays.pr("PR1")?.withdrawnAt).toBeTypeOf("string")
   })
 
   it("Q1: resubmitting a merged branch at the SAME head is an 'already merged' no-op, not a refusal or a new revision", async () => {
@@ -2645,70 +2661,61 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     ).rejects.toMatchObject({ failure: { kind: "refusal", code: "git-commit-missing" } })
   })
 
-  // The withdrawn payload's only door back. A withdrawal spends the payload
-  // identity: no OTHER branch may carry that commit again. The door that stays
-  // open is the withdrawn PR's OWN branch, which reopens it in place. These
-  // tests hold both halves together — the refusal must name a remedy that the
-  // very next test proves actually works, or it prints a wrong instruction.
-  describe("withdrawn payload keeps its own door open", () => {
-    it("names the withdrawn PR, when it was withdrawn, and the exact reopen command", async () => {
+  // Pre-purge, a withdrawal SPENT the payload identity: no other branch could
+  // carry that commit, and the only door back was reopening the withdrawn PR
+  // in place. The legacy mint's retirement retires the door with it — a
+  // withdrawn payload re-enters through the DERIVED lane on any branch, and
+  // content dedupe is the queue's job at compose. The record-lane dedupe
+  // survives only inside the explicit `submit` command, which still writes
+  // records until S7 deletes the store.
+  describe("withdrawn payload re-enters through the derived lane", () => {
+    it("the identical head re-enters on a NEW branch — the spent-payload refusal is retired", async () => {
       await using app = (await createHarness()).app
-      record(await app.bays.submitSelection("topic/burned", directOptions(HEAD_1)))
+      await app.bays.submit({ branch: "topic/burned", headSha: HEAD_1 })
       await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
       expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "withdrawn" })
-      const withdrawnAt = app.bays.pr("PR1")?.withdrawnAt
-      expect(withdrawnAt).toBeTypeOf("string")
 
       // The bead's specimen: the identical head, offered on a NEW branch.
-      const refused = await app.bays
-        .submitSelection("topic/rebuilt", directOptions(HEAD_1))
-        .then(() => undefined)
-        .catch((error: unknown) => (error as Error).message)
-
-      expect(refused).toContain("payload already recorded as change 'PR1'")
-      // …and, unlike the bare refusal, says WHY the door is shut and where the
-      // open one is: the state, its timestamp, and the branch to resubmit.
-      expect(refused).toContain("withdrawn")
-      expect(refused).toContain(withdrawnAt)
-      expect(refused).toContain("yrd pr submit topic/burned")
-    })
-
-    it("the named remedy is real: resubmitting the withdrawn branch at the SAME head reopens the change", async () => {
-      await using app = (await createHarness()).app
-      record(await app.bays.submitSelection("topic/burned", directOptions(HEAD_1)))
-      await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
-
-      // Exactly the command the refusal prints — same branch, same head, no
-      // rebuilt commit invented purely to change a hash.
-      const reopened = record(await app.bays.submitSelection("topic/burned", directOptions(HEAD_1)))
-
-      expect(changeFacts(reopened)).toMatchObject({
-        id: "PR1",
-        branch: "topic/burned",
-        delivery: "submitted",
-        current: { n: 2, head: HEAD_1 },
-      })
-      expect(reopened.withdrawnAt).toBeUndefined()
+      // Pre-purge this refused ("payload already recorded"); now the record
+      // lane no longer owns direct branches, so it composes as derived.
+      const reentered = await app.bays.submitSelection("topic/rebuilt", directOptions(HEAD_1))
+      expect(reentered).toMatchObject({ lane: "derived", branch: "topic/rebuilt", sha: HEAD_1 })
+      expect(app.bays.state().submits["topic/rebuilt"]).toMatchObject({ sha: HEAD_1 })
       expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
     })
 
-    it("keeps the bare refusal for a LIVE collision, which no reopen can cure", async () => {
+    it("resubmitting the withdrawn branch itself re-enters the same content as a derived member", async () => {
       await using app = (await createHarness()).app
-      record(await app.bays.submitSelection("topic/live", directOptions(HEAD_1)))
+      await app.bays.submit({ branch: "topic/burned", headSha: HEAD_1 })
+      await app.bays.closePr({ pr: "PR1", reason: "withdrawn by mistake" })
+
+      // Same branch, same head: withdrawal withdrew the RECORD; resubmitting
+      // the content runs it again. Re-entry composes fresh — no reopen, the
+      // record keeps its withdrawn history.
+      const reentered = await app.bays.submitSelection("topic/burned", directOptions(HEAD_1))
+      expect(reentered).toMatchObject({ lane: "derived", branch: "topic/burned", sha: HEAD_1 })
+      expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
+        delivery: "withdrawn",
+        current: { n: 1, head: HEAD_1 },
+      })
+      expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    })
+
+    it("keeps the bare refusal for a LIVE collision inside the record-lane submit command", async () => {
+      await using app = (await createHarness()).app
+      await app.bays.submit({ branch: "topic/live", headSha: HEAD_1, base: "main", baseSha: BASE })
       expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "submitted" })
 
-      // The direct `submit` command, not `submitSelection`: a LIVE payload
-      // offered on another branch is short-circuited by submitSelection into an
-      // idempotent return of the live change, so the dedupe refusal is only
-      // reachable here.
+      // The explicit `submit` command still writes records, so IT still owns
+      // the payload-dedupe refusal for its own lane. A live change is not
+      // reopenable; printing a reopen command here would be a wrong
+      // instruction, so the refusal carries none.
       const refused = await app.bays
         .submit({ branch: "topic/other", headSha: HEAD_1, base: "main", baseSha: BASE })
         .then(() => undefined)
         .catch((error: unknown) => (error as Error).message)
 
       expect(refused).toContain("payload already recorded as change 'PR1'")
-      // A live change is not reopenable; printing a reopen command here would be a
-      // wrong instruction, so the refusal carries none.
       expect(refused).not.toContain("yrd pr submit")
       expect(refused).not.toContain("withdrawn")
     })

@@ -1151,10 +1151,10 @@ export function createBays(
       }
     }
 
-    // Only a live change binds an issue in place. A terminal change resolved here is a
-    // withdrawn/canceled branch about to be reopened by the direct-branch
-    // resubmit below (D2); its issue rides along when that mint records the
-    // fresh revision, so binding here (which refuses on a terminal change) is skipped.
+    // Only a live change binds an issue in place. A terminal change resolved
+    // here is a withdrawn/canceled branch whose resubmit falls through to the
+    // DERIVED lane below (the reopen door retired with the legacy mint), so
+    // binding here (which refuses on a terminal change) is skipped.
     if (pr !== undefined && isLiveChange(pr)) pr = await bindIssue(pr, options.issue)
     if (
       pr !== undefined &&
@@ -1219,6 +1219,29 @@ export function createBays(
           "record-mint-retired",
           `yrd: draft records are retired — push '${selector}' and submit it plainly ('yrd pr submit ${selector}'), which runs it as a derived member`,
         )
+      }
+      // Record-only options have no record to bind on the derived lane. The
+      // common ones are commit-derived by the CLI anyway (title/description
+      // from the head commit), so dropping them loses nothing — but dropping
+      // them SILENTLY would be a silent error, so the drop rides the result
+      // envelope's warnings sink and the log, D3-style, and names the cure.
+      const recordOnly = [
+        options.title !== undefined ? "title" : undefined,
+        options.description !== undefined ? "description" : undefined,
+        options.issue !== undefined ? "issue" : undefined,
+        options.track !== undefined ? "track" : undefined,
+        options.props !== undefined && Object.keys(options.props).length > 0 ? "props" : undefined,
+      ].filter((field): field is string => field !== undefined)
+      if (recordOnly.length > 0) {
+        const dropped = recordOnly.join("/")
+        options.warnings?.push(
+          `${dropped} bind to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${selector}' to carry them`,
+        )
+        log?.warn?.("record-only submit options dropped on the derived lane", {
+          action: "submit-derived-metadata-dropped",
+          branch: selector,
+          dropped: recordOnly,
+        })
       }
       await actions.recordBranchSubmit({ branch: selector, sha: headSha, base: resolved.base })
       log?.info?.("submit routed to the derived lane; the fact is the submission, no record minted", {

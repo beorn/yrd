@@ -57,30 +57,53 @@ function record(result: Awaited<ReturnType<Bays["submitSelection"]>>): Change {
   return result
 }
 
-/** Seed a journal with one integrated change per entry (all on the given branch, so
- * the branch collides), then boot an app on it. */
+/** Seed a journal with one change per entry (all on the given branch, so the
+ * branch collides), then boot an app on it. A seed with `live: true` stops at
+ * pushed+submitted (a live delivery, as the record lane would have left it);
+ * otherwise it lands as integrated at `commit`. The live seeds replaced the
+ * direct-branch Q1 mint these fixtures used before the legacy mint retired —
+ * a direct resubmit now routes to the derived lane and mints nothing. */
 async function appWithIntegrated(
   branch: string,
-  seeds: ReadonlyArray<{ pr: string; headSha: string; commit: string }>,
+  seeds: ReadonlyArray<{ pr: string; headSha: string; commit?: string; live?: boolean }>,
 ) {
   const nextId = ids()
   const at = "2026-01-01T00:00:00.000Z"
   const seededCommand = { id: nextId(), op: "fixture.seed" }
-  const events = seeds.flatMap(({ pr, headSha, commit }) => [
-    {
-      id: nextId(),
-      name: "pr/pushed",
-      ts: at,
-      data: { pr, branch, base: "main", headSha, baseSha: BASE, revision: 1 },
-    },
-    { id: nextId(), name: "pr/submitted", ts: at, data: { pr, revision: 1, headSha } },
-    {
-      id: nextId(),
-      name: "pr/integrated",
-      ts: at,
-      data: { pr, revision: 1, headSha, run: `R-${pr}`, commit, landingSha: commit, baseSha: BASE },
-    },
-  ])
+  const events = seeds.flatMap(({ pr, headSha, commit, live }) => {
+    const delivered = [
+      {
+        id: nextId(),
+        name: "pr/pushed",
+        ts: at,
+        // The stable Change-Id (shape `I` + 40 hex) lets revision intake
+        // rebuild identity on the live seed; only the shape is validated. The
+        // modern pushed-event arm requires changeId and submitter together.
+        data: {
+          pr,
+          branch,
+          base: "main",
+          headSha,
+          baseSha: BASE,
+          revision: 1,
+          changeId: `I${headSha.slice(0, 40)}`,
+          submitter: "fixture",
+        },
+      },
+      { id: nextId(), name: "pr/submitted", ts: at, data: { pr, revision: 1, headSha } },
+    ]
+    if (live === true) return delivered
+    if (commit === undefined) throw new Error(`seed ${pr}: an integrated seed needs its landing commit`)
+    return [
+      ...delivered,
+      {
+        id: nextId(),
+        name: "pr/integrated",
+        ts: at,
+        data: { pr, revision: 1, headSha, run: `R-${pr}`, commit, landingSha: commit, baseSha: BASE },
+      },
+    ]
+  })
   const journal = createMemoryJournal([
     {
       command: seededCommand,
@@ -108,9 +131,11 @@ const mint = (tip: string) => ({ base: "main", resolveRevision: async () => tip,
 
 describe("resolvePR live-preference + requireLivePR mutation guard", () => {
   it("resolves a branch with one terminal + one live change to the live one, for reads and mutating verbs", async () => {
-    await using app = await appWithIntegrated("topic/b", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
-    // Q1 mints a fresh live delivery (PR2) on the merged branch.
-    record(await app.bays.submitSelection("topic/b", mint(HEAD_2)))
+    // PR2 is the live delivery colliding with the integrated PR1 on topic/b.
+    await using app = await appWithIntegrated("topic/b", [
+      { pr: "PR1", headSha: HEAD_1, commit: BASE },
+      { pr: "PR2", headSha: HEAD_2, live: true },
+    ])
 
     // Read: the branch selector resolves the LIVE PR, not the frozen integrated one.
     expect(changeFacts(app.bays.pr("topic/b"))).toMatchObject({ id: "PR2", delivery: "submitted" })
@@ -121,12 +146,12 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
   })
 
   it("resolves a branch with multiple terminal PRs + one live change to the live one", async () => {
+    // Two integrated PRs already collide on topic/c; PR3 is the live delivery.
     await using app = await appWithIntegrated("topic/c", [
       { pr: "PR1", headSha: HEAD_1, commit: BASE },
       { pr: "PR2", headSha: HEAD_2, commit: "b".repeat(40) },
+      { pr: "PR3", headSha: HEAD_3, live: true },
     ])
-    // Two integrated PRs already collide on topic/c; a new head mints the live PR3.
-    record(await app.bays.submitSelection("topic/c", mint(HEAD_3)))
 
     expect(changeFacts(app.bays.pr("topic/c"))).toMatchObject({ id: "PR3", delivery: "submitted" })
     await app.bays.requestChecks({ pr: "topic/c" })
@@ -178,8 +203,10 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
   })
 
   it("refuses a historical revision selector at the submit-selection mutation boundary", async () => {
-    await using app = await appWithIntegrated("topic/h", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
-    record(await app.bays.submitSelection("topic/h", mint(HEAD_2)))
+    await using app = await appWithIntegrated("topic/h", [
+      { pr: "PR1", headSha: HEAD_1, commit: BASE },
+      { pr: "PR2", headSha: HEAD_2, live: true },
+    ])
     await app.bays.intake({ branch: "topic/h", headSha: HEAD_3, baseSha: BASE })
     await app.bays.submit({ pr: "PR2" })
 
