@@ -3447,7 +3447,7 @@ describe("Queue command adapters", () => {
         exitCode: 17,
         signal: null,
         stdout: "[yrd-base-health] base aaaaaaaaaaaa green\n",
-        stderr: `src/index.ts(12,4): error TS2322: Type 'string' is not assignable\n M src/formatted.ts\n${"x".repeat(2_100)}`,
+        stderr: `src/index.ts(12,4): error TS2322: Type 'string' is not assignable\n M src/formatted.ts\n     ✓ indented reporter row must not read as porcelain  12ms\n${"x".repeat(2_100)}`,
         durationMs: 321,
         timedOut: false,
       } satisfies ProcessResult,
@@ -3524,6 +3524,54 @@ describe("Queue command adapters", () => {
       expect(outcome.error.message).not.toContain(cwd)
     },
   )
+
+  it("does not mint working-tree diagnostics from indented reporter rows", async () => {
+    // Vitest's default reporter indents test rows by three-plus spaces, which
+    // the porcelain parse used to read as a changed-file status pair and label
+    // "working tree changed during check". The one real porcelain row is the
+    // positive control proving the parse still fires at all.
+    const result = {
+      exitCode: 1,
+      signal: null,
+      stdout: [
+        "     ✓ hab registers the observer as an on-failure resident service  729ms",
+        "   ✓  default  packages/example/tests/example.test.ts (1 test) 15ms",
+        "   FAIL  default  packages/example/tests/flaky.spec.tsx > flaky spec",
+        " M src/touched-during-check.ts",
+        "",
+      ].join("\n"),
+      stderr: "",
+      durationMs: 42,
+      timedOut: false,
+    } satisfies ProcessResult
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-reporter-rows-"))
+    roots.push(cwd)
+    const step = configuredCommandStep<ChangeShape>({
+      inject: { process: { run: () => Promise.resolve(result) } },
+      command: ["false"],
+      cwd,
+      purpose: "check",
+      artifactRoot: join(cwd, "artifacts"),
+    })
+    const outcome = await step(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
+      throw new Error(`configured command was ${outcome.status}`)
+    }
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence.diagnostics).toEqual([
+      { file: "src/touched-during-check.ts", [sourceRowKey]: 1, message: "working tree changed during check" },
+    ])
+  })
 
   it("surfaces an escaped-descendant stall as its OWN blocker, even with no output-progress lease configured", async () => {
     // The direct child exited (code 0) but a descendant held the output pipe
