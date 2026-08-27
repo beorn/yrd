@@ -26,14 +26,13 @@ import {
   resolveChange,
   reviewState,
   type BaysState,
-  type BranchUnsubmit,
   type HasBays,
   type Change,
   type ChangeAdmission,
   type ChangeAdmissionRecord,
   type ChangeAdmissionRecordedFact,
   type ChangeAdmissionStep,
-  type IntakeChangeArgs,
+  type PrNumberMint,
 } from "@yrd/bay"
 import {
   command,
@@ -92,6 +91,7 @@ import {
   Queues,
   ChangeSnapshotSchema,
   arbitrateDerivedChange,
+  latestChangeSnapshot,
   resolveMemberById,
   type AddStepResult,
   type BatchConfig,
@@ -131,11 +131,14 @@ import {
 } from "./model.ts"
 import {
   DerivedRunMemberSchema,
+  deriveRunMemberArgs,
   derivedAuthorityLookup,
+  derivedLaneBranches,
   isDerivedRunMember,
   materializeDerivedRunMembers,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
+  type DerivedSubmitEnrichment,
 } from "./derived-admission.ts"
 import {
   activeQueueRootIds,
@@ -361,12 +364,29 @@ function queueRunNoRunnablePRs(
  * and a withdrawn or integrated record already tells the reader more than the
  * bare ref can.
  */
-function unrecordedSubmits(bays: DeepReadonly<BaysState>): UnrecordedSubmit[] {
+function unrecordedSubmits(bays: DeepReadonly<BaysState>, queues: DeepReadonly<QueuesState>): UnrecordedSubmit[] {
   const recorded = new Set(Object.values(bays.prs).map((pr) => pr.branch))
-  return Object.entries(bays.submits)
-    .filter(([branch]) => !recorded.has(branch))
-    .toSorted(([left], [right]) => left.localeCompare(right))
-    .map(([branch, submit]) => unrecordedSubmit(branch, submit))
+  return (
+    Object.entries(bays.submits)
+      .filter(([branch]) => !recorded.has(branch))
+      // S6 door: a branch the derived lane has ADMITTED at exactly this sha is a
+      // MEMBER — its truth lives in run/status rows, not a refusal row. A
+      // derived-lane branch nothing has admitted yet KEEPS the row: whether
+      // admission can succeed needs git and wiring (Change-Id trailer, the
+      // configured mint), which a projection read cannot know, and a branch the
+      // queue has not picked up must stay loudly visible somewhere (A10: the
+      // refusal row survives only for submits the lane has not served).
+      .filter(
+        ([branch, submit]) =>
+          latestChangeSnapshot(
+            queues as QueuesState,
+            (snapshot) =>
+              snapshot.branch === branch && snapshot.headSha === submit.sha && bays.prs[snapshot.id] === undefined,
+          ) === undefined,
+      )
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([branch, submit]) => unrecordedSubmit(branch, submit))
+  )
 }
 
 function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submits"][string]>): UnrecordedSubmit {
@@ -379,10 +399,10 @@ function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submit
       code: "unrecorded-submit",
       message:
         `branch '${branch}' is submitted in git (${submit.sha.slice(0, 12)} for '${submit.base}', ` +
-        `since ${submit.at}) but no PR record carries it, so the queue cannot run it yet; ` +
-        `the queue mints the record itself at its next compose (phase 2b) — a row that persists means ` +
-        `no runner is composing or the intake was refused (action 'compose-submit-intake-refused' in the ` +
-        `queue log says why); 'yrd pr submit ${branch}' remains the manual path`,
+        `since ${submit.at}) and runs as a DERIVED member once the queue's next compose admits it (S6) — ` +
+        `a row that persists means no runner is composing, derived admission is unwired (no PR-number ` +
+        `mint or enrichment reader configured), or the derivation was refused ` +
+        `(action 'compose-derived-refused' in the queue log says why)`,
     },
   }
 }
@@ -728,6 +748,20 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
    * embedded hosts with no repository, which fall back to the installed set. */
   resolveDeclaredPlan?(baseSha: string): DeclaredStepPlanAtBase | Promise<DeclaredStepPlanAtBase>
   prepareCandidate?: CandidatePreparer
+  /** The durable PR-number mint (S6 door): derived-member admission mints its
+   * identity here at admission time, commit-before-escape — the SAME store the
+   * bays plugin holds, so numbering stays one monotone sequence. Absent, the
+   * compose cannot admit ref-only branches that need a fresh identity; each
+   * such branch is warned and stays visible as an unrecorded-submit row. */
+  prNumberMint?: PrNumberMint
+  /** Read a DERIVED member's admission enrichment from git — the tip commit's
+   * Change-Id trailer and any props/issue/title the host derives (S6 door:
+   * records no longer mint, so admission is where identity/props enter).
+   * Absent, admission still reuses retained snapshot identities; a branch
+   * needing a fresh Change-Id refuses `derived-change-id-missing` loudly. */
+  readSubmitEnrichment?(
+    input: Readonly<{ branch: string; sha: string }>,
+  ): DerivedSubmitEnrichment | Promise<DerivedSubmitEnrichment>
   /** Repository-truth sink for one immutable terminal merge record. */
   recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
   runner?: (jobs: Jobs) => Runner
@@ -875,8 +909,9 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly ChangeEligibility[]
   /**
    * Branches approved in git (`refs/yrd/submit/*`, projected by the receiver)
-   * that no PR record carries — visible, never runnable, each with its reason.
-   * The record wins when one exists for the branch (branch-is-change 2a).
+   * that the DERIVED lane has not yet admitted at their current sha (S6) —
+   * visible with the reason, retiring once a retained run snapshot serves the
+   * branch. The record wins when one exists for the branch.
    */
   unrecordedSubmits(snapshot?: DeepReadonly<QueueRuntimeState>): readonly UnrecordedSubmit[]
   /** One branch, both sources (record + submit ref), one answer — including
@@ -1068,8 +1103,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               recordAdmission: (args) => yrd.bays.recordAdmission(args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
-              intakeSubmit: (args) => yrd.bays.intake(args),
-              recordBranchUnsubmit: (args) => yrd.bays.recordBranchUnsubmit(args),
             },
             steps,
             options.defaultBase,
@@ -1077,6 +1110,8 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.resolveDeclaredPlan,
             options.prepareCandidate,
             options.recordMerge,
+            options.prNumberMint,
+            options.readSubmitEnrichment,
             configuredRunner,
             progress,
             needsPersonOwner,
@@ -1121,10 +1156,6 @@ type QueueActions = Readonly<{
   recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<CommandResult>
-  /** `bay.intake` — how the compose sweep mints a record for a ref-only submit (phase 2b). */
-  intakeSubmit(args: IntakeChangeArgs): Promise<CommandResult>
-  /** Retires a projected submit-ref fact once an intaken record has taken over its approval. */
-  recordBranchUnsubmit(args: BranchUnsubmit): Promise<CommandResult>
 }>
 
 function createQueue<Shape extends ChangeShape>(
@@ -1138,6 +1169,8 @@ function createQueue<Shape extends ChangeShape>(
   resolveDeclaredPlan: QueueOptions<readonly AnyStepDef[]>["resolveDeclaredPlan"],
   prepareCandidate: CandidatePreparer | undefined,
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
+  derivedMint: PrNumberMint | undefined,
+  readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
@@ -1282,69 +1315,72 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   /**
-   * Branch-is-change phase 2b (@i/10-merge-queue/23005): the bridge that closes
-   * `unrecordedSubmit`'s refusal. Every live projected submit ref whose branch
-   * has NO change record — in any state — is intaken here, through the same
-   * `bay.intake` command a `refs/for/` push drains into: one dispatch mints
-   * `pr/pushed` + `pr/submitted` + `pr/checks-requested` under the durable
-   * PR-number mint, and the record — never the bare ref — is what selection
-   * runs. The author never writes the authorial store; the record is a
-   * queue-minted artifact, submitter-stamped `yrd/queue` so forensics can tell
-   * it from an authored submission.
+   * S6 door — DERIVED admission of ref-only approvals, replacing the retired
+   * 2b intake sweep (census #3): every live projected submit ref whose branch
+   * the arbitration rules DERIVED becomes a derived run member — identity
+   * minted here at admission time under the durable PR-number mint
+   * (commit-before-escape), enrichment (Change-Id trailer, props, issue) read
+   * from git through the host's configured reader, and the ChangeSnapshot the
+   * run journals is the identity's only durable home. No record is minted, no
+   * submit fact is retired: the fact IS the submission, and it stands until
+   * the receiver sweeps the ref (branch delete) or a re-push renews it.
    *
-   * The reopen-vs-mint rule, stated (the refs/for PR2081 lesson): this sweep
-   * acts only on branches with no record AT ALL — `unrecordedSubmits` filters
-   * out a record in ANY state — so the sweep always MINTS a fresh identity and
-   * never reopens one. Reopening a withdrawn/canceled identity stays the
-   * author's own `pr submit` act (D2), and integrated identities stay frozen
-   * (Q1). If a record appears between this read and the dispatch,
-   * `bay.intake`'s own branch-path semantics govern deterministically: a live
-   * record absorbs an identical payload as a zero-event no-op (reported below,
-   * never superseded here), and a terminal record never reopens.
+   * Loud-edge policy, carried from the sweep it replaces: a typed refusal or
+   * infrastructure fact attributable to ONE branch (vanished/moved fact,
+   * record-lane collision, missing Change-Id trailer) is warned and skipped —
+   * the branch keeps its unrecorded-submit row, so the refusal cannot go dark
+   * — while a mint-store failure and any untyped throw PROPAGATE and fail the
+   * compose: those need a human, not a retry loop. A duplicate payload
+   * refuses at materialization inside the same policy.
    *
-   * After a successful mint the projected submit fact is retired with
-   * `branch/unsubmitted` reason `superseded` — the reserved 2b word: the
-   * intaken record has taken over the approval. The git ref itself stands
-   * untouched (only the receiver writes refs). A crash between the two
-   * dispatches leaves record + fact standing, which is the ordinary
-   * both-sources shape: the record wins everywhere and nothing re-intakes the
-   * branch.
-   *
-   * Failure policy, loud by construction: a DELIBERATE refusal or
-   * infrastructure fact (one `bay.intake` raised under its own code) is
-   * attributable to THIS submit — warn (`compose-submit-intake-refused`),
-   * keep sweeping, and the row survives into the considered rows and
-   * `queue audit`, so the refusal cannot go dark. Everything else PROPAGATES
-   * and fails the compose — `fact === undefined`, and equally the dispatch
-   * layer's `command-refused` wrapper, which is how an UNTYPED apply throw
-   * arrives here: the durable mint's store failure above all, and the
-   * duplicate-payload collision, both of which need a human, not a retry
-   * loop. `mintChangeId` commits the high-water before an id escapes, so a
-   * failed mint has minted nothing and the next compose retries from scratch.
+   * With no mint configured the lane cannot admit fresh branches: say so once
+   * per compose, loudly, and leave every row standing.
    */
-  const intakeUnrecordedSubmits = async (): Promise<void> => {
-    for (const submit of unrecordedSubmits(runtime().bays)) {
-      let result: CommandResult
+  const deriveRefOnlyMembers = async (skip: ReadonlySet<string>): Promise<DerivedRunMember[]> => {
+    const snapshot = runtime()
+    const branches = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
+    if (branches.length === 0) return []
+    if (derivedMint === undefined) {
+      log.warn?.(
+        "queue compose cannot admit ref-only branches: no PR-number mint is configured for derived admission",
+        {
+          action: "compose-derived-mint-missing",
+          branches,
+        },
+      )
+      return []
+    }
+    const derived: DerivedRunMember[] = []
+    for (const branch of branches) {
+      const submit = snapshot.bays.submits[branch]
+      if (submit === undefined) continue
       try {
-        result = await actions.intakeSubmit({
-          branch: submit.branch,
-          headSha: submit.sha,
+        const enrichment =
+          readSubmitEnrichment === undefined ? undefined : await readSubmitEnrichment({ branch, sha: submit.sha })
+        const member = deriveRunMemberArgs({
+          bays: snapshot.bays,
+          queues: snapshot.queues,
+          mint: derivedMint,
+          branch,
+          ...(enrichment === undefined ? {} : { enrichment }),
+        })
+        derived.push(member)
+        log.info?.("queue compose derived an admission for a branch submitted only in git", {
+          action: "compose-derived-admitted",
+          branch,
+          sha: submit.sha,
           base: submit.base,
-          submit: true,
-          submitter: "yrd/queue",
+          pr: member.id,
+          revision: member.revision,
         })
       } catch (error) {
         const fact = failureFact(error)
-        if (
-          fact === undefined ||
-          fact.code === "command-refused" ||
-          (fact.kind !== "refusal" && fact.kind !== "infrastructure")
-        ) {
+        if (fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) {
           throw error
         }
-        log.warn?.("queue compose could not intake a submitted branch; its refusal row stands", {
-          action: "compose-submit-intake-refused",
-          branch: submit.branch,
+        log.warn?.("queue compose could not derive an admission for a submitted branch; its row stands", {
+          action: "compose-derived-refused",
+          branch,
           sha: submit.sha,
           base: submit.base,
           code: fact.code,
@@ -1353,31 +1389,8 @@ function createQueue<Shape extends ChangeShape>(
         })
         continue
       }
-      if (result.events.length === 0) {
-        // A record for this branch appeared between the projection read and
-        // the dispatch (another process's compose, or the author's own
-        // submission). That writer owns the takeover; recording `superseded`
-        // here would claim an approval this dispatch never absorbed.
-        log.info?.("queue compose found a submitted branch already recorded; nothing to intake", {
-          action: "compose-submit-intake-noop",
-          branch: submit.branch,
-          sha: submit.sha,
-          base: submit.base,
-        })
-        continue
-      }
-      const minted = result.events.find((event) => event.name === "pr/pushed")?.data as
-        | Readonly<{ pr?: string }>
-        | undefined
-      await actions.recordBranchUnsubmit({ branch: submit.branch, reason: "superseded" })
-      log.info?.("queue compose minted a change for a branch submitted only in git", {
-        action: "compose-submit-intaken",
-        branch: submit.branch,
-        sha: submit.sha,
-        base: submit.base,
-        ...(minted?.pr === undefined ? {} : { pr: minted.pr }),
-      })
     }
+    return derived
   }
 
   const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
@@ -2406,23 +2419,28 @@ function createQueue<Shape extends ChangeShape>(
           await actions.refresh()
           await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
-          // Ref-only approvals become records BEFORE any snapshot feeds
-          // selection, so the same compose that would have refused them runs
-          // them (phase 2b). Unconditional on purpose: the encounter is the
-          // projection, not the selector, so an explicit run mints the same
-          // records a selectorless drain would — it just does not select them.
-          await intakeUnrecordedSubmits()
-          // Derived members (S6): admit only the args.derived entries whose
-          // live submit fact still stands as derived. 2b's loud-edge policy
-          // carries over: a typed refusal (vanished/moved fact, record-lane
-          // collision) is warned, ledgered, and skipped — the row survives into
-          // audit — while a mint-store failure, a duplicate payload, or any
-          // untyped throw PROPAGATES and fails the compose. Until the door
-          // retires the intake sweep above, no live caller builds
-          // `args.derived`, so this loop is empty in production today.
+          // Ref-only approvals derive their admission BEFORE any snapshot
+          // feeds selection, so the same selectorless compose that admits them
+          // runs them (S6 door, replacing the 2b record-minting sweep).
+          // Selectorless ONLY, unlike the sweep it replaces: the sweep's
+          // explicit-run mint left a durable record behind, but a derived
+          // identity's only durable home is the run/started snapshot — derived
+          // during a run that will not select it, the freshly minted number
+          // escapes nowhere and burns. An explicit selection still honors
+          // caller-passed `args.derived` entries verbatim.
+          const selfDerived = selectorless
+            ? await deriveRefOnlyMembers(new Set((args.derived ?? []).map((member) => member.branch)))
+            : []
+          // Admit only the entries whose live submit fact still stands as
+          // derived (caller-passed entries first, this compose's own
+          // derivations after). The loud-edge policy: a typed refusal
+          // (vanished/moved fact, record-lane collision) is warned, ledgered,
+          // and skipped — the row survives into audit — while a mint-store
+          // failure, a duplicate payload, or any untyped throw PROPAGATES and
+          // fails the compose.
           const admitDerived = async (): Promise<DerivedRunMember[]> => {
             const cycle: DerivedRunMember[] = []
-            for (const member of args.derived ?? []) {
+            for (const member of [...(args.derived ?? []), ...selfDerived]) {
               try {
                 materializeDerivedRunMembers(runtime().bays, [member])
                 cycle.push(member)
@@ -2681,7 +2699,7 @@ function createQueue<Shape extends ChangeShape>(
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
             const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
-            const unrecorded = unrecordedSubmits(snapshot.bays)
+            const unrecorded = unrecordedSubmits(snapshot.bays, snapshot.queues)
             if (rejected.length > 0 || (diagnostic.decisions.length === 0 && unrecorded.length > 0)) {
               reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps, unrecorded))
             } else if (diagnostic.decisions.length === 0) {
@@ -3153,7 +3171,8 @@ function createQueue<Shape extends ChangeShape>(
       return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
     unrecordedSubmits(projected) {
-      return unrecordedSubmits((projected ?? runtime()).bays)
+      const snapshot = projected ?? runtime()
+      return unrecordedSubmits(snapshot.bays, snapshot.queues)
     },
     deriveChange(branch, projected) {
       const snapshot = projected ?? runtime()
@@ -3641,7 +3660,7 @@ function createQueueCommands(
       const prs = selectionResult.prs
       if (prs.length === 0) {
         const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
-        const unrecorded = unrecordedSubmits(state.bays)
+        const unrecorded = unrecordedSubmits(state.bays, state.queues)
         return {
           events: [],
           value:
@@ -3794,8 +3813,67 @@ function createQueueCommands(
             : settledRun.conclusion === "cancelled"
               ? ("canceled" as const)
               : ("failed" as const)
+      // S6 — the DERIVED members' single terminal-emission point. A recordless
+      // member has no store to absorb `pr/integrated` through an advance (and
+      // an advance-side emission would repeat: nothing state-visible marks it
+      // done), so the settlement batch carries its terminal facts, sourced
+      // from the run's own snapshots — and the settled event's application
+      // retires the root from the active set, which is what makes this
+      // once-per-run by construction. Record members' terminals stay on the
+      // advance path, byte-identical to pre-S6 (A3).
+      const integration = settledRun.integration
+      const derivedTerminals: EventDraft[] =
+        status !== "passed" || integration === undefined
+          ? []
+          : settledRun.prs
+              .filter((member) => member.intent === undefined && state.bays.prs[member.id] === undefined)
+              .flatMap((member): EventDraft[] => {
+                const alreadyMerged = integration.alreadyLanded
+                if (alreadyMerged !== undefined) {
+                  return [
+                    event("pr/already-landed", {
+                      pr: member.id,
+                      revision: member.revision,
+                      headSha: member.headSha,
+                      run: settledRun.id,
+                      ...(member.issue === undefined ? {} : { issueRef: member.issue }),
+                      baseSha: integration.baseSha,
+                      candidateSha: alreadyMerged.candidateSha,
+                      candidateTreeSha: alreadyMerged.candidateTreeSha,
+                      baseTreeSha: alreadyMerged.baseTreeSha,
+                      ...(member.props === undefined ? {} : { props: member.props }),
+                    }),
+                  ]
+                }
+                if (member.changeId === undefined) {
+                  // Unreachable for a member the derived admission built — it
+                  // refuses a tip without a Change-Id trailer — and a merged
+                  // truth without stable identity must not be claimed.
+                  return []
+                }
+                return [
+                  event("pr/integrated", {
+                    pr: member.id,
+                    revision: member.revision,
+                    headSha: member.headSha,
+                    run: settledRun.id,
+                    ...(member.issue === undefined ? {} : { issueRef: member.issue }),
+                    commit: integration.commit,
+                    landingSha: integration.commit,
+                    baseSha: integration.baseSha,
+                    changeId: member.changeId,
+                    ...(member.props === undefined ? {} : { props: member.props }),
+                  }),
+                ]
+              })
       return {
-        events: claimed ? [event("queue/run/settled", { run: root, ...(status === undefined ? {} : { status }) })] : [],
+        events:
+          claimed || derivedTerminals.length > 0
+            ? [
+                ...derivedTerminals,
+                event("queue/run/settled", { run: root, ...(status === undefined ? {} : { status }) }),
+              ]
+            : [],
       }
     },
   })
@@ -4681,8 +4759,11 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/integrated") {
     const integrated = QueueAuthorityTokenFactSchema.parse(applied.data)
-    const currentTerminal = typeof (applied.data as { run?: unknown }).run === "string"
-    if (!terminalAuthorityMatches(state.queues.authority, integrated, applied.name, currentTerminal)) return state
+    // S6 relaxation: a DERIVED member's terminal names no current token — its
+    // authority was the submit fact, never a token, so there is nothing to
+    // invalidate and nothing to require. Tolerant (never the old throw); the
+    // stale-terminal invariant still fires when a token EXISTS and disagrees.
+    if (!terminalAuthorityMatches(state.queues.authority, integrated, applied.name, false)) return state
     return {
       queues: {
         ...state.queues,
@@ -4692,7 +4773,8 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/already-landed") {
     const alreadyMerged = ChangeAlreadyMergedSchema.parse(applied.data)
-    if (!terminalAuthorityMatches(state.queues.authority, alreadyMerged, applied.name, true)) return state
+    // S6 relaxation — same rule as pr/integrated above.
+    if (!terminalAuthorityMatches(state.queues.authority, alreadyMerged, applied.name, false)) return state
     return {
       queues: {
         ...state.queues,
@@ -5364,8 +5446,8 @@ function requestStep(
 
 /** Exported as the S6 re-sourced-emitter test seam: the merge bookkeeping and
  * needs-author emissions for DERIVED members are asserted on this pure
- * function's event drafts, because applying a recordless terminal event still
- * throws in the bay reducer until the door commit relaxes it (stage 4). */
+ * function's event drafts (e.g. the moved-fact gate, which no journaled
+ * lifecycle can hold still long enough to observe). */
 export function advanceQueue(
   state: DeepReadonly<RuntimeState>,
   record: DeepReadonly<QueueRecord>,
@@ -5491,53 +5573,13 @@ export function advanceQueue(
     // record it against; the merge merges exactly as it would for any other
     // member, and only the ordinary PR-merge bookkeeping below applies to it.
     const changeSnapshots = record.prs.filter((member) => member.intent === undefined)
-    // RE-SOURCE (S6 census #11), the load-bearing half: a derived member has no
-    // record for the samePayload loop below to find, so its terminal fact —
-    // the event settlement and every status surface consume — emits from the
-    // run's own ChangeSnapshot. Records stay the first source for every member
-    // that has one (the loop below, byte-identical to pre-S6), so the
-    // grandfathered lane's enrichment is exactly what it always was.
-    for (const member of changeSnapshots) {
-      if (state.bays.prs[member.id] !== undefined) continue
-      const alreadyMerged = shape.integration.alreadyLanded
-      if (alreadyMerged !== undefined) {
-        events.push(
-          event("pr/already-landed", {
-            pr: member.id,
-            revision: member.revision,
-            headSha: member.headSha,
-            run: record.id,
-            ...(member.issue === undefined ? {} : { issueRef: member.issue }),
-            baseSha: shape.integration.baseSha,
-            candidateSha: alreadyMerged.candidateSha,
-            candidateTreeSha: alreadyMerged.candidateTreeSha,
-            baseTreeSha: alreadyMerged.baseTreeSha,
-            ...(member.props === undefined ? {} : { props: member.props }),
-          }),
-        )
-        continue
-      }
-      if (member.changeId === undefined) {
-        // Unreachable for a member the derived admission built — it refuses a
-        // tip without a Change-Id trailer — and a merged truth without stable
-        // identity must not be claimed (same rule as the record lane below).
-        continue
-      }
-      events.push(
-        event("pr/integrated", {
-          pr: member.id,
-          revision: member.revision,
-          headSha: member.headSha,
-          run: record.id,
-          ...(member.issue === undefined ? {} : { issueRef: member.issue }),
-          commit: shape.integration.commit,
-          landingSha: shape.integration.commit,
-          baseSha: shape.integration.baseSha,
-          changeId: member.changeId,
-          ...(member.props === undefined ? {} : { props: member.props }),
-        }),
-      )
-    }
+    // RE-SOURCE (S6 census #11): a derived member's terminal facts are NOT
+    // emitted here. The record loop below dedupes against store state, and a
+    // recordless member has none — an advance-side emission would re-emit on
+    // every advance and give `needsAdvance` no absorbed-signal to terminate
+    // on. Their single emission point is the `settled` command's apply, whose
+    // application retires the root from the active set (the state-visible
+    // once-marker). Records stay the first source below, byte-identical.
     for (const current of samePayloadPRs(state.bays, changeSnapshots)) {
       const alreadyMerged = shape.integration.alreadyLanded
       if (alreadyMerged !== undefined) {
@@ -6376,7 +6418,7 @@ function auditQueues(
     // carries, so nothing can run it (branch-is-change 2a). Same grace as a
     // draft, so a push that is about to be followed by its `pr submit` does
     // not page; same consumer contract — the watcher reads this, never git.
-    for (const submit of unrecordedSubmits(state.bays)) {
+    for (const submit of unrecordedSubmits(state.bays, state.queues)) {
       const atMs = parseAuditTime(submit.at, "branch submit clock")
       if (auditNowMs - atMs <= DRAFT_STRANDED_GRACE_MS) continue
       findings.push({
@@ -6385,7 +6427,11 @@ function auditQueues(
         specimen: `branch:${submit.branch}`,
         since: submit.at,
         blockedMs: Math.max(0, auditNowMs - atMs),
-        resolution: [`yrd pr submit ${submit.branch} --issue <ref>`],
+        // S6: the derived lane serves live submits; a persisting row means the
+        // compose is not running, derived admission is unwired, or the
+        // derivation refused (the queue log's 'compose-derived-*' actions say
+        // which). Re-pushing branch + submit ref renews the authority.
+        resolution: [`git push origin ${submit.branch}:refs/for/${submit.base}/<issue>`],
       })
     }
   }
@@ -7917,6 +7963,9 @@ export const YRD_REFUSAL_CODES = [
   // edges of the retired 2b sweep. All four are author-curable in the git
   // regime — re-push the branch/submit ref, or add the Change-Id trailer.
   "derived-change-id-missing",
+  // The host's enrichment reader raises this when the submitted commit is not
+  // in the repository (R2's vanished-commit edge, attributable to one branch).
+  "derived-commit-vanished",
   "derived-record-lane",
   "derived-submit-moved",
   "derived-submit-vanished",
@@ -7998,6 +8047,9 @@ export const YRD_REFUSAL_CODES = [
   "queue-paused",
   "queue-progress-stalled",
   "queue-read-boundary-moved",
+  // S6 door: both retired mint arms (bay intake + submit) refuse with this one
+  // code when a live submit fact owns the branch and no record does.
+  "record-mint-retired",
   "recut-base-missing",
   "recut-branch-absent",
   "recut-current-changed",
@@ -8543,6 +8595,12 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
     if (step.kind !== "merge" || run.integration === undefined) return false
     return run.prs.some((pr) => {
       const current = state.bays.prs[pr.id]
+      // A DERIVED member (S6) has no record to absorb the integration — its
+      // terminal fact emits at settlement, not through an advance — so it can
+      // never hold an advance open. Without this the settle loop re-advances
+      // (and would re-emit) forever, waiting on a store write that is
+      // deliberately a no-op.
+      if (current === undefined && pr.intent === undefined) return false
       const alreadyMerged = run.integration?.alreadyLanded
       const currentAlreadyMerged = current?.alreadyLanded
       return (

@@ -1194,6 +1194,19 @@ export function isLiveChange(pr: Change): boolean {
   return pr.state === "open"
 }
 
+/**
+ * S6 receiver-dispatch rule: intake is the grandfathered RECORD lane's act,
+ * and only a branch a LIVE record already owns takes a revision through it. A
+ * recordless (or terminal-record) branch belongs to the DERIVED lane — the
+ * receiver's submit-ref write IS its submission, and dispatching intake for
+ * it would only refuse `record-mint-retired` and wedge the drain retrying.
+ * The lane is decided here, AT WRITE TIME, so read-side arbitration never
+ * meets the live-record×different-sha ambiguity (s6-door-design §2).
+ */
+export function recordLaneOwnsBranch(bays: Pick<BaysState, "prs">, branch: string): boolean {
+  return Object.values(bays.prs).some((pr) => pr.branch === branch && isLiveChange(pr))
+}
+
 /** The one reader of `Change.track`. The fallback IS the fleet-wide default
  * for records that never wrote the bit: tracked, since 2026-08-25
  * (@yrd/core/tracked-delivery step 2, operator-approved) — an absent bit

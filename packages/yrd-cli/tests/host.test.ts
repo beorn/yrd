@@ -11,7 +11,7 @@ import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { currentChangeRev, changeBaseSha, changeDeliveryState } from "@yrd/bay"
+import { currentChangeRev, changeBaseSha, changeDeliveryState, recordLaneOwnsBranch } from "@yrd/bay"
 import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
@@ -2782,30 +2782,34 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
-  it("turns one refs/for push into an atomically submitted checked PR", async () => {
+  it("turns one refs/for push into a DERIVED-lane submission: the submit fact, never a record (S6 door)", async () => {
     const { repo, featureSha } = await repository()
     const initialized = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
     const receiverPath = initialized.receiver.receiverPath
     await initialized.close()
 
-    // This is the only author action. The managed receiver must carry the
-    // submit intent all the way through intake; a later `yrd pr submit` would
-    // recreate the exact second act P2 removes.
+    // This is the only author action. Post-door the receiver's conditional
+    // dispatch never intakes a recordless branch — the submit-ref write IS the
+    // submission, the carrier branch is materialized, and no `pr/*` record
+    // event ever journals. The queue's next compose derives and runs it.
     await git(repo, "push", receiverPath, `${featureSha}:refs/for/main/@yrd/core/atomic-submit`)
 
     await using reopened = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
-    const [pr] = Object.values(reopened.app.state().bays.prs)
-    expect(pr).toMatchObject({
-      issue: "@yrd/core/atomic-submit",
-      branch: "issue/@yrd/core/atomic-submit",
+    expect(reopened.app.state().bays.prs).toEqual({})
+    expect(reopened.app.state().bays.submits["issue/@yrd/core/atomic-submit"]).toMatchObject({
+      sha: featureSha,
+      base: "main",
     })
-    expect(changeDeliveryState(pr!)).toBe("submitted")
-    expect(reopened.app.bays.checksRequested(pr!.id)).toBe(true)
+    // The carrier branch exists for the derived member to run from.
+    expect((await git(repo, "rev-parse", "refs/heads/issue/@yrd/core/atomic-submit")).trim()).toBe(featureSha)
+    // The lane rule itself, on the live state the dispatch consulted.
+    expect(recordLaneOwnsBranch(reopened.app.state().bays, "issue/@yrd/core/atomic-submit")).toBe(false)
 
     const transactions = (await journalEnvelope(repo))
       .flatMap(({ values }) => values)
       .map((value) => parseJournalFrame(value).events.map(({ name }) => name))
-    expect(transactions).toContainEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
+    expect(transactions).toContainEqual(["branch/submitted"])
+    expect(transactions.flat().filter((name) => name.startsWith("pr/"))).toEqual([])
   })
 
   it("uses the Hab service identity at the shipping process host", async () => {

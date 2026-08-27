@@ -270,7 +270,7 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
         sha: SHA,
         base: "main",
         at: "2026-01-01T00:00:00.000Z",
-        reason: { code: "unrecorded-submit", message: expect.stringContaining("no PR record carries it") },
+        reason: { code: "unrecorded-submit", message: expect.stringContaining("runs as a DERIVED member") },
       },
     ])
     const derived = app.queue.deriveChange("issue/ref-only")
@@ -306,10 +306,12 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
 
   it("the record wins when both sources exist for one branch, and the unrecorded row disappears", async () => {
     await using app = await createQueueApp()
-    await app.bays.recordBranchSubmit({ branch: "issue/both", sha: SHA, base: "main" })
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/both"])
-
+    // S6 order: the record must exist BEFORE the submit fact — a facted
+    // recordless branch is the derived lane's and the mint arm refuses it
+    // (record-mint-retired). Both-sources now arises the receiver's way: a
+    // live record's branch gets its submit ref (re-)projected.
     const pr = await submit(app, "issue/both")
+    await app.bays.recordBranchSubmit({ branch: "issue/both", sha: SHA, base: "main" })
     expect(app.queue.unrecordedSubmits()).toEqual([])
     const derived = app.queue.deriveChange("issue/both")
     expect(derived.record?.id).toBe(pr)

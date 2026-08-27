@@ -41,6 +41,7 @@ import * as z from "zod"
 import { mintDerivedMemberIdentity } from "./derived-member.ts"
 import {
   arbitrateDerivedChange,
+  latestChangeSnapshot,
   Queues,
   type ChangeSnapshot,
   type QueueRecord,
@@ -185,6 +186,16 @@ function materializeDerivedRunMember(bays: DeepReadonly<BaysState>, member: Deri
   }
 }
 
+/** What a derived member's admission reads from git — the tip commit's
+ * Change-Id trailer and whatever props/issue/title the host derives from the
+ * commit. This layer never reads git itself; the host supplies the reader. */
+export type DerivedSubmitEnrichment = Readonly<{
+  changeId?: string
+  props?: ChangeProps
+  issue?: string
+  title?: string
+}>
+
 /** The authority verdict the token machinery cannot give a recordless member. */
 export type DerivedMemberAuthority = Readonly<{ standing: true }> | Readonly<{ standing: false; consumedBy: RunId }>
 
@@ -268,6 +279,22 @@ function changeIdNumber(id: string): number | undefined {
 }
 
 /**
+ * Every branch the DERIVED lane currently owns: a live submit fact whose
+ * arbitration verdict is "derived" (no record, or only a terminal one at a
+ * different sha). This is the door compose's selection universe — the exact
+ * population the retired 2b sweep used to mint records for, plus the
+ * terminal-branch re-submissions the sweep could never see.
+ */
+export function derivedLaneBranches(bays: DeepReadonly<BaysState>): string[] {
+  return Object.keys(bays.submits)
+    .filter((branch) => {
+      const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
+      return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
+    })
+    .toSorted()
+}
+
+/**
  * The door-side driver step, exported so tests (and, at the door, the compose)
  * derive one branch's admissible member: arbitration guard, admission-time
  * mint (commit-before-escape — `mintChangeId`/reuse inside
@@ -287,7 +314,7 @@ export function deriveRunMemberArgs(
     queues: DeepReadonly<QueuesState>
     mint: PrNumberMint
     branch: string
-    enrichment?: Readonly<{ changeId?: string; props?: ChangeProps; issue?: string; title?: string }>
+    enrichment?: DerivedSubmitEnrichment
   }>,
 ): DerivedRunMember {
   const { mint, branch, enrichment } = options
@@ -311,15 +338,25 @@ export function deriveRunMemberArgs(
         `a derived member (record '${verdict.record?.id ?? "?"}' answers for it)`,
     )
   }
-  const identity = mintDerivedMemberIdentity({ mint, bays, queues, branch })
-  const changeId = identity.changeId ?? enrichment?.changeId
-  if (changeId === undefined) {
+  // Refuse a missing Change-Id BEFORE the mint can commit a number: without
+  // this order every compose would burn one number per still-unenriched
+  // branch. The reuse path is pure (no commit), so peeking it first is free.
+  const reusable = latestChangeSnapshot(
+    queues as QueuesState,
+    (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
+  )
+  if (reusable?.changeId === undefined && enrichment?.changeId === undefined) {
     raiseFailure(
       "refusal",
       "derived-change-id-missing",
       `yrd: branch '${branch}' tip ${submit.sha} carries no Change-Id trailer and no retained snapshot ` +
         `supplies one — amend the commit with a Change-Id trailer and re-push branch + submit ref`,
     )
+  }
+  const identity = mintDerivedMemberIdentity({ mint, bays, queues, branch })
+  const changeId = identity.changeId ?? enrichment?.changeId
+  if (changeId === undefined) {
+    throw new Error(`yrd: derived member for '${branch}' lost its change id between peek and mint`)
   }
   return {
     branch,

@@ -1900,6 +1900,22 @@ function intakePR(
   ) {
     return { events: [] }
   }
+  // S6 door: a branch with a LIVE SUBMIT FACT and no live record is the
+  // derived lane's — the fact IS the submission, and minting a record beside
+  // it would run both lanes for one push (A4 made structural at the mint).
+  // A factless branch keeps the legacy mint: it is exactly the population no
+  // receiver delivered (pre-door fixtures, a hand-driven legacy submit), it
+  // stays visible to the S7 drain gauge, and the receiver path can never
+  // reach here recordless — its conditional dispatch skips intake first.
+  if (existing === undefined && current.submits[branch] !== undefined) {
+    raiseFailure(
+      "refusal",
+      "record-mint-retired",
+      `yrd: record creation is retired (S6 door): branch '${branch}' has a live submit ref and no live change ` +
+        `record — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
+        `('git push origin HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
+    )
+  }
   const id = existing?.id ?? mintChangeId(mint, current.prs)
   const changeId = changeIdForRevision(existing, commandId)
   const submitter = args.submitter ?? defaultSubmitter
@@ -2016,6 +2032,18 @@ function submitWork(
       : undefined
   if (commandId === undefined) {
     raiseFailure("infrastructure", "change-id-command-missing", "yrd: change creation requires its durable command id")
+  }
+  // S6 door — same rule as intake's mint arm: a live submit fact owns the
+  // branch (derived lane), so neither a fresh mint nor a D2 reopen may run
+  // beside it; a factless branch keeps the legacy mint/reopen surface.
+  if (resubmitted === undefined && current.submits[args.branch] !== undefined) {
+    raiseFailure(
+      "refusal",
+      "record-mint-retired",
+      `yrd: record creation is retired (S6 door): branch '${args.branch}' has a live submit ref and no change ` +
+        `record to reopen — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
+        `('git push origin HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
+    )
   }
   const id = resubmitted?.id ?? mintChangeId(mint, current.prs)
   const changeId = changeIdForRevision(resubmitted, commandId)
@@ -3045,7 +3073,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/needs-author": {
       const changed = ChangeNeedsAuthorFactSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: '${applied.name}' names missing change '${changed.pr}'`)
+      // S6 relaxation: a DERIVED member's author-facing refusal FACT names no
+      // record — the journal fact is the product and the store write is a
+      // no-op. Unreachable while replaying any pre-door journal: a historical
+      // needs-author is always preceded in retained history by its record's
+      // pr/pushed (or the record rides the checkpoint across eviction), so
+      // this branch fires only for post-door emissions (A5 proves it).
+      if (pr === undefined) return state
       assertTerminalApplies(pr, changed, applied.name)
       const delivery = changeDeliveryState(pr)
       if (delivery !== "submitted" && delivery !== "ready") {
@@ -3092,7 +3126,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           ? v1.data
           : LegacyChangeIntegratedSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
+      // S6 relaxation: a DERIVED member's terminal fact names no record; the
+      // journal fact is what settlement and status consume, and the store
+      // write is a no-op. Unreachable for pre-door journals (see the
+      // pr/needs-author case note); fires only for post-door emissions.
+      if (pr === undefined) return state
       assertTerminalApplies(pr, changed, applied.name)
       const run = parsed.success ? parsed.data.run : v1?.success === true ? v1.data.run : undefined
       return patchPR(pr, {
@@ -3115,7 +3153,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/already-landed": {
       const changed = ChangeAlreadyMergedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
+      // S6 relaxation — same rule and same replay argument as pr/integrated.
+      if (pr === undefined) return state
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         state: "closed",

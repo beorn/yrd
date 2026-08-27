@@ -30,6 +30,7 @@ import {
   type ReceiverRefUpdate,
   type ReceiverSubmitIntent,
   type ReceiverTarget,
+  recordLaneOwnsBranch,
 } from "@yrd/bay"
 import {
   createHeldOutCommandEvaluator,
@@ -95,6 +96,7 @@ import {
   type StepExecution,
   type StepRunner,
   Queues,
+  type DerivedSubmitEnrichment,
 } from "@yrd/queue"
 import {
   installedPlanStale,
@@ -1951,12 +1953,20 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
           })
         ).sha,
       )
+  // ONE durable mint for both plugins (S6): bays keeps it for grandfathered
+  // revision numbering, and the queue mints derived-member identities from the
+  // same monotone sequence at admission time. Lives beside journal.sqlite,
+  // outside checkpoint-identity state: mint durability must survive the store
+  // re-initialization class (22986).
+  const prNumberMint = createDurablePrNumberMint({ dir: options.stateDir })
   const queue = withQueue({
     steps: configuredQueueSteps(options, mergeCommand, gateScriptShas),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
     defaultBase: options.config.base,
     requires: options.config.requires,
+    prNumberMint,
+    readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
     resolveBaseSha: async (base) =>
@@ -2027,9 +2037,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     }),
     withBays({
       jobs: bayJobs,
-      // Lives beside journal.sqlite, outside checkpoint-identity state: mint
-      // durability must survive the store re-initialization class (22986).
-      prNumberMint: createDurablePrNumberMint({ dir: options.stateDir }),
+      prNumberMint,
       defaultBase: baseIdentity(options.config.base),
       ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
       resolveBase: async (base, context) => {
@@ -2123,8 +2131,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // predecessor; parity was proven against the live checkpoint before
         // the cut (2084/2084 stored labels equal the record derivation).
         const { statuses: _retiredStatusCopy, ...authorityWithoutStatusCopy } =
-          queuesWithoutBackfill.authority as typeof queuesWithoutBackfill.authority &
-            Readonly<{ statuses?: unknown }>
+          queuesWithoutBackfill.authority as typeof queuesWithoutBackfill.authority & Readonly<{ statuses?: unknown }>
         const { intents: _deadIntents, ...withoutDeadIntents } = state as typeof state & Readonly<{ intents?: unknown }>
         return {
           ...withoutDeadIntents,
@@ -2457,6 +2464,66 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  * fails if anyone moved the carrier in between, so a concurrent writer is a
  * loud refusal rather than a silently lost revision.
  */
+/**
+ * S6 door: a DERIVED member's admission enrichment, read from the tip commit
+ * at exactly the submitted sha — the `Change-Id` trailer (stable identity),
+ * the `Bead` trailer (issue linkage plus the settlement-visible `bead` prop),
+ * and the subject as the display title. Missing trailers come back absent;
+ * the derived admission decides what absence refuses (a missing Change-Id
+ * does, loudly, unless a retained snapshot already supplies the identity).
+ */
+export async function readDerivedSubmitEnrichment(
+  process: Pick<Process, "run">,
+  repo: string,
+  sha: string,
+): Promise<DerivedSubmitEnrichment> {
+  const args = [
+    "show",
+    "-s",
+    "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)%x09%(trailers:key=Bead,valueonly,separator=%x2c)%x09%s",
+    sha,
+  ]
+  const result = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(result, args)
+  if (result.exitCode !== 0) {
+    // R2's vanished-commit edge: the submit fact stands but its commit is not
+    // in this repository (pruned, or never fetched). Attributable to the ONE
+    // branch — a typed refusal the compose skips loudly, never a compose-wide
+    // failure that would starve every healthy sibling.
+    if (/bad object|unknown revision|not a valid object name|bad revision/iu.test(result.stderr)) {
+      raiseFailure(
+        "refusal",
+        "derived-commit-vanished",
+        `yrd: submitted commit ${sha.slice(0, 12)} is not in this repository — re-push the branch and its ` +
+          `submit ref to renew the submission`,
+      )
+    }
+    throw new Error(
+      `yrd: could not read derived-submit enrichment at ${sha.slice(0, 12)}: ${result.stderr.trim() || "git show failed"}`,
+    )
+  }
+  const [changeIds = "", beads = "", subject = ""] = result.stdout.split("\n")[0]?.split("\t") ?? []
+  const changeId = changeIds
+    .split(",")
+    .map((value) => value.trim())
+    .find((value) => /^I[0-9a-f]{40}$/u.test(value))
+  const bead = beads
+    .split(",")
+    .map((value) => value.trim())
+    .find((value) => value.length > 0)
+  const title = subject.trim()
+  return {
+    ...(changeId === undefined ? {} : { changeId }),
+    ...(bead === undefined ? {} : { issue: bead, props: { bead } }),
+    ...(title.length === 0 ? {} : { title }),
+  }
+}
+
 export async function materializeCarrier(
   process: Pick<Process, "run">,
   repo: string,
@@ -2517,6 +2584,13 @@ async function intakeResult(
   // exactly the undeliverable state this exists to prevent, and a failure here
   // leaves the result for the next drain to retry.
   await materializeCarrier(process, repo, result)
+  // S6 door — the receiver's conditional dispatch: intake only when a live
+  // record owns the branch (a grandfathered revision append). Otherwise the
+  // branch is the DERIVED lane's, the submit-ref write that follows in the
+  // drain IS the submission, and dispatching intake would refuse
+  // `record-mint-retired` and wedge the drain retrying the result forever.
+  const branch = result.intake.branch ?? result.branch
+  if (branch !== undefined && !recordLaneOwnsBranch(app.state().bays, branch)) return
   await app.dispatch(
     app.commands.bay.intake,
     { ...result.intake, receipt: result.id },

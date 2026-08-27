@@ -4,21 +4,29 @@
  * under both lanes, silently loses its terminal `pr/integrated` (settlement
  * and every status surface go dark), or its identity is minted without the
  * commit-before-escape contract. Stage 3 of the door program
- * (@i/10-merge-queue/s6-door-design §5 ordering item 3): derived members are
- * selectable, admittable and runnable, and the terminal emitters re-source
- * from the run's own ChangeSnapshot — proven with the door SIMULATED, because
- * the mint arms and the 2b intake sweep still stand. The simulation vehicle is
- * the decisive terminal×different-sha cell: a branch with a terminal record is
- * invisible to the sweep, so its live re-submission is exactly the derived
- * member the door will produce. Tests that need the RELAXED reducer (applying
- * a recordless terminal event) are written and skipped "enables-at-door".
+ * (@i/10-merge-queue/s6-door-design §5 ordering items 3-4): derived members
+ * are selectable, admittable and runnable; the terminal emitters re-source
+ * from the run's own ChangeSnapshot and the RELAXED reducer applies a
+ * recordless terminal as a store no-op; the compose self-derives ref-only
+ * branches where the 2b sweep used to mint records; and the retired mint arms
+ * refuse `record-mint-retired` for any branch a live submit fact owns (A2 —
+ * the fact IS the lane decision, made at write time).
  * @level l2
  * @consumer @yrd/queue
  */
+import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, volatilePrNumberMint, withBays, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
+import {
+  createBayJobDefs,
+  recordLaneOwnsBranch,
+  volatilePrNumberMint,
+  withBays,
+  type BayWorkspace,
+  type PrNumberMint,
+} from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, failureFact, parseJournalFrame, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -38,6 +46,7 @@ import {
   type StepExecution,
 } from "@yrd/queue"
 
+const packagesRoot = join(import.meta.dirname, "..", "..")
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const SHA = "7".repeat(40)
@@ -117,6 +126,14 @@ async function createApp(
     log?: ReturnType<typeof createLogger>
     steps?: readonly ReturnType<typeof passingCheck | typeof passingMerge>[]
     defaultSteps?: readonly string[]
+    /** Arms the door's compose self-derivation (S6): the durable mint derived
+     * admission commits identities to, and the git-enrichment reader. */
+    prNumberMint?: PrNumberMint
+    readSubmitEnrichment?: (input: Readonly<{ branch: string; sha: string }>) => {
+      changeId?: string
+      props?: Record<string, string>
+      issue?: string
+    }
   }> = {},
 ) {
   const steps = options.steps ?? ([passingCheck(), passingMerge()] as const)
@@ -128,6 +145,8 @@ async function createApp(
     defaultSteps: options.defaultSteps ?? ["check", "merge"],
     resolveBaseSha: () => BASE,
     prepareCandidate: mergeableCandidate,
+    ...(options.prNumberMint === undefined ? {} : { prNumberMint: options.prNumberMint }),
+    ...(options.readSubmitEnrichment === undefined ? {} : { readSubmitEnrichment: options.readSubmitEnrichment }),
   } as never as Parameters<typeof withQueue>[0])
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(
@@ -183,6 +202,22 @@ function doorEntry(
 function stepsMapOf(app: App): ReadonlyMap<string, never> {
   const installed = app.queue.steps()
   return new Map(installed.map((step) => [step.name, { ...step, declaredDefault: true } as never]))
+}
+
+/** Every journaled event of `name`, in order — the door's terminal facts live
+ * ONLY in the journal (the store write is a no-op for derived members). */
+async function journalEvents(
+  journal: ReturnType<typeof createMemoryJournal>,
+  name: string,
+): Promise<readonly Readonly<{ name: string; data: unknown }>[]> {
+  const out: Readonly<{ name: string; data: unknown }>[] = []
+  for await (const batch of journal.read(0)) {
+    for (const value of batch.values) {
+      const frame = parseJournalFrame(value)
+      for (const applied of frame.events) if (applied.name === name) out.push(applied)
+    }
+  }
+  return out
 }
 
 describe("S6 stage 3 — derived-member selection, admission, run", () => {
@@ -263,26 +298,23 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(mint.highWater()).toBe(2)
   })
 
-  it("the merge bookkeeping emits pr/integrated from the run's own snapshot for a recordless member — and applying it still throws until the door relaxes the reducer (A1/A8 emitter half)", async () => {
-    await using app = await createApp()
+  it("the merge bookkeeping emits pr/integrated from the run's own snapshot for a recordless member, and the relaxed reducer applies it as a store no-op (A1/A8 emitter half)", async () => {
+    const journal = createMemoryJournal()
+    await using app = await createApp({ journal })
     await strandDerivedBranch(app, "issue/derived")
     const entry = doorEntry(app, "issue/derived", { props: { bead: "22991" }, issue: "22991" })
+    const prsBefore = structuredClone(app.state().bays.prs)
 
-    // The full lifecycle is door-gated: the terminal event for a recordless
-    // member is refused by today's reducer, loudly, at apply time.
-    await expect(app.queue.run({ derived: [entry] }, runtime)).rejects.toThrow(
-      /terminal 'pr\/integrated' names missing change 'PR2'/,
-    )
+    const runs = await app.queue.run({ derived: [entry] }, runtime)
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
 
-    // The state kept the run with its completed merge job (the failed apply
-    // committed nothing) — advance it purely and read the drafted events: the
-    // re-sourced emitter, tested at the seam the door will open.
+    // The journaled terminal fact carries the snapshot-sourced payload — the
+    // exact event settlement's hook receives (A8's enrichment half).
+    const integrated = await journalEvents(journal, "pr/integrated")
+    expect(integrated).toHaveLength(1)
     const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
     if (record === undefined) throw new Error("expected the derived merge run to be retained")
-    const { events } = advanceQueue(app.state(), record, stepsMapOf(app))
-    const integrated = events.find((event) => event.name === "pr/integrated")
-    if (integrated === undefined) throw new Error("expected a snapshot-sourced pr/integrated draft")
-    expect(integrated.data).toMatchObject({
+    expect(integrated[0]?.data).toMatchObject({
       pr: "PR2",
       revision: 2,
       headSha: SHA,
@@ -291,36 +323,35 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       landingSha: MERGED,
       baseSha: BASE,
       changeId: CHANGE_ID,
-      // A8's enrichment: the trailer-sourced prop rides the terminal fact —
-      // this is the exact payload settlement's hook receives post-door.
       props: { bead: "22991" },
       issueRef: "22991",
     })
     // The snapshot schema carries no submitter — the one accepted enrichment
     // delta (s6-door-preflight leg 1 names it rather than diffing it).
-    expect((integrated.data as { submitter?: string }).submitter).toBeUndefined()
+    expect((integrated[0]?.data as { submitter?: string }).submitter).toBeUndefined()
 
-    // Grandfather intact in the same emission: no event names the branch's
-    // TERMINAL record (different payload), and the store was not written.
-    expect(events.filter((event) => event.name === "pr/integrated")).toHaveLength(1)
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+    // The relaxed reducer applied it as a store NO-OP: byte-identical records,
+    // the branch's terminal record untouched, and the submit fact standing.
+    expect(app.state().bays.prs).toEqual(prsBefore)
+    expect(app.state().bays.submits["issue/derived"]).toMatchObject({ sha: SHA })
   })
 
   it("pr/needs-author re-sources from the snapshot when a derived member's step fails author-owned (census #13)", async () => {
-    await using app = await createApp({ steps: [passingCheck(), authorFailingMerge()] })
+    const journal = createMemoryJournal()
+    await using app = await createApp({ journal, steps: [passingCheck(), authorFailingMerge()] })
     await strandDerivedBranch(app, "issue/derived")
     const entry = doorEntry(app, "issue/derived", { props: { bead: "22991" }, issue: "22991" })
+    const prsBefore = structuredClone(app.state().bays.prs)
 
-    // Same door gate: the needs-author FACT for a recordless member is refused
-    // by today's reducer at apply time, loudly.
-    await expect(app.queue.run({ derived: [entry] }, runtime)).rejects.toThrow(/missing change 'PR2'/)
-
+    // Post-door the author-owned failure settles cleanly: the refusal FACT is
+    // journaled from the snapshot and the relaxed reducer applies it as a
+    // store no-op.
+    await app.queue.run({ derived: [entry] }, runtime)
+    const needsAuthor = await journalEvents(journal, "pr/needs-author")
+    expect(needsAuthor).toHaveLength(1)
     const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
     if (record === undefined) throw new Error("expected the derived merge run to be retained")
-    const { events } = advanceQueue(app.state(), record, stepsMapOf(app))
-    const needsAuthor = events.find((event) => event.name === "pr/needs-author")
-    if (needsAuthor === undefined) throw new Error("expected a snapshot-sourced pr/needs-author draft")
-    expect(needsAuthor.data).toMatchObject({
+    expect(needsAuthor[0]?.data).toMatchObject({
       pr: "PR2",
       revision: 2,
       headSha: SHA,
@@ -330,10 +361,14 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       step: "merge",
       receipt: { code: "authored-gitlink" },
     })
+    expect(app.state().bays.prs).toEqual(prsBefore)
 
     // The pure-git analogue of the submitted/ready gate: once the live submit
     // fact moves off the pinned sha (the author superseded the member), the
-    // refusal is not emitted — only the run failure is.
+    // refusal is not emitted — only the run failure is. Asserted on the pure
+    // advance over the same run, its recorded failure stripped so the
+    // emission path re-derives.
+    const unfailed = { ...record, failure: undefined }
     const moved = {
       ...app.state(),
       bays: {
@@ -341,9 +376,11 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
         submits: { "issue/derived": { sha: RESUBMIT_SHA, base: "main", at: "2026-01-01T00:00:00.000Z" } },
       },
     }
-    const withoutFact = advanceQueue(moved, record, stepsMapOf(app))
+    const withoutFact = advanceQueue(moved, unfailed as never, stepsMapOf(app))
     expect(withoutFact.events.some((event) => event.name === "pr/needs-author")).toBe(false)
     expect(withoutFact.events.some((event) => event.name === "queue/run/failed")).toBe(true)
+    const standing = advanceQueue({ ...app.state() }, unfailed as never, stepsMapOf(app))
+    expect(standing.events.some((event) => event.name === "pr/needs-author")).toBe(true)
   })
 
   it("derived submit authority is one-per-fact: consumed by the merge run, standing again after a re-push (design §2)", async () => {
@@ -353,7 +390,7 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     // below reuses PR2 and must see the high-water its mint committed.
     const mint = volatilePrNumberMint(1)
     const entry = doorEntry(app, "issue/derived", { mint })
-    await app.queue.run({ derived: [entry] }, runtime).catch(() => undefined)
+    await app.queue.run({ derived: [entry] }, runtime)
     const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
     if (record === undefined) throw new Error("expected the derived merge run")
 
@@ -386,15 +423,19 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
   it("a member with a live record for its branch never enters the derived lane (A4 — never both lanes)", async () => {
     await using app = await createApp()
     await strandDerivedBranch(app, "issue/derived")
-    // High mint floor: the app's own mint hands the racing intake PR2, so the
-    // driver's number must not collide with it (production shares ONE durable
-    // mint, where this collision is impossible by monotonicity).
+    // High mint floor: the racing reopen below revives PR1 and later flows may
+    // mint; the driver's number must not collide (production shares ONE
+    // durable mint, where a collision is impossible by monotonicity).
     const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(50) })
-    // A live record appears for the branch AFTER the driver derived the entry
-    // (the race the receiver's conditional dispatch resolves at the door).
-    await app.bays.intake({ branch: "issue/derived", headSha: "6".repeat(40), base: "main", baseSha: BASE })
+    // A live record appears for the branch AFTER the driver derived the entry:
+    // the author's explicit D2 reopen of the terminal identity — the one
+    // record-creation act the door leaves to a terminal-branch author.
+    await app.bays.submit({ branch: "issue/derived", headSha: "6".repeat(40), base: "main", baseSha: BASE })
+    const reopened = app.state().bays.prs.PR1
+    expect(reopened?.state).toBe("open")
     expect(() => materializeDerivedRunMembers(app.state().bays, [entry])).toThrow(/record lane owns it/)
-    // The selectorless compose skips it loudly instead of running both lanes.
+    // The selectorless compose skips the derived entry loudly instead of
+    // running both lanes; the record lane owns the branch now.
     await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
     const run = Queues.values(app.state().queues).find((candidate) => candidate.prs.some((pr) => pr.id === entry.id))
     expect(run).toBeUndefined()
@@ -469,10 +510,9 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(app.queue.resolveMember("PR1")).toMatchObject({ source: "record", id: "PR1" })
   })
 
-  // ————— enables-at-door: written for the door PR, skipped until the reducer
-  // relaxations land (stage 4). Each body is the honest post-door assertion. —————
+  // ————— the three formerly door-gated tests, live now that the door is open —————
 
-  it.skip("enables-at-door: a derived member merges end to end — pr/integrated APPLIES, prs/receipts byte-identical (A1 full)", async () => {
+  it("a derived member merges end to end — pr/integrated APPLIES as a store no-op, prs/receipts byte-identical (A1 full)", async () => {
     await using app = await createApp()
     await strandDerivedBranch(app, "issue/derived")
     const prsBefore = structuredClone(app.state().bays.prs)
@@ -486,30 +526,122 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(app.state().bays.receipts).toEqual(receiptsBefore)
   })
 
-  it.skip("enables-at-door: a live submit is a runnable derived row, not an unrecorded-submit refusal (A10 flip)", async () => {
-    // Needs the door's compose wiring (stage 4 replaces the intake sweep with
-    // self-derived admission): a branch + submit ref alone, no derived args,
-    // is selected and run by one selectorless compose, and the
-    // "visible, never runnable" refusal row survives only for MALFORMED facts.
-    await using app = await createApp({ steps: [passingCheck()], defaultSteps: ["check"] })
+  it("a live submit is a runnable derived row served by one selectorless compose, not an unrecorded-submit refusal (A10 flip, A1 by the front door)", async () => {
+    // The door's own wiring end to end: a branch + submit ref alone — no
+    // records, no derived args, no intake — is derived, admitted, and run by
+    // one selectorless compose under the configured mint + enrichment reader,
+    // and the "visible, never runnable" refusal row retires once the lane
+    // serves the branch.
+    const mint = volatilePrNumberMint()
+    await using app = await createApp({
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: mint,
+      readSubmitEnrichment: () => ({ changeId: CHANGE_ID, props: { bead: "22991" }, issue: "22991" }),
+    })
     await app.bays.recordBranchSubmit({ branch: "issue/post-door", sha: SHA, base: "main" })
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/post-door"])
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
     expect(app.state().bays.prs).toEqual({})
+    const record = Queues.values(app.state().queues).find((run) =>
+      run.prs.some((pr) => pr.branch === "issue/post-door"),
+    )
+    expect(record?.prs[0]).toMatchObject({
+      id: "PR1",
+      changeId: CHANGE_ID,
+      headSha: SHA,
+      revision: 1,
+      props: { bead: "22991" },
+      issue: "22991",
+    })
+    // Served ⇒ the refusal row retires everywhere it rendered.
     expect(app.queue.unrecordedSubmits()).toEqual([])
     const audit = app.queue.audit({ now: "2026-01-02T00:00:00.000Z" })
     expect(audit.findings.filter((finding) => finding.code === "unrecorded-submit")).toEqual([])
+    // Not yet served stays visible: a second ref-only branch with no compose
+    // between keeps its row — the row is "not picked up", never silence.
+    await app.bays.recordBranchSubmit({ branch: "issue/waiting", sha: RESUBMIT_SHA, base: "main" })
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/waiting"])
   })
 
-  it.skip("enables-at-door: replay converges over a journal holding recordless terminal events (A5 full)", async () => {
+  it("replay converges over a journal holding recordless terminal events, with zero store writes for the derived era (A5 full)", async () => {
     const journal = createMemoryJournal()
     const id = ids()
+    let mintedPrs: unknown
     {
       await using app = await createApp({ journal, id })
       await strandDerivedBranch(app, "issue/derived")
+      const prsBefore = structuredClone(app.state().bays.prs)
       await app.queue.run({ derived: [doorEntry(app, "issue/derived")] }, runtime)
+      // The tolerate branch is a store NO-OP: the pre-door era's records are
+      // byte-identical after the post-door segment applied its terminals.
+      expect(app.state().bays.prs).toEqual(prsBefore)
+      mintedPrs = prsBefore
     }
     await using replayed = await createApp({ journal, id })
-    expect(Object.keys(replayed.state().bays.prs)).toEqual(["PR1"])
+    expect(replayed.state().bays.prs).toEqual(mintedPrs)
+    const run = Queues.values(replayed.state().queues).find((record) => record.prs.some((pr) => pr.id === "PR2"))
+    expect(run?.prs[0]).toMatchObject({ id: "PR2", headSha: SHA })
+  })
+})
+
+describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", () => {
+  it("bay.intake refuses record-mint-retired for a branch a live submit fact owns and no record does", async () => {
+    await using app = await createApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/facted", sha: SHA, base: "main" })
+    await expect(
+      app.bays.intake({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE }),
+    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "record-mint-retired" } })
+    expect(app.state().bays.prs).toEqual({})
+  })
+
+  it("bay.submit refuses record-mint-retired for the same branch, and the message names the surviving path", async () => {
+    await using app = await createApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/facted", sha: SHA, base: "main" })
+    await expect(
+      app.bays.submit({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE }),
+    ).rejects.toThrow(/record-mint-retired|refs\/for/)
+    const refusal = await app.bays
+      .submit({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE })
+      .then(() => undefined)
+      .catch((error: unknown) => failureFact(error))
+    expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
+    expect(refusal?.message).toMatch(/refs\/for\/main\/<issue>/)
+    expect(app.state().bays.prs).toEqual({})
+  })
+
+  it("a factless branch keeps the legacy mint — the population no receiver delivered, still visible to the S7 drain gauge", async () => {
+    await using app = await createApp()
+    await app.bays.submit({ branch: "issue/legacy", headSha: SHA, base: "main", baseSha: BASE })
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+  })
+
+  it("the refusal code has exactly one spelling across every package source (A2 grep half)", () => {
+    const roots = readdirSync(packagesRoot).flatMap((pkg) => {
+      const src = join(packagesRoot, pkg, "src")
+      return existsSync(src) ? [src] : []
+    })
+    const spellings = new Set<string>()
+    for (const root of roots) {
+      for (const entry of readdirSync(root, { recursive: true }) as string[]) {
+        if (!entry.endsWith(".ts") && !entry.endsWith(".tsx")) continue
+        const source = readFileSync(join(root, entry), "utf8")
+        for (const match of source.matchAll(/record[-_ ]?mint[-_ ]?retired/giu)) spellings.add(match[0])
+      }
+    }
+    expect([...spellings]).toEqual(["record-mint-retired"])
+  })
+
+  it("the receiver's lane rule: intake dispatches only for a branch a LIVE record owns", async () => {
+    await using app = await createApp()
+    // No record: derived lane.
+    expect(recordLaneOwnsBranch(app.state().bays, "issue/nothing")).toBe(false)
+    // Terminal record: still the derived lane (the decisive A4 cell).
+    await strandDerivedBranch(app, "issue/terminal")
+    expect(recordLaneOwnsBranch(app.state().bays, "issue/terminal")).toBe(false)
+    // Live record: the grandfathered record lane.
+    await app.bays.submit({ branch: "issue/live", headSha: "6".repeat(40), base: "main", baseSha: BASE })
+    expect(recordLaneOwnsBranch(app.state().bays, "issue/live")).toBe(true)
   })
 })
