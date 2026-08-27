@@ -974,7 +974,8 @@ async function submitIntent(receiver: GitPushReceiver, ref: string, env?: Enviro
   }
   check(
     false,
-    `submit ref '${ref}' names no base branch that exists; tried ${splits.map((split) => `'${split.base}'`).join(", ")}`,
+    `submit ref '${ref}' names no base branch that exists; tried ${splits.map((split) => `'${split.base}'`).join(", ")}; ` +
+      "push to 'refs/for/<base>/<change>' with a base branch that exists",
   )
 }
 
@@ -1010,7 +1011,8 @@ async function validatePin(
   )
   check(
     pinned.code === 0,
-    `pinned base ${target.baseSha.slice(0, 12)} is not in the history of base branch '${target.base}'`,
+    `pinned base ${target.baseSha.slice(0, 12)} is not in the history of base branch '${target.base}'; ` +
+      `rebase the change onto '${target.base}' and push again`,
   )
   const descends = await receiverGit(receiver, ["merge-base", "--is-ancestor", target.baseSha, update.newSha], {
     env,
@@ -1019,7 +1021,8 @@ async function validatePin(
   })
   check(
     descends.code === 0,
-    `pushed head ${update.newSha.slice(0, 12)} does not descend from pinned base ${target.baseSha.slice(0, 12)}`,
+    `pushed head ${update.newSha.slice(0, 12)} does not descend from pinned base ` +
+      `${target.baseSha.slice(0, 12)}; rebase the change onto '${target.base}' and push again`,
   )
 }
 

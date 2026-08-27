@@ -11695,7 +11695,26 @@ describe("runYrd", () => {
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
     expect(refusal.stdout()).toBe("")
-    expect(refusal.stderr()).toBe("error: no bay 'missing'\n")
+    // Exact equality on the RENDERED bytes is deliberately the fence here: the
+    // selector refusal must keep naming how to find a real Bay. `no bay 'X'`
+    // alone is true and useless — the same defect this file already records at
+    // "tells a bayless author which step is missing", where it cost one seat
+    // three escalations and most of a day.
+    //
+    // The `resolve:` line is not decoration and not a second message: the
+    // refusal renderer lifts a quoted 'yrd ...' command out of the prose into
+    // it (actionable-error.ts `embeddedYrdCommands`), so in this file a cure is
+    // spelled as a quoted command or it does not reach the reader at all. The
+    // surrounding prose is discarded on the way, which is why asserting the raw
+    // message string here would fence something nobody ever sees.
+    expect(refusal.stderr()).toBe("error: no bay 'missing'\nresolve: yrd bay\n")
+
+    // The selectorless branch of the same helper. It had no test at all, and
+    // said only that nothing was available — never that Bays are something you
+    // open. A first-time caller cannot act on the bare statement.
+    const noneAtAll = outputIO()
+    expect(await runYrd(app, yrd("bay", "close"), noneAtAll.io)).toBe(1)
+    expect(noneAtAll.stderr()).toBe("error: no bays are available to close\nresolve: yrd bay open --bay <name>\n")
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)

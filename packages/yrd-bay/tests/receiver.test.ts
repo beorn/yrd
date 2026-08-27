@@ -556,6 +556,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(ancestry.code).not.toBe(0)
     expect(ancestry.stderr).toContain("does not descend from pinned base")
     expect(ancestry.stderr).toContain(unrelated.slice(0, 12))
+    // Both ancestry refusals must name the cure, not only the defect: this is
+    // what `git push` itself prints, so the pusher reads THIS and nothing else.
+    // The carrier check two functions below already says it this way; these
+    // two said only what was wrong.
+    expect(ancestry.stderr).toContain("rebase the change onto 'main' and push again")
 
     const wrongPin = await push(
       f,
@@ -563,6 +568,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       await installHookHost(f.root, { "issue/unrelated": target(unrelated) }),
     )
     expect(wrongPin.stderr).toContain("is not in the history of base branch 'main'")
+    expect(wrongPin.stderr).toContain("rebase the change onto 'main' and push again")
 
     await git(f.mainRepo, "switch", "-q", "main")
     await git(f.mainRepo, "switch", "-qc", "issue/unknown")
@@ -929,6 +935,24 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // only checked the exit code would pass without this path existing at all.
     expect(result.stderr).toContain("names no change")
     expect(result.stderr).toContain("refs/for/<base>/<change>")
+  })
+
+  it("names the cure when a refs/for push targets a base branch that does not exist", async () => {
+    // The sibling above — a ref with no change segment — has always named the
+    // spelling to use. This path, a well-formed ref whose BASE does not exist,
+    // listed the bases it tried and stopped there. `refs/for` is this repo's
+    // standard delivery path, so a stale or mistyped base is an ordinary
+    // mistake, and the pusher reads only what `git push` prints.
+    const f = await fixture("submit-nobase")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "nobase.txt")
+
+    const env = await installHookHost(f.root, {})
+    const result = await push(f, "work:refs/for/nosuchbase/22999", env)
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("names no base branch that exists")
+    expect(result.stderr).toContain("nosuchbase")
+    expect(result.stderr).toContain("push to 'refs/for/<base>/<change>' with a base branch that exists")
   })
 
   it("refuses a refs/for push whose resolver returns no carrier branch", async () => {

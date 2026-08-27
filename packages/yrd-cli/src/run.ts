@@ -2851,7 +2851,7 @@ function selectedBays(state: BaysState, selectors: readonly string[], cwd: strin
     return unique(
       selectors.map((selector) => {
         const bay = resolveBay(state, selector)
-        if (bay === undefined) refusal(`no bay '${selector}'`)
+        if (bay === undefined) refusal(`no bay '${selector}'; run 'yrd bay' to list available Bays`)
         return bay
       }),
     )
@@ -2859,7 +2859,9 @@ function selectedBays(state: BaysState, selectors: readonly string[], cwd: strin
   const local = currentBay(state, cwd)
   if (local !== undefined) return [local]
   const live = sortedBays(state).filter((bay) => bay.status !== "closed")
-  if (live.length === 0) refusal(`no bays are available to ${action}`)
+  if (live.length === 0) {
+    refusal(`no bays are available to ${action}; run 'yrd bay open --bay <name>' to create one`)
+  }
   return live
 }
 
