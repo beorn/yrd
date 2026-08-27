@@ -305,49 +305,56 @@ export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): b
  * the record lane as its consumer. Measured 2026-08-27 (PR2139): the record
  * lane merged revision 1, the submit fact survived at the merge commit's sha,
  * the terminal×different-sha cell arbitrated "derived", and the next compose
- * minted and merged an empty revision 2 — one approval, two merges. A
- * re-submission of a branch with record history re-enters through the record
- * lane (`yrd pr submit` mints a fresh identity beside the terminal record);
- * the branches this filter newly excludes stay loud via
- * {@link recordShadowedSubmits}.
+ * minted and merged an empty revision 2 — one approval, two merges. The
+ * incident's signature is landed CONTENT (the fact pointing at the landing
+ * commit itself), excluded via {@link alreadyLandedSubmits}; a terminal
+ * branch's genuinely NEW head composes here — post-purge the derived lane is
+ * the only re-entry (Q1).
  */
 export function derivedLaneBranches(bays: DeepReadonly<BaysState>): string[] {
   return Object.keys(bays.submits)
     .filter((branch) => {
       const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
-      if (records.length > 0) return false
+      // One-lane-consumes, decided by LIVE ownership plus landed content:
+      // - a LIVE record owns its branch, so its standing fact is that
+      //   record's own pending signal, never a derived admission;
+      // - a fact pointing AT a terminal record's landing commit is the
+      //   PR2139 incident cell — content already on main, a stale
+      //   re-projection, not an approval of new work (the empty double-merge
+      //   minted exactly there);
+      // - any OTHER terminal-record branch composes: post-purge (the legacy
+      //   mint is retired) the derived lane IS the only re-entry for a merged
+      //   or withdrawn branch's next head (Q1), and excluding record history
+      //   wholesale would strand every resubmit.
+      if (records.some((pr) => isLiveChange(pr as Change))) return false
+      if (alreadyLandedSubmits(bays).some((row) => row.branch === branch)) return false
       return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
     })
     .toSorted()
 }
 
 /**
- * The submits the derived lane may NOT serve and the record lane is not
- * serving either: a live submit fact on a branch with record HISTORY whose
- * newest-truth arbitration would still rule "derived" (terminal record,
- * different sha). Under the one-lane-consumes invariant (PR2139 double-merge,
- * 2026-08-27) these branches are excluded from {@link derivedLaneBranches};
- * this is the reporting surface that keeps the exclusion loud — the compose
- * warns one row per branch, and the cure is the record lane: `yrd pr submit
- * <branch>` mints a fresh identity beside the terminal record.
- *
- * A branch whose record is LIVE does not appear: its standing fact is the
- * record's own pending-revision signal, not an orphaned approval.
+ * Standing facts whose sha IS a terminal record's landing commit for the same
+ * branch: content the queue already merged, surviving as a re-projected ref —
+ * the PR2139 double-merge's exact signature. These never compose; the compose
+ * warns one row per branch (NO SILENT ERRORS) and the cure is retirement of
+ * the stale fact, not a resubmit.
  */
-export function recordShadowedSubmits(
+export function alreadyLandedSubmits(
   bays: DeepReadonly<BaysState>,
 ): Readonly<{ branch: string; sha: string; record: string }>[] {
   return Object.keys(bays.submits)
     .flatMap((branch) => {
-      const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
-      if (records.length === 0) return []
-      const verdict = arbitrateDerivedChange(records as Change[], bays.submits[branch])
-      if (verdict.lane !== "derived" || verdict.record === undefined) return []
       const submit = bays.submits[branch]
-      return submit === undefined ? [] : [{ branch, sha: submit.sha, record: verdict.record.id }]
+      if (submit === undefined) return []
+      const landed = Object.values(bays.prs).find(
+        (pr) => pr.branch === branch && !isLiveChange(pr as Change) && pr.integration?.commit === submit.sha,
+      )
+      return landed === undefined ? [] : [{ branch, sha: submit.sha, record: landed.id }]
     })
     .toSorted((left, right) => left.branch.localeCompare(right.branch))
 }
+
 
 /**
  * The door-side driver step, exported so tests (and, at the door, the compose)

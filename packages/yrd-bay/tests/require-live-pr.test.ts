@@ -9,7 +9,8 @@ import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "../src/plugin.ts"
+import { type Bays, createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "../src/plugin.ts"
+import type { DerivedSubmission } from "../src/model.ts"
 import { currentChangeRev, changeDeliveryState, type Change } from "../src/model.ts"
 
 const HEAD_1 = "1".repeat(40)
@@ -45,9 +46,15 @@ function workspaceAdapter(): BayWorkspace {
   }
 }
 
-function changeFacts(pr: Change | undefined) {
+function changeFacts(pr: Change | DerivedSubmission | undefined) {
   if (pr === undefined) throw new Error("expected PR")
+  if ("lane" in pr) throw new Error("expected a record-lane Change, got a derived submission")
   return { ...pr, delivery: changeDeliveryState(pr), current: currentChangeRev(pr) }
+}
+
+function record(result: Awaited<ReturnType<Bays["submitSelection"]>>): Change {
+  if ("lane" in result) throw new Error("expected a record-lane Change, got a derived submission")
+  return result
 }
 
 /** Seed a journal with one integrated change per entry (all on the given branch, so
@@ -103,7 +110,7 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
   it("resolves a branch with one terminal + one live change to the live one, for reads and mutating verbs", async () => {
     await using app = await appWithIntegrated("topic/b", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
     // Q1 mints a fresh live delivery (PR2) on the merged branch.
-    await app.bays.submitSelection("topic/b", mint(HEAD_2))
+    record(await app.bays.submitSelection("topic/b", mint(HEAD_2)))
 
     // Read: the branch selector resolves the LIVE PR, not the frozen integrated one.
     expect(changeFacts(app.bays.pr("topic/b"))).toMatchObject({ id: "PR2", delivery: "submitted" })
@@ -119,7 +126,7 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
       { pr: "PR2", headSha: HEAD_2, commit: "b".repeat(40) },
     ])
     // Two integrated PRs already collide on topic/c; a new head mints the live PR3.
-    await app.bays.submitSelection("topic/c", mint(HEAD_3))
+    record(await app.bays.submitSelection("topic/c", mint(HEAD_3)))
 
     expect(changeFacts(app.bays.pr("topic/c"))).toMatchObject({ id: "PR3", delivery: "submitted" })
     await app.bays.requestChecks({ pr: "topic/c" })
@@ -172,7 +179,7 @@ describe("resolvePR live-preference + requireLivePR mutation guard", () => {
 
   it("refuses a historical revision selector at the submit-selection mutation boundary", async () => {
     await using app = await appWithIntegrated("topic/h", [{ pr: "PR1", headSha: HEAD_1, commit: BASE }])
-    await app.bays.submitSelection("topic/h", mint(HEAD_2))
+    record(await app.bays.submitSelection("topic/h", mint(HEAD_2)))
     await app.bays.intake({ branch: "topic/h", headSha: HEAD_3, baseSha: BASE })
     await app.bays.submit({ pr: "PR2" })
 

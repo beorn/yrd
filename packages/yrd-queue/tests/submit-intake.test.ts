@@ -253,41 +253,34 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/duplicate"])
   })
 
-  it("a terminal-record branch re-submitted in git is NOT composed — one lane consumes, and the record lane is the way back in", async () => {
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+  it("a terminal-record branch re-submitted in git at a NEW head COMPOSES as its derived re-entry (Q1)", async () => {
     const queueMint = volatilePrNumberMint()
-    await using app = await createApp({ log, queueMint })
+    await using app = await createApp({ queueMint })
     const pr = await submitBranch(app, "issue/terminal")
     await app.bays.closePr({ pr: pr.id, reason: "superseded" })
-    // The author re-pushes the branch and its submit ref at a NEW sha. The S6
-    // door first ran this as a derived member (terminal×different-sha) — until
-    // the same cell double-merged a branch whose record had JUST merged and
-    // whose fact survived (PR2139, 2026-08-27). One submit fact, one lane: a
-    // branch with record history re-enters through `yrd pr submit` (which
-    // mints a fresh identity beside the terminal record — the next test), and
-    // the compose skips it LOUDLY instead of consuming it a second time.
+    // The author re-pushes the branch and its submit ref at a NEW sha. The
+    // record is HISTORY, not ownership: post-purge (the legacy mint is
+    // retired) the derived lane is the only re-entry for a terminal branch's
+    // next head, so this composes — the PR2139 double-merge stays fenced by
+    // the live-ownership exclusion, the landed-content exclusion, and the
+    // fact-retirement at every merge, none of which this state trips.
     await app.bays.recordBranchSubmit({ branch: "issue/terminal", sha: SHA, base: "main" })
 
-    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+    const runs = await app.queue.run({}, runtime)
+    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
 
-    // Nothing minted, nothing consumed: the withdrawn record is untouched
-    // history, no derived run exists, the fact stands for the record lane,
-    // and the exclusion said so with the remedy.
+    // The withdrawn record is untouched history; the new head ran under a
+    // FRESH derived identity beside it.
     const terminal = app.state().bays.prs[pr.id]
     if (terminal === undefined) throw new Error("expected the withdrawn record to survive")
     expect(changeDeliveryState(terminal)).toBe("withdrawn")
     expect(Object.keys(app.state().bays.prs)).toEqual([pr.id])
-    expect(queueMint.highWater()).toBe(0)
-    const record = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((member) => member.branch === "issue/terminal"),
+    expect(queueMint.highWater()).toBeGreaterThan(0)
+    const reentry = Queues.values(app.state().queues).find((run) =>
+      run.prs.some((member) => member.branch === "issue/terminal" && member.headSha === SHA),
     )
-    expect(record).toBeUndefined()
-    expect(app.state().bays.submits["issue/terminal"]).toMatchObject({ sha: SHA, base: "main" })
-    const shadowed = events.find(
-      (event) => event.kind === "log" && event.props?.action === "compose-derived-record-shadowed",
-    )
-    expect(shadowed, "the exclusion must be loud — a silent skip strands the approval").toBeDefined()
+    expect(reentry, "the new head must run as a derived member").toBeDefined()
+    expect(reentry?.prs[0]?.id).not.toBe(pr.id)
   })
 
   it("the collision rule under the sweep's race: bay.intake mints a fresh identity for a terminal record and no-ops an identical live one", async () => {

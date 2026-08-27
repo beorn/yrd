@@ -2662,10 +2662,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    const submitted = await app.bays.submitSelection("issue/feature", {
+    const submission = await app.bays.submitSelection("issue/feature", {
       resolveRevision: async () => featureSha,
       run: { runner: "test", leaseMs: 60_000 },
     })
+    if ("lane" in submission) throw new Error("expected a record-lane Change in this legacy fixture")
+    const submitted = submission
 
     expect(currentChangeRev(submitted)).toMatchObject({ n: 1, head: featureSha, baseSha: remoteBaseSha })
     expect(changeDeliveryState(submitted)).toBe("submitted")

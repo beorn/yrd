@@ -42,6 +42,7 @@ import {
   type ChangeDeliveryState,
   type ChangeRev,
   type ChangePublicationInput,
+  type DerivedSubmission,
   type MaterializeDeploymentInput,
   type ReleaseDeploymentJobInput,
 } from "@yrd/bay"
@@ -5487,7 +5488,11 @@ function createOnlyRefusal(
 }
 
 type ChangeSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"
-type ChangeSelectionResult = Readonly<{ prs: readonly Change[]; warnings: readonly string[] }>
+type ChangeSelectionResult = Readonly<{
+  prs: readonly Change[]
+  derived: readonly DerivedSubmission[]
+  warnings: readonly string[]
+}>
 
 async function applyChangeSelection(
   app: YrdCliApp,
@@ -5504,6 +5509,7 @@ async function applyChangeSelection(
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   const prs: Change[] = []
+  const derived: DerivedSubmission[] = []
   // Advisory warnings for submissions that SUCCEED with a caveat (e.g. a dirty
   // worktree — D3). Collected from the bay operation and rendered in the result
   // envelope, matching the queue list/status `warnings` shape.
@@ -5526,13 +5532,16 @@ async function applyChangeSelection(
     const metadata = await resolveSubmitMetadata(app, selector, options, io)
     // Internal compatibility seam: `draft` means emit `pr/pushed` without
     // `pr/submitted`; it is deliberately not part of either submit CLI.
-    let pr = await app.bays.submitSelection(selector, {
+    const submission = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
       ...(options.track === false ? { track: false } : {}),
-      ...(stageAsDraft ? { draft: true } : {}),
+      // pr.create stages a real draft record; the pre-submit staging pass of
+      // pr.submit/bay.submit previews without writing (a recordless branch
+      // returns the derived preview instead of refusing or minting).
+      ...(stageAsDraft ? (createOnly ? { draft: true } : { stage: true }) : {}),
       ...(props === undefined ? {} : { props }),
       ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
@@ -5540,6 +5549,13 @@ async function applyChangeSelection(
       run: runtimeOptions(io),
       warnings,
     })
+    if ("lane" in submission) {
+      // Routed to the derived lane: the fact is the submission. Record-lane
+      // aftercare (supersede-cancel, reviewers, check requests) does not apply.
+      derived.push(submission)
+      continue
+    }
+    let pr = submission
     if (previous !== undefined) {
       const priorRevision = currentChangeRev(previous)
       const currentRevision = currentChangeRev(pr)
@@ -5568,7 +5584,7 @@ async function applyChangeSelection(
     }
     prs.push(pr)
   }
-  return { prs, warnings }
+  return { prs, derived, warnings }
 }
 
 async function printChangeSelectionResult(
@@ -5820,6 +5836,26 @@ async function applyChangeSelectionVerb(
   }
   for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
   const selected = checkable.map((pr) => pr.id)
+  // A submit routed entirely to the derived lane admitted nothing on the
+  // record side and is still a SUCCESS: the facts are written, compose picks
+  // them up. Only a selection that produced neither lane's acceptance is the
+  // author-billed refusal below.
+  if (selected.length === 0 && result.derived.length > 0) {
+    await printResultWithWarnings(
+      io,
+      jsonEnabled(options),
+      { command, prs: [], derived: result.derived, ...(requiredChecks.length === 0 ? {} : { requiredChecks }) },
+      createElement(ChangeResultView, { prs: [], runs: [], now: io.now?.() ?? Date.now() }),
+      [
+        ...warnings,
+        ...result.derived.map(
+          (submission) =>
+            `submitted to the derived lane: ${submission.branch} @ ${submission.sha.slice(0, 12)} (base ${submission.base}) — composes as a derived member on the next queue pass`,
+        ),
+      ],
+    )
+    return 0
+  }
   if (selected.length === 0) {
     // Nothing was admitted, but the selection can still have handed back
     // author-owned work (a needs-author or rejected change returned
@@ -5873,6 +5909,7 @@ async function applyChangeSelectionVerb(
       // reach no surface at all. It rides the envelope rather than stderr,
       // which stays silent on success (@i/10-merge-queue/failed-check-erased).
       ...(requiredChecks.length === 0 ? {} : { requiredChecks }),
+      ...(result.derived.length === 0 ? {} : { derived: result.derived }),
     },
     createElement(ChangeResultView, {
       prs: currentPrs,
@@ -5881,7 +5918,16 @@ async function applyChangeSelectionVerb(
       now: io.now?.() ?? Date.now(),
       ...(io.columns === undefined ? {} : { columns: io.columns }),
     }),
-    warnings,
+    [
+      ...warnings,
+      // The derived acceptance is a success line, not a warning, but it rides
+      // the same human stream so a submit's outcome is never silent: the fact
+      // is the submission, and the queue composes it on its next pass.
+      ...result.derived.map(
+        (submission) =>
+          `submitted to the derived lane: ${submission.branch} @ ${submission.sha.slice(0, 12)} (base ${submission.base}) — composes as a derived member on the next queue pass`,
+      ),
+    ],
   )
   return changeSelectionExitCode(currentPrs)
 }
@@ -10446,6 +10492,9 @@ async function applyRedeliveryStep(
     run: runtimeOptions(io),
     warnings,
   })
+  // Routed to the derived lane: the fact is the submission; compose admits it
+  // and runs its checks — nothing further to request here.
+  if ("lane" in submitted) return
   const delivery = changeDeliveryState(submitted)
   if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") return
   await requireQueueableSubmodulePins(submitted, services, io)

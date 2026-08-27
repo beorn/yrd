@@ -109,6 +109,7 @@ import {
   BranchUnsubmitSchema,
   type BranchSubmit,
   type BranchUnsubmit,
+  type DerivedSubmission,
 } from "./model.ts"
 
 const TextSchema = z.string().trim().min(1)
@@ -239,6 +240,10 @@ export type SubmitSelectionOptions = Readonly<{
    * governs future revisions, which a terminal change no longer has. */
   track?: boolean
   draft?: boolean
+  /** Pre-submit staging pass: resolve what WOULD submit without writing. On a
+   * recordless branch this returns the derived preview instead of minting or
+   * writing the fact; record paths keep their draft-stage behavior. */
+  stage?: boolean
   props?: ChangeProps
   resolveRevision(ref: string): Promise<string | undefined>
   /** Parent SHAs of one commit in the submission repository. The active-Bay
@@ -752,7 +757,7 @@ export type Bays = Readonly<{
   certifyHandoff(args: CertifyHandoffArgs): Promise<CommandResult>
   intake(args: IntakeChangeArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
-  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change>>
+  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change> | DerivedSubmission>
   /** Live queue SHA `pr create` will consume for this bay — not the historical pin. */
   effectiveBase(selector: string, requestedBase?: string): Promise<BayBaseTarget>
   close(args: CloseBayArgs): Promise<CommandResult>
@@ -1013,7 +1018,7 @@ export function createBays(
   const submitSelectionOperation = async (
     selector: string,
     options: SubmitSelectionOptions,
-  ): Promise<DeepReadonly<Change>> => {
+  ): Promise<DeepReadonly<Change> | DerivedSubmission> => {
     let snapshot = state()
     const resolved = resolveChangeMatch(snapshot, selector)
     if (resolved?.revision !== undefined) requireLiveChange(snapshot, selector)
@@ -1199,23 +1204,30 @@ export function createBays(
         }
         return submitted
       }
-      await submitOperation({
-        branch: selector,
-        headSha,
-        ...resolved,
-        ...(options.issue === undefined ? {} : { issue: options.issue }),
-        ...(options.draft === true ? { draft: true } : {}),
-        ...(options.props === undefined ? {} : { props: options.props }),
-      })
-      const submitted = resolveChange(state(), selector)
-      if (submitted === undefined) {
+      // THE LEGACY MINT IS RETIRED (A2 fact-keyed grandfather, purged
+      // 2026-08-27): a recordless direct branch routes to the DERIVED lane —
+      // the branch/submitted fact is the submission, compose admits it under
+      // the synthetic identity, and no record ever mints here again. The
+      // staging pass previews without writing; pr.create's draft records were
+      // a record-lane feature and refuse with the cure.
+      if (options.stage === true) {
+        return { lane: "derived", branch: selector, sha: headSha, base: resolved.base }
+      }
+      if (options.draft === true) {
         raiseFailure(
-          "infrastructure",
-          "pr-state-invalid",
-          `yrd: direct branch submit '${selector}' did not create a change`,
+          "refusal",
+          "record-mint-retired",
+          `yrd: draft records are retired — push '${selector}' and submit it plainly ('yrd pr submit ${selector}'), which runs it as a derived member`,
         )
       }
-      return submitted
+      await actions.recordBranchSubmit({ branch: selector, sha: headSha, base: resolved.base })
+      log?.info?.("submit routed to the derived lane; the fact is the submission, no record minted", {
+        action: "submit-derived-routed",
+        branch: selector,
+        sha: headSha,
+        base: resolved.base,
+      })
+      return { lane: "derived", branch: selector, sha: headSha, base: resolved.base }
     }
 
     if (bay.status !== "active") {
@@ -1227,20 +1239,27 @@ export function createBays(
     raiseFailure("refusal", "pr-not-pushed", `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
   }
 
-  const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change>> => {
+  const submitSelection = (
+    selector: string,
+    options: SubmitSelectionOptions,
+  ): Promise<DeepReadonly<Change> | DerivedSubmission> => {
     const before = resolveChange(state(), selector)
     return observe(
       {
         lifecycle: "submit",
         identity: before === undefined ? undefined : changeIdentity(before),
         attributes: { selector },
-        resultAttributes: changeIdentity,
+        resultAttributes: (result) => ("lane" in result ? { branch: result.branch } : changeIdentity(result)),
       },
       // Bind the resolved title/description in one seam AFTER the change is
       // materialized, so every submit path (bay, direct branch, resubmit,
       // draft, integrated) records the same metadata without threading it
-      // through each early return.
-      async () => bindMetadata(await submitSelectionOperation(selector, options), options),
+      // through each early return. A derived-routed submission has no record
+      // to bind metadata on; the fact is the whole submission.
+      async () => {
+        const result = await submitSelectionOperation(selector, options)
+        return "lane" in result ? result : bindMetadata(result, options)
+      },
     )
   }
 

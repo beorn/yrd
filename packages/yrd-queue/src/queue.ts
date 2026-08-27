@@ -137,7 +137,7 @@ import {
   derivedLaneBranches,
   isDerivedRunMember,
   materializeDerivedRunMembers,
-  recordShadowedSubmits,
+  alreadyLandedSubmits,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
   type DerivedSubmitEnrichment,
@@ -1346,20 +1346,21 @@ function createQueue<Shape extends ChangeShape>(
    */
   const deriveRefOnlyMembers = async (skip: ReadonlySet<string>): Promise<DerivedRunMember[]> => {
     const snapshot = runtime()
-    // One lane consumes one push: a standing fact on a branch with record
-    // history is OUTSIDE the derived universe (PR2139 double-merge,
-    // 2026-08-27), and an exclusion nobody can see is a stranded approval —
-    // say so, once per compose per branch, with the way back in.
-    for (const shadowed of recordShadowedSubmits(snapshot.bays)) {
-      if (skip.has(shadowed.branch)) continue
+    // One lane consumes one push, decided by LIVE ownership plus landed
+    // content (see derivedLaneBranches). The PR2139 incident cell — a fact
+    // standing AT a terminal record's landing commit — is excluded there and
+    // must stay loud here: content already merged, the fact is a stale
+    // re-projection to retire, never new work.
+    for (const stale of alreadyLandedSubmits(snapshot.bays)) {
+      if (skip.has(stale.branch)) continue
       log.warn?.(
-        "queue compose will not derive an admission for a branch with record history; " +
-          "re-enter through the record lane: 'yrd pr submit " + shadowed.branch + "'",
+        "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
+          "the fact is stale — retire it (git push bay :refs/yrd/submit/" + stale.branch + ")",
         {
-          action: "compose-derived-record-shadowed",
-          branch: shadowed.branch,
-          sha: shadowed.sha,
-          record: shadowed.record,
+          action: "compose-derived-fact-already-landed",
+          branch: stale.branch,
+          sha: stale.sha,
+          record: stale.record,
         },
       )
     }

@@ -5,13 +5,14 @@
  * survived, and the next selectorless compose arbitrated the branch DERIVED
  * (terminal×different-sha) and merged an empty revision 2 whose second parent
  * was revision 1's own merge commit — a phantom revision and a second merge
- * commit for one approval. The invariant these tests fence: a branch with ANY
- * record-lane Change — open, queued, merged or withdrawn — is never composed
- * by the derived lane (one lane consumes one push), and the record lane's
- * merge retires the branch's submit fact in the same journal write that
- * records the terminal, so the fact cannot outlive the approval it carried.
- * Genuinely recordless branches keep composing: the derived lane exists for
- * exactly them.
+ * commit for one approval. The invariant these tests fence: one lane consumes
+ * one push, decided by LIVE ownership plus landed content — a live record's
+ * branch never composes derived (the fact is that record's pending signal), a
+ * fact pointing AT a terminal record's landing commit never composes (stale
+ * landed content, the incident's exact signature), and the record lane's
+ * merge retires the branch's fact in the same journal write as the terminal.
+ * A terminal branch's genuinely NEW head DOES compose: post-purge the derived
+ * lane is the only re-entry (Q1), and recordless branches are its population.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -25,7 +26,7 @@ import {
   candidateRefFor,
   derivedLaneBranches,
   Queues,
-  recordShadowedSubmits,
+  alreadyLandedSubmits,
   withMerge,
   withQueue,
   withStep,
@@ -183,7 +184,7 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     // the old universe ruled DERIVED.
     await app.bays.recordBranchSubmit({ branch: "task/fence", sha: MERGED, base: "main" })
     expect(derivedLaneBranches(app.state().bays)).toEqual([])
-    expect(recordShadowedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/fence"])
+    expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/fence"])
 
     // The next selectorless compose — where the empty revision 2 was minted
     // and merged live — must compose NOTHING for this branch.
@@ -195,9 +196,9 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     )
     expect(doubled, "no derived run may exist beside the record lane's merge").toEqual([])
 
-    // NO SILENT ERRORS: the exclusion says so, names the branch, and points at
-    // the record lane as the way back in.
-    expect(actionsLogged(events)).toContain("compose-derived-record-shadowed")
+    // NO SILENT ERRORS: the exclusion says so, names the branch, and names the
+    // cure — the fact is stale landed content, retire it.
+    expect(actionsLogged(events)).toContain("compose-derived-fact-already-landed")
   })
 
   it("the record lane's merge retires the branch's submit fact in the same journal write (reason: superseded)", async () => {
@@ -233,10 +234,8 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     expect(replayed.state().bays.submits["task/retired"]).toBeUndefined()
   })
 
-  it("a mid-run re-push is NOT retired: a fact at a different sha survives the merge and waits for the record lane", async () => {
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    await using app = await createApp({ log })
+  it("a mid-run re-push survives the merge and COMPOSES as the branch's derived re-entry (Q1)", async () => {
+    await using app = await createApp({})
     const pr = await submitBranch(app, "task/repushed")
     // The author approved NEWER content than the revision the run pins.
     await app.bays.recordBranchSubmit({ branch: "task/repushed", sha: RESUBMIT_SHA, base: "main" })
@@ -244,22 +243,27 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     const runs = await app.queue.run({ prs: [pr.id] }, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
 
-    // The standing consent is for content the merge did NOT land — it stands.
+    // The standing consent is for content the merge did NOT land — it stands,
+    // and post-purge the derived lane IS the terminal branch's re-entry: the
+    // record is history, the new head is new work (Q1). Excluding record
+    // history wholesale would strand every resubmit of a merged branch.
     expect(app.state().bays.submits["task/repushed"]).toMatchObject({ sha: RESUBMIT_SHA })
-    // But the branch has record history, so the derived lane still may not
-    // consume it: the compose skips it loudly and the record lane (`yrd pr
-    // submit`) is the way forward.
-    expect(derivedLaneBranches(app.state().bays)).toEqual([])
-    expect(recordShadowedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/repushed"])
-    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
-    expect(actionsLogged(events)).toContain("compose-derived-record-shadowed")
+    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
+    expect(derivedLaneBranches(app.state().bays)).toEqual(["task/repushed"])
+    const again = await app.queue.run({}, runtime)
+    expect(again).toMatchObject([{ status: "completed", conclusion: "success" }])
+    const reentry = Queues.values(app.state().queues).find((run) =>
+      run.prs.some((member) => member.branch === "task/repushed" && member.headSha === RESUBMIT_SHA),
+    )
+    expect(reentry, "the new head runs as a derived member").toBeDefined()
+    expect(reentry?.prs[0]?.id).not.toBe(pr.id)
   })
 
   it("a genuinely recordless branch still composes, runs and merges as a derived member", async () => {
     await using app = await createApp({})
     await app.bays.recordBranchSubmit({ branch: "issue/recordless", sha: RECORDLESS_SHA, base: "main" })
     expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless"])
-    expect(recordShadowedSubmits(app.state().bays)).toEqual([])
+    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
 
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
@@ -270,26 +274,26 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     expect(record?.prs[0]).toMatchObject({ branch: "issue/recordless", headSha: RECORDLESS_SHA })
   })
 
-  it("EVERY record state excludes its branch from the derived universe — open, withdrawn, merged — and only recordless branches remain", async () => {
+  it("the derived universe: live ownership and landed content exclude; terminal history with a NEW head composes", async () => {
     await using app = await createApp({})
-    // Open record + fact: record-lane pendency, excluded and NOT shadowed.
+    // Open record + fact: record-lane pendency, excluded — the fact is the
+    // live record's own pending signal.
     await submitBranch(app, "task/open")
     await app.bays.recordBranchSubmit({ branch: "task/open", sha: SHA, base: "main" })
-    // Withdrawn record + fact: excluded AND shadowed (the old flip cell).
+    // Withdrawn record + NEW-head fact: the terminal branch's derived
+    // re-entry (Q1) — composes.
     const withdrawn = await submitBranch(app, "task/withdrawn")
     await app.bays.closePr({ pr: withdrawn.id, reason: "superseded" })
     await app.bays.recordBranchSubmit({ branch: "task/withdrawn", sha: RESUBMIT_SHA, base: "main" })
-    // Merged record + fact at the merge commit: the incident cell, excluded.
+    // Merged record + fact AT the landing commit: the incident cell — stale
+    // landed content, excluded.
     const merged = await submitBranch(app, "task/merged")
     await app.queue.run({ prs: [merged.id] }, runtime)
     await app.bays.recordBranchSubmit({ branch: "task/merged", sha: MERGED, base: "main" })
     // Recordless: the derived lane's own population.
     await app.bays.recordBranchSubmit({ branch: "issue/recordless", sha: RECORDLESS_SHA, base: "main" })
 
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless"])
-    expect(recordShadowedSubmits(app.state().bays).map((row) => row.branch)).toEqual([
-      "task/merged",
-      "task/withdrawn",
-    ])
+    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless", "task/withdrawn"])
+    expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/merged"])
   })
 })

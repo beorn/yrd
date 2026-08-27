@@ -215,11 +215,13 @@ describe("native needs-author lifecycle", () => {
     expect(app.bays.prs().map(({ id }) => id)).toContain(pr)
 
     const props = { request: "needs-author-repair" }
-    const correlated = await app.bays.submitSelection(pr, {
+    const submission = await app.bays.submitSelection(pr, {
       props,
       resolveRevision: async (selector) => (selector === "main" ? BASE : HEAD),
       run: runtime,
     })
+    if ("lane" in submission) throw new Error("expected a record-lane Change for a record id selector")
+    const correlated = submission
     expect(changeFacts(correlated)).toMatchObject({
       id: pr,
       revision: 1,

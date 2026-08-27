@@ -940,6 +940,15 @@ export const BranchSubmitSchema = z
   .strict()
 export type BranchSubmit = z.infer<typeof BranchSubmitSchema>
 
+/**
+ * A submit routed to the DERIVED lane: the branch/submitted fact IS the
+ * submission — no record mints, compose admits it under the synthetic
+ * identity. The legacy A2 fact-keyed mint (a factless `pr submit` creating a
+ * Change record post-S6) is retired; a live record still takes the record
+ * path until S7 deletes the store (2026-08-27 operator ruling: one lane).
+ */
+export type DerivedSubmission = Readonly<{ lane: "derived"; branch: string; sha: string; base: string }>
+
 /** CLOSED: a new reason is a schema change, never a string (@cto efd1fa9a, constraint 1). */
 export const BranchUnsubmitReasonSchema = z.enum(["deleted", "archived", "superseded"])
 export type BranchUnsubmitReason = z.infer<typeof BranchUnsubmitReasonSchema>

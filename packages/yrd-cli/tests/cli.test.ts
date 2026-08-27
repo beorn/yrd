@@ -699,15 +699,13 @@ async function submitBayFixture(app: TestApp, bay: string): Promise<void> {
   // Domain fixture: callers below explicitly control check-request and Queue
   // timing. Public `bay submit` owns the synchronous handoff behavior proved
   // by its focused regression instead of silently changing these fixtures.
-  expect(
-    changeDeliveryState(
-      await app.bays.submitSelection(bay, {
-        resolveRevision: async () => undefined,
-        resolveParents: async () => ["0".repeat(40)],
-        run: { runner: "cli-test", leaseMs: 60_000 },
-      }),
-    ),
-  ).toBe("submitted")
+  const bayResult = await app.bays.submitSelection(bay, {
+    resolveRevision: async () => undefined,
+    resolveParents: async () => ["0".repeat(40)],
+    run: { runner: "cli-test", leaseMs: 60_000 },
+  })
+  if ("lane" in bayResult) throw new Error("expected a record-lane Change from a bay submit")
+  expect(changeDeliveryState(bayResult)).toBe("submitted")
 }
 
 async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open"]>[0]): Promise<void> {
