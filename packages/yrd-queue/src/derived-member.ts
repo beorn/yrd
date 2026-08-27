@@ -24,8 +24,9 @@ export type DerivedMemberIdentity = Readonly<{
   id: string
   /** Present only when the identity was reused from a retained snapshot that
    * recorded one. A freshly minted member has no changeId yet — the derived
-   * admission path sources it from the commit's Change-Id trailer, never here:
-   * this function owns the NUMBER contract only. */
+   * admission path sources it from the commit's Change-Id trailer or its
+   * synthetic submit-fact mint (changeIdForDerivedSubmit), never here: this
+   * function owns the NUMBER contract only. */
   changeId?: string
   revision: number
   /** True when a fresh number was committed to the mint; false when the latest
