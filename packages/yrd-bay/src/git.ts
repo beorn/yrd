@@ -163,21 +163,37 @@ export function resolveBayWorkspacePath(
   return undefined
 }
 
+/**
+ * The local git remote name every Bay workspace `configureIntake` provisions
+ * names Yrd's own push receiver under — never the `origin` a workspace was
+ * cloned from. A `refs/for` submission (`git push ${RECEIVER_REMOTE_NAME}
+ * HEAD:refs/for/<base>/<issue>`) is read by this remote alone; origin never
+ * hears of it (prs.git store, receiver.ts). Printed cure/resolution text that
+ * names `origin` for a `refs/for` push sends the reader to a remote that
+ * silently discards the submission — import this constant instead of a
+ * second hand-typed literal.
+ */
+export const RECEIVER_REMOTE_NAME = "bay"
+
 async function configureIntake(git: Git, path: string, remote: string): Promise<void> {
-  const existing = await git.run(path, ["remote", "get-url", "bay"], true)
+  const existing = await git.run(path, ["remote", "get-url", RECEIVER_REMOTE_NAME], true)
   if (existing.code !== 0 || existing.stdout.trim() !== remote) {
     const configured = await git.mutateConfig(
       path,
-      existing.code === 0 ? ["remote", "set-url", "bay", remote] : ["remote", "add", "bay", remote],
+      existing.code === 0
+        ? ["remote", "set-url", RECEIVER_REMOTE_NAME, remote]
+        : ["remote", "add", RECEIVER_REMOTE_NAME, remote],
     )
     if (configured.code !== 0) {
-      const raced = await git.run(path, ["remote", "get-url", "bay"], true)
+      const raced = await git.run(path, ["remote", "get-url", RECEIVER_REMOTE_NAME], true)
       if (raced.code !== 0 || raced.stdout.trim() !== remote) {
-        throw new Error(configured.stderr.trim() || configured.stdout.trim() || "could not configure bay remote")
+        throw new Error(
+          configured.stderr.trim() || configured.stdout.trim() || `could not configure ${RECEIVER_REMOTE_NAME} remote`,
+        )
       }
     }
   }
-  await git.run(path, ["config", "--worktree", "remote.pushDefault", "bay"])
+  await git.run(path, ["config", "--worktree", "remote.pushDefault", RECEIVER_REMOTE_NAME])
   await git.run(path, ["config", "--worktree", "push.default", "current"])
 }
 

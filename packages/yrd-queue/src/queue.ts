@@ -1,6 +1,7 @@
 import {
   GitRefSchema,
   GitShaSchema,
+  RECEIVER_REMOTE_NAME,
   ChangeAlreadyMergedSchema,
   ChangeAdmissionRecordedFactSchema,
   ChangeIntegratedSchema,
@@ -6431,7 +6432,7 @@ function auditQueues(
         // compose is not running, derived admission is unwired, or the
         // derivation refused (the queue log's 'compose-derived-*' actions say
         // which). Re-pushing branch + submit ref renews the authority.
-        resolution: [`git push origin ${submit.branch}:refs/for/${submit.base}/<issue>`],
+        resolution: [`git push ${RECEIVER_REMOTE_NAME} ${submit.branch}:refs/for/${submit.base}/<issue>`],
       })
     }
   }
