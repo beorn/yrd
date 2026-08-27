@@ -1,4 +1,5 @@
 export * from "./alternates-audit.ts"
+export * from "./derived-admission.ts"
 export * from "./derived-member.ts"
 export * from "./model.ts"
 export * from "./queue.ts"

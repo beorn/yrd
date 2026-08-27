@@ -133,6 +133,34 @@ describe("terminalSettlementTargets", () => {
     expect(found.integrated).toBe(true)
   })
 
+  it("settles a DERIVED member's snapshot-sourced pr/integrated — recordless, trailer-sourced prop, no submitter (S6 A8)", () => {
+    // The exact payload the S6 re-sourced merge bookkeeping emits for a member
+    // with no record: every field from the run's ChangeSnapshot, props from
+    // the commit trailer, and deliberately no submitter (the snapshot schema
+    // carries none). Settlement reads the JOURNAL, never the record store, so
+    // the recordless member's bead prop must reach the hook unchanged.
+    const derived = frame([
+      {
+        name: "pr/integrated",
+        data: {
+          pr: "PR2087",
+          revision: 2,
+          headSha: "7".repeat(40),
+          run: "R31",
+          issueRef: "22991",
+          commit: "b".repeat(40),
+          landingSha: "b".repeat(40),
+          baseSha: "a".repeat(40),
+          changeId: `I${"c".repeat(40)}`,
+          props: { "host-request": "bead-close" },
+        },
+      },
+    ])
+    const found = terminalSettlementTargets([derived], "host-request")
+    expect(found.targets).toEqual([{ key: "host-request", value: "bead-close", eventId: expect.any(String) }])
+    expect(found.integrated).toBe(true)
+  })
+
   it("settles pre-props journal frames spelled correlation: {namespace, id}", () => {
     const values = [frame([legacyTerminal("pr/rejected", "host-request", "legacy")])]
     const found = terminalSettlementTargets(values, "host-request")

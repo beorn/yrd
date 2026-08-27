@@ -130,6 +130,14 @@ import {
   type UnrecordedSubmit,
 } from "./model.ts"
 import {
+  DerivedRunMemberSchema,
+  derivedAuthorityLookup,
+  isDerivedRunMember,
+  materializeDerivedRunMembers,
+  type DerivedAuthorityLookup,
+  type DerivedRunMember,
+} from "./derived-admission.ts"
+import {
   activeQueueRootIds,
   childRunId,
   indexQueueChild,
@@ -220,6 +228,12 @@ const QueueRunArgsSchema = z
     declaredPlan: DeclaredStepPlanSchema.optional(),
     /** Immutable Candidate facts prepared by the effectful Queue facade. */
     candidate: CandidateCreatedSchema.optional(),
+    /** Derived members — branches running from their live submit fact with no
+     * record (S6 door design §2). Identity minted by the driver at admission
+     * time (commit-before-escape); apply re-validates each against the live
+     * submit fact and materializes it for the same selection the records get.
+     * Until the door retires the 2b intake sweep no live caller builds this. */
+    derived: z.array(DerivedRunMemberSchema).optional(),
   })
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
@@ -1587,6 +1601,11 @@ function createQueue<Shape extends ChangeShape>(
     if (resolveCycleBase === undefined) return
     for (const pr of prs) {
       if (!checksRequested(pr)) continue
+      // Derived member (S6): its check authority IS the live submit fact,
+      // pinned to exactly the submit sha — no `pr/checks-requested` event
+      // exists to re-point, and dispatching one would refuse pr-not-found.
+      // Admission pins the cycle base per dispatch instead.
+      if (runtime().bays.prs[pr.id] === undefined) continue
       const base = baseIdentity(pr.base)
       const baseSha = await resolveCycleBase(base)
       if (checkRequest(pr)?.baseSha === baseSha) continue
@@ -1699,13 +1718,19 @@ function createQueue<Shape extends ChangeShape>(
   const recordRevisionAdmission = (
     pr: DeepReadonly<Change>,
     admission: ChangeAdmissionRecord,
-  ): Promise<CommandResult> =>
-    actions.recordAdmission({
+  ): Promise<CommandResult | undefined> => {
+    // Derived member (S6 census #9): the record-side admission copy is the
+    // duplicated authority this program deletes. The verdict already persists
+    // in the admission Jobs and the queues-slice refusal streak; dispatching
+    // `recordAdmission` for a recordless member would only refuse pr-not-found.
+    if (runtime().bays.prs[pr.id] === undefined) return Promise.resolve(undefined)
+    return actions.recordAdmission({
       pr: pr.id,
       revision: changeRevisionNumber(pr),
       headSha: changeHead(pr),
       admission,
     })
+  }
 
   /** The authority count this verdict may record, announcing an unresolved one.
    *
@@ -1718,6 +1743,13 @@ function createQueue<Shape extends ChangeShape>(
    * carrier and the logger (@yrd/core/rebuilt-carrier-denied-retry). */
   const verdictRequestCount = (pr: DeepReadonly<Change>, baseSha: string): number | "unresolved" => {
     const tally = revisionCheckRequestTally(pr, baseSha)
+    // A derived member's synthetic request records no base BY DESIGN (its
+    // authority is the live submit fact) and no verdict is ever recorded for
+    // it, so an unresolved tally is not the durable data defect the record
+    // lane must announce.
+    if (tally.status === "unresolved" && runtime().bays.prs[pr.id] === undefined) {
+      return recordedRequestCount(tally)
+    }
     if (tally.status === "unresolved") {
       log.warn?.("queue checks before queueing could not resolve the base of every check request for this tree", {
         action: "admission-request-count-unresolved",
@@ -1986,10 +2018,14 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<void> => {
     for (const selector of selectors) {
       if (selector === undefined) continue
-      const pr = resolveChange(runtime().bays, selector)
-      // A selector that names no PR is the `pr-not-found` refusal itself: there
+      const snapshot = runtime()
+      // Record first, retained snapshot second (the id-seam): a DERIVED member
+      // has no record but its refusal streak must still attribute — a wedge
+      // against a recordless member is exactly as invisible as 22395's. A
+      // selector neither resolves is the `pr-not-found` refusal itself: there
       // is nothing to attribute a streak to, and the caller already logged it
       // loud. Anything else would invent a wedge against a phantom id.
+      const pr = resolveMemberById(snapshot.bays, snapshot.queues, selector)
       if (pr === undefined) continue
       try {
         await appendAdmissionRefusal({
@@ -2036,6 +2072,7 @@ function createQueue<Shape extends ChangeShape>(
     resolveCycleBase: CycleBaseResolver | undefined,
     selection?: "explicit",
     runOptions?: RunJobOptions,
+    derived: readonly DeepReadonly<Change>[] = [],
   ): Promise<AdmissionDispatch> => {
     const admitted: string[] = []
     const refused: string[] = []
@@ -2044,7 +2081,7 @@ function createQueue<Shape extends ChangeShape>(
     const selectorless = selection !== "explicit"
     for (const selector of selectors) {
       try {
-        const pr = resolveChange(runtime().bays, selector)
+        const pr = resolveChange(runtime().bays, selector) ?? derived.find((member) => member.id === selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, selector))
         const snapshot = runtime()
         const delivery = changeDeliveryState(pr)
@@ -2099,6 +2136,7 @@ function createQueue<Shape extends ChangeShape>(
     options: QueueRunOptions,
     resolveCycleBase: CycleBaseResolver | undefined,
     selection?: "explicit",
+    derived: readonly DeepReadonly<Change>[] = [],
   ): Promise<string[]> => {
     const targets = new Set(selectors)
     const admitted = new Set<string>()
@@ -2148,7 +2186,7 @@ function createQueue<Shape extends ChangeShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined).filter(
+      const queued = admissionQueue(snapshot, steps, selection === "explicit" ? targets : undefined, derived).filter(
         (pr) => !released.has(pr.id),
       )
       // A habitant (`continueAdmissions` installed) admits one change per turn so a
@@ -2160,6 +2198,7 @@ function createQueue<Shape extends ChangeShape>(
         resolveCycleBase,
         selection,
         options,
+        derived,
       )
       for (const pr of dispatched.admitted) admitted.add(pr)
       for (const pr of dispatched.refused) released.add(pr)
@@ -2171,7 +2210,7 @@ function createQueue<Shape extends ChangeShape>(
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) continue
 
       for (const selector of targets) {
-        const pr = resolveChange(snapshot.bays, selector)
+        const pr = resolveChange(snapshot.bays, selector) ?? derived.find((member) => member.id === selector)
         if (pr === undefined) continue
         const runId = checkEligibility(snapshot, pr, steps).run
         if (runId !== undefined) {
@@ -2373,6 +2412,53 @@ function createQueue<Shape extends ChangeShape>(
           // projection, not the selector, so an explicit run mints the same
           // records a selectorless drain would — it just does not select them.
           await intakeUnrecordedSubmits()
+          // Derived members (S6): admit only the args.derived entries whose
+          // live submit fact still stands as derived. 2b's loud-edge policy
+          // carries over: a typed refusal (vanished/moved fact, record-lane
+          // collision) is warned, ledgered, and skipped — the row survives into
+          // audit — while a mint-store failure, a duplicate payload, or any
+          // untyped throw PROPAGATES and fails the compose. Until the door
+          // retires the intake sweep above, no live caller builds
+          // `args.derived`, so this loop is empty in production today.
+          const admitDerived = async (): Promise<DerivedRunMember[]> => {
+            const cycle: DerivedRunMember[] = []
+            for (const member of args.derived ?? []) {
+              try {
+                materializeDerivedRunMembers(runtime().bays, [member])
+                cycle.push(member)
+              } catch (error) {
+                const fact = failureFact(error)
+                if (fact === undefined || (fact.kind !== "refusal" && fact.kind !== "infrastructure")) throw error
+                log.warn?.("queue compose skipped a derived member whose submit fact no longer admits it", {
+                  action: "compose-candidate-skip",
+                  pr: member.id,
+                  branch: member.branch,
+                  code: fact.code,
+                  kind: fact.kind,
+                  reason: fact.message,
+                })
+                await noteCandidateRefusal([member.id], { code: fact.code, kind: fact.kind, reason: fact.message })
+              }
+            }
+            return cycle
+          }
+          let cycleDerived = await admitDerived()
+          let cycleArgs: QueueRunArgs =
+            cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
+          const derivedEntry = (id: string): DerivedRunMember | undefined =>
+            cycleDerived.find((member) => member.id === id)
+          const materializedDerived = (bays: DeepReadonly<BaysState>): Change[] =>
+            cycleDerived.flatMap((member) => {
+              try {
+                return materializeDerivedRunMembers(bays, [member])
+              } catch (error) {
+                // Mirrors the record path's tolerance for changes that
+                // disappeared mid-cycle: the authoritative CAS refuses loudly
+                // at dispatch if anything still names the member.
+                if (failureFact(error)?.kind === "refusal") return []
+                throw error
+              }
+            })
           // The intent lane that used to interleave here with a head-of-line
           // release (keyed by submodule) is retired along with the rest of the
           // intent rail — there is no longer a second lane of queue members to
@@ -2397,8 +2483,9 @@ function createQueue<Shape extends ChangeShape>(
               run.prs.filter((pr) => pinnedChangeError(snapshot, [pr], run.id) === undefined).map((pr) => pr.id),
             ),
           )
-          const requested = requestedPRs(snapshot.bays, args, consumed, intentCutoff)
+          const requested = requestedPRs(snapshot.bays, cycleArgs, consumed, intentCutoff)
           const authoritySteps = requestedOrDeclaredSteps(steps, args.steps, args.declaredPlan)
+          const cycleAuthority = derivedAuthorityLookup(snapshot)
           const authorityGaps = selectorless
             ? requested.flatMap((pr) => {
                 const requestedSnapshot = Queues.snapshot(pr)
@@ -2407,12 +2494,18 @@ function createQueue<Shape extends ChangeShape>(
                   [requestedSnapshot],
                   authoritySteps,
                   integratedChangeShape([pr]) !== undefined,
+                  cycleAuthority,
                 )
               })
             : []
           for (const gap of authorityGaps) {
             try {
-              if (gap.reason === "consumed") {
+              if (gap.reason === "consumed" && snapshot.bays.prs[gap.pr] !== undefined) {
+                // Record lane only: the eject writes a durable pr/needs-author
+                // on the record. A derived member has no record to write it on
+                // (PURE-GIT ruling) — its consumed authority is already legible
+                // from run history, and the warn + refusal ledger below is its
+                // whole trace.
                 const ejected = await actions.run({
                   prs: [gap.pr],
                   ...(args.steps === undefined ? {} : { steps: args.steps }),
@@ -2435,9 +2528,11 @@ function createQueue<Shape extends ChangeShape>(
               // A `consumed` gap ejects with a durable `pr/needs-author` result,
               // so it leaves a trace and stops repeating. A `missing` gap leaves
               // nothing and re-skips the same PR every cycle — ledger that one.
-              if (gap.reason === "missing") {
+              // A DERIVED consumed gap has no record for the eject to write on,
+              // so it takes the same ledger row (its cure is a re-push).
+              if (gap.reason === "missing" || snapshot.bays.prs[gap.pr] === undefined) {
                 await noteCandidateRefusal([gap.pr], {
-                  code: `queue-${gap.kind}-authority-missing`,
+                  code: `queue-${gap.kind}-authority-${gap.reason}`,
                   reason: gapReason,
                 })
               }
@@ -2484,7 +2579,9 @@ function createQueue<Shape extends ChangeShape>(
           // their admission still matches their request, so `admissionQueue`
           // drops them structurally.
           const admissible = selectorless
-            ? admissionQueue(snapshot, steps).filter((pr) => !authorityGapIds.has(pr.id))
+            ? admissionQueue(snapshot, steps, undefined, materializedDerived(snapshot.bays)).filter(
+                (pr) => !authorityGapIds.has(pr.id),
+              )
             : []
           const checkedIds = new Set(checked.map((pr) => pr.id))
           const refreshable = [...checked, ...admissible.filter((pr) => !checkedIds.has(pr.id))]
@@ -2506,8 +2603,10 @@ function createQueue<Shape extends ChangeShape>(
             // runs without changing WHICH carriers it admits once it does. It
             // also makes the returned set the set actually admitted from, rather
             // than dropping every pushed carrier the drain took.
+            const enteringDerived = materializedDerived(runtime().bays)
             const entering = refreshable.flatMap((pr) => {
-              const current = resolveChange(runtime().bays, pr.id)
+              const current =
+                resolveChange(runtime().bays, pr.id) ?? enteringDerived.find((member) => member.id === pr.id)
               return current === undefined ? [] : [current]
             })
             await drainAdmissions(
@@ -2515,6 +2614,7 @@ function createQueue<Shape extends ChangeShape>(
               runOptions,
               resolveCycleBase,
               selection,
+              enteringDerived,
             )
           } catch (error) {
             const fact = failureFact(error)
@@ -2534,8 +2634,9 @@ function createQueue<Shape extends ChangeShape>(
             )
           }
           snapshot = runtime()
+          const settledDerived = materializedDerived(snapshot.bays)
           const currentChecked = checked.flatMap((pr) => {
-            const current = resolveChange(snapshot.bays, pr.id)
+            const current = resolveChange(snapshot.bays, pr.id) ?? settledDerived.find((member) => member.id === pr.id)
             return current === undefined ? [] : [current]
           })
           const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -2557,7 +2658,15 @@ function createQueue<Shape extends ChangeShape>(
           // so unrelated ready PRs can integrate while targeted one-PR drains
           // return their admission result instead of a checks-running refusal.
           const unavailable = new Set([...consumed, ...pendingIds, ...authorityGaps.map((gap) => gap.pr)])
-          const runnable = runnableChangeSelection(snapshot, args, steps, needsPersonOwner, unavailable, {
+          // Re-prune the derived entries against the post-admission state so a
+          // member whose fact vanished mid-cycle drops out of merge selection
+          // instead of failing the drain (the dispatch below still CAS-refuses
+          // loudly if a fact vanishes between here and apply).
+          cycleDerived = cycleDerived.filter((member) =>
+            settledDerived.some((materialized) => materialized.id === member.id),
+          )
+          cycleArgs = cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
+          const runnable = runnableChangeSelection(snapshot, cycleArgs, steps, needsPersonOwner, unavailable, {
             explicitStepAuthority,
             ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
           })
@@ -2567,7 +2676,7 @@ function createQueue<Shape extends ChangeShape>(
             // admission phase's temporary exclusions hide the reason it emitted
             // no candidate. This uses the SAME eligibility helper as selection;
             // it broadens evidence only, never what may run.
-            const diagnostic = runnableChangeSelection(snapshot, args, steps, needsPersonOwner, consumed, {
+            const diagnostic = runnableChangeSelection(snapshot, cycleArgs, steps, needsPersonOwner, consumed, {
               explicitStepAuthority,
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
@@ -2594,7 +2703,14 @@ function createQueue<Shape extends ChangeShape>(
             // its refusal record — that record is what `queue audit` reads, so a
             // stain replays as a finding every cycle until someone reads the
             // carrier by hand.
-            let members = candidate
+            // Records first, derived after (order preserved within each class):
+            // the dispatch below carries record ids in `prs` and derived
+            // entries in `derived`, and apply re-selects them in exactly that
+            // concatenation — the Candidate's rev order must match it.
+            let members = [
+              ...candidate.filter((pr) => derivedEntry(pr.id) === undefined),
+              ...candidate.filter((pr) => derivedEntry(pr.id) !== undefined),
+            ]
             try {
               const baseSha = await resolveCandidateBaseSha(candidate, resolveCycleBase)
               let facts: z.infer<typeof CandidateCreatedSchema> | undefined
@@ -2666,8 +2782,13 @@ function createQueue<Shape extends ChangeShape>(
               // picks up the config that moved with it, and `apply` stays a
               // pure reducer over the plan it is handed.
               const declaredPlan = await resolveCyclePlan?.(baseSha)
+              const derivedInRun = members.flatMap((pr) => {
+                const entry = derivedEntry(pr.id)
+                return entry === undefined ? [] : [entry]
+              })
               const started = await actions.run({
-                prs: members.map((pr) => pr.id),
+                prs: members.filter((pr) => derivedEntry(pr.id) === undefined).map((pr) => pr.id),
+                ...(derivedInRun.length === 0 ? {} : { derived: derivedInRun }),
                 ...(args.steps === undefined ? {} : { steps: args.steps }),
                 baseSha,
                 ...(declaredPlan === undefined
@@ -3390,11 +3511,19 @@ function createQueueCommands(
     params: AdmissionStepArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionStepArgs) {
       const pr = state.bays.prs[args.pr.id]
+      // Freshness referent per lane (same rule as pinnedChangeError): a record
+      // member answers from its record; a DERIVED member (S6, recordless by
+      // design) answers from its live submit fact at exactly the pinned sha.
+      const derivedFresh =
+        pr === undefined &&
+        state.bays.submits[args.pr.branch]?.sha === args.pr.headSha &&
+        baseIdentity(state.bays.submits[args.pr.branch]?.base ?? "") === baseIdentity(args.pr.base)
       if (
-        pr === undefined ||
-        changeRevisionNumber(pr) !== args.pr.revision ||
-        changeHead(pr) !== args.pr.headSha ||
-        baseIdentity(pr.base) !== baseIdentity(args.pr.base)
+        !derivedFresh &&
+        (pr === undefined ||
+          changeRevisionNumber(pr) !== args.pr.revision ||
+          changeHead(pr) !== args.pr.headSha ||
+          baseIdentity(pr.base) !== baseIdentity(args.pr.base))
       ) {
         raiseFailure(
           "refusal",
@@ -3580,16 +3709,24 @@ function createQueueCommands(
           ),
         }
       }
+      const derivedAuthority = derivedAuthorityLookup(state)
       const authorityGap = queueAuthorityGaps(
         state.queues.authority,
         candidateSnapshots,
         remaining,
         integrated !== undefined,
+        derivedAuthority,
       )[0]
       if (authorityGap !== undefined) {
         const needsAuthor = queueAuthorityNeedsAuthorEvent(state, authorityGap, remaining)
         if (needsAuthor !== undefined) return { events: [needsAuthor] }
-        requireQueueAuthority(state.queues.authority, candidateSnapshots, remaining, integrated !== undefined)
+        requireQueueAuthority(
+          state.queues.authority,
+          candidateSnapshots,
+          remaining,
+          integrated !== undefined,
+          derivedAuthority,
+        )
       }
       if (requiresPreparedCandidate && args.candidate === undefined) {
         throw new Error("yrd: queue run requires prepared Candidate facts")
@@ -3824,10 +3961,15 @@ function createQueueCommands(
     params: AdmissionRefusedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
-      // the wedged PR, so a phantom id must never become a phantom finding.
-      const pr = state.bays.prs[args.pr]
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
-      const revision = currentChangeRev(pr)
+      // the wedged PR, so a phantom id must never become a phantom finding. A
+      // DERIVED member (S6) is attributable through the id-seam — its identity
+      // lives in retained run snapshots, never the record store.
+      const member = resolveMemberById(state.bays, state.queues, args.pr)
+      if (member === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
+      const revision =
+        member.source === "record"
+          ? { n: currentChangeRev(member.record).n, head: currentChangeRev(member.record).head }
+          : { n: member.snapshot.revision, head: member.snapshot.headSha }
       const refused = event("queue/admission/refused", {
         ...args,
         revision: revision.n,
@@ -4090,6 +4232,7 @@ function queueAuthorityGaps(
   prs: readonly DeepReadonly<ChangeSnapshot>[],
   steps: readonly DeepReadonly<InstalledStep>[],
   alreadyIntegrated = false,
+  derived?: DerivedAuthorityLookup,
 ): QueueAuthorityGap[] {
   const gaps: QueueAuthorityGap[] = []
   for (const pr of prs) {
@@ -4097,6 +4240,22 @@ function queueAuthorityGaps(
     if (kind === undefined) continue
     const token = kind === "submit" ? authority.submits[pr.id] : authority.checks[pr.id]
     if (token === undefined || !sameAuthorityToken(token, pr)) {
+      // Derived members (S6) hold no token: their standing authority IS the
+      // live submit fact for exactly this sha, consumption derived from run
+      // history — no event, no projection (design §2).
+      const fact = derived?.(pr as ChangeSnapshot)
+      if (fact?.standing === true) continue
+      if (fact !== undefined) {
+        gaps.push({
+          kind,
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          reason: "consumed",
+          consumedBy: fact.consumedBy,
+        })
+        continue
+      }
       gaps.push({ kind, pr: pr.id, revision: pr.revision, headSha: pr.headSha, reason: "missing" })
     } else {
       const consumedBy = token.consumedBy
@@ -4119,8 +4278,9 @@ function requireQueueAuthority(
   prs: readonly DeepReadonly<ChangeSnapshot>[],
   steps: readonly DeepReadonly<InstalledStep>[],
   alreadyIntegrated = false,
+  derived?: DerivedAuthorityLookup,
 ): void {
-  const gap = queueAuthorityGaps(authority, prs, steps, alreadyIntegrated)[0]
+  const gap = queueAuthorityGaps(authority, prs, steps, alreadyIntegrated, derived)[0]
   if (gap === undefined) return
   const detail =
     gap.reason === "consumed"
@@ -4383,7 +4543,14 @@ function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonl
   return roots
 }
 
-/** The one production projection path for a started Queue run. */
+/** The one production projection path for a started Queue run.
+ *
+ * S6 note, stated where the row is written: this projection is queues-slice
+ * pure and cannot see `bays`, so a DERIVED member — whose standing authority
+ * is its live submit fact, not a token — books here as `missingSubmits` in
+ * token vocabulary. That row is a fact about TOKENS, not a verdict; the audit
+ * (which holds the whole runtime state) interprets it through
+ * `isDerivedRunMember` before reporting ancestry findings. */
 export function projectQueueStarted(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): QueuesState {
   if (Queues.get(queues, record.id) !== undefined) throw new Error(`yrd: duplicate queue run '${record.id}'`)
   validateRunCandidateResult(queues, record)
@@ -5195,7 +5362,11 @@ function requestStep(
   )
 }
 
-function advanceQueue(
+/** Exported as the S6 re-sourced-emitter test seam: the merge bookkeeping and
+ * needs-author emissions for DERIVED members are asserted on this pure
+ * function's event drafts, because applying a recordless terminal event still
+ * throws in the bay reducer until the door commit relaxes it (stage 4). */
+export function advanceQueue(
   state: DeepReadonly<RuntimeState>,
   record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
@@ -5264,13 +5435,32 @@ function advanceQueue(
       firstArtifact(checkEvidence(job), "stderr") ??
       ("artifacts" in job ? firstArtifact({ artifacts: job.artifacts }, "stderr") : undefined)
     const authorResult = needsAuthorJobResult(job)
-    if (
-      authorResult === undefined ||
-      isIntegrated(before) ||
-      pr === undefined ||
-      current === undefined ||
-      (changeDeliveryState(current) !== "submitted" && changeDeliveryState(current) !== "ready")
-    ) {
+    if (authorResult === undefined || isIntegrated(before) || pr === undefined) {
+      return { events: [failed] }
+    }
+    if (current === undefined) {
+      // RE-SOURCE (S6 census #13): a derived member has no record, so the
+      // author-facing refusal FACT emits from the run's own snapshot — going
+      // dark here would starve the audit/status surfaces and settlement of the
+      // needs-author trail post-door. The submitted/ready gate's pure-git
+      // analogue: the live submit fact still stands at exactly the pinned sha
+      // (a mid-run re-push or branch delete means the author already
+      // superseded this member, and nagging them about it would be noise).
+      if (state.bays.submits[pr.branch]?.sha !== pr.headSha) return { events: [failed] }
+      const refusal = {
+        pr: pr.id,
+        revision: pr.revision,
+        headSha: pr.headSha,
+        run: record.id,
+        ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+        ...(pr.props === undefined ? {} : { props: pr.props }),
+        step: planned.name,
+        ...(evidence === undefined ? {} : { evidence }),
+        detail: failure.message,
+      }
+      return { events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })] }
+    }
+    if (changeDeliveryState(current) !== "submitted" && changeDeliveryState(current) !== "ready") {
       return { events: [failed] }
     }
     const refusal = {
@@ -5301,6 +5491,53 @@ function advanceQueue(
     // record it against; the merge merges exactly as it would for any other
     // member, and only the ordinary PR-merge bookkeeping below applies to it.
     const changeSnapshots = record.prs.filter((member) => member.intent === undefined)
+    // RE-SOURCE (S6 census #11), the load-bearing half: a derived member has no
+    // record for the samePayload loop below to find, so its terminal fact —
+    // the event settlement and every status surface consume — emits from the
+    // run's own ChangeSnapshot. Records stay the first source for every member
+    // that has one (the loop below, byte-identical to pre-S6), so the
+    // grandfathered lane's enrichment is exactly what it always was.
+    for (const member of changeSnapshots) {
+      if (state.bays.prs[member.id] !== undefined) continue
+      const alreadyMerged = shape.integration.alreadyLanded
+      if (alreadyMerged !== undefined) {
+        events.push(
+          event("pr/already-landed", {
+            pr: member.id,
+            revision: member.revision,
+            headSha: member.headSha,
+            run: record.id,
+            ...(member.issue === undefined ? {} : { issueRef: member.issue }),
+            baseSha: shape.integration.baseSha,
+            candidateSha: alreadyMerged.candidateSha,
+            candidateTreeSha: alreadyMerged.candidateTreeSha,
+            baseTreeSha: alreadyMerged.baseTreeSha,
+            ...(member.props === undefined ? {} : { props: member.props }),
+          }),
+        )
+        continue
+      }
+      if (member.changeId === undefined) {
+        // Unreachable for a member the derived admission built — it refuses a
+        // tip without a Change-Id trailer — and a merged truth without stable
+        // identity must not be claimed (same rule as the record lane below).
+        continue
+      }
+      events.push(
+        event("pr/integrated", {
+          pr: member.id,
+          revision: member.revision,
+          headSha: member.headSha,
+          run: record.id,
+          ...(member.issue === undefined ? {} : { issueRef: member.issue }),
+          commit: shape.integration.commit,
+          landingSha: shape.integration.commit,
+          baseSha: shape.integration.baseSha,
+          changeId: member.changeId,
+          ...(member.props === undefined ? {} : { props: member.props }),
+        }),
+      )
+    }
     for (const current of samePayloadPRs(state.bays, changeSnapshots)) {
       const alreadyMerged = shape.integration.alreadyLanded
       if (alreadyMerged !== undefined) {
@@ -6155,6 +6392,11 @@ function auditQueues(
   for (const record of Queues.values(state.queues)) {
     for (const pr of record.prs) {
       if (pr.intent !== undefined || state.bays.prs[pr.id] !== undefined) continue
+      // A derived member (S6) is recordless BY DESIGN — its number sits above
+      // every record the frozen store holds (A9 mint monotonicity), which is
+      // what separates it from the store-corruption class this finding exists
+      // for. It counts in the audit population without a finding.
+      if (isDerivedRunMember(state.bays, pr)) continue
       findings.push({
         code: "missing-pr",
         message: `queue run '${record.id}' references missing change '${pr.id}'`,
@@ -6165,8 +6407,14 @@ function auditQueues(
     const authority = projectionLookupGet(state.queues.authority.runs, record.id)
     if (record.parent === undefined && authority !== undefined) {
       const intentMembers = new Set(record.prs.filter((pr) => pr.intent !== undefined).map((pr) => pr.id))
+      // A derived member (S6) holds no token, so the queues-slice projection
+      // books it as missing in TOKEN vocabulary; its real authority — the live
+      // submit fact — was verified at run start and is not an ancestry gap.
+      // This read side holds the whole runtime state, so the interpretation
+      // lives here, not in the slice-pure projection.
+      const derivedMembers = new Set(record.prs.filter((pr) => isDerivedRunMember(state.bays, pr)).map((pr) => pr.id))
       for (const pr of authority.missingSubmits) {
-        if (intentMembers.has(pr)) continue
+        if (intentMembers.has(pr) || derivedMembers.has(pr)) continue
         findings.push({
           code: "run-without-submit-ancestry",
           message: `queue run '${record.id}' started change '${pr}' without an unconsumed matching submit fact`,
@@ -6175,7 +6423,7 @@ function auditQueues(
         })
       }
       for (const pr of authority.missingChecks) {
-        if (intentMembers.has(pr)) continue
+        if (intentMembers.has(pr) || derivedMembers.has(pr)) continue
         findings.push({
           code: "run-without-check-ancestry",
           message: `queue run '${record.id}' started pushed change '${pr}' without an unconsumed matching checks fact`,
@@ -6534,6 +6782,10 @@ function recordedPlanDrift(
 }
 
 function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change[] | undefined {
+  // `prs: []` beside a non-empty `derived` is an EXPLICIT selection of exactly
+  // those derived members (the compose's candidate dispatch for an all-derived
+  // partition); a bare empty/absent `prs` stays the implicit queue.
+  if (args.prs !== undefined && args.prs.length === 0 && (args.derived?.length ?? 0) > 0) return []
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {
@@ -6573,22 +6825,29 @@ function requestedPRs(
   implicitBefore?: QueuePosition,
 ): Change[] {
   const explicit = explicitPRs(state, args)
+  // Derived members (S6): materialized beside the records and ranked by the
+  // same submit clock. Explicit selections append them verbatim — the driver
+  // only passes what it selected — while the implicit queue interleaves them.
+  const derived = materializeDerivedRunMembers(state, args.derived ?? [])
+  const bySubmitClock = (left: Change, right: Change): number => {
+    const leftSubmittedAt = currentChangeRev(left).submittedAt
+    const rightSubmittedAt = currentChangeRev(right).submittedAt
+    if (leftSubmittedAt === undefined) throw new Error(`yrd: queued change '${left.id}' has no submit time`)
+    if (rightSubmittedAt === undefined) {
+      throw new Error(`yrd: queued change '${right.id}' has no submit time`)
+    }
+    return leftSubmittedAt.localeCompare(rightSubmittedAt) || compareNatural(left.id, right.id)
+  }
   const prs = (
-    explicit ??
-    Object.values(state.prs)
-      .filter((pr) => {
-        const delivery = changeDeliveryState(pr)
-        return delivery === "submitted" || delivery === "ready"
-      })
-      .toSorted((left, right) => {
-        const leftSubmittedAt = currentChangeRev(left).submittedAt
-        const rightSubmittedAt = currentChangeRev(right).submittedAt
-        if (leftSubmittedAt === undefined) throw new Error(`yrd: queued change '${left.id}' has no submit time`)
-        if (rightSubmittedAt === undefined) {
-          throw new Error(`yrd: queued change '${right.id}' has no submit time`)
-        }
-        return leftSubmittedAt.localeCompare(rightSubmittedAt) || compareNatural(left.id, right.id)
-      })
+    explicit === undefined
+      ? [
+          ...Object.values(state.prs).filter((pr) => {
+            const delivery = changeDeliveryState(pr)
+            return delivery === "submitted" || delivery === "ready"
+          }),
+          ...derived,
+        ].toSorted(bySubmitClock)
+      : [...explicit, ...derived]
   )
     .filter((pr) => !excluded.has(pr.id))
     .filter(
@@ -6757,10 +7016,15 @@ function admissionQueue(
   state: DeepReadonly<RuntimeState>,
   steps: readonly RuntimeStep[],
   targets?: ReadonlySet<string>,
+  derived: readonly DeepReadonly<Change>[] = [],
 ): Change[] {
   const selected = admissionSteps(steps)
   if (selected.length === 0) return []
-  return Object.values(state.bays.prs)
+  // Derived members (S6) ride the same filter chain as records: their
+  // materialized value answers `submitted` with a standing check request for
+  // exactly the submit sha, and their verdict evidence lives in the admission
+  // Jobs rather than a stored admission record.
+  return [...Object.values(state.bays.prs), ...derived]
     .filter((pr) => targets === undefined || targets.has(pr.id))
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
@@ -6792,6 +7056,16 @@ function admissionQueue(
       if (refusal?.settlement === undefined) return true
       const revision = currentChangeRev(pr)
       return refusal.revision !== revision.n || refusal.headSha !== revision.head
+    })
+    .filter((pr) => {
+      // Derived member (S6): no stored admission verdict ever retires it from
+      // this queue — its verdict lives in the admission Jobs. Keep it only
+      // while its checks are unattempted: passed retires it, failed requires a
+      // re-push (the derived retry act — git CAS, per-push consent), checking
+      // is already dispatched. Without this exit the drain loop re-admits the
+      // same recordless member forever.
+      if (state.bays.prs[pr.id] !== undefined) return true
+      return checkEligibility(state, pr, steps).status === "queued"
     })
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
@@ -7234,7 +7508,7 @@ function currentRevisionAdmissionJobs(
   steps: readonly RuntimeStep[],
 ): readonly (DeepReadonly<Job> | undefined)[] | undefined {
   const request = checkRequest(pr)
-  const baseSha = request?.baseSha ?? changeBaseSha(pr)
+  const baseSha = request?.baseSha ?? changeBaseSha(pr) ?? derivedAdmissionBaseSha(state, pr)
   if (baseSha === undefined) return undefined
   const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
   if (snapshot === undefined) return undefined
@@ -7245,6 +7519,29 @@ function currentRevisionAdmissionJobs(
     return id === undefined ? undefined : state.jobs.byId[id]
   })
   return jobs.every((job) => job === undefined) ? undefined : jobs
+}
+
+/**
+ * The base a DERIVED member's admission actually ran against. A derived
+ * member's synthetic check request records no base — its authority is the
+ * live submit fact, pinned by sha, and admission pins the CYCLE base at
+ * dispatch time — so the verdict is recovered from the admission Job keys for
+ * this member revision (the revision ordinal is minted per push, so those
+ * jobs are exactly this tree's). When the base moved between dispatches the
+ * newest dispatch wins, which is the same "the request whose base is current"
+ * rule the record lane's `checkRequest` applies.
+ */
+function derivedAdmissionBaseSha(state: DeepReadonly<RuntimeState>, pr: DeepReadonly<Change>): string | undefined {
+  if (state.bays.prs[pr.id] !== undefined) return undefined
+  const prefix = admissionRevisionKeyPrefix(pr.id, changeRevisionNumber(pr))
+  let newest: Readonly<{ baseSha: string; job: string }> | undefined
+  for (const [key, job] of Object.entries(state.jobs.byKey)) {
+    if (!key.startsWith(prefix)) continue
+    const baseSha = key.slice(prefix.length).split(":")[0]
+    if (baseSha === undefined || baseSha.length === 0) continue
+    if (newest === undefined || compareNatural(job, newest.job) > 0) newest = { baseSha, job }
+  }
+  return newest?.baseSha
 }
 
 function projectChangeChecks(
@@ -7616,6 +7913,13 @@ export const YRD_REFUSAL_CODES = [
   "contribution-inspection",
   "definition-read-only",
   "deletion-inspection",
+  // S6 derived-member admission (derived-admission.ts): the re-homed loud
+  // edges of the retired 2b sweep. All four are author-curable in the git
+  // regime — re-push the branch/submit ref, or add the Change-Id trailer.
+  "derived-change-id-missing",
+  "derived-record-lane",
+  "derived-submit-moved",
+  "derived-submit-vanished",
   "dirty-base",
   "dirty-worktree",
   "draft",
@@ -8190,8 +8494,20 @@ function pinnedChangeError(
       }
     }
     const current = state.bays.prs[snapshot.id]
+    if (current === undefined) {
+      // Derived member (S6): recordless by design — the live submit fact is the
+      // pin's referent. Standing at exactly the pinned sha ⇒ fresh; moved or
+      // vanished ⇒ the author superseded the member mid-run (re-push or branch
+      // delete), which is the same stale-pr the record lane reports. A
+      // record-era member can never alias in here: intake retires the branch's
+      // submit fact (`superseded`), so no standing fact matches its pin.
+      if (state.bays.submits[snapshot.branch]?.sha === snapshot.headSha) continue
+      return {
+        code: "stale-pr",
+        message: `change '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
+      }
+    }
     if (
-      current === undefined ||
       changeRevisionNumber(current) !== snapshot.revision ||
       changeHead(current) !== snapshot.headSha ||
       baseIdentity(current.base) !== baseIdentity(snapshot.base) ||
