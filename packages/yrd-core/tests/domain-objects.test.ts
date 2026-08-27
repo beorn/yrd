@@ -627,6 +627,66 @@ describe("Yrd domain objects", () => {
     expect(fact?.message).toMatch(/inspect the checkpoint store|declare an edge/i)
   })
 
+  // fails: the refusal prints one undiscriminating remedy today — flipped by the fix commit.
+  it.fails("discriminates a store written by an unknown composition from a declared chain that stalls", async () => {
+    // The refusal's two producing states have opposite remedies, and a message
+    // that cannot tell them apart sends the reader to the expensive one. A
+    // stored identity NO declared edge starts from was written by a different
+    // — in fleet history always newer or off-pin — composition, and declaring
+    // an edge from it is the lap that mints the next outage; the cheap remedy
+    // is syncing or restoring the checkout that wrote the store. A stored
+    // identity the composition DOES retain but whose chain stops short of the
+    // target is a graph defect, and the fix is the missing hop at the stall
+    // point, which the end-to-end pair alone does not name.
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const predecessor = withCounter("counter-v1")(createYrdDef())
+    const writer = await createYrd(predecessor, {
+      inject: { journal: cache.journal, id: ids("provenance-command", "provenance-event") },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 1 } })
+    await writer.close()
+    const stored = cache.stored()
+    if (stored === undefined) throw new Error("expected predecessor checkpoint")
+    const evictedThrough = 27609
+    const retained = {
+      ...cache.journal,
+      history: journalHistory(evictedThrough),
+      read(after = 0, before?: number) {
+        if (after === 0) throw new RangeError(`history below cursor ${evictedThrough + 1} was evicted`)
+        return backing.read(after, before)
+      },
+    } satisfies Journal<unknown>
+    const other = "1".repeat(64)
+    const dangling = "2".repeat(64)
+    const load = async (migrations: readonly Core.CheckpointMigration<CounterState>[]) => {
+      let caught: unknown
+      try {
+        await createYrd(withCheckpointMigrations(withCounter("counter-v2")(createYrdDef()), migrations), {
+          inject: { journal: retained },
+        })
+      } catch (error) {
+        caught = error
+      }
+      return failureFact(caught)
+    }
+
+    const unknown = await load([{ from: other, migrate: (state) => state }])
+    expect(unknown?.code).toBe("checkpoint-migration-missing")
+    expect(unknown?.message).toContain(stored.identity)
+    expect(unknown?.message).toContain(`cursor ${evictedThrough}`)
+    expect(unknown?.message).toMatch(/no record of/i)
+    expect(unknown?.message).toMatch(/sync or restore the checkout/i)
+    expect(unknown?.message).not.toMatch(/invent a migration|run a migration to proceed/i)
+
+    const stalled = await load([{ from: stored.identity, to: dangling, migrate: (state) => state }])
+    expect(stalled?.code).toBe("checkpoint-migration-missing")
+    expect(stalled?.message).toContain(`cursor ${evictedThrough}`)
+    expect(stalled?.message).toContain(dangling)
+    expect(stalled?.message).toMatch(/stalls at/i)
+    expect(stalled?.message).toMatch(/declare the missing edge/i)
+  })
+
   it("restores versioned result frames from a projection checkpoint", async () => {
     const backing = createMemoryJournal<unknown>()
     const cache = createCheckpointJournal(backing)
