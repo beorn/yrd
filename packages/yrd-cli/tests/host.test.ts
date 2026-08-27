@@ -4546,11 +4546,12 @@ checks: [{check: {run: "true"}}]
   //   submodule pin is unpublished" above.
   // - "publishes from trusted staging without running source push hooks":
   //   record publication jobs (pr create + pr publish + queue-run publication)
-  //   are the retired mint's machinery. NOTE, reported as a src gap: the
-  //   derived lane's LANDING push runs from a scratch worktree that shares the
-  //   source repository's hooks, so a failing source pre-push hook now fails
-  //   the integration push (native-root-push-failure) — the isolation this
-  //   test used to pin does not exist on the surviving path.
+  //   are the retired mint's machinery. The src gap this NOTE used to report —
+  //   the derived lane's LANDING push shared the source repository's hooks, so
+  //   a failing source pre-push hook failed the integration push
+  //   (native-root-push-failure) — was closed 2026-08-27: the landing push and
+  //   its rollback quarantine source hooks (yrd-queue quarantineSourceHooks),
+  //   pinned by yrd-queue/tests/landing-push-hook-isolation.test.ts.
   // - "keeps a failed publication visible on the change after queue run --once
   //   exits red": publication projections lived on the record (`pr view`
   //   publication status); with no record there is no surface carrying a

@@ -25,6 +25,7 @@ import {
 import { readCommitSubmodules } from "git-super/commit-graph"
 import { writeGitlink } from "git-super/gitlink"
 import { ensureCommitObject } from "git-super/objects"
+import type { GitProcess } from "git-super/process"
 import { pushRefUpdates } from "git-super/push"
 import { resolveSubmoduleOrigin } from "git-super/submodule-origin"
 import * as z from "zod"
@@ -6999,6 +7000,20 @@ async function mergeError(
   return undefined
 }
 
+/** The queue's landing push (and its rollback) is trusted plumbing, but it
+ * runs against the source repository — the scratch worktree shares its
+ * `.git`, so `.git/hooks` and `core.hooksPath` are the AUTHOR's. Quarantine
+ * hooks for exactly these invocations (git-super's worktree idiom, the
+ * isolation the retired record-publication path pinned): author hook code
+ * must neither execute with the queue's authority nor gate the queue's own
+ * branch update. `-c` is per-invocation, so author-facing pushes keep their
+ * hooks. */
+function quarantineSourceHooks(git: GitProcess): GitProcess {
+  return {
+    run: (request) => git.run({ ...request, args: ["-c", "core.hooksPath=/dev/null", ...request.args] }),
+  }
+}
+
 async function rollbackQueueBase(
   git: Git,
   repo: string,
@@ -7009,7 +7024,7 @@ async function rollbackQueueBase(
     if (base.remote !== undefined) {
       const rolledBack = await pushRefUpdates({
         root: repo,
-        git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+        git: quarantineSourceHooks(adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS })),
         timeoutMs: GIT_TIMEOUT_MS,
         updates: [
           {
@@ -7146,7 +7161,7 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
               // A caller's recursive-push config would replay the root-only SHA refspec inside each submodule.
               const pushed = await pushRefUpdates({
                 root: path,
-                git: adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS }),
+                git: quarantineSourceHooks(adaptProcessGit(git.process, { env: git.env, timeoutMs: GIT_TIMEOUT_MS })),
                 timeoutMs: GIT_TIMEOUT_MS,
                 updates: [
                   {
