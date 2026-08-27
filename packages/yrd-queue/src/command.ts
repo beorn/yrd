@@ -7380,79 +7380,73 @@ export function configuredMergeStep<Shape extends ChangeShape>(
         }),
       })
 
-      return await withSubmoduleMainPromotions(
-        git,
-        repo,
-        checked.baseSha,
-        checked.candidateSha,
-        async () => {
-          const cancellation = mergeAuthorityCancellation(context)
-          if (cancellation !== undefined) return cancellation
-          await recordMergeAttempt(git, repo, input, context, checked)
-          const outcome = await command(input, context)
-          let merge: GitQueueTarget
-          try {
-            merge = await authoritativeQueueBase(git, repo, branch)
-          } catch (cause) {
-            const refusal = queueAuthorityRefusal(cause)
-            if (refusal !== undefined) {
-              return failedWithEvidence(
-                failureFact(cause)?.code ?? "queue-environment-refused",
-                messageOf(cause),
-                refusal,
-              )
-            }
-            return outcome.status === "completed" && outcome.conclusion === "failure"
-              ? failed(outcome.error.code, outcome.error.message)
-              : failed("merge-verification-failed", messageOf(cause))
-          }
-          const missing = await mergeError(git, repo, input, checked, merge.sha)
-          if (missing === undefined) {
-            const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
-            if (sourceRefError !== undefined) {
-              const rollbackError = await rollbackQueueBase(git, repo, base, merge)
-              if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
-              await clearMergeAttempts(git, repo, input, checked)
-              return failed("invalid-candidate", sourceRefError)
-            }
-            return withSubmoduleMainPromotions(
-              git,
-              repo,
-              undefined,
-              merge.sha,
-              async (promotions, results) => {
-                const settlement = await applySubmoduleMainPromotions(git, promotions, results)
-                if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
-                return {
-                  status: "completed",
-                  conclusion: "success",
-                  output: await physicalIntegrationProof(
-                    git,
-                    repo,
-                    input,
-                    context,
-                    merge.sha,
-                    checked,
-                    settlement.results,
-                  ),
-                }
-              },
-              { settleSafePromotions: true },
+      return await withSubmoduleMainPromotions(git, repo, checked.baseSha, checked.candidateSha, async () => {
+        const cancellation = mergeAuthorityCancellation(context)
+        if (cancellation !== undefined) return cancellation
+        await recordMergeAttempt(git, repo, input, context, checked)
+        const outcome = await command(input, context)
+        let merge: GitQueueTarget
+        try {
+          merge = await authoritativeQueueBase(git, repo, branch)
+        } catch (cause) {
+          const refusal = queueAuthorityRefusal(cause)
+          if (refusal !== undefined) {
+            return failedWithEvidence(
+              failureFact(cause)?.code ?? "queue-environment-refused",
+              messageOf(cause),
+              refusal,
             )
           }
-          await clearMergeAttempts(git, repo, input, checked)
-          if (outcome.status === "completed" && outcome.conclusion === "failure") {
-            return failed(outcome.error.code, outcome.error.message)
+          return outcome.status === "completed" && outcome.conclusion === "failure"
+            ? failed(outcome.error.code, outcome.error.message)
+            : failed("merge-verification-failed", messageOf(cause))
+        }
+        const missing = await mergeError(git, repo, input, checked, merge.sha)
+        if (missing === undefined) {
+          const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+          if (sourceRefError !== undefined) {
+            const rollbackError = await rollbackQueueBase(git, repo, base, merge)
+            if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+            await clearMergeAttempts(git, repo, input, checked)
+            return failed("invalid-candidate", sourceRefError)
           }
-          if (outcome.status === "waiting") {
-            return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
-          }
-          return failed(
-            "merge-command-did-not-land",
-            `merge command exited successfully but '${branch}' does not contain '${missing}'`,
+          return withSubmoduleMainPromotions(
+            git,
+            repo,
+            undefined,
+            merge.sha,
+            async (promotions, results) => {
+              const settlement = await applySubmoduleMainPromotions(git, promotions, results)
+              if (settlement.status === "failed") return submoduleMainFailureResult(settlement.error)
+              return {
+                status: "completed",
+                conclusion: "success",
+                output: await physicalIntegrationProof(
+                  git,
+                  repo,
+                  input,
+                  context,
+                  merge.sha,
+                  checked,
+                  settlement.results,
+                ),
+              }
+            },
+            { settleSafePromotions: true },
           )
-        },
-      )
+        }
+        await clearMergeAttempts(git, repo, input, checked)
+        if (outcome.status === "completed" && outcome.conclusion === "failure") {
+          return failed(outcome.error.code, outcome.error.message)
+        }
+        if (outcome.status === "waiting") {
+          return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
+        }
+        return failed(
+          "merge-command-did-not-land",
+          `merge command exited successfully but '${branch}' does not contain '${missing}'`,
+        )
+      })
     } catch (cause) {
       const classified = await stepInfrastructureFailure(git, repo, cause)
       if (classified !== undefined) return classified
