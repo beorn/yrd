@@ -885,8 +885,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
                   "checkpoint-migration-missing",
                   `yrd: no checkpoint migration path exists from '${predecessor.identity}' to '${checkpointIdentity}'; ` +
                     `rebuild from history is unavailable because history through cursor ${evictedThrough} was evicted. ` +
-                    "If this identity pair is unexpected, inspect the checkpoint store; " +
-                    "if it is an intended definition change, declare an edge from the stored identity",
+                    checkpointMigrationRemedy(definition[checkpointMigrations], predecessor.identity, checkpointIdentity),
                 )
               }
               throw error
@@ -1490,6 +1489,51 @@ type ResolvedCheckpointMigration<State extends object> = Readonly<{
   to: string
   migrate(state: DeepReadonly<State>): State
 }>
+
+/** Name the remedy for the producing state, not the failure class. The two
+ * states behind a missing path have opposite cures: a stored identity outside
+ * the declared graph was written by another composition — in fleet history
+ * always a newer or off-pin build — and the cheap cure is the checkout, never
+ * an edge declared from an identity this source never shipped; a retained
+ * identity whose chain stops short needs its missing hop named, which the
+ * end-to-end pair alone does not reveal. */
+function checkpointMigrationRemedy(
+  migrations: readonly Readonly<{ from: string; to?: string | undefined }>[],
+  from: string,
+  target: string,
+): string {
+  const edges = migrations.map((migration) => ({ from: migration.from, to: migration.to ?? target }))
+  if (!edges.some((edge) => edge.from === from)) {
+    return (
+      "This composition has no record of the stored identity, so the store was written by a different — " +
+      "typically newer, or off-pin — composition. Sync or restore the checkout that wrote the store first; " +
+      "declare an edge only for a contract this composition genuinely shipped, measured from the deployment's " +
+      "stored identity, never from a harness"
+    )
+  }
+  // A cycle raises checkpoint-migration-cyclic before a missing path is ever
+  // reported, so the subgraph reachable here is a DAG and holds a dead end.
+  const seen = new Set<string>([from])
+  const frontier = [from]
+  const stalls: string[] = []
+  while (frontier.length > 0) {
+    const identity = frontier.pop() as string
+    const outgoing = edges.filter((edge) => edge.from === identity)
+    if (outgoing.length === 0) {
+      stalls.push(identity)
+      continue
+    }
+    for (const edge of outgoing) {
+      if (seen.has(edge.to)) continue
+      seen.add(edge.to)
+      frontier.push(edge.to)
+    }
+  }
+  return (
+    `The declared chain stalls at ${stalls.map((identity) => `'${identity}'`).join(", ")} without reaching ` +
+    "the target; declare the missing edge from there"
+  )
+}
 
 function checkpointMigrationPath<State extends object, Commands extends CommandTree, Features extends object>(
   definition: YrdDef<State, Commands, Features>,

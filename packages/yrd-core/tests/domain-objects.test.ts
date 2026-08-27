@@ -627,8 +627,7 @@ describe("Yrd domain objects", () => {
     expect(fact?.message).toMatch(/inspect the checkpoint store|declare an edge/i)
   })
 
-  // fails: the refusal prints one undiscriminating remedy today — flipped by the fix commit.
-  it.fails("discriminates a store written by an unknown composition from a declared chain that stalls", async () => {
+  it("discriminates a store written by an unknown composition from a declared chain that stalls", async () => {
     // The refusal's two producing states have opposite remedies, and a message
     // that cannot tell them apart sends the reader to the expensive one. A
     // stored identity NO declared edge starts from was written by a different
