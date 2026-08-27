@@ -23,9 +23,12 @@
  * family and this module should converge on one implementation — this one is
  * the exported home.
  *
- * Patch equivalence, equivalence classes and burn-in deliberately do NOT live
- * here: a later phase owns `patchEquivalence`. This module never reads commit
- * history at all — only trees.
+ * Patch equivalence deliberately does NOT live here — and after the
+ * 2026-08-26 burn-in (hub/yrd/2026-08-26-patch-equivalence-burn-in.md,
+ * vault-side) it lives nowhere: `git patch-id --stable` hashes context lines,
+ * so its key moves when main edits NEAR a change and cannot bind verdicts or
+ * reviews. The replacement is the normalized ±line digest in `binding-key.ts`.
+ * This module never reads commit history at all — only trees.
  */
 import type { RefGit } from "./uncarried-facts.ts"
 
@@ -81,7 +84,12 @@ export type ExactDelta = Readonly<{
  * submodule changes must never be filtered out, because a gitlink-only delta
  * is a real delta.
  */
-const EXACT_DELTA_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames"] as const
+export const EXACT_DELTA_DIFF_OPTIONS = [
+  "--no-ext-diff",
+  "--no-textconv",
+  "--ignore-submodules=none",
+  "--no-renames",
+] as const
 
 const RAW_RECORD = /^:([0-7]{6}) ([0-7]{6}) ((?:[0-9a-f]{64}|[0-9a-f]{40})) ((?:[0-9a-f]{64}|[0-9a-f]{40})) ([A-Z])$/u
 
@@ -215,4 +223,224 @@ export function formatExactDelta(delta: ExactDelta): string {
   if (delta.entries.length === 0) return `${head}: no changed paths`
   const lines = delta.entries.map((entry) => `  ${entry.kind} ${entry.object} ${entry.path}`)
   return [`${head}: ${delta.entries.length} changed path(s)`, ...lines].join("\n")
+}
+
+/**
+ * The change's own mode contribution, as a printable token: `=` when the
+ * change leaves the mode alone, `+<mode>` for a creation, `-<mode>` for a
+ * deletion, `<base>-><candidate>` for a chmod. Absolute modes of an untouched
+ * entry are deliberately NOT part of this — they belong to whatever base the
+ * delta was measured against, so keying them would move an identity on every
+ * rebase over a chmod on main.
+ */
+export function exactDeltaModeDelta(entry: ExactDeltaEntry): string {
+  if (entry.baseMode === undefined) {
+    if (entry.candidateMode === undefined) {
+      throw new Error(`yrd: exact delta entry for '${entry.path}' carries no mode on either side`)
+    }
+    return `+${entry.candidateMode}`
+  }
+  if (entry.candidateMode === undefined) return `-${entry.baseMode}`
+  return entry.baseMode === entry.candidateMode ? "=" : `${entry.baseMode}->${entry.candidateMode}`
+}
+
+export type CrossBaseDifferenceReason = "missing-from-landed" | "kind" | "object" | "mode-delta" | "gitlink-target"
+
+export type CrossBaseDifference = Readonly<{
+  path: string
+  reason: CrossBaseDifferenceReason
+  /** The authored side's value for the disagreeing fact, printable. */
+  authored: string
+  /** The landed side's value; `(absent)` when the path is missing. */
+  landed: string
+}>
+
+export type CrossBaseComparison = Readonly<{
+  /** True only when NEITHER delta is empty and every authored path agrees.
+   * An empty delta is an absence, never a key (identity.md's empty-refuses
+   * clause), so emptiness on either side is never equality. */
+  equal: boolean
+  authoredEmpty: boolean
+  landedEmpty: boolean
+  /** Every disagreement over the authored path set, in authored order. */
+  differing: readonly CrossBaseDifference[]
+}>
+
+/**
+ * The cross-base equality clause of the net-delta witness, corrected per the
+ * 2026-08-26 burn-in (hub/yrd/2026-08-26-patch-equivalence-burn-in.md § the
+ * exactDelta disagreements): two deltas of the same change measured against
+ * DIFFERENT bases are compared over the authored path set on (kind, object,
+ * mode delta) — never on resulting blob ids, because rebasing a change onto a
+ * base that also touched the file necessarily changes the resulting blob.
+ * Blob comparison refused 24 ordinary rebases on real history; this predicate
+ * admits 20 of them outright and still refuses all 18 real divergences —
+ * gitlink entries ARE compared by recorded target, since a pin is the change's
+ * own content and a conflict-free rebase never rewrites it: an absorbed pin is
+ * landed code the author never submitted. The remaining 4 (a file whose whole
+ * change the base absorbed) surface as `missing-from-landed`, which
+ * {@link resolveAbsorbedPaths} settles with one tree read; a consumer that
+ * skips that step over-refuses, never over-admits.
+ *
+ * Landed paths outside the authored set are invisible here: the merge
+ * machinery's own contributions (the shaset commit) are not the change's.
+ */
+export function crossBaseDeltaEquality(authored: ExactDelta, landed: ExactDelta): CrossBaseComparison {
+  const landedByPath = new Map(landed.entries.map((entry) => [entry.path, entry]))
+  const differing: CrossBaseDifference[] = []
+  for (const entry of authored.entries) {
+    const counterpart = landedByPath.get(entry.path)
+    if (counterpart === undefined) {
+      differing.push({ path: entry.path, reason: "missing-from-landed", authored: entry.kind, landed: "(absent)" })
+      continue
+    }
+    if (counterpart.kind !== entry.kind) {
+      differing.push({ path: entry.path, reason: "kind", authored: entry.kind, landed: counterpart.kind })
+      continue
+    }
+    if (counterpart.object !== entry.object) {
+      differing.push({ path: entry.path, reason: "object", authored: entry.object, landed: counterpart.object })
+      continue
+    }
+    const authoredMode = exactDeltaModeDelta(entry)
+    const landedMode = exactDeltaModeDelta(counterpart)
+    if (authoredMode !== landedMode) {
+      differing.push({ path: entry.path, reason: "mode-delta", authored: authoredMode, landed: landedMode })
+      continue
+    }
+    if (entry.object === "gitlink") {
+      // The present side of the authored entry names the recorded commit the
+      // change ships (or removes); kinds already agree, so the same side is
+      // present on the landed entry.
+      const side = entry.candidateOid !== undefined ? "candidateOid" : "baseOid"
+      const authoredTarget = entry[side]
+      const landedTarget = counterpart[side]
+      if (authoredTarget !== landedTarget) {
+        differing.push({
+          path: entry.path,
+          reason: "gitlink-target",
+          authored: authoredTarget ?? "(absent)",
+          landed: landedTarget ?? "(absent)",
+        })
+      }
+    }
+  }
+  const authoredEmpty = authored.entries.length === 0
+  const landedEmpty = landed.entries.length === 0
+  return { equal: !authoredEmpty && !landedEmpty && differing.length === 0, authoredEmpty, landedEmpty, differing }
+}
+
+/**
+ * Resolves the one ambiguous difference class `crossBaseDeltaEquality` cannot
+ * decide from two deltas alone: a `missing-from-landed` path means EITHER the
+ * landed base already absorbed that file's whole change (an ordinary rebase —
+ * admit) OR the merge dropped authored work (refuse). The burn-in corpus holds
+ * 4 real absorbed specimens (PR1243, PR1521, PR1874, PR2019) that pure
+ * path-set comparison would wrongly refuse.
+ *
+ * The discriminating read is one tree lookup per missing path, against the
+ * landed delta's OWN base tree: the change is absorbed exactly when that base
+ * already carries the change's result — the authored candidate (mode, blob)
+ * for an addition/modification, or the path's absence for a deletion. Only
+ * trees are read, per this module's contract.
+ *
+ * A landed delta that is EMPTY stays unequal regardless (the empty-refuses
+ * clause): full absorption is the redundant-change settlement's business,
+ * never a witness key.
+ */
+export async function resolveAbsorbedPaths(
+  git: ExactDeltaGit,
+  repo: string,
+  authored: ExactDelta,
+  landed: ExactDelta,
+  comparison: CrossBaseComparison,
+): Promise<CrossBaseComparison> {
+  const entriesByPath = new Map(authored.entries.map((entry) => [entry.path, entry]))
+  const remaining: CrossBaseDifference[] = []
+  for (const difference of comparison.differing) {
+    if (difference.reason !== "missing-from-landed") {
+      remaining.push(difference)
+      continue
+    }
+    const entry = entriesByPath.get(difference.path)
+    if (entry === undefined) {
+      throw new Error(`yrd: comparison names '${difference.path}' but the authored delta does not carry it`)
+    }
+    const listed = await treeEntryAt(git, repo, landed.baseTree, entry.path)
+    if (entry.kind === "deleted") {
+      // Absorbed when the landed base no longer carries the path at all.
+      if (listed === undefined) continue
+      remaining.push(difference)
+      continue
+    }
+    if (listed !== undefined && listed.mode === entry.candidateMode && listed.oid === entry.candidateOid) continue
+    remaining.push(difference)
+  }
+  return withDiffering(comparison, remaining)
+}
+
+/**
+ * The merge-time resolution of `missing-from-landed`, for a consumer that
+ * holds the CANDIDATE tree (the clean rebase the queue built and tested): the
+ * merged result may legitimately show no delta at an authored path when the
+ * base absorbed that file's change — including absorbed-then-edited-further,
+ * where the base's blob is not byte-identical to the authored candidate and
+ * {@link resolveAbsorbedPaths} cannot decide (the burn-in's PR1243 and PR1874
+ * are that shape). The merged tree is honest at such a path exactly when it
+ * agrees with the candidate there, so each remaining missing path is settled
+ * by comparing the landed delta's own result tree against `candidateTree` at
+ * that path: equal (or both absent) resolves, disagreement stays refused.
+ *
+ * The candidate must be an artifact built independently of the merged result
+ * (the queue's tested candidate); passing the merged tree itself as
+ * `candidateTree` answers vacuously.
+ */
+export async function resolveMissingAgainstCandidate(
+  git: ExactDeltaGit,
+  repo: string,
+  landed: ExactDelta,
+  comparison: CrossBaseComparison,
+  candidateTree: string,
+): Promise<CrossBaseComparison> {
+  const remaining: CrossBaseDifference[] = []
+  for (const difference of comparison.differing) {
+    if (difference.reason !== "missing-from-landed") {
+      remaining.push(difference)
+      continue
+    }
+    const merged = await treeEntryAt(git, repo, landed.candidateTree, difference.path)
+    const candidate = await treeEntryAt(git, repo, candidateTree, difference.path)
+    if (merged?.mode === candidate?.mode && merged?.oid === candidate?.oid) continue
+    remaining.push(difference)
+  }
+  return withDiffering(comparison, remaining)
+}
+
+function withDiffering(comparison: CrossBaseComparison, differing: CrossBaseDifference[]): CrossBaseComparison {
+  return {
+    equal: !comparison.authoredEmpty && !comparison.landedEmpty && differing.length === 0,
+    authoredEmpty: comparison.authoredEmpty,
+    landedEmpty: comparison.landedEmpty,
+    differing,
+  }
+}
+
+/** One tree entry's (mode, oid) at a path, or undefined when absent — a pure
+ * tree read; parse failures throw rather than reading as absence. */
+async function treeEntryAt(
+  git: ExactDeltaGit,
+  repo: string,
+  tree: string,
+  path: string,
+): Promise<Readonly<{ mode: string; oid: string }> | undefined> {
+  const listed = await git.run(repo, ["ls-tree", "-z", tree, "--", path])
+  const record = listed.split("\0").find((row) => row !== "")
+  if (record === undefined) return undefined
+  const match = /^([0-7]{6}) \S+ (\S+)\t/u.exec(record)
+  if (match === null) throw new Error(`yrd: unparsable ls-tree record '${record}' for '${path}'`)
+  const [, mode, oid] = match
+  if (mode === undefined || oid === undefined) {
+    throw new Error(`yrd: unparsable ls-tree record '${record}' for '${path}'`)
+  }
+  return { mode, oid }
 }
