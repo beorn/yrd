@@ -75,6 +75,7 @@ import {
   candidateRefDenominator,
   InstalledStepSchema,
   IntentRecordIdSchema,
+  isDerivedRunMember,
   MERGE_RECORD_REF,
   mergeJoinedNothing,
   mergeRecordToStatement,
@@ -85,6 +86,8 @@ import {
   parseSubmoduleModelChangeAuthorizationValue,
   sweepUncarriedRefs,
   type CandidateRefSweepResult,
+  type ChangeSnapshot,
+  type QueueRecord,
   type QueuesState,
   type InTotoStatement,
   type MergeRecordBody,
@@ -2522,15 +2525,143 @@ function trackerDeliveryV1(delivery: TrackerDeliveryV2): TrackerDeliveryV1 {
   return { ...identity, status }
 }
 
+/**
+ * One DERIVED member's delivery row, from its newest retained root run plus the
+ * branch's standing submit fact. A derived member is recordless BY DESIGN (the
+ * S6 door composes it from the branch-submit fact; the terminal reducers
+ * deliberately no-op for its id — "S6 relaxation", @yrd/bay plugin.ts), so its
+ * delivery truth is never in `bays.prs` and must be read from the run records.
+ *
+ * The integration proof is read through `app.queue.get` — for a retained
+ * record that is exactly `materializeRun(record, jobs)`, the same
+ * materialization whose `settledRun.integration` the settle command's
+ * derived-terminals batch emits from (@yrd/queue queue.ts `settled`), so this
+ * projection and the settlement facts can never disagree about the proof.
+ */
+function derivedTrackerDelivery(
+  app: YrdCliApp,
+  state: DeepReadonly<YrdCliState>,
+  record: DeepReadonly<QueueRecord>,
+  member: ChangeSnapshot,
+): TrackerDeliveryV2 | undefined {
+  if (member.issue === undefined) return undefined
+  const runs = Queues.values(state.queues)
+    .filter((candidate) =>
+      candidate.prs.some(
+        (snapshot) =>
+          snapshot.id === member.id && snapshot.revision === member.revision && snapshot.headSha === member.headSha,
+      ),
+    )
+    .toSorted((left, right) => {
+      const started = left.startedAt.localeCompare(right.startedAt)
+      return started === 0 ? compareNatural(left.id, right.id) : started
+    })
+    .map(({ id }) => id)
+  const identity = {
+    issueRef: member.issue,
+    pr: member.id,
+    revision: member.revision,
+    headSha: member.headSha,
+    runs,
+    ...(member.props === undefined ? {} : { props: member.props }),
+  }
+  const run = app.queue.get(record.id)
+  const integration = run?.integration
+  if (run !== undefined && run.status === "completed" && run.conclusion === "success" && integration !== undefined) {
+    const at = run.finishedAt ?? record.passedAt ?? record.startedAt
+    const alreadyLanded = integration.alreadyLanded
+    if (alreadyLanded !== undefined) {
+      return {
+        ...identity,
+        status: "already-landed",
+        at,
+        baseSha: integration.baseSha,
+        candidateSha: alreadyLanded.candidateSha,
+        candidateTreeSha: alreadyLanded.candidateTreeSha,
+        baseTreeSha: alreadyLanded.baseTreeSha,
+      }
+    }
+    return { ...identity, status: "integrated", at, landingSha: integration.commit }
+  }
+  // The DERIVED lane retires no submit fact: the fact standing at exactly the
+  // member's head is the branch's continuing consent — the queue re-serves it
+  // or the author re-pushes. That covers a run that PASSED without an
+  // integration proof (check-only / admission-only passes: the merge is still
+  // pending, and skipping the row would blind the bridge to the
+  // staged-but-unlanded window) and a failed/canceled run alike: projecting
+  // "submitted" there is true (not terminally resolved) but imprecise —
+  // needs-author precision for derived members arrives with the durable
+  // refusal ledger (wave item).
+  const submit = state.bays.submits[member.branch]
+  if (submit !== undefined && submit.sha === member.headSha) {
+    return { ...identity, status: "submitted", at: submit.at }
+  }
+  const terminal =
+    run !== undefined
+      ? run.status === "completed"
+      : record.failure !== undefined || record.canceledAt !== undefined || record.passedAt !== undefined
+  // Still running with the fact moved or gone: the run is live delivery work
+  // at this revision even though a newer push supersedes its consent, so the
+  // row stays visible; only the fact's `at` is lost, so fall back to the
+  // run's own start.
+  if (!terminal) return { ...identity, status: "submitted", at: record.startedAt }
+  // Terminal without an integration proof AND the fact vanished or moved off
+  // this head: superseded — the branch's current truth is a newer fact (or
+  // none), and that fact's own composition projects the next row.
+  return undefined
+}
+
+/**
+ * DERIVED delivery rows for the tracker bridges — the projection that keeps
+ * `yrd issue --json` (and the tent tracker bridge behind it) sighted on
+ * deliveries that never mint a Change record.
+ *
+ * Selection: retained ROOT runs, newest `startedAt` first; the first member
+ * seen per BRANCH claims it (the newest run is the branch's current delivery
+ * attempt — older runs' members for a claimed branch are skipped outright,
+ * row or no row).
+ *
+ * A branch-submit FACT with no retained run yet (never composed) projects
+ * NOTHING here: the pending window between `pr submit` and the first compose
+ * is a declared blind spot of this bridge (known wave item, alongside the
+ * durable refusal ledger), not a silent one.
+ *
+ * Disjointness with the record rows is by construction: record rows project
+ * from `bays.prs`, derived rows only from members whose id has no record
+ * (`isDerivedRunMember`), so no id — and no branch — produces both.
+ */
+function derivedTrackerDeliveries(app: YrdCliApp, state: DeepReadonly<YrdCliState>): TrackerDeliveryV2[] {
+  const roots = Queues.values(state.queues)
+    .filter((record) => record.parent === undefined)
+    .toSorted((left, right) => {
+      const started = right.startedAt.localeCompare(left.startedAt)
+      return started === 0 ? compareNatural(right.id, left.id) : started
+    })
+  const claimed = new Set<string>()
+  const deliveries: TrackerDeliveryV2[] = []
+  for (const record of roots) {
+    for (const member of record.prs) {
+      if (!isDerivedRunMember(state.bays, member)) continue
+      if (claimed.has(member.branch)) continue
+      claimed.add(member.branch)
+      const delivery = derivedTrackerDelivery(app, state, record, member)
+      if (delivery !== undefined) deliveries.push(delivery)
+    }
+  }
+  return deliveries.toSorted((left, right) => compareNatural(left.pr, right.pr))
+}
+
 function trackerBridges(
   app: YrdCliApp,
   snapshot: JournalSnapshot<YrdCliState>,
   include: (delivery: TrackerDeliveryV2) => boolean,
 ): Readonly<{ trackerBridge: TrackerBridgeV1; trackerBridgeV2: TrackerBridgeV2 }> {
-  const deliveries = Object.values(snapshot.state.bays.prs)
+  const recorded = Object.values(snapshot.state.bays.prs)
     .map((pr) => trackerDeliveryV2(pr, snapshot.state, app.queue.eligibility(pr.id, snapshot.state)))
     .filter((delivery): delivery is TrackerDeliveryV2 => delivery !== undefined && include(delivery))
     .toSorted((left, right) => compareNatural(left.pr, right.pr))
+  const derived = derivedTrackerDeliveries(app, snapshot.state).filter(include)
+  const deliveries = [...recorded, ...derived]
   const trackerBridgeV2 = { version: 2 as const, asOf: snapshot.asOf, deliveries }
   return {
     trackerBridge: {
