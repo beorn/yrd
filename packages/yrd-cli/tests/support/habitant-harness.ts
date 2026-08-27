@@ -25,8 +25,19 @@ const emptyState = (): HabitantState => ({
   queues: { admissionRefusals: {} },
 })
 
+/** Memoized by INPUT identity: a factory that returns the same object models a
+ * durable store with no new observations — an idle cycle — and the completed
+ * state must then keep a stable identity across refreshes, exactly as the real
+ * app's state does while the journal is not moving. A factory that builds a
+ * fresh object per call keeps modeling a moving journal, unchanged. */
+const completedStates = new WeakMap<HabitantState, HabitantState>()
+
 function completeState(state: HabitantState) {
-  return { ...state, jobs: state.jobs ?? { byId: {} } }
+  const cached = completedStates.get(state)
+  if (cached !== undefined) return cached
+  const completed = { ...state, jobs: state.jobs ?? { byId: {} } }
+  completedStates.set(state, completed)
+  return completed
 }
 
 /**

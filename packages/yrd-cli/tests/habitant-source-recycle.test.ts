@@ -18,7 +18,11 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { habitantSourceHealth } from "../src/run.ts"
-import { HABITANT_SOURCE_STALE_OBSERVATIONS, type HabitantSourceStall } from "../src/source-staleness.ts"
+import {
+  HABITANT_SOURCE_RECYCLE_RETRY_MS,
+  HABITANT_SOURCE_STALE_OBSERVATIONS,
+  type HabitantSourceStall,
+} from "../src/source-staleness.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
 const roots: string[] = []
@@ -119,6 +123,12 @@ describe("habitant source recycle — noticing the gap", () => {
         }),
       }),
     )
+    // ONE loud line an operator can act on without the props: the drift by both
+    // shas, and the cure.
+    const warning = f.warnings.find((w) => w.props.action === "resident-source-stale-restart")
+    expect(warning?.message).toContain(`git:${source.bootedSha}`)
+    expect(warning?.message).toContain(`git:${source.headSha}`)
+    expect(warning?.message).toMatch(/supervisor restart brings the runner up on the new source/u)
   })
 
   it("does not recycle on a single observation — one read can catch a checkout mid-advance", async () => {
@@ -184,7 +194,7 @@ describe("habitant source recycle — the restart that changes nothing", () => {
     })
   })
 
-  it("refuses to recycle twice for the same gap, and names the checkout as the thing to advance", async () => {
+  it("refuses to recycle twice for the same gap within the retry window, naming the checkout to advance", async () => {
     const source = staleSource(3)
     const first = fixture(source.bootedSha, source.root)
     expect((await first.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)).recycle).toBe(true)
@@ -204,12 +214,38 @@ describe("habitant source recycle — the restart that changes nothing", () => {
       behind: 3,
       sourceRoot: source.root,
       previousAttemptAt: "2026-08-14T22:39:00.000Z",
+      retryAt: new Date(Date.parse("2026-08-14T22:39:00.000Z") + HABITANT_SOURCE_RECYCLE_RETRY_MS).toISOString(),
     })
-    // The remedy has to name the checkout and the by-hand restart, because
-    // nothing automatic can fix it from here.
+    // The remedy has to name the checkout and the by-hand restart — nothing
+    // automatic can fix it from INSIDE the window — and the retry, so an
+    // operator reading one line knows the hold is bounded.
     expect(warning?.message).toContain(source.root)
     expect(warning?.message).toMatch(/advance the checkout/iu)
     expect(warning?.message).toMatch(/not restarting again/iu)
+    expect(warning?.message).toMatch(/retry/iu)
+  })
+
+  it("retries the restart once the attempt has aged past the retry window — a raced projection is not a permanent hold", async () => {
+    const source = staleSource(3)
+    const first = fixture(source.bootedSha, source.root)
+    expect((await first.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)).recycle).toBe(true)
+
+    // Same gap, same durable state dir, but the window has passed: the checkout
+    // freeze that defeated the first restart may since have lifted, so exit
+    // once more — and re-stamp the attempt, so a still-frozen checkout costs
+    // one bounded restart per window, never a storm.
+    const retriedAt = Date.parse("2026-08-14T22:39:00.000Z") + HABITANT_SOURCE_RECYCLE_RETRY_MS
+    const second = fixture(source.bootedSha, source.root, first.stateDir)
+    Object.assign(second.io, { now: () => retriedAt })
+
+    const outcome = await second.observe(HABITANT_SOURCE_STALE_OBSERVATIONS)
+
+    expect(outcome.recycle).toBe(true)
+    expect(second.readRecycle()).toMatchObject({
+      bootedSha: source.bootedSha,
+      headSha: source.headSha,
+      attemptedAt: new Date(retriedAt).toISOString(),
+    })
   })
 
   it("recycles again once the source has genuinely moved on past a prior attempt", async () => {

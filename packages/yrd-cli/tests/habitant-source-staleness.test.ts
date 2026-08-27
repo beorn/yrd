@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest"
 import {
   decideHabitantSource,
   foldSourceStaleness,
+  HABITANT_SOURCE_RECYCLE_RETRY_MS,
   HABITANT_SOURCE_STALE_BEHIND,
   HABITANT_SOURCE_STALE_OBSERVATIONS,
   type HabitantSourceObservation,
@@ -25,6 +26,9 @@ import {
 const BOOTED = "a".repeat(40)
 const HEAD = "b".repeat(40)
 const NEWER_HEAD = "c".repeat(40)
+const ATTEMPTED_AT = "2026-08-14T22:39:00.000Z"
+/** One minute after the recorded attempt: well inside the retry window. */
+const NOW = Date.parse(ATTEMPTED_AT) + 60_000
 
 function behind(count: number | undefined, headSha: string | undefined = HEAD): HabitantSourceObservation {
   return { bootedSha: BOOTED, headSha, behind: count }
@@ -80,10 +84,12 @@ describe("habitant source staleness — the window", () => {
 
 describe("habitant source staleness — the verdict", () => {
   it("serves on until the window closes, then recycles", () => {
-    expect(decideHabitantSource(undefined, undefined).kind).toBe("serve")
-    expect(decideHabitantSource(after(HABITANT_SOURCE_STALE_OBSERVATIONS - 1, behind(2)), undefined).kind).toBe("serve")
+    expect(decideHabitantSource(undefined, undefined, NOW).kind).toBe("serve")
+    expect(decideHabitantSource(after(HABITANT_SOURCE_STALE_OBSERVATIONS - 1, behind(2)), undefined, NOW).kind).toBe(
+      "serve",
+    )
 
-    const action = decideHabitantSource(after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2)), undefined)
+    const action = decideHabitantSource(after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2)), undefined, NOW)
     expect(action).toMatchObject({
       kind: "recycle",
       bootedSha: BOOTED,
@@ -94,24 +100,46 @@ describe("habitant source staleness — the verdict", () => {
   })
 
   it("carries the head a recycle is aiming at, so the restart is auditable", () => {
-    const action = decideHabitantSource(after(2, behind(7, NEWER_HEAD)), undefined)
+    const action = decideHabitantSource(after(2, behind(7, NEWER_HEAD)), undefined, NOW)
     expect(action).toMatchObject({ kind: "recycle", headSha: NEWER_HEAD, behind: 7 })
   })
 
-  it("refuses a SECOND recycle for the same gap — the restart changed nothing, so it cannot help", () => {
+  it("holds instead of a SECOND recycle while the attempt is FRESH — that restart just changed nothing", () => {
     const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2))
-    const action = decideHabitantSource(stall, {
-      bootedSha: BOOTED,
-      headSha: HEAD,
-      attemptedAt: "2026-08-14T22:39:00.000Z",
-    })
+    const action = decideHabitantSource(stall, { bootedSha: BOOTED, headSha: HEAD, attemptedAt: ATTEMPTED_AT }, NOW)
     expect(action).toMatchObject({
       kind: "checkout-behind",
       bootedSha: BOOTED,
       headSha: HEAD,
       behind: 2,
-      attemptedAt: "2026-08-14T22:39:00.000Z",
+      attemptedAt: ATTEMPTED_AT,
     })
+  })
+
+  it("holds right up to the retry window's edge, then retries the recycle past it", () => {
+    // A recycle that raced the checkout projection must not become a permanent
+    // hold: within the window exiting again would change nothing, but the
+    // freeze that made the last restart ineffective may since have lifted —
+    // re-ask by exiting once per window, bounded, instead of serving stale
+    // until an operator notices.
+    const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2))
+    const attempt = { bootedSha: BOOTED, headSha: HEAD, attemptedAt: ATTEMPTED_AT }
+    const edge = Date.parse(ATTEMPTED_AT) + HABITANT_SOURCE_RECYCLE_RETRY_MS
+    expect(decideHabitantSource(stall, attempt, edge - 1).kind).toBe("checkout-behind")
+    expect(decideHabitantSource(stall, attempt, edge).kind).toBe("recycle")
+  })
+
+  it("treats an unreadable attempt timestamp as expired — a corrupt record costs one restart, never a permanent hold", () => {
+    const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2))
+    const action = decideHabitantSource(stall, { bootedSha: BOOTED, headSha: HEAD, attemptedAt: "not-a-date" }, NOW)
+    expect(action.kind).toBe("recycle")
+  })
+
+  it("a future-stamped attempt cannot hold the runner — clock skew costs one restart, not an unbounded hold", () => {
+    const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2))
+    const future = new Date(NOW + 3_600_000).toISOString()
+    const action = decideHabitantSource(stall, { bootedSha: BOOTED, headSha: HEAD, attemptedAt: future }, NOW)
+    expect(action.kind).toBe("recycle")
   })
 
   it("recycles again once the source actually moved on — a prior attempt is not a permanent ban", () => {
@@ -119,21 +147,13 @@ describe("habitant source staleness — the verdict", () => {
     // advanced again. The stale record names the OLD booted sha, so it must not
     // suppress this genuinely new gap.
     const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, { bootedSha: HEAD, headSha: NEWER_HEAD, behind: 2 })
-    const action = decideHabitantSource(stall, {
-      bootedSha: BOOTED,
-      headSha: HEAD,
-      attemptedAt: "2026-08-14T22:39:00.000Z",
-    })
+    const action = decideHabitantSource(stall, { bootedSha: BOOTED, headSha: HEAD, attemptedAt: ATTEMPTED_AT }, NOW)
     expect(action.kind).toBe("recycle")
   })
 
   it("recycles when a prior attempt aimed at a DIFFERENT head, even from the same booted sha", () => {
     const stall = after(HABITANT_SOURCE_STALE_OBSERVATIONS, behind(2, NEWER_HEAD))
-    const action = decideHabitantSource(stall, {
-      bootedSha: BOOTED,
-      headSha: HEAD,
-      attemptedAt: "2026-08-14T22:39:00.000Z",
-    })
+    const action = decideHabitantSource(stall, { bootedSha: BOOTED, headSha: HEAD, attemptedAt: ATTEMPTED_AT }, NOW)
     expect(action.kind).toBe("recycle")
   })
 })
