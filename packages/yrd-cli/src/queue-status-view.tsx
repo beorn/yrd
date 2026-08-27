@@ -26,6 +26,7 @@ import {
 } from "@yrd/bay"
 import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
+import { isDerivedMemberId, recordNumberFrontier } from "@yrd/queue"
 import type {
   Candidate,
   InstalledStep,
@@ -1344,12 +1345,15 @@ function timelineRunMemberRows(
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
   const stepNames = stepNamesOfRun(run)
   const mergeVerdict = running ? ("running" as const) : mergeVerdictOfOutcome(status)
+  const frontier = recordNumberFrontier(result.prs.map((candidate) => candidate.id))
   return run.prs.map((member, index) => {
     const current = result.prs.find((candidate) => candidate.id === member.id)
     // An intent member's snapshot is its complete record: render from it and
     // skip the change-only enrichments (lineage history, admission clock,
-    // submitter). A change member with no retained PR stays loud.
-    if (current === undefined && member.intent === undefined) {
+    // submitter). A derived member (S6: minted above the frozen store's
+    // frontier) renders the same way — recordless BY DESIGN. A recordless
+    // member at or below the frontier is journal corruption and stays loud.
+    if (current === undefined && member.intent === undefined && !isDerivedMemberId(member.id, frontier)) {
       throw new Error(`yrd: run '${run.id}' has no retained change '${member.id}'`)
     }
     const lineage =

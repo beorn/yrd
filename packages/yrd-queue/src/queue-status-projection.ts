@@ -30,6 +30,7 @@ import {
 import { type Event, type JsonValue, stageAsync } from "@yrd/core"
 import { type Job, type JobError, JobRequestSchema, JobTransitionSchema } from "@yrd/job"
 import { GateCertificateSchema } from "./command.ts"
+import { isDerivedMemberId, recordNumberFrontier } from "./derived-admission.ts"
 import {
   type Candidate,
   type ChangeCheckRecord,
@@ -462,15 +463,19 @@ export function queueRunRevisionClocks(
   runs: Iterable<Run>,
 ): Map<string, ChangeRunRevisionClock> {
   const byId = new Map([...prs].map((pr) => [pr.id, pr]))
+  const frontier = recordNumberFrontier(byId.keys())
   const clocks = new Map<string, ChangeRunRevisionClock>()
   for (const run of runs) {
     for (const revision of run.prs) {
       const pr = byId.get(revision.id)
       if (pr === undefined) {
         // A carrier-free pin intent's member id is an intent id: the snapshot
-        // is the whole record and no revision clock exists. A change member with
-        // no retained PR is journal corruption and stays loud.
+        // is the whole record and no revision clock exists. A derived member
+        // (S6: minted above the frozen store's frontier) is recordless BY
+        // DESIGN and has no record clock either. A recordless member at or
+        // below the frontier is journal corruption and stays loud.
         if (revision.intent !== undefined) continue
+        if (isDerivedMemberId(revision.id, frontier)) continue
         throw new Error(`yrd: run '${run.id}' has no retained change '${revision.id}'`)
       }
       clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
@@ -1269,6 +1274,7 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
   const submissionTimes = new Map<string, string | null>()
   for (const result of results) {
     const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
+    const frontier = recordNumberFrontier(byId.keys())
     for (const pr of result.prs) {
       for (const revision of pr.revs) {
         if (revision.submittedAt !== undefined) {
@@ -1289,7 +1295,9 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
         const pr = byId.get(member.id)
         if (pr === undefined) {
           // Intent members have no submission: the run itself is the admission.
-          if (member.intent !== undefined) {
+          // A derived member (S6) has no record to date a submission from either;
+          // its admission clock is the run's, exactly like an intent's.
+          if (member.intent !== undefined || isDerivedMemberId(member.id, frontier)) {
             submissionTimes.set(queueRunRevisionKey(run, member), null)
             continue
           }

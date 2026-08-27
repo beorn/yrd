@@ -267,10 +267,29 @@ function consumingRun(
  */
 export function isDerivedRunMember(bays: DeepReadonly<Pick<BaysState, "prs">>, pr: ChangeSnapshot): boolean {
   if (pr.intent !== undefined || bays.prs[pr.id] !== undefined) return false
-  const number = changeIdNumber(pr.id)
-  if (number === undefined) return false
-  const frozenMax = Math.max(0, ...Object.keys(bays.prs).flatMap((id) => changeIdNumber(id) ?? []))
-  return number > frozenMax
+  return isDerivedMemberId(pr.id, recordNumberFrontier(Object.keys(bays.prs)))
+}
+
+/**
+ * The frozen store's mint frontier: the highest PR number any retained record
+ * carries. Ids minted strictly above it are the derived lane's (A9: no record
+ * ever mints again post-door). Exposed separately from `isDerivedRunMember` so
+ * status projections that hold record LISTS rather than `BaysState` apply the
+ * same discriminator instead of re-spelling it.
+ */
+export function recordNumberFrontier(recordIds: Iterable<string>): number {
+  let max = 0
+  for (const id of recordIds) {
+    const number = changeIdNumber(id)
+    if (number !== undefined && number > max) max = number
+  }
+  return max
+}
+
+/** The id half of `isDerivedRunMember`'s rule, against a precomputed frontier. */
+export function isDerivedMemberId(id: string, frontier: number): boolean {
+  const number = changeIdNumber(id)
+  return number !== undefined && number > frontier
 }
 
 function changeIdNumber(id: string): number | undefined {
