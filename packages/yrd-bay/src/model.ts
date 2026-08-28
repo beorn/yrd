@@ -812,6 +812,36 @@ export const changeComposition = (pr: Change): CompositionV1 | undefined => curr
 export const changeRemerge = (pr: Change): ChangeRemergeProof | undefined => currentChangeRev(pr).recut
 
 /** Historical W2/S7 label projected from the GitHub-shaped PR plus latest revision facts. */
+/**
+ * TWO OF THIS FUNCTION'S RETURN VALUES ARE UNREACHABLE FOR A DERIVED MEMBER,
+ * which post-S7 (branch-is-change, @i/10 22991) is every member.
+ *
+ * `ready` requires `revision.admission?.status === "passed"`, and `needs-author`
+ * requires `changeNeedsAuthor(pr)`, which reads `pr.needsAuthor` and then
+ * `currentChangeRev(pr).admission`. Measured across the workspace: NOTHING in
+ * src writes `ChangeRev.admission` (its three apparent writers are a type
+ * field, a plugin-callback property and a function parameter) and NOTHING
+ * writes `Change.needsAuthor`. Both were the deleted record store's to set —
+ * `recordRevisionAdmission` is now a no-op that says so in its own body — and a
+ * derived member is materialized from a submit fact that carries neither. They
+ * survive on the type only so a pre-S7 journal stays readable.
+ *
+ * SO WHY IS NOTHING RED. Almost every consumer names `ready` as a disjunct
+ * beside `submitted` (`delivery === "submitted" || delivery === "ready"`), and
+ * those are unaffected — the member simply arrives as `submitted` and takes the
+ * same branch. Only consumers testing a value EXCLUSIVELY are dead code, and
+ * they are quiet by construction. That combination — a value that cannot be
+ * produced, read mostly in positions where its absence changes nothing — is why
+ * this survived the cutover with a green suite.
+ *
+ * THE CAPABILITY IS NOT LOST, and this is the part to check before deleting
+ * anything. `needs-author` still reaches operators through the JOB-derived
+ * eligibility path (`needsAuthorJobResult` in @yrd/queue, surfaced as an
+ * eligibility reason code that `queue-status-projection` reads). What died is
+ * the SECOND, record-backed source, not the concept. Removing these two values
+ * from the union is therefore a live option rather than a regression — but it
+ * is a public API change and wants a ruling, not a drive-by.
+ */
 export function changeDeliveryState(pr: Change): ChangeDeliveryState {
   if (pr.state === "closed") {
     if (pr.merged) return pr.alreadyLanded === undefined ? "integrated" : "already-landed"
