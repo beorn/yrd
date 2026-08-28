@@ -246,25 +246,21 @@ describe("pr submit tracking default", () => {
     expect(app.bays.prs()).toEqual([])
   })
 
-  it("--no-track warns record-only and the submit still lands derived", async () => {
+  it.each(["--track", "--no-track"])("%s refuses as retired before touching any state", async (flag) => {
+    // Tracking was the record lane's freshness machinery; on the derived lane
+    // a re-push IS the fresh submission, so the pair refuses instead of
+    // silently accepting a flag that binds to nothing (S7 retirement,
+    // branch-is-change @i/10 22991). The refusal fires before the submit, so
+    // neither a record nor a submit fact is minted.
     const app = await createCliApp()
     const output = outputIO(() => RECORDED_HEAD)
 
-    expect(
-      await runYrd(app, yrd("pr", "submit", BRANCH, "--no-track", "--json"), output.io, noRequiredChecks),
-      output.stderr(),
-    ).toBe(0)
-    const envelope = JSON.parse(output.stdout()) as SubmitEnvelope
-    expect(envelope.command).toBe("pr.submit")
-    expect(envelope.prs).toEqual([])
-    expect(envelope.derived).toEqual([{ lane: "derived", branch: BRANCH, sha: RECORDED_HEAD, base: "main" }])
-    // track binds to change records; on the derived lane it is dropped LOUDLY
-    // in the envelope warnings while the submit succeeds.
-    expect(envelope.warnings).toEqual([
-      `track binds to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${BRANCH}' to carry them`,
-      DERIVED_ACCEPTANCE_LINE,
-    ])
+    expect(await runYrd(app, yrd("pr", "submit", BRANCH, flag, "--json"), output.io, noRequiredChecks)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toContain("track-flags-retired")
+    expect(output.stderr()).toContain("push again to refresh")
     expect(app.bays.prs()).toEqual([])
+    expect(app.bays.state().submits).toEqual({})
   })
 })
 

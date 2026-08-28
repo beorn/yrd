@@ -63,7 +63,13 @@ export function recordedRunPlan(record: QueueRecord): RecordedRunPlan {
 
 /** One check the checks-before-queueing stage certified for one change
  * revision at one exact base sha, as `ChangeAdmission.steps` records it. */
-export type AdmissionCheck = Readonly<{ name: string; revision: string }>
+export type AdmissionCheck = Readonly<{
+  name: string
+  /** The step's recorded revision. A derived member's legacy admission-Job key
+   * may omit it; the step still counts as executed, and only the
+   * revision-drift comparison is forfeited. */
+  revision?: string
+}>
 
 /** The passed checks recorded for one Run member at one exact base sha, or
  * undefined when that member has no passed record at that base. The audit is
@@ -99,7 +105,8 @@ export function accountRunSteps(recorded: RecordedRunPlan, admissionFor?: Admiss
     if (inRun !== undefined) return { name, where: "run", revision: inRun.revision }
     const evidence = memberEvidence?.map((checks) => checks?.find((check) => check.name === name))
     if (evidence !== undefined && evidence.length > 0 && evidence.every((check) => check !== undefined)) {
-      return { name, where: "admission", ...(evidence[0] === undefined ? {} : { revision: evidence[0].revision }) }
+      const revision = evidence[0]?.revision
+      return { name, where: "admission", ...(revision === undefined ? {} : { revision }) }
     }
     return { name, where: "missing" }
   })

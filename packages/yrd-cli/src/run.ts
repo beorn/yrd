@@ -4,6 +4,10 @@ import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { Fragment, createElement } from "react"
+// Raw strings are SILENTLY DROPPED as Fragment children by the silvery
+// renderer (only a top-level string gets Text-wrapped in output.tsx); every
+// string child below must ride inside a Text element or it never prints.
+import { Text } from "silvery"
 import * as z from "zod"
 import {
   CompositionV1Schema,
@@ -22,8 +26,7 @@ import {
   changeNeedsAuthor,
   changeRevisionNumber,
   changeRevisionLineage,
-  changePublicationJobKey,
-  ChangePublicationInputSchema,
+  changeNotFoundMessage,
   changeSourceReadyAt,
   deploymentJobKey,
   HabGenerationReleaseResultSchema,
@@ -41,8 +44,8 @@ import {
   type ChangeFreshnessTransition,
   type ChangeDeliveryState,
   type ChangeRev,
-  type ChangePublicationInput,
   type DerivedSubmission,
+  type ProjectedBranchSubmit,
   type MaterializeDeploymentInput,
   type ReleaseDeploymentJobInput,
 } from "@yrd/bay"
@@ -76,6 +79,7 @@ import {
   InstalledStepSchema,
   IntentRecordIdSchema,
   isDerivedRunMember,
+  latestChangeSnapshot,
   MERGE_RECORD_REF,
   mergeJoinedNothing,
   mergeRecordToStatement,
@@ -179,8 +183,6 @@ import {
 import type { QueueReadModel } from "./queue-read-model.ts"
 import {
   preflightRemerge,
-  prunePrs,
-  withdrawOne,
   withdrawPrs,
   type RemergePreflightResult,
   type RemergePreflightVerdict,
@@ -1317,11 +1319,20 @@ function runnerHealthError(code: string, cause: string, resolution: readonly str
   return Object.freeze({ code, cause, resolution: Object.freeze([...resolution]) })
 }
 
+/** "Queued work exists" for runner health: live submit facts the derived lane
+ * owns, plus record-lane submitted/ready records while the frozen store still
+ * holds live ones. The fact arm reads first so the store's deletion only
+ * removes the legacy term. */
 function queuedDeliveryCount(app: YrdCliApp): number {
-  return Object.values(stateOf(app).bays.prs).filter((pr) => {
+  const state = stateOf(app)
+  const derived = Object.keys(state.bays.submits).filter(
+    (branch) => app.queue.deriveChange(branch).authority.lane === "derived",
+  ).length
+  const records = Object.values(state.bays.prs).filter((pr) => {
     const delivery = changeDeliveryState(pr)
     return delivery === "submitted" || delivery === "ready"
   }).length
+  return derived + records
 }
 
 /** Both sides must be KNOWN: an unreported merge position is not comparable,
@@ -1474,22 +1485,27 @@ export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): str
 
 /** Exact latest merge driven for one queue. The epoch heartbeat publishes
  * this content so a probe can distinguish the right driver from an unrelated
- * habitant process with the same service name. */
+ * habitant process with the same service name.
+ *
+ * Run history answers first (a run's own `integration` proof covers both
+ * lanes, derived members included); integrated records stay a legacy term
+ * while the frozen store still holds them, so the newest of the two worlds
+ * wins and the store's deletion only removes the legacy term. */
 export function habitantDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
+  const fromRuns = allQueueRuns(app).flatMap((run) => {
+    if (baseIdentity(run.base) !== baseIdentity(base) || run.integration === undefined || run.finishedAt === undefined) {
+      return []
+    }
+    return [{ commit: run.integration.commit, at: run.finishedAt }]
+  })
+  const fromRecords = Object.values(stateOf(app).bays.prs).flatMap((pr) => {
+    if (baseIdentity(pr.base) !== baseIdentity(base) || pr.integratedAt === undefined || pr.integration === undefined) {
+      return []
+    }
+    return [{ commit: pr.integration.commit, at: pr.integratedAt }]
+  })
   return (
-    Object.values(stateOf(app).bays.prs)
-      .flatMap((pr) => {
-        if (
-          baseIdentity(pr.base) !== baseIdentity(base) ||
-          pr.integratedAt === undefined ||
-          pr.integration === undefined
-        ) {
-          return []
-        }
-        return [{ commit: pr.integration.commit, at: pr.integratedAt }]
-      })
-      .toSorted((left, right) => left.at.localeCompare(right.at))
-      .at(-1) ?? null
+    [...fromRuns, ...fromRecords].toSorted((left, right) => left.at.localeCompare(right.at)).at(-1) ?? null
   )
 }
 
@@ -3725,27 +3741,6 @@ async function prepareOwnedBay(
   return { identity, bay }
 }
 
-/** Git-side issue ownership for `issue ensure`.
- *
- * The caller resolves the tracker reference before entering this seam.
- * `reuseActive` is intentionally opt-in so interactive ownership keeps its
- * exclusive-open refusal.
- */
-async function prepareResolvedIssueBay(
-  app: YrdCliApp,
-  issue: string,
-  io: YrdCliIO,
-  options: Readonly<{ reuseActive?: boolean }> = {},
-): Promise<PreparedIssueBay> {
-  const opened = await prepareOwnedBay(app, issue, {}, io, {
-    issueResolved: true,
-    ...(options.reuseActive === true ? { reuseActive: true } : {}),
-  })
-  if (opened === undefined) refusal(`Bay for issue '${issue}' was interrupted before it could be used`)
-  const path = opened.bay.path
-  if (path === undefined) refusal(`Bay '${opened.bay.id}' opened without a worktree path`)
-  return { ...opened, bay: { ...opened.bay, path } }
-}
 
 async function openPersistentBay(
   app: YrdCliApp,
@@ -3831,23 +3826,6 @@ async function runBaySession(
     await orphanRunBay(app, bay, `post-child checkpoint or close failed: ${errorDetail(error)}`)
     throw error
   }
-}
-
-/** Record or reuse the one draft change for an issue branch. The issue ensure
- * surface delegates to the public `pr create` core so PR identity, revision,
- * and tracking cannot drift. */
-async function ensureIssueDraft(
-  app: YrdCliApp,
-  issue: string,
-  branch: string,
-  io: YrdCliIO,
-  options: Readonly<{ track: boolean }>,
-): Promise<Readonly<{ pr: Change; warnings: readonly string[] }>> {
-  const selection = { issue, ...(options.track ? { track: true } : {}) }
-  const result = await applyChangeSelection(app, [branch], selection, io, "pr.create")
-  const pr = result.prs[0]
-  if (pr === undefined) refusal(`branch '${branch}' has no PR after create`)
-  return { pr, warnings: result.warnings }
 }
 
 async function refreshBays(
@@ -4042,6 +4020,25 @@ async function closeBays(
       await printHuman(
         io,
         `FORCE close ${bay.id} ${bay.name}: status exit=${report.exit} (destroying despite blocks)\n${formatBayStatusHuman(report)}`,
+      )
+    }
+    // --withdraw closes record-lane deliveries. A derived-lane branch has no
+    // record to withdraw — its submit fact is receiver-owned state that only
+    // the branch-state verbs may retire (they push the decision ref; writing
+    // the projection here would diverge from the remote). Refusing is the loud
+    // replacement for the silent no-op the empty record scan used to produce
+    // (NSE-15).
+    if (
+      options.withdraw === true &&
+      stateOf(app).bays.submits[bay.branch] !== undefined &&
+      app.queue.deriveChange(bay.branch).authority.lane === "derived"
+    ) {
+      raiseFailure(
+        "refusal",
+        "bay-withdraw-derived",
+        `yrd: bay '${bay.id}' branch '${bay.branch}' is submitted on the derived lane; --withdraw retires ` +
+          `change records, not submit facts — retire the fact first with 'yrd draft ${bay.branch}' (unsubmit) ` +
+          `or 'yrd archive ${bay.branch}' (shelve), then close the bay`,
       )
     }
     try {
@@ -4291,10 +4288,22 @@ function gatherBayStatusFacts(
     }
   }
 
-  const openChangeIds = app.bays
-    .prs()
-    .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
-    .map((pr) => pr.id)
+  // The live-delivery guard behind `bay close`'s safety verdict. The derived
+  // lane's arm reads the branch's standing submit fact FIRST (NSE-14): with
+  // records as the only source, a bay whose branch has a live derived
+  // submission read as safe to close. Records stay the legacy term.
+  const liveSubmitEntry =
+    stateOf(app).bays.submits[bay.branch] !== undefined &&
+    app.queue.deriveChange(bay.branch).authority.lane === "derived"
+      ? [latestMemberForBranch(app, bay.branch)?.id ?? `refs/yrd/submit/${bay.branch}`]
+      : []
+  const openChangeIds = [
+    ...app.bays
+      .prs()
+      .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
+      .map((pr) => pr.id),
+    ...liveSubmitEntry,
+  ]
   const openedAt = Date.parse(bay.openedAt)
   const ageMs = Number.isFinite(openedAt) ? Math.max(0, now - openedAt) : undefined
 
@@ -4867,164 +4876,6 @@ async function requireQueueableSubmodulePinsForCommand(
   }
 }
 
-type PublicationProjection = Readonly<{
-  job: string
-  status: "publication-required" | "publishing" | "published" | "publication-failed"
-  continuation: ChangePublicationInput["continuation"]
-  detail: string
-  error?: JobError
-}>
-
-function publicationJob(app: YrdCliApp, pr: Change): Job | undefined {
-  const revision = currentChangeRev(pr)
-  const current = app.jobs.getByKey(
-    changePublicationJobKey({ pr: pr.id, revision: revision.n, headSha: revision.head }),
-  )
-  if (current !== undefined) return current
-  return Object.values(stateOf(app).jobs.byId)
-    .filter((job) => job.definition === "pr.publish" && ChangePublicationInputSchema.parse(job.input).pr === pr.id)
-    .toSorted((left, right) => right.requestedAt.localeCompare(left.requestedAt))[0]
-}
-
-function projectPublication(job: Job | undefined): PublicationProjection | undefined {
-  if (job?.definition !== "pr.publish") return undefined
-  const input = ChangePublicationInputSchema.parse(job.input)
-  if (job.status === "queued") {
-    return {
-      job: job.id,
-      status: "publication-required",
-      continuation: input.continuation,
-      detail: "waiting for the one-shot or habitant queue runner",
-    }
-  }
-  if (job.status === "in_progress" || job.status === "waiting") {
-    return {
-      job: job.id,
-      status: "publishing",
-      continuation: input.continuation,
-      detail:
-        job.status === "waiting" ? (job.detail ?? "publisher is waiting") : "credential-bearing publisher is running",
-    }
-  }
-  if (job.conclusion === "success") {
-    return { job: job.id, status: "published", continuation: input.continuation, detail: "immutable refs published" }
-  }
-  const detail =
-    job.conclusion === "failure"
-      ? job.error.message
-      : job.conclusion === "timed_out"
-        ? job.lostReason
-        : job.conclusion === "cancelled"
-          ? job.cancelReason
-          : "publication job did not run"
-  return {
-    job: job.id,
-    status: "publication-failed",
-    continuation: input.continuation,
-    detail,
-    ...(job.conclusion === "failure" ? { error: job.error } : {}),
-  }
-}
-
-async function publishPr(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  selector: string,
-  options: JsonOption & Readonly<{ queue?: boolean }>,
-  io: YrdCliIO,
-): Promise<void> {
-  const process = services.process ?? configuration("pr.publish capability is not installed")
-  const pr = requiredPr(app, selector)
-  const revision = currentChangeRev(pr)
-  const baseSha = changeBaseSha(pr)
-  if (baseSha === undefined) {
-    raiseFailure("refusal", "pr-base-missing", `yrd: change '${pr.id}' has no immutable base SHA`)
-  }
-  const sourceRoot = resolve(io.cwd ?? globalThis.process.cwd())
-  const submodules = await changedSubmodulePins({
-    process,
-    repo: sourceRoot,
-    baseSha,
-    headSha: revision.head,
-  })
-  const input: ChangePublicationInput = {
-    pr: pr.id,
-    revision: revision.n,
-    headSha: revision.head,
-    baseSha,
-    branch: pr.branch,
-    sourceRoot,
-    components: submodules.map(({ path, pin }) => ({ path, pin })),
-    continuation: options.queue === true ? "queue" : "none",
-  }
-  const key = changePublicationJobKey(input)
-  let job = app.jobs.getByKey(key)
-  if (job === undefined) {
-    const requested = await app.bays.requestPublication(input)
-    const id = app.jobs.requested(requested)[0] ?? app.jobs.getByKey(key)?.id
-    job = id === undefined ? undefined : app.jobs.get(id)
-  } else {
-    if (JSON.stringify(ChangePublicationInputSchema.parse(job.input)) !== JSON.stringify(input)) {
-      raiseFailure(
-        "refusal",
-        "publication-request-conflict",
-        `yrd: change '${pr.id}' revision ${revision.n} already has publication Job '${job.id}' with different request details`,
-      )
-    }
-    if (job.status === "completed" && (job.conclusion === "failure" || job.conclusion === "timed_out")) {
-      job = await app.jobs.retry(job.id)
-    }
-  }
-  const publication = projectPublication(job)
-  if (publication === undefined) throw new Error(`yrd: change '${pr.id}' publication request produced no Job`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.publish", pr: projectChangeTaskStatus(pr), publication },
-    `${pr.id} ${publication.status}: ${publication.detail}`,
-  )
-}
-
-async function readyPr(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  selector: string,
-  options: JsonOption,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  const selected = requiredPr(app, selector)
-  const refusalExit = await requireQueueableSubmodulePinsForCommand(selected, services, options, io)
-  if (refusalExit !== undefined) return refusalExit
-  await runPreSubmitGuards(services, io, undefined, undefined, jsonEnabled(options))
-  // Same gate, same erasure as `pr submit` had: the verdicts were awaited and
-  // dropped, so a `pr ready` that ran four checks left no evidence any ran.
-  const requiredChecks = await runRequiredChecks(services, io, undefined, undefined, false, jsonEnabled(options))
-  await app.bays.ready({ pr: selector })
-  let pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after ready`)
-  if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
-  pr = app.bays.pr(pr.id)
-  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after requesting checks`)
-  const eligibility = app.queue.eligibility(pr.id)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    {
-      command: "pr.ready",
-      pr: projectChangeTaskStatusWithEligibility(pr, eligibility),
-      eligibility: projectEligibilityTaskStatus(eligibility),
-      ...(requiredChecks.length === 0 ? {} : { requiredChecks }),
-    },
-    createElement(ChangeResultView, {
-      prs: [pr],
-      runs: [],
-      eligibilities: [eligibility],
-      ...(io.columns === undefined ? {} : { columns: io.columns }),
-    }),
-  )
-  return changeDeliveryState(pr) === "needs-author" ? 1 : 0
-}
-
 type ExecuteRemergeChangeOptions = Readonly<{
   revision?: number
   proposedHeadSha?: string
@@ -5274,99 +5125,6 @@ async function executeRemergeChange(
   return { current, output, result, unchanged, settlement: undefined }
 }
 
-async function reviewPr(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption & Readonly<{ approve?: boolean; reject?: boolean; by?: string; ref?: string; note?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.approve === options.reject) usage("pr review requires exactly one of --approve or --reject")
-  await app.bays.review({
-    pr: selector,
-    by: options.by ?? io.runner ?? "operator",
-    decision: options.approve === true ? "approve" : "reject",
-    ...(options.ref === undefined ? {} : { ref: options.ref }),
-    ...(options.note === undefined ? {} : { note: options.note }),
-  })
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after review`)
-  const review =
-    options.ref === undefined
-      ? app.bays.reviewState(pr.id).current
-      : pr.reviews.findLast((candidate) => candidate.ref === options.ref)
-  if (review === undefined) throw new Error(`yrd: change '${pr.id}' did not retain its current review`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    {
-      command: "pr.review",
-      pr: changeFact(pr),
-      review,
-      eligibility: projectEligibilityTaskStatus(app.queue.eligibility(pr.id)),
-    },
-    `${pr.id} revision ${changeRevisionNumber(pr)} ${review.decision} by ${review.by}`,
-  )
-}
-
-async function requestReviewPr(
-  app: YrdCliApp,
-  selector: string,
-  reviewers: readonly string[],
-  options: JsonOption & Readonly<{ clear?: boolean; by?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.clear === true && reviewers.length > 0) {
-    usage("pr request-review --clear cannot combine with reviewer identities")
-  }
-  if (options.clear !== true && reviewers.length === 0) {
-    usage("pr request-review requires reviewer identities or --clear")
-  }
-  await app.bays.requestReview({
-    pr: selector,
-    reviewers: options.clear === true ? [] : [...reviewers],
-    by: options.by ?? io.runner ?? "operator",
-  })
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after request-review`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    {
-      command: "pr.request-review",
-      pr: changeFact(pr),
-      requestedReviewers: pr.requestedReviewers ?? [],
-      needsReview: app.bays.needsReview(pr.id),
-    },
-    `${pr.id} requested reviewers ${(pr.requestedReviewers ?? []).length === 0 ? "cleared" : (pr.requestedReviewers ?? []).join(", ")}`,
-  )
-}
-
-async function commentPr(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption & Readonly<{ by?: string; ref?: string; note?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.note === undefined || options.note.trim() === "") usage("pr comment requires --note <text>")
-  await app.bays.comment({
-    pr: selector,
-    by: options.by ?? io.runner ?? "operator",
-    note: options.note,
-    ...(options.ref === undefined ? {} : { ref: options.ref }),
-  })
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`yrd: change '${selector}' disappeared after comment`)
-  const comment =
-    options.ref === undefined ? pr.comments.at(-1) : pr.comments.findLast((candidate) => candidate.ref === options.ref)
-  if (comment === undefined) throw new Error(`yrd: change '${pr.id}' did not retain its comment`)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.comment", pr: changeFact(pr), comment },
-    `${pr.id} revision ${changeRevisionNumber(pr)} commented by ${comment.by}`,
-  )
-}
-
 async function changeChecks(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -5566,13 +5324,25 @@ async function resolveSubmitMetadata(
   }
 }
 
-/** One spelling of the tracking surface across every verb that records it.
- * Tracking is the DEFAULT (tracked-delivery, 2026-08-25); `--track` is the
- * explicit affirmation and `--no-track` the recorded opt-out. */
-const TRACK_OPTION_DESCRIPTION =
-  "merge into latest (default): the habitant records, preflights, and queues later branch pushes as frozen revisions"
-const NO_TRACK_OPTION_DESCRIPTION =
-  "opt out of tracking: a moved branch head then refuses instead of being recorded as a revision"
+/** One spelling of the retired tracking surface across every verb that carried
+ * it. Tracking was the record lane's freshness machinery; on the derived lane
+ * a re-push IS the fresh submission, so the pair refuses instead of silently
+ * accepting a flag that binds to nothing. */
+const TRACK_OPTION_DESCRIPTION = "retired: refuses and names why"
+const NO_TRACK_OPTION_DESCRIPTION = "retired: refuses and names why"
+
+function refuseRetiredTrackFlags(): never {
+  // The retired flags are deliberately NOT quoted: a quoted `yrd ...` in a
+  // failure message is lifted into its `resolution`, and the one thing this
+  // must never recommend is the flag itself.
+  raiseFailure(
+    "refusal",
+    "track-flags-retired",
+    "yrd: --track/--no-track are retired with the change-record store (branch-is-change, @i/10 22991) — " +
+      "tracking was the record lane's freshness machinery, and on the derived lane a re-push IS the new " +
+      "submission. Drop the flag; push again to refresh.",
+  )
+}
 
 type ChangeSelectionOptions = {
   follow?: boolean
@@ -5908,6 +5678,7 @@ async function applyChangeSelectionVerb(
   io: YrdCliIO,
   command: ChangeSelectionCommand,
 ): Promise<YrdCliExitCode> {
+  if (options.track !== undefined) refuseRetiredTrackFlags()
   const requiredChecks: PreSubmitCheckVerdict[] = []
   if (command === "pr.submit") {
     const unlandable = await refuseSubmitWithoutMergeAuthority(options, io, services)
@@ -6104,6 +5875,125 @@ async function readComposition(path: string | undefined, io: YrdCliIO): Promise<
 
 function requiredPr(app: YrdCliApp, selector: string): Change {
   return app.bays.pr(selector) ?? requireLiveChange(stateOf(app).bays, selector)
+}
+
+/**
+ * One selector, both worlds, one answer — the S7 read-side resolver
+ * (branch-is-change, @i/10 22991). The DERIVED world answers first: a branch
+ * whose newest-truth arbitration says the derived lane owns it resolves to its
+ * live submit fact plus its latest retained run member. The record store stays
+ * the legacy/history source — a branch the arbitration assigns to the record
+ * lane, and every id/alias with a record, resolves exactly as before — so the
+ * store's deletion turns the record arms into no-ops instead of behavior
+ * changes. A synthetic id with no record resolves to its retained member
+ * snapshot (`resolveMemberById`'s S6 seam): post-door identities live only in
+ * run retention.
+ */
+type ResolvedDelivery =
+  | Readonly<{ lane: "record"; pr: Change }>
+  | Readonly<{
+      lane: "derived"
+      branch: string
+      /** The standing live submit fact, absent for a history-only member. */
+      submit?: ProjectedBranchSubmit
+      /** Latest retained run member for the branch, absent before first compose. */
+      member?: ChangeSnapshot
+      /** Terminal record history for the branch, when the frozen store still holds one. */
+      record?: Change
+    }>
+
+/** The branch a selector names in the DERIVED world: an exact live-submit key,
+ * or a bay whose branch holds one. Record aliases are deliberately not
+ * consulted here — the record store answers those on the legacy arm. */
+function derivedSelectorBranch(app: YrdCliApp, selector: string): string | undefined {
+  const state = stateOf(app)
+  if (state.bays.submits[selector] !== undefined) return selector
+  const bay = app.bays.get(selector)
+  if (bay !== undefined && state.bays.submits[bay.branch] !== undefined) return bay.branch
+  return undefined
+}
+
+/** Latest retained run member for one branch — the only durable home a derived
+ * member's identity has (snapshots survive the record store's deletion). */
+function latestMemberForBranch(app: YrdCliApp, branch: string): ChangeSnapshot | undefined {
+  return latestChangeSnapshot(stateOf(app).queues, (snapshot) => snapshot.branch === branch)
+}
+
+function derivedDeliveryForBranch(app: YrdCliApp, branch: string): Extract<ResolvedDelivery, { lane: "derived" }> {
+  const derived = app.queue.deriveChange(branch)
+  const member = latestMemberForBranch(app, branch)
+  return {
+    lane: "derived",
+    branch,
+    ...(derived.submit === undefined ? {} : { submit: derived.submit }),
+    ...(member === undefined ? {} : { member }),
+    ...(derived.authority.record === undefined ? {} : { record: derived.authority.record }),
+  }
+}
+
+function resolveDelivery(app: YrdCliApp, selector: string): ResolvedDelivery | undefined {
+  const branch = derivedSelectorBranch(app, selector)
+  if (branch !== undefined && app.queue.deriveChange(branch).authority.lane === "derived") {
+    return derivedDeliveryForBranch(app, branch)
+  }
+  const record = app.bays.pr(selector)
+  if (record !== undefined) return { lane: "record", pr: record }
+  const member = app.queue.resolveMember(selector)
+  if (member !== undefined && member.source === "snapshot") {
+    const snapshot = member.snapshot
+    const derived = app.queue.deriveChange(snapshot.branch)
+    // The retained snapshot was addressed by its own id; the branch's live
+    // fact rides along only while it still stands at membership's sha family.
+    return {
+      lane: "derived",
+      branch: snapshot.branch,
+      member: snapshot,
+      ...(derived.submit === undefined ? {} : { submit: derived.submit }),
+      ...(derived.authority.record === undefined ? {} : { record: derived.authority.record }),
+    }
+  }
+  return undefined
+}
+
+/** The not-found refusal for the S7 resolver: the record-store message plus
+ * the derived world it also searched, per the forensic rule — a "no results"
+ * must say what was queried and where it looked. */
+function deliveryNotFoundMessage(app: YrdCliApp, selector: string): string {
+  const state = stateOf(app)
+  const submits = Object.keys(state.bays.submits).length
+  const members = new Set<string>()
+  for (const record of Queues.values(state.queues)) {
+    for (const snapshot of record.prs) if (snapshot.intent === undefined) members.add(snapshot.id)
+  }
+  return (
+    `${changeNotFoundMessage(state.bays, selector)}, ` +
+    `${String(submits)} live submit(s), and ${String(members.size)} retained run member(s)`
+  )
+}
+
+function requiredDelivery(app: YrdCliApp, selector: string): ResolvedDelivery {
+  const resolved = resolveDelivery(app, selector)
+  if (resolved === undefined) {
+    raiseFailure("refusal", "pr-not-found", deliveryNotFoundMessage(app, selector))
+  }
+  return resolved
+}
+
+/** Head sha of a derived delivery: the live fact wins (it is the submission);
+ * a history-only member answers from its retained snapshot. */
+function derivedDeliveryHead(delivery: Extract<ResolvedDelivery, { lane: "derived" }>): string {
+  const head = delivery.submit?.sha ?? delivery.member?.headSha
+  if (head === undefined) {
+    // Structurally unreachable — a derived resolution always carries a fact or
+    // a member — but a silent undefined here would become a git error naming
+    // nothing, so the invariant fails loud with the delivery named.
+    raiseFailure(
+      "infrastructure",
+      "pr-state-invalid",
+      `yrd: derived delivery for branch '${delivery.branch}' carries neither a live submit fact nor a retained member`,
+    )
+  }
+  return head
 }
 
 type ChangeMergeOutcome =
@@ -6318,41 +6208,117 @@ const CHANGE_LIST_STATES: readonly ChangeDeliveryState[] = [
 ]
 const CHANGE_LIST_STATE_HELP = CHANGE_LIST_STATES.join(", ")
 
+// The live-lane `--state` vocabulary: what a derived submission is doing right
+// now, judged from its fact, retained member, runs, and standing refusal.
+// Disjoint from both record vocabularies by construction ("landed" is the
+// live-fact word; "integrated"/"already-landed" stay record delivery labels).
+const CHANGE_LIST_LIVE_STATES = ["pending", "queued", "running", "refused", "landed"] as const
+const CHANGE_LIST_LIVE_STATE_HELP = CHANGE_LIST_LIVE_STATES.join(", ")
+
+type LiveSubmitRow = Readonly<{
+  branch: string
+  sha: string
+  base: string
+  at: string
+  state: (typeof CHANGE_LIST_LIVE_STATES)[number]
+  id?: string
+  revision?: number
+  run?: string
+  refusal?: Readonly<{ code: string; reason: string }>
+}>
+
+/** One row per live submit fact the derived lane owns, joined to its retained
+ * run member when compose has minted one — the pr-list half of the S7 truth
+ * that a just-submitted derived branch is VISIBLE (host-conv gap A). */
+function liveSubmitRows(app: YrdCliApp, base: string | undefined): LiveSubmitRow[] {
+  const state = stateOf(app)
+  return Object.entries(state.bays.submits)
+    .filter(([branch]) => app.queue.deriveChange(branch).authority.lane === "derived")
+    .filter(([, submit]) => base === undefined || baseIdentity(submit.base) === base)
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([branch, submit]) => {
+      const delivery = derivedDeliveryForBranch(app, branch)
+      const status = derivedDeliveryStatus(app, delivery)
+      const active = status.runs.findLast((run) => !Queues.terminal(run))
+      const landing =
+        status.state === "landed"
+          ? status.runs.findLast((run) => Queues.succeeded(run) && run.integration !== undefined)
+          : undefined
+      const run = active ?? landing
+      const member = delivery.member
+      return {
+        branch,
+        sha: submit.sha,
+        base: submit.base,
+        at: submit.at,
+        // "history" needs the fact to be absent, and this row exists because
+        // the fact stands — the fold keeps the type honest without a cast.
+        state: status.state === "history" ? "pending" : status.state,
+        ...(member === undefined ? {} : { id: member.id, revision: member.revision }),
+        ...(run === undefined ? {} : { run: run.id }),
+        ...(status.refusal === undefined ? {} : { refusal: status.refusal }),
+      }
+    })
+}
+
+function liveSubmitLine(row: LiveSubmitRow): string {
+  const doing =
+    row.state === "refused"
+      ? `refused [${row.refusal?.code ?? "unknown"}]`
+      : row.state === "pending"
+        ? "pending compose"
+        : row.state === "landed"
+          ? `landed via run ${row.run ?? "?"}`
+          : `${row.state} run ${row.run ?? "?"}`
+  const member = row.id === undefined ? "" : ` as ${row.id}.${String(row.revision ?? 0)}`
+  return `  ${row.branch} @ ${row.sha.slice(0, 12)} base ${row.base} submitted ${row.at} — ${doing}${member}`
+}
+
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
     Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
+  if (options.needsReview === true || options.reviewer !== undefined) {
+    // The retired flags are deliberately NOT quoted: a quoted `yrd ...` in a
+    // failure message is lifted into its `resolution`, and the one thing this
+    // must never recommend is the flag itself.
+    raiseFailure(
+      "refusal",
+      "pr-list-review-filters-retired",
+      "yrd: pr list --needs-review/--reviewer are retired with the change-record store (branch-is-change, " +
+        "@i/10 22991): review records no longer gate delivery, so there is no review queue to filter. The " +
+        "pushed submit ref is the recorded consent; 'yrd pr list' shows every live submission.",
+    )
+  }
   const byRecordState =
     options.state !== undefined && CHANGE_LIST_RECORD_STATES.includes(options.state as Change["state"])
   const byDeliveryStatus =
     options.state !== undefined && CHANGE_LIST_STATES.includes(options.state as ChangeDeliveryState)
-  // A value that both vocabularies define has two readings, and picking one
-  // would answer a question the caller did not ask. The two sets are disjoint
-  // today; this fires only if one drifts into the other, and says so rather
-  // than silently filtering the field it happened to check first.
-  if (byRecordState && byDeliveryStatus) {
+  const byLiveState =
+    options.state !== undefined &&
+    CHANGE_LIST_LIVE_STATES.includes(options.state as (typeof CHANGE_LIST_LIVE_STATES)[number])
+  // A value that two vocabularies define has two readings, and picking one
+  // would answer a question the caller did not ask. The three sets are
+  // disjoint today; this fires only if one drifts into another, and says so
+  // rather than silently filtering the field it happened to check first.
+  if ((byRecordState && byDeliveryStatus) || (byLiveState && (byRecordState || byDeliveryStatus))) {
     usage(
-      `--state '${options.state}' is ambiguous: it names both a record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
-        `and a delivery status (${CHANGE_LIST_STATE_HELP})`,
+      `--state '${options.state}' is ambiguous: it names more than one of a record state ` +
+        `(${CHANGE_LIST_RECORD_STATE_HELP}), a delivery status (${CHANGE_LIST_STATE_HELP}), ` +
+        `and a live submission state (${CHANGE_LIST_LIVE_STATE_HELP})`,
     )
   }
-  if (options.state !== undefined && !byRecordState && !byDeliveryStatus) {
+  if (options.state !== undefined && !byRecordState && !byDeliveryStatus && !byLiveState) {
     usage(
-      `--state '${options.state}' is invalid; expected a record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
-        `or a delivery status (${CHANGE_LIST_STATE_HELP})`,
+      `--state '${options.state}' is invalid; expected a record state (${CHANGE_LIST_RECORD_STATE_HELP}), ` +
+        `a delivery status (${CHANGE_LIST_STATE_HELP}), or a live submission state (${CHANGE_LIST_LIVE_STATE_HELP})`,
     )
   }
   const state = stateOf(app)
   const base = options.base === undefined ? undefined : selectedBase(state, options.base)
-  const explicitlyFiltered =
-    options.base !== undefined ||
-    options.state !== undefined ||
-    options.issue !== undefined ||
-    options.needsReview === true ||
-    options.reviewer !== undefined
+  const explicitlyFiltered = options.base !== undefined || options.state !== undefined || options.issue !== undefined
   const matching = app.bays
     .prs()
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
@@ -6372,67 +6338,172 @@ async function listPrs(
     .map((pr) => ({
       pr,
       eligibility: app.queue.eligibility(pr.id),
-      needsReview: app.bays.needsReview(pr.id, options.reviewer),
+      needsReview: app.bays.needsReview(pr.id),
     }))
     .filter(
       ({ pr, eligibility }) =>
         options.state === undefined ||
-        (byRecordState
-          ? pr.state === options.state
-          : projectedChangeStatus(pr, eligibility) === options.state ||
-            changeDeliveryState(pr) === options.state ||
-            // v1 clients used `rejected` as the only author-fix bucket. Keep
-            // that filter as a read-compatible superset while every returned
-            // row tells the truth with native `status: needs-author`.
-            (options.state === "rejected" && projectedChangeStatus(pr, eligibility) === "needs-author")),
+        (byLiveState
+          ? false
+          : byRecordState
+            ? pr.state === options.state
+            : projectedChangeStatus(pr, eligibility) === options.state ||
+              changeDeliveryState(pr) === options.state ||
+              // v1 clients used `rejected` as the only author-fix bucket. Keep
+              // that filter as a read-compatible superset while every returned
+              // row tells the truth with native `status: needs-author`.
+              (options.state === "rejected" && projectedChangeStatus(pr, eligibility) === "needs-author")),
     )
-    .filter(({ pr, eligibility, needsReview }) =>
-      options.needsReview === true
-        ? options.reviewer !== undefined
-          ? needsReview
-          : needsReview ||
-            ((changeDeliveryState(pr) === "pushed" ||
-              changeDeliveryState(pr) === "submitted" ||
-              changeDeliveryState(pr) === "ready") &&
-              eligibility.review.required &&
-              !eligibility.review.approved)
-        : true,
-    )
+  // LIVE section — the derived lane's submissions. A record-vocabulary filter
+  // asks a records question and hides them; a live-state filter selects them;
+  // the unfiltered list always shows them (live work never falls out of the
+  // default surface — the retention window binds history rows only).
+  const live =
+    byRecordState || byDeliveryStatus
+      ? []
+      : liveSubmitRows(app, base).filter((row) => !byLiveState || row.state === options.state)
   const selected = new Set(rows.map(({ pr }) => pr.id))
-  const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
+  const liveMemberIds = new Set(live.flatMap((row) => (row.id === undefined ? [] : [row.id])))
+  const runs = allQueueRuns(app).filter((run) =>
+    run.prs.some((member) => selected.has(member.id) || liveMemberIds.has(member.id)),
+  )
   const { merges, warnings } = await reconcileChangeMerges(
     rows.map(({ pr }) => pr),
     io,
   )
-  const publicationWarnings = rows.flatMap(({ pr }) => {
-    const publication = projectPublication(publicationJob(app, pr))
-    return publication === undefined || publication.status === "published"
-      ? []
-      : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`]
-  })
+  const liveLines =
+    live.length === 0 ? [] : ["Live submissions (derived lane):", ...live.map(liveSubmitLine), ""].join("\n") + "\n"
   await printResultWithWarnings(
     io,
     json,
     {
       command: "pr.list",
       prs: rows.map(({ pr, eligibility, needsReview }) => {
-        const publication = projectPublication(publicationJob(app, pr))
         return {
           ...projectChangeTaskStatusWithEligibility(pr, eligibility, merges.get(pr.id)),
           eligibility: projectEligibilityTaskStatus(eligibility),
           requestedReviewers: pr.requestedReviewers ?? [],
           needsReview,
-          ...(publication === undefined ? {} : { publication }),
         }
       }),
+      live,
       runs: runs.map(projectQueueRunTaskStatus),
     },
-    createElement(ChangeListView, {
-      rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), merges),
-      columns: io.columns ?? 120,
-      window: { hidden: matching.length - listed.length, total: matching.length },
-    }),
-    [...warnings, ...publicationWarnings],
+    createElement(
+      Fragment,
+      null,
+      ...(live.length === 0 ? [] : [createElement(Text, null, liveLines)]),
+      createElement(ChangeListView, {
+        rows: changeListRows(rows, runs, io.now?.() ?? Date.now(), merges),
+        columns: io.columns ?? 120,
+        window: { hidden: matching.length - listed.length, total: matching.length },
+      }),
+    ),
+    warnings,
+  )
+}
+
+/** The delivery state one derived resolution is in right now, judged from its
+ * fact, its retained member, that member's runs, and any standing admission
+ * refusal — the derived lane's replacement for `ChangeDeliveryState`. */
+function derivedDeliveryStatus(
+  app: YrdCliApp,
+  delivery: Extract<ResolvedDelivery, { lane: "derived" }>,
+): Readonly<{
+  state: "pending" | "queued" | "running" | "refused" | "landed" | "history"
+  runs: readonly Run[]
+  refusal?: Readonly<{ code: string; reason: string }>
+}> {
+  const member = delivery.member
+  const runs = member === undefined ? [] : allQueueRuns(app).filter((run) => run.prs.some(({ id }) => id === member.id))
+  if (delivery.submit === undefined) return { state: "history", runs }
+  const refusal = member === undefined ? undefined : stateOf(app).queues.admissionRefusals[member.id]
+  const active = runs.findLast((run) => !Queues.terminal(run))
+  if (active !== undefined) {
+    return { state: active.status === "in_progress" ? "running" : "queued", runs }
+  }
+  if (refusal !== undefined && refusal.settlement === undefined && refusal.headSha === delivery.submit.sha) {
+    return { state: "refused", runs, refusal: { code: refusal.code, reason: refusal.reason } }
+  }
+  // A successful integrated run for the fact's EXACT sha: the submission is
+  // delivered, and compose skips an already-landed submit — "pending" here
+  // would promise a compose that never comes. The fact itself stands until the
+  // receiver retires it, which is why this is a live state and not history.
+  if (
+    member !== undefined &&
+    member.headSha === delivery.submit.sha &&
+    runs.some((run) => Queues.succeeded(run) && run.integration !== undefined)
+  ) {
+    return { state: "landed", runs }
+  }
+  // A member retained for an OLDER sha than the standing fact is history; the
+  // live fact itself is what compose picks up next — pending either way.
+  return { state: "pending", runs }
+}
+
+/** `pr view`/`pr status` for a derived-lane delivery: the fact is the record.
+ * Renders fact + retained member + runs; no `Change` projection exists to
+ * borrow, so the envelope is the derived composite. */
+async function viewDerivedDelivery(
+  app: YrdCliApp,
+  delivery: Extract<ResolvedDelivery, { lane: "derived" }>,
+  options: JsonOption,
+  io: YrdCliIO,
+  command: string,
+): Promise<void> {
+  const status = derivedDeliveryStatus(app, delivery)
+  const member = delivery.member
+  const submit = delivery.submit
+  const stateLine =
+    status.state === "running" || status.state === "queued"
+      ? `${status.state} — run ${status.runs.findLast((run) => !Queues.terminal(run))?.id ?? "?"}`
+      : status.state === "refused"
+        ? `refused — [${status.refusal?.code ?? "unknown"}] ${status.refusal?.reason ?? ""}`
+        : status.state === "landed"
+          ? `landed — run ${
+              status.runs.findLast((run) => Queues.succeeded(run) && run.integration !== undefined)?.id ?? "?"
+            } integrated this sha; the submit fact stands until the receiver retires it`
+          : status.state === "pending"
+            ? "pending — composes as a derived member on the next queue pass"
+            : "history — no live submit fact stands for this branch"
+  const lines = [
+    `${delivery.branch} — derived lane (the submit fact is the submission; no change record exists)`,
+    ...(submit === undefined
+      ? []
+      : [`submitted ${submit.sha.slice(0, 12)} (base ${submit.base}) at ${submit.at}`]),
+    stateLine,
+    ...(member === undefined
+      ? []
+      : [
+          `member ${member.id}.${String(member.revision)} @ ${member.headSha.slice(0, 12)}` +
+            `${member.issue === undefined ? "" : ` issue ${member.issue}`} — retained run snapshot`,
+        ]),
+    ...status.runs.map(
+      (run) => `run ${run.id}: ${run.status}${run.conclusion === undefined ? "" : ` (${run.conclusion})`}`,
+    ),
+    ...(delivery.record === undefined
+      ? []
+      : [`history: record ${delivery.record.id} is ${changeDeliveryState(delivery.record)} for this branch`]),
+  ]
+  await printResult(
+    io,
+    jsonEnabled(options),
+    {
+      command,
+      derived: {
+        lane: "derived",
+        branch: delivery.branch,
+        state: status.state,
+        ...(submit === undefined ? {} : { sha: submit.sha, base: submit.base, at: submit.at }),
+      },
+      ...(member === undefined ? {} : { member }),
+      runs: status.runs.map(projectQueueRunTaskStatus),
+      ...(status.refusal === undefined ? {} : { refusal: status.refusal }),
+      ...(delivery.record === undefined
+        ? {}
+        : { record: { id: delivery.record.id, status: changeDeliveryState(delivery.record) } }),
+    },
+    lines.join("\n"),
   )
 }
 
@@ -6444,7 +6515,12 @@ async function viewPr(
   services: YrdCliServices,
   command = "pr.view",
 ): Promise<void> {
-  const pr = requiredPr(app, selector)
+  const resolved = requiredDelivery(app, selector)
+  if (resolved.lane === "derived") {
+    await viewDerivedDelivery(app, resolved, options, io, command)
+    return
+  }
+  const pr = resolved.pr
   const json = jsonEnabled(options)
   let liveSource: Readonly<{ head: string }> | undefined
   if (!json) {
@@ -6498,8 +6574,7 @@ async function viewPr(
   const attempts = await queueAttempts(services)
   const detail = ChangeDetailData(pr, runs, attempts)
   const eligibility = app.queue.eligibility(pr.id)
-  const publication = projectPublication(publicationJob(app, pr))
-  await printResultWithWarnings(
+  await printResult(
     io,
     json,
     {
@@ -6510,7 +6585,6 @@ async function viewPr(
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,
-      ...(publication === undefined ? {} : { publication }),
     },
     createElement(ChangeDetailView, {
       pr,
@@ -6521,9 +6595,6 @@ async function viewPr(
       now: io.now?.() ?? Date.now(),
       ...(position === undefined ? {} : { position }),
     }),
-    publication === undefined || publication.status === "published"
-      ? []
-      : [`${pr.id} ${publication.status}: ${publication.detail} (Job ${publication.job})`],
   )
 }
 
@@ -6538,9 +6609,44 @@ async function viewChangeRuns(
     const snapshot = await app.journalSnapshot()
     let pr = resolveChange(snapshot.state.bays, selector)
     if (pr === undefined) {
+      // Derived arm (host-conv gap B): a synthetic id or derived branch
+      // renders its retained member's runs — the member snapshot is the
+      // identity, no record exists to project.
+      const resolved = resolveDelivery(app, selector)
+      if (resolved?.lane === "derived" && resolved.member !== undefined) {
+        const member = resolved.member
+        const runs = allQueueRuns(app).filter((run) => run.prs.some(({ id }) => id === member.id))
+        const attempts = await queueAttempts(services)
+        const data = runs.map((run) => queueShowData(run, runs, attempts))
+        await printResult(
+          io,
+          jsonEnabled(options),
+          {
+            command: "pr.runs",
+            derived: {
+              lane: "derived",
+              branch: resolved.branch,
+              ...(resolved.submit === undefined
+                ? {}
+                : { sha: resolved.submit.sha, base: resolved.submit.base, at: resolved.submit.at }),
+            },
+            member,
+            runs: data,
+          },
+          [
+            `${member.id}.${String(member.revision)} ${resolved.branch} @ ${member.headSha.slice(0, 12)} — derived member`,
+            ...(runs.length === 0
+              ? ["no retained runs for this member"]
+              : data.map(
+                  (row) => `run ${row.run}: ${row.taskStatus ?? ""}`.trimEnd(),
+                )),
+          ].join("\n"),
+        )
+        return
+      }
       const confirmed = await app.journalSnapshot()
       if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
-      pr = requireLiveChange(snapshot.state.bays, selector)
+      raiseFailure("refusal", "pr-not-found", deliveryNotFoundMessage(app, selector))
     }
     const runs = changeQueueRuns(app, pr)
     const attempts = await queueAttempts(services)
@@ -6577,8 +6683,35 @@ async function diffPr(
   options: JsonOption & Readonly<{ stat?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
-  const pr = requiredPr(app, selector)
+  const resolved = requiredDelivery(app, selector)
   const cwd = io.cwd ?? process.cwd()
+  if (resolved.lane === "derived") {
+    // The fact carries the head; the retained member's pinned baseSha wins
+    // over the moving base ref when compose recorded one for that head.
+    const head = derivedDeliveryHead(resolved)
+    const member = resolved.member?.headSha === head ? resolved.member : undefined
+    const derivedBase = member?.baseSha ?? resolved.submit?.base ?? resolved.member?.base ?? "main"
+    let derivedDiff: string
+    try {
+      derivedDiff = gitSync(cwd, ["diff", ...(options.stat === true ? ["--stat"] : []), `${derivedBase}...${head}`, "--"])
+    } catch (error) {
+      refusal(`cannot diff branch '${resolved.branch}': ${error instanceof Error ? error.message : String(error)}`)
+    }
+    await printResult(
+      io,
+      jsonEnabled(options),
+      {
+        command: "pr.diff",
+        pr: member?.id ?? resolved.branch,
+        base: derivedBase,
+        head,
+        diff: derivedDiff,
+      },
+      derivedDiff,
+    )
+    return
+  }
+  const pr = resolved.pr
   const base = changeBaseSha(pr) ?? pr.base
   let diff: string
   try {
@@ -6621,7 +6754,30 @@ async function checkoutPr(
   options: JsonOption & Readonly<{ bay?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  const pr = requiredPr(app, selector)
+  const resolved = requiredDelivery(app, selector)
+  if (resolved.lane === "derived") {
+    // Same immutable inspection for a derived delivery: materialize the fact's
+    // sha (or the retained member's, for a history-only id) detached.
+    const head = derivedDeliveryHead(resolved)
+    const member = resolved.member
+    const name = options.bay ?? `pr-${(member?.id ?? resolved.branch).toLowerCase().replace(/[^a-z0-9._-]+/gu, "-")}`
+    await provisionBay(
+      app,
+      name,
+      {
+        from: head,
+        expectedHead: head,
+        base: resolved.submit?.base ?? member?.base ?? "main",
+        ...(member?.issue === undefined ? {} : { issue: member.issue }),
+        ...options,
+      },
+      io,
+      "pr.checkout",
+      member?.id ?? resolved.branch,
+    )
+    return
+  }
+  const pr = resolved.pr
   const name = options.bay ?? `pr-${pr.id.toLowerCase()}`
   // PR checkout is immutable inspection: authors normally keep the branch checked
   // out in their own Bay, while its recorded revision remains safe to materialize detached.
@@ -6654,16 +6810,33 @@ function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
   }
 }
 
-function currentPr(app: YrdCliApp, io: YrdCliIO): Change {
+/** The delivery the invoking bay or checked-out branch names — the S7 pivot of
+ * the old record-only `currentPr`. The derived world answers first (a standing
+ * submit fact the arbitration assigns to the derived lane), the record store
+ * second as the legacy source, retained run members third as history — so a
+ * just-submitted derived branch is VISIBLE here instead of being told to
+ * submit again (host-conv gap A). The refusal survives with its fact
+ * vocabulary for a branch neither world knows. */
+function currentDelivery(app: YrdCliApp, io: YrdCliIO): ResolvedDelivery {
   const state = stateOf(app)
   const cwd = io.cwd ?? process.cwd()
   const bay = currentBay(state.bays, cwd)
   const branch = bay?.branch ?? currentGitBranch(cwd, io)
+  if (
+    branch !== undefined &&
+    state.bays.submits[branch] !== undefined &&
+    app.queue.deriveChange(branch).authority.lane === "derived"
+  ) {
+    return derivedDeliveryForBranch(app, branch)
+  }
   const pr =
     (bay === undefined ? undefined : Object.values(state.bays.prs).find((candidate) => candidate.bay === bay.id)) ??
     Object.values(state.bays.prs).find((candidate) => candidate.branch === branch)
-  if (pr === undefined) refusal("the current bay or branch has no PR; submit it with 'yrd pr submit'")
-  return pr as Change
+  if (pr !== undefined) return { lane: "record", pr: pr as Change }
+  if (branch !== undefined && latestMemberForBranch(app, branch) !== undefined) {
+    return derivedDeliveryForBranch(app, branch)
+  }
+  refusal("the current bay or branch has no PR; submit it with 'yrd pr submit'")
 }
 
 async function queuedChangePosition(app: YrdCliApp, pr: Change, io: YrdCliIO): Promise<number | undefined> {
@@ -6686,51 +6859,12 @@ async function queuedChangePositions(app: YrdCliApp, base: string, io: YrdCliIO)
 }
 
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO, services: YrdCliServices): Promise<void> {
-  const pr = currentPr(app, io)
-  await viewPr(app, pr.id, options, io, services, "pr.status")
-}
-
-async function editPr(
-  app: YrdCliApp,
-  selector: string,
-  options: JsonOption &
-    Readonly<{
-      issue?: string
-      note?: string
-      title?: string
-      description?: string
-      track?: boolean
-      untrack?: boolean
-    }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.track === true && options.untrack === true) usage("pr edit takes --track or --untrack, not both")
-  const track = options.track === true ? true : options.untrack === true ? false : undefined
-  if (
-    options.issue === undefined &&
-    options.note === undefined &&
-    options.title === undefined &&
-    options.description === undefined &&
-    track === undefined
-  ) {
-    usage("pr edit requires --issue, --note, --title, --description, --track, or --untrack")
+  const resolved = currentDelivery(app, io)
+  if (resolved.lane === "record") {
+    await viewPr(app, resolved.pr.id, options, io, services, "pr.status")
+    return
   }
-  const pr = requiredPr(app, selector)
-  await app.bays.editPr({
-    pr: pr.id,
-    ...(options.issue === undefined ? {} : { issue: options.issue }),
-    ...(options.note === undefined ? {} : { note: options.note }),
-    ...(options.title === undefined ? {} : { title: options.title }),
-    ...(options.description === undefined ? {} : { description: options.description }),
-    ...(track === undefined ? {} : { track }),
-  })
-  const edited = requiredPr(app, pr.id)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.edit", pr: projectChangeTaskStatus(edited) },
-    createElement(ChangeResultView, { prs: [edited], runs: changeQueueRuns(app, edited) }),
-  )
+  await viewDerivedDelivery(app, resolved, options, io, "pr.status")
 }
 
 function changeFact(pr: DeepReadonly<Change>): Readonly<{
@@ -6752,26 +6886,99 @@ function changeFact(pr: DeepReadonly<Change>): Readonly<{
   }
 }
 
-function selectedCheckPRs(app: YrdCliApp, selectors: readonly string[]): Change[] {
-  // Was a hand-rolled `no change '<selector>'`, a third spelling of a fact the bay
-  // model already words. Routing through requiredPr keeps ONE not-found
-  // message, so the searched-count reaches every surface instead of the one
-  // that happened to be fixed.
-  return selectors.map((selector) => requiredPr(app, selector))
+/** A derived member's check evidence, read from its admission Jobs — the only
+ * durable home the derived lane's checks-before-queueing verdicts have
+ * (`recordRevisionAdmission` deliberately skips recordless members; the reuse
+ * read in @yrd/queue's `derivedRevisionAdmissionReuse` reads the same keys).
+ * The key family is `admission:<id>:<revision>:<baseSha>:<index>[:stepRev]`,
+ * buildable from the member identity alone. A member with no admission Job at
+ * all reports one truthful `not-requested` row rather than zero rows. */
+function derivedCheckRecords(
+  app: YrdCliApp,
+  delivery: Extract<ResolvedDelivery, { lane: "derived" }>,
+): ChangeCheckViewRecord[] {
+  const member = delivery.member
+  if (member === undefined) {
+    return [{ pr: delivery.branch, revision: 0, status: "not-requested" }]
+  }
+  const state = stateOf(app)
+  const prefix = `admission:${member.id}:${String(member.revision)}:`
+  const rows = Object.entries(state.jobs.byKey)
+    .filter(([key]) => key.startsWith(prefix))
+    .flatMap(([key, id]) => {
+      const job = state.jobs.byId[id]
+      if (job === undefined) return []
+      // Key tail after the identity prefix: `<baseSha>:<index>[:<stepRev>]`.
+      const index = key.slice(prefix.length).split(":")[1] ?? "0"
+      const input = job.input as Readonly<{ step?: unknown }> | undefined
+      const step = typeof input?.step === "string" ? input.step : undefined
+      const status: ChangeCheckViewRecord["status"] =
+        job.status === "completed"
+          ? job.conclusion === "success"
+            ? "passed"
+            : "failed"
+          : job.status === "in_progress"
+            ? "checking"
+            : "queued"
+      return [
+        {
+          pr: member.id,
+          revision: member.revision,
+          status,
+          job: job.id,
+          ...(step === undefined ? {} : { step }),
+          position: Number(index),
+        } satisfies ChangeCheckViewRecord,
+      ]
+    })
+    .toSorted((left, right) => (left.position ?? 0) - (right.position ?? 0))
+  return rows.length === 0 ? [{ pr: member.id, revision: member.revision, status: "not-requested" }] : rows
 }
 
 function changeCheckRecords(app: YrdCliApp, selectors: readonly string[]): ChangeCheckViewRecord[] {
-  selectedCheckPRs(app, selectors)
-  return [...app.queue.checks(selectors)]
+  // The S7 resolver answers for every selector FIRST — one not-found message,
+  // with the searched counts, for both worlds. Record-lane selectors keep
+  // core's own projection; derived-lane selectors read admission-Job evidence.
+  const resolved = selectors.map((selector) => ({ selector, delivery: requiredDelivery(app, selector) }))
+  const recordSelectors = resolved
+    .filter(({ delivery }) => delivery.lane === "record")
+    .map(({ selector }) => selector)
+  const records = recordSelectors.length === 0 ? [] : [...app.queue.checks(recordSelectors)]
+  const derived = resolved.flatMap(({ delivery }) =>
+    delivery.lane === "derived" ? derivedCheckRecords(app, delivery) : [],
+  )
+  return [...records, ...derived]
 }
+
+/** The issue lens's sources, stated because they bound what it can see: bays,
+ * change records (legacy), contests, and COMPOSED run members whose snapshots
+ * carry an `issue` (S6 trailer enrichment). A fact-only submission — pushed
+ * but not yet composed — carries no issue anywhere, so it cannot appear here;
+ * the listing discloses that instead of silently narrowing (NSE-10). */
+const ISSUE_LENS_SOURCE_DISCLAIMER =
+  "issues joined from bays, records, contests, and composed runs only — a submitted branch appears here after its first compose"
 
 function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: string): IssueLensRow[] {
   const contests = app.contests.list()
+  // Latest retained member snapshot per id that names an issue: the derived
+  // lane's only issue linkage (fact submissions carry none; compose fills
+  // `issue` from trailers). Records shadow members sharing an id.
+  const memberIssues = new Map<string, ChangeSnapshot>()
+  for (const record of Queues.values(stateOf(app).queues)) {
+    for (const snapshot of record.prs) {
+      if (snapshot.intent === undefined && snapshot.issue !== undefined && state.bays.prs[snapshot.id] === undefined) {
+        memberIssues.set(snapshot.id, snapshot)
+      }
+    }
+  }
   const refs = new Set<string>()
   for (const bay of Object.values(state.bays.byId)) if (bay.issue !== undefined) refs.add(bay.issue)
   for (const pr of Object.values(state.bays.prs)) if (pr.issue !== undefined) refs.add(pr.issue)
+  for (const member of memberIssues.values()) if (member.issue !== undefined) refs.add(member.issue)
   for (const contest of contests) refs.add(`${contest.issue.ref.source}:${contest.issue.ref.id}`)
-  if (selected !== undefined && !refs.has(selected)) refusal(`no issue '${selected}' is in flight`)
+  if (selected !== undefined && !refs.has(selected)) {
+    refusal(`no issue '${selected}' is in flight — ${ISSUE_LENS_SOURCE_DISCLAIMER}`)
+  }
   return [...refs]
     .filter((issue) => selected === undefined || issue === selected)
     .toSorted()
@@ -6781,6 +6988,12 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
       const prs = Object.values(state.bays.prs).filter(
         (pr) => pr.issue === issue || (pr.bay !== undefined && bayIds.has(pr.bay)),
       )
+      const members = [...memberIssues.values()].filter((member) => member.issue === issue)
+      const memberOutcomes = members.map((member) => {
+        const runs = allQueueRuns(app).filter((run) => run.prs.some(({ id }) => id === member.id))
+        const latest = runs.at(-1)
+        return latest?.conclusion ?? latest?.status ?? "composed"
+      })
       const joinedContests = contests.filter(
         (contest) => `${contest.issue.ref.source}:${contest.issue.ref.id}` === issue,
       )
@@ -6789,39 +7002,16 @@ function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: 
         issue,
         ...taskStatusFields(taskStatus),
         bays: bays.map((bay) => bay.id).join(",") || "-",
-        prs: prs.map((pr) => pr.id).join(",") || "-",
+        prs: [...prs.map((pr) => pr.id), ...members.map((member) => member.id)].join(",") || "-",
         contests: joinedContests.map((contest) => contest.id).join(",") || "-",
         outcome:
-          [...prs.map((pr) => changeDeliveryState(pr)), ...joinedContests.map((contest) => contest.status)].join(",") ||
-          "in-flight",
+          [
+            ...prs.map((pr) => changeDeliveryState(pr)),
+            ...memberOutcomes,
+            ...joinedContests.map((contest) => contest.status),
+          ].join(",") || "in-flight",
       }
     })
-}
-
-async function ensureIssueDelivery(
-  app: YrdCliApp,
-  issue: string,
-  options: JsonOption,
-  io: YrdCliIO,
-): Promise<YrdCliExitCode> {
-  await app.issues.resolve(app.issues.ref(issue))
-  const opened = await prepareResolvedIssueBay(app, issue, io, { reuseActive: true })
-  const draft = await ensureIssueDraft(app, issue, opened.identity.branch, io, {
-    track: true,
-  })
-  await printResultWithWarnings(
-    io,
-    jsonEnabled(options),
-    {
-      command: "issue.ensure",
-      issue,
-      bay: opened.bay,
-      pr: projectChangeTaskStatus(draft.pr),
-    },
-    `issue ${issue} → bay ${opened.bay.id} ${opened.identity.branch} → tracked draft ${draft.pr.id}`,
-    draft.warnings,
-  )
-  return 0
 }
 
 async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
@@ -6839,12 +7029,18 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
     {
       command: selected === undefined ? "issue.list" : "issue.view",
       issues,
+      sources: ISSUE_LENS_SOURCE_DISCLAIMER,
       ...bridges,
     },
-    createElement(IssueLensView, {
-      rows: issues,
-      ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridges.trackerBridgeV2) }),
-    }),
+    createElement(
+      Fragment,
+      null,
+      createElement(IssueLensView, {
+        rows: issues,
+        ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridges.trackerBridgeV2) }),
+      }),
+      createElement(Text, null, `\n${ISSUE_LENS_SOURCE_DISCLAIMER}\n`),
+    ),
   )
 }
 
@@ -6877,77 +7073,65 @@ async function runQueues(
   )
 }
 
-function queuedPublicationJobs(app: YrdCliApp): readonly Job[] {
-  return Object.values(stateOf(app).jobs.byId).filter(
-    (job) => job.definition === "pr.publish" && job.status === "queued",
-  )
-}
-
-async function preparePublicationQueueCycle(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  io: YrdCliIO,
-): Promise<readonly Job[]> {
-  const queued = queuedPublicationJobs(app)
-  const executed =
-    queued.length === 0
-      ? []
-      : await runJobs(
-          app,
-          queued.map((job) => job.id),
-          io,
-        )
-  const successful = Object.values(stateOf(app).jobs.byId).filter(
-    (job) => job.definition === "pr.publish" && job.status === "completed" && job.conclusion === "success",
-  )
-  for (const job of successful) {
-    const input = ChangePublicationInputSchema.parse(job.input)
-    if (input.continuation !== "queue") continue
-    const pr = app.bays.pr(input.pr)
-    if (pr === undefined || changeDeliveryState(pr) !== "pushed") continue
-    const revision = currentChangeRev(pr)
-    if (revision.n !== input.revision || revision.head !== input.headSha) continue
-    await executeRemergeChange(
-      app,
-      services,
-      pr.id,
-      {
-        queue: true,
-        expectedCurrent: {
-          revision: input.revision,
-          headSha: input.headSha,
-          ...(isTracked(pr) ? { track: true } : {}),
-        },
-      },
-      io,
-    )
-  }
-  return executed
-}
-
 /** Root `yrd cancel <selector>` — stop the CURRENT ATTEMPT (chief ruling,
- * I23): resolve a merge-request selector to its running or waiting run and
- * cancel that run; members re-queue and the change stays open. Cancel
- * never withdraws — "stop delivering this" is `mr close --reason`; run both
- * for both effects. A run selector passes through unchanged. */
+ * I23): resolve a delivery selector to its running or waiting run and cancel
+ * that run; members re-queue and the delivery stays live. Cancel never
+ * unsubmits — "stop delivering this" is the branch-state verb ('yrd draft
+ * <branch>' unsubmits, 'yrd archive <branch>' shelves); run both for both
+ * effects. A run selector passes through unchanged. */
 async function cancelAttempt(
   app: YrdCliApp,
   selector: string,
   options: JsonOption & Readonly<{ reason?: string }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  const pr = app.bays.pr(selector)
-  if (pr !== undefined) {
+  const resolved = resolveDelivery(app, selector)
+  if (resolved?.lane === "record") {
+    const pr = resolved.pr
     const summary = app.queue.status(pr.base)
     const active = [...summary.running, ...summary.waiting].find((run) => run.prs.some((member) => member.id === pr.id))
     if (active === undefined) {
       raiseFailure(
         "refusal",
         "no-active-attempt",
-        `yrd: change '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, use 'yrd mr close --reason <text> --burn-payload'`,
+        `yrd: change '${pr.id}' has no running or waiting attempt to cancel; to stop delivering it, ` +
+          `run 'yrd draft ${pr.branch}' (unsubmit) or 'yrd archive ${pr.branch}' (shelve)`,
       )
     }
     return cancelQueueRun(app, active.id, options, io)
+  }
+  if (resolved?.lane === "derived") {
+    const member = resolved.member
+    const base = resolved.submit?.base ?? member?.base
+    const summary = base === undefined ? undefined : app.queue.status(base)
+    const active =
+      summary === undefined || member === undefined
+        ? undefined
+        : [...summary.running, ...summary.waiting].find((run) => run.prs.some(({ id }) => id === member.id))
+    if (active === undefined) {
+      raiseFailure(
+        "refusal",
+        "no-active-attempt",
+        `yrd: branch '${resolved.branch}' has no running or waiting attempt to cancel; its submit fact stays ` +
+          `live — to stop delivering it, run 'yrd draft ${resolved.branch}' (unsubmit) or ` +
+          `'yrd archive ${resolved.branch}' (shelve)`,
+      )
+    }
+    return cancelQueueRun(app, active.id, options, io)
+  }
+  // Neither world resolved the selector. A run reference (it carries a #number
+  // or is all digits) still passes to the run canceler; anything else would
+  // only earn a bare run-not-found there, so refuse HERE naming everything
+  // that was searched (forensic rule: a miss says where it looked).
+  if (!/#?\d+$/u.test(selector.trim())) {
+    const state = stateOf(app)
+    raiseFailure(
+      "refusal",
+      "no-active-attempt",
+      `yrd: no live submission or run named '${selector}' — searched ` +
+        `${String(Object.keys(state.bays.submits).length)} live submit(s), ` +
+        `${String(Object.keys(state.bays.prs).length)} change record(s), and retained runs`,
+    )
   }
   return cancelQueueRun(app, selector, options, io)
 }
@@ -7317,7 +7501,7 @@ function queueChangeDiffSource(pr: Change, revision: number): Readonly<{ base: s
   return base === undefined ? undefined : { base, headSha }
 }
 
-function queueChangeDiffResult(pr: Change, revision: number, numstat: string, patch: string): QueueChangeDiff {
+function queueChangeDiffResult(id: string, revision: number, numstat: string, patch: string): QueueChangeDiff {
   const rows = numstat.split("\0").filter((row) => row !== "")
   let additions = 0
   let deletions = 0
@@ -7331,13 +7515,34 @@ function queueChangeDiffResult(pr: Change, revision: number, numstat: string, pa
     const path = pathParts.join("\t")
     if (path !== "") files.push(path)
   }
-  return { pr: pr.id, revision, additions, deletions, files, patch }
+  return { pr: id, revision, additions, deletions, files, patch }
 }
 
 /** Resolve a revision-bound PR delta for the watch detail's PR overview. */
 export function queueChangeDiff(cwd: string, pr: Change, revision = changeRevisionNumber(pr)): QueueChangeDiff {
   const source = queueChangeDiffSource(pr, revision)
   if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  return queueDiffFromSource(cwd, pr.id, revision, source)
+}
+
+/** The same delta, from a retained run-member snapshot instead of a record —
+ * the derived lane's diff source (a snapshot pins its own base/head shas). A
+ * revision the snapshot does not carry reads as pruned, the same absence
+ * vocabulary the record path uses for a pruned rev. */
+function queueMemberDiff(cwd: string, member: ChangeSnapshot, revision: number): QueueChangeDiff {
+  if (revision !== member.revision) return { pr: member.id, revision, unavailable: "refs-pruned" }
+  return queueDiffFromSource(cwd, member.id, revision, {
+    base: member.baseSha ?? member.base,
+    headSha: member.headSha,
+  })
+}
+
+function queueDiffFromSource(
+  cwd: string,
+  id: string,
+  revision: number,
+  source: Readonly<{ base: string; headSha: string }>,
+): QueueChangeDiff {
   // Missing objects are the one recoverable absence state. Validate the
   // repository outside this catch so environment/corruption failures never
   // masquerade as ordinary ref pruning.
@@ -7347,7 +7552,7 @@ export function queueChangeDiff(cwd: string, pr: Change, revision = changeRevisi
     gitSync(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
   } catch (error) {
     if (isGitTimeoutError(error)) throw error
-    return { pr: pr.id, revision, unavailable: "refs-pruned" }
+    return { pr: id, revision, unavailable: "refs-pruned" }
   }
   const range = `${source.base}...${source.headSha}`
   const numstat = gitSync(cwd, ["diff", "--numstat", "--no-renames", "-z", range, "--"])
@@ -7360,7 +7565,7 @@ export function queueChangeDiff(cwd: string, pr: Change, revision = changeRevisi
     range,
     "--",
   ])
-  return queueChangeDiffResult(pr, revision, numstat, patch)
+  return queueChangeDiffResult(id, revision, numstat, patch)
 }
 
 async function queueChangeDiffAsync(
@@ -7384,7 +7589,7 @@ async function queueChangeDiffAsync(
     runGit(cwd, ["diff", "--numstat", "--no-renames", "-z", range, "--"]),
     runGit(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames", range, "--"]),
   ])
-  return queueChangeDiffResult(pr, revision, numstat, patch)
+  return queueChangeDiffResult(pr.id, revision, numstat, patch)
 }
 
 type QueueChangeDiffResolver = Readonly<{
@@ -7734,19 +7939,43 @@ async function attachQueueListDetails(
   const outputs =
     io.artifactRoot === undefined ? [] : await queueArtifactOutputs(outputResults, io.artifactRoot, outputAttempts)
   const prsById = new Map(snapshot.results.flatMap((result) => result.prs).map((pr) => [pr.id, pr] as const))
+  // Run-member snapshots answer for ids the record projection does not carry —
+  // post-S7 every derived member lives ONLY here, so a record miss must fall
+  // through to the member instead of silently dropping the diff (NSE-5).
+  const membersById = new Map(
+    snapshot.results.flatMap((result) =>
+      [...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
+        run.prs.map((member) => [member.id, member] as const),
+      ),
+    ),
+  )
+  const memberDiff = (id: string, revision: number): QueueChangeDiff => {
+    const member = membersById.get(id)
+    if (member === undefined) {
+      // Neither the record projection nor any retained run carries this id;
+      // an empty diff list here read as "nothing to show" — say what is
+      // actually absent instead (the id has no retained member snapshot).
+      return { pr: id, revision, unavailable: "refs-pruned" }
+    }
+    try {
+      return queueMemberDiff(io.cwd ?? process.cwd(), member, revision)
+    } catch (error) {
+      if (isGitTimeoutError(error)) throw error
+      return { pr: id, revision, unavailable: "git-error" }
+    }
+  }
   const diffs = await (async (): Promise<readonly QueueChangeDiff[]> => {
     if (focus !== undefined) {
       const focusedPr = prsById.get(focus.pr)
-      if (focusedPr === undefined) return []
+      if (focusedPr === undefined) return [memberDiff(focus.pr, focus.revision)]
       return [await diffResolver.resolve(io.cwd ?? process.cwd(), focusedPr, focus.revision, snapshot.now)]
     }
     const visibleRevisions = new Map(
-      snapshot.projection.rows.flatMap((row) => {
-        const pr = prsById.get(row.pr)
-        return pr === undefined ? [] : [[`${row.pr}:${row.revision}`, { pr, revision: row.revision }] as const]
-      }),
+      snapshot.projection.rows.map((row) => [`${row.pr}:${row.revision}`, { id: row.pr, revision: row.revision }] as const),
     )
-    return [...visibleRevisions.values()].map(({ pr, revision }) => {
+    return [...visibleRevisions.values()].map(({ id, revision }) => {
+      const pr = prsById.get(id)
+      if (pr === undefined) return memberDiff(id, revision)
       try {
         return queueChangeDiff(io.cwd ?? process.cwd(), pr, revision)
       } catch (error) {
@@ -8156,7 +8385,7 @@ function resolveQueueTargets(
   }
   let canonicalFilter: string | undefined
   if (filterPr !== undefined) {
-    // Same consolidation as selectedCheckPRs: one not-found message, worded by
+    // Same consolidation as changeCheckRecords: one not-found message, worded by
     // the bay model, so `queue run <unknown>` reports what it searched too.
     const found = resolveChange(state.bays, filterPr) ?? requireLiveChange(state.bays, filterPr)
     canonicalFilter = found.id
@@ -8517,6 +8746,23 @@ const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
  * signal. The failure is logged as well, because a rail that only degrades
  * quietly still needs someone to know why.
  */
+/** Every branch some world has decided about: change records (terminal ones
+ * INCLUDED — a ref whose PR was withdrawn is not stranded work, it is work
+ * someone already decided about), live submit facts, and retained run-member
+ * branches. The last two arms exist so the decided set SURVIVES the record
+ * store's deletion (NSE-16): with records as the only source, every branch the
+ * derived lane carried or landed would re-report as stranded — loud false
+ * positives that train operators to ignore the rail. */
+function carriedBranchSet(app: YrdCliApp): Set<string> {
+  const state = stateOf(app)
+  const carried = new Set(Object.values(state.bays.prs).map((pr) => pr.branch))
+  for (const branch of Object.keys(state.bays.submits)) carried.add(branch)
+  for (const record of Queues.values(state.queues)) {
+    for (const snapshot of record.prs) if (snapshot.intent === undefined) carried.add(snapshot.branch)
+  }
+  return carried
+}
+
 function createUncarriedSweeper(
   app: YrdCliApp,
   io: YrdCliIO,
@@ -8535,7 +8781,7 @@ function createUncarriedSweeper(
       base,
       namespace: "refs/remotes/origin",
       authoredOnly: true,
-      carriedBranches: new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch)),
+      carriedBranches: carriedBranchSet(app),
       // Declared empty, never omitted — the disposition store is host-evaluated
       // after this sweep (applyHostFindingFilter). retiredRefs cannot carry it.
       retiredRefs: new Set<string>(),
@@ -8584,10 +8830,7 @@ async function queueUncarried(
 ): Promise<YrdCliExitCode> {
   const cwd = io.cwd ?? globalThis.process.cwd()
   const base = options.base ?? "main"
-  // A branch is carried if any change names it — including terminal
-  // ones. A ref whose PR was withdrawn is not stranded work waiting to be
-  // found; it is work someone already decided about.
-  const carriedBranches = new Set(Object.values(stateOf(app).bays.prs).map((pr) => pr.branch))
+  const carriedBranches = carriedBranchSet(app)
   await using process = createProcess()
   const result = await sweepUncarriedRefs(sweepGit(process), {
     repo: cwd,
@@ -8730,54 +8973,6 @@ async function adminPruneCandidateRefs(
   return 0
 }
 
-/** Why one repository-proven merge did not become a journal index row.
- *
- * `already-indexed` and `intent-carrier` are the two that describe a healthy estate: the row is
- * there, or the merge was never a change and has no `pr/integrated` row to rebuild. Every other
- * reason is a gap the operator still owns. */
-type IndexRebuildSkip = Readonly<{
-  pr: string
-  revision: number
-  run: string
-  reason:
-    | "already-indexed"
-    | "intent-carrier"
-    | "pr-unknown"
-    | "legacy-no-change-id"
-    | "revision-superseded"
-    | "unverifiable"
-  detail: string
-}>
-
-/** Skips that leave nothing for the operator to do. */
-const HEALTHY_SKIP_REASONS: ReadonlySet<IndexRebuildSkip["reason"]> = new Set<IndexRebuildSkip["reason"]>([
-  "already-indexed",
-  "intent-carrier",
-])
-
-type IndexRebuildReport = Readonly<{
-  ref: string
-  // `knownPrs` is the journal's OWN count, independent of what the repo scan found — the fact
-  // that distinguishes "the journal is missing a few index rows" from "the journal has been
-  // wiped and holds no PR entities at all," which the per-record `pr-unknown` skips below cannot
-  // say on their own: each one only knows about its own PR.
-  scanned: Readonly<{ records: number; merged: number; changes: number; knownPrs: number }>
-  rebuilt: readonly Readonly<{ pr: string; revision: number; run: string; commit: string }>[]
-  skipped: readonly IndexRebuildSkip[]
-  /** Listed notes the bulk scan could not verify at all — they never became a change to consider. */
-  unverifiable: readonly UnverifiableMergeRecord[]
-}>
-
-type JournalPR = NonNullable<ReturnType<YrdCliApp["bays"]["pr"]>>
-type MergeRepairInput = Parameters<YrdCliApp["queue"]["reconcileMerge"]>[0]
-
-type MergeRepair =
-  | Readonly<{ status: "repairable"; input: MergeRepairInput }>
-  | Readonly<{
-      status: "already-indexed" | "legacy-no-change-id" | "revision-superseded" | "no-merged-commit"
-      detail: string
-    }>
-
 /**
  * `merge.finishedAt` is `z.iso.datetime({ offset: true })`, so two records can
  * name the same instant with different offsets: `2026-08-12T20:00:00.000Z` and
@@ -8792,145 +8987,7 @@ function mergeInstant(record: MergeRecordBody): number {
   return at
 }
 
-/**
- * What repository truth can do for one change's index row, from one merge record.
- *
- * `yrd why <selector> --repair` and `yrd doctor --rebuild-index-from-repo` are
- * the same repair at different breadths, and had drifted into two copies of the
- * same "does this record cover the change's CURRENT revision" predicate and the same
- * eight-field `reconcileMerge` argument. Each caller still owns its own
- * reporting: the bulk path names every skip, the selector path stays quiet, and
- * only the bulk path treats a merged record with no merged commit as a refusal.
- */
-function mergeRepair(record: MergeRecordBody, pr: JournalPR): MergeRepair {
-  const revision = currentChangeRev(pr)
-  const change = record.changes.find((entry) => entry.pr === pr.id)
-  if (change?.changeId === undefined) {
-    return { status: "legacy-no-change-id", detail: "record predates stable Change-Id identity" }
-  }
-  if (
-    change.revision !== revision.n ||
-    change.submittedHead !== revision.head ||
-    change.changeId !== revision.changeId
-  ) {
-    return {
-      status: "revision-superseded",
-      detail: `record covers revision ${String(change.revision)} at ${change.submittedHead}; journal is at revision ${String(revision.n)} at ${revision.head}`,
-    }
-  }
-  const commit = record.merge.mergedCommit
-  if (commit === undefined) {
-    return {
-      status: "no-merged-commit",
-      detail: `merge-record '${record.merge.id}' reports a merged result with no merged commit`,
-    }
-  }
-  if (
-    changeDeliveryState(pr) === "integrated" &&
-    pr.terminalRun === record.merge.id &&
-    pr.integration?.commit === commit
-  ) {
-    return { status: "already-indexed", detail: `pr/integrated already records ${record.merge.id} at ${commit}` }
-  }
-  return {
-    status: "repairable",
-    input: {
-      pr: change.pr,
-      revision: change.revision,
-      headSha: change.submittedHead,
-      run: record.merge.id,
-      commit,
-      landingSha: commit,
-      baseSha: commit,
-      changeId: change.changeId,
-    },
-  }
-}
 
-/** Rebuild every missing `pr/integrated` index row from repository truth alone.
- *
- * The bulk sibling of `yrd why <selector> --repair`, with the same per-change predicate: a row is
- * only written when the record's change matches the change's current revision exactly. Repo truth
- * cannot recreate a change that the journal has never seen — a merge record proves a merge, not a
- * PR's existence — so those changes are reported as skipped, never silently dropped.
- */
-async function rebuildIndexFromRepo(app: YrdCliApp, services: YrdCliServices): Promise<IndexRebuildReport> {
-  const mergeRecords = services.mergeRecords ?? configuration("repository merge-record capability is not installed")
-  const proof = await mergeRecords.all()
-  if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
-    // Same verdict `yrd why` gives the same condition: broken repository truth is not an index gap.
-    configuration(`${MERGE_RECORD_REF} is ${proof.status}: ${proof.reason}`)
-  }
-  const records = proof.status === "proven" ? proof.records : []
-  const merged = records.filter((entry) => entry.record.merge.result === "merged")
-  // The journal's own count, read once, up front — independent of anything the repo scan below
-  // finds. It is the fact that tells a `pr-unknown` skip apart from a wiped journal: one skip says
-  // "this change", `knownPrs === 0` says "no PR at all, and every skip below is that same fact."
-  const knownPrs = Object.keys(stateOf(app).bays.prs).length
-
-  // One PR can appear in several attempts; only its latest merged attempt describes the merge.
-  const latest = new Map<string, Readonly<{ record: MergeRecordBody; change: MergeRecordBody["changes"][number] }>>()
-  let changes = 0
-  for (const entry of merged) {
-    for (const change of entry.record.changes) {
-      changes += 1
-      const known = latest.get(change.pr)
-      if (known !== undefined && mergeInstant(known.record) >= mergeInstant(entry.record)) continue
-      latest.set(change.pr, { record: entry.record, change })
-    }
-  }
-
-  // A merged pin intent is not a change and never had a `pr/integrated` row: `mergeRecordBody` fills
-  // `changes[].pr` from the queue MEMBER's own id, and that field is `QueueMemberIdSchema` — a
-  // union whose arms are pinned to the shapes their mints write, so the record itself says which
-  // kind of member merged. Asking the journal for a change under an intent id can only ever answer
-  // "unknown", which is why most of this repository's merges reported a change gap that was never a
-  // PR — 58 of the 115 merged records under the live merge-record ref carry an intent id
-  // (`I102`…`yrdpin#181`), 57 a change id, none anything else (read 2026-08-14). The intent RAIL that
-  // once held those records as `app.intents` is retired (2026-08-18) — there is no live lookup
-  // left to name which submodule a given intent id advanced — but the id SHAPE alone is still
-  // sufficient: any id this schema accepts is a pin-intent merge by construction (the mint that
-  // wrote it never wrote anything else), so it never carries a `pr/integrated` row and is never a
-  // gap.
-  const rebuilt: { pr: string; revision: number; run: string; commit: string }[] = []
-  const skipped: IndexRebuildSkip[] = []
-  for (const [prId, { record, change }] of latest) {
-    const run = record.merge.id
-    const skip = (reason: IndexRebuildSkip["reason"], detail: string): void => {
-      skipped.push({ pr: prId, revision: change.revision, run, reason, detail })
-    }
-    // One record's contradictions belong to that record. A recovery scan that dies on the first
-    // one hides every merge behind it, and the estate it runs on is damaged by definition.
-    try {
-      if (IntentRecordIdSchema.safeParse(prId).success) {
-        skip("intent-carrier", `queue member is a min-commit change '${prId}'; its merge carries no pr/integrated row`)
-        continue
-      }
-      const pr = app.bays.pr(prId)
-      if (pr === undefined) {
-        skip("pr-unknown", "no PR in the journal; a merge record proves a merge, not a change's existence")
-        continue
-      }
-      const repair = mergeRepair(record, pr)
-      if (repair.status === "no-merged-commit") refusal(repair.detail)
-      if (repair.status !== "repairable") {
-        skip(repair.status, repair.detail)
-        continue
-      }
-      await app.queue.reconcileMerge(repair.input)
-      rebuilt.push({ pr: prId, revision: change.revision, run, commit: repair.input.commit })
-    } catch (cause) {
-      skip("unverifiable", cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-  return {
-    ref: MERGE_RECORD_REF,
-    scanned: { records: records.length, merged: merged.length, changes, knownPrs },
-    rebuilt,
-    skipped,
-    unverifiable: proof.status === "proven" ? proof.unverifiable : [],
-  }
-}
 
 /**
  * The estate repair, said plainly and BY CAUSE.
@@ -8963,47 +9020,7 @@ function estateRepairLines(report: MergeRecordEstateRepair, applied: boolean): r
   ]
 }
 
-function indexRebuildLines(report: IndexRebuildReport): readonly string[] {
-  const { records, merged, changes, knownPrs } = report.scanned
-  const considered = report.rebuilt.length + report.skipped.length
-  const unverified = report.unverifiable.length
-  // `knownPrs === 0` with at least one `pr-unknown` skip is not "this run found a gap or two" —
-  // it is every candidate merge hitting the SAME wall, because there is no PR entity anywhere
-  // in the journal to attach an index row to. Say that once, at the top, before the per-record
-  // detail repeats it N times: the flag repairs a known PR's missing index row, it does not
-  // reconstruct a change entity the journal has never seen (Remnant 2, @yrd/core/doctor-rebuild-hardening).
-  const journalEmpty = knownPrs === 0 && report.skipped.some((entry) => entry.reason === "pr-unknown")
-  const lines = [
-    ...(journalEmpty
-      ? [
-          "the journal holds zero PR entities — every pr-unknown skip below repeats that one fact",
-          "--rebuild-index-from-repo repairs a KNOWN PR's missing index row; it cannot recreate a change",
-          "entity the journal has never seen (see @yrd/core/doctor-rebuild-hardening Remnant 2)",
-        ]
-      : []),
-    `scanned ${String(records)} merge record${records === 1 ? "" : "s"} under ${report.ref} — ${String(merged)} merged, ${String(changes)} change${changes === 1 ? "" : "s"}` +
-      // The count of notes that never became a change belongs beside the denominator they are
-      // missing from, or "scanned N" reads as N verified.
-      (unverified === 0
-        ? ""
-        : `, ${String(unverified)} record${unverified === 1 ? "" : "s"} the scan could not verify`),
-    // `changes` counts every change in every merged attempt; one queue member can
-    // appear in several, and only its latest merged attempt describes the merge.
-    // Naming that collapse is what turns an unexplained shortfall into arithmetic
-    // the reader can check: rebuilt + skipped = the distinct merges considered.
-    `${String(changes)} change${changes === 1 ? " collapses" : "s collapse"} to ${String(considered)} distinct merge${considered === 1 ? "" : "s"} — rebuilt ${String(report.rebuilt.length)}, skipped ${String(report.skipped.length)}`,
-  ]
-  for (const entry of report.rebuilt) {
-    lines.push(`  REBUILT ${entry.pr} revision ${String(entry.revision)} via ${entry.run} at ${entry.commit}`)
-  }
-  for (const entry of report.skipped) {
-    lines.push(`  SKIPPED ${entry.pr} revision ${String(entry.revision)} ${entry.reason}: ${entry.detail}`)
-  }
-  for (const entry of report.unverifiable) {
-    lines.push(`  UNVERIFIABLE ${entry.note} ${entry.status}: ${entry.reason}`)
-  }
-  return lines
-}
+
 
 /**
  * The Candidate-ref half of `yrd doctor`.
@@ -9296,18 +9313,23 @@ async function configDoctor(
     }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  if (options.rebuildIndexFromRepo === true) {
+    // The retired flag is deliberately NOT quoted: a quoted `yrd ...` in a
+    // failure message is lifted into its `resolution`, and the one command this
+    // must never recommend is itself.
+    raiseFailure(
+      "refusal",
+      "doctor-rebuild-index-retired",
+      "yrd: doctor --rebuild-index-from-repo is retired with the change-record store (branch-is-change, " +
+        "@i/10 22991): there is no pr/integrated index to rebuild onto. Merge truth stays in repository merge " +
+        "records — 'yrd why <selector>' proves one merge, 'yrd log' shows run history.",
+    )
+  }
   const rebuilt =
     options.rebuildViews === true
       ? await (services.journal?.rebuildViews?.() ?? configuration("journal view rebuild capability is not installed"))
       : undefined
-  // `rebuildIndexFromRepo` reads `app.bays.pr(...)` to decide what repository
-  // truth can repair, and writes through `reconcileMerge`. Both need a current
-  // projection: refresh before it so the read is not stale, and again after so
-  // the findings below see what it repaired.
   await app.refresh()
-  // Estate repair runs BEFORE the index rebuild on purpose: the rebuild reads the
-  // merge-record estate, and an estate holding one unprovable record refuses every
-  // read. Repairing after would rebuild from an estate that just refused.
   const estateRepair =
     options.retractUnprovable === true
       ? await (services.mergeRecords?.retractUnprovable({
@@ -9315,7 +9337,6 @@ async function configDoctor(
           now: options.now ?? new Date().toISOString(),
         }) ?? configuration("repository merge-record capability is not installed"))
       : undefined
-  const indexRebuild = options.rebuildIndexFromRepo === true ? await rebuildIndexFromRepo(app, services) : undefined
   await app.refresh()
   const state = stateOf(app)
   const retention = await retentionDoctor(app, io)
@@ -9338,28 +9359,19 @@ async function configDoctor(
       retention,
       ...(candidateRefs.sweep === undefined ? {} : { candidateRefs: candidateRefs.sweep }),
       ...(rebuilt === undefined ? {} : { rebuilt }),
-      ...(indexRebuild === undefined ? {} : { indexRebuild }),
       ...(estateRepair === undefined ? {} : { estateRepair }),
     },
     [
       ...(estateRepair === undefined ? [] : estateRepairLines(estateRepair, options.apply === true)),
-      ...(indexRebuild === undefined ? [] : indexRebuildLines(indexRebuild)),
       doctorLine,
       retentionDoctorLine(retention),
     ].join("\n"),
     warnings,
   )
-  // A merge repo truth proves but the index still cannot carry is a real gap, not a clean run —
-  // and so is a note the scan could not verify at all. A pin merge is neither: it has no
-  // pr/integrated row to be missing.
-  const unrebuilt =
-    (indexRebuild !== undefined &&
-      (indexRebuild.skipped.some((entry) => !HEALTHY_SKIP_REASONS.has(entry.reason)) ||
-        indexRebuild.unverifiable.length > 0)) ||
-    // Records that still cannot prove themselves are a real gap. Reporting them and
-    // exiting 0 would be the same silence that let one poisoned record answer for
-    // the whole estate for two days.
-    (estateRepair !== undefined && estateRepair.planned.length > estateRepair.applied.length)
+  // Records that still cannot prove themselves are a real gap. Reporting them and
+  // exiting 0 would be the same silence that let one poisoned record answer for
+  // the whole estate for two days.
+  const unrebuilt = estateRepair !== undefined && estateRepair.planned.length > estateRepair.applied.length
   // The exit code answers "is anything actually wrong", and only refusal-severity
   // findings and that unrebuilt gap are. `submoduleTrackingWarnings` fires on ANY
   // unbranched submodule, so every run inside a superproject carried at least one
@@ -9675,6 +9687,48 @@ async function bumpJournal(
  * post-item-2 evidence. `yrd doctor` is the inventory (it reports orphans with
  * the denominator), and `yrd admin candidate-refs prune` is the one actuator.
  */
+/** The S7 record-verb retirements (branch-is-change, @i/10 22991): every verb
+ * that WROTE the change-record store refuses by name, with what replaced it —
+ * or the statement that nothing does. The retired verb itself is deliberately
+ * NOT quoted anywhere in these messages: a quoted `yrd ...` in a failure
+ * message is lifted into its `resolution`, and the one command a retirement
+ * must never recommend is itself. Registered hidden so an old runbook gets
+ * this typed refusal, never an unknown-command error. */
+const RETIRED_CHANGE_RECORD_VERBS = {
+  "pr edit":
+    "yrd: pr edit is retired with the change-record store. A branch IS the change: its metadata lives on the " +
+    "head commit — amend the subject, body, and trailers (Change-Id, Bead) and push; the derived lane reads " +
+    "identity from the branch and metadata from the commit.",
+  "pr review":
+    "yrd: pr review is retired with the change-record store; revision-bound review records have no derived-lane " +
+    "replacement — review gating moved out of the record store entirely. The pushed submit ref " +
+    "(written by 'yrd submit <branch>') is the recorded consent.",
+  "pr request-review":
+    "yrd: pr request-review is retired with the change-record store; requested-reviewer records have no " +
+    "derived-lane replacement — review gating moved out of the record store entirely.",
+  "pr comment":
+    "yrd: pr comment is retired with the change-record store; nothing replaces revision comments — durable " +
+    "discussion belongs on the issue, and the commit message carries the change's own rationale.",
+  "pr ready":
+    "yrd: pr ready is retired with the change-record store. Push the branch and submit it plainly " +
+    "('yrd pr submit <branch>'); the submit fact queues it and the queue runs its required checks.",
+  "pr publish":
+    "yrd: pr publish is retired with the change-record store; credential-bearing publication jobs were " +
+    "record-lane machinery. Push the branch to origin yourself — the pushed ref is what the queue composes from.",
+  "admin pr prune":
+    "yrd: admin pr prune is retired with the change-record store. Compose settles already-contained payloads " +
+    "itself (payload-already-contained), and 'yrd archive <branch>' shelves a branch whose content main " +
+    "already carries.",
+  "issue ensure":
+    "yrd: issue ensure is retired with the change-record store; there are no tracked draft records to ensure. " +
+    "Open the issue's bay ('yrd bay open <issue>') and push its branch — the push is the draft, and " +
+    "'yrd pr submit <branch>' delivers it.",
+} as const
+
+function refuseRetiredChangeRecordVerb(verb: keyof typeof RETIRED_CHANGE_RECORD_VERBS): never {
+  raiseFailure("refusal", `${verb.replaceAll(" ", "-")}-retired`, RETIRED_CHANGE_RECORD_VERBS[verb])
+}
+
 function refuseRetiredQueueCandidateRefs(): never {
   // The retired verb is deliberately NOT quoted: a quoted `yrd ...` in a
   // failure message is lifted into its `resolution`, and the one command this
@@ -9951,642 +10005,6 @@ function habitantCycleRecovery(error: unknown): HabitantCycleRecovery | undefine
   return undefined
 }
 
-export type HabitantTrackedRevisionTransition =
-  | Readonly<{
-      status: "applied"
-      pr: string
-      branch: string
-      fromRevision: number
-      fromHead: string
-      sourceRevision: number
-      sourceHead: string
-      currentRevision: number
-      verdict: RemergePreflightVerdict
-      recorded: boolean
-    }>
-  | Readonly<{
-      status: "deferred"
-      pr: string
-      branch: string
-      revision: number
-      headSha: string
-      code: string
-      message: string
-    }>
-  | Readonly<{
-      status: "needs-person"
-      pr: string
-      branch: string
-      revision: number
-      headSha: string
-      code: "refusal-remedy-needs-withdraw"
-      message: string
-    }>
-  /** The member stopped matching and was swept to a terminal state with a stated
-   * reason, rather than left to age at the head of the queue. */
-  | Readonly<{
-      status: "evicted"
-      pr: string
-      branch: string
-      revision: number
-      headSha: string
-      code: "recut-branch-absent"
-      message: string
-    }>
-
-function trackedPreflightSettlementRef(pr: Change, revision: Pick<ChangeRev, "n" | "head">): string {
-  return `yrd:track-preflight-needs-person:${pr.id}:${revision.n}:${revision.head}`
-}
-
-/**
- * Sweep one candidate whose source branch origin no longer advertises to a
- * terminal state, with the refusal itself as the recorded reason.
- *
- * No human verb is required by design: the alternative — the behaviour this
- * replaces — was to defer forever behind a doubling backoff, which reads as
- * "still working on it" on every instrument while the queue head cannot move.
- * The reason travels with the withdrawal, so `pr view` and the journal both
- * answer why the change left without anyone reconstructing it.
- */
-async function evictUnobservableCandidate(
-  app: YrdCliApp,
-  candidate: Change,
-  revision: Pick<ChangeRev, "n" | "head">,
-  code: "recut-branch-absent",
-  message: string,
-  io: YrdCliIO,
-  observation: TrackedObservationBackoff | undefined,
-): Promise<HabitantTrackedRevisionTransition> {
-  observation?.delete(trackedObservationKey(candidate, revision))
-  await withdrawOne(app, candidate.id, message, io)
-  const outcome: HabitantTrackedRevisionTransition = {
-    status: "evicted",
-    pr: candidate.id,
-    branch: candidate.branch,
-    revision: revision.n,
-    headSha: revision.head,
-    code,
-    message,
-  }
-  app.log.warn?.(`Evicted tracked change ${candidate.id}: its source branch is gone from origin.`, {
-    action: "queue-track-branch-absent-evicted",
-    ...outcome,
-  })
-  return outcome
-}
-
-function trackedPreflightNeedsPerson(pr: Change, revision: ChangeRev): boolean {
-  const ref = trackedPreflightSettlementRef(pr, revision)
-  return pr.comments.some(
-    (comment) => comment.revision === revision.n && comment.headSha === revision.head && comment.ref === ref,
-  )
-}
-
-/**
- * Codes `freshRemoteBranch` raises while OBSERVING one tracked change's branch, each
- * a fact about THAT branch: deleted on origin after merging (the routine `fatal:
- * couldn't find remote ref`, exit 128), a fetch that timed out, or a refreshed
- * ref that will not resolve to a commit. Observing one candidate is per-candidate
- * work, so these defer that candidate and the cycle moves on.
- *
- * Deliberately an explicit list read at the observation call rather than a test
- * on kind:"configuration" — that kind also covers real composition faults
- * (async-command, missing Git facts) which must keep stopping the runner
- * fail-loud. `recut-branch-observer-missing` stays excluded: it says no Git
- * process is installed in THIS process, so it is identical for every candidate,
- * and deferring it per-PR would dress a process-wide gap as per-branch weather.
- * {@link refreshTrackedQueueRevisions} instead detects the missing observer
- * upfront and skips its pass with one cycle-level warning — tracking is the
- * default, so an observer-less embedder reaches it with every live change, and
- * crashing the queue runner over an ambient default would be disproportionate.
- */
-const TRACKED_OBSERVATION_CODES: ReadonlySet<string> = new Set([
-  "recut-branch-refresh-failed",
-  "recut-branch-head-missing",
-])
-
-/**
- * Process-scoped re-observation backoff, keyed by {pr, revision, head}. A branch
- * that cannot be observed is usually structural (deleted on origin and not
- * restored), and its observation is a live `git fetch` at the HEAD of the cycle —
- * a 30s timeout there stalls every other tracked change. So each consecutive failure
- * doubles the number of cycles skipped before the next attempt, capped, which
- * bounds both the wasted fetch and the log noise while still ALWAYS retrying, so
- * a restored branch resumes without an operator turn. Any new authored revision
- * is a new key and observes immediately. Mirrors the process-scoped `remedied`
- * set that `applyRefusalRemedies` owns: a claim about this process, never
- * durable state.
- */
-export type TrackedObservationBackoff = Map<string, Readonly<{ failures: number; skipped: number }>>
-
-const MAX_OBSERVATION_SKIP = 32
-
-function trackedObservationKey(pr: Change, revision: Pick<ChangeRev, "n" | "head">): string {
-  return `${pr.id}:${revision.n}:${revision.head}`
-}
-
-/**
- * Observe opted-in PR branches before the habitant's normal base-freshness
- * pass. When a branch moved, certify the exact observed SHA directly as the
- * successor revision. The frozen SHA and expected-current fact flow through
- * preflight together, so an interrupted cycle never leaves a provisional
- * authored revision behind.
- *
- * `observation` is the caller's re-observation backoff. The habitant owns one for
- * its lifetime; a one-shot or programmatic caller omits it and observes every
- * candidate exactly once, which is the whole of its cycle.
- */
-export async function refreshTrackedQueueRevisions(
-  app: YrdCliApp,
-  services: YrdCliServices,
-  io: YrdCliIO,
-  observation?: TrackedObservationBackoff,
-): Promise<readonly HabitantTrackedRevisionTransition[]> {
-  const candidates = Object.values(stateOf(app).bays.prs)
-    .filter((pr) => {
-      const delivery = changeDeliveryState(pr)
-      return isTracked(pr) && isLiveChange(pr) && delivery !== "pushed"
-    })
-    .toSorted(
-      (left, right) =>
-        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) || compareNatural(left.id, right.id),
-    )
-  const outcomes: HabitantTrackedRevisionTransition[] = []
-  if (candidates.length > 0 && io.pruneGit === undefined && services.process === undefined) {
-    // Tracking is the default, so an embedder that wires no Git observer at all
-    // still reaches this pass with every live change. That gap is a fact about
-    // THIS process, identical for every candidate: report it once per cycle and
-    // leave the recorded revisions authoritative, instead of crashing the queue
-    // runner or parking candidates one by one as if it were per-branch weather.
-    app.log.warn?.(
-      `Skipped tracked-branch observation for ${String(candidates.length)} candidate(s): no Git process is installed.`,
-      {
-        action: "queue-track-observation-unavailable",
-        prs: candidates.map((candidate) => candidate.id),
-      },
-    )
-    return outcomes
-  }
-  if (observation !== undefined) {
-    // Drop entries for candidates that moved or left the tracked set: a new
-    // authored revision must observe immediately, not inherit a skip window.
-    const live = new Set(candidates.map((candidate) => trackedObservationKey(candidate, currentChangeRev(candidate))))
-    for (const key of observation.keys()) {
-      if (!live.has(key)) observation.delete(key)
-    }
-  }
-
-  for (const candidate of candidates) {
-    if (io.drainSignal?.aborted === true) break
-    const before = currentChangeRev(candidate)
-    const observationKey = trackedObservationKey(candidate, before)
-    const backoff = observation?.get(observationKey)
-    if (backoff !== undefined && backoff.skipped < Math.min(2 ** backoff.failures, MAX_OBSERVATION_SKIP)) {
-      observation?.set(observationKey, { ...backoff, skipped: backoff.skipped + 1 })
-      continue
-    }
-    let classified: RemergePreflightResult | undefined
-    let freshness: RemergeBranchFreshness
-    try {
-      freshness = await requireImplicitRemergeBranchFreshness(candidate, before, { queue: true }, services, io)
-      observation?.delete(observationKey)
-    } catch (error) {
-      // Containment is scoped to the OBSERVATION phase by position: only this
-      // await is wrapped, so a failure anywhere after it keeps the existing
-      // refusal-only absorption below.
-      const failure = failureFact(error)
-      if (failure?.kind === "refusal" && failure.code === "recut-branch-absent") {
-        // Origin answered authoritatively that the branch is gone, so no later
-        // cycle can observe it and no retry is progress. Deferring one of these
-        // is what wedged the queue behind PR1189 for 40 minutes and 19 PRs: the
-        // member could never recut and never land, yet the queue kept treating
-        // it as an ordinary waiting row. It leaves with its reason recorded.
-        outcomes.push(
-          await evictUnobservableCandidate(app, candidate, before, failure.code, failure.message, io, observation),
-        )
-        continue
-      }
-      if (failure?.kind !== "configuration" || !TRACKED_OBSERVATION_CODES.has(failure.code)) throw error
-      const attempts = (backoff?.failures ?? 0) + 1
-      observation?.set(observationKey, { failures: attempts, skipped: 0 })
-      const outcome: HabitantTrackedRevisionTransition = {
-        status: "deferred",
-        pr: candidate.id,
-        branch: candidate.branch,
-        revision: before.n,
-        headSha: before.head,
-        code: failure.code,
-        message: failure.message,
-      }
-      outcomes.push(outcome)
-      app.log.warn?.(
-        `Could not observe tracked change ${candidate.id}'s branch; it remains queued for another cycle.`,
-        {
-          action: "queue-track-observation-deferred",
-          attempts,
-          ...outcome,
-        },
-      )
-      continue
-    }
-    try {
-      const interrupted = !app.bays.checksRequested(candidate.id) && !trackedPreflightNeedsPerson(candidate, before)
-      if (freshness.status === "fresh" && !interrupted) continue
-
-      const source = freshness.status === "tracked-drift" ? before : currentChangeRev(requiredPr(app, candidate.id))
-      classified = await preflightRemerge(
-        app,
-        candidate.id,
-        {
-          queue: true,
-          ...(freshness.status === "tracked-drift"
-            ? {
-                revision: before.n,
-                proposedHeadSha: freshness.liveHead,
-                expectedCurrent: { revision: before.n, headSha: before.head, track: true },
-              }
-            : {}),
-        },
-        io,
-      )
-      await applyPreflightVerdict(app, services, classified, io, { track: true })
-      const current = currentChangeRev(requiredPr(app, candidate.id))
-      const outcome: HabitantTrackedRevisionTransition = {
-        status: "applied",
-        pr: candidate.id,
-        branch: candidate.branch,
-        fromRevision: before.n,
-        fromHead: before.head,
-        sourceRevision: source.n,
-        sourceHead: source.head,
-        currentRevision: current.n,
-        verdict: classified.verdict,
-        recorded: freshness.status === "tracked-drift",
-      }
-      outcomes.push(outcome)
-      app.log.info?.("Prepared the latest tracked change revision for the merge queue's entry checks.", {
-        action: "queue-track-prepared",
-        ...outcome,
-      })
-    } catch (error) {
-      const failure = failureFact(error)
-      if (failure?.kind !== "refusal") throw error
-      if (failure.code === "refusal-remedy-needs-withdraw") {
-        if (classified === undefined) throw error
-        const classifiedRevision = { n: classified.revision, head: classified.evidence.headSha }
-        const currentPr = requiredPr(app, candidate.id)
-        try {
-          await app.bays.comment({
-            pr: currentPr.id,
-            by: io.runner ?? "yrd-cli",
-            ref: trackedPreflightSettlementRef(currentPr, classifiedRevision),
-            note: failure.message,
-            expectedCurrent: {
-              pr: currentPr.id,
-              revision: classifiedRevision.n,
-              headSha: classifiedRevision.head,
-              track: true,
-            },
-          })
-        } catch (settlementError) {
-          const settlementFailure = failureFact(settlementError)
-          if (settlementFailure?.kind !== "refusal" || settlementFailure.code !== "comment-current-changed") {
-            throw settlementError
-          }
-          const outcome: HabitantTrackedRevisionTransition = {
-            status: "deferred",
-            pr: candidate.id,
-            branch: candidate.branch,
-            revision: classifiedRevision.n,
-            headSha: classifiedRevision.head,
-            code: settlementFailure.code,
-            message: settlementFailure.message,
-          }
-          outcomes.push(outcome)
-          app.log.info?.("Skipped settling a tracked change preflight because the change changed.", {
-            action: "queue-track-settlement-deferred",
-            ...outcome,
-          })
-          continue
-        }
-        const outcome: HabitantTrackedRevisionTransition = {
-          status: "needs-person",
-          pr: currentPr.id,
-          branch: currentPr.branch,
-          revision: classifiedRevision.n,
-          headSha: classifiedRevision.head,
-          code: failure.code,
-          message: failure.message,
-        }
-        outcomes.push(outcome)
-        app.log.warn?.(`Tracked PR ${currentPr.id} needs an operator decision before entry checks.`, {
-          action: "queue-track-needs-person",
-          ...outcome,
-        })
-        continue
-      }
-      const deferredRevision =
-        classified === undefined ? before : { n: classified.revision, head: classified.evidence.headSha }
-      const outcome: HabitantTrackedRevisionTransition = {
-        status: "deferred",
-        pr: candidate.id,
-        branch: candidate.branch,
-        revision: deferredRevision.n,
-        headSha: deferredRevision.head,
-        code: failure.code,
-        message: failure.message,
-      }
-      outcomes.push(outcome)
-      app.log.warn?.(`Could not prepare tracked change ${candidate.id}; it remains queued for another cycle.`, {
-        action: "queue-track-deferred",
-        ...outcome,
-      })
-    }
-  }
-  return outcomes
-}
-
-type HabitantQueueFreshnessTransition =
-  | Readonly<{
-      status: "settled"
-      pr: string
-      revision: number
-      fromBase: string | undefined
-      toBase: string
-      proof: "payload-already-contained"
-      patchId: string
-    }>
-  | Readonly<{
-      status: "refreshed"
-      pr: string
-      revision: number
-      fromBase: string | undefined
-      toBase: string
-      headSha: string
-      patchId: string
-    }>
-  | Readonly<{
-      status: "refused"
-      pr: string
-      revision: number
-      fromBase: string | undefined
-      toBase: string
-      code: string
-      message: string
-    }>
-  | Readonly<{
-      status: "deferred"
-      pr: string
-      revision: number
-      fromBase: string | undefined
-      toBase: string
-      code: "recut-current-changed"
-      message: string
-    }>
-  | Readonly<{
-      status: "recovered"
-      pr: string
-      revision: number
-      runs: readonly string[]
-      jobs: readonly string[]
-    }>
-
-/**
- * Apply the admitted -> refreshed Queue transition before the habitant takes
- * its next run snapshot. The transition deliberately stays inside the existing
- * serialized habitant cycle: it reuses the installed recutter and journal
- * rather than starting another writer or scheduler.
- */
-export async function refreshAdmittedQueueRevisions(
-  app: YrdCliApp,
-  services: Pick<YrdCliServices, "recut">,
-  io: YrdCliIO,
-): Promise<readonly HabitantQueueFreshnessTransition[]> {
-  const snapshot = stateOf(app)
-  const outcomes: HabitantQueueFreshnessTransition[] = []
-  const interrupted = Object.values(snapshot.bays.prs).filter(
-    (pr) => currentChangeRev(pr).recut?.transition?.to === "refreshed",
-  )
-  const staleRunsByPr = new Map<string, Run[]>()
-  const staleRunIds = new Set<string>()
-  const staleAdmissionRevisionsByChange = new Map<string, number[]>()
-  const staleJobsByPr = new Map<string, string[]>()
-  for (const pr of interrupted) {
-    const claim = snapshot.queues.authority.claims[pr.id]
-    const revision = currentChangeRev(pr)
-    const staleAdmissionRevisions = pr.revs
-      .map(({ n }) => n)
-      .filter((candidateRevision) => candidateRevision !== revision.n)
-    if (staleAdmissionRevisions.length > 0) staleAdmissionRevisionsByChange.set(pr.id, staleAdmissionRevisions)
-    if (claim?.consumedBy === undefined || (claim.revision === revision.n && claim.headSha === revision.head)) {
-      continue
-    }
-    const run = app.queue.get(claim.consumedBy)
-    if (run === undefined || Queues.terminal(run)) continue
-    staleRunsByPr.set(pr.id, [run])
-    staleRunIds.add(run.id)
-  }
-  for (const run of [...staleRunIds].toSorted(compareNatural)) {
-    await app.queue.cancelRun({
-      run,
-      by: io.runner ?? "yrd-cli",
-      reason: "recover an interrupted accepted-to-refreshed transition",
-    })
-  }
-  for (const pr of interrupted) {
-    const jobIds: string[] = []
-    for (const revision of staleAdmissionRevisionsByChange.get(pr.id) ?? []) {
-      jobIds.push(
-        ...(await app.queue.cancelAdmissionJobs({
-          pr: pr.id,
-          revision,
-          by: io.runner ?? "yrd-cli",
-          reason: "recover an interrupted accepted-to-refreshed transition",
-        })),
-      )
-    }
-    if (jobIds.length > 0) staleJobsByPr.set(pr.id, jobIds)
-  }
-  for (const pr of interrupted) {
-    const runIds = staleRunsByPr.get(pr.id)?.map(({ id }) => id) ?? []
-    const jobIds = staleJobsByPr.get(pr.id) ?? []
-    if (runIds.length === 0 && jobIds.length === 0) continue
-    const revision = changeRevisionNumber(pr)
-    outcomes.push({ status: "recovered", pr: pr.id, revision, runs: runIds, jobs: jobIds })
-    app.log.info?.("Recovered an interrupted PR update.", {
-      action: "queue-freshness-recovered",
-      pr: pr.id,
-      revision,
-      runs: runIds,
-      jobs: jobIds,
-    })
-  }
-  const batches = app.queue.freshnessCandidateBatches()
-  const candidatesById = new Map(Object.values(snapshot.bays.prs).map((pr) => [pr.id, pr] as const))
-  const candidates = batches.flatMap((batch, batchIndex) =>
-    batch.flatMap((id, index) => {
-      const candidate = candidatesById.get(id)
-      return candidate === undefined
-        ? []
-        : [{ candidate, batch: batchIndex, base: baseIdentity(candidate.base), last: index === batch.length - 1 }]
-    }),
-  )
-  if (candidates.length === 0) return outcomes
-
-  const groups = await queueTargetGroups(new Set(candidates.map(({ candidate }) => candidate.base)), io)
-  const preparedBatches = new Set<number>()
-  const preparedBases = new Set<string>()
-  for (const plan of candidates) {
-    if (preparedBases.has(plan.base)) continue
-    const candidate = plan.candidate
-    const finishBatch = (): void => {
-      if (plan.last && preparedBatches.has(plan.batch)) preparedBases.add(plan.base)
-    }
-    const candidateRevision = currentChangeRev(candidate)
-    if (io.drainSignal?.aborted === true) break
-    const target = groups.find(
-      (group) => group.aliases.has(candidate.base) || group.aliases.has(baseIdentity(candidate.base)),
-    )
-    if (target?.headSha === undefined) {
-      raiseFailure(
-        "infrastructure",
-        "queue-base-unresolved",
-        `yrd: automatic re-merge could not resolve the merge-queue base '${candidate.base}' for change '${candidate.id}'`,
-      )
-    }
-    if (candidateRevision.baseSha === target.headSha) {
-      preparedBatches.add(plan.batch)
-      finishBatch()
-      continue
-    }
-
-    try {
-      const remerge = await executeRemergeChange(
-        app,
-        services,
-        candidate.id,
-        {
-          queue: true,
-          force: true,
-          admit: false,
-          transition: { from: "admitted", to: "refreshed" },
-        },
-        io,
-      )
-      const refreshedRevision = currentChangeRev(remerge.current)
-      if (remerge.settlement === "payload-already-contained") {
-        outcomes.push({
-          status: "settled",
-          pr: remerge.current.id,
-          revision: refreshedRevision.n,
-          fromBase: candidateRevision.baseSha,
-          toBase: remerge.result.baseSha,
-          proof: remerge.settlement,
-          patchId: remerge.result.patchId,
-        })
-        app.log.info?.("Settled a queued PR whose payload current main already contains.", {
-          action: "queue-freshness-superseded",
-          pr: remerge.current.id,
-          revision: refreshedRevision.n,
-          fromBase: candidateRevision.baseSha,
-          toBase: remerge.result.baseSha,
-          proof: remerge.settlement,
-          patchId: remerge.result.patchId,
-        })
-        finishBatch()
-        continue
-      }
-      outcomes.push({
-        status: "refreshed",
-        pr: remerge.current.id,
-        revision: refreshedRevision.n,
-        fromBase: candidateRevision.baseSha,
-        toBase: remerge.result.baseSha,
-        headSha: refreshedRevision.head,
-        patchId: remerge.result.patchId,
-      })
-      preparedBatches.add(plan.batch)
-      app.log.info?.("Updated a queued PR to the latest base.", {
-        action: "queue-freshness-refreshed",
-        pr: remerge.current.id,
-        revision: refreshedRevision.n,
-        fromBase: candidateRevision.baseSha,
-        toBase: remerge.result.baseSha,
-        patchId: remerge.result.patchId,
-      })
-    } catch (error) {
-      const failure = failureFact(error)
-      if (failure?.kind !== "refusal") throw error
-      if (failure.code === "recut-current-changed") {
-        outcomes.push({
-          status: "deferred",
-          pr: candidate.id,
-          revision: candidateRevision.n,
-          fromBase: candidateRevision.baseSha,
-          toBase: target.headSha,
-          code: "recut-current-changed",
-          message: failure.message,
-        })
-        app.log.info?.("Skipped updating a queued PR because it changed.", {
-          action: "queue-freshness-deferred",
-          pr: candidate.id,
-          revision: candidateRevision.n,
-          fromBase: candidateRevision.baseSha,
-          toBase: target.headSha,
-          code: failure.code,
-          reason: failure.message,
-        })
-        finishBatch()
-        continue
-      }
-      const priorRefusal = stateOf(app).queues.admissionRefusals[candidate.id]
-      const repeatedRefusal =
-        priorRefusal?.settlement === undefined &&
-        priorRefusal?.revision === candidateRevision.n &&
-        priorRefusal.headSha === candidateRevision.head &&
-        priorRefusal.code === failure.code &&
-        priorRefusal.reason === failure.message
-      try {
-        await app.queue.recordAdmissionRefusal({
-          pr: candidate.id,
-          code: failure.code,
-          kind: failure.kind,
-          reason: failure.message,
-        })
-      } catch (ledgerError) {
-        app.log.error?.("Could not journal a queued PR freshness refusal; the wedge oracle will under-count.", {
-          action: "queue-freshness-refusal-unrecorded",
-          pr: candidate.id,
-          code: failure.code,
-          reason: ledgerError instanceof Error ? ledgerError.message : String(ledgerError),
-        })
-      }
-      outcomes.push({
-        status: "refused",
-        pr: candidate.id,
-        revision: candidateRevision.n,
-        fromBase: candidateRevision.baseSha,
-        toBase: target.headSha,
-        code: failure.code,
-        message: failure.message,
-      })
-      if (!repeatedRefusal) {
-        app.log.warn?.(`Could not update PR ${candidate.id} to the latest base; it remains queued.`, {
-          action: "queue-freshness-refused",
-          pr: candidate.id,
-          revision: candidateRevision.n,
-          fromBase: candidateRevision.baseSha,
-          toBase: target.headSha,
-          code: failure.code,
-          reason: failure.message,
-        })
-      }
-    }
-    finishBatch()
-  }
-  return outcomes
-}
-
 /** What the habitant did about one wedged PR this cycle. */
 export type RefusalRemedyOutcome =
   | Readonly<{
@@ -10745,8 +10163,8 @@ async function applyRefusalRemedy(
  * needs-person. Mechanical code-carrier remedies still run here because a
  * successful re-merge produces a new revision and makes progress.
  *
- * Runs inside the existing serialized habitant cycle beside
- * {@link refreshAdmittedQueueRevisions}: same installed recutter, same journal,
+ * Runs inside the existing serialized habitant cycle
+ * ({@link prepareHabitantQueueCycle}): same installed recutter, same journal,
  * no second writer or scheduler. Applies at most one remedy per change revision, so
  * a remedy that fails degrades to the printed refusal rather than becoming its
  * own loop; a remedy that succeeds produces a new revision, which is what makes
@@ -10854,8 +10272,15 @@ function observeHabitantRefusals(app: YrdCliApp, runs: number): HabitantRefusalO
     refusals: refusals.map(({ pr, code, count }) => ({ pr, code, count })),
     heads: Object.fromEntries(
       refusals.flatMap((refusal) => {
+        // A derived member's refusal is keyed by its synthetic id, which has no
+        // record — its head lives on the retained run snapshot. Records answer
+        // first only as the legacy source.
         const pr = snapshot.bays.prs[refusal.pr]
-        return pr === undefined ? [] : [[refusal.pr, currentChangeRev(pr).head] as const]
+        const head =
+          pr === undefined
+            ? latestChangeSnapshot(snapshot.queues, (candidate) => candidate.id === refusal.pr)?.headSha
+            : currentChangeRev(pr).head
+        return head === undefined ? [] : [[refusal.pr, head] as const]
       }),
     ),
   }
@@ -11040,11 +10465,13 @@ export async function habitantRecoverySweep(
 }
 
 /**
- * Run every revision-preparation robot in the habitant's single-writer cycle.
- * Ordering is load-bearing: track the authored branch first, refresh that
- * frozen revision onto the queue base second, then repair prior admission
- * refusals. The return value tells the caller whether to re-prove its installed
- * baseline before composing.
+ * Run the habitant's single-writer revision-preparation cycle. Post-S7 the
+ * cycle is one robot: repair prior admission refusals. The record-lane robots
+ * it used to order ahead of that — publication jobs, tracked-branch
+ * observation, admitted-revision refreshes — retired with the record lane
+ * (branch-is-change, @i/10 22991): on the derived lane a re-push IS the fresh
+ * submission and compose owns admission freshness. The return value tells the
+ * caller whether to re-prove its installed baseline before composing.
  */
 function preparationBaselineChanged(before: YrdCliState, after: YrdCliState): boolean {
   if (before.bays !== after.bays || before.jobs !== after.jobs || before.contests !== after.contests) {
@@ -11059,30 +10486,12 @@ async function prepareHabitantQueueCycle(
   services: YrdCliServices,
   io: YrdCliIO,
   remedied: Set<string>,
-  observation: TrackedObservationBackoff,
 ): Promise<boolean> {
-  const beforePublication = stateOf(app)
-  const publications = await preparePublicationQueueCycle(app, services, io)
-  const publicationChanged = publications.length > 0 || preparationBaselineChanged(beforePublication, stateOf(app))
-  if (services.recut === undefined) return publicationChanged
-  const beforeTracking = stateOf(app)
-  const tracking = await refreshTrackedQueueRevisions(app, services, io, observation)
-  const trackingChanged = preparationBaselineChanged(beforeTracking, stateOf(app))
-  const beforeFreshness = stateOf(app)
-  const freshness = await refreshAdmittedQueueRevisions(app, services, io)
-  const freshnessChanged = preparationBaselineChanged(beforeFreshness, stateOf(app))
+  if (services.recut === undefined) return false
   const beforeRemedies = stateOf(app)
   const remedies = await applyRefusalRemedies(app, services, io, remedied)
   const remediesChanged = preparationBaselineChanged(beforeRemedies, stateOf(app))
-  return (
-    publicationChanged ||
-    trackingChanged ||
-    freshnessChanged ||
-    remediesChanged ||
-    tracking.some((outcome) => outcome.status === "applied") ||
-    freshness.some(({ status }) => status === "refreshed" || status === "settled" || status === "recovered") ||
-    remedies.some((outcome) => outcome.status === "applied")
-  )
+  return remediesChanged || remedies.some((outcome) => outcome.status === "applied")
 }
 
 export async function followQueueRuns(
@@ -11146,9 +10555,6 @@ export async function followQueueRuns(
   // across restarts; this Set only prevents a partially applied mechanical drill
   // from repeating inside the same process before its journal transition clears.
   const remedied = new Set<string>()
-  // Re-observation backoff for tracked branches this process could not observe
-  // (22584). Process-scoped like `remedied`: a claim about THIS runner's cycles.
-  const observation: TrackedObservationBackoff = new Map()
   // Consecutive all-candidate-refusal cycles against an unchanged world (22474
   // specimen 3). Also process-scoped: it is a claim about THIS process.
   let stall: HabitantRefusalStall | undefined
@@ -11206,7 +10612,7 @@ export async function followQueueRuns(
       // A mechanical re-merge may itself take long enough for the declared plan
       // to move. Re-read it before admitting the fresh revision; never start a
       // Run under the pre-re-merge gate snapshot.
-      if (await prepareHabitantQueueCycle(app, services, io, remedied, observation)) {
+      if (await prepareHabitantQueueCycle(app, services, io, remedied)) {
         runRequired = true
         await gate()
       }
@@ -11606,8 +11012,8 @@ async function refuseChangeMerge(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) {
+  const resolved = resolveDelivery(app, selector)
+  if (resolved === undefined) {
     const next = `yrd pr submit ${selector}`
     const message = `the queue is the only merger; branch '${selector}' is not submitted; submit it: ${next}`
     const guidance = {
@@ -11624,6 +11030,58 @@ async function refuseChangeMerge(
     }
     refusal(message)
   }
+  if (resolved.lane === "derived") {
+    // The selector addressed the derived lane — a live submit fact, or a
+    // retained member's synthetic id. The teaching stays the same (the queue
+    // is the only merger) but the status must be the delivery's own, never
+    // "not submitted" for work that IS submitted (host-conv gap B).
+    const status = derivedDeliveryStatus(app, resolved)
+    const subject = resolved.member?.id ?? `branch '${resolved.branch}'`
+    const detail =
+      status.state === "running" || status.state === "queued"
+        ? {
+            status: status.state,
+            next: `yrd watch`,
+            guidance: { watch: "yrd watch" },
+            message: `${subject} is ${status.state}${status.runs.length === 0 ? "" : ` (run ${status.runs.at(-1)?.id ?? "?"})`}; the queue merges it when its run passes`,
+          }
+        : status.state === "refused"
+          ? {
+              status: status.state,
+              next: `yrd pr view ${selector}`,
+              guidance: { inspect: `yrd pr view ${selector}` },
+              message: `${subject} was refused admission [${status.refusal?.code ?? "unknown"}]; fix the branch and push again`,
+            }
+          : status.state === "pending"
+            ? {
+                status: status.state,
+                next: `yrd watch`,
+                guidance: { watch: "yrd watch" },
+                message: `${subject} is submitted at ${resolved.submit?.sha.slice(0, 12) ?? "?"} and composes on the next queue pass`,
+              }
+            : {
+                status: status.state,
+                next: `yrd pr view ${selector}`,
+                guidance: { inspect: `yrd pr view ${selector}` },
+                message: `${subject} has no live submit fact; its retained runs are history — see: yrd pr view ${selector}`,
+              }
+    const message = `the queue is the only merger; ${detail.message}`
+    const guidance = {
+      command: "pr.merge",
+      branch: resolved.branch,
+      ...(resolved.member === undefined ? {} : { pr: resolved.member.id }),
+      status: detail.status,
+      next: detail.next,
+      guidance: detail.guidance,
+      failure: { kind: "refusal", code: "queue-only-merger", message },
+    }
+    if (jsonEnabled(options)) {
+      io.stderr(stableJson(guidance))
+      return 1
+    }
+    refusal(message)
+  }
+  const pr = resolved.pr
 
   const position = await queuedChangePosition(app, pr, io)
   const detail = changeMergeRefusalDetail(pr, position, latestRunForCurrentRevision(pr, app.queue.status(pr.base)))
@@ -11743,6 +11201,17 @@ async function explainMerge(
   options: JsonOption & Readonly<{ repair?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  if (options.repair === true) {
+    // The retired flag is deliberately NOT quoted so the renderer cannot lift
+    // it into the printed resolution.
+    raiseFailure(
+      "refusal",
+      "why-repair-retired",
+      "yrd: why --repair is retired with the change-record store (branch-is-change, @i/10 22991): there is no " +
+        "pr/integrated index row to re-mint from a merge record. The record itself stays the proof — this " +
+        "command already reports it without the flag.",
+    )
+  }
   if (services.mergeRecords !== undefined) {
     const proof = await services.mergeRecords.find(selector)
     if (proof.status === "repository-corrupt" || proof.status === "repository-incomplete") {
@@ -11796,15 +11265,6 @@ async function explainMerge(
       const verdict = latest.record.merge.result
       const reason = latest.record.reason
       const fix = latest.record.fix
-      let repaired = false
-      const pr = app.bays.pr(selector)
-      if (verdict === "merged" && options.repair === true && pr !== undefined) {
-        const repair = mergeRepair(latest.record, pr)
-        if (repair.status === "repairable") {
-          await app.queue.reconcileMerge(repair.input)
-          repaired = true
-        }
-      }
       // Nothing-new is a first-class outcome, not a defect: the change was already
       // contained, so "at <commit>" would print the BASE and read as a fresh merge.
       // Derived here by predicate — the record stores the facts, never the label.
@@ -11824,7 +11284,9 @@ async function explainMerge(
           selector,
           verdict,
           ...(nothingNew ? { nothingNew } : {}),
-          repaired,
+          // Frozen false: the --repair index re-mint retired with the record
+          // store; consumers still key on the field's presence.
+          repaired: false,
           record: latest.record,
           pointer: latest.pointer,
           attempts,
@@ -12058,11 +11520,7 @@ function buildProgram(
     .command("doctor")
     .description("diagnose repository configuration and retention warnings")
     .option("--rebuild-views", "atomically rebuild registered query views from immutable Journal history")
-    .option(
-      "--rebuild-index-from-repo",
-      "rebuild missing pr/integrated index rows for PRs the journal already knows, from every proven " +
-        "merge record in the repository (cannot recreate a change entity the journal has never seen)",
-    )
+    .option("--rebuild-index-from-repo", "retired: refuses and names why")
     .option(
       "--retract-unprovable",
       "list EVERY merge record the repository cannot prove, by cause; add --apply to append a retraction " +
@@ -12075,7 +11533,7 @@ function buildProgram(
   program
     .command("why <selector>")
     .description("prove one change merge from repository truth and its journal index")
-    .option("--repair", "append a missing pr/integrated index row from repository proof")
+    .option("--repair", "retired: refuses and names why")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(
@@ -12443,11 +11901,26 @@ function buildProgram(
       }
       await gate()
       const app = installed()
-      const publications = await preparePublicationQueueCycle(app, installedServices(), io)
-      if (publications.length > 0) await gate()
       const runs = await runQueues(app, selectors, options, io)
+      // The S7 resolver maps each selector onto whichever world answered the
+      // run: a record id, or a derived member's retained snapshot id. A
+      // selector neither world resolves already earned core's own refusal in
+      // the run above, so it contributes nothing here rather than refusing a
+      // second time after a successful pass.
       const selectedChangeIds =
-        selectors.length === 0 ? undefined : new Set(selectors.map((selector) => requiredPr(app, selector).id))
+        selectors.length === 0
+          ? undefined
+          : new Set(
+              selectors.flatMap((selector) => {
+                const resolved = resolveDelivery(app, selector)
+                if (resolved === undefined) return []
+                return resolved.lane === "record"
+                  ? [resolved.pr.id]
+                  : resolved.member === undefined
+                    ? []
+                    : [resolved.member.id]
+              }),
+            )
       const blocked = admissionBlockedChanges(app, selectedChangeIds)
       const blockerText = blocked.map(({ eligibility }) => eligibility.reason?.message).join("\n")
       const human =
@@ -12455,13 +11928,15 @@ function buildProgram(
           ? createElement(QueueRunsView, { runs })
           : runs.length === 0
             ? blockerText
-            : createElement(Fragment, null, createElement(QueueRunsView, { runs }), "\n", blockerText)
+            : createElement(Fragment, null, createElement(QueueRunsView, { runs }), createElement(Text, null, `\n${blockerText}`))
       await printResult(
         io,
         jsonEnabled(options),
         {
           command: "queue.run",
-          publications: publications.map((job) => ({ ...job, projection: projectPublication(job) })),
+          // Frozen empty: pr.publish jobs retired with the record lane, and
+          // existing consumers pin the key's presence on this envelope.
+          publications: [],
           results: runs.map(projectQueueRunTaskStatus),
           ...(blocked.length === 0
             ? {}
@@ -12474,8 +11949,7 @@ function buildProgram(
         },
         human,
       )
-      const publicationFailed = publications.some((job) => job.status !== "completed" || job.conclusion !== "success")
-      setExit(publicationFailed || runs.some(Queues.failed) ? 1 : 0)
+      setExit(runs.some(Queues.failed) ? 1 : 0)
     })
   queue
     .command("cancel <run>")
@@ -12522,12 +11996,13 @@ function buildProgram(
     .option("--base <branch>", "scope changes to one base")
     .option(
       "--state <state>",
-      `scope changes to one record state (${CHANGE_LIST_RECORD_STATE_HELP}) ` +
-        `or one native or projected delivery status (${CHANGE_LIST_STATE_HELP})`,
+      `scope changes to one record state (${CHANGE_LIST_RECORD_STATE_HELP}), ` +
+        `one native or projected delivery status (${CHANGE_LIST_STATE_HELP}), ` +
+        `or one live submission state (${CHANGE_LIST_LIVE_STATE_HELP})`,
     )
     .option("--issue <ref>", "scope changes to one issue reference")
-    .option("--needs-review", "show revisions needing approval")
-    .option("--reviewer <reviewer>", "scope --needs-review to one requested reviewer")
+    .option("--needs-review", "retired: refuses and names why")
+    .option("--reviewer <reviewer>", "retired: refuses and names why")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
   list.addHelpSection(
@@ -12628,50 +12103,51 @@ function buildProgram(
     .description("show the current bay or branch change")
     .option("--json", "emit stable JSON")
     .action(async (options) => statusPr(installed(), options, io, installedServices()))
-  pr.command("edit <selector>")
-    .description("edit the issue link, note, title, description, or branch tracking")
-    .option("--issue <ref>", "set the tracker-neutral issue reference")
-    .option("--note <text>", "set the delivery note")
-    .option("--title <text>", "set the change subject")
-    .option("--description <text>", "set the change description body")
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--untrack", "stop tracking: a stale head again blocks the re-merge")
+  // Retired record-write verbs (S7, branch-is-change): each stays registered,
+  // hidden, so an old runbook gets a loud typed refusal naming its
+  // replacement — never a silent drop, never an unknown-command error
+  // (`queue candidate-refs` precedent).
+  pr.command("edit <selector>", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--issue <ref>", "ignored; the verb is retired")
+    .option("--note <text>", "ignored; the verb is retired")
+    .option("--title <text>", "ignored; the verb is retired")
+    .option("--description <text>", "ignored; the verb is retired")
+    .option("--track", "ignored; the verb is retired")
+    .option("--untrack", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => editPr(installed(), selector, options, io))
-  // Hidden with recut: the draft story is `create` = draft, `submit` = ready.
+    .action(() => refuseRetiredChangeRecordVerb("pr edit"))
   pr.command("publish <selector>", { hidden: true })
-    .description("request credential-bearing publication of one immutable change revision")
-    .option("--queue", "re-merge and queue the revision after publishing succeeds")
+    .description("retired: refuses and names why")
+    .option("--queue", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => publishPr(installed(), installedServices(), selector, options, io))
+    .action(() => refuseRetiredChangeRecordVerb("pr publish"))
   pr.command("ready <selector>", { hidden: true })
-    .description("submit a pushed change revision and request configured checks")
+    .description("retired: refuses and names why")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      setExit(await readyPr(installed(), installedServices(), selector, options, io)),
-    )
-  pr.command("review <selector>")
-    .description("record a revision-bound review verdict")
-    .option("--approve", "approve the current revision")
-    .option("--reject", "reject the current revision")
-    .option("--by <identity>", "reviewer identity")
-    .option("--ref <id>", "idempotency reference")
-    .option("--note <text>", "review note")
+    .action(() => refuseRetiredChangeRecordVerb("pr ready"))
+  pr.command("review <selector>", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--approve", "ignored; the verb is retired")
+    .option("--reject", "ignored; the verb is retired")
+    .option("--by <identity>", "ignored; the verb is retired")
+    .option("--ref <id>", "ignored; the verb is retired")
+    .option("--note <text>", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => reviewPr(installed(), selector, options, io))
-  pr.command("request-review <selector> [reviewers...]")
-    .description("replace the requested reviewers for a change (declarative set)")
-    .option("--clear", "clear the requested reviewer set")
-    .option("--by <identity>", "requesting identity")
+    .action(() => refuseRetiredChangeRecordVerb("pr review"))
+  pr.command("request-review <selector> [reviewers...]", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--clear", "ignored; the verb is retired")
+    .option("--by <identity>", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selector, reviewers, options) => requestReviewPr(installed(), selector, reviewers, options, io))
-  pr.command("comment <selector>")
-    .description("record a non-gating revision comment")
-    .option("--by <identity>", "commenter identity")
-    .option("--ref <id>", "idempotency reference")
-    .requiredOption("--note <text>", "comment text")
+    .action(() => refuseRetiredChangeRecordVerb("pr request-review"))
+  pr.command("comment <selector>", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--by <identity>", "ignored; the verb is retired")
+    .option("--ref <id>", "ignored; the verb is retired")
+    .option("--note <text>", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => commentPr(installed(), selector, options, io))
+    .action(() => refuseRetiredChangeRecordVerb("pr comment"))
   pr.command("checks <selector...>")
     .description("show required-check evidence for current change revisions")
     .option("--follow", "follow active checks to a terminal result")
@@ -12743,13 +12219,13 @@ function buildProgram(
     )
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await bayPruneCommand(installed(), installedServices(), options, io)))
-  const adminPr = admin.command("pr").description("administer changes")
+  const adminPr = admin.command("pr", { hidden: true }).description("retired change administration")
   adminPr
-    .command("prune")
-    .description("withdraw live PRs whose content their base branch already contains")
-    .option("--dry-run", "print every checked verdict without withdrawing")
+    .command("prune", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--dry-run", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (options) => prunePrs(installed(), options, io))
+    .action(() => refuseRetiredChangeRecordVerb("admin pr prune"))
   const adminCandidateRefs = admin.command("candidate-refs").description("administer synthetic Candidate refs")
   adminCandidateRefs
     .command("prune")
@@ -12792,10 +12268,10 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (issueId, options) => listIssues(installed(), options, io, issueId))
   issue
-    .command("ensure <issue>")
-    .description("ensure one issue-owned Bay and one tracked draft change")
+    .command("ensure <issue>", { hidden: true })
+    .description("retired: refuses and names why")
     .option("--json", "emit stable JSON")
-    .action(async (issueId, options) => setExit(await ensureIssueDelivery(installed(), issueId, options, io)))
+    .action(() => refuseRetiredChangeRecordVerb("issue ensure"))
 
   const contest = program.command("contest").description("inspect and select contest attempts")
   contest.helpCommand(false)

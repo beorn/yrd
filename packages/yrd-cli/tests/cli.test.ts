@@ -1219,10 +1219,20 @@ describe("runYrd", () => {
 
     const pr = outputIO()
     expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
-    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "close"]) {
+    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "close"]) {
       expect(pr.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
     expect(pr.stdout()).not.toMatch(/^\s+retry\b/mu)
+    // Retired record-write verbs (S7, branch-is-change): hidden from help, but
+    // still registered so an old runbook gets a loud typed refusal naming the
+    // replacement instead of "unknown command".
+    for (const retired of ["edit", "publish", "ready", "review", "request-review", "comment"]) {
+      expect(pr.stdout()).not.toMatch(new RegExp(`^\\s+${retired}\\b`, "mu"))
+      const refused = outputIO()
+      expect(await runYrd(app, yrd("pr", retired, "PR1", "--json"), refused.io)).toBe(1)
+      expect(refused.stderr()).toContain(`pr-${retired}-retired`)
+      expect(refused.stderr()).toContain("retired with the change-record store")
+    }
 
     const beforeRetiredRetry = await Array.fromAsync(app.events()).then((events) => events.length)
     const retiredRetry = outputIO()
@@ -1337,6 +1347,92 @@ describe("runYrd", () => {
     const dashboard = outputIO()
     expect(await runYrd(app, yrd("--json"), dashboard.io), dashboard.stderr()).toBe(0)
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
+  })
+
+  it("pr status and pr list see a just-submitted derived branch instead of teaching a resubmit", async () => {
+    const app = await createApp()
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/fresh", "--base", "main", "--json"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+
+    // The live specimen (host-conv gap A): `pr status` right after a derived
+    // submit told the author "has no PR; submit it" — the fact IS the
+    // submission, so the checked-out branch resolves to it.
+    const status = outputIO({ currentBranch: () => "topic/fresh" })
+    expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
+    expect(JSON.parse(status.stdout())).toMatchObject({
+      command: "pr.status",
+      derived: { lane: "derived", branch: "topic/fresh", sha: HEAD_SHA, base: "main", state: "pending" },
+    })
+
+    const list = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--json"), list.io), list.stderr()).toBe(0)
+    expect(JSON.parse(list.stdout())).toMatchObject({
+      command: "pr.list",
+      prs: [],
+      live: [{ branch: "topic/fresh", sha: HEAD_SHA, base: "main", state: "pending" }],
+    })
+
+    const human = outputIO()
+    expect(await runYrd(app, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("Live submissions (derived lane):")
+    expect(human.stdout()).toContain("pending compose")
+
+    // The live-state vocabulary selects live rows; a record vocabulary asks a
+    // records question and hides them.
+    const filtered = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "pending", "--json"), filtered.io)).toBe(0)
+    expect(JSON.parse(filtered.stdout())).toMatchObject({ live: [{ branch: "topic/fresh" }] })
+    const recordsOnly = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--state", "open", "--json"), recordsOnly.io)).toBe(0)
+    expect(JSON.parse(recordsOnly.stdout())).toMatchObject({ live: [] })
+  })
+
+  it("pr view/checks/runs/merge address a composed derived member by id and branch (PR2145/PR2146 specimen)", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns, resolveBaseSha: () => BASE_SHA })
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/member", "--json"), submit.io), submit.stderr()).toBe(0)
+    const drain = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drain.io), drain.stderr()).toBe(0)
+    const drained = JSON.parse(drain.stdout()) as {
+      results: readonly { prs: readonly { id: string; branch: string }[] }[]
+    }
+    const member = drained.results.flatMap((run) => run.prs).find((row) => row.branch === "topic/member")
+    if (member === undefined) throw new Error("expected the drain to compose topic/member")
+
+    // The live specimen (2026-08-27): `pr view PR2146` and `pr checks PR2145`
+    // refused pr-not-found while the members sat in run history. Both the
+    // synthetic id and the branch resolve to the retained member now.
+    for (const selector of [member.id, "topic/member"]) {
+      const view = outputIO()
+      expect(await runYrd(app, yrd("pr", "view", selector, "--json"), view.io), view.stderr()).toBe(0)
+      expect(JSON.parse(view.stdout())).toMatchObject({
+        command: "pr.view",
+        // The run integrated the fact's exact sha, so the live state is
+        // "landed" — never "pending", which would promise a compose that
+        // already happened (compose skips already-landed submits).
+        derived: { lane: "derived", branch: "topic/member", state: "landed" },
+        member: { id: member.id, branch: "topic/member" },
+      })
+    }
+
+    // The drain ran the required check as a standalone admission Job before
+    // composing, so the member holds a recorded PASSING verdict — exit 0 per
+    // the frozen checks contract. The specimen's bug was pr-not-found.
+    const checks = outputIO()
+    expect(await runYrd(app, yrd("pr", "checks", member.id, "--json"), checks.io), checks.stderr()).toBe(0)
+    expect(checks.stdout()).toContain('"kind":"pr.check"')
+    expect(checks.stdout()).toContain('"status":"passed"')
+
+    const runs = outputIO()
+    expect(await runYrd(app, yrd("pr", "runs", member.id, "--json"), runs.io), runs.stderr()).toBe(0)
+
+    const merge = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", member.id, "--json"), merge.io)).toBe(1)
+    expect(merge.stderr()).not.toContain("pr-not-found")
   })
 
   it("refuses a submit into a repository that declares no merge authority", async () => {
@@ -1516,11 +1612,6 @@ describe("runYrd", () => {
       surface: "pr runs",
       args: ["pr", "runs", "pr1", "--json"],
       expected: { command: "pr.runs", pr: { id: "PR1" } },
-    },
-    {
-      surface: "pr review",
-      args: ["pr", "review", "pr1", "--approve", "--by", "@cto", "--json"],
-      expected: { command: "pr.review", pr: { id: "PR1" } },
     },
     {
       surface: "PR resubmission",
@@ -1916,25 +2007,6 @@ describe("runYrd", () => {
     expect(JSON.parse(aliasJson.stdout())).toMatchObject({ command: "pr.list" })
   })
 
-  it("queues ready's authoritative checks without minting a Run", async () => {
-    const checkedRevisions: string[] = []
-    const app = await createApp({ waitingCheck: true, checkedRevisions })
-    await app.bays.submit({
-      branch: "topic/habitant-ready",
-      headSha: HEAD_SHA,
-      base: "main",
-      draft: true,
-    })
-
-    const ready = outputIO({ habitantLeaseHeld: () => Promise.resolve(true) })
-    expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(0)
-
-    expect(checkedRevisions).toEqual([])
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 1, status: "queued" }])
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.bays.checksRequested("PR1")).toBe(true)
-  })
-
   it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
@@ -2019,565 +2091,6 @@ describe("runYrd", () => {
     const sparse: { repo: string; fromHeadSha: string; toHeadSha: string }[] = []
     sparse.length = 1
     expect(() => collapseRecomposedSources(sparse)).toThrow("yrd: recomposed source 0 is missing")
-  })
-
-  it("mechanically recuts an admitted certificate across consecutive base advances (R1304/R1307)", async () => {
-    const oldHead = "2".repeat(40)
-    const nextHead = "3".repeat(40)
-    const nextBase = "b".repeat(40)
-    const laterHead = "4".repeat(40)
-    const laterBase = "e".repeat(40)
-    const treeSha = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const remergeInputs: unknown[] = []
-    const app = await createApp({ waitingCheck: true })
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          remergeInputs.push(input)
-          return Promise.resolve({
-            headSha: remergeInputs.length === 1 ? nextHead : laterHead,
-            baseSha: remergeInputs.length === 1 ? nextBase : laterBase,
-            treeSha,
-            patchId,
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const cycle = runInternals.refreshAdmittedQueueRevisions
-
-    await app.bays.submit({ branch: "issue/auto-recut", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: oldHead,
-      baseSha: BASE_SHA,
-      treeSha,
-      patchId,
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
-    const firstAdmissionJob = revisionAdmissionJob(app, "PR1")
-    expect(firstAdmissionJob).toMatchObject({ status: "waiting" })
-    const beforeCycle = await Array.fromAsync(app.events()).then((events) => events.length)
-    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
-
-    expect(cycle, "habitant cycles need a queue-owned base-advance recut seam").toBeTypeOf("function")
-    await cycle(app, services, io)
-    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
-    const secondAdmissionJob = revisionAdmissionJob(app, "PR1")
-    expect(secondAdmissionJob).toMatchObject({ status: "waiting" })
-    expect(secondAdmissionJob?.id).not.toBe(firstAdmissionJob?.id)
-
-    expect(remergeInputs).toEqual([
-      expect.objectContaining({
-        id: "PR1",
-        revision: 2,
-        headSha: oldHead,
-        baseSha: BASE_SHA,
-        current: expect.objectContaining({ revision: 2, headSha: oldHead, baseSha: BASE_SHA, patchId }),
-      }),
-    ])
-    const firstRefresh = app.bays.pr("PR1")!
-    expect(changeDeliveryState(firstRefresh)).toBe("submitted")
-    expect(currentChangeRev(firstRefresh)).toMatchObject({
-      n: 3,
-      head: nextHead,
-      baseSha: nextBase,
-      recut: {
-        fromRevision: 2,
-        patchId,
-        treeSha,
-        transition: { from: "admitted", to: "refreshed" },
-      },
-    })
-    expect(firstRefresh.revs).toMatchObject([{ n: 1 }, { n: 2 }, { n: 3 }])
-    expect(app.jobs.get(firstAdmissionJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(Queues.ids(app.state().queues)).toEqual([])
-
-    const appended = (await Array.fromAsync(app.events())).slice(beforeCycle)
-    const remergeIndex = appended.findIndex(
-      ({ name, data }) =>
-        name === "pr/recut" && (data as { successor?: { revision?: number } }).successor?.revision === 3,
-    )
-    const successorJobIndex = appended.findIndex(
-      ({ name, data }) =>
-        name === "job/requested" && (data as { key?: string }).key?.startsWith("admission:PR1:3:") === true,
-    )
-    expect(remergeIndex).toBeGreaterThanOrEqual(0)
-    expect(appended[remergeIndex]?.data).toMatchObject({ transition: { from: "admitted", to: "refreshed" } })
-    expect(successorJobIndex).toBeGreaterThan(remergeIndex)
-
-    const afterFirstCycle = await Array.fromAsync(app.events()).then((events) => events.length)
-    await cycle(app, services, io)
-    expect(remergeInputs).toHaveLength(1)
-    expect(app.bays.pr("PR1")?.revs).toHaveLength(3)
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterFirstCycle)
-
-    await cycle(app, services, outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: laterBase }) }).io)
-    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
-    const thirdAdmissionJob = revisionAdmissionJob(app, "PR1")
-    expect(thirdAdmissionJob).toMatchObject({ status: "waiting" })
-    expect(remergeInputs).toHaveLength(2)
-    const secondRefresh = app.bays.pr("PR1")!
-    expect(changeDeliveryState(secondRefresh)).toBe("submitted")
-    expect(currentChangeRev(secondRefresh)).toMatchObject({
-      n: 4,
-      head: laterHead,
-      baseSha: laterBase,
-      recut: {
-        fromRevision: 3,
-        patchId,
-        transition: { from: "admitted", to: "refreshed" },
-      },
-    })
-    expect(secondRefresh.revs).toMatchObject([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }])
-    expect(app.jobs.get(secondAdmissionJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(thirdAdmissionJob?.id).not.toBe(secondAdmissionJob?.id)
-  })
-
-  it("refreshes only the next queue candidate batch after a base advance", async () => {
-    let targetBase = "f".repeat(40)
-    const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
-    const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
-    const remergeInputs: Array<{ id: string }> = []
-    const app = await createApp({ batch: 2 })
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          const remerge = input as { id: string }
-          remergeInputs.push(remerge)
-          const index = Number(remerge.id.slice(2)) - 1
-          return Promise.resolve({
-            headSha: refreshedHeads[index]!,
-            baseSha: targetBase,
-            treeSha: "c".repeat(40),
-            patchId: "d".repeat(40),
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const refresh = runInternals.refreshAdmittedQueueRevisions
-    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: targetBase }) }).io
-
-    for (const [index, oldHead] of oldHeads.entries()) {
-      const pr = `PR${index + 1}`
-      await app.bays.submit({
-        branch: `issue/convoy-${index + 1}`,
-        headSha: oldHead,
-        baseSha: BASE_SHA,
-        draft: true,
-      })
-      await app.bays.recut({
-        pr,
-        fromRevision: 1,
-        headSha: oldHead,
-        baseSha: BASE_SHA,
-        treeSha: "c".repeat(40),
-        patchId: "d".repeat(40),
-        reviewCarried: false,
-      })
-      await app.bays.ready({ pr })
-      await app.bays.requestChecks({ pr, baseSha: BASE_SHA })
-    }
-    for (const pr of ["PR1", "PR2", "PR3", "PR4", "PR5"]) await app.bays.editPr({ pr, track: false })
-
-    await refresh(app, services, io)
-    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
-    expect(["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n)).toEqual([
-      3, 3, 2, 2, 2,
-    ])
-
-    await app.bays.closePr({ pr: "PR1", reason: "candidate merged" })
-    await app.bays.closePr({ pr: "PR2", reason: "candidate merged" })
-    targetBase = "e".repeat(40)
-    await refresh(app, services, io)
-    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4"])
-
-    await app.bays.closePr({ pr: "PR3", reason: "candidate merged" })
-    await app.bays.closePr({ pr: "PR4", reason: "candidate merged" })
-    targetBase = "d".repeat(40)
-    await refresh(app, services, io)
-    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2", "PR3", "PR4", "PR5"])
-    expect(currentChangeRev(app.bays.pr("PR5")!).n).toBe(3)
-  })
-
-  it("settles an absorbed front candidate and refreshes the next PR in the same cycle (22528)", async () => {
-    const absorbedHead = "2".repeat(40)
-    const nextHead = "3".repeat(40)
-    const refreshedNextHead = "4".repeat(40)
-    const nextBase = "b".repeat(40)
-    const baseTree = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const remergeInputs: Array<{ id: string }> = []
-    const app = await createApp({ waitingCheck: (input) => input.prs.some((pr) => pr.id === "PR1") })
-    const services = {
-      recut: {
-        recut(input: unknown) {
-          const remerge = input as { id: string }
-          remergeInputs.push(remerge)
-          if (remerge.id === "PR2") {
-            return Promise.resolve({
-              headSha: refreshedNextHead,
-              baseSha: nextBase,
-              treeSha: "f".repeat(40),
-              patchId,
-              unchanged: false,
-            })
-          }
-          return Promise.resolve({
-            // The remerger has proven that the resolved Queue base already
-            // contains every authored path. Nothing remains to admit or merge.
-            headSha: nextBase,
-            baseSha: nextBase,
-            treeSha: baseTree,
-            patchId,
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const refresh = runInternals.refreshAdmittedQueueRevisions
-    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
-
-    await app.bays.submit({ branch: "issue/absorbed", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: absorbedHead,
-      baseSha: BASE_SHA,
-      treeSha: "e".repeat(40),
-      patchId,
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toEqual([])
-    const admissionJob = revisionAdmissionJob(app, "PR1")
-    expect(admissionJob).toMatchObject({ status: "waiting" })
-
-    await app.bays.submit({ branch: "issue/next", headSha: nextHead, baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
-
-    const before = await Array.fromAsync(app.events()).then((events) => events.length)
-    await expect(refresh(app, services, io)).resolves.toEqual([
-      expect.objectContaining({ status: "settled", pr: "PR1", proof: "payload-already-contained" }),
-      expect.objectContaining({ status: "refreshed", pr: "PR2", headSha: refreshedNextHead }),
-    ])
-
-    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("already-landed")
-    expect(app.jobs.get(admissionJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 2, head: absorbedHead })
-    const appended = (await Array.fromAsync(app.events())).slice(before)
-    expect(appended.filter(({ name }) => name === "pr/already-landed")).toEqual([
-      expect.objectContaining({
-        data: expect.objectContaining({
-          pr: "PR1",
-          revision: 2,
-          headSha: absorbedHead,
-          baseSha: nextBase,
-          candidateSha: nextBase,
-          candidateTreeSha: baseTree,
-          baseTreeSha: baseTree,
-          settlement: {
-            kind: "refresh-superseded",
-            proof: "payload-already-contained",
-            patchId,
-          },
-        }),
-      }),
-    ])
-
-    const afterSettlement = await Array.fromAsync(app.events()).then((events) => events.length)
-    await expect(refresh(app, services, io)).resolves.toEqual([])
-    expect(remergeInputs.map(({ id }) => id)).toEqual(["PR1", "PR2"])
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterSettlement)
-
-    // The same-cycle refresh proves that terminal settlement releases the
-    // selector immediately instead of merely hiding PR1 for one habitant tick.
-    // The in-memory app's canonical base resolver is intentionally fixed at
-    // BASE_SHA, independent of the refresh seam's injected next-base oracle.
-    const runs = await app.queue.run({}, { runner: "yrd-cli", leaseMs: 60_000 })
-    expect(runs).toMatchObject([{ prs: [{ id: "PR2", revision: 2, headSha: refreshedNextHead }] }])
-    expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("integrated")
-  })
-
-  it("runs admitted-to-refreshed as a habitant pre-run transition", async () => {
-    const nextBase = "b".repeat(40)
-    const nextHead = "3".repeat(40)
-    const patchId = "d".repeat(40)
-    const app = await createApp({ waitingCheck: true })
-    await app.bays.submit({ branch: "issue/habitant-refresh", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.editPr({ pr: "PR1", track: false })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: "2".repeat(40),
-      baseSha: BASE_SHA,
-      treeSha: "c".repeat(40),
-      patchId,
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    const services = {
-      recut: {
-        recut() {
-          return Promise.resolve({
-            headSha: nextHead,
-            baseSha: nextBase,
-            treeSha: "e".repeat(40),
-            patchId,
-            unchanged: false,
-          })
-        },
-      },
-    } as unknown as YrdCliServices
-    const controller = new AbortController()
-    const gate = vi.fn(async () => undefined)
-    const io = outputIO({
-      resolveQueueTarget: async () => ({ base: "main", sha: nextBase }),
-      scope: {
-        signal: controller.signal,
-        sleep: async () => {
-          controller.abort()
-        },
-      } as YrdCliIO["scope"],
-    }).io
-
-    await expect(runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, gate, services)).resolves.toBe(
-      3,
-    )
-    expect(gate).toHaveBeenCalledTimes(2)
-    const refreshed = app.bays.pr("PR1")!
-    expect(changeDeliveryState(refreshed)).toBe("submitted")
-    expect(currentChangeRev(refreshed)).toMatchObject({
-      n: 3,
-      head: nextHead,
-      recut: { patchId, transition: { from: "admitted", to: "refreshed" } },
-    })
-    expect(revisionAdmissionJob(app, "PR1")).toMatchObject({ status: "waiting" })
-    expect(Queues.ids(app.state().queues)).toEqual([])
-  })
-
-  it("keeps a five-carrier convoy tail flat until each habitant candidate batch reaches the front", async () => {
-    let targetBase = "f".repeat(40)
-    let now = 0
-    const oldHeads = ["2", "3", "4", "5", "6"].map((digit) => digit.repeat(40))
-    const refreshedHeads = ["7", "8", "9", "a", "b"].map((digit) => digit.repeat(40))
-    const remergeIds: string[] = []
-    const checkedRevisions: string[] = []
-    const app = await createApp({ batch: 2, waitingCheck: true, checkedRevisions })
-
-    for (const [index, oldHead] of oldHeads.entries()) {
-      const pr = `PR${index + 1}`
-      await app.bays.submit({
-        branch: `issue/habitant-convoy-${index + 1}`,
-        headSha: oldHead,
-        baseSha: BASE_SHA,
-        draft: true,
-      })
-      await app.bays.recut({
-        pr,
-        fromRevision: 1,
-        headSha: oldHead,
-        baseSha: BASE_SHA,
-        treeSha: "c".repeat(40),
-        patchId: "d".repeat(40),
-        reviewCarried: false,
-      })
-      await app.bays.ready({ pr })
-      await app.bays.requestChecks({ pr, baseSha: BASE_SHA })
-    }
-
-    const remerge = vi.fn((input: unknown) => {
-      const candidate = input as { id: string }
-      remergeIds.push(candidate.id)
-      const index = Number(candidate.id.slice(2)) - 1
-      return Promise.resolve({
-        headSha: refreshedHeads[index]!,
-        baseSha: targetBase,
-        treeSha: "e".repeat(40),
-        patchId: "d".repeat(40),
-        unchanged: false,
-      })
-    })
-    const services = { recut: { recut: remerge } } as unknown as YrdCliServices
-    const controller = new AbortController()
-    const beforeHabitant = await Array.fromAsync(app.events()).then((events) => events.length)
-    const snapshots: Array<{
-      recuts: string[]
-      revisions: number[]
-      admissions: string[]
-      jobs: string[]
-      checks: string[]
-    }> = []
-    let sleeps = 0
-    const io = outputIO({
-      now: () => now,
-      resolveQueueTarget: async () => ({ base: "main", sha: targetBase }),
-      scope: {
-        signal: controller.signal,
-        sleep: async () => {
-          const habitantEvents = (await Array.fromAsync(app.events())).slice(beforeHabitant)
-          snapshots.push({
-            recuts: [...remergeIds],
-            revisions: ["PR1", "PR2", "PR3", "PR4", "PR5"].map((pr) => currentChangeRev(app.bays.pr(pr)!).n),
-            admissions: ["PR1", "PR2", "PR3", "PR4", "PR5"].flatMap((pr) =>
-              app.bays
-                .pr(pr)!
-                .checkRequests.filter(({ revision }) => revision === 3)
-                .map(({ revision }) => `${pr}@${revision}`),
-            ),
-            jobs: habitantEvents.flatMap(({ name, data }) => {
-              if (name !== "job/requested") return []
-              const match = /^admission:(PR\d+):(\d+):/.exec((data as { key?: string }).key ?? "")
-              return match === null ? [] : [`${match[1]}@${match[2]}`]
-            }),
-            checks: [...checkedRevisions],
-          })
-          sleeps += 1
-          if (sleeps === 1) {
-            await app.bays.closePr({ pr: "PR1", reason: "candidate merged" })
-            await app.bays.closePr({ pr: "PR2", reason: "candidate merged" })
-            targetBase = "e".repeat(40)
-            now += 60_000
-            return
-          }
-          if (sleeps === 2) {
-            await app.bays.closePr({ pr: "PR3", reason: "candidate merged" })
-            await app.bays.closePr({ pr: "PR4", reason: "candidate merged" })
-            targetBase = "d".repeat(40)
-            now += 60_000
-            return
-          }
-          controller.abort()
-        },
-      } as YrdCliIO["scope"],
-    }).io
-
-    await expect(
-      runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, async () => undefined, services),
-    ).resolves.toBe(3)
-
-    // Each snapshot is taken after the habitant's refresh + admission pass and
-    // before the simulated base move. The tail therefore proves zero work until
-    // its candidate batch reaches the front, followed by exactly one recut/check.
-    expect(snapshots).toEqual([
-      {
-        recuts: ["PR1", "PR2"],
-        revisions: [3, 3, 2, 2, 2],
-        admissions: ["PR1@3", "PR2@3"],
-        jobs: ["PR1@3"],
-        checks: ["PR1@3"],
-      },
-      {
-        recuts: ["PR1", "PR2", "PR3", "PR4"],
-        revisions: [3, 3, 3, 3, 2],
-        admissions: ["PR1@3", "PR2@3", "PR3@3", "PR4@3"],
-        jobs: ["PR1@3", "PR3@3"],
-        checks: ["PR1@3", "PR3@3"],
-      },
-      {
-        recuts: ["PR1", "PR2", "PR3", "PR4", "PR5"],
-        revisions: [3, 3, 3, 3, 3],
-        admissions: ["PR1@3", "PR2@3", "PR3@3", "PR4@3", "PR5@3"],
-        jobs: ["PR1@3", "PR3@3", "PR5@3"],
-        checks: ["PR1@3", "PR3@3", "PR5@3"],
-      },
-    ])
-    expect(remerge).toHaveBeenCalledTimes(5)
-  })
-
-  it("re-proves the baseline when freshness mutates the change before refusing it", async () => {
-    const nextBase = "b".repeat(40)
-    const nextHead = "3".repeat(40)
-    const unpublishedPin = "4".repeat(40)
-    const app = await createApp()
-    await app.bays.submit({ branch: "issue/post-recut-refusal", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: "2".repeat(40),
-      baseSha: BASE_SHA,
-      treeSha: "c".repeat(40),
-      patchId: "d".repeat(40),
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-
-    const processRun = vi.fn(async (request: ProcessRequest): Promise<ProcessResult> => {
-      const argv = request.argv
-      const stdout = argv.includes("merge-base")
-        ? `${BASE_SHA}\n`
-        : argv.includes("ls-tree") && argv.includes("-r") && argv.includes(nextHead)
-          ? `160000 commit ${unpublishedPin}\tdep\0`
-          : argv.includes("ls-tree") && argv.includes(nextHead) && argv.includes(".gitmodules")
-            ? `100644 blob ${"5".repeat(40)}\t.gitmodules\n`
-            : argv.includes("config") && argv.includes(`${nextHead}:.gitmodules`)
-              ? "submodule.dep.path\ndep\0"
-              : argv.includes("rev-parse") && argv.includes("--show-toplevel")
-                ? "/repo/dep\n"
-                : ""
-      return {
-        exitCode: 0,
-        signal: null,
-        stdout,
-        stderr: "",
-        durationMs: 0,
-        timedOut: false,
-      }
-    })
-    const remerge = vi.fn(async () => ({
-      headSha: nextHead,
-      baseSha: nextBase,
-      treeSha: "e".repeat(40),
-      patchId: "d".repeat(40),
-      unchanged: false,
-    }))
-    const services = {
-      process: { run: processRun },
-      recut: { recut: remerge },
-    } as unknown as YrdCliServices
-    const queueRun = vi.fn(async () => [])
-    const viewer = { ...app, queue: { ...app.queue, run: queueRun } } as TestApp
-    const controller = new AbortController()
-    const gate = vi.fn(async () => undefined)
-    let sleeps = 0
-    const io = outputIO({
-      cwd: "/repo",
-      resolveQueueTarget: async () => ({ base: "main", sha: nextBase }),
-      scope: {
-        signal: controller.signal,
-        sleep: async () => {
-          sleeps += 1
-          if (sleeps === 2) controller.abort()
-        },
-      } as YrdCliIO["scope"],
-    }).io
-
-    await expect(
-      runInternals.followQueueRuns(viewer, [], { json: true, interval: 1 }, io, gate, services),
-    ).resolves.toBe(3)
-
-    expect(remerge).toHaveBeenCalled()
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 3, head: nextHead })
-    // A recut PR is queue-carried, so the gate asks reachability (the mute stub advertises
-    // zero refs → unreachable), never the author min-commit main-ancestry question.
-    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
-      pr: "PR1",
-      revision: 3,
-      headSha: nextHead,
-      code: "submodule-pin-unpublished",
-      count: 1,
-    })
-    expect(gate, "a post-mutation refusal must re-read the declared plan").toHaveBeenCalledTimes(2)
   })
 
   it("exits non-zero when an internal scope aborts an unchanged idle follow tick", async () => {
@@ -2738,125 +2251,6 @@ describe("runYrd", () => {
     } finally {
       await Promise.all([runner.close(), writer.close()])
     }
-  })
-
-  it("recovers a journaled freshness transition when the habitant stops before canceling its predecessor", async () => {
-    const nextHead = "3".repeat(40)
-    const nextBase = "b".repeat(40)
-    const treeSha = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const app = await createApp({ waitingCheck: true })
-    await app.bays.submit({ branch: "issue/refresh-crash", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: "2".repeat(40),
-      baseSha: BASE_SHA,
-      treeSha,
-      patchId,
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })
-    const predecessorJob = revisionAdmissionJob(app, "PR1")
-    expect(predecessorJob).toMatchObject({ status: "waiting" })
-
-    // This is the durable point after auto-recut and before the habitant's
-    // best-effort predecessor cancellation. A process exit here must leave the
-    // successor submitted/checkable so the next ordinary Queue drain recovers.
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 2,
-      headSha: nextHead,
-      baseSha: nextBase,
-      treeSha,
-      patchId,
-      reviewCarried: false,
-      expectedCurrent: { revision: 2, headSha: "2".repeat(40) },
-      transition: { from: "admitted", to: "refreshed" },
-    })
-    const interrupted = app.bays.pr("PR1")!
-    expect(changeDeliveryState(interrupted)).toBe("submitted")
-    expect(currentChangeRev(interrupted)).toMatchObject({ n: 3, head: nextHead })
-    expect(app.bays.checksRequested("PR1")).toBe(true)
-
-    const refresh = runInternals.refreshAdmittedQueueRevisions
-    const services = {
-      recut: {
-        recut() {
-          throw new Error("same-base recovery must not recompute Git proof")
-        },
-      },
-    } as unknown as YrdCliServices
-    await expect(
-      refresh(app, services, outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io),
-    ).resolves.toContainEqual({
-      status: "recovered",
-      pr: "PR1",
-      revision: 3,
-      runs: [],
-      jobs: [predecessorJob!.id],
-    })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })
-    expect(app.jobs.get(predecessorJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(revisionAdmissionJob(app, "PR1")).toMatchObject({ status: "waiting" })
-    expect(Queues.ids(app.state().queues)).toEqual([])
-  })
-
-  it("does not overwrite an authored revision that arrives while habitant freshness is computing", async () => {
-    const branch = "issue/auto-recut-cas"
-    const remergeHead = "2".repeat(40)
-    const authoredHead = "3".repeat(40)
-    const staleAutoHead = "4".repeat(40)
-    const nextBase = "b".repeat(40)
-    const treeSha = "c".repeat(40)
-    const patchId = "d".repeat(40)
-    const app = await createApp({ waitingCheck: true })
-    const refresh = runInternals.refreshAdmittedQueueRevisions
-
-    await app.bays.submit({ branch, headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: remergeHead,
-      baseSha: BASE_SHA,
-      treeSha,
-      patchId,
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-
-    const services = {
-      recut: {
-        async recut() {
-          // The Git proof runs outside the journal CAS. Model a submitter pushing
-          // a new authored revision before that proof tries to append.
-          await app.bays.intake({ branch, headSha: authoredHead, base: "main", baseSha: BASE_SHA })
-          return {
-            headSha: staleAutoHead,
-            baseSha: nextBase,
-            treeSha: "e".repeat(40),
-            patchId: "f".repeat(40),
-            unchanged: false,
-          }
-        },
-      },
-    } as unknown as YrdCliServices
-    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
-
-    await expect(refresh(app, services, io)).resolves.toEqual([
-      expect.objectContaining({ status: "deferred", pr: "PR1", code: "recut-current-changed" }),
-    ])
-    const authored = app.bays.pr("PR1")!
-    expect(changeDeliveryState(authored)).toBe("pushed")
-    expect(currentChangeRev(authored)).toMatchObject({ n: 3, head: authoredHead })
-    expect(authored.revs).toMatchObject([
-      { n: 1, head: HEAD_SHA },
-      { n: 2, head: remergeHead },
-      { n: 3, head: authoredHead },
-    ])
   })
 
   it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
@@ -4918,8 +4312,9 @@ describe("runYrd", () => {
     const invalid = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--state", "bogus-value", "--json"), invalid.io)).toBe(2)
     expect(invalid.stderr()).toContain(
-      "--state 'bogus-value' is invalid; expected a record state (open, closed) or a delivery status " +
-        "(pushed, submitted, ready, needs-author, rejected, integrated, already-landed, withdrawn, canceled)",
+      "--state 'bogus-value' is invalid; expected a record state (open, closed), a delivery status " +
+        "(pushed, submitted, ready, needs-author, rejected, integrated, already-landed, withdrawn, canceled), " +
+        "or a live submission state (pending, queued, running, refused, landed)",
     )
     // A refusal must never silently pass through as an empty success either —
     // confirm no `pr.list` result reached stdout at all.
@@ -11337,13 +10732,17 @@ describe("runYrd", () => {
     const app = await createApp()
     const optionValue = outputIO()
 
-    expect(await runYrd(app, yrd("pr", "edit", "PR404", "--title", "--json"), optionValue.io)).toBe(1)
+    expect(await runYrd(app, yrd("pr", "checkout", "PR404", "--bay", "--json"), optionValue.io)).toBe(1)
     expect(optionValue.stdout()).toBe("")
     // The denominator is load-bearing, not decoration: it is what separates
     // "no such PR" from "the index returned nothing". This app has no PRs, so
     // `searched 0` here is HONEST ABSENCE — which is why the message reports
-    // the count and does not assert a verdict at zero.
-    expect(optionValue.stderr()).toBe("error: no change 'PR404' — searched 0 change(s)\n")
+    // the count and does not assert a verdict at zero. The S7 resolver widens
+    // the denominator to every world it searched: records, live submit facts,
+    // and retained run members.
+    expect(optionValue.stderr()).toBe(
+      "error: no change 'PR404' — searched 0 change(s), 0 live submit(s), and 0 retained run member(s)\n",
+    )
 
     const afterTerminator = outputIO()
     expect(await runYrd(app, yrd("pr", "crate", "--", "--json"), afterTerminator.io)).toBe(2)
@@ -11774,69 +11173,18 @@ describe("runYrd", () => {
     expect(human.stdout()).not.toContain(`at ${BASE_SHA}\n`)
   })
 
-  it("repairs a repository-proven merge whose Journal index row is missing", async () => {
+  it("refuses why --repair as retired, naming the surviving proof surfaces", async () => {
+    // The pr/integrated index the flag re-minted rows onto is retired with the
+    // change-record store (branch-is-change, @i/10 22991). The merge record
+    // itself stays the proof; `why` reports it without the flag.
     await using app = await createApp()
     await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    const revision = currentChangeRev(app.bays.pr("PR1")!)
-    if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-    const pointer = {
-      ref: "refs/notes/yrd/merge-records" as const,
-      target: "2".repeat(40),
-      note: "c".repeat(40),
-      checksum: "d".repeat(64),
-    }
-    const record = {
-      merge: {
-        id: "R-recovered",
-        base: "main",
-        baseSha: BASE_SHA,
-        candidate: "C1",
-        result: "merged" as const,
-        mergedCommit: MERGED_SHA,
-        startedAt: "2026-08-12T20:00:00.000Z",
-        finishedAt: "2026-08-12T20:01:00.000Z",
-      },
-      changes: [
-        {
-          pr: "PR1",
-          revision: 1,
-          submittedHead: HEAD_SHA,
-          changeId: revision.changeId,
-          generatedCommit: MERGED_SHA,
-        },
-      ],
-      evidence: { jobs: [] },
-      pins: [],
-    }
     const output = outputIO()
 
-    expect(
-      await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io, {
-        mergeRecords: {
-          find: async () => ({
-            status: "proven" as const,
-            records: [{ record, pointer }],
-            unverifiable: [],
-            retracted: [],
-          }),
-          all: async () => ({
-            status: "proven" as const,
-            records: [{ record, pointer }],
-            unverifiable: [],
-            retracted: [],
-          }),
-          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
-        },
-      } as YrdCliServices),
-      output.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "why",
-      verdict: "merged",
-      repaired: true,
-      pointer,
-    })
-    expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, changeId: revision.changeId })
+    expect(await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toContain("why-repair-retired")
+    expect(output.stderr()).toContain("there is no pr/integrated index row to re-mint")
   })
 
   // The in-toto projection is read-time and needs a builder the durable record
@@ -12235,13 +11583,14 @@ describe("explicit queue step authority", () => {
 
     try {
       const output = outputIO()
-      expect(
-        await runYrd(app, yrd("pr", "edit", "PR1", "--note", "render running steps"), output.io),
-        output.stderr(),
-      ).toBe(0)
+      expect(await runYrd(app, yrd("pr", "view", "PR1"), output.io), output.stderr()).toBe(0)
       expect(checkRuns).toEqual([])
       expect(mergeRuns).toEqual(["merge"])
-      expect(output.stdout()).toContain("check=skipped merge=running")
+      // The concise `check=skipped merge=running` summary itself is pinned on
+      // the queue list/watch frames above; the change view shows the same
+      // merge-only batch as its live run with both members aboard.
+      expect(output.stdout()).toContain("RUN main#1 STATUS in_progress")
+      expect(output.stdout()).toContain("pr#1.1:111111111111,pr#2.1:222222222222")
       expect(app.queue.get("R1")).toMatchObject({
         status: "in_progress",
         stepSelection: {
@@ -14261,380 +13610,21 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
   })
 
   describe("doctor --rebuild-index-from-repo", () => {
-    const mergedRecord = (changeId: string) => ({
-      merge: {
-        id: "R-recovered",
-        base: "main",
-        baseSha: BASE_SHA,
-        candidate: "C1",
-        result: "merged" as const,
-        mergedCommit: MERGED_SHA,
-        startedAt: "2026-08-12T20:00:00.000Z",
-        finishedAt: "2026-08-12T20:01:00.000Z",
-      },
-      changes: [{ pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId, generatedCommit: MERGED_SHA }],
-      evidence: { jobs: [] },
-      pins: [],
-    })
-
-    const pointer = {
-      ref: "refs/notes/yrd/merge-records" as const,
-      target: "2".repeat(40),
-      note: "c".repeat(40),
-      checksum: "d".repeat(64),
-    }
-
-    const servicesFor = (records: readonly unknown[]): YrdCliServices =>
-      ({
-        mergeRecords: {
-          find: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records, unverifiable: [], retracted: [] }),
-          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
-        },
-      }) as YrdCliServices
-
-    it("rebuilds every missing pr/integrated row and denominates what it scanned", async () => {
-      await using app = await createApp()
-      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-      const revision = currentChangeRev(app.bays.pr("PR1")!)
-      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-      const record = mergedRecord(revision.changeId)
-      const output = outputIO()
-
-      expect(
-        await runYrd(
-          app,
-          yrd("doctor", "--rebuild-index-from-repo", "--json"),
-          output.io,
-          servicesFor([{ record, pointer }]),
-        ),
-        output.stderr(),
-      ).toBe(0)
-      expect(JSON.parse(output.stdout())).toMatchObject({
-        command: "doctor",
-        indexRebuild: {
-          ref: "refs/notes/yrd/merge-records",
-          scanned: { records: 1, merged: 1, changes: 1 },
-          rebuilt: [{ pr: "PR1", revision: 1, run: "R-recovered", commit: MERGED_SHA }],
-          skipped: [],
-        },
-      })
-      expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA, changeId: revision.changeId })
-    })
-
-    // `finishedAt` is `z.iso.datetime({ offset: true })`, so its text and its
-    // instant can disagree. `R-earlier` reads "2026-08-12T23:00:00.000+05:00" —
-    // later than "2026-08-12T20:00:00.000Z" as text, two hours EARLIER as an
-    // instant (18:00Z). A string compare therefore keeps the stale attempt and
-    // writes its run into the index row; so does `localeCompare` on the
-    // `yrd why` side. Only an instant compare picks `R-later`.
-    it("collapses attempts by instant, not by the text of an offset-bearing timestamp", async () => {
-      await using app = await createApp()
-      await app.bays.submit({ branch: "issue/offsets", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-      const revision = currentChangeRev(app.bays.pr("PR1")!)
-      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-      const base = mergedRecord(revision.changeId)
-      const earlier = {
-        ...base,
-        merge: { ...base.merge, id: "R-earlier", finishedAt: "2026-08-12T23:00:00.000+05:00" },
-      }
-      const later = { ...base, merge: { ...base.merge, id: "R-later", finishedAt: "2026-08-12T20:00:00.000Z" } }
-      const output = outputIO()
-
-      expect(
-        await runYrd(
-          app,
-          yrd("doctor", "--rebuild-index-from-repo", "--json"),
-          output.io,
-          // Stale attempt first, so it is the incumbent a text compare refuses to replace.
-          servicesFor([
-            { record: earlier, pointer },
-            { record: later, pointer },
-          ]),
-        ),
-        output.stderr(),
-      ).toBe(0)
-      expect(JSON.parse(output.stdout())).toMatchObject({
-        indexRebuild: { rebuilt: [{ pr: "PR1", run: "R-later" }] },
-      })
-      expect(app.bays.pr("PR1")?.terminalRun).toBe("R-later")
-    })
-
-    it("reports a scan that found nothing with its denominator rather than a clean verdict", async () => {
+    it("refuses as retired, naming the surviving merge-truth surfaces", async () => {
+      // The pr/integrated index the flag rebuilt onto is retired with the
+      // change-record store (branch-is-change, @i/10 22991). Merge truth stays
+      // in repository merge records: 'yrd why' proves one merge, 'yrd log'
+      // shows run history. The flag stays registered so an old runbook gets
+      // this refusal, never an unknown-option error.
       await using app = await createApp()
       const output = outputIO()
 
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, servicesFor([])),
-        output.stderr(),
-      ).toBe(0)
-      expect(output.stdout()).toContain("scanned 0 merge records under refs/notes/yrd/merge-records")
-      expect(output.stdout()).toContain("0 changes collapse to 0 distinct merges — rebuilt 0, skipped 0")
-    })
-
-    it("names the change it cannot rebuild and refuses to call the run clean", async () => {
-      await using app = await createApp()
-      const record = mergedRecord(`I${"e".repeat(40)}`)
-      const output = outputIO()
-
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, servicesFor([{ record, pointer }])),
-        output.stderr(),
-      ).toBe(1)
-      expect(output.stdout()).toContain("SKIPPED PR1 revision 1 pr-unknown")
-      expect(output.stdout()).toContain("a merge record proves a merge, not a change's existence")
-    })
-
-    // Contract 4 / doctor-rebuild-hardening: a wiped journal reads as N identical
-    // "pr-unknown" skips, one per merge, with nothing at the top of the report
-    // naming the actual condition — the journal holds no PR entities at all, so
-    // every skip below is the same fact repeated, not N separate gaps. An operator
-    // reading this after real data loss deserves the ONE sentence that tells them
-    // what happened and what the flag can and cannot do about it.
-    it("names the journal itself as empty, once, instead of repeating pr-unknown per merge", async () => {
-      await using app = await createApp()
-      const output = outputIO()
-      const prIds = ["PR1", "PR2", "PR3"]
-      const records = prIds.map((prId, index) => ({
-        record: {
-          merge: {
-            id: `R-${prId}`,
-            base: "main",
-            baseSha: BASE_SHA,
-            candidate: `C-${prId}`,
-            result: "merged" as const,
-            mergedCommit: MERGED_SHA,
-            startedAt: "2026-08-12T20:00:00.000Z",
-            finishedAt: "2026-08-12T20:01:00.000Z",
-          },
-          changes: [
-            {
-              pr: prId,
-              revision: 1,
-              submittedHead: HEAD_SHA,
-              changeId: `I${String(index)}${"e".repeat(39)}`,
-              generatedCommit: MERGED_SHA,
-            },
-          ],
-          evidence: { jobs: [] },
-          pins: [],
-        },
-        pointer,
-      }))
-
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), output.io, servicesFor(records)),
-        output.stderr(),
-      ).toBe(1)
-      expect(JSON.parse(output.stdout())).toMatchObject({
-        indexRebuild: { scanned: { knownPrs: 0 }, rebuilt: [] },
-      })
-
-      const human = outputIO()
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), human.io, servicesFor(records)),
-        human.stderr(),
-      ).toBe(1)
-      expect(human.stdout()).toContain("the journal holds zero PR entities")
-      expect(human.stdout()).toContain("repairs a KNOWN PR's missing index row")
-      expect(human.stdout()).toContain("entity the journal has never seen")
-      // Still every merge named underneath — the aggregate line is in ADDITION
-      // to the per-record detail, never a replacement for it.
-      for (const prId of prIds) {
-        expect(human.stdout()).toContain(`SKIPPED ${prId} revision 1 pr-unknown`)
-      }
-    })
-
-    it("leaves an already-indexed merge alone and says so", async () => {
-      await using app = await createApp()
-      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-      const revision = currentChangeRev(app.bays.pr("PR1")!)
-      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-      const services = servicesFor([{ record: mergedRecord(revision.changeId), pointer }])
-
-      const first = outputIO()
-      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), first.io, services), first.stderr()).toBe(0)
-      const second = outputIO()
-      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), second.io, services), second.stderr()).toBe(
-        0,
-      )
-      expect(second.stdout()).toContain("1 change collapses to 1 distinct merge — rebuilt 0, skipped 1")
-      expect(second.stdout()).toContain("SKIPPED PR1 revision 1 already-indexed")
-    })
-
-    it("skips a record whose revision the journal has already superseded", async () => {
-      await using app = await createApp()
-      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-      const revision = currentChangeRev(app.bays.pr("PR1")!)
-      if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
-      const stale = mergedRecord(revision.changeId)
-      const record = { ...stale, changes: [{ ...stale.changes[0]!, submittedHead: "9".repeat(40) }] }
-      const output = outputIO()
-
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, servicesFor([{ record, pointer }])),
-        output.stderr(),
-      ).toBe(1)
-      expect(output.stdout()).toContain("SKIPPED PR1 revision 1 revision-superseded")
-      expect(app.bays.pr("PR1")?.integration).toBeUndefined()
-    })
-
-    it("refuses loudly when the merge-record ref itself is unreadable", async () => {
-      await using app = await createApp()
-      const output = outputIO()
-
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {
-          mergeRecords: {
-            find: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
-            all: async () => ({ status: "repository-corrupt" as const, reason: "merge-record ref unreadable" }),
-            retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
-          },
-        } as YrdCliServices),
-      ).toBe(2)
-      expect(output.stderr()).toContain("merge-record ref unreadable")
-    })
-
-    it("refuses when no repository merge-record capability is installed", async () => {
-      await using app = await createApp()
-      const output = outputIO()
-
-      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), output.io, {} as YrdCliServices)).toBe(2)
-      expect(output.stderr()).toContain("repository merge-record capability is not installed")
-    })
-
-    const SUBMODULE = "components/alpha"
-    const CURRENT_PIN = "a".repeat(40)
-    const TARGET_SHA = "b".repeat(40)
-
-    /** A merged pin intent records its OWN id in `changes[].pr` — `mergeRecordBody` fills that
-     * field from the queue member's id, and `MergeRecordChange.pr` is `QueueMemberIdSchema`, a
-     * union that discriminates PR ids from intent ids. So the record itself says which kind of
-     * member merged; `app.bays.pr()` returning undefined for an intent id is the expected answer,
-     * never evidence of a missing PR. */
-    const intentRecord = (member: string) => ({
-      merge: {
-        id: "R-pin",
-        base: "main",
-        baseSha: BASE_SHA,
-        candidate: "C-pin",
-        result: "merged" as const,
-        mergedCommit: MERGED_SHA,
-        startedAt: "2026-08-14T20:00:00.000Z",
-        finishedAt: "2026-08-14T20:01:00.000Z",
-      },
-      changes: [{ pr: member, revision: 1, submittedHead: HEAD_SHA }],
-      evidence: { jobs: [] },
-      pins: [{ path: SUBMODULE, before: CURRENT_PIN, after: TARGET_SHA }],
-    })
-
-    it("buckets a merged intent carrier as a healthy skip, never a change gap", async () => {
-      // The intent rail itself is retired (this carrier's own commit): there is
-      // no more `app.intents` to submit through or consult, so doctor can no
-      // longer distinguish "a known intent record" from "an id merely shaped
-      // like one" — and it no longer needs to. Any id `IntentRecordIdSchema`
-      // accepts is a pin-intent merge by construction (the mint that wrote it
-      // never wrote anything else), so it is always a healthy skip, never a gap.
-      await using app = await createApp()
-      const output = outputIO()
-
-      expect(
-        await runYrd(
-          app,
-          yrd("doctor", "--rebuild-index-from-repo"),
-          output.io,
-          servicesFor([{ record: intentRecord("yrdpin#164"), pointer }]),
-        ),
-        output.stderr(),
-      ).toBe(0)
-      expect(output.stdout()).toContain("SKIPPED yrdpin#164 revision 1 intent-carrier")
-      expect(output.stdout()).not.toContain("pr-unknown")
-    })
-
-    it("reports a record it cannot verify and keeps rebuilding the rest of the estate", async () => {
-      const poisonedHead = "7".repeat(40)
-      await using app = await createApp()
-      await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-      await app.bays.submit({ branch: "issue/poisoned", headSha: poisonedHead, base: "main", baseSha: BASE_SHA })
-      const revision = currentChangeRev(app.bays.pr("PR1")!)
-      const poisonedRevision = currentChangeRev(app.bays.pr("PR2")!)
-      if (revision.changeId === undefined || poisonedRevision.changeId === undefined) {
-        throw new Error("expected current PR Change-Ids")
-      }
-      // A merged record with no merged commit: repository truth that contradicts itself, for a change
-      // the journal knows, so the scan reaches the contradiction rather than an earlier skip. It
-      // comes FIRST so a scan that aborts on it never reaches the merge it could still rebuild.
-      const contradictory = {
-        merge: {
-          id: "R-poisoned",
-          base: "main",
-          baseSha: BASE_SHA,
-          candidate: "C-poisoned",
-          result: "merged" as const,
-          mergedCommit: undefined,
-          startedAt: "2026-08-14T20:00:00.000Z",
-          finishedAt: "2026-08-14T20:01:00.000Z",
-        },
-        changes: [
-          {
-            pr: "PR2",
-            revision: 1,
-            submittedHead: poisonedHead,
-            changeId: poisonedRevision.changeId,
-            generatedCommit: MERGED_SHA,
-          },
-        ],
-        evidence: { jobs: [] },
-        pins: [],
-      }
-      const output = outputIO()
-
-      expect(
-        await runYrd(
-          app,
-          yrd("doctor", "--rebuild-index-from-repo"),
-          output.io,
-          servicesFor([
-            { record: contradictory, pointer },
-            { record: mergedRecord(revision.changeId), pointer },
-          ]),
-        ),
-        output.stderr(),
-      ).toBe(1)
-      expect(output.stdout()).toContain("SKIPPED PR2 revision 1 unverifiable")
-      expect(output.stdout()).toContain("REBUILT PR1 revision 1 via R-recovered")
-      expect(app.bays.pr("PR1")?.integration).toMatchObject({ commit: MERGED_SHA })
-    })
-
-    it("counts the records the bulk scan itself could not verify", async () => {
-      const unverifiable = [
-        {
-          note: "f".repeat(40),
-          status: "repository-corrupt" as const,
-          reason: "merge-record is invalid: unexpected token",
-          classification: "unreadable" as const,
-        },
-      ]
-      const services = {
-        mergeRecords: {
-          find: async () => ({ status: "proven" as const, records: [], unverifiable: [], retracted: [] }),
-          all: async () => ({ status: "proven" as const, records: [], unverifiable, retracted: [] }),
-          retractUnprovable: async () => ({ proven: 0, alreadyRetracted: 0, planned: [], applied: [] }),
-        },
-      } as YrdCliServices
-
-      await using app = await createApp()
-      const json = outputIO()
-      expect(
-        await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), json.io, services),
-        json.stderr(),
-      ).toBe(1)
-      expect(JSON.parse(json.stdout())).toMatchObject({ indexRebuild: { unverifiable } })
-
-      const human = outputIO()
-      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo"), human.io, services), human.stderr()).toBe(1)
-      expect(human.stdout()).toContain("1 record the scan could not verify")
-      expect(human.stdout()).toContain("UNVERIFIABLE")
+      expect(await runYrd(app, yrd("doctor", "--rebuild-index-from-repo", "--json"), output.io)).toBe(1)
+      expect(output.stdout()).toBe("")
+      expect(output.stderr()).toContain("doctor-rebuild-index-retired")
+      expect(output.stderr()).toContain("there is no pr/integrated index to rebuild onto")
+      expect(output.stderr()).toContain("yrd why <selector>")
+      expect(output.stderr()).toContain("yrd log")
     })
   })
 

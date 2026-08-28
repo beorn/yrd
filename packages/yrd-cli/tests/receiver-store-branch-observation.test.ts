@@ -1,36 +1,29 @@
 /**
- * @failure A `git push bay HEAD:refs/for/main/<issue>` minted change PR2081 and
- * the habitant's tracked-observation pass WITHDREW it the same second: the
- * branch-liveness observation asked the GitHub origin about the receiver-minted
- * `issue/…` carrier, origin answered an authoritative "absent" about a branch
- * it never hosted, and `evictUnobservableCandidate` swept the change. Reopening
- * with `yrd pr submit` was withdrawn again 27s later by the same arm
- * (@i/10-merge-queue/refsfor-withdrawn-carrier).
+ * @failure A `git push bay HEAD:refs/for/main/<issue>` minted change PR2081,
+ * and read surfaces (`yrd pr view`) asked the GitHub origin about the
+ * receiver-minted `issue/…` carrier: origin answered an authoritative "absent"
+ * about a branch it never hosted, and the view refused a perfectly live
+ * change (@i/10-merge-queue/refsfor-withdrawn-carrier). The store, not
+ * origin, owns a receiver-minted branch. (The habitant's tracked-observation
+ * pass — the arm that WITHDREW the change outright — is retired with the
+ * change-record store; branch-is-change, @i/10 22991: a re-push is the fresh
+ * submission, so no observation sweep re-judges liveness.)
  * @level l2
- * @consumer @yrd/cli habitant runner, `yrd pr view`
+ * @consumer `yrd pr view`
  *
- * Drives the REAL observation arm exactly like habitant-tracked-observation:
- * no `io.pruneGit`, a real repository with a real origin AND a real receiver
- * store at `<git-common-dir>/yrd/prs.git`, and the installed `@yrd/process`.
+ * Drives the REAL observation arm: no `io.pruneGit`, a real repository with a
+ * real origin AND a real receiver store at `<git-common-dir>/yrd/prs.git`, and
+ * the installed `@yrd/process`.
  */
 import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
-import { withJobs, type JobResult } from "@yrd/job"
+import { describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
-import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
-import { createLogger, type Event as LogEvent } from "loggily"
 import { observeLiveBranch } from "../src/remote-branch.ts"
-import * as runInternals from "../src/run.ts"
-import type { YrdCliApp, YrdCliIO, YrdCliServices } from "../src/types.ts"
 
 /** The live incident's shape: a carrier the refs/for push named after its issue. */
 const CARRIER = "issue/@i/10-merge-queue/22991-branch-is-change-delete-the-pr-record"
-/** Negative control: a branch neither origin nor the store owns must still evict. */
-const GONE = "task/gone-everywhere"
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   const result = Bun.spawnSync(["git", "-C", cwd, ...args], {
@@ -53,7 +46,7 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
  * `.git/yrd/prs.git` owns the refs/for-minted carrier as its accepted
  * `refs/yrd/submit/<branch>` approval, and whose local `refs/heads/<carrier>`
  * is the intake-materialized carrier — the exact post-push state PR2081 was
- * withdrawn from. GONE exists locally only: not on origin, not in the store.
+ * refused from.
  */
 async function repository() {
   const root = await mkdtemp(join(tmpdir(), "yrd-receiver-store-observation-"))
@@ -81,138 +74,12 @@ async function repository() {
   const store = join(repo, ".git", "yrd", "prs.git")
   await git(root, ["init", "-q", "--bare", store])
   await git(repo, ["push", "-q", store, `refs/heads/${CARRIER}:refs/yrd/submit/${CARRIER}`])
-
-  // The genuinely-gone branch: local commit only, absent on origin and in the store.
-  await git(repo, ["checkout", "-q", "-b", GONE, "main"])
-  const goneHead = await commit("gone.txt", "gone-everywhere work")
   await git(repo, ["checkout", "-q", "main"])
-  return { repo, mainSha, carrierHead, goneHead }
+  return { repo, mainSha, carrierHead }
 }
 
-function ids(): () => string {
-  let value = 0
-  return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
-}
-
-/** Composes only the plugins the tracking pass touches, exactly like
- * habitant-tracked-observation.test.ts. */
-async function trackedApp(mainSha: string, log: ReturnType<typeof createLogger>) {
-  const bayJobs = createBayJobDefs({
-    revision: "observation-workspace-v1",
-    provision: (input: { bay: string }) => ({
-      status: "completed" as const,
-      conclusion: "success" as const,
-      output: { path: `/bays/${input.bay}`, headSha: mainSha, baseSha: mainSha },
-    }),
-    refresh: (input: { bay: string; path?: string }) => ({
-      status: "completed" as const,
-      conclusion: "success" as const,
-      output: { path: input.path ?? `/bays/${input.bay}`, headSha: mainSha, baseSha: mainSha, dirty: false },
-    }),
-    checkpoint: () => ({
-      status: "completed" as const,
-      conclusion: "success" as const,
-      output: { headSha: mainSha, pushed: true, wip: false },
-    }),
-    deprovision: () => ({ status: "completed" as const, conclusion: "success" as const, output: {} }),
-  } as never)
-  const check = withStep(
-    "check",
-    (): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: {} }),
-    {
-      revision: "check-v1",
-      output: JsonSchema,
-      classification: "carrier",
-    },
-  )
-  const merge = withMerge(
-    async (_input: StepExecution<ChangeShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { commit: mainSha, baseSha: mainSha },
-    }),
-    { revision: "merge-v1" },
-  )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({
-      prNumberMint: volatilePrNumberMint(),
-      jobs: bayJobs,
-      defaultBase: "main",
-      resolveBase: () => ({ base: "main", baseSha: mainSha }),
-    }),
-  )
-  return createYrd(queue(base), {
-    inject: {
-      journal: createMemoryJournal(),
-      clock: () => "2026-08-26T18:18:39.850Z",
-      id: ids(),
-      log,
-    },
-  })
-}
-
-function liveIO(repo: string): YrdCliIO {
-  return {
-    stdout: () => {},
-    stderr: () => {},
-    cwd: repo,
-    runner: "yrd-cli:receiver-store-observation-test",
-    leaseMs: 60_000,
-    now: () => Date.parse("2026-08-26T18:18:57.794Z"),
-  } as unknown as YrdCliIO
-}
-
-describe("a receiver-owned carrier survives the habitant's tracked-observation pass", () => {
-  it("keeps the refs/for-minted change submitted while still evicting a branch that is gone everywhere", async () => {
-    const fixture = await repository()
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const app = await trackedApp(fixture.mainSha, log)
-    const cliApp = app as unknown as YrdCliApp
-
-    // The live incident's sequence: intake submitted the carrier and requested
-    // its checks; the observation pass ran seconds later.
-    await app.bays.submit({ branch: CARRIER, headSha: fixture.carrierHead, base: "main", baseSha: fixture.mainSha })
-    await app.bays.submit({ branch: GONE, headSha: fixture.goneHead, base: "main", baseSha: fixture.mainSha })
-    await app.bays.editPr({ pr: "PR1", track: true })
-    await app.bays.editPr({ pr: "PR2", track: true })
-    await app.bays.review({ pr: "PR1", by: "@reviewer", decision: "approve", ref: "approved-carrier" })
-    await app.bays.review({ pr: "PR2", by: "@reviewer", decision: "approve", ref: "approved-gone" })
-    await app.bays.requestChecks({ pr: "PR1" })
-    await app.bays.requestChecks({ pr: "PR2" })
-
-    const io = liveIO(fixture.repo)
-    await using process = createProcess({ env: { PATH: Bun.env.PATH } })
-    const services = { process, recut: { recut: vi.fn() } } as unknown as YrdCliServices
-
-    const outcomes = await runInternals.refreshTrackedQueueRevisions(cliApp, services, io)
-
-    // THE DEFECT: before the store-first observation, this pass returned
-    // {status:"evicted", code:"recut-branch-absent"} for the carrier and closed
-    // it — origin's authoritative "absent" was true of the wrong remote. The
-    // store owns the branch, so its recorded head is fresh and the change must
-    // stay exactly where intake left it.
-    expect(outcomes.find((outcome) => outcome.branch === CARRIER)).toBeUndefined()
-    const carrier = Object.values(app.state().bays.prs).find((pr) => pr.branch === CARRIER)
-    expect(carrier).toMatchObject({ state: "open", merged: false })
-
-    // Negative control, and proof eviction itself still works: a branch that
-    // neither origin nor the store owns is still swept, with the store named in
-    // the recorded reason so the next reader knows both authorities answered.
-    const evicted = outcomes.find((outcome) => outcome.branch === GONE)
-    expect(evicted).toMatchObject({ status: "evicted", pr: "PR2", code: "recut-branch-absent" })
-    if (evicted?.status !== "evicted") throw new Error("expected the gone-everywhere branch to evict")
-    expect(evicted.message).toContain("gone from origin")
-    expect(evicted.message).toContain("the receiver store does not own")
-    const gone = Object.values(app.state().bays.prs).find((pr) => pr.branch === GONE)
-    expect(gone).toMatchObject({ state: "closed", merged: false })
-    log.end()
-  })
-
-  it("resolves the carrier for read surfaces (`pr view`) from the store, not origin", async () => {
+describe("a receiver-owned carrier resolves from the store, not origin", () => {
+  it("resolves the carrier for read surfaces (`pr view`) at the store's accepted head", async () => {
     // `viewPr` refuses with pr-view-branch-absent purely on this observation's
     // verdict, so the mechanism-level assertion covers the surface: a
     // store-owned branch observes ok at the store's accepted head.
