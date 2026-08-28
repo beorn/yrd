@@ -40,6 +40,8 @@ const MERGED = "b".repeat(40)
 const SHA = "7".repeat(40)
 const RESUBMIT_SHA = "8".repeat(40)
 const RECORDLESS_SHA = "9".repeat(40)
+/** A recordless branch's fact pointing at content the base ALREADY contains. */
+const LANDED_SHA = "c".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
@@ -84,6 +86,8 @@ async function createApp(
     id?: () => string
     log?: ReturnType<typeof createLogger>
     queueMint?: PrNumberMint
+    /** Stands in for the host's git ancestry read; see `isSubmitSuperseded`. */
+    superseded?: (sha: string) => boolean
   }> = {},
 ) {
   const check = withStep(
@@ -111,6 +115,9 @@ async function createApp(
     prepareCandidate: mergeableCandidate,
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
+    ...(options.superseded === undefined
+      ? {}
+      : { isSubmitSuperseded: ({ sha }: Readonly<{ sha: string }>) => options.superseded?.(sha) === true }),
   })
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(
@@ -295,5 +302,40 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
 
     expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless", "task/withdrawn"])
     expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/merged"])
+  })
+
+  it("does not compose a RECORDLESS branch whose content the base already contains", async () => {
+    // Measured 2026-08-28: four already-merged branches kept composing every
+    // pass because nothing had retired their standing facts, and the compose
+    // ejected each one forever. The merge queue did not merge for 2h25m.
+    //
+    // `alreadyLandedSubmits` is structurally blind to them, for TWO reasons,
+    // and either one alone is fatal:
+    //   1. it needs a terminal RECORD for the branch, and these had none —
+    //      post-purge the derived lane is where merged branches live;
+    //   2. it compares the fact's sha to that record's integration commit,
+    //      and the queue REBUILDS a candidate at merge into a new head, so
+    //      the equality it tests cannot hold across a real merge.
+    // Both are "has this content landed?" asked of the wrong oracle. Git
+    // answers it directly, for every branch, record or not.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createApp({ log, superseded: (sha) => sha === LANDED_SHA })
+    await app.bays.recordBranchSubmit({ branch: "issue/ghost", sha: LANDED_SHA, base: "main" })
+
+    // The record-keyed guard sees nothing — there is no record to match.
+    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
+    // The lane still OFFERS the branch; excluding it is the compose's job,
+    // because only the compose can reach git.
+    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/ghost"])
+
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+    expect(
+      Queues.values(app.state().queues).some((run) => run.prs.some((member) => member.branch === "issue/ghost")),
+      "a superseded fact must not compose a member",
+    ).toBe(false)
+    // NO SILENT ERRORS: the skip names the branch and its cure.
+    expect(actionsLogged(events)).toContain("compose-derived-fact-superseded")
+    log.end()
   })
 })

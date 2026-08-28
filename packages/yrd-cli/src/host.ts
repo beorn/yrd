@@ -1969,6 +1969,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     requires: options.config.requires,
     prNumberMint,
     readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
+    isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
     resolveBaseSha: async (base) =>
@@ -2475,6 +2476,55 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  * identity from the submission's stable facts (a retained snapshot's identity
  * or a present trailer wins over that mint).
  */
+/**
+ * Does the base branch already contain this standing fact's content?
+ *
+ * Answers the queue's `isSubmitSuperseded` capability from git, because the
+ * queue layer is pure over its own state and the record store can no longer
+ * answer it: a merged branch usually has no record left, and the queue
+ * rebuilds a candidate at merge into a NEW head, so comparing the fact's sha
+ * to a recorded integration commit fails even when a record exists.
+ *
+ * Ancestry, not sha equality. It is the general form — equality is its
+ * reflexive case — and it holds across the rebuild, since the rebuilt commit
+ * lands on the base and the fact's own tip becomes its ancestor.
+ *
+ * BOUNDARY, stated rather than papered over: a REBASED landing changes the
+ * content's identity, so the original tip is not an ancestor of the base and
+ * this returns false. Catching that needs tree-equality (`git merge-tree`),
+ * which `yrd admin pr prune` implements for its own verdict. This covers the
+ * merge and fast-forward cases, which are the queue's own landing paths.
+ */
+export async function isSubmitContentLanded(
+  process: Pick<Process, "run">,
+  repo: string,
+  sha: string,
+  base: string,
+): Promise<boolean> {
+  const target = await resolveGitQueueTarget({ inject: { process }, repo, branch: baseIdentity(base) })
+  const args = ["merge-base", "--is-ancestor", sha, target.sha]
+  const result = await process.run({
+    argv: ["git", "-C", repo, ...args],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  assertGitDidNotTimeOut(result, args)
+  // git answers this one in the exit code: 0 ancestor, 1 not. Every OTHER
+  // code is git failing to answer, and the two wrong readings are not
+  // symmetric. Reading a failure as "superseded" would DROP a live
+  // submission and say nothing — the worst outcome available here. Reading
+  // it as "not superseded" restores the pre-fix behaviour for one branch,
+  // whose ghost is then loud on every pass. So this throws, and the compose
+  // degrades per branch instead of guessing.
+  if (result.exitCode === 0) return true
+  if (result.exitCode === 1) return false
+  throw new Error(
+    `yrd: could not decide whether ${sha.slice(0, 12)} is already on '${base}': ` +
+      (result.stderr.trim() || `git merge-base --is-ancestor exited ${String(result.exitCode)}`),
+  )
+}
+
 export async function readDerivedSubmitEnrichment(
   process: Pick<Process, "run">,
   repo: string,
