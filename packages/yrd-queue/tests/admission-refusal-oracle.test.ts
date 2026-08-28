@@ -92,6 +92,7 @@ function checkOnlyPlugin(
    * diverge here — this literal previously carried its own copy of every knob. */
   progress: QueueProgressPolicy = { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
   needsPersonOwner?: string,
+  mint?: PrNumberMint,
 ) {
   const check = withStep(
     "check",
@@ -109,7 +110,7 @@ function checkOnlyPlugin(
     resolveBaseSha: () => BASE,
     prepareCandidate,
     progress,
-    ...derivedArming(),
+    ...derivedArming(mint),
     ...(needsPersonOwner === undefined ? {} : { needsPersonOwner }),
   })
 }
@@ -122,9 +123,17 @@ async function createApp(
   log?: ReturnType<typeof createLogger>,
   progress?: QueueProgressPolicy,
   needsPersonOwner?: string,
+  /** The PR-number mint, threaded for the same reason `journal` and `id` are:
+   * a replay fixture models a fresh PROCESS, not a lost mint file. The mint's
+   * high-water is durable in production, and a fresh volatile one resets it to
+   * zero — which `mintDerivedMemberIdentity` correctly refuses to reuse an id
+   * above ("an id escaped without its commit"). Pass the same mint to both
+   * halves of a replay or the second half fails on that guard rather than on
+   * whatever it meant to prove. */
+  mint?: PrNumberMint,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = checkOnlyPlugin(prepareCandidate, progress, needsPersonOwner)
+  const queue = checkOnlyPlugin(prepareCandidate, progress, needsPersonOwner, mint)
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
@@ -481,7 +490,16 @@ describe("admission refusal oracle — a head-of-line member refused at admissio
         since: "2026-01-01T00:02:00.000Z",
         blockedMs: 2 * 60_000,
       })
-      expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings).toHaveLength(1)
+      // ONE loop finding, not one per code in the streak's history — that is
+      // what this assertion fences. It cannot be a bare length any more: since
+      // S7 a member refused before any run is also an approval no compose has
+      // served, so `unrecorded-submit` legitimately names the same branch from
+      // the other side, and pinning the total would make this test fail for
+      // reporting MORE about the same wedge.
+      expect(app.queue.audit({ now: "2026-01-01T00:20:00.000Z" }).findings.map((finding) => finding.code)).toEqual([
+        "unrecorded-submit",
+        "admission-refusal-loop",
+      ])
     }
 
     await using replayed = await createApp(prepare, clock.read, journal, id)
@@ -671,9 +689,12 @@ describe("admission refusal oracle — a head-of-line member refused at admissio
       preparations += 1
       return refusing(input)
     }
+    // One mint across both halves: the replay is a fresh process, not a lost
+    // mint file (see `createApp`).
+    const mint = volatilePrNumberMint()
     let prId = ""
     {
-      await using app = await createApp(prepare, clock.read, journal, id)
+      await using app = await createApp(prepare, clock.read, journal, id, undefined, undefined, undefined, mint)
       await submitBranch(app, "issue/needs-person", HEAD)
       for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
         clock.set(at)
@@ -703,7 +724,7 @@ describe("admission refusal oracle — a head-of-line member refused at admissio
     // Replay: a settled refusal is not re-attempted, so the candidate preparer
     // is not called again and the journal does not grow.
     const beforeReplay = await Array.fromAsync(journal.read()).then((events) => events.length)
-    await using replayed = await createApp(prepare, clock.read, journal, id)
+    await using replayed = await createApp(prepare, clock.read, journal, id, undefined, undefined, undefined, mint)
     await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
     expect(preparations).toBe(3)
     expect(await Array.fromAsync(journal.read()).then((events) => events.length)).toBe(beforeReplay)

@@ -103,6 +103,7 @@ import {
   type QueueAuditEmission,
   type QueueAuditFinding,
   type QueueAuditFindingEmission,
+  type QueueAdmissionRefusal,
   type QueueAuthorityState,
   type QueueAuthorityToken,
   type QueueFailure,
@@ -5841,8 +5842,15 @@ function admissionExecutionId(pr: DeepReadonly<ChangeSnapshot>, baseSha: string)
   return `${admissionRevisionKeyPrefix(pr.id, pr.revision)}${baseSha}`
 }
 
+/** Every admission Job key for one member, whatever revision or base it ran
+ * against. The audit's attempt count reads this rather than the literal, so a
+ * change to the key shape cannot silently zero the count. */
+function admissionMemberKeyPrefix(pr: string): string {
+  return `admission:${pr}:`
+}
+
 function admissionRevisionKeyPrefix(pr: string, revision: number): string {
-  return `admission:${pr}:${revision}:`
+  return `${admissionMemberKeyPrefix(pr)}${revision}:`
 }
 
 function admissionJobKey(
@@ -6358,30 +6366,30 @@ function auditQueues(
   // here: `queue audit` reported `findings: []` through a 5h46m block while each
   // cycle logged a loggily-only `compose-candidate-skip`. The refusal ledger is
   // the durable trace of exactly that, so read it (22395).
-  const queued = admissionQueue(state, steps)
-  const refusalFindings = admissionRefusalAuditFindings(state, queued, progress, needsPersonOwner)
+  //
+  // NEITHER population may be `admissionQueue`'s. That function's members are
+  // MATERIALIZED by the compose — it needs the PR-number mint and a git
+  // enrichment read to derive one — and `audit` is a pure read with neither, so
+  // it can only ever pass an empty `derived` and get an empty queue back. That
+  // is exactly how these three codes went dark under S7: the list of finding
+  // codes never changed, so the `satisfies` fence stayed green, while the
+  // population every producer walked emptied out. Both walks below therefore
+  // read DURABLE state only — standing submit facts, retained run snapshots,
+  // the refusal ledger and the Job store — so there is no argument a caller can
+  // forget to pass.
+  const refusalFindings = admissionRefusalAuditFindings(state, progress, needsPersonOwner)
   findings.push(...refusalFindings)
-  findings.push(
-    ...queueProgressAuditFindings(state, queueProgressQueue(state, steps), refusalFindings, progress, options),
-  )
+  findings.push(...queueProgressAuditFindings(state, steps, refusalFindings, progress, options))
   return { findings }
 }
 
 function admissionRefusalAuditFindings(
   state: DeepReadonly<RuntimeState>,
-  queued: readonly DeepReadonly<Change>[],
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
 ): QueueAuditFindingEmission[] {
   const findings: QueueAuditFindingEmission[] = []
-  // The refused rows used to be re-materialized from their records and folded
-  // into the head-of-line population. A ledger row names an id with no standing
-  // materialization since S7, so the head is the admission queue alone — which
-  // already contains every member a refusal can be blocking.
-  const head = [...new Map(queued.map((pr) => [pr.id, pr])).values()].toSorted(
-    (left, right) =>
-      queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
-  )[0]
+  const head = requiredCheckQueueHead(state)
   for (const refusal of Object.values(state.queues.admissionRefusals).toSorted((left, right) =>
     compareNatural(left.pr, right.pr),
   )) {
@@ -6433,80 +6441,331 @@ function admissionRefusalAuditFindings(
   return findings
 }
 
+/**
+ * The head of the required-check queue, named from DURABLE state alone.
+ *
+ * A refusal only reads as a head-of-line LOOP if something can say what the
+ * head is, and pre-S7 that was `admissionQueue` — a population the audit can no
+ * longer obtain, because a derived member is materialized by the compose from
+ * the PR-number mint and a git enrichment read. Asking for it from a pure audit
+ * returns `[]` forever, and an empty queue has no head, so every refusal fell
+ * through the `head?.id !== refusal.pr` guard and `admission-refusal-loop` went
+ * permanently silent while the ledger behind it kept counting.
+ *
+ * What survives is the ordering itself, which never needed materialization: the
+ * queue is ordered by the clock a member's own submit fact carries
+ * ({@link queueProgressTime} reduces to exactly `submit.at` for a derived
+ * member, because the fact IS the check request), tie-broken by id. So this
+ * walks the standing facts and names each one the way the compose would:
+ *
+ *   - its refusal-ledger row's id, when a compose refused it (the row is a
+ *     refused member's ONLY durable identity — no run, so no snapshot), else
+ *   - its latest retained run snapshot's id.
+ *
+ * A fact with neither has never been composed, holds no id, and cannot be the
+ * member a refusal is blocking. A fact whose snapshot a run has already
+ * consumed is PAST admission and leaves this queue — a live ledger row does not
+ * hold it here, for the reason the loop body spells out.
+ */
+function requiredCheckQueueHead(
+  state: DeepReadonly<RuntimeState>,
+): Readonly<{ id: string; at: string }> | undefined {
+  const authority = derivedAuthorityLookup(state)
+  const candidates: Readonly<{ id: string; at: string }>[] = []
+  for (const [branch, submit] of Object.entries(state.bays.submits)) {
+    if (submit === undefined) continue
+    const ledger = branchAdmissionRefusal(state.queues, branch)
+    const snapshot = latestChangeSnapshot(
+      state.queues as QueuesState,
+      (member) => member.branch === branch && member.headSha === submit.sha,
+    )
+    const id = ledger?.pr ?? snapshot?.id
+    if (id === undefined) continue
+    // A member a run already holds is PAST admission, and a ledger row does not
+    // put it back: every compose after the admitting one re-derives the member,
+    // finds its authority spent and ledgers `queue-submit-authority-consumed`,
+    // so a merge that hangs for an hour mints a refusal STREAK on a member that
+    // passed its entry checks on the first try. Reported as a head-of-line
+    // refusal loop that is a false page with the wrong cure, and — worse — it
+    // suppressed the `queue-progress-stalled` finding that names the real
+    // failure, because the progress walk yields to the refusal walk on a shared
+    // member. The run is where this member's story is; `queue-progress-stalled`
+    // tells it.
+    if (snapshot !== undefined && authority(snapshot)?.standing !== true) continue
+    const pause = state.queues.pauses[baseIdentity(submit.base)]
+    if (pause !== undefined && !pause.allowedPRs.includes(id)) continue
+    candidates.push({ id, at: submit.at })
+  }
+  return candidates.toSorted(
+    (left, right) => left.at.localeCompare(right.at) || compareNatural(left.id, right.id),
+  )[0]
+}
+
+/** The refusal-ledger row a branch currently carries, if any. Keyed by branch
+ * rather than by id because a refused derived member's id is minted by the very
+ * compose being refused — the row is what makes the id stable across cycles. */
+function branchAdmissionRefusal(
+  queues: DeepReadonly<QueuesState>,
+  branch: string,
+): DeepReadonly<QueueAdmissionRefusal> | undefined {
+  return Object.values(queues.admissionRefusals).find((row) => row.branch === branch)
+}
+
+/**
+ * The identity a standing fact carries when no compose has served its CURRENT
+ * sha. Same ladder as {@link requiredCheckQueueHead}, with one rung added at
+ * the bottom: under branch-is-change a branch nothing has ever composed has no
+ * number at all, and the branch name is then the only identity that exists.
+ *
+ * The bottom rung is deliberately a real, actionable string rather than an
+ * omitted field: `queue-never-started` is in the page-worthy set
+ * (`habitantQueueProgress`), whose consumer requires `pr` alongside `count`, so
+ * a finding that omitted it would take the whole audit source down rather than
+ * report the queue it was describing.
+ */
+function unservedMemberIdentity(state: DeepReadonly<RuntimeState>, branch: string): string {
+  const ledger = branchAdmissionRefusal(state.queues, branch)
+  if (ledger !== undefined) return ledger.pr
+  return latestChangeSnapshot(state.queues as QueuesState, (member) => member.branch === branch)?.id ?? branch
+}
+
+/**
+ * Admission attempts the queue actually DISPATCHED for these members — the
+ * post-S7 quantity `progress.minAdmissionChecks` gates.
+ *
+ * It used to count `ChangeCheckRequest` rows inside the no-merge window. A
+ * standing submit fact IS the check request now, so every derived member
+ * carries exactly one of those forever: counting them would have answered `1`
+ * for every member in every state, which is inside the policy's quiet middle
+ * band and would have silenced this walk just as thoroughly as the empty
+ * population did. Two durable traces replace it, and BOTH are needed: an
+ * admission Job, one per (member, revision, base, step), for the cycles that
+ * got through the door, and the refusal ledger's streak for the cycles that did
+ * not — see the comment on `refused` below for why the second half is what
+ * makes a hung merge measurable at all.
+ */
+function admissionAttempts(
+  state: DeepReadonly<RuntimeState>,
+  members: readonly string[],
+  sinceMs: number,
+): number {
+  const prefixes = members.map((id) => admissionMemberKeyPrefix(id))
+  const dispatched = Object.entries(state.jobs.byKey)
+    .filter(([key]) => prefixes.some((prefix) => key.startsWith(prefix)))
+    .map(([, id]) => state.jobs.byId[id])
+    .filter((job) => job !== undefined && parseAuditTime(job.requestedAt, "admission job clock") >= sinceMs).length
+  // A compose that REFUSES a member dispatches no Job at all, so Jobs alone
+  // count only the cycles that got through the door. The ledger counts the
+  // rest, and this is the half that makes a hung merge measurable: every cycle
+  // after the admitting one re-derives the member, finds its authority spent
+  // and appends to the streak. A streak whose last refusal predates the window
+  // is history — the window restarted on a merge — and contributes nothing.
+  const refused = members.reduce((total, id) => {
+    const row = state.queues.admissionRefusals[id]
+    if (row === undefined) return total
+    return parseAuditTime(row.lastAt, "admission refusal clock") >= sinceMs ? total + row.count : total
+  }, 0)
+  return dispatched + refused
+}
+
+/**
+ * Work the queue has SERVED and not delivered: a standing submit fact whose
+ * current sha a run admitted, where that run has not merged.
+ *
+ * This is the population `queueProgressQueue` used to compute, and the reason
+ * it returned nothing is worth stating because the mistake is easy to make
+ * again. It kept a member only while `derivedAuthorityLookup` called its fact
+ * STANDING — but standing means "no run has consumed this authority yet", and
+ * a run consumes it at ADMISSION, not at merge. So the moment the queue
+ * accepted a member it dropped out of the progress population, and
+ * "admission passes, nothing merges" — the one failure this walk exists to
+ * catch — was the exact shape it could no longer see.
+ *
+ * Delivery, not consumption, is the retirement: the consuming run's
+ * `passedAt`, the same stamp {@link latestQueueMergeMs} reads as this base's
+ * merge clock, so a member leaves this population at precisely the moment it
+ * becomes the event that restarts the window for everybody behind it.
+ */
+function outstandingServedMembers(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): Change[] {
+  const selected = declaredDefaultSteps(steps)
+  if (!selected.some((step) => step.kind === "merge")) return []
+  const authority = derivedAuthorityLookup(state)
+  return Object.entries(state.bays.submits)
+    .flatMap(([branch, submit]): Change[] => {
+      if (submit === undefined) return []
+      const snapshot = latestChangeSnapshot(
+        state.queues as QueuesState,
+        (member) => member.branch === branch && member.headSha === submit.sha,
+      )
+      // No snapshot at this sha is the UNSERVED half, reported by
+      // `queue-never-started` — never silently dropped between the two walks.
+      if (snapshot === undefined) return []
+      const verdict = authority(snapshot)
+      if (verdict === undefined) return []
+      if (!verdict.standing && queueRunDelivered(state, verdict.consumedBy)) return []
+      const pr = materializeSnapshotMember(state.bays, snapshot)
+      return pr === undefined ? [] : [pr]
+    })
+    .filter((pr) => blockingQueuePause(state, pr) === undefined)
+    .toSorted(
+      (left, right) =>
+        queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
+    )
+}
+
+/** Did this run MERGE its members? `passedAt` is the stamp a root run gets when
+ * it reaches `passed`, and it is the same fact `latestQueueMergeMs` reads. */
+function queueRunDelivered(state: DeepReadonly<RuntimeState>, run: RunId): boolean {
+  return Queues.get(state.queues as QueuesState, run)?.passedAt !== undefined
+}
+
+/**
+ * The two ways a queue fails to move, both re-sourced onto standing submit
+ * facts (S7, branch-is-change @i/10 22991) and split by ONE durable question —
+ * has any compose served this fact's current sha?
+ *
+ *   - No  ⇒ `queue-never-started`. The approval stands and nothing has run it.
+ *   - Yes ⇒ `queue-progress-stalled`. Something ran it and nothing merged.
+ *
+ * That split replaces the record lane's `checksRequested(pr)` test, which since
+ * S7 answers TRUE for every member alive (the fact is the check request), so
+ * the never-started arm it used to gate had emptied permanently.
+ */
 function queueProgressAuditFindings(
   state: DeepReadonly<RuntimeState>,
-  queued: readonly DeepReadonly<Change>[],
+  steps: readonly RuntimeStep[],
   refusalFindings: readonly QueueAuditFinding[],
   progress: QueueProgressPolicy,
   options: QueueAuditOptions,
 ): QueueAuditFindingEmission[] {
-  if (options.now === undefined || queued.length === 0) return []
-  const findings: QueueAuditFindingEmission[] = []
+  if (options.now === undefined) return []
+  const selected = declaredDefaultSteps(steps)
+  // Both arms stay behind the merge-step guard, unchanged and still not
+  // endorsed: the selection is PERSISTED at install time and nothing
+  // reconciles it with the config the CLI would compute today, so a queue
+  // installed merge-less audits clean forever. `unrecorded-submit` is the
+  // surface that still speaks for such a queue, and it takes no guard.
+  if (!selected.some((step) => step.kind === "merge")) return []
   const nowMs = parseAuditTime(options.now, "now")
-  const byBase = Map.groupBy(queued, (pr) => baseIdentity(pr.base))
-  for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    const neverStarted = prs.filter((pr) => !checksRequested(pr))
-    if (neverStarted.length > 0) {
-      const readyAtMs = Math.min(
-        ...neverStarted.map((pr) => parseAuditTime(changeSourceReadyAt(pr), `source-ready time for ${pr.id}`)),
-      )
-      const sinceMs = readyAtMs
-      const blockedMs = Math.max(0, nowMs - sinceMs)
-      const first = neverStarted[0]
-      if (blockedMs >= progress.noLandingMs && first !== undefined) {
-        const since = new Date(sinceMs).toISOString()
-        findings.push({
-          code: "queue-never-started",
-          message:
-            `Queue '${base}' has ${neverStarted.length} submitted ` +
-            `${neverStarted.length === 1 ? "change" : "changes"} that never started required checks for ` +
-            `${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
-          resolution: [
-            `Start or restart the habitant queue runner, then verify it requests required checks for '${first.id}'.`,
-          ],
-          pr: first.id,
-          specimen: `queue:${base}:never-started`,
-          count: neverStarted.length,
-          since,
-          blockedMs,
-        })
-      }
-    }
+  const findings: QueueAuditFindingEmission[] = []
+  findings.push(...neverStartedFindings(state, refusalFindings, progress, nowMs))
+  findings.push(...progressStalledFindings(state, steps, refusalFindings, progress, nowMs))
+  return findings
+}
 
-    const started = prs.filter((pr) => checksRequested(pr))
-    if (started.length === 0) continue
+/**
+ * Approvals standing in git that no compose has served — PR685's shape (ready
+ * at position 1 for 65 minutes over a LIVE runner while `queue audit` stayed
+ * empty), which is why zero attempts must stay loud rather than read as quiet.
+ *
+ * Same population as `unrecorded-submit`, deliberately, and reused from it
+ * rather than derived a second time: one branch-level row per approval for a
+ * reader, one aggregate per queue for the pager, and no way for the two to
+ * disagree about who is waiting.
+ */
+function neverStartedFindings(
+  state: DeepReadonly<RuntimeState>,
+  refusalFindings: readonly QueueAuditFinding[],
+  progress: QueueProgressPolicy,
+  nowMs: number,
+): QueueAuditFindingEmission[] {
+  const findings: QueueAuditFindingEmission[] = []
+  const unserved = unrecordedSubmits(state.bays, state.queues)
+    .map((submit) => ({ ...submit, id: unservedMemberIdentity(state, submit.branch) }))
+    .filter((submit) => {
+      const pause = state.queues.pauses[baseIdentity(submit.base)]
+      return pause === undefined || pause.allowedPRs.includes(submit.id)
+    })
+  const byBase = Map.groupBy(unserved, (submit) => baseIdentity(submit.base))
+  for (const [base, submits] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const ordered = submits.toSorted(
+      (left, right) => left.at.localeCompare(right.at) || compareNatural(left.id, right.id),
+    )
+    const head = ordered[0]
+    if (head === undefined) continue
+    // The window is dated from the OLDEST unserved approval: a later approval
+    // joining must not drag the clock forward and shorten a wedge that has
+    // already been running.
+    const since = head.at
+    const blockedMs = Math.max(0, nowMs - parseAuditTime(since, "branch submit clock"))
+    if (blockedMs < progress.noLandingMs) continue
+    // A member the refusal walk already named owns its own finding, with the
+    // ledger's exact code and streak. Two pages for one wedge is how an
+    // operator learns to mute both.
+    if (refusalFindings.some((finding) => ordered.some((submit) => submit.id === finding.pr))) continue
+    // The policy's quiet middle band, unchanged in meaning and re-sourced in
+    // quantity ({@link admissionAttempts}): zero attempts is a runner asleep
+    // over ready work and must page; a handful is ordinary retry cadence; many
+    // is a queue trying and failing.
+    const attempts = admissionAttempts(state, ordered.map((submit) => submit.id), parseAuditTime(since, "branch submit clock"))
+    if (attempts > 0 && attempts < progress.minAdmissionChecks) continue
+    findings.push({
+      code: "queue-never-started",
+      message:
+        `Queue '${base}' has ${ordered.length} submitted ` +
+        `${ordered.length === 1 ? "approval" : "approvals"} that no compose has served for ` +
+        `${formatRefusalSpan(blockedMs)} (since ${since}); head is branch '${head.branch}'.`,
+      resolution: [
+        `Start or restart the habitant queue runner, then verify it composes branch '${head.branch}'.`,
+      ],
+      pr: head.id,
+      specimen: `queue:${base}:never-started`,
+      count: ordered.length,
+      since,
+      blockedMs,
+    })
+  }
+  return findings
+}
+
+/**
+ * Served work that is not landing: the queue admitted it and no merge followed
+ * inside the SLO. The window restarts on every real merge, so this measures the
+ * gap since the queue last MOVED, not since the work arrived.
+ *
+ * `minAdmissionChecks` gates this arm exactly as it always did, and finding the
+ * quantity it now counts took measuring rather than reading: after S7 an
+ * admitted member's Jobs, runs, authority and submit fact are byte-identical
+ * whether one compose cycle has passed or ten, which is why re-sourcing this
+ * onto Jobs alone would have answered `1` forever and pinned every stalled
+ * queue inside the quiet band. The refusal LEDGER is what still separates them
+ * — each cycle after the admitting one re-derives the member and appends
+ * `queue-submit-authority-consumed` to its streak — so a hung merge is
+ * measurable, and a queue tried once is not yet accused of failing.
+ */
+function progressStalledFindings(
+  state: DeepReadonly<RuntimeState>,
+  steps: readonly RuntimeStep[],
+  refusalFindings: readonly QueueAuditFinding[],
+  progress: QueueProgressPolicy,
+  nowMs: number,
+): QueueAuditFindingEmission[] {
+  const findings: QueueAuditFindingEmission[] = []
+  const outstanding = outstandingServedMembers(state, steps)
+  const byBase = Map.groupBy(outstanding, (pr) => baseIdentity(pr.base))
+  for (const [base, prs] of [...byBase.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    const first = prs[0]
+    if (first === undefined) continue
     const latestMergeMs = latestQueueMergeMs(state, base)
     const queuedAtMs = Math.min(
-      ...started.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)),
+      ...prs.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)),
     )
     const sinceMs = Math.max(queuedAtMs, latestMergeMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
-    const first = started[0]
-    const admissionChecks = started.reduce(
-      (total, pr) =>
-        total +
-        pr.checkRequests.filter((request) => parseAuditTime(request.at, `check request for ${pr.id}`) >= sinceMs)
-          .length,
-      0,
-    )
-    if (
-      blockedMs < progress.noLandingMs ||
-      (admissionChecks > 0 && admissionChecks < progress.minAdmissionChecks) ||
-      first === undefined ||
-      refusalFindings.some((finding) => finding.pr === first.id)
-    ) {
-      continue
-    }
+    if (blockedMs < progress.noLandingMs) continue
+    if (refusalFindings.some((finding) => finding.pr === first.id)) continue
+    const attempts = admissionAttempts(state, prs.map((pr) => pr.id), sinceMs)
+    if (attempts > 0 && attempts < progress.minAdmissionChecks) continue
     const since = new Date(sinceMs).toISOString()
     findings.push({
       code: "queue-progress-stalled",
       message:
-        `Queue '${base}' has ${started.length} required-check ${started.length === 1 ? "change" : "changes"} queued and ` +
-        `no merge for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${admissionChecks} pre-queue ` +
-        `${admissionChecks === 1 ? "check" : "checks"}; head is '${first.id}'.`,
+        `Queue '${base}' has ${prs.length} admitted ${prs.length === 1 ? "change" : "changes"} and ` +
+        `no merge for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${attempts} admission ` +
+        `${attempts === 1 ? "attempt" : "attempts"}; head is '${first.id}'.`,
       pr: first.id,
       specimen: `queue:${base}`,
-      count: started.length,
+      count: prs.length,
       since,
       blockedMs,
     })
@@ -6926,39 +7185,6 @@ function admissionQueue(
       const rightAt = queueProgressTime(right)
       return leftAt.localeCompare(rightAt) || compareNatural(left.id, right.id)
     })
-}
-
-/** Work that has entered the queue but has not produced a delivery outcome yet.
- *
- * This is deliberately broader than `admissionQueue`: a successful admission
- * removes a change from the next admission pass, but it remains outstanding until a
- * Queue run merges (or otherwise changes its delivery state). Progress auditing
- * must span that gap or the exact "admission passes, nothing merges" failure is
- * invisible.
- */
-function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): Change[] {
-  const selected = declaredDefaultSteps(steps)
-  if (!selected.some((step) => step.kind === "merge")) return []
-  // S7 population: every branch whose live submit fact still holds STANDING
-  // authority, materialized from its latest retained run snapshot. Standing is
-  // what "has not produced a delivery outcome" means once records are gone — a
-  // merged branch's surviving fact reads as consumed and drops out here, which
-  // is the same retirement the record lane got from its delivery state. A
-  // branch no run has ever admitted has no snapshot to materialize and is
-  // reported by `unrecorded-submit` instead, so it is not silently dropped.
-  const authority = derivedAuthorityLookup(state)
-  return Object.keys(state.bays.submits)
-    .flatMap((branch): Change[] => {
-      const snapshot = latestChangeSnapshot(state.queues as QueuesState, (member) => member.branch === branch)
-      if (snapshot === undefined || authority(snapshot)?.standing !== true) return []
-      const pr = materializeSnapshotMember(state.bays, snapshot)
-      return pr === undefined ? [] : [pr]
-    })
-    .filter((pr) => blockingQueuePause(state, pr) === undefined)
-    .toSorted(
-      (left, right) =>
-        queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
-    )
 }
 
 /** The one queue ordering clock, and it is TOTAL: check-request time when the
@@ -7698,7 +7924,6 @@ export const YRD_REFUSAL_CODES = [
   "candidate-conflict",
   "candidate-conflicting",
   "candidate-ref-refused",
-  "candidate-revision-mismatch",
   "candidate-submodules-failed",
   "carrier-drops-landed",
   "carrier-inspection",
@@ -7739,13 +7964,16 @@ export const YRD_REFUSAL_CODES = [
   // The host's enrichment reader raises this when the submitted commit is not
   // in the repository (R2's vanished-commit edge, attributable to one branch).
   "derived-commit-vanished",
+  // HISTORICAL-ONLY: the derived/record arbitration refusal, whose producer
+  // went with the record store (9352d8d7). Kept for the same reason as
+  // "source-publish" below — a refusal ledgered before the sweep still names
+  // it, and unregistering it would make failureDisposition throw on that row.
   "derived-record-lane",
   "derived-submit-moved",
   "derived-submit-vanished",
   "dirty-base",
   "dirty-worktree",
   "draft",
-  "draft-stranded",
   "dropped-parent-contribution",
   "evaluator-missing-result",
   "exclusive-busy",
@@ -7762,6 +7990,10 @@ export const YRD_REFUSAL_CODES = [
   "invalid-candidate",
   "invalid-command",
   "invalid-config",
+  // HISTORICAL-ONLY: the flow-module config loader raised it; the loader went
+  // with flows and flow-fingerprints (f6d79e39). Invocation-time, so unlikely
+  // to be persisted — kept because "unlikely" is not "cannot", and a wrong
+  // delete throws in a READ path.
   "invalid-config-module",
   "invalid-run",
   "job-canceled",
@@ -7784,7 +8016,6 @@ export const YRD_REFUSAL_CODES = [
   "merge-unauthored-deletion",
   "merge-verification-failed",
   "min-commit-unpublished",
-  "missing-pr",
   // TEST-FIXTURE-ONLY narrative codes (queue-watch-round6.test.ts's fictional
   // design-review rounds) — never produced by real yrd code, registered
   // as-is rather than rewriting the fixture's illustrative choice of string.
@@ -7806,6 +8037,11 @@ export const YRD_REFUSAL_CODES = [
   // indirection into a direct `code:` literal (command.ts), so the census
   // sees the producer it previously missed.
   "proposed-commit-missing",
+  // HISTORICAL-ONLY, both: `pr publish --queue` recorded a durable publication
+  // Job, and a terminal push error persisted as its JobError.code. The verb and
+  // its producers went with the record lane (612198a0 → e323f5be, b599e26d,
+  // 85911630); the Job errors in journals written before that did not, and
+  // runner-timeline / queue-status-view classify exactly those codes.
   "publication-failed",
   "publication-unavailable",
   "pushed-not-submitted",
@@ -7824,7 +8060,9 @@ export const YRD_REFUSAL_CODES = [
   // code when a live submit fact owns the branch and no record does.
   "record-mint-retired",
   "recut-base-missing",
-  "recut-branch-absent",
+  // HISTORICAL-ONLY: a recut candidate refusal, retired with the rewrite
+  // machinery and the recut verb (c146f903, e323f5be). It reached run failures,
+  // so recorded runs carry it.
   "recut-current-changed",
   "recut-publish",
   "refusal-remedy-needs-withdraw",
@@ -7839,8 +8077,6 @@ export const YRD_REFUSAL_CODES = [
   "run-canceled",
   "run-lease-expired",
   "run-plan-mismatch",
-  "run-without-check-ancestry",
-  "run-without-submit-ancestry",
   "runner-error",
   "runner-health-failed",
   "runtime-reload-exec-failed",
