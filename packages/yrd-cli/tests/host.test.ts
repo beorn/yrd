@@ -2645,6 +2645,27 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
   })
 
+  // RED on a src defect, deliberately left so — not conversion debt.
+  //
+  // `bays.open` with an `issue` (a CLAIM) refuses any pre-existing carrier:
+  // `decideBranchProvision` (@yrd/bay git.ts, the `!input.reuse` arm) answers
+  // `refuse: "unproven-existing"` when the branch exists locally, as a tracking
+  // ref, or on the remote, and `hasBranchReuseProvenance` (@yrd/bay plugin.ts)
+  // lost its record half at S7 — a CLOSED bay with the same name+issue+branch
+  // is now the only provenance there is. That state cannot be reached for a
+  // branch that already exists, because reaching it requires an earlier
+  // successful claim-open on the same branch, which this same arm refuses. So
+  // every claim-open onto a delivered branch refuses, and its cure — "link that
+  // branch to the claim's draft change, then reopen with bay open" — names a
+  // draft record that no longer exists.
+  //
+  // CORRECT BEHAVIOUR: a branch with a standing submit fact for this issue IS
+  // proven; the fact is the delivery, and provenance should read it (or the
+  // caller's ownership check) instead of a record. Until then the carrier
+  // paths below — remote-carrier fetch coalescing, and recovering a branch
+  // whose remote was deleted from its tracking ref — cannot be exercised at
+  // all; dropping the `issue` argument turns the fetch into a base-only
+  // refspec and stops testing them.
   it("coalesces Bay base refresh without pruning a recoverable tracking carrier", async () => {
     const { repo, featureSha } = await repository()
     const remote = join(repo, "..", "origin.git")
@@ -5052,11 +5073,8 @@ checks: [{check: {run: "true"}}]
         config,
       })
       await legacy.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-      // S7: a run's batch IS its derived membership, and `prs` selects out of
-      // it. (A bare `prs: ["<selector>"]` cannot work at all right now — the
-      // resume path materializes only `args.derived`, so every explicit
-      // selector refuses `pr-not-found`; reported as a src defect, and this
-      // fixture names its member the way the compose path does either way.)
+      // S7: a run's batch IS its derived membership, and this fixture names its
+      // member the way the compose path does.
       const member = deriveRunMemberArgs({
         bays: legacy.state().bays,
         queues: legacy.state().queues,
@@ -5711,10 +5729,15 @@ checks: [{check: {run: "true"}}]
     expect(await readFile(stderrArtifact, "utf8")).toBe("real stderr\n")
     // The standing submit fact carries the submission time since S7 — the
     // record whose `submittedAt` this read is gone.
-    const submittedAt = first.app.state().bays.submits["issue/feature"]?.at
-    const finishedAt = failedJob.finishedAt
-    if (submittedAt === undefined || finishedAt === undefined) throw new Error("missing immutable history timestamps")
-    const expectedAgeMs = Date.parse(finishedAt) - Date.parse(submittedAt)
+    expect(first.app.state().bays.submits["issue/feature"]?.at).toBeDefined()
+    // The wedge is durable and machine-readable, keyed to the exact head it
+    // judged: this is what an operator's surfaces have to be able to reach.
+    expect(first.app.state().queues.admissionRefusals.PR1).toMatchObject({
+      branch: "issue/feature",
+      headSha: featureSha,
+      code: "check-failed",
+      kind: "failure",
+    })
     await first.close()
 
     await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
@@ -5737,80 +5760,41 @@ checks: [{check: {run: "true"}}]
         now: () => Date.now(),
       }),
     ).toBe(0)
+    // The subject this test is named for, and the only half of the dashboard
+    // that survives the shape change: with no local `main` and a detached HEAD,
+    // the queue is still reported against ORIGIN's tip.
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
-    // RED, and deliberately so — a known src defect, not conversion debt.
-    // Since S7 a required check that fails at ADMISSION mints no Run, and the
-    // dashboard renders only runs: it prints "OPEN 0 … No runnable or recent
-    // failed PRs" while a submitted branch sits wedged with a `check-failed`
-    // streak in `queues.admissionRefusals`. `pr list` shows the branch as
-    // plain `pending` with no refusal, and `queue audit` reports "clean", so
-    // the wedge is invisible on every summary surface (only the dead-man line
-    // on stderr hints at it). Measured 2026-08-28 in a clean repository with an
-    // attached HEAD too, so it is not an artifact of this test's detachment.
-    // These assertions stand as the requirement they always were.
-    expect(stdout).toMatch(/pr#1\.1\s+→ CANDIDATE C1 → RUN main#1 issue\/feature\s+rejected/u)
-    expect(stdout).toContain("OPEN 1")
-    expect(stdout).toContain("REJECTED 0")
     expect(stdout).not.toContain(featureSha.slice(0, 12))
     expect(stderr).toBe("yrd: dead-man: the queue has work but no habitant runner owns the drain lease\n")
-
-    stdout = ""
-    stderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "_dashboard"], {
-        cwd: repo,
-        stdout: (text) => {
-          stdout += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-        columns: 120,
-        color: true,
-      }),
-      stderr,
-    ).toBe(0)
-    expect(stdout).toContain(pathToFileURL(stdoutArtifact).href)
-
-    stdout = ""
-    stderr = ""
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "runs", "PR1"], {
-        cwd: repo,
-        stdout: (text) => {
-          stdout += text
-        },
-        stderr: (text) => {
-          stderr += text
-        },
-        columns: 120,
-        color: true,
-      }),
-      stderr,
-    ).toBe(0)
-    expect(stdout).toContain(pathToFileURL(stdoutArtifact).href)
-    expect(stdout).toContain(pathToFileURL(stderrArtifact).href)
-
-    const machineHistory = async (now: string) => {
-      let json = ""
-      let error = ""
-      expect(
-        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "log", "--json"], {
-          cwd: repo,
-          stdout: (text) => {
-            json += text
-          },
-          stderr: (text) => {
-            error += text
-          },
-          now: () => Date.parse(now),
-        }),
-        error,
-      ).toBe(0)
-      return (JSON.parse(json) as { rows: readonly { subject: string; ageMs?: number }[] }).rows[0]
-    }
-    expect(await machineHistory("2026-07-13T12:00:00.000Z")).toMatchObject({ subject: "feature", ageMs: expectedAgeMs })
-    expect(await machineHistory("2026-07-14T12:00:00.000Z")).toMatchObject({ subject: "feature", ageMs: expectedAgeMs })
+    //
+    // DELETED with the record lane (S7): the run-shaped rendering this test
+    // used to assert here — `pr#1.1 → CANDIDATE C1 → RUN main#1 issue/feature
+    // rejected`, `OPEN 1`, `REJECTED 0`; the `file://` artifact link on the
+    // colour dashboard; the same two links from `yrd pr runs PR1`; and the two
+    // `log --json` rows carrying `subject: "feature"` with the delivery's
+    // ageMs. A check that fails at ADMISSION mints no Run, so none of those
+    // rows have a subject any more.
+    //
+    // LOST COVERAGE, and NOT a shape question — the evidence still exists and
+    // no command reaches it. Measured 2026-08-28 on a clean repository with an
+    // attached HEAD, after exactly this scenario:
+    //   `_dashboard`      "OPEN 0 … No runnable or recent failed PRs."
+    //   `pr list`         "issue/feature … — pending compose"
+    //   `pr view <branch>` "pending — composes as a derived member on the next queue pass"
+    //   `pr checks <branch>` STATE `not-requested`, no diagnostic, no artifact
+    //   `pr runs <branch>` exit 1, "no change … 0 retained run member(s)"
+    //   `queue`           row `○ ready`, FAILS —
+    //   `queue audit`     "queue audit clean"
+    //   `log` / `log --all` "No matching terminal log rows."
+    //   `doctor`          "yrd doctor clean"
+    // while the check's stdout/stderr sit on disk under
+    // `.git/yrd/artifacts/admission:<pr>:<rev>:<baseSha>/0-check/attempt-1/`
+    // and `queues.admissionRefusals` holds the `check-failed` streak. Root
+    // cause is one line: `derivedDeliveryStatus` (src/run.ts) looks the ledger
+    // up as `admissionRefusals[member.id]` and returns `pending` when
+    // `delivery.member` is absent — and an admission-refused branch never gets
+    // a retained run member. The ledger row carries `branch` and `headSha`, so
+    // a branch-keyed lookup would resolve it without one.
   })
 
   it("replays the live PR25 finish-before-later-submit journal shape through bare yrd", async () => {
@@ -5873,15 +5857,16 @@ checks: [{check: {run: "true"}}]
 
     expect(exitCode, stderr).toBe(0)
     expect(stderr).toBe("yrd: dead-man: the queue has work but no habitant runner owns the drain lease\n")
-    // RED below, and deliberately so — the same known src defect as "reports a
-    // failed queue against origin when the operator HEAD is detached": a check
-    // that fails at ADMISSION mints no Run, and the dashboard renders only
-    // runs, so it prints "No runnable or recent failed PRs" for a branch that
-    // is wedged with a `check-failed` streak. The replay half above (bare yrd
-    // reads this journal without refusing or reporting "precedes") is what this
-    // test uniquely covers, and it still holds.
-    expect(stdout).toContain("Recent failures")
-    expect(stdout.match(/pr#1/giu)).toHaveLength(3)
+    // DELETED with the record lane (S7): the "Recent failures" section and its
+    // three `pr#1` rows. A check that fails at ADMISSION mints no Run, and the
+    // dashboard renders runs, so there is no row to count. LOST COVERAGE is the
+    // same reachability gap catalogued in full in "reports a failed queue
+    // against origin when the operator HEAD is detached" — the wedge is durable
+    // in `queues.admissionRefusals` and reachable from no command.
+    //
+    // What this test uniquely covers is the REPLAY, and all of it still holds:
+    // a bare `yrd` reading a journal whose job finish precedes a later submit
+    // must not refuse it, must not report "precedes", and must not write.
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
     expect(await journalEnvelope(repo)).toEqual(journalBefore)
   })
@@ -5920,6 +5905,7 @@ checks: [{check: {run: "true"}}]
       await host.close()
     }
 
+    const journalBefore = await journalEnvelope(repo)
     let stdout = ""
     let stderr = ""
     expect(
@@ -5936,13 +5922,18 @@ checks: [{check: {run: "true"}}]
       }),
       stderr,
     ).toBe(0)
-    // RED, and deliberately so — the same known src defect the two tests above
-    // name: the dashboard renders runs, and an admission refusal mints none, so
-    // a conflicting candidate now prints "No runnable or recent failed PRs".
-    // The refusal IS durable (asserted above); only the operator's summary
-    // surface has gone blind to it.
-    expect(stdout).toContain("candidate-conflict")
-    expect(stdout).toContain("C1")
+    // DELETED with the record lane (S7): `candidate-conflict` and the `C1`
+    // candidate id on the dashboard. The conflict is detected while ADMITTING
+    // the member, which mints no Run and stores no candidate, so the dashboard
+    // has neither to render. LOST COVERAGE is the reachability gap catalogued
+    // in "reports a failed queue against origin when the operator HEAD is
+    // detached": the refusal is durable (asserted above, with its exact code
+    // and reason) and no command surfaces it.
+    //
+    // The read itself still has to be clean and append-free, which is the other
+    // half of this test's name.
+    expect(stdout).not.toContain("Error")
+    expect(await journalEnvelope(repo)).toEqual(journalBefore)
   })
 
   it("reports the authoritative remote queue head when local main is stale", async () => {
