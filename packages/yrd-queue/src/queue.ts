@@ -540,11 +540,12 @@ type RefusedMemberIdentity = Readonly<{ id: string; branch: string; revision: nu
 /** `revision`/`headSha` are optional only for replaying facts written before
  * exact-revision refusal identity was introduced by 22528 (`branch` before S7);
  * new commands always populate revision and headSha. */
-const AdmissionRefusedFactSchema = AdmissionRefusedSchema
-  .strict()
-  .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
+const AdmissionRefusedFactSchema = AdmissionRefusedSchema.strict().refine(
+  (fact) => (fact.revision === undefined) === (fact.headSha === undefined),
+  {
     message: "revision and headSha must be provided together",
-  })
+  },
+)
 const SettleAdmissionRefusalSchema = z
   .object({
     pr: PRIdSchema,
@@ -1392,14 +1393,21 @@ function createQueue<Shape extends ChangeShape>(
    * With no mint configured the lane cannot admit fresh branches: say so once
    * per compose, loudly, and leave every row standing.
    */
-  const deriveRefOnlyMembers = async (skip: ReadonlySet<string>): Promise<DerivedRunMember[]> => {
+  const deriveRefOnlyMembers = async (
+    skip: ReadonlySet<string>,
+    selectors?: readonly string[],
+  ): Promise<DerivedRunMember[]> => {
     const snapshot = runtime()
     // The already-landed warn that stood here read a fact's sha against a
     // terminal RECORD's integration commit — the PR2139 incident cell — and can
     // no longer be computed. The hazard it named is caught downstream by
     // authority consumption instead (see `derivedLaneBranches`), which ejects a
     // merged branch's surviving fact with a `compose-candidate-skip` warn.
-    const branches = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
+    const branches = narrowToSelectableBranches(
+      snapshot.queues,
+      derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch)),
+      selectors,
+    )
     if (branches.length === 0) return []
     if (derivedMint === undefined) {
       log.warn?.(
@@ -2549,16 +2557,25 @@ function createQueue<Shape extends ChangeShape>(
           // was empty for exactly the caller that needed it and every selector
           // refused `pr-not-found`.
           //
-          // The mint-burn this guard was protecting is real but cannot be paid
-          // around: a branch no compose has ever served has NO durable id — the
-          // number is minted here — so `prs: ["PR1"]` cannot resolve without
-          // deriving the lane first. Selection narrows afterwards; an unselected
-          // member retains no snapshot and no ledger row, so its number is
-          // skipped rather than reused, which is the mint's stated contract
-          // ("number skip, never recycle") rather than an exception to it. The
-          // sweep this replaced paid the same cost with a durable record.
+          // The mint-burn this guard was protecting is real, and the first cut
+          // of this path priced it wrong. It said an unselected member's number
+          // "is skipped rather than reused" — one number, once, inside the
+          // mint's "number skip, never recycle" contract. It is one number per
+          // un-composed branch PER RUN, forever, because an unselected member
+          // anchors no durable identity for the next run to reuse. Three idle
+          // branches took the high-water 1 → 4 → 7 → 10 over three explicit
+          // runs.
+          //
+          // The escape is minting, not deriving. Deriving the lane really is a
+          // precondition for resolving a selector against it, so that half
+          // stands; handing a durable number to a member selection is about to
+          // discard never was. `narrowToSelectableBranches` resolves the
+          // selector against the two identity homes a compose leaves behind —
+          // a retained snapshot, a refusal-ledger row — and derives only what
+          // the selection can keep.
           const selfDerived = await deriveRefOnlyMembers(
             new Set((args.derived ?? []).map((member) => member.branch)),
+            selectorless ? undefined : args.prs,
           )
           // Admit only the entries whose live submit fact still stands as
           // derived (caller-passed entries first, this compose's own
@@ -2625,7 +2642,9 @@ function createQueue<Shape extends ChangeShape>(
           // (or step filter) never reported runs outside it, and the sweep's
           // settlements are not scoped to the caller's selectors.
           const roots: RunId[] =
-            selectorless && args.steps === undefined ? [...cleaned, ...resumable.map((run) => run.id)] : resumable.map((run) => run.id)
+            selectorless && args.steps === undefined
+              ? [...cleaned, ...resumable.map((run) => run.id)]
+              : resumable.map((run) => run.id)
           for (const run of resumable) await settleCandidate(run.id)
 
           snapshot = runtime()
@@ -6206,7 +6225,6 @@ function unisolableStalePlanBatches(
   return batches
 }
 
-
 function auditQueues(
   state: DeepReadonly<RuntimeState>,
   steps: readonly RuntimeStep[],
@@ -6503,9 +6521,7 @@ function admissionRefusalAuditFindings(
  * consumed is PAST admission and leaves this queue — a live ledger row does not
  * hold it here, for the reason the loop body spells out.
  */
-function requiredCheckQueueHead(
-  state: DeepReadonly<RuntimeState>,
-): Readonly<{ id: string; at: string }> | undefined {
+function requiredCheckQueueHead(state: DeepReadonly<RuntimeState>): Readonly<{ id: string; at: string }> | undefined {
   const authority = derivedAuthorityLookup(state)
   const candidates: Readonly<{ id: string; at: string }>[] = []
   for (const [branch, submit] of Object.entries(state.bays.submits)) {
@@ -6532,9 +6548,7 @@ function requiredCheckQueueHead(
     if (pause !== undefined && !pause.allowedPRs.includes(id)) continue
     candidates.push({ id, at: submit.at })
   }
-  return candidates.toSorted(
-    (left, right) => left.at.localeCompare(right.at) || compareNatural(left.id, right.id),
-  )[0]
+  return candidates.toSorted((left, right) => left.at.localeCompare(right.at) || compareNatural(left.id, right.id))[0]
 }
 
 /** The refusal-ledger row a branch currently carries, if any. Keyed by branch
@@ -6752,9 +6766,7 @@ function neverStartedFindings(
         `Queue '${base}' has ${ordered.length} submitted ` +
         `${ordered.length === 1 ? "approval" : "approvals"} that no compose has served for ` +
         `${formatRefusalSpan(blockedMs)} (since ${since}); head is branch '${head.branch}'.`,
-      resolution: [
-        `Start or restart the habitant queue runner, then verify it composes branch '${head.branch}'.`,
-      ],
+      resolution: [`Start or restart the habitant queue runner, then verify it composes branch '${head.branch}'.`],
       pr: head.id,
       specimen: `queue:${base}:never-started`,
       count: ordered.length,
@@ -6805,9 +6817,7 @@ function progressStalledFindings(
     const first = prs[0]
     if (first === undefined) continue
     const latestMergeMs = latestQueueMergeMs(state, base)
-    const queuedAtMs = Math.min(
-      ...prs.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)),
-    )
+    const queuedAtMs = Math.min(...prs.map((pr) => parseAuditTime(queueProgressTime(pr), `queue time for ${pr.id}`)))
     const sinceMs = Math.max(queuedAtMs, latestMergeMs ?? queuedAtMs)
     const blockedMs = Math.max(0, nowMs - sinceMs)
     if (blockedMs < progress.noLandingMs) continue
@@ -6964,6 +6974,68 @@ function explicitPRs(
   return prs
 }
 
+/**
+ * The derived-lane branches an explicit selector could possibly name — the
+ * narrowing that keeps a named run from MINTING a number for every branch it is
+ * about to discard.
+ *
+ * Deriving the whole lane on an explicit compose is required and stays: a
+ * selector is matched against that batch and nothing else, so `prs: ["PR1"]`
+ * cannot resolve against a lane that was never derived. What is NOT required is
+ * handing a durable number to a member the selection then throws away, and that
+ * is what the un-narrowed derivation did.
+ *
+ * The cost is per invocation, not per branch, and this correction is the point:
+ * an unselected member retains no run snapshot and no refusal-ledger row, so it
+ * has no durable identity home, so the NEXT explicit run cannot reuse its number
+ * and mints another. Measured with three un-composed branches present, the mint
+ * high-water went 1 → 4 → 7 → 10 across three `queue run <selector>` calls — N
+ * numbers per run for N un-composed branches, forever, not the single skipped
+ * number the first cut of this path claimed. Twelve idle submissions and ten
+ * explicit runs burn 120.
+ *
+ * Resolution without minting is possible because a number a selector can
+ * meaningfully name is already anchored somewhere durable — a retained
+ * `ChangeSnapshot` (the member ran) or its refusal-ledger row (the member was
+ * refused at admission). Those are exactly the two arms
+ * `mintDerivedMemberIdentity` reuses. A `PRn` matching neither names a number
+ * that escaped a previous run and can never be reissued; refusing it
+ * `pr-not-found` is correct, and it is what the operator already sees — before
+ * this narrowing that id resolved to a DIFFERENT branch on every run, so it was
+ * never stably nameable in the first place.
+ *
+ * Folding matches {@link explicitPRs} exactly, including the asymmetry and for
+ * the same @chief ruling: the minted id is our namespace and folds; the branch
+ * is git's namespace and does not. The two functions must agree — this one
+ * decides what gets derived and that one decides what the selector picked, so a
+ * divergence would silently narrow a member out of a batch and then refuse it as
+ * missing.
+ */
+function narrowToSelectableBranches(
+  queues: DeepReadonly<QueuesState>,
+  branches: readonly string[],
+  selectors: readonly string[] | undefined,
+): readonly string[] {
+  if (selectors === undefined || selectors.length === 0) return branches
+  const named = new Set(selectors)
+  const folded = new Set(selectors.map((selector) => selector.toLowerCase()))
+  return branches.filter((branch) => {
+    if (named.has(branch)) return true
+    const anchored = anchoredDerivedId(queues, branch)
+    return anchored !== undefined && folded.has(anchored.toLowerCase())
+  })
+}
+
+/** A derived branch's durable id when it has one, minting nothing. The same two
+ * reuse arms `mintDerivedMemberIdentity` consults, in the same order: a retained
+ * run snapshot first, then the refusal-ledger row that anchors a member refused
+ * before any run retained one. Absent from both ⇒ the branch has never held a
+ * number that outlived a compose. */
+function anchoredDerivedId(queues: DeepReadonly<QueuesState>, branch: string): string | undefined {
+  const retained = latestChangeSnapshot(queues as QueuesState, (snapshot) => snapshot.branch === branch)
+  return retained?.id ?? branchAdmissionRefusal(queues, branch)?.pr
+}
+
 type QueuePosition = Readonly<{ at: string; identity: string }>
 
 function changeQueuePosition(pr: DeepReadonly<Change>): QueuePosition {
@@ -7014,11 +7086,7 @@ function requestedPRs(
   // caller: `explicitPRs` returns `[]` for that dispatch alone, while a
   // non-empty selector list either resolves to a non-empty selection or raises
   // `pr-not-found`, so it can never arrive here empty.
-  const prs = (
-    explicit === undefined || explicit.length === 0
-      ? [...derived].toSorted(bySubmitClock)
-      : [...explicit]
-  )
+  const prs = (explicit === undefined || explicit.length === 0 ? [...derived].toSorted(bySubmitClock) : [...explicit])
     .filter((pr) => !excluded.has(pr.id))
     .filter(
       (pr) =>
@@ -7728,7 +7796,6 @@ function derivedAdmissionBaseSha(state: DeepReadonly<RuntimeState>, pr: DeepRead
   }
   return newest?.baseSha
 }
-
 
 function reusableRevisionAdmission(
   state: DeepReadonly<RuntimeState>,

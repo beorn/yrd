@@ -74,7 +74,11 @@ function workspace(): BayWorkspace {
       conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    checkpoint: () => ({ status: "completed", conclusion: "success", output: { headSha: HEAD, pushed: true, wip: false } }),
+    checkpoint: () => ({
+      status: "completed",
+      conclusion: "success",
+      output: { headSha: HEAD, pushed: true, wip: false },
+    }),
     deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
@@ -226,15 +230,60 @@ describe("explicit selection — a selector must resolve against the live submit
     ])
   })
 
-  it("resolves the minted ID spelling with no caller-supplied batch", async () => {
-    // The id is the spelling an operator copies off a status surface, so it
-    // must resolve from the same starting state as the branch spelling.
+  it("resolves the minted ID spelling, with no caller-supplied batch, once the member HAS one", async () => {
+    // The id is the spelling an operator copies off a status surface — and
+    // that premise is also the whole limit on when it can resolve. A branch no
+    // compose has served appears on the status surface as an
+    // `UnrecordedSubmit`, which carries branch, sha, base and a reason and NO
+    // id. There is no number to copy yet, so there is none to honour.
+    //
+    // RETRACTION, recorded because this test asserted the opposite when it
+    // landed: it started from a bare submit fact and expected `PR1` to name it.
+    // That passed only because resolving the id MINTED the entire derived lane
+    // to look for it — the per-invocation burn `submit-intake`'s "an explicit
+    // run never mints an identity for a branch it will not select" forbids, and
+    // the two could not both hold. The premise sentence above is what decides
+    // between them: at that starting state no surface offers the spelling this
+    // test claimed an operator had copied. It is also unstable on its own
+    // terms — with two un-composed branches, WHICH one is `PR1` depends on
+    // derivation order, and the numbers move every run.
+    //
+    // So the id spelling resolves from the first state that has one, a retained
+    // run snapshot, and the branch spelling covers everything before that.
+    // `changeNotFoundMessage` says the same thing where the miss is reported:
+    // "Branch names are the selectors that resolve."
     await using app = await createApp()
     await submitFact(app, "issue/lonely", "1")
+    await app.queue.run({}, runtime)
+    await submitFact(app, "issue/lonely", "2")
 
     const runs = await app.queue.run({ prs: ["PR1"] }, runtime)
 
     expect(ranMembers(runs)).toEqual([`PR1@issue/lonely`])
+  })
+
+  it("refuses an ID naming a branch no compose has served — and mints nothing to find out", async () => {
+    // The fence on the retraction above. Without it, "we no longer resolve
+    // that" is indistinguishable from having quietly dropped id resolution,
+    // and nothing states the price we refused to pay: a miss must not burn a
+    // number, because burning one is exactly what the old resolution did on
+    // every hit AND every miss.
+    await using app = await createApp()
+    const mint = mints.get(app)
+    if (mint === undefined) throw new Error("app was not created by createApp — no mint registered")
+    await submitFact(app, "issue/lonely", "1")
+    const before = mint.highWater()
+
+    expect(await refusalFrom(app.queue.run({ prs: ["PR1"] }, runtime))).toContain(
+      "no change 'PR1' — searched 1 submitted branch",
+    )
+    expect(mint.highWater(), "a miss must not burn a number").toBe(before)
+
+    // POSITIVE CONTROL: the branch spelling resolves from this exact state, so
+    // the refusal above is about the ID spelling and not about a surface that
+    // refuses everything. Without this the assertion would pass against a
+    // completely broken selector.
+    expect(ranMembers(await app.queue.run({ prs: ["issue/lonely"] }, runtime))).toEqual([`PR1@issue/lonely`])
   })
 })
 
@@ -315,8 +364,13 @@ describe("explicit selection — selector case folding", () => {
    * prevent, reached from a different direction.
    */
   it("folds case for the minted ID spelling, as every other selector surface does", async () => {
+    // Composed first, for the reason recorded on "resolves the minted ID
+    // spelling ... once the member HAS one": an id exists to be folded only
+    // once a run has retained it. The folding rule under test is unchanged.
     await using app = await createApp()
     await submitFact(app, "Topic/Selectors", "1")
+    await app.queue.run({}, runtime)
+    await submitFact(app, "Topic/Selectors", "2")
 
     const runs = await app.queue.run({ prs: ["pr1"] }, runtime)
 
@@ -336,9 +390,10 @@ describe("explicit selection — selector case folding", () => {
     // and becomes a real guard the moment the fix lands, rather than a green
     // that was never armed.
     const exact = await app.queue.run({ prs: ["Topic/Selectors"] }, runtime)
-    expect(exact.flatMap((run) => run.prs.map((pr) => pr.branch)), "control: the exact spelling must resolve").toEqual([
-      "Topic/Selectors",
-    ])
+    expect(
+      exact.flatMap((run) => run.prs.map((pr) => pr.branch)),
+      "control: the exact spelling must resolve",
+    ).toEqual(["Topic/Selectors"])
 
     // Only now is the refusal meaningful. A branch selector that differs only
     // in case names a ref that does not exist; refuse it rather than guess
