@@ -18,6 +18,7 @@ import {
   type Change,
   type PrNumberMint,
 } from "@yrd/bay"
+import { compareNatural } from "@yrd/core"
 import { latestChangeSnapshot, maxChangeSnapshotRevision, newestTruthRecord, type QueuesState } from "./model.ts"
 
 export type DerivedMemberIdentity = Readonly<{
@@ -41,6 +42,9 @@ export type DerivedMemberIdentity = Readonly<{
  *   record carries (a recordless id can only have been minted for a derived
  *   member) keeps its id and changeId across re-pushes; the revision continues
  *   as 1 + the highest revision any retained snapshot records for that id.
+ *   With no snapshot retained, the branch's refusal-ledger row anchors the
+ *   same reuse (a member refused at its FIRST admission has no snapshot —
+ *   without the row every refused compose burned a fresh number).
  * - Fresh: `mintChangeId` commits max(high-water, frozen-store max) + 1 before
  *   the id escapes — a derived member's number is always strictly above both
  *   (A9). The revision seeds from the branch's newest terminal record when the
@@ -87,6 +91,31 @@ export function mintDerivedMemberIdentity(
       id: reusable.id,
       ...(reusable.changeId === undefined ? {} : { changeId: reusable.changeId }),
       revision: maxChangeSnapshotRevision(queues, reusable.id) + 1,
+      minted: false,
+    }
+  }
+  // A member refused at admission before ANY run retained a snapshot has one
+  // other durable identity home: its refusal-ledger row (wave defect 1 made
+  // the row exist; host-conv gap D is what happens without this reuse — every
+  // refused compose burns a fresh number for the same branch). Same tree as
+  // the refused one keeps the refused revision, so the standing admission
+  // Jobs still key; a re-push continues the count above everything retained.
+  const refused = Object.values(queues.admissionRefusals)
+    .filter((row) => row.branch === branch && bays.prs[row.pr] === undefined)
+    .toSorted((left, right) => compareNatural(left.pr, right.pr))
+    .at(-1)
+  if (refused !== undefined) {
+    const number = changeIdNumber(refused.pr)
+    if (number !== undefined && number > mint.highWater()) {
+      throw new Error(
+        `yrd: derived member '${refused.pr}' for branch '${branch}' exceeds the mint high-water ` +
+          `${String(mint.highWater())} — an id escaped without its commit; refusing to reuse it`,
+      )
+    }
+    const sameTree = bays.submits[branch]?.sha === refused.headSha ? refused.revision : undefined
+    return {
+      id: refused.pr,
+      revision: sameTree ?? Math.max(refused.revision ?? 0, maxChangeSnapshotRevision(queues, refused.pr)) + 1,
       minted: false,
     }
   }
