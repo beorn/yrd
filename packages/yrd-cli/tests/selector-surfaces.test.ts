@@ -249,19 +249,6 @@ describe("case-insensitive CLI selector surfaces", () => {
     // refuses close-retired before resolving any selector, so the fold is no
     // longer observable on that surface.
     {
-      // KNOWN RED — src defect, and NOT a folding one: `queue run` refuses
-      // every selector form on the derived lane, `pr1`, `PR1` and the exact
-      // `Topic/One` alike (measured). `resumableQueueRoots` selects with
-      // `explicitPRs(state.bays, args, materializeDerivedRunMembers(state.bays,
-      // args.derived ?? []))`, and the CLI's `runQueues` sends only `prs`, so
-      // the batch a selector is matched against is always EMPTY. Composes its
-      // own batch, so this row must NOT be primed.
-      surface: "queue run",
-      args: ["queue", "run", "pr1", "--json"],
-      prime: false,
-      expected: { command: "queue.run", results: [{ prs: [{ id: "PR1" }] }] },
-    },
-    {
       surface: "pr checks",
       args: ["pr", "checks", "pr1", "--json"],
       // This row's subject is the SELECTOR, and the canonical row it prints is
@@ -301,8 +288,8 @@ describe("case-insensitive CLI selector surfaces", () => {
       prime?: boolean
     }) => {
       const app = await createCliApp({ seeds: ONE_PR_SEED })
-      // Surfaces that READ an identity need one to exist first; the surface that
-      // composes its own batch mints as it runs and must start from the fact.
+      // Every surface here READS an identity, and only a retained compose has
+      // one — see `primeIdentity`.
       if (prime !== false) await primeIdentity(app)
       const output = outputIO()
 
@@ -310,6 +297,43 @@ describe("case-insensitive CLI selector surfaces", () => {
       expect(JSON.parse(output.stdout())).toMatchObject(expected)
     },
   )
+
+  /**
+   * `queue run` left the table above, where it had always been the odd row.
+   *
+   * It carried `prime: false` — "composes its own batch, so this row must NOT
+   * be primed" — which was true only while resolving an id MINTED the derived
+   * lane on the spot to look for it. That minting is gone (yrd-queue
+   * `narrowToSelectableBranches`): an explicit run no longer buys a durable
+   * number for members it will not select, so `pr1` has nothing to fold against
+   * until a compose has retained an identity. Priming supplies one — and also
+   * consumes the branch's submit authority, so the run then has nothing left to
+   * do and refuses.
+   *
+   * The fold is still fully observable, because the refusal canonicalizes:
+   * `pr1` goes in, `change 'PR1'` comes back. That is the same shape the merge
+   * test below asserts, on the same reasoning.
+   *
+   * LOST COVERAGE, named rather than quietly dropped: the SUCCESS path — a
+   * folded id selecting a member that then runs — is no longer covered at the
+   * CLI layer. It needs a primed identity AND a live authority, i.e. a second
+   * push, and this fixture's seeded journal history carries a `pr/integrated`
+   * terminal that refuses one ("stale terminal 'pr/integrated' ... targets
+   * 2@22…; queue authority is 1@11…"). Rebuilding the seed for it is a
+   * fixture-owner job. The path itself is proven a layer down, by yrd-queue's
+   * "an explicit run never mints an identity for a branch it will not select",
+   * which composes, re-pushes, selects `PR1` and integrates it.
+   */
+  it("folds the selector on queue run, naming the canonical change", async () => {
+    const app = await createCliApp({ seeds: ONE_PR_SEED })
+    await primeIdentity(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), output.io)).toBe(1)
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      failure: { message: expect.stringContaining("change 'PR1'") },
+    })
+  })
 
   it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
     const app = await createCliApp({ seeds: ONE_PR_SEED })
@@ -493,6 +517,3 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(refused.stderr()).toContain("change 'PR1' required check failed in R1")
   })
 })
-
-
-

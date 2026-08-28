@@ -713,6 +713,28 @@ function contestCompetitors(): string {
   ])
 }
 
+/**
+ * SELECT SUBMITTED-BUT-UNCOMPOSED BRANCHES BY BRANCH NAME, NEVER BY `PRn`.
+ *
+ * This helper leaves `issue/one` submitted and NOT composed, and at that state
+ * the branch has no change id — nothing has minted one. Fixtures here used to
+ * write `queue run PR1` immediately after submitting, which worked only
+ * because resolving the id minted the whole derived lane on the spot to look
+ * for it; that is a per-invocation number burn, and the queue no longer pays
+ * it (yrd-queue `narrowToSelectableBranches`).
+ *
+ * It was never a spelling an operator could have obtained, either. The status
+ * row for such a branch is an `UnrecordedSubmit` — branch, sha, base, reason,
+ * no id — the watch footer says "<branch> submitted, awaiting compose", and
+ * `timelineSubmitFactRows` states the rule outright: "Nothing is minted before
+ * admission, so the row makes NO change-id claim ... `pr` carries the branch".
+ * `changeNotFoundMessage` closes it from the refusal side: "Branch names are
+ * the selectors that resolve."
+ *
+ * So a `PRn` selector is correct only AFTER a compose has retained the member
+ * (or refused it into the ledger). Filters and views keyed on `PRn` are fine
+ * at that point — `log --pr PR1` and `pr view PR1` below run after a compose.
+ */
 async function openAndSubmit(app: TestApp): Promise<void> {
   await openTestBay(app, { name: "one" })
   await submitBayFixture(app, "B1")
@@ -2623,7 +2645,7 @@ describe("runYrd", () => {
         sha: String(index).repeat(40),
         base: "main",
       })
-      await app.queue.run({ prs: [`PR${index}`] }, { runner: "test", leaseMs: 60_000 })
+      await app.queue.run({ prs: [`topic/log-filter-${index}`] }, { runner: "test", leaseMs: 60_000 })
     }
 
     const rows = (stdout: string) => (JSON.parse(stdout) as { rows: readonly { outcome: string }[] }).rows
@@ -2654,7 +2676,7 @@ describe("runYrd", () => {
         sha,
         base: "main",
       })
-      await app.queue.run({ prs: [`PR${index + 1}`] }, { runner: "test", leaseMs: 60_000 })
+      await app.queue.run({ prs: [`topic/log-subject-${index + 1}`] }, { runner: "test", leaseMs: 60_000 })
     }
 
     let active = 0
@@ -2685,11 +2707,11 @@ describe("runYrd", () => {
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
     await app.bays.recordBranchSubmit({ branch: "topic/main-one", sha: "1".repeat(40), base: "main" })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    await app.queue.run({ prs: ["topic/main-one"] }, { runner: "test", leaseMs: 60_000 })
     await app.bays.recordBranchSubmit({ branch: "topic/main-two", sha: "2".repeat(40), base: "main" })
-    await app.queue.run({ prs: ["PR2"] }, { runner: "test", leaseMs: 60_000 })
+    await app.queue.run({ prs: ["topic/main-two"] }, { runner: "test", leaseMs: 60_000 })
     await app.bays.recordBranchSubmit({ branch: "topic/release", sha: "3".repeat(40), base: "release/2.0" })
-    await app.queue.run({ prs: ["PR3"] }, { runner: "test", leaseMs: 60_000 })
+    await app.queue.run({ prs: ["topic/release"] }, { runner: "test", leaseMs: 60_000 })
 
     const assertScope = async (args: readonly string[], expectedRuns: readonly string[]) => {
       const output = outputIO()
@@ -2897,7 +2919,7 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRejectedWait)
 
     const run = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "issue/one", "--json"), run.io), run.stderr()).toBe(0)
     expect(checkRuns).toEqual(["check"])
     expect(mergeRuns).toEqual(["merge"])
     // Integration is the run's own terminal fact now that no record mirrors it.
@@ -8232,7 +8254,7 @@ describe("runYrd", () => {
     await openAndSubmit(app)
     const integrated = outputIO()
     expect(
-      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), integrated.io),
+      await runYrd(app, yrd("queue", "run", "issue/one", "--steps", "check,merge", "--json"), integrated.io),
       integrated.stderr(),
     ).toBe(0)
 
@@ -9292,12 +9314,12 @@ describe("runYrd", () => {
 
     const app = await createApp()
     await app.bays.recordBranchSubmit({ branch: "issue/canonical", sha: "1".repeat(40), base: "main" })
-    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
+    expect((await app.queue.run({ prs: ["issue/canonical"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
       status: "completed",
       conclusion: "success",
     })
     await app.bays.recordBranchSubmit({ branch: "issue/alias", sha: "2".repeat(40), base: "origin/main" })
-    expect((await app.queue.run({ prs: ["PR2"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
+    expect((await app.queue.run({ prs: ["issue/alias"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
       status: "completed",
       conclusion: "success",
     })
@@ -10897,9 +10919,10 @@ describe("runYrd", () => {
       // A change selector is a one-shot pass: it drains, prints the interactive run
       // table, and never announces the habitant follow-runner.
       const selectedHuman = outputIO({ cwd: repo, runner })
-      expect(await runYrd(await readyApp(), yrd("queue", "run", "PR1"), selectedHuman.io), selectedHuman.stderr()).toBe(
-        0,
-      )
+      expect(
+        await runYrd(await readyApp(), yrd("queue", "run", "issue/one"), selectedHuman.io),
+        selectedHuman.stderr(),
+      ).toBe(0)
       expect(selectedHuman.stdout()).not.toContain("Queue runner ")
       expect(selectedHuman.stdout()).toContain("STATE")
 
@@ -11277,7 +11300,7 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     await openAndSubmit(app)
     const tracked = trackedScope()
     const run = outputIO({ scope: tracked.scope })
-    expect(await runYrd(app, yrd("queue", "run", "PR1"), run.io), run.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "issue/one"), run.io), run.stderr()).toBe(0)
     expect(tracked.sleeps).toEqual([])
     expect(run.stdout()).toContain("STATE")
   })
@@ -11355,7 +11378,7 @@ describe("prop projections", () => {
   it("omits props from uncorrelated Run, show, and log JSON", async () => {
     const app = await createApp()
     await app.bays.recordBranchSubmit({ branch: "topic/uncorrelated", sha: HEAD_SHA, base: "main" })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    await app.queue.run({ prs: ["topic/uncorrelated"] }, { runner: "cli-test", leaseMs: 60_000 })
     const run = app.queue.get("R1")
     if (run === undefined) throw new Error("expected an uncorrelated Run fixture")
     const persisted = JSON.parse(JSON.stringify(run)) as Readonly<{
@@ -11377,7 +11400,7 @@ describe("explicit queue step authority", () => {
 
     const output = outputIO()
     expect(
-      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "merge", "--json"), output.io),
+      await runYrd(app, yrd("queue", "run", "issue/one", "--steps", "merge", "--json"), output.io),
       output.stderr(),
     ).toBe(0)
     expect(checkRuns).toEqual([])
@@ -11416,7 +11439,7 @@ describe("explicit queue step authority", () => {
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const completed = outputIO()
-    const running = runYrd(app, yrd("queue", "run", "PR1", "PR2", "--steps", "merge"), completed.io)
+    const running = runYrd(app, yrd("queue", "run", "issue/one", "issue/two", "--steps", "merge"), completed.io)
     await mergeStarted.promise
 
     try {
@@ -12578,7 +12601,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     const app = await createApp()
     try {
       await openAndSubmit(app)
-      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      await app.queue.run({ prs: ["issue/one"] }, { runner: "test", leaseMs: 60_000 })
       const outputPath = join(artifactRoot, "R1", "0-check", "attempt-1", "output.log")
       mkdirSync(join(outputPath, ".."), { recursive: true })
       writeFileSync(outputPath, "must stay unread for a change-only row\n")
@@ -12821,7 +12844,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     const app = await createApp({ failingCheck: true })
     try {
       await openAndSubmit(app)
-      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      await app.queue.run({ prs: ["issue/one"] }, { runner: "test", leaseMs: 60_000 })
       const attempts = await queueLogAttempts(app.events())
       let reads = 0
       const noJournalScan = new Proxy(app, {
