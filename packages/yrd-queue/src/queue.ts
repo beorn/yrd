@@ -2538,18 +2538,28 @@ function createQueue<Shape extends ChangeShape>(
           // observation of that outcome vanish.
           const cleaned = await cleanupSettledRoots()
           if (args.steps?.length === 0) return []
-          // Ref-only approvals derive their admission BEFORE any snapshot
-          // feeds selection, so the same selectorless compose that admits them
-          // runs them (S6 door, replacing the 2b record-minting sweep).
-          // Selectorless ONLY, unlike the sweep it replaces: the sweep's
-          // explicit-run mint left a durable record behind, but a derived
-          // identity's only durable home is the run/started snapshot — derived
-          // during a run that will not select it, the freshly minted number
-          // escapes nowhere and burns. An explicit selection still honors
-          // caller-passed `args.derived` entries verbatim.
-          const selfDerived = selectorless
-            ? await deriveRefOnlyMembers(new Set((args.derived ?? []).map((member) => member.branch)))
-            : []
+          // Ref-only approvals derive their admission BEFORE any snapshot feeds
+          // selection, so the same compose that admits them runs them (S6 door,
+          // replacing the 2b record-minting sweep).
+          //
+          // EVERY compose, selectorless or not — this was `selectorless ? … : []`
+          // and that is what made `yrd queue run <selector>` impossible. A
+          // selector is matched against this batch and nothing else, and the CLI
+          // passes `prs: [...selectors]` with no `derived` at all, so the batch
+          // was empty for exactly the caller that needed it and every selector
+          // refused `pr-not-found`.
+          //
+          // The mint-burn this guard was protecting is real but cannot be paid
+          // around: a branch no compose has ever served has NO durable id — the
+          // number is minted here — so `prs: ["PR1"]` cannot resolve without
+          // deriving the lane first. Selection narrows afterwards; an unselected
+          // member retains no snapshot and no ledger row, so its number is
+          // skipped rather than reused, which is the mint's stated contract
+          // ("number skip, never recycle") rather than an exception to it. The
+          // sweep this replaced paid the same cost with a durable record.
+          const selfDerived = await deriveRefOnlyMembers(
+            new Set((args.derived ?? []).map((member) => member.branch)),
+          )
           // Admit only the entries whose live submit fact still stands as
           // derived (caller-passed entries first, this compose's own
           // derivations after). The loud-edge policy: a typed refusal
@@ -2604,7 +2614,13 @@ function createQueue<Shape extends ChangeShape>(
           // now) because `requestedPRs` still takes it as a general parameter.
           const intentCutoff: QueuePosition | undefined = undefined
           let snapshot = runtime()
-          const resumable = resumableQueueRoots(snapshot, args, steps)
+          // `cycleArgs`, not `args`: this resolves the same selectors
+          // `requestedPRs` does, and it runs FIRST, so handing it the caller's
+          // untouched arguments made it the surface that refused `pr-not-found`
+          // before the compose's own derived batch was ever consulted. Both
+          // resolutions must see one population or the earlier one speaks for
+          // the later.
+          const resumable = resumableQueueRoots(snapshot, cycleArgs, steps)
           // Cleaned roots join an UNFILTERED drain only: an explicit selection
           // (or step filter) never reported runs outside it, and the sweep's
           // settlements are not scoped to the caller's selectors.
@@ -6913,7 +6929,21 @@ function explicitPRs(
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {
-    const pr = materialized.find((member) => member.id === selector || member.branch === selector)
+    // The two spellings fold DIFFERENTLY, and the asymmetry is the ruling
+    // (@chief), not an oversight to tidy away.
+    //
+    // The minted id is OUR namespace — we mint every value in it, so folding
+    // can never collapse two distinct members, and the status surfaces an
+    // operator copies it off already fold. The branch is GIT'S namespace, where
+    // refs are case-sensitive and `Topic/Selectors` and `topic/selectors` can
+    // both exist and mean different things; a folding branch selector could
+    // resolve to a branch the operator did not name, at the moment they are
+    // asking us to merge it. Making someone retype a branch is cheap.
+    //
+    // So: do not "make the three selector surfaces agree" by folding both.
+    const pr = materialized.find(
+      (member) => member.id.toLowerCase() === selector.toLowerCase() || member.branch === selector,
+    )
     if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
     return pr
   })
@@ -6963,16 +6993,24 @@ function requestedPRs(
     }
     return leftSubmittedAt.localeCompare(rightSubmittedAt) || compareNatural(left.id, right.id)
   }
+  // A NAMED selection is exactly what was named — nothing is unioned back in.
+  //
+  // This used to append every unselected member of the batch after the
+  // selection, so `queue run <one-branch>` composed the whole batch. It was
+  // written for ONE internal caller — the compose's own candidate dispatch,
+  // which passes `prs: []` beside the candidate's `derived` entries meaning
+  // "exactly these members" — where the union is the intended set and no
+  // narrowing was ever asked for. With a real selector it silently re-added
+  // everything the operator did not ask for, and a merge step then merged it.
+  //
+  // `explicit.length === 0` separates the two, and can only mean the internal
+  // caller: `explicitPRs` returns `[]` for that dispatch alone, while a
+  // non-empty selector list either resolves to a non-empty selection or raises
+  // `pr-not-found`, so it can never arrive here empty.
   const prs = (
-    explicit === undefined
+    explicit === undefined || explicit.length === 0
       ? [...derived].toSorted(bySubmitClock)
-      : // An explicit selection carries the batch it was drawn from: the
-        // compose's own candidate dispatch passes `prs: []` beside the
-        // candidate's `derived` entries, which means "exactly these members".
-        // Dedupe because `explicitPRs` now resolves ITS selectors out of the
-        // same batch — the record half that used to make the two disjoint by
-        // construction is gone.
-        [...explicit, ...derived.filter((member) => !explicit.some((pr) => pr.id === member.id))]
+      : [...explicit]
   )
     .filter((pr) => !excluded.has(pr.id))
     .filter(
