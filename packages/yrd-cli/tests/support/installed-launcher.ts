@@ -1,9 +1,12 @@
 /**
- * @failure The `yrd watch` integration drills share one launcher across every
- * checkout on the box, so concurrent runs decide each other's results: whoever
- * installs or removes it last decides whether the other runs find a launcher at
- * all, and every run executes that one checkout's working tree instead of the
- * tree under test.
+ * @failure The `yrd watch` integration drills used to share one launcher path
+ * across every PROCESS in a worktree, keyed only by a hash of the worktree
+ * root. Two concurrent vitest invocations against the same checkout — two
+ * sibling agents, or a full-suite run overlapping a targeted one — raced to
+ * (re)write the same file: whoever installed or removed it last decided
+ * whether the other run found a launcher at all (2026-08-28, S7 integration
+ * flake hunt). The path is now unique per process, so concurrent runs in the
+ * same worktree never touch each other's launcher.
  * @consumer @yrd/cli tests
  *
  * The drills need a launcher that starts `yrd` the way production does — a real
@@ -21,10 +24,17 @@ import { join, resolve } from "node:path"
 export const yrdRoot = resolve(import.meta.dirname, "../../../..")
 
 /**
- * Keyed by the worktree path so two checkouts never share a launcher, and
- * stable within a worktree so repeated runs reuse one built file.
+ * Keyed by the worktree path so two checkouts never share a launcher, AND by
+ * this process's pid so two concurrent runs against the SAME worktree never
+ * share one either — the file used to be worktree-only, and a second vitest
+ * invocation racing this one's (re)write decided whether either run found a
+ * launcher at all. Cost: every process builds its own copy instead of reusing
+ * one across runs, which is fine — `installedYrdLauncher` below is one write.
  */
-const launcherDir = join(tmpdir(), `yrd-launcher-${createHash("sha256").update(yrdRoot).digest("hex").slice(0, 16)}`)
+const launcherDir = join(
+  tmpdir(),
+  `yrd-launcher-${createHash("sha256").update(yrdRoot).digest("hex").slice(0, 16)}-${process.pid}`,
+)
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`
@@ -48,12 +58,13 @@ exec bun ${shellQuote(join(yrdRoot, "bin/yrd.ts"))} "$@"
 let launcherPath: string | undefined
 
 /**
- * Path to this worktree's production `yrd` launcher, building it on first use.
+ * Path to this process's production `yrd` launcher, building it on first use.
  *
  * Building costs one small write, so there is no cache to invalidate and no
  * staleness to reason about: every call rewrites deterministic content. The
- * write merges through a rename so a second run in the same worktree can never
- * observe a half-written script.
+ * write merges through a rename so a second CALL in this same process can
+ * never observe a half-written script — and since `launcherDir` is now
+ * per-pid, a concurrent process's own build can never race this one's.
  */
 export function installedYrdLauncher(): string {
   if (launcherPath !== undefined) return launcherPath
