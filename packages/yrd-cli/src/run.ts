@@ -1299,9 +1299,8 @@ function runnerHealthError(code: string, cause: string, resolution: readonly str
  * nothing left to count. */
 function queuedDeliveryCount(app: YrdCliApp): number {
   const state = stateOf(app)
-  return Object.keys(state.bays.submits).filter(
-    (branch) => app.queue.deriveChange(branch).authority.lane === "derived",
-  ).length
+  return Object.keys(state.bays.submits).filter((branch) => app.queue.deriveChange(branch).authority.lane === "derived")
+    .length
 }
 
 /** Both sides must be KNOWN: an unreported merge position is not comparable,
@@ -1413,9 +1412,7 @@ export function staleDraftFindings(
   // with the state that could produce one.
   return app.queue
     .audit({ now })
-    .findings.filter(
-      (finding) => finding.code === "unrecorded-submit" && (finding.blockedMs ?? 0) >= thresholdMs,
-    )
+    .findings.filter((finding) => finding.code === "unrecorded-submit" && (finding.blockedMs ?? 0) >= thresholdMs)
 }
 
 /** One scannable warning line per stale draft or unrecorded submit, in the
@@ -1462,7 +1459,11 @@ export function needsPersonWarnings(findings: readonly QueueAuditFinding[]): str
  * bounds it — a merge older than the retained runs reports as none. */
 export function habitantDriverLastMerged(app: YrdCliApp, base: string): QueueDriverEpoch["lastMerged"] {
   const fromRuns = allQueueRuns(app).flatMap((run) => {
-    if (baseIdentity(run.base) !== baseIdentity(base) || run.integration === undefined || run.finishedAt === undefined) {
+    if (
+      baseIdentity(run.base) !== baseIdentity(base) ||
+      run.integration === undefined ||
+      run.finishedAt === undefined
+    ) {
       return []
     }
     return [{ commit: run.integration.commit, at: run.finishedAt }]
@@ -3545,7 +3546,6 @@ async function prepareOwnedBay(
   return { identity, bay }
 }
 
-
 async function openPersistentBay(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -3681,10 +3681,14 @@ async function refreshBay(app: YrdCliApp, bay: Bay, io: YrdCliIO): Promise<Bay> 
  * instead of an operator.
  */
 function bayOnBranchCure(branch: string): string {
+  // QUOTED, and in the order the operator runs them. The actionable-error layer
+  // lifts a quoted `'yrd …'` into a `resolve:` line and flattens the prose
+  // around it, so an indented command block renders as one run-together
+  // sentence and reaches `resolve:` not at all — the cure would be invisible in
+  // exactly the surface an operator reads.
   return (
-    `  yrd bay open --bay <name>\n` +
-    `  yrd in <name> -- git switch ${branch}\n` +
-    `or reopen the issue's own bay with 'yrd bay open <issue>'.`
+    `open a bay ('yrd bay open --bay <name>'), then put the branch in it ` +
+    `('yrd in <name> -- git switch ${branch}'); or reopen the issue's own bay ('yrd bay open <issue>')`
   )
 }
 
@@ -3695,9 +3699,7 @@ export function handoffBayMissingRemedy(selector: string, branch: string): strin
   return (
     `yrd: no active bay tracks '${selector}', and 'bay handoff' certifies a bay's materialized workspace — ` +
     `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
-    `Open one on '${branch}' first:\n` +
-    `${bayOnBranchCure(branch)}\n` +
-    `Then re-run this command.`
+    `Open one on '${branch}' first — ${bayOnBranchCure(branch)} — then re-run this command.`
   )
 }
 
@@ -3777,7 +3779,9 @@ async function certifyBayHandoff(
       },
       createElement(BayStatusView, { bays: [bay] }),
     )
-    if (blockers.length > 0) await printHuman(io, blockers.map((blocker) => `yrd: ${blocker}`).join("\n"))
+    // stderr, and never in JSON mode: the payload already carries `blockers`,
+    // and a human line on stdout would corrupt the JSON stream a caller parses.
+    if (!jsonEnabled(options)) for (const blocker of blockers) io.stderr(`yrd: ${blocker}\n`)
     return blockers.length === 0 ? 0 : 1
   }
   // The Bay projection records the last observed workspace head, while the
@@ -5857,12 +5861,14 @@ async function listPrs(
   // branch already on main. The claim is checkable, so it is checked — at most
   // twice per distinct base — before it is printed.
   const { merges, warnings } = await reconcileDeliveryMerges(
-    rows.filter((row) => row.state === "ended").map(({ pr, base: rowBase, headSha }) => ({
-      id: pr,
-      base: rowBase,
-      headSha,
-      recorded: "ended",
-    })),
+    rows
+      .filter((row) => row.state === "ended")
+      .map(({ pr, base: rowBase, headSha }) => ({
+        id: pr,
+        base: rowBase,
+        headSha,
+        recorded: "ended",
+      })),
     io,
   )
   const liveLines =
@@ -5964,9 +5970,7 @@ async function viewDerivedDelivery(
             : "history — no live submit fact stands for this branch"
   const lines = [
     `${delivery.branch} — derived lane (the submit fact is the submission; no change record exists)`,
-    ...(submit === undefined
-      ? []
-      : [`submitted ${submit.sha.slice(0, 12)} (base ${submit.base}) at ${submit.at}`]),
+    ...(submit === undefined ? [] : [`submitted ${submit.sha.slice(0, 12)} (base ${submit.base}) at ${submit.at}`]),
     stateLine,
     ...(member === undefined
       ? []
@@ -6049,9 +6053,7 @@ async function viewChangeRuns(
             `${member.id}.${String(member.revision)} ${resolved.branch} @ ${member.headSha.slice(0, 12)} — derived member`,
             ...(runs.length === 0
               ? ["no retained runs for this member"]
-              : data.map(
-                  (row) => `run ${row.run}: ${row.taskStatus ?? ""}`.trimEnd(),
-                )),
+              : data.map((row) => `run ${row.run}: ${row.taskStatus ?? ""}`.trimEnd())),
           ].join("\n"),
         )
         return
@@ -6082,7 +6084,12 @@ async function diffPr(
     const derivedBase = member?.baseSha ?? resolved.submit?.base ?? resolved.member?.base ?? "main"
     let derivedDiff: string
     try {
-      derivedDiff = gitSync(cwd, ["diff", ...(options.stat === true ? ["--stat"] : []), `${derivedBase}...${head}`, "--"])
+      derivedDiff = gitSync(cwd, [
+        "diff",
+        ...(options.stat === true ? ["--stat"] : []),
+        `${derivedBase}...${head}`,
+        "--",
+      ])
     } catch (error) {
       refusal(`cannot diff branch '${resolved.branch}': ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -7230,7 +7237,9 @@ async function attachQueueListDetails(
       return [await diffResolver.resolve(io.cwd ?? process.cwd(), focusedPr, focus.revision, snapshot.now)]
     }
     const visibleRevisions = new Map(
-      snapshot.projection.rows.map((row) => [`${row.pr}:${row.revision}`, { id: row.pr, revision: row.revision }] as const),
+      snapshot.projection.rows.map(
+        (row) => [`${row.pr}:${row.revision}`, { id: row.pr, revision: row.revision }] as const,
+      ),
     )
     return [...visibleRevisions.values()].map(({ id, revision }) => {
       const pr = prsById.get(id)
@@ -8036,7 +8045,11 @@ const UNCARRIED_SWEEP_INTERVAL_MS = 10 * 60 * 1000
  * store's deletion (NSE-16): with records as the only source, every branch the
  * derived lane carried or landed would re-report as stranded — loud false
  * positives that train operators to ignore the rail. */
-function carriedBranchSet(app: YrdCliApp): Set<string> {
+/** The branches a change already carries, and therefore the ones the uncarried
+ * rail must NOT report. Exported for the population fence in
+ * `tests/carried-branch-population.test.ts`: every other uncarried test stubs
+ * this set as an input, so nothing else can catch it going empty. */
+export function carriedBranchSet(app: YrdCliApp): Set<string> {
   const state = stateOf(app)
   const carried = new Set(Object.keys(state.bays.submits))
   for (const record of Queues.values(state.queues)) {
@@ -8269,8 +8282,6 @@ function mergeInstant(record: MergeRecordBody): number {
   return at
 }
 
-
-
 /**
  * The estate repair, said plainly and BY CAUSE.
  *
@@ -8301,8 +8312,6 @@ function estateRepairLines(report: MergeRecordEstateRepair, applied: boolean): r
       : ["  re-run with --apply to append these retractions"]),
   ]
 }
-
-
 
 /**
  * The Candidate-ref half of `yrd doctor`.
@@ -9458,7 +9467,11 @@ export async function applyRefusalRemedies(
 ): Promise<readonly RefusalRemedyOutcome[]> {
   const snapshot = stateOf(app)
   const outcomes: RefusalRemedyOutcome[] = []
-  for (const plan of planRefusalRemedies(snapshot.queues.admissionRefusals, (id) => remedySubject(app, id), attempted)) {
+  for (const plan of planRefusalRemedies(
+    snapshot.queues.admissionRefusals,
+    (id) => remedySubject(app, id),
+    attempted,
+  )) {
     if (io.drainSignal?.aborted === true) break
     // Recorded BEFORE the attempt. A remedy that throws must degrade to the
     // printed refusal, never re-arm itself on the next cycle.
@@ -10896,8 +10909,14 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
-    .option("--description <text>", "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
+    .option(
+      "--title <text>",
+      "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)",
+    )
+    .option(
+      "--description <text>",
+      "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)",
+    )
     .option(
       "--prop <key>=<value>",
       "set a prop on the submitted revision — an opaque key=value label (repeatable)",
@@ -10918,7 +10937,10 @@ function buildProgram(
     // now overrides @yrd/bay's live-submission close guard, and the submission
     // it once retracted is exactly what it leaves standing — so the help says
     // that outright rather than repeating the old promise.
-    .option("--withdraw", "close the workspace while the submission STANDS (nothing is withdrawn; the branch stays submitted)")
+    .option(
+      "--withdraw",
+      "close the workspace while the submission STANDS (nothing is withdrawn; the branch stays submitted)",
+    )
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
@@ -11187,7 +11209,12 @@ function buildProgram(
           ? createElement(QueueRunsView, { runs })
           : runs.length === 0
             ? blockerText
-            : createElement(Fragment, null, createElement(QueueRunsView, { runs }), createElement(Text, null, `\n${blockerText}`))
+            : createElement(
+                Fragment,
+                null,
+                createElement(QueueRunsView, { runs }),
+                createElement(Text, null, `\n${blockerText}`),
+              )
       await printResult(
         io,
         jsonEnabled(options),
@@ -11310,8 +11337,14 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
-    .option("--description <text>", "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
+    .option(
+      "--title <text>",
+      "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)",
+    )
+    .option(
+      "--description <text>",
+      "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)",
+    )
     .option(
       "--prop <key>=<value>",
       "set a prop on the submitted revision — an opaque key=value label (repeatable)",
@@ -11599,8 +11632,11 @@ function commanderErrorMessage(command: CliCommand | undefined, error: Commander
     command?.name() === "submit" &&
     error.code === "commander.unknownOption" &&
     error.message.includes("unknown option '--draft'")
+  // The remedy clause leads with `run '…'` so `oneLineCause` clips the whole
+  // remedy off the projected cause; a clause that trails the commands leaves a
+  // dangling half-sentence in the `cause` field.
   return removedDraftSubmit
-    ? `${error.message}; a pushed branch is already a draft — submit it with 'yrd pr submit <branch>' when it is ready, and 'yrd draft <branch>' puts it back`
+    ? `${error.message}; run 'yrd pr submit <branch>' when the branch is ready, and 'yrd draft <branch>' to put it back — a pushed branch is already the draft`
     : error.message
 }
 
@@ -11680,54 +11716,96 @@ function jsonOutputRequested(program: CliCommand, args: readonly string[]): bool
   return false
 }
 
-/** The shape `yrdVisibleCommandPaths` needs from a Commander node. Structural
- * rather than the concrete `CliCommand`, so the walk states exactly the three
- * members it depends on. */
+/** The shape `yrdCommandSurface` needs from a Commander node. Structural rather
+ * than the concrete `CliCommand`, so the walk states exactly the members it
+ * depends on. */
 type IntrospectableCommand = Readonly<{
   name: () => string
   aliases: () => readonly string[]
+  commands: readonly IntrospectableCommand[]
+  options: readonly Readonly<{ long?: string | undefined; description: string }>[]
+  /** Commander's own record of the child that runs when the parent is invoked
+   * bare. `yrd bay --json` is really `yrd bay _list --json`, so the default
+   * child's flags are reachable at the parent's path and belong in its facts. */
+  _defaultCommandName?: string | undefined
   createHelp: () => Readonly<{ visibleCommands: (command: IntrospectableCommand) => readonly IntrospectableCommand[] }>
 }>
 
+/** One command as the CLI really registers it. `live` is false for a verb
+ * registered hidden — which is how every retired verb is registered — and for
+ * an option whose help says it is retired or ignored. */
+export type YrdCommandFact = Readonly<{
+  /** Space-joined path under `yrd`, one entry per accepted spelling. */
+  path: string
+  live: boolean
+  /** Every long flag accepted at this path, INCLUDING inherited globals, mapped
+   * to whether the flag itself is live. */
+  options: ReadonlyMap<string, boolean>
+}>
+
+/** A retired verb's or flag's help text, by the two conventions this CLI uses
+ * for them. Kept next to the registration site's own wording on purpose: the
+ * test that reads this is checking a convention, so the convention has to be
+ * stated in exactly one place. */
+function retiredHelpText(description: string): boolean {
+  return description.startsWith("retired:") || description.startsWith("ignored; the verb is retired")
+}
+
 /**
- * Every command path this CLI actually offers an operator, read from the LIVE
+ * The whole command surface as the CLI really registers it, read from the LIVE
  * Commander tree.
  *
  * Never scraped from `--help` text: that output carries wrapped descriptions
  * and a trailing prose section whose lines are indented exactly like command
  * rows, so a text parser cannot tell a verb from a sentence.
  *
- * Hidden commands are excluded by construction, and hidden is precisely how a
- * retired verb is registered here ("retired: refuses and names why"). So a path
- * absent from this set is a path no refusal, remedy or help example may print —
- * an operator cannot discover it, and running it only earns a second refusal.
- * Aliases count as spellings, and the walk recurses under each, so `yrd pr
- * submit` and `yrd change submit` both resolve.
+ * Hidden is precisely how a retired verb is registered here, so a path whose
+ * `live` is false is a path no refusal, remedy or help example may print — an
+ * operator cannot discover it, and running it only earns a second refusal. The
+ * same holds one level down for flags: `bay open --pr` is a live command
+ * carrying a retired flag, and a cure naming it refuses just as hard.
  *
  * Exported for `remedy-executable-in-emitting-state.test.ts`, which walks every
- * `yrd …` command the source prints and fails when one is missing here. That
- * test is the only thing standing between a retirement and a cure that names
- * the verb it just retired — a shape this repo has now shipped four times.
+ * `yrd …` command the source prints and fails when one is not live here. That
+ * test is what stands between a retirement and a cure naming the verb it just
+ * retired — a shape this repo has now shipped four separate times.
  */
-export function yrdVisibleCommandPaths(): ReadonlySet<string> {
+export function yrdCommandSurface(): readonly YrdCommandFact[] {
   const invocation = normalizeYrdInvocation(["yrd"])
   const io: YrdCliIO = { stdout() {}, stderr() {} }
   const program = buildProgram(undefined, {}, invocation.name, io, () => undefined, {}, invocation)
-  const paths = new Set<string>()
-  const walk = (command: IntrospectableCommand, prefix: readonly string[]): void => {
-    for (const child of command.createHelp().visibleCommands(command)) {
-      // Commander's generated `help` verb is not part of the surface a cure
-      // would ever name, and it is synthesized per node.
+  const facts: YrdCommandFact[] = []
+  const declaredOptions = (command: IntrospectableCommand, into: Map<string, boolean>): void => {
+    for (const option of command.options) {
+      if (option.long !== undefined) into.set(option.long, !retiredHelpText(option.description))
+    }
+  }
+  const walk = (command: IntrospectableCommand, prefix: readonly string[], inherited: ReadonlyMap<string, boolean>) => {
+    const visible = new Set(command.createHelp().visibleCommands(command))
+    for (const child of command.commands) {
+      // Commander's generated `help` verb is synthesized per node and is not
+      // part of the surface a cure would ever name.
       if (child.name() === "help") continue
+      const options = new Map(inherited)
+      declaredOptions(child, options)
+      // `yrd bay --json` runs the group's default child, so that child's flags
+      // are genuinely accepted at the group's own path.
+      const fallback = child.commands.find((grandchild) => grandchild.name() === child._defaultCommandName)
+      if (fallback !== undefined) declaredOptions(fallback, options)
+      const live = visible.has(child)
       for (const spelling of [child.name(), ...child.aliases()]) {
         const path = [...prefix, spelling]
-        paths.add(path.join(" "))
-        walk(child, path)
+        facts.push({ path: path.join(" "), live, options })
+        walk(child, path, options)
       }
     }
   }
-  walk(program as unknown as IntrospectableCommand, [])
-  return paths
+  const globals = new Map<string, boolean>()
+  for (const option of (program as unknown as IntrospectableCommand).options) {
+    if (option.long !== undefined) globals.set(option.long, !retiredHelpText(option.description))
+  }
+  walk(program as unknown as IntrospectableCommand, [], globals)
+  return facts
 }
 
 /** Cold-path fallback for host failures outside the normal command catcher.
