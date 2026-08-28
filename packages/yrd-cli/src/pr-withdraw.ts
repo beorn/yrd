@@ -280,7 +280,10 @@ export async function preflightRemerge(
       : verdict === "RECUT-FORCE" || verdict === "RECUT"
         ? `yrd pr submit ${pr.branch}`
         : options.queue === true
-          ? `yrd pr ready ${pr.id}`
+          ? // `yrd pr ready` retired with the record verbs: queueing a fresh tip is
+            // a resubmit — the standing fact renews and compose picks it up, which
+            // is also exactly what the in-process applier executes.
+            `yrd pr submit ${pr.branch}`
           : `yrd pr view ${pr.id}`
   const evidence: RemergePreflightResult["evidence"] = {
     headSha: source.head,

@@ -11346,8 +11346,8 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
+    .option("--title <text>", "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
+    .option("--description <text>", "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
     .option(
       "--prop <key>=<value>",
       "set a prop on the submitted revision — an opaque key=value label (repeatable)",
@@ -11733,8 +11733,8 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch create")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
+    .option("--title <text>", "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
+    .option("--description <text>", "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
     .option(
       "--prop <key>=<value>",
       "set a prop on the draft revision — an opaque key=value label (repeatable)",
@@ -11769,8 +11769,8 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (defaults to the head commit subject)")
-    .option("--description <text>", "PR description body (defaults to the head commit body)")
+    .option("--title <text>", "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
+    .option("--description <text>", "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
     .option(
       "--prop <key>=<value>",
       "set a prop on the submitted revision — an opaque key=value label (repeatable)",
