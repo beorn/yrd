@@ -1,17 +1,19 @@
 /**
  * @failure Bay lifecycle state diverges from durable Jobs, replayed record
- * history stops materializing, or a retired record verb quietly comes back.
+ * history stops parsing, a legacy pr/* payload starts being accepted as a live
+ * append, or a retired record verb quietly comes back.
  * @level l2
  * @consumer @yrd/bay
  *
  * S7 conversion note (branch-is-change, @i/10 22991): every test that drove a
  * record VERB (intake, submit-by-record, ready, recut, review, comment,
  * requestChecks, requestReview, recordAdmission, editPr, closePr,
- * settleSuperseded, publication) was deleted with the verbs; tests of
- * surviving flows (bay workspace lifecycle, derived-lane submission, replay,
- * selectors, refusals) converted. Record STATE in these fixtures is seeded by
- * journal replay — the reducers stay live until the store field deletes at
- * integration — never by commands, which can no longer emit pr/* events.
+ * settleSuperseded, publication) was deleted with the verbs; tests of surviving
+ * flows (bay workspace lifecycle, derived-lane submission, replay, refusals)
+ * converted. The record store is gone, so a fixture's seeded pr/* history
+ * projects NOTHING — it is journal content, and every assertion that used to
+ * read a materialized record now reads the journal instead. "No record minted"
+ * means no pr/* frame appended.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -32,15 +34,11 @@ import {
   GitShaSchema,
   ChangeAdmissionRecordedFactSchema,
   ChangeRejectedFactSchema,
-  currentChangeRev,
   normalizeV2By,
   normalizeV2Submitter,
-  changeDeliveryState,
   resolveBase,
-  resolveChange,
   type BaysState,
   type DeprovisionedBay,
-  type Change,
   type ProvisionedBay,
   type RefreshedBay,
 } from "../src/model.ts"
@@ -187,13 +185,7 @@ async function createHarness(log?: ConditionalLogger) {
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
 
-function changeFacts(pr: Change | undefined) {
-  if (pr === undefined) throw new Error("expected PR")
-  return { ...pr, delivery: changeDeliveryState(pr), current: currentChangeRev(pr) }
-}
-
 const bays = (app: TestApp): BaysState => app.bays.state() as BaysState
-const readChange = (app: TestApp, selector: string): Change | undefined => resolveChange(bays(app), selector)
 
 type SeedEvent = { name: string; data: Record<string, unknown> }
 
@@ -354,7 +346,11 @@ describe("withBays", () => {
 
     expect((app.commands as Record<string, unknown>).pr).toBeUndefined()
     expect(Object.keys(app.bays)).not.toEqual(expect.arrayContaining(["startSession", "stopSession"]))
-    expect(readChange(app, "PR1")).not.toHaveProperty("sessions")
+    // The retired session facts replay (the journal below still holds all
+    // three) and project nothing at all: no bay, no submit fact. There is no
+    // session-bearing state left for a Hab launch to leak into.
+    expect(app.bays.list()).toEqual([])
+    expect(bays(app).submits).toEqual({})
     expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([
       "pr/pushed",
       "pr/session-started",
@@ -395,18 +391,26 @@ describe("withBays", () => {
     }
     // Q1: resubmitting the merged branch with a NEW head re-enters through the
     // DERIVED lane — the submit fact is the submission, the queue composes it
-    // under a fresh derived identity, and no record mints. The integrated PR1
-    // stays frozen.
+    // under a fresh derived identity, and no record mints.
+    const seeded = (await Array.fromAsync(app.events())).map(({ name }) => name)
     const reentered = await app.bays.submitSelection("topic/merged", submitOptions)
     expect(reentered).toMatchObject({ lane: "derived", branch: "topic/merged", sha: HEAD_2, base: "main" })
     expect(bays(app).submits["topic/merged"]).toMatchObject({ sha: HEAD_2 })
-    expect(Object.keys(bays(app).prs)).toEqual(["PR1"])
-    expect(changeFacts(readChange(app, "PR1"))).toMatchObject({ delivery: "integrated", current: { head: HEAD_1 } })
-    // With no live record the branch selector read-resolves the frozen change.
-    expect(changeFacts(readChange(app, "topic/merged"))).toMatchObject({ id: "PR1", delivery: "integrated" })
+    // "No record minted" is a claim about the JOURNAL now: the branch's landed
+    // pr/* history is neither extended nor rewritten, and the re-entry appends
+    // exactly one derived-lane fact beside it.
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([...seeded, "branch/submitted"])
   })
 
-  it("refuses a terminal result that does not transition the current PR revision", async () => {
+  it("accepts a terminal frame naming a superseded revision, and projects nothing from it", async () => {
+    // COVERAGE RETIRED WITH ITS SUBJECT, not converted (S7, @i/10 22991): this
+    // test used to prove the reducer REFUSED a terminal whose revision had been
+    // superseded ("stale terminal 'pr/withdrawn' for change 'PR1'"). Staleness
+    // is a comparison against a record's CURRENT revision, and the store that
+    // held one is deleted — `assertTerminalApplies` still stands in plugin.ts
+    // with no caller. No surviving @yrd/bay surface judges a terminal against a
+    // revision. What the package still owes is what this now pins: the frame is
+    // well-formed, so the append registry ACCEPTS it, and it projects nothing.
     const staleWithdraw = command({
       title: "Emit a stale change withdrawal",
       apply: () => ({
@@ -435,15 +439,15 @@ describe("withBays", () => {
       ],
       { staleWithdraw },
     )
-    const before = await Array.fromAsync(app.events())
+    const before = (await Array.fromAsync(app.events())).map(({ name }) => name)
 
-    await expect(app.dispatch(staleWithdraw, undefined)).rejects.toThrow(/stale terminal.*PR1/iu)
+    await app.dispatch(staleWithdraw, undefined)
 
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-    expect(changeFacts(readChange(app, "PR1"))).toMatchObject({
-      delivery: "submitted",
-      current: { n: 2, head: HEAD_2 },
-    })
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([...before, "pr/withdrawn"])
+    // Four seeded pr/* frames carrying two revisions, plus a fifth naming the
+    // first — and the projection is empty. Acceptance without projection, for
+    // a frame no reducer is left to judge.
+    expect(app.bays.state()).toEqual({ byId: {}, submits: {} })
   })
 
   it("replays historical current and legacy terminal payloads without accepting legacy appends", async () => {
@@ -582,43 +586,29 @@ describe("withBays", () => {
       { legacyWithdraw, legacyReject, transitionalReject, legacyIntegrate, legacyPush, legacySubmit },
     )
 
-    expect(changeFacts(readChange(app, "PR1"))).toMatchObject({ delivery: "rejected", issue: issueRef })
-    expect(readChange(app, "PR1")?.revs).toEqual([expect.not.objectContaining({ submitter: expect.anything() })])
-    expect(changeFacts(readChange(app, "PR2"))).toMatchObject({
-      state: "closed",
-      merged: true,
-      delivery: "integrated",
-      issue: issueRef,
-      integration: { commit: BASE, baseSha: BASE },
-    })
-    expect(changeFacts(readChange(app, "PR3"))).toMatchObject({ delivery: "withdrawn", issue: issueRef })
-    expect(changeFacts(readChange(app, "PR4"))).toMatchObject({ delivery: "integrated", terminalRun: "R91" })
-    expect(changeFacts(readChange(app, "PR5"))).toMatchObject({
-      delivery: "rejected",
-      terminalRun: "R92",
-      detail: "current check failure",
-    })
-    expect(changeFacts(readChange(app, "PR6"))).toMatchObject({
-      delivery: "canceled",
-      terminalRun: "R93",
-      canceledBy: "@ci",
-      cancelReason: "superseded",
-    })
-    expect(changeFacts(readChange(app, "PR7"))).toMatchObject({
-      delivery: "pushed",
-      current: { n: 2, head: HEAD_2, submitter: "@dev/3", recut: { fromRevision: 1 } },
-    })
-    expect(changeFacts(readChange(app, "PR8"))).toMatchObject({
-      delivery: "pushed",
-      current: { n: 2, head: HEAD_2, recut: { fromRevision: 1 } },
-    })
-    expect(currentChangeRev(readChange(app, "PR8")!)).not.toHaveProperty("submitter")
-    await expect(app.dispatch(legacyWithdraw, undefined)).rejects.toThrow()
-    await expect(app.dispatch(legacyReject, undefined)).rejects.toThrow()
-    await expect(app.dispatch(transitionalReject, undefined)).rejects.toThrow()
-    await expect(app.dispatch(legacyIntegrate, undefined)).rejects.toThrow()
-    await expect(app.dispatch(legacyPush, undefined)).rejects.toThrow()
-    await expect(app.dispatch(legacySubmit, undefined)).rejects.toThrow()
+    // The REPLAY half: eight changes' worth of legacy and current terminal
+    // payloads — a withdrawal carrying only its id, an integration with no
+    // landingSha, a rejection with no headSha, recuts with and without
+    // submitter provenance, an edit landing after its terminal — all parsed by
+    // the permissive `replayEvents` schemas rather than quarantined. Booting at
+    // all is that proof; projecting nothing is S7.
+    expect(app.bays.state()).toEqual({ byId: {}, submits: {} })
+
+    // The APPEND half, and why the two registries are not one: `replayEvents`
+    // accepts every shape above, `events` accepts only the current one. Each
+    // command below re-offers a seeded payload as a LIVE append and is refused
+    // there, named to the field the modern shape requires and the legacy one
+    // lacks. Pinned to that field rather than left as a bare `toThrow()`: with
+    // the materialization half of this test gone, these six ARE the test, and a
+    // bare throw would read as green for an unrelated crash — or, worse, keep
+    // reading green if a widened append schema started taking legacy frames and
+    // something else happened to throw.
+    await expect(app.dispatch(legacyWithdraw, undefined)).rejects.toThrow(/"revision"[\s\S]*received undefined/u)
+    await expect(app.dispatch(legacyReject, undefined)).rejects.toThrow(/"headSha"[\s\S]*received undefined/u)
+    await expect(app.dispatch(transitionalReject, undefined)).rejects.toThrow(/"step"[\s\S]*received undefined/u)
+    await expect(app.dispatch(legacyIntegrate, undefined)).rejects.toThrow(/"landingSha"[\s\S]*received undefined/u)
+    await expect(app.dispatch(legacyPush, undefined)).rejects.toThrow(/"changeId"[\s\S]*received undefined/u)
+    await expect(app.dispatch(legacySubmit, undefined)).rejects.toThrow(/"submitter"[\s\S]*received undefined/u)
   })
 
   it("runs a pinned bay through refresh, derived submission, the close guard, and close", async () => {
@@ -646,7 +636,9 @@ describe("withBays", () => {
     })
     expect(submitted).toMatchObject({ lane: "derived", branch: "issue/fix-release", sha: HEAD_2, base: "main" })
     expect(bays(app).submits["issue/fix-release"]).toMatchObject({ sha: HEAD_2, base: "main" })
-    expect(Object.keys(bays(app).prs)).toEqual([])
+    // No record intake anywhere in the bay's life: its journal is bay/* facts
+    // plus the one derived-lane submission.
+    expect((await Array.fromAsync(app.events())).filter(({ name }) => name.startsWith("pr/"))).toEqual([])
     expect(workspace.calls).toEqual([`provision:B1:${BASE}`, "refresh:B1", "checkpoint:B1"])
 
     // The close guard re-keys on the standing submit fact: closing while the
@@ -1017,7 +1009,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     expect(bays(app).submits[branch]).toMatchObject({ sha: HEAD_2 })
   })
 
-  it("D2 retired: a withdrawn branch's resubmit re-enters through the derived lane; the record stays withdrawn", async () => {
+  it("D2 retired: a withdrawn branch's resubmit re-enters through the derived lane; the withdrawn history stays frozen", async () => {
     await using app = await seededApp([
       {
         name: "pr/pushed",
@@ -1026,28 +1018,25 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
       { name: "pr/submitted", data: { pr: "PR1", revision: 1, headSha: HEAD_1 } },
       { name: "pr/withdrawn", data: { pr: "PR1", revision: 1, headSha: HEAD_1, reason: "pulled back" } },
     ])
-    expect(changeFacts(readChange(app, "PR1"))).toMatchObject({ delivery: "withdrawn" })
+    const seeded = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(seeded, "the seeded history ends withdrawn").toEqual(["pr/pushed", "pr/submitted", "pr/withdrawn"])
 
     // The reopen door retired with the legacy mint: resubmitting the branch
     // writes the submit fact and the queue composes it as a derived member.
-    // The withdrawn record keeps its frozen history — direct branches derive
-    // identity from content now, not from record continuity.
+    // Direct branches derive identity from content now, not from record
+    // continuity — so the withdrawal is still the last word on the old
+    // history, and no reopen frame joins it.
     const reentered = await app.bays.submitSelection("topic/redeliver", directOptions(HEAD_2))
     expect(reentered).toMatchObject({ lane: "derived", branch: "topic/redeliver", sha: HEAD_2 })
     expect(bays(app).submits["topic/redeliver"]).toMatchObject({ sha: HEAD_2 })
-    expect(Object.keys(bays(app).prs)).toEqual(["PR1"])
-    expect(changeFacts(readChange(app, "PR1"))).toMatchObject({
-      delivery: "withdrawn",
-      current: { n: 1, head: HEAD_1 },
-    })
-    expect(readChange(app, "PR1")?.withdrawnAt).toBeTypeOf("string")
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([...seeded, "branch/submitted"])
   })
 
   it("Q1 simplified: resubmitting a merged branch at the SAME head routes to the derived lane too", async () => {
     // S7 dropped the terminal-branch interception (inventory: "always route to
     // derived") — a same-head resubmit re-projects the fact, and the queue's
     // compose settles an already-landed member at run time, loudly, from its
-    // tree-containment proof. The frozen record is untouched.
+    // tree-containment proof. The landed pr/* history is untouched.
     await using app = await seededApp([
       {
         name: "pr/pushed",
@@ -1064,8 +1053,6 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     const already = await app.bays.submitSelection("topic/merged", directOptions(HEAD_1))
     expect(already).toMatchObject({ lane: "derived", branch: "topic/merged", sha: HEAD_1, base: "main" })
     expect(bays(app).submits["topic/merged"]).toMatchObject({ sha: HEAD_1 })
-    expect(Object.keys(bays(app).prs)).toEqual(["PR1"])
-    expect(changeFacts(readChange(app, "PR1"))).toMatchObject({ delivery: "integrated", integration: { commit: BASE } })
     const after = await Array.fromAsync(app.events())
     expect(after.length).toBe(before + 1)
     expect(after.at(-1)?.name).toBe("branch/submitted")
@@ -1120,7 +1107,7 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
 
     it("the identical head re-enters on a NEW branch — the spent-payload refusal is retired", async () => {
       await using app = await seededApp(withdrawnSeed)
-      expect(changeFacts(readChange(app, "PR1"))).toMatchObject({ delivery: "withdrawn" })
+      const seeded = (await Array.fromAsync(app.events())).map(({ name }) => name)
 
       // The bead's specimen: the identical head, offered on a NEW branch.
       // Pre-purge this refused ("payload already recorded"); now the record
@@ -1128,22 +1115,20 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
       const reentered = await app.bays.submitSelection("topic/rebuilt", directOptions(HEAD_1))
       expect(reentered).toMatchObject({ lane: "derived", branch: "topic/rebuilt", sha: HEAD_1 })
       expect(bays(app).submits["topic/rebuilt"]).toMatchObject({ sha: HEAD_1 })
-      expect(Object.keys(bays(app).prs)).toEqual(["PR1"])
+      expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([...seeded, "branch/submitted"])
     })
 
     it("resubmitting the withdrawn branch itself re-enters the same content as a derived member", async () => {
       await using app = await seededApp(withdrawnSeed)
+      const seeded = (await Array.fromAsync(app.events())).map(({ name }) => name)
 
-      // Same branch, same head: withdrawal withdrew the RECORD; resubmitting
-      // the content runs it again. Re-entry composes fresh — no reopen, the
-      // record keeps its withdrawn history.
+      // Same branch, same head: the withdrawal withdrew a RECORD; resubmitting
+      // the content runs it again. Re-entry composes fresh — no reopen, and
+      // the withdrawn history keeps its own last word.
       const reentered = await app.bays.submitSelection("topic/burned", directOptions(HEAD_1))
       expect(reentered).toMatchObject({ lane: "derived", branch: "topic/burned", sha: HEAD_1 })
-      expect(changeFacts(readChange(app, "PR1"))).toMatchObject({
-        delivery: "withdrawn",
-        current: { n: 1, head: HEAD_1 },
-      })
-      expect(Object.keys(bays(app).prs)).toEqual(["PR1"])
+      expect(bays(app).submits["topic/burned"]).toMatchObject({ sha: HEAD_1 })
+      expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toEqual([...seeded, "branch/submitted"])
     })
   })
 })

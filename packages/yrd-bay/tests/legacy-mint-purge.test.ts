@@ -6,8 +6,13 @@
  * invalidation and the PR2139 double-merge (2026-08-27). Post-purge the verb
  * still works, but a recordless branch routes to the DERIVED lane: the submit
  * writes the branch/submitted fact and mints nothing; compose admits it under
- * the synthetic identity. A live record keeps the record path until S7 deletes
- * the store wholesale.
+ * the synthetic identity.
+ *
+ * S7 (branch-is-change, @i/10 22991) deleted the record store, so "minted
+ * nothing" is no longer a question the STATE can answer — there is no `prs`
+ * field to find empty. The journal is where a mint would show, and the modern
+ * spelling of this file's intent is that the submit appends the derived-lane
+ * fact and no `pr/*` frame beside it.
  * @level l2
  * @consumer @yrd/bay `yrd pr submit` / `bay submit`; the 22991 S7 chain
  */
@@ -71,7 +76,13 @@ describe("legacy mint purge — pr.submit routes recordless branches to the deri
     const state = app.state()
     expect(state.bays.submits["topic/fresh"], "the derived lane's submit fact").toBeDefined()
     expect(state.bays.submits["topic/fresh"]?.sha).toBe(HEAD_1)
-    const minted = Object.values(state.bays.prs).filter((pr) => pr.branch === "topic/fresh")
-    expect(minted, "no legacy record may mint post-purge").toHaveLength(0)
+    // The app booted on an EMPTY journal, so this is the whole append: one
+    // derived-lane fact and nothing else.
+    const appended = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(appended, "the submit appends exactly the derived-lane fact").toEqual(["branch/submitted"])
+    expect(
+      appended.filter((name) => name.startsWith("pr/")),
+      "no legacy record may mint post-purge",
+    ).toHaveLength(0)
   })
 })

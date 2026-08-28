@@ -60,7 +60,6 @@ import {
   normalizeV2By,
   normalizeLegacyChangeKeys,
   normalizeV1CorrelationToProps,
-  changeProps,
   changeDeliveryState,
   changeHead,
   changeRevisionNumber,
@@ -1245,23 +1244,6 @@ function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffAr
   }
 }
 
-function propsEqual(left: DeepReadonly<ChangeProps>, right: DeepReadonly<ChangeProps>): boolean {
-  const entries = Object.entries(left)
-  return entries.length === Object.keys(right).length && entries.every(([key, value]) => right[key] === value)
-}
-
-/** The first key `next` would overwrite with a different value, if any. */
-function propsConflictKey(
-  current: DeepReadonly<ChangeProps> | undefined,
-  next: DeepReadonly<ChangeProps>,
-): string | undefined {
-  if (current === undefined) return undefined
-  for (const [key, value] of Object.entries(next)) {
-    const existing = current[key]
-    if (existing !== undefined && existing !== value) return key
-  }
-  return undefined
-}
 
 function propsPatch(pr: DeepReadonly<Change>, props: DeepReadonly<ChangeProps>) {
   return {
@@ -1273,27 +1255,13 @@ function propsPatch(pr: DeepReadonly<Change>, props: DeepReadonly<ChangeProps>) 
   }
 }
 
-function assertTerminalApplies(
-  pr: DeepReadonly<Change>,
-  terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; props?: ChangeProps }>,
-  eventName: string,
-): void {
-  const currentProps = changeProps(pr)
-  if (
-    (terminal.revision !== undefined && terminal.revision !== changeRevisionNumber(pr)) ||
-    (terminal.headSha !== undefined && terminal.headSha !== changeHead(pr))
-  ) {
-    throw new Error(
-      `yrd: stale terminal '${eventName}' for change '${pr.id}' targets ${terminal.revision ?? "unknown"}@${terminal.headSha ?? "unknown"}; current is ${changeRevisionNumber(pr)}@${changeHead(pr)}`,
-    )
-  }
-  if (terminal.issueRef !== undefined && terminal.issueRef !== pr.issue) {
-    throw new Error(`yrd: terminal issue '${terminal.issueRef}' does not match change '${pr.id}'`)
-  }
-  if (terminal.props !== undefined && (currentProps === undefined || !propsEqual(currentProps, terminal.props))) {
-    throw new Error(`yrd: terminal props does not match change '${pr.id}'`)
-  }
-}
+/* S7: `assertTerminalApplies` deleted here, not lost. It refused a terminal
+ * naming a superseded revision by comparing against the RECORD's current
+ * revision — a comparison the record store took with it. The invariant itself
+ * lives on in @yrd/queue (`queue.ts`, "stale terminal ... queue authority is
+ * ..."), keyed on queue authority instead, which is where a terminal's producer
+ * now is. Deleting the bay copy is what makes the queue's the only one: a
+ * callerless guard reads as protection nobody has. */
 
 function associateRejectedTerminalRun(
   pr: DeepReadonly<Change>,
