@@ -8236,6 +8236,18 @@ async function resolveInitRow(
   }
 }
 
+/** BOTH spellings of a scoped delivery's identity — the minted change id and
+ * the branch it was pushed on — because the surfaces this scope filters emit
+ * rows keyed either way. A record-lane row carries the id; a DERIVED-lane row
+ * is projected from a standing submit fact that predates any mint, so its only
+ * identity is the branch (`factOnly`, see submitFactChangeRows). Scoping to an
+ * id alone can never match — nor exclude — a branch-keyed row, which is how a
+ * named delivery still rendered an unrelated branch's fact (23238). */
+function scopeChangeIdentities(selected: Set<string>, pr: Change): void {
+  selected.add(pr.id)
+  selected.add(pr.branch)
+}
+
 function resolveQueueTargets(
   state: YrdCliState,
   selectors: readonly string[],
@@ -8250,7 +8262,7 @@ function resolveQueueTargets(
     if (pr === undefined) bases.add(selectedBase(state, selector))
     else {
       bases.add(pr.base)
-      selected.add(pr.id)
+      scopeChangeIdentities(selected, pr)
     }
   }
   let canonicalFilter: string | undefined
@@ -8259,7 +8271,7 @@ function resolveQueueTargets(
     // the bay model, so `queue run <unknown>` reports what it searched too.
     const found = resolveChange(state.bays, filterPr) ?? requireLiveChange(state.bays, filterPr)
     canonicalFilter = found.id
-    selected.add(found.id)
+    scopeChangeIdentities(selected, found)
     bases.add(found.base)
   }
   return { bases, selected, changeFilter: canonicalFilter }
