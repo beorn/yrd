@@ -217,6 +217,130 @@ async function gitlinkConflictFixture(options: {
   return { root, superRepo, moduleRepo, gitlinkPath, targetSha, authorBranch, authorTip, authorModuleSha }
 }
 
+/**
+ * The PR2164 shape (2026-08-28): the author's floor is an ANCESTOR of the submodule's
+ * main tip, and the superproject's main ALREADY pins that tip — someone else's change
+ * landed the same dependency bump first. Distinct from
+ * {@link gitlinkConflictFixture}, where the two module commits are siblings and main's
+ * tip is a merge of both, so the fill always has something left to write.
+ */
+async function landedAheadFixture(): Promise<{
+  root: string
+  superRepo: string
+  moduleRepo: string
+  gitlinkPath: string
+  targetSha: string
+  authorBranch: string
+  authorTip: string
+  authorModuleSha: string
+  mainModuleSha: string
+}> {
+  const { mkdtemp } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const root = await mkdtemp(join(tmpdir(), "yrd-rebuild-landed-ahead-"))
+  const superRepo = join(root, "super")
+  const moduleRepo = join(root, "module")
+  const gitlinkPath = "dep"
+
+  await git.run(root, ["init", "-q", "-b", "main", "module"])
+  await git.run(moduleRepo, ["config", "user.name", "Yrd Test"])
+  await git.run(moduleRepo, ["config", "user.email", "yrd@example.invalid"])
+  await Bun.write(`${moduleRepo}/version.txt`, "base\n")
+  await git.run(moduleRepo, ["add", "version.txt"])
+  await git.run(moduleRepo, ["commit", "-qm", "module base"])
+
+  await git.run(root, ["init", "-q", "-b", "main", "super"])
+  await git.run(superRepo, ["config", "user.name", "Yrd Test"])
+  await git.run(superRepo, ["config", "user.email", "yrd@example.invalid"])
+  await git.run(superRepo, ["config", "protocol.file.allow", "always"])
+  await git.run(superRepo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRepo, gitlinkPath])
+  await git.run(superRepo, ["commit", "-qm", "add dependency"])
+  const baseSuperSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+
+  // The author's move goes straight onto the submodule's main (published, so the
+  // shaset fill-in's precondition holds), and main then moves PAST it.
+  await Bun.write(`${moduleRepo}/author.txt`, "author\n")
+  await git.run(moduleRepo, ["add", "author.txt"])
+  await git.run(moduleRepo, ["commit", "-qm", "author move"])
+  const authorModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
+  await Bun.write(`${moduleRepo}/later.txt`, "later\n")
+  await git.run(moduleRepo, ["add", "later.txt"])
+  await git.run(moduleRepo, ["commit", "-qm", "main moves past the floor"])
+  const mainModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
+
+  const authorBranch = "task/author-gitlink"
+  await git.run(superRepo, ["switch", "-qc", authorBranch, baseSuperSha])
+  await git.run(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
+  await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", authorModuleSha])
+  await git.run(superRepo, ["add", "--", gitlinkPath])
+  await git.run(superRepo, ["commit", "-qm", "author: advance dependency to the floor"])
+  const authorTip = await git.run(superRepo, ["rev-parse", "HEAD"])
+
+  // Main lands the SAME dependency ahead of the author, at the submodule's tip.
+  await git.run(superRepo, ["switch", "-q", "main"])
+  await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
+  await git.run(superRepo, ["add", "--", gitlinkPath])
+  await git.run(superRepo, ["commit", "-qm", "main: an earlier change already bumped the dependency"])
+  const targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+
+  return {
+    root,
+    superRepo,
+    moduleRepo,
+    gitlinkPath,
+    targetSha,
+    authorBranch,
+    authorTip,
+    authorModuleSha,
+    mainModuleSha,
+  }
+}
+
+describe("rebuildCandidateByMerge — the base already landed the fill's own target", () => {
+  /**
+   * The live PR2164 wedge (2026-08-28, `needs-person` for five hours on
+   * "generated wrapper paths differ: expected [km], got []"). Two mechanisms in this
+   * file's own path disagreed: the gitlink conflict resolves to the BASE's value, and
+   * the base already carries the submodule's main tip — which is exactly what the fill
+   * then asks the shaset writer to set. `update-index` had nothing to change, the staged
+   * set came back empty, and the writer's completeness proof read a no-op as a mismatch.
+   */
+  it("composes when the base-side conflict resolution already reached the filled value", async () => {
+    const fixture = await landedAheadFixture()
+    roots.push(fixture.root)
+
+    // The fixture's own preconditions, checked with plain git so the test does not
+    // depend on the internals it exercises: the author's floor is a strict ancestor of
+    // the submodule's main tip, and the target already pins that tip.
+    await git.run(fixture.moduleRepo, ["merge-base", "--is-ancestor", fixture.authorModuleSha, fixture.mainModuleSha])
+    expect(await git.run(fixture.superRepo, ["rev-parse", `${fixture.targetSha}:${fixture.gitlinkPath}`])).toBe(
+      fixture.mainModuleSha,
+    )
+    expect(await git.run(fixture.superRepo, ["rev-parse", `${fixture.authorTip}:${fixture.gitlinkPath}`])).toBe(
+      fixture.authorModuleSha,
+    )
+
+    const result = await rebuildCandidateByMerge(
+      options(fixture.superRepo),
+      { sha: fixture.targetSha },
+      {
+        id: "PR1",
+        changeId: CHANGE_ID,
+        branch: fixture.authorBranch,
+        headSha: fixture.authorTip,
+      },
+    )
+
+    // The candidate carries the submodule's main tip, and the authored tip is still its
+    // second parent — the rebuild neither refused nor rewrote the author's work.
+    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])).toBe(
+      fixture.mainModuleSha,
+    )
+    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}^2`])).toBe(fixture.authorTip)
+  })
+})
+
 describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => {
   it("4. author's submodule commit IS published to the submodule's main: the gitlink fills from main, no refusal", async () => {
     const fixture = await gitlinkConflictFixture({ authorPublishedToMain: true })
