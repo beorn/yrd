@@ -61,8 +61,22 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // 2026-08-26 — 22991 phase 2, first store-deletion door: initialState no
   // longer seeds queues.authority.statuses (the stored ChangeDeliveryState
   // copy); delivery state derives from the change record and the submit
-  // facts at read time. Current.
+  // facts at read time. THE LIVE /hh JOURNAL STORES THIS ONE at the time of
+  // the entry below, so the edge out of it is what carries the fleet across
+  // the store deletion.
   "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
+  // 2026-08-28 — 22991 phase 2, the store deletion itself: `bays.prs` (the
+  // change records) and `bays.receipts` (intake idempotence) leave the state
+  // contract. A branch and its standing submit fact are the delivery truth.
+  //
+  // READ FROM THE GATE, NOT FROM A NOTE. An earlier confirmation of this same
+  // value was carried in a checklist for hours while the branch kept moving,
+  // and a measurement taken mid-branch computed a DIFFERENT identity
+  // (16b9b496…) — same composition, earlier commit. The two are not in
+  // conflict and neither was stale: an identity is a fact about one commit.
+  // The gate prints the value for the source in front of you, which is the
+  // only version that cannot be out of date. Current.
+  "1b458ee2a1013abdab4b4f6d6e7ce9bc263e3bbe5c2ba8f577ea7aa5f692ae32",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

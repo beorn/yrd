@@ -646,8 +646,13 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // and the production predecessor 701431d5 (measured from the live
     // journal's stored checkpoint_identity, cursor 92592, read-only
     // 2026-08-26) gains a retained edge below.
+    // Conscious update 2026-08-28 (22991 phase 2, the store deletion itself):
+    // `bays.prs` and `bays.receipts` leave the state contract, so the identity
+    // moves once more and 381cdb9e — the identity the live journal stored
+    // before this cut — becomes the retained predecessor that carries the
+    // deployment across it.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c")
+    expect(first.manifest.targetIdentity).toBe("1b458ee2a1013abdab4b4f6d6e7ce9bc263e3bbe5c2ba8f577ea7aa5f692ae32")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -707,8 +712,19 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       from: "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
       to: previousTargetIdentity,
     })
+    // TWO HOPS SINCE 2026-08-28, not one. The store deletion put its own
+    // identity between the released hop and the target, and the intermediate
+    // edge is spelled EXPLICITLY in host.ts on purpose: its callback still
+    // carries `bays.prs`, so letting it resolve implicitly onto the current
+    // target would hand a migrated checkpoint a field the contract no longer
+    // has. Assert both hops — asserting only the endpoints would pass even if
+    // the middle collapsed.
     expect(first.manifest.edges).toContainEqual({
       from: previousTargetIdentity,
+      to: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
+    })
+    expect(first.manifest.edges).toContainEqual({
+      from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
       to: first.manifest.targetIdentity,
     })
     // The door cannot run twice: nothing migrates OUT of the current identity,
@@ -1967,7 +1983,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c")
+    // The CURRENT target, not the identity of the edge under test: a restored
+    // checkpoint walks every forward edge it can, so since the store deletion
+    // (2026-08-28) a 701431d5 checkpoint lands two hops on rather than parking
+    // at 381cdb9e. Pinned as a literal, like the lock above, so a future bump
+    // fails here and has to be acknowledged instead of silently re-pointing.
+    expect(rewritten.checkpoint_identity).toBe("1b458ee2a1013abdab4b4f6d6e7ce9bc263e3bbe5c2ba8f577ea7aa5f692ae32")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -3642,13 +3663,20 @@ checks: [{check: {run: "true"}}]
     // identity change shipped without one; the intent rail's deletion, same
     // day, is the second edge this same lock caught).
     //
-    // Since 42ef9a27 / c344e112 (2026-08-25) that path is TWO HOPS, not one:
-    // every historical predecessor converges on the released change-record
-    // identity, which then takes a single real forward edge to the target. This
-    // expectation read `to: targetIdentity` for a whole day after the graph
-    // stopped being shaped that way, so the lock was red on main and asserting
-    // nothing anyone could act on.
+    // Since 42ef9a27 / c344e112 (2026-08-25) that path is not one hop: every
+    // historical predecessor converges on the released change-record identity,
+    // which then walks forward to the target. This expectation read
+    // `to: targetIdentity` for a whole day after the graph stopped being shaped
+    // that way, so the lock was red on main and asserting nothing anyone could
+    // act on.
+    //
+    // 2026-08-28 it became THREE hops: the store deletion put its own identity
+    // between the released hop and the target. Both forward edges are spelled
+    // out below rather than collapsed to endpoints — an endpoints-only
+    // assertion passes even when the middle disappears, and the middle is the
+    // edge that carries the live deployment across the deletion.
     const releasedHop = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
+    const storeDeletionHop = "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c"
     expect(attestation.manifest.edges).toEqual([
       { from: "0106b543f7e02d29dddc830b48352f4188e4ae86c641f4888771c27ce805f6e3", to: releasedHop },
       { from: "0150a374820eafd53c72571ff04caffc85acf1c9839c60736299ecd20f2c4657", to: releasedHop },
@@ -3662,8 +3690,15 @@ checks: [{check: {run: "true"}}]
       // The production identity before the declared step list left
       // `initialState` (23192), measured from the live journal's refusal.
       { from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598", to: releasedHop },
-      // The one real forward edge: the released identity above to the target.
-      { from: releasedHop, to: attestation.manifest.targetIdentity },
+      // First forward edge: the released identity to the store-deletion
+      // identity. Explicit in host.ts because its callback still carries
+      // `bays.prs`, which the contract after the next hop no longer has.
+      { from: releasedHop, to: storeDeletionHop },
+      // Second forward edge: the identity the live journal stores today to the
+      // current target. This is the one that carries the fleet across the
+      // deletion, and history is evicted past the point where a replay could
+      // substitute for it.
+      { from: storeDeletionHop, to: attestation.manifest.targetIdentity },
       { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
       // The production composition's identity before branch-is-change 2a.
       { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },
