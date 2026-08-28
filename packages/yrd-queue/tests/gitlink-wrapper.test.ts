@@ -292,6 +292,79 @@ describe("synthesizeGitlinkWrapper — the shaset-commit writer's contract as of
     expect(result.error.message).toContain("allowed [bun.lock]")
   })
 
+  /**
+   * The live PR2164 shape (2026-08-28): the content merge already brought the submodule
+   * to the value the shaset fill computed, so `update-index` had nothing to write and the
+   * staged set came back empty against `expected [km]`. The wrapper wrote a refusal out of
+   * a no-op and parked the change for five hours.
+   */
+  it("treats a gitlink the parent already carries as satisfied, not as a missing path", async () => {
+    const fixture = await repository()
+    const { repo, parent } = fixture
+    const result = await synthesizeGitlinkWrapper(
+      gitAdapter(),
+      repo,
+      parent,
+      // The base already RECORDS this exact value — asking for it stages nothing.
+      [{ path: "dep", sha: pin(fixture, "dep").base }],
+      "wrapper",
+    )
+
+    expect(result.status).toBe("passed")
+    if (result.status !== "passed") throw new Error("unreachable")
+    expect(result.output.commit).toBe(parent)
+    expect(result.output.generatedPaths).toEqual([])
+  })
+
+  it("writes only the gitlinks that still move when another is already at its value", async () => {
+    const fixture = await repository(["dep-a", "dep-b"])
+    const { repo, parent } = fixture
+    const result = await synthesizeGitlinkWrapper(
+      gitAdapter(),
+      repo,
+      parent,
+      [
+        { path: "dep-a", sha: pin(fixture, "dep-a").base },
+        { path: "dep-b", sha: pin(fixture, "dep-b").next },
+      ],
+      "wrapper",
+    )
+
+    expect(result.status).toBe("passed")
+    if (result.status !== "passed") throw new Error("unreachable")
+    const changed = await sh(repo, ["diff", "--name-only", parent, result.output.commit])
+    expect(changed.stdout.split("\n")).toEqual(["dep-b"])
+    const entryA = await sh(repo, ["ls-tree", result.output.commit, "--", "dep-a"])
+    expect(entryA.stdout).toContain(`160000 commit ${pin(fixture, "dep-a").base}`)
+  })
+
+  /**
+   * The half of the samePaths proof that still carries information: a path nobody asked
+   * for reaching the shaset tree is a real integrity failure, and relaxing the no-op leg
+   * above must not relax this one.
+   */
+  it("still refuses when a path nobody requested reaches the staged set", async () => {
+    const fixture = await repository()
+    const { repo, parent } = fixture
+    const result = await synthesizeGitlinkWrapper(
+      gitAdapter(),
+      repo,
+      parent,
+      [{ path: "dep", sha: pin(fixture, "dep").next }],
+      "wrapper",
+      async () => {
+        await writeFile(join(repo, "stowaway.txt"), "unrequested\n")
+        await sh(repo, ["add", "--", "stowaway.txt"])
+        return { generatedPaths: [] }
+      },
+    )
+
+    expect(result.status).toBe("failed")
+    if (result.status !== "failed") throw new Error("unreachable")
+    expect(result.error.code).toBe("wrapper-mismatch")
+    expect(result.error.message).toContain("stowaway.txt")
+  })
+
   it("returns the parent untouched when there is nothing to stage — the nothing-new shape", async () => {
     const { repo, parent } = await repository()
     const result = await synthesizeGitlinkWrapper(gitAdapter(), repo, parent, [], "wrapper")

@@ -4170,7 +4170,17 @@ export async function synthesizeGitlinkWrapper(
   message: string,
   provisionPinIntent?: PinIntentProvisioner,
 ): Promise<Readonly<{ status: "passed"; output: SynthesizedGitlinkWrapper }> | CandidateFailure> {
-  const expectedPaths = updates.map((update) => update.path)
+  // What the wrapper still has to WRITE, which is not the same as what it was
+  // asked to SET: a requested value the parent commit already records stages
+  // nothing at all, so counting it as expected below turns a no-op into a
+  // refusal. That is exactly what parked PR2164 for five hours on 2026-08-28 —
+  // the content merge fast-forwarded `km` to the same commit the shaset fill
+  // computed from the submodule's main, `update-index` had nothing to change,
+  // and the proof read `expected [km], got []`. Decided from the parent's own
+  // tree, never from writeGitlink's `unchanged`: the tree is the fact, the
+  // return value is only a report about the index.
+  const expectedPaths: string[] = []
+  const carriedByParent: string[] = []
   for (const update of updates) {
     const staged = await writeQueueGitlink(git, path, update.path, update.sha)
     if (!queueGitlinkWriteSucceeded(staged)) {
@@ -4181,6 +4191,12 @@ export async function synthesizeGitlinkWrapper(
         [update.path],
       )
     }
+    const carried = await readGitlink(git, path, parent, update.path)
+    if (carried !== undefined && carried.toLowerCase() === update.sha.toLowerCase()) {
+      carriedByParent.push(update.path)
+      continue
+    }
+    expectedPaths.push(update.path)
   }
   let provisionedPaths: readonly string[] = []
   if (provisionPinIntent !== undefined && updates.length > 0) {
@@ -4217,9 +4233,16 @@ export async function synthesizeGitlinkWrapper(
   }
   const materialized = await stagedPaths(git, path)
   if (!samePaths(materialized, expectedPaths)) {
+    // Name what was excluded from `expected` and why, in the refusal itself:
+    // an empty `got` reads as "the writer did nothing" until the reader can see
+    // how many requested paths were already satisfied by the parent.
     return candidateFailure(
       "wrapper-mismatch",
-      `generated wrapper paths differ: expected [${expectedPaths.join(", ")}], got [${materialized.join(", ")}]`,
+      `generated wrapper paths differ: expected [${expectedPaths.join(", ")}], got [${materialized.join(", ")}]` +
+        (carriedByParent.length === 0
+          ? ""
+          : `; excluded ${carriedByParent.length} requested gitlink(s) '${parent}' already carries ` +
+            `[${carriedByParent.join(", ")}]`),
       ".",
       symmetricDifference(materialized, expectedPaths),
     )
@@ -4495,7 +4518,12 @@ async function fillAuthoredGitlinksFromMain(
   return { status: "passed", output: { updates, filledPins, componentModelChanges } }
 }
 
-async function readGitlink(git: Git, repo: string, ref: string, path: string): Promise<string | undefined> {
+async function readGitlink(
+  git: Pick<Git, "run">,
+  repo: string,
+  ref: string,
+  path: string,
+): Promise<string | undefined> {
   const result = await git.run(repo, ["ls-tree", "-z", ref, "--", path], true)
   if (result.code !== 0 || result.stdout === "") return undefined
   const header = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(result.stdout)
