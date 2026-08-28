@@ -2758,7 +2758,7 @@ async function prepareCandidateMembers(
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const changes: CandidateChange[] = []
-  const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string): void => {
+  const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string, containedInBase: boolean): void => {
     if (pr.intent !== undefined || pr.changeId === undefined) return
     changes.push(
       CandidateChangeSchema.parse({
@@ -2767,6 +2767,7 @@ async function prepareCandidateMembers(
         revision: pr.revision,
         submittedHead: pr.headSha,
         generatedCommit,
+        containedInBase,
       }),
     )
   }
@@ -2835,8 +2836,16 @@ async function prepareCandidateMembers(
     // against a base that already contains it. Nothing is left to merge, and
     // re-merging an already-contained head would only manufacture an empty
     // merge commit.
+    //
+    // This is the ONLY place the question "is this member already in the base?"
+    // is put to git as a check that can answer no. It used to be asked, acted
+    // on, and forgotten in the same breath — so every later consumer re-asked
+    // it of the collapsed candidate, where `is-ancestor X X`,
+    // `candidateSha === baseSha` and `tree(X) === tree(X)` all answer yes for
+    // free. Recording it is what makes those consumers able to read a
+    // measurement instead of a tautology.
     if (await isAncestor(git, path, pr.headSha, "HEAD")) {
-      recordChange(pr, pr.headSha)
+      recordChange(pr, pr.headSha, true)
       continue
     }
     if (refuse !== undefined && refuse.paths.length > 0) {
@@ -2895,7 +2904,7 @@ async function prepareCandidateMembers(
         submoduleResolutions.push(...resolved.output)
         const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
         if (wrapper !== undefined) return wrapper
-        recordChange(pr, await git.commit(path, "HEAD"))
+        recordChange(pr, await git.commit(path, "HEAD"), false)
         continue
       }
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
@@ -2953,7 +2962,7 @@ async function prepareCandidateMembers(
       generated = synthesized.output.commit
       submoduleResolutions.push(...authoredFill.filledPins)
     }
-    recordChange(pr, generated)
+    recordChange(pr, generated, false)
   }
   return {
     status: "passed",
