@@ -2,9 +2,10 @@
  * @failure A required check RUNS, FAILS, and every operator surface still
  * reports the branch as healthy: `pr merge` tells the author to wait for a pass
  * that can never come, `pr checks` calls a check that exited 7
- * "not-requested", `queue audit` answers clean, and `pr list`/`pr view`/`pr
- * status` say "pending" — while `queues.admissionRefusals` holds the streak the
- * whole time.
+ * "not-requested", and `pr list`/`pr view`/`pr status` say "pending" — while
+ * `queues.admissionRefusals` holds the streak the whole time. `queue audit`
+ * belongs here for the opposite reason: its silence at one failure is correct,
+ * and the defect was that the READERS were silent with it.
  * @level l2
  * @consumer @yrd/cli pr merge · pr checks · pr list · pr view · pr status · queue audit
  *
@@ -21,8 +22,18 @@
  *   `pr merge`    issues a WRONG INSTRUCTION — "wait" — to the one person who
  *                 could act on the failure, at the moment they try to land.
  *   `pr checks`   asserts something FALSE: `not-requested` for a check that ran.
- *   `queue audit` gives a FALSE ALL-CLEAR from the tool whose job is wedges.
- *   the readers    are merely silent.
+ *   the readers   are merely silent.
+ *
+ * `queue audit` was on that list and should not have been: one failed check is
+ * an author's business, and a repeated identical refusal becomes
+ * `admission-refusal-loop` only at ADMISSION_REFUSAL_LOOP_THRESHOLD — a
+ * threshold set on purpose, because an audit that reports every first failure
+ * is an audit nobody reads. Its test asserts the DIVERGENCE instead: the
+ * wedge-finder may stay quiet only while the readers speak. Whether a VERDICT
+ * (a `check-failed` at one sha fails identically forever) deserves a threshold
+ * of 1 the way `candidate-already-landed` already does is @i/10-yrd/23236; that
+ * bead will invalidate the test below, and it must be changed by that decision
+ * rather than edited into agreement.
  *
  * Every assertion below names the refusal CODE, because "something is wrong" is
  * not what an operator needs at 2am — the code is what routes them.
@@ -270,6 +281,73 @@ describe("a refused branch is visible on the surfaces an operator reaches for", 
     expect(await runYrd(app, yrd("pr", "view", BRANCH), view.io), view.stderr()).toBe(0)
     expect(view.stdout()).toContain("refused")
     expect(view.stdout()).toContain(REFUSAL_CODE)
+  })
+
+  // REGRESSIONS. The fix reads the ledger by BRANCH now, which is what makes a
+  // memberless refusal reportable — and which opens three ways to be wrong that
+  // the id-keyed lookup could not be. Each of these passes today; each fails if
+  // the corresponding guard is dropped.
+  it("does not attribute another branch's refusal to this one", async () => {
+    // A branch-keyed lookup implemented as "find any refusal" would attach the
+    // first ledger row to every branch. Two refused branches, two codes: each
+    // must report its own.
+    await using app = await refusedBranch()
+    const otherBranch = "topic/other-refused"
+    await app.bays.recordBranchSubmit({ branch: otherBranch, sha: "3".repeat(40), base: "main" })
+    await app.queue.run({}, { runner: "refusal-visibility-test", leaseMs: 60_000 })
+
+    const list = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--json"), list.io), list.stderr()).toBe(0)
+    const live = (JSON.parse(list.stdout()) as { live: readonly Readonly<{ branch: string; state: string }>[] }).live
+    expect(live.map((row) => row.branch).toSorted()).toEqual([BRANCH, otherBranch].toSorted())
+    for (const row of live) {
+      expect(row.state, `${row.branch} must carry its own verdict`).toBe("refused")
+    }
+  })
+
+  it("stops reporting refused once the refusal is settled", async () => {
+    // `settlement === undefined` is the other half of the condition, and the
+    // one a re-key could silently drop: a refusal a human has already taken
+    // (needs-person) is recorded history, not a live wedge, and a surface that
+    // keeps shouting it teaches the operator to ignore the surface.
+    await using app = await refusedBranch()
+    const [row] = Object.values(app.state().queues.admissionRefusals)
+    if (row?.revision === undefined || row.headSha === undefined) {
+      throw new Error("expected the ledger row the fixture asserts, with the revision and head it refused")
+    }
+    await app.queue.settleAdmissionRefusal({
+      pr: row.pr,
+      revision: row.revision,
+      headSha: row.headSha,
+      disposition: "needs-person",
+      reason: "an operator has taken this one",
+    })
+
+    const view = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", BRANCH, "--json"), view.io), view.stderr()).toBe(0)
+    const derived = (JSON.parse(view.stdout()) as { derived: Readonly<{ state: string }> }).derived
+    expect(derived.state, "a settled refusal is history, not a live refusal").not.toBe("refused")
+  })
+
+  it("reports the LATEST refusal after a re-push refuses again", async () => {
+    // The sha comparison must gate on the CURRENT head, not merely on having
+    // seen one: a branch fixed, re-pushed, and refused again for a NEW reason
+    // has to report the new reason. Getting this wrong strands an operator on
+    // the previous cure.
+    await using app = await refusedBranch()
+    const nextHead = "4".repeat(40)
+    await app.bays.recordBranchSubmit({ branch: BRANCH, sha: nextHead, base: "main" })
+    await app.queue.run({}, { runner: "refusal-visibility-test", leaseMs: 60_000 })
+
+    expect(app.state().queues.admissionRefusals[Object.keys(app.state().queues.admissionRefusals)[0]!]).toMatchObject({
+      branch: BRANCH,
+      headSha: nextHead,
+    })
+    const view = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", BRANCH, "--json"), view.io), view.stderr()).toBe(0)
+    expect(JSON.parse(view.stdout())).toMatchObject({
+      derived: { sha: nextHead, state: "refused", refusal: { code: REFUSAL_CODE } },
+    })
   })
 
   it("keeps a re-pushed branch out of the refused state its previous head earned", async () => {
