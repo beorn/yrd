@@ -54,15 +54,26 @@ async function queuedRunnerRepo(config?: string): Promise<{ repo: string }> {
   await writeFile(join(repo, "live-row.txt"), "live row\n")
   await git(repo, "add", "live-row.txt")
   await git(repo, "commit", "-qm", "live row")
-  const headSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   await using submitter = await createYrdHost({ cwd: repo, log: createLogger("test", [{ level: "silent" }]) })
-  await submitter.app.bays.submit({
-    branch: "issue/live-row",
-    headSha,
+  // S7 (branch-is-change): the branch's standing submit fact IS the submission,
+  // so the runner is seeded through the derived lane. `bays.submit` minted a
+  // record and is retired — it refuses by name rather than seeding anything.
+  const submission = await submitter.app.bays.submitSelection("issue/live-row", {
     base: "main",
     issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+    // Answered from the fixture's own repository rather than stubbed: the
+    // branch is not checked out here, so resolving its ref IS the step that
+    // finds the head being submitted.
+    resolveRevision: (ref) => git(repo, "rev-parse", "--verify", `${ref}^{commit}`).catch(() => undefined),
+    resolveParents: async (sha) => (await git(repo, "rev-list", "--parents", "-n", "1", sha)).split(" ").slice(1),
+    run: { runner: "test", leaseMs: 60_000 },
   })
+  // The fixture's whole purpose is a runner with something to admit. A
+  // submission that did not reach the derived lane would leave the queue empty
+  // and every lifecycle assertion downstream would pass over silence.
+  expect(submission).toMatchObject({ lane: "derived" })
+  expect(submitter.app.bays.state().submits[submission.branch]).toMatchObject({ sha: submission.sha })
   return { repo }
 }
 

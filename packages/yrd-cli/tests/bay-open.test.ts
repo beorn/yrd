@@ -116,64 +116,83 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     const rootHelp = output(repo)
     expect(await yrd(repo, rootHelp.io, "--help"), rootHelp.stderr()).toBe(0)
     expect(rootHelp.stdout()).not.toMatch(/^\s+do(?:\s|$)/mu)
+    // S7: `issue ensure` is retired and registered HIDDEN, so it is off the
+    // help — but hidden is not absent: an old runbook still reaches its
+    // refusal rather than the parser's "unknown command".
     const issueHelp = output(repo)
     expect(await yrd(repo, issueHelp.io, "issue", "--help"), issueHelp.stderr()).toBe(0)
-    expect(issueHelp.stdout()).toContain("ensure [options] <issue>")
+    expect(issueHelp.stdout()).not.toMatch(/^\s+ensure\b/mu)
+    const retiredEnsure = output(repo)
+    expect(await yrd(repo, retiredEnsure.io, "issue", "ensure", CLAIM)).toBe(1)
+    expect(retiredEnsure.stderr()).toContain("issue ensure is retired with the change-record store")
+    expect(retiredEnsure.stderr()).not.toContain("unknown command")
   })
 
-  it("ensures one issue-owned Bay and one tracked draft change idempotently", async () => {
+  // `issue ensure` made a bay AND a tracked draft record in one IDEMPOTENT act;
+  // the record half went with the store, and its refusal names the replacement
+  // pair — open the issue's bay, then push the branch, because the push IS the
+  // draft. This test follows that cure and asserts what it actually does.
+  //
+  // LOST COVERAGE, two things, and the second is a behaviour change rather
+  // than a gap: the human line `issue <ref> → bay B1 <branch> → tracked draft
+  // PR1`, which announced a bay and its draft as ONE outcome; and IDEMPOTENCE
+  // itself — `bay open` on an already-open issue REFUSES and routes to `yrd in
+  // B1`, where `issue ensure` returned the same pair unchanged. Loud with a
+  // cure is a defensible answer, but a runbook that called `issue ensure`
+  // twice now needs two different commands.
+  it("opens one issue-owned Bay, and refuses rather than reopening it", async () => {
     const { repo } = await repository()
+    const retired = output(repo)
+    expect(await yrd(repo, retired.io, "issue", "ensure", CLAIM, "--json")).toBe(1)
+    expect(retired.stderr()).toContain("there are no tracked draft records to ensure")
+    // The refusal is only useful if its cure is the pair that actually works.
+    expect(retired.stderr()).toContain("yrd bay open <issue>")
+    expect(retired.stderr()).toContain("yrd pr submit <branch>")
+
+    // `bay open` answers with the workspace PATH on stdout and its one-line
+    // account on stderr; the identity is read back from `bay list`.
     const first = output(repo)
-    expect(await yrd(repo, first.io, "issue", "ensure", CLAIM, "--json"), first.stderr()).toBe(0)
-    const firstResult = JSON.parse(first.stdout()) as {
-      command: string
-      issue: string
-      bay: { id: string; issue?: string; branch: string; status: string }
-      pr: { id: string; issue?: string; branch: string; track?: boolean; status: string; revs: readonly unknown[] }
-    }
-    expect(firstResult).toMatchObject({
-      command: "issue.ensure",
-      issue: CLAIM,
-      bay: { id: "B1", issue: CLAIM, branch: BRANCH, status: "active" },
-      pr: { id: "PR1", issue: CLAIM, branch: BRANCH, track: true, status: "pushed" },
-    })
+    expect(await yrd(repo, first.io, "bay", "open", CLAIM), first.stderr()).toBe(0)
+    const bayPath = first.stdout().trim()
+    expect(isAbsolute(bayPath)).toBe(true)
+    expect(first.stderr()).toContain(BRANCH)
 
     const second = output(repo)
-    expect(await yrd(repo, second.io, "issue", "ensure", CLAIM, "--json"), second.stderr()).toBe(0)
-    const secondResult = JSON.parse(second.stdout()) as typeof firstResult
-    expect(secondResult).toMatchObject({
-      command: "issue.ensure",
-      issue: CLAIM,
-      bay: { id: "B1" },
-      pr: { id: "PR1" },
-    })
-    expect(secondResult.pr.revs).toEqual(firstResult.pr.revs)
-
-    const human = output(repo)
-    expect(await yrd(repo, human.io, "issue", "ensure", CLAIM), human.stderr()).toBe(0)
-    expect(human.stdout()).toBe(`issue ${CLAIM} → bay B1 ${BRANCH} → tracked draft PR1\n`)
+    expect(await yrd(repo, second.io, "bay", "open", CLAIM)).toBe(1)
+    expect(second.stdout()).toBe("")
+    expect(second.stderr()).toContain("is already open as B1")
+    expect(second.stderr(), "a refusal that does not say how to reach it is a dead end").toContain("yrd in B1")
 
     const bays = output(repo)
     expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
-    expect((JSON.parse(bays.stdout()) as { bays: readonly unknown[] }).bays).toHaveLength(1)
-    const prs = output(repo)
-    expect(await yrd(repo, prs.io, "pr", "list", "--json"), prs.stderr()).toBe(0)
-    expect((JSON.parse(prs.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
+    expect(JSON.parse(bays.stdout())).toMatchObject({
+      bays: [{ id: "B1", issue: CLAIM, branch: BRANCH, status: "open" }],
+    })
+    // And nothing minted a delivery: the push is what drafts one.
+    const changes = output(repo)
+    expect(await yrd(repo, changes.io, "pr", "list", "--json"), changes.stderr()).toBe(0)
+    expect(JSON.parse(changes.stdout())).toMatchObject({ live: [], history: [] })
   })
 
-  it("refuses to ensure a draft from an active Bay with uncommitted work", async () => {
-    const { repo } = await repository()
-    const first = output(repo)
-    expect(await yrd(repo, first.io, "issue", "ensure", CLAIM, "--json"), first.stderr()).toBe(0)
-    const ensured = JSON.parse(first.stdout()) as { bay: { path: string } }
-    await writeFile(join(ensured.bay.path, "uncommitted.txt"), "not durable\n")
-
-    const retry = output(repo)
-    expect(await yrd(repo, retry.io, "issue", "ensure", CLAIM)).toBe(1)
-    expect(retry.stderr()).toContain("holds uncommitted changes")
-    expect(retry.stderr()).toContain("checkpoint them before ensuring its draft change")
-    expect(retry.stderr()).toContain("yrd in B1")
-  })
+  /*
+   * DELETED with the record lane (S7): "refuses to ensure a draft from an
+   * active Bay with uncommitted work".
+   *
+   * Its subject was `issue ensure` refusing when the bay it would draft from
+   * held uncommitted changes — "holds uncommitted changes … checkpoint them
+   * before ensuring its draft change … yrd in B1". The verb is retired and its
+   * refusal fires before any bay is inspected, so the guard has no reachable
+   * caller.
+   *
+   * LOST COVERAGE: nothing now warns that a bay's uncommitted work is about to
+   * be left out of a delivery. The S7 replacement is the opposite policy rather
+   * than the same guard moved — `bay submit` CHECKPOINTS dirty work into a
+   * `wip:` commit and pushes it (asserted in cli.test.ts, "refreshes an active
+   * bay before submit and warns while using the committed head for dirty
+   * work") — so the uncommitted bytes are included with a warning instead of
+   * refused. That is a deliberate change of behaviour, not a gap, but no test
+   * states the two policies side by side.
+   */
 
   it("opens a persistent Bay without running a command", async () => {
     const { repo } = await repository()
@@ -528,8 +547,10 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
     await git(targeted.repo, "commit", "-qm", "existing target")
     await git(targeted.repo, "push", "-q", "-u", "origin", branch)
     await git(targeted.repo, "switch", "-q", "main")
-    const draft = output(targeted.repo)
-    expect(await yrd(targeted.repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
+    // S7: the PUSH is the draft, and `--pr` reattached a bay to a RECORD's
+    // branch, so both halves of the old flow are retired. The refusal is the
+    // contract now, and it has to carry the whole cure — this is the surface an
+    // operator meets when an old runbook says `bay run --pr`.
     const continued = output(targeted.repo)
     expect(
       await yrd(
@@ -544,10 +565,20 @@ describe("yrd bay open/run/in", { timeout: 30_000 }, () => {
         "-c",
         "printf reattached > result.txt",
       ),
-      continued.stderr(),
-    ).toBe(0)
-    expect(continued.stdout()).toContain(`bay explicit-target → reattached ${branch}, no issue linked`)
-    expect(await git(targeted.repo, "show", `refs/remotes/origin/${branch}:result.txt`)).toBe("reattached")
+    ).toBe(1)
+    expect(continued.stdout()).toBe("")
+    expect(continued.stderr()).toContain("is retired with the change-record store")
+    expect(continued.stderr()).toContain("yrd bay open --bay <name>")
+    expect(continued.stderr()).toContain(`yrd in <name> -- git switch ${branch}`)
+    // Nothing ran: a retired verb must not do half the work it names.
+    await expect(git(targeted.repo, "show", `refs/remotes/origin/${branch}:result.txt`)).rejects.toThrow()
+
+    // LOST COVERAGE: reattaching a bay to an existing branch AS ONE ACT, and
+    // the line that announced it (`bay <name> → reattached <branch>, no issue
+    // linked`). The cure is two commands with no announcement, and the two
+    // sibling tests here measure where it stops serving — a pruned branch needs
+    // a fetch first, and a branch another worktree holds cannot be switched to
+    // at all.
   })
 
   it("generates an anonymous Bay when no selector exists", async () => {
@@ -1141,8 +1172,9 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
+    // S7: the PUSH above is the draft — `pr create` is retired precisely
+    // because there is no draft record left to mint, so the fixture's minting
+    // step is not replaced, it is deleted.
     await git(repo, "branch", "-D", branch)
     await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
     const run = output(repo)
@@ -1152,11 +1184,20 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     ).toBe(0)
 
     expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
-    const prs = output(repo)
-    expect(await yrd(repo, prs.io, "pr", "list", "--issue", CLAIM, "--json"), prs.stderr()).toBe(0)
-    expect(JSON.parse(prs.stdout())).toMatchObject({
-      prs: [{ branch, issue: CLAIM, status: "pushed", revs: [{ n: 1, head: originalHead }] }],
-    })
+    // "without implicitly recutting it" — the claim's original commit is still
+    // an ancestor of the recovered branch, so the run CONTINUED the branch
+    // rather than cutting a fresh one. That was the `pr list --issue` row's
+    // `revs: [{ head: originalHead }]`; the record is gone and git is where the
+    // fact always really lived.
+    await expect(
+      git(repo, "merge-base", "--is-ancestor", originalHead, `refs/remotes/origin/${branch}`),
+    ).resolves.toBeDefined()
+    // LOST COVERAGE: that the branch still belonged to its CLAIM. A pushed
+    // branch with no standing submit fact is not a delivery, so no list surface
+    // carries the issue↔branch pairing any more.
+    const changes = output(repo)
+    expect(await yrd(repo, changes.io, "pr", "list", "--json"), changes.stderr()).toBe(0)
+    expect(JSON.parse(changes.stdout())).toMatchObject({ live: [], history: [] })
   })
 
   it("targets an existing PR branch through --pr without implicitly recutting it", async () => {
@@ -1170,24 +1211,58 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch), draft.stderr()).toBe(0)
+    // S7: the PUSH is the draft — `pr create` is retired because there is no
+    // draft record left to mint, so the minting step is deleted rather than
+    // replaced.
     await git(repo, "branch", "-D", branch)
     await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
 
+    // `--pr` is retired here too: it reattached a bay to a RECORD's branch.
+    const retired = output(repo)
+    expect(
+      await yrd(repo, retired.io, "bay", "run", "--pr", branch, "--", "sh", "-c", "printf continued > continued.txt"),
+    ).toBe(1)
+    expect(retired.stderr()).toContain("is retired with the change-record store")
+
+    // Follow the printed cure, and MEASURE where it stops. This fixture is the
+    // recovery case `--pr` served: the local branch and its tracking ref are
+    // gone, and only origin still has the work.
+    const opened = output(repo)
+    expect(await yrd(repo, opened.io, "bay", "open", "--bay", "explicit-target"), opened.stderr()).toBe(0)
+    const switched = output(repo)
+    const switchExit = await yrd(repo, switched.io, "in", "explicit-target", "--", "git", "switch", branch)
+    // MEASURED 2026-08-28: the cure's second command fails — "fatal: invalid
+    // reference" — because `git switch` DWIMs from a remote-TRACKING ref and
+    // this one was pruned. `--pr` needed no fetch: it read the recorded head.
+    // LOST: the cure is incomplete for the recovery case, and says nothing
+    // about fetching first.
+    expect(switchExit, "the printed cure does not recover a pruned branch").not.toBe(0)
+    expect(`${switched.stdout()}${switched.stderr()}`).toContain("invalid reference")
+
+    // With the missing step supplied by hand, the rest of the flow works.
+    const fetched = output(repo)
+    expect(
+      await yrd(repo, fetched.io, "in", "explicit-target", "--", "git", "fetch", "origin", branch),
+      fetched.stderr(),
+    ).toBe(0)
+    const retried = output(repo)
+    expect(
+      await yrd(repo, retried.io, "in", "explicit-target", "--", "git", "switch", "-c", branch, "FETCH_HEAD"),
+      retried.stderr(),
+    ).toBe(0)
+
     const run = output(repo)
     expect(
-      await yrd(repo, run.io, "bay", "run", "--pr", branch, "--", "sh", "-c", "printf continued > continued.txt"),
+      await yrd(repo, run.io, "in", "explicit-target", "--", "sh", "-c", "printf continued > continued.txt"),
       run.stderr(),
     ).toBe(0)
-    expect(run.stdout()).toContain(`bay explicit-target → reattached ${branch}, no issue linked`)
-    expect(await git(repo, "show", `refs/remotes/origin/${branch}:continued.txt`)).toBe("continued")
 
-    const prs = output(repo)
-    expect(await yrd(repo, prs.io, "pr", "view", branch, "--json"), prs.stderr()).toBe(0)
-    expect(JSON.parse(prs.stdout())).toMatchObject({
-      pr: { branch, status: "pushed", revs: [{ n: 1, head: originalHead }] },
-    })
+    // LOST COVERAGE: the reattachment ANNOUNCEMENT (`bay <name> → reattached
+    // <branch>, no issue linked`) — the cure is two commands and neither says
+    // what the pair accomplished — and the `pr view` row that carried the
+    // branch's recorded head. The not-recut fact is asserted on git instead,
+    // where it now lives.
+    await expect(git(repo, "merge-base", "--is-ancestor", originalHead, `refs/heads/${branch}`)).resolves.toBeDefined()
   })
 
   it("opens a branch-held PR at its recorded head through --pr", async () => {
@@ -1201,32 +1276,57 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch), draft.stderr()).toBe(0)
+    // S7: the PUSH is the draft — `pr create` is retired because there is no
+    // draft record left to mint, so the minting step is deleted rather than
+    // replaced.
     const authorSlot = join(repo, "..", "author-slot")
     await git(repo, "worktree", "add", "-q", authorSlot, branch)
 
+    // `bay open --pr` is retired: it bound a bay to a RECORD, and there is none.
     const open = output(repo)
-    expect(await yrd(repo, open.io, "bay", "open", "--pr", branch), open.stderr()).toBe(0)
+    expect(await yrd(repo, open.io, "bay", "open", "--pr", branch)).toBe(1)
+    expect(open.stderr()).toContain("bay open --pr is retired with the change-record store")
+    expect(open.stderr()).toContain("yrd bay open --bay <name>")
+    expect(open.stderr()).toContain(`yrd in <name> -- git switch ${branch}`)
+
+    // Now FOLLOW the printed cure, on the case this flag existed for: the
+    // author holds the branch in another worktree. Whatever happens here is the
+    // measurement, recorded in the test rather than assumed.
+    const cured = output(repo)
+    expect(await yrd(repo, cured.io, "bay", "open", "--bay", "held"), cured.stderr()).toBe(0)
+    const switched = output(repo)
+    const switchExit = await yrd(repo, switched.io, "in", "held", "--", "git", "switch", branch)
+
+    // MEASURED 2026-08-28: the cure CANNOT serve this case. `git switch` refuses
+    // a branch another worktree holds, which is precisely the situation
+    // `--pr` addressed by provisioning a DETACHED bay at the recorded head.
+    // LOST CAPABILITY, not just lost coverage: there is no supported way to put
+    // a bay at a branch-held delivery's head — an operator must detach by hand
+    // (`yrd in held -- git switch --detach <sha>`), and no surface says so.
+    expect(switchExit, "the printed cure fails on the branch-held case").not.toBe(0)
+    expect(`${switched.stdout()}${switched.stderr()}`).toMatch(/already (?:checked out|used by worktree)/u)
 
     const bays = output(repo)
     expect(await yrd(repo, bays.io, "bay", "list", "--json"), bays.stderr()).toBe(0)
     const bay = (JSON.parse(bays.stdout()) as { bays: Array<{ id: string; headSha?: string; path?: string }> }).bays[0]
-    expect(bay).toMatchObject({ id: "B1", headSha: originalHead, path: expect.any(String) })
+    expect(bay).toMatchObject({ id: "B1", path: expect.any(String) })
+    // The manual detach the cure omits does reach the recorded head…
+    await git(bay?.path ?? "", "switch", "--detach", originalHead)
     expect(await git(bay?.path ?? "", "rev-parse", "HEAD")).toBe(originalHead)
 
-    await writeFile(join(bay?.path ?? "", "continued.txt"), "continued in detached Bay\n")
-    await git(bay?.path ?? "", "add", "continued.txt")
-    await git(bay?.path ?? "", "commit", "-qm", "continue held candidate")
-    const continuedHead = await git(bay?.path ?? "", "rev-parse", "HEAD")
+    // …and then the workaround dead-ends, which is the part worth recording.
+    // `bay refresh` requires the workspace to sit on the bay's OWN branch, so a
+    // hand-detached bay cannot be refreshed: "workspace … is on branch '',
+    // expected 'task/held'". `--pr` made a detached bay a first-class shape and
+    // the lifecycle understood it; nothing does now.
     const refresh = output(bay?.path ?? repo)
-    expect(await yrd(repo, refresh.io, "bay", "refresh", bay?.id ?? ""), refresh.stderr()).toBe(0)
-
-    const refreshed = output(repo)
-    expect(await yrd(repo, refreshed.io, "bay", "list", "--json"), refreshed.stderr()).toBe(0)
-    expect(JSON.parse(refreshed.stdout())).toMatchObject({
-      bays: [{ id: "B1", branch, headSha: continuedHead, status: "open" }],
-    })
+    expect(await yrd(repo, refresh.io, "bay", "refresh", bay?.id ?? "")).toBe(1)
+    expect(refresh.stderr()).toContain("expected 'task/held'")
+    //
+    // DELETED with `--pr`: continuing work in the detached bay and having
+    // `bay refresh` record the new head onto the delivery (`bays: [{ id: "B1",
+    // branch, headSha: continuedHead }]`). That flow needed a bay whose branch
+    // IS the held one, which is exactly what the retired flag provisioned.
   })
 
   it("repairs a live claim draft whose local branch lost its tracking ref", async () => {
@@ -1239,8 +1339,9 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
+    // S7: the PUSH is the draft — `pr create` is retired because there is no
+    // draft record left to mint, so the minting step is deleted rather than
+    // replaced.
     await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
 
     const run = output(repo)
@@ -1262,8 +1363,9 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
+    // S7: the PUSH is the draft — `pr create` is retired because there is no
+    // draft record left to mint, so the minting step is deleted rather than
+    // replaced.
     await git(repo, "branch", "-D", branch)
     const origin = await git(repo, "remote", "get-url", "origin")
     await git(origin, "update-ref", "-d", `refs/heads/${branch}`)
@@ -1288,8 +1390,9 @@ printf ran > "$YRD_TEST_SHELL_LOG"
     await git(repo, "push", "-q", "-u", "origin", branch)
     await git(repo, "switch", "-q", "main")
 
-    const draft = output(repo)
-    expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
+    // S7: the PUSH is the draft — `pr create` is retired because there is no
+    // draft record left to mint, so the minting step is deleted rather than
+    // replaced.
     const origin = await git(repo, "remote", "get-url", "origin")
     await git(origin, "update-ref", "-d", `refs/heads/${branch}`)
     await git(repo, "branch", "-f", branch, "main")
@@ -1310,8 +1413,9 @@ printf ran > "$YRD_TEST_SHELL_LOG"
       await git(repo, "push", "-q", "-u", "origin", branch)
       await git(repo, "switch", "-q", "main")
 
-      const draft = output(repo)
-      expect(await yrd(repo, draft.io, "pr", "create", branch, "--issue", CLAIM), draft.stderr()).toBe(0)
+      // S7: the PUSH is the draft — `pr create` is retired because there is no
+      // draft record left to mint, so the minting step is deleted rather than
+      // replaced.
       const origin = await git(repo, "remote", "get-url", "origin")
       await git(origin, "update-ref", "-d", `refs/heads/${branch}`)
       await git(repo, "update-ref", "-d", `refs/remotes/origin/${branch}`)
