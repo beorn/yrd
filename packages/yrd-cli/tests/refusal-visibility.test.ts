@@ -38,6 +38,9 @@
  * Every assertion below names the refusal CODE, because "something is wrong" is
  * not what an operator needs at 2am — the code is what routes them.
  */
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, volatilePrNumberMint, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
@@ -87,12 +90,22 @@ function workspace() {
  * admission — the exact live shape, not a seeded ledger row. */
 async function createCliApp() {
   const bayJobs = createBayJobDefs(workspace())
+  // A REAL file on disk, because the surface under test refuses to render an
+  // artifact it cannot find — `artifactLocation` requires the path to exist,
+  // deliberately, so that a rendered path is never one that 404s at 2am. A
+  // fixture returning a made-up path would therefore prove nothing: the column
+  // would stay empty for the RIGHT reason and the test would pass for the
+  // wrong one.
+  const artifactDir = await mkdtemp(join(tmpdir(), "refusal-visibility-artifact-"))
+  const artifactPath = join(artifactDir, "0-check", "attempt-1", "stderr.log")
+  await mkdir(dirname(artifactPath), { recursive: true })
+  await writeFile(artifactPath, "check command exited 7\n", "utf8")
   const check = withStep(
     "check",
     (): JobResult<JsonValue> => ({
       status: "completed",
       conclusion: "failure",
-      error: { code: REFUSAL_CODE, message: "check command exited 7" },
+      error: { code: REFUSAL_CODE, message: "check command exited 7", evidence: { artifacts: [{ path: artifactPath }] } },
       output: { exitCode: 7 },
     }),
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
@@ -348,6 +361,24 @@ describe("a refused branch is visible on the surfaces an operator reaches for", 
     expect(JSON.parse(view.stdout())).toMatchObject({
       derived: { sha: nextHead, state: "refused", refusal: { code: REFUSAL_CODE } },
     })
+  })
+
+  it("names where the evidence is, not just that it exists", async () => {
+    // The admission Job writes both output streams to disk. Until this landed,
+    // `pr checks` rendered the failed row with an empty ARTIFACT column while
+    // the bytes sat there — the operator was routed to the right branch and the
+    // right code, and still could not be told the evidence existed. A ledger
+    // that records evidence nobody can reach is a rumour.
+    await using app = await refusedBranch()
+    const output = outputIO()
+
+    await runYrd(app, yrd("pr", "checks", BRANCH, "--json"), output.io)
+    const body = `${output.stdout()}${output.stderr()}`
+    // The path is asserted by SHAPE, not spelled out: the artifact root is a
+    // temporary directory per run, so pinning the prefix would test the fixture.
+    expect(body, "the failed row must carry a reachable artifact path").toMatch(
+      /"artifact":"[^"]*0-check[^"]*"/u,
+    )
   })
 
   it("keeps a re-pushed branch out of the refused state its previous head earned", async () => {

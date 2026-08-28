@@ -6201,6 +6201,24 @@ async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO, servi
  * The key family is `admission:<id>:<revision>:<baseSha>:<index>[:stepRev]`,
  * buildable from the member identity alone. A member with no admission Job at
  * all reports one truthful `not-requested` row rather than zero rows. */
+/** The first artifact a Job actually has on disk, as a path. Direct outputs
+ * first, then evidence nested under an error — the same two places the run
+ * renderer looks, so the two surfaces cannot disagree about where evidence
+ * lives. Returns undefined rather than a guess: a path that does not exist is
+ * worse than no path, because it sends someone looking. */
+function firstLocalArtifact(job: unknown): string | undefined {
+  const record = job as Readonly<{ output?: unknown; error?: Readonly<{ evidence?: unknown }> }> | undefined
+  if (record === undefined) return undefined
+  for (const candidate of uniqueArtifacts([
+    ...directArtifacts(record.output),
+    ...nestedArtifacts(record.error?.evidence),
+  ])) {
+    const location = artifactLocation(candidate)
+    if (location !== undefined && "path" in location) return location.path
+  }
+  return undefined
+}
+
 function derivedCheckRecords(
   app: YrdCliApp,
   delivery: Extract<ResolvedDelivery, { lane: "derived" }>,
@@ -6259,6 +6277,13 @@ function derivedCheckRecords(
           ...(refusal === undefined || status !== "failed"
             ? {}
             : { error: { code: refusal.code, message: refusal.reason } }),
+          // WHERE THE BYTES ARE. The admission Job records both output streams
+          // on disk and nothing printed the path, so an operator could be told
+          // a check failed and its code, and still have no way to be told the
+          // evidence exists. `artifactLocation` refuses to fabricate — it
+          // requires the file to be there — so an absent artifact stays absent
+          // rather than becoming a path that 404s at 2am.
+          ...(firstLocalArtifact(job) === undefined ? {} : { artifact: firstLocalArtifact(job) }),
           position: Number(index),
         } satisfies ChangeCheckViewRecord,
       ]
