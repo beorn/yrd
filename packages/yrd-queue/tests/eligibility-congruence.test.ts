@@ -270,7 +270,15 @@ describe("eligibility congruence — the second source (refs/yrd/submit, project
         sha: SHA,
         base: "main",
         at: "2026-01-01T00:00:00.000Z",
-        reason: { code: "unrecorded-submit", message: expect.stringContaining("runs as a DERIVED member") },
+        // `createQueueApp` configures no `prNumberMint`, so the row reports the
+        // wiring it OBSERVED rather than listing what it might be
+        // (@i/10-yrd/23996-derived-empty-silent). The old spelling asserted the
+        // wired sentence against an unwired queue and could not tell the two
+        // apart — which was the defect, not the fixture.
+        reason: {
+          code: "unrecorded-submit",
+          message: expect.stringContaining("derived admission is UNWIRED here — no PR-number mint is configured"),
+        },
       },
     ])
     const derived = app.queue.deriveChange("issue/ref-only")

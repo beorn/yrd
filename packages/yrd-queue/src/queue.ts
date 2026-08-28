@@ -360,13 +360,41 @@ function queueRunNoRunnablePRs(
 }
 
 /**
+ * The derived lane's admission wiring, as THIS process configured it — the one
+ * half of "why is this row still here" that is observable from a projection
+ * read, and the half that cost the most to answer by hand.
+ *
+ * Only `mint` blocks: with no PR-number mint the compose admits nothing, so
+ * every row stands (see {@link deriveRefOnlyMembers}). A missing `enrichment`
+ * reader degrades an admitted member to a synthetic change id and blocks
+ * nothing — the audit line used to name the two together as one "unwired"
+ * cause, which is why a reader could not act on it
+ * (@i/10-yrd/23996-derived-empty-silent).
+ */
+type DerivedAdmissionWiring = Readonly<{ mint: boolean; enrichment: boolean }>
+
+/** The one derivation of {@link DerivedAdmissionWiring} from configuration, so
+ * the compose's own reading of what is wired and the reading the audit prints
+ * can never disagree. */
+function derivedAdmissionWiring(
+  mint: PrNumberMint | undefined,
+  enrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
+): DerivedAdmissionWiring {
+  return { mint: mint !== undefined, enrichment: enrichment !== undefined }
+}
+
+/**
  * The approvals the queue can see but not run: every projected submit ref
  * whose branch has no PR record. A record for the branch — in ANY state —
  * wins, because the record is what candidates, runs and checks are keyed by,
  * and a withdrawn or integrated record already tells the reader more than the
  * bare ref can.
  */
-function unrecordedSubmits(bays: DeepReadonly<BaysState>, queues: DeepReadonly<QueuesState>): UnrecordedSubmit[] {
+function unrecordedSubmits(
+  bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
+  wiring: DerivedAdmissionWiring,
+): UnrecordedSubmit[] {
   const recorded = new Set(Object.values(bays.prs).map((pr) => pr.branch))
   return (
     Object.entries(bays.submits)
@@ -387,11 +415,30 @@ function unrecordedSubmits(bays: DeepReadonly<BaysState>, queues: DeepReadonly<Q
           ) === undefined,
       )
       .toSorted(([left], [right]) => left.localeCompare(right))
-      .map(([branch, submit]) => unrecordedSubmit(branch, submit))
+      .map(([branch, submit]) => unrecordedSubmit(branch, submit, wiring))
   )
 }
 
-function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submits"][string]>): UnrecordedSubmit {
+/**
+ * One standing approval the queue can see but not run, and WHY — the observed
+ * wiring first, never a list of possibilities.
+ *
+ * The retired text named three causes in one sentence, which implied the
+ * reader could tell them apart when nothing here could: a healthy empty lane
+ * and an unconfigured mint left byte-identical rows. Two seats spent hours
+ * choosing between them in opposite directions, and a third ruled the mint out
+ * by reading `pr-mint.json` by hand — a fact this projection has held all
+ * along. So the mint is REPORTED, not enumerated, and the residual pair (no
+ * compose ran / the derivation refused) is named as a pair together with the
+ * surface that answers it, so no reader mistakes it for a menu they are
+ * expected to pick from (@i/10-yrd/23996-derived-empty-silent).
+ */
+function unrecordedSubmit(
+  branch: string,
+  submit: DeepReadonly<BaysState["submits"][string]>,
+  wiring: DerivedAdmissionWiring,
+): UnrecordedSubmit {
+  const provenance = `branch '${branch}' is submitted in git (${submit.sha.slice(0, 12)} for '${submit.base}', since ${submit.at})`
   return {
     branch,
     sha: submit.sha,
@@ -399,12 +446,19 @@ function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submit
     at: submit.at,
     reason: {
       code: "unrecorded-submit",
-      message:
-        `branch '${branch}' is submitted in git (${submit.sha.slice(0, 12)} for '${submit.base}', ` +
-        `since ${submit.at}) and runs as a DERIVED member once the queue's next compose admits it (S6) — ` +
-        `a row that persists means no runner is composing, derived admission is unwired (no PR-number ` +
-        `mint or enrichment reader configured), or the derivation was refused ` +
-        `(action 'compose-derived-refused' in the queue log says why)`,
+      message: wiring.mint
+        ? `${provenance} and runs as a DERIVED member once the queue's next compose admits it (S6) — ` +
+          `derived admission IS wired here (PR-number mint configured` +
+          `${
+            wiring.enrichment
+              ? ""
+              : `; no git enrichment reader, so an admitted member gets a synthetic change id — that does not ` +
+                `block admission`
+          }), so this row is waiting on a compose: either no runner is composing, or the derivation refused ` +
+          `(action 'compose-derived-refused' in the habitant runner log names the branch and why)`
+        : `${provenance} and cannot run: derived admission is UNWIRED here — no PR-number mint is configured ` +
+          `for the queue plugin (the durable pr-mint.json store the bays plugin shares), so no compose can ` +
+          `admit it and this row stands until the mint exists (S6)`,
     },
   }
 }
@@ -1086,7 +1140,13 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(options.requires === undefined ? {} : { requires: z.array(QueueRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(steps, byName, needsPersonOwner, options.prepareCandidate !== undefined)
+  const commands = createQueueCommands(
+    steps,
+    byName,
+    needsPersonOwner,
+    derivedAdmissionWiring(options.prNumberMint, options.readSubmitEnrichment),
+    options.prepareCandidate !== undefined,
+  )
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -1244,6 +1304,10 @@ function createQueue<Shape extends ChangeShape>(
 ): Queue<Shape> {
   const current = (id: RunId): Run => materializeRun(Queues.record(state(), id), runtime().jobs)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
+  // Read ONCE from this process's configuration: every surface that reports why
+  // a standing submit fact has not been admitted answers from the same two
+  // bits the compose itself acts on (@i/10-yrd/23996-derived-empty-silent).
+  const wiring = derivedAdmissionWiring(derivedMint, readSubmitEnrichment)
   const reportZeroEventRun = (value: JsonValue | undefined): boolean => {
     const covered = QueueRunReuseCoveredSchema.safeParse(value)
     if (covered.success) {
@@ -1412,11 +1476,14 @@ function createQueue<Shape extends ChangeShape>(
     // standing AT a terminal record's landing commit — is excluded there and
     // must stay loud here: content already merged, the fact is a stale
     // re-projection to retire, never new work.
-    for (const stale of alreadyLandedSubmits(snapshot.bays)) {
+    const landed = alreadyLandedSubmits(snapshot.bays)
+    for (const stale of landed) {
       if (skip.has(stale.branch)) continue
       log.warn?.(
         "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
-          "the fact is stale — retire it (git push bay :refs/yrd/submit/" + stale.branch + ")",
+          "the fact is stale — retire it (git push bay :refs/yrd/submit/" +
+          stale.branch +
+          ")",
         {
           action: "compose-derived-fact-already-landed",
           branch: stale.branch,
@@ -1429,8 +1496,10 @@ function createQueue<Shape extends ChangeShape>(
     // the record store. A fact whose content the base already holds is a stale
     // re-projection, never new work — and unlike the record-keyed check this
     // one answers for a recordless branch and survives a merge-time rebuild.
-    const offered = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
+    const lane = derivedLaneBranches(snapshot.bays)
+    const offered = lane.filter((branch) => !skip.has(branch))
     const branches: string[] = []
+    let supersededCount = 0
     for (const branch of offered) {
       const submit = snapshot.bays.submits[branch]
       if (submit === undefined) continue
@@ -1459,7 +1528,9 @@ function createQueue<Shape extends ChangeShape>(
       if (superseded) {
         log.warn?.(
           "queue compose will not derive an admission for a submit fact whose content the base already " +
-            "contains; the fact is stale — retire it (git push bay :refs/yrd/submit/" + branch + ")",
+            "contains; the fact is stale — retire it (git push bay :refs/yrd/submit/" +
+            branch +
+            ")",
           {
             action: "compose-derived-fact-superseded",
             branch,
@@ -1467,11 +1538,53 @@ function createQueue<Shape extends ChangeShape>(
             base: submit.base,
           },
         )
+        supersededCount += 1
         continue
       }
       branches.push(branch)
     }
-    if (branches.length === 0) return []
+    if (branches.length === 0) {
+      // NO SILENT ERRORS. This return and the mint-missing return below are the
+      // SAME empty array to the caller, and the unrecorded-submit rows they
+      // leave standing read identically from outside — except that only ONE of
+      // them ever said anything. So the ordinary healthy nothing-to-do case was
+      // indistinguishable from a real misconfiguration, and two seats paid for
+      // that in opposite directions before a third ruled the mint out by
+      // reading pr-mint.json by hand (@i/10-yrd/23996-derived-empty-silent).
+      //
+      // Say WHICH, in the message and in `cause`, over the population the zero
+      // is a zero across: what was queried (every live submit fact), where it
+      // looked (the derived lane) and what it excluded (already admitted this
+      // compose, landed, superseded).
+      const population = {
+        action: "compose-derived-lane-empty",
+        submits: Object.keys(snapshot.bays.submits).length,
+        lane: lane.length,
+        offered: offered.length,
+        excludedAlreadyAdmitted: skip.size,
+        excludedAlreadyLanded: landed.length,
+        excludedSuperseded: supersededCount,
+        mint: derivedMint === undefined ? "unconfigured" : "configured",
+        enrichmentReader: readSubmitEnrichment === undefined ? "unconfigured" : "configured",
+      } as const
+      if (derivedMint === undefined) {
+        log.warn?.(
+          "queue compose derived no admissions and derived admission is UNWIRED: no PR-number mint is " +
+            "configured for the queue plugin (the durable pr-mint.json store the bays plugin shares). The " +
+            "derived lane is empty on this pass, so nothing is standing on it yet — but the next submitted " +
+            "branch cannot be admitted until the mint exists",
+          { ...population, cause: "mint-unconfigured" },
+        )
+      } else {
+        log.info?.(
+          "queue compose derived no admissions because the derived lane is EMPTY: every live submit fact is " +
+            "already served or excluded. The PR-number mint is configured, so this is nothing-to-do rather " +
+            "than a wiring fault; the counts say what was queried and what was excluded",
+          { ...population, cause: "lane-empty" },
+        )
+      }
+      return []
+    }
     if (derivedMint === undefined) {
       log.warn?.(
         "queue compose cannot admit ref-only branches: no PR-number mint is configured for derived admission " +
@@ -2859,7 +2972,7 @@ function createQueue<Shape extends ChangeShape>(
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
             const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
-            const unrecorded = unrecordedSubmits(snapshot.bays, snapshot.queues)
+            const unrecorded = unrecordedSubmits(snapshot.bays, snapshot.queues, wiring)
             if (rejected.length > 0 || (diagnostic.decisions.length === 0 && unrecorded.length > 0)) {
               reportZeroEventRun(queueRunNoRunnablePRs(rejected, authoritySteps, unrecorded))
             } else if (diagnostic.decisions.length === 0) {
@@ -3322,7 +3435,7 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     },
-    audit: (options = {}) => auditQueues(runtime(), steps, progress, needsPersonOwner, options),
+    audit: (options = {}) => auditQueues(runtime(), steps, progress, needsPersonOwner, wiring, options),
     eligibility(selector, projected) {
       // Called once per change by the queue views, and the single largest stage of a
       // cold `queue ls` — resolveChange plus checkEligibility together dominate it.
@@ -3339,7 +3452,7 @@ function createQueue<Shape extends ChangeShape>(
     },
     unrecordedSubmits(projected) {
       const snapshot = projected ?? runtime()
-      return unrecordedSubmits(snapshot.bays, snapshot.queues)
+      return unrecordedSubmits(snapshot.bays, snapshot.queues, wiring)
     },
     deriveChange(branch, projected) {
       const snapshot = projected ?? runtime()
@@ -3355,7 +3468,9 @@ function createQueue<Shape extends ChangeShape>(
           ? {}
           : { record, eligibility: ChangeEligibility(snapshot, record, steps, needsPersonOwner) }),
         ...(submit === undefined ? {} : { submit }),
-        ...(record !== undefined || submit === undefined ? {} : { unrecorded: unrecordedSubmit(branch, submit) }),
+        ...(record !== undefined || submit === undefined
+          ? {}
+          : { unrecorded: unrecordedSubmit(branch, submit, wiring) }),
         authority: arbitrateDerivedChange(records, submit),
       }
     },
@@ -3690,6 +3805,7 @@ function createQueueCommands(
   steps: readonly RuntimeStep[],
   byName: ReadonlyMap<string, RuntimeStep>,
   needsPersonOwner: string,
+  wiring: DerivedAdmissionWiring,
   requiresPreparedCandidate = false,
 ): QueueCommands {
   const admissionStep = command({
@@ -3827,7 +3943,7 @@ function createQueueCommands(
       const prs = selectionResult.prs
       if (prs.length === 0) {
         const rejected = selectionResult.decisions.filter(({ eligibility }) => !eligibility.runnable)
-        const unrecorded = unrecordedSubmits(state.bays, state.queues)
+        const unrecorded = unrecordedSubmits(state.bays, state.queues, wiring)
         return {
           events: [],
           value:
@@ -5923,9 +6039,7 @@ function payloadIdentity(pr: DeepReadonly<Change> | DeepReadonly<ChangeSnapshot>
  * fact no-ops), so a replayed batch cannot double-retire.
  */
 function submitFactRetirement(bays: DeepReadonly<BaysState>, branch: string, mergedHead: string): EventDraft[] {
-  return bays.submits[branch]?.sha === mergedHead
-    ? [event("branch/unsubmitted", { branch, reason: "superseded" })]
-    : []
+  return bays.submits[branch]?.sha === mergedHead ? [event("branch/unsubmitted", { branch, reason: "superseded" })] : []
 }
 
 function queueLifecycleRun(applied: Event): RunId | undefined {
@@ -6581,6 +6695,7 @@ function auditQueues(
   steps: readonly RuntimeStep[],
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
+  wiring: DerivedAdmissionWiring,
   options: QueueAuditOptions,
 ): QueueAuditEmission {
   // Emissions, not readings: every code pushed below — or written inline into
@@ -6666,7 +6781,7 @@ function auditQueues(
     // carries, so nothing can run it (branch-is-change 2a). Same grace as a
     // draft, so a push that is about to be followed by its `pr submit` does
     // not page; same consumer contract — the watcher reads this, never git.
-    for (const submit of unrecordedSubmits(state.bays, state.queues)) {
+    for (const submit of unrecordedSubmits(state.bays, state.queues, wiring)) {
       const atMs = parseAuditTime(submit.at, "branch submit clock")
       if (auditNowMs - atMs <= DRAFT_STRANDED_GRACE_MS) continue
       findings.push({
@@ -6675,10 +6790,10 @@ function auditQueues(
         specimen: `branch:${submit.branch}`,
         since: submit.at,
         blockedMs: Math.max(0, auditNowMs - atMs),
-        // S6: the derived lane serves live submits; a persisting row means the
-        // compose is not running, derived admission is unwired, or the
-        // derivation refused (the queue log's 'compose-derived-*' actions say
-        // which). Re-pushing branch + submit ref renews the authority.
+        // S6: the derived lane serves live submits. WHICH of the reasons a row
+        // persists for is `unrecordedSubmit`'s to report from the observed
+        // wiring — this walk must not restate the enumeration that fix removed.
+        // Re-pushing branch + submit ref renews the authority either way.
         resolution: [`git push ${RECEIVER_REMOTE_NAME} ${submit.branch}:refs/for/${submit.base}/<issue>`],
       })
     }

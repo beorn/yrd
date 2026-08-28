@@ -796,6 +796,92 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     expect(warn?.message).toMatch(/every row stands until the mint exists/)
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/unadmittable"])
   })
+
+  // ————— @i/10-yrd/23996: the empty return that said nothing —————
+  //
+  // `deriveRefOnlyMembers` hands the caller the same `[]` for a healthy empty
+  // lane and for an unconfigured mint. Only the second had a voice, so from
+  // outside the two were the same silence — and the standing unrecorded-submit
+  // rows they leave behind read the same too. Both empty returns must now say
+  // WHICH, and the two must not say the same thing.
+
+  const composeEvent = (events: readonly LogEvent[], action: string) =>
+    events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.props?.action === action,
+    )
+
+  it("says the derived lane is EMPTY, with the population it is empty over, when the mint IS configured", async () => {
+    const events: LogEvent[] = []
+    await using app = await createApp({
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      prNumberMint: volatilePrNumberMint(),
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+    })
+    // No submit facts at all: the ordinary, healthy nothing-to-do compose —
+    // the exact pass that used to return `[]` without a word.
+    await expect(app.queue.run({}, runtime)).resolves.toBeDefined()
+
+    const empty = composeEvent(events, "compose-derived-lane-empty")
+    expect(empty, "the empty-lane return must not be silent").toBeDefined()
+    expect(empty?.level, "nothing-to-do is not a fault").toBe("info")
+    expect(empty?.message).toMatch(/derived lane is EMPTY/u)
+    expect(empty?.message).toMatch(/mint is configured/u)
+    // What was queried, and what was excluded — never a bare zero.
+    expect(empty?.props).toMatchObject({
+      cause: "lane-empty",
+      submits: 0,
+      lane: 0,
+      offered: 0,
+      excludedAlreadyAdmitted: 0,
+      excludedAlreadyLanded: 0,
+      excludedSuperseded: 0,
+      mint: "configured",
+    })
+    // The wiring fault it must NOT be confused with.
+    expect(composeEvent(events, "compose-derived-mint-missing")).toBeUndefined()
+  })
+
+  it("says the MINT is unconfigured, not merely that the lane is empty, on the same empty return", async () => {
+    const events: LogEvent[] = []
+    await using app = await createApp({
+      steps: [passingCheck()],
+      defaultSteps: ["check"],
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+    })
+    // Same empty lane, different wiring: nothing is standing, so the existing
+    // mint-missing warn (which needs an offered branch) never fires. This is
+    // the branch that had no voice at all.
+    await expect(app.queue.run({}, runtime)).resolves.toBeDefined()
+
+    const empty = composeEvent(events, "compose-derived-lane-empty")
+    expect(empty).toBeDefined()
+    expect(empty?.level, "an unwired lane is a configuration fault, not a no-op").toBe("warn")
+    expect(empty?.message).toMatch(/derived admission is UNWIRED/u)
+    expect(empty?.message).toMatch(/no PR-number mint is configured/u)
+    expect(empty?.props).toMatchObject({ cause: "mint-unconfigured", mint: "unconfigured", submits: 0 })
+  })
+
+  it("the two empty returns do not say the same thing — that sameness WAS the defect", async () => {
+    const said = async (mint: boolean): Promise<Readonly<{ level: string; message: string; cause: unknown }>> => {
+      const events: LogEvent[] = []
+      await using app = await createApp({
+        steps: [passingCheck()],
+        defaultSteps: ["check"],
+        ...(mint ? { prNumberMint: volatilePrNumberMint() } : {}),
+        log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }]),
+      })
+      await app.queue.run({}, runtime)
+      const empty = composeEvent(events, "compose-derived-lane-empty")
+      if (empty === undefined) throw new Error("the empty-lane return logged nothing")
+      return { level: empty.level, message: empty.message, cause: empty.props?.cause }
+    }
+
+    const [wired, unwired] = await Promise.all([said(true), said(false)])
+    expect(wired.message).not.toBe(unwired.message)
+    expect(wired.level).not.toBe(unwired.level)
+    expect(wired.cause).not.toBe(unwired.cause)
+  })
 })
 
 describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", () => {
