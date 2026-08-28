@@ -7,9 +7,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { deriveRunMemberArgs, type InstalledStep, type QueueRecord } from "@yrd/queue"
+import type { InstalledStep, QueueRecord } from "@yrd/queue"
 import { failureFact } from "@yrd/core"
-import { volatilePrNumberMint } from "@yrd/bay"
 import { createLogger } from "loggily"
 import { createYrdHost as createYrdHostRaw, runYrdProcess } from "../src/host.ts"
 import { queueAuditComparisonLine, requireInstalledDeclaredPlan } from "../src/run.ts"
@@ -567,17 +566,11 @@ describe("the derived plan audit against a real repository", { timeout: 20_000 }
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-      // S7: a run's batch IS its derived membership, and `prs` selects out of
-      // it. A bare `prs: ["<selector>"]` cannot work at all right now — the
-      // resume path materializes only `args.derived`, so every explicit
-      // selector refuses `pr-not-found`; reported as a src defect.
-      const member = deriveRunMemberArgs({
-        bays: host.app.state().bays,
-        queues: host.app.state().queues,
-        mint: volatilePrNumberMint(),
-        branch: "issue/feature",
-      })
-      const run = (await host.app.queue.run({ prs: [], derived: [member] }, { runner: "test", leaseMs: 60_000 }))[0]
+      // An explicit selector names the BRANCH since S7 — the spelling `yrd
+      // queue run <branch>` itself produces. It refused every selector until
+      // the resume path was taught to materialize the cycle's own derived
+      // population (fixed in "explicit selection resolves, and narrows to exactly what was named").
+      const run = (await host.app.queue.run({ prs: ["issue/feature"] }, { runner: "test", leaseMs: 60_000 }))[0]
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
       expect(run?.stepSelection).toMatchObject({
         source: "declared-at-base",
@@ -672,14 +665,8 @@ describe("the derived plan audit against a real repository", { timeout: 20_000 }
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-      const member = deriveRunMemberArgs({
-        bays: host.app.state().bays,
-        queues: host.app.state().queues,
-        mint: volatilePrNumberMint(),
-        branch: "issue/feature",
-      })
       const run = (
-        await host.app.queue.run({ prs: [], derived: [member], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+        await host.app.queue.run({ prs: ["issue/feature"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
       )[0]
       expect(run?.stepSelection).toMatchObject({ source: "explicit", steps: ["check"] })
       const audit = await host.services.queue?.auditEnvironment?.()
