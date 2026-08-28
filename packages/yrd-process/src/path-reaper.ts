@@ -90,7 +90,14 @@ export async function reapOwnedPath(
    * process table. Production never passes one: the census then reads the real
    * `/proc`, exactly as before. Same trust model as the git-facts injection the
    * CLI already uses for containment questions — reachable only from inside the
-   * process, never from the environment. */
+   * process, never from the environment.
+   *
+   * ONLY FOR A TEST THAT HAS NO REAL HOLDER. An injected tree replaces the
+   * evidence entirely: a process genuinely holding the path is not in it, so it
+   * is neither killed nor reported, and the reap returns CERTIFIED over a live
+   * holder. Measured — a real process holding the path survived and coverage
+   * still came back complete. Use it only where the fixture owns every process
+   * that could matter; never to make a teardown test pass on a busy machine. */
   options: Readonly<{ procRoot?: string }> = {},
 ): Promise<PathReapResult> {
   const root = await canonicalPath(path)
@@ -317,6 +324,34 @@ async function darwinPathProcessHolderCensus(root: string): Promise<PathHolderCe
 type SourceAvailability = "readable" | "exited" | "denied" | "uninspectable"
 type SourceObservation<T> = Readonly<{ availability: SourceAvailability; value: T }>
 
+/** How long to wait before confirming a coverage gap. Long enough to outlast
+ * process teardown, negligible beside the seconds the reaper already spends
+ * settling a process tree, and paid only by a process that showed a gap in the
+ * first place. */
+const GAP_CONFIRM_MS = 75
+
+/** Only the permanent class, for naming a process in a refusal. */
+function anyUninspectableSource(
+  observed: Readonly<
+    Record<"cwd" | "executable" | "processRoot" | "mappedFiles" | "descriptors", SourceObservation<unknown>>
+  >,
+): boolean {
+  return [observed.cwd, observed.executable, observed.processRoot, observed.mappedFiles, observed.descriptors].some(
+    (observation) => observation.availability === "uninspectable",
+  )
+}
+
+/** A gap is anything that could be hiding a holder. An EXIT is not a gap. */
+function anyGap(
+  observed: Readonly<
+    Record<"cwd" | "executable" | "processRoot" | "mappedFiles" | "descriptors", SourceObservation<unknown>>
+  >,
+): boolean {
+  return [observed.cwd, observed.executable, observed.processRoot, observed.mappedFiles, observed.descriptors].some(
+    (observation) => observation.availability === "denied" || observation.availability === "uninspectable",
+  )
+}
+
 async function linuxPathProcessHolderCensus(root: string, procRoot: string): Promise<PathHolderCensus> {
   const entries = await readdir(procRoot, { withFileTypes: true }).catch((error: unknown) => {
     throw new Error(`Linux path-holder census requires readable proc root '${procRoot}': ${errorDetail(error)}`, {
@@ -357,27 +392,49 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       // One status read per same-UID process. It is what lets the census tell
       // a CONTRADICTION from a gap: a zombie denies `fd` while provably
       // holding nothing, and a non-dumpable process denies everything forever.
-      const status = await readProcessStatus(proc)
-      const factsFor = (relative: string) => async (): Promise<ProcessEntryFacts> => ({
-        ...status,
-        processUid: uid,
-        entryUid: await lstat(`${proc}/${relative}`).then(
-          (stats) => stats.uid,
-          () => undefined,
-        ),
-      })
-      const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
-        observeProcessLink(`${proc}/cwd`, factsFor("cwd")),
-        observeProcessLink(`${proc}/exe`, factsFor("exe")),
-        observeProcessLink(`${proc}/root`, factsFor("root")),
-        observeProcessMaps(`${proc}/maps`, factsFor("maps")),
-        observeProcessDescriptors(`${proc}/fd`, factsFor("fd")),
-      ])
-      if (
-        [cwd, executable, processRoot, mappedFiles, descriptors].some(
-          (observation) => observation.availability === "uninspectable",
-        )
-      ) {
+      const readSources = async () => {
+        const status = await readProcessStatus(proc)
+        const factsFor = (relative: string) => async (): Promise<ProcessEntryFacts> => ({
+          ...status,
+          processUid: uid,
+          // Both re-read on the FAILURE path only, so nothing is added to the
+          // path every healthy process takes.
+          processGone: await stat(proc).then(
+            () => false,
+            () => true,
+          ),
+          entryUid: await lstat(`${proc}/${relative}`).then(
+            (stats) => stats.uid,
+            () => undefined,
+          ),
+        })
+        const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
+          observeProcessLink(`${proc}/cwd`, factsFor("cwd")),
+          observeProcessLink(`${proc}/exe`, factsFor("exe")),
+          observeProcessLink(`${proc}/root`, factsFor("root")),
+          observeProcessMaps(`${proc}/maps`, factsFor("maps")),
+          observeProcessDescriptors(`${proc}/fd`, factsFor("fd")),
+        ])
+        return { status, cwd, executable, processRoot, mappedFiles, descriptors }
+      }
+      let observed = await readSources()
+      if (anyGap(observed)) {
+        // NO GAP IS BELIEVED ON ONE SAMPLE. A process being torn down is
+        // unreadable for the moments around its death and wears whichever
+        // signature its leftover entries happen to present — measured under
+        // churn, 28 of 28 processes that looked permanently non-dumpable were
+        // GONE 60ms later. A single sample cannot separate "always unreadable"
+        // from "unreadable right now", and both mistakes are expensive: one
+        // puts a dead pid in a refusal an operator is told to accept forever,
+        // the other refuses a deletion that nothing was ever holding.
+        //
+        // One confirmation separates them. A vanished or readable process was
+        // never a gap; a genuinely unreadable one reads identically every time.
+        await Bun.sleep(GAP_CONFIRM_MS)
+        observed = await readSources()
+      }
+      const { status, cwd, executable, processRoot, mappedFiles, descriptors } = observed
+      if (anyGap(observed) && anyUninspectableSource(observed)) {
         uninspectable.push({ pid, comm: status.comm ?? "unknown" })
       }
       recordSourceCoverage(sourceCoverage.cwd, cwd.availability)
@@ -576,6 +633,9 @@ export type ProcessEntryFacts = Readonly<{
   processUid?: number
   /** Owner of the specific entry whose read failed. */
   entryUid?: number
+  /** Whether `/proc/<pid>` had already disappeared when the failure was
+   * classified. Re-read on the failure path only. */
+  processGone?: boolean
 }>
 
 /**
@@ -596,9 +656,19 @@ export type ProcessEntryFacts = Readonly<{
  *    no ptrace and no privilege. Kernels that expose no `Dumpable:` line in
  *    status (this one does not) leave ownership as the only available read.
  *
- * ORDER IS LOAD-BEARING: a zombie's inner entries are root-owned too, measured
- * on every zombie present when this was written. The state test therefore has
- * to run first, or every zombie is misread as non-dumpable.
+ * ORDER IS LOAD-BEARING, and TWO states wear the non-dumpable signature:
+ *
+ *  - a zombie's inner entries are root-owned too, measured on every zombie
+ *    present when this was written;
+ *  - so are an EXITING process's, for the moments around its death. Measured
+ *    under spawn churn: of 28 same-uid processes that presented as running with
+ *    root-owned entries, 28 were GONE 60ms later. Labelling those permanent
+ *    would name a pid in a refusal that outlives the process it names, and tell
+ *    an operator to accept it forever.
+ *
+ * So existence and zombie state are both settled before ownership is consulted.
+ * Reversing that order does not fail a test — it silently converts routine
+ * process churn into a permanent-sounding deletion refusal.
  */
 export function classifyProcessEntryUnavailability(
   code: string | undefined,
@@ -606,7 +676,10 @@ export function classifyProcessEntryUnavailability(
 ): Exclude<SourceAvailability, "readable"> | undefined {
   if (code === "ENOENT" || code === "ESRCH") return "exited"
   if (code !== "EACCES" && code !== "EPERM") return undefined
-  if (facts.state === "Z") return "exited"
+  // A process that is gone, or a zombie, holds nothing — whatever errno its
+  // leftover entry produced. Both must be settled BEFORE the ownership test,
+  // because both wear its signature.
+  if (facts.processGone === true || facts.state === "Z") return "exited"
   const { processUid, entryUid } = facts
   if (processUid !== undefined && entryUid !== undefined && processUid !== entryUid) return "uninspectable"
   return "denied"

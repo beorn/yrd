@@ -268,6 +268,30 @@ describe("proc-entry unavailability is resolved against what the process says", 
     expect(classifyProcessEntryUnavailability(code, { state, processUid: 3001, entryUid })).toBe(expected)
   })
 
+  test("a process that has already exited holds nothing, whatever its leftover entry said", () => {
+    // Measured under spawn churn: an exiting process presents as RUNNING with
+    // root-owned proc entries — byte-identical to a non-dumpable one — and is
+    // gone milliseconds later. Of 28 seen, 28 had exited within 60ms. Reading
+    // those as permanent would put a dead pid in a refusal and tell an operator
+    // to accept it forever.
+    expect(
+      classifyProcessEntryUnavailability("EACCES", { state: "R", processUid: 3001, entryUid: 0, processGone: true }),
+    ).toBe("exited")
+    // Same facts, process still there: the permanent class is correct.
+    expect(
+      classifyProcessEntryUnavailability("EACCES", { state: "R", processUid: 3001, entryUid: 0, processGone: false }),
+    ).toBe("uninspectable")
+  })
+
+  test("a denial from a vanished process is an exit, not a coverage gap", () => {
+    // The other half of the same race, and the one that produced spurious
+    // refusals in a real suite run: the process is reaped between enumeration
+    // and inspection, so its status cannot be read and its state is unknown —
+    // but its absence is knowable and settles the question on its own.
+    expect(classifyProcessEntryUnavailability("EACCES", { processUid: 3001, processGone: true })).toBe("exited")
+    expect(classifyProcessEntryUnavailability("EACCES", { processUid: 3001, processGone: false })).toBe("denied")
+  })
+
   test("an unreadable status degrades to the conservative answer, never to a certification", () => {
     // The status read can lose a race with the process exiting. Losing it must
     // cost coverage, not correctness: with no facts the census answers exactly
@@ -413,6 +437,46 @@ describe("a permanent gap is named and can be accepted; a clearable one cannot",
       /census incomplete.*deletion cannot be certified/u,
     )
   })
+})
+
+describe("no coverage gap is believed on one sample", () => {
+  test.runIf(process.platform === "linux")("a gap that clears on confirmation is not a gap", async () => {
+    // The census must not certify from a single read, and must not refuse from
+    // one either. This fixture is unreadable when the census first looks and
+    // readable well inside the confirmation window — the shape of a process
+    // being torn down, which is what produced spurious refusals in a real run.
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-path-gap-clears-"))
+    scratch.push(fixture)
+    const ownedPath = join(fixture, "owned")
+    const procRoot = join(fixture, "proc")
+    const processRoot = join(procRoot, "4242")
+    mkdirSync(ownedPath)
+    mkdirSync(join(processRoot, "fd"), { recursive: true })
+    symlinkSync("/", join(processRoot, "cwd"))
+    symlinkSync("/bin/sh", join(processRoot, "exe"))
+    symlinkSync("/", join(processRoot, "root"))
+    const maps = join(processRoot, "maps")
+    writeFileSync(maps, "")
+    chmodSync(maps, 0o000)
+    const reopen = setTimeout(() => chmodSync(maps, 0o644), 25)
+
+    try {
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+
+      expect(census.coverage).toMatchObject({
+        complete: true,
+        uninspectable: [],
+        sources: { maps: { readable: 1, unavailable: { exited: 0, denied: 0, uninspectable: 0 } } },
+      })
+    } finally {
+      clearTimeout(reopen)
+      chmodSync(maps, 0o644)
+    }
+  })
+
+  // The control is the neighbouring "reports reduced same-UID coverage" test:
+  // the same fixture whose denial NEVER clears still refuses, so this pair
+  // proves the confirmation distinguishes them rather than certifying both.
 })
 
 describe("the proc tree the reaper censuses is injectable", () => {
