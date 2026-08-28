@@ -514,6 +514,7 @@ export function configuredChecks(
     cwd: string,
     ref: string | undefined,
     keepOnFailure: boolean,
+    carrier: boolean,
   ): Promise<YrdCliCheckResult> => {
     const baseSha = await resolveCommit(process, repo, config.base)
     if (baseSha === undefined) {
@@ -529,6 +530,26 @@ export function configuredChecks(
         "configuration",
         "required-check-candidate-missing",
         `yrd: required-check candidate '${ref ?? "HEAD"}' is missing`,
+      )
+    }
+    // The other shape of the same nothing: a carrier whose tip IS the base.
+    // Nothing composes, so the collapse below never fires, and the pair is
+    // degenerate from the first line — the check would compare a commit
+    // against itself and report a verdict about a range that holds no commits.
+    //
+    // Only for a carrier. `yrd check` judges whatever tree it was pointed at,
+    // and pointing it at a tree sitting on the base is an ordinary local
+    // reading (22600 does exactly that); a submit or a ready is judging
+    // something that has to CARRY a change, and one that carries nothing is a
+    // no-op carrier the queue would have nothing to merge.
+    if (carrier && candidateSha === baseSha) {
+      raiseFailure(
+        "refusal",
+        "required-check-degenerate-range",
+        `yrd: required check '${name}' has no candidate range: candidate '${ref ?? "HEAD"}' and base ` +
+          `'${config.base}' are the same commit ${baseSha}, so this carrier adds nothing to its base and the ` +
+          `check would compare ${baseSha} against itself. Nothing would be measured, so no verdict was ` +
+          `computed. Commit the work this change is meant to carry before submitting it.`,
       )
     }
     const inherited = cleanGitEnvironment(environment)
@@ -574,6 +595,37 @@ export function configuredChecks(
     // YRD_CANDIDATE_SHA has always named a commit, never the working tree, so
     // the composed checkout is the honest materialization of what was declared.
     const composes = !(await isAncestorCommit(process, repo, baseSha, candidateSha))
+    // Composition is a no-op when the candidate is ALREADY reachable from base:
+    // `git merge --no-ff <ancestor>` answers "Already up to date.", exits 0 and
+    // leaves HEAD where it was, so the composed candidate IS the base and the
+    // pair handed to every check is X..X — a range containing nothing.
+    //
+    // Measured on `task/hub-yrd-split-brain` (2026-08-28): the branch had been
+    // fast-forwarded onto an earlier main, main moved on, so base was NOT an
+    // ancestor of the candidate (this composes) while the candidate WAS
+    // reachable from base (the merge did nothing). Both variables named
+    // 136fb282ac4d. `typecheck` and `manifest-co-change` then passed VACUOUSLY
+    // on the empty range — an ancestry-shaped check reads `X is an ancestor of
+    // X` as yes for free — and only `substrate-pair` refused. Two green
+    // verdicts over nothing is the silent error; the third check catching it
+    // was luck, not design.
+    //
+    // Probed here rather than after the merge because everything below this
+    // line is minutes of worktree, submodule population and workspace install
+    // spent on a candidate that cannot be measured at all.
+    if (composes && (await isAncestorCommit(process, repo, candidateSha, baseSha))) {
+      raiseFailure(
+        "refusal",
+        "required-check-degenerate-range",
+        `yrd: required check '${name}' has no candidate range: candidate ${candidateSha} is already reachable ` +
+          `from base '${config.base}' (${baseSha}), so composing it onto the base is a no-op and both ` +
+          `YRD_BASE_SHA and YRD_CANDIDATE_SHA would name ${baseSha}. Nothing would be measured, so no verdict ` +
+          `was computed — a check that compares a base against a candidate means nothing when they are the same ` +
+          `commit. This is what an already-landed branch looks like once it has been fast-forwarded onto the ` +
+          `base: commit the work this branch is meant to carry, or withdraw the change. Re-submitting the same ` +
+          `tip refuses here again.`,
+      )
+    }
     // A check with base-pinned gate scripts (23183) never runs in the invoking
     // tree: pinning would mean OVERWRITING files in the author's own checkout.
     // It always executes in a materialized checkout, where the declared paths
@@ -667,6 +719,31 @@ export function configuredChecks(
           "infrastructure",
           "required-check-composition-missing",
           `yrd: composing required-check candidate '${candidateSha}' onto base '${baseSha}' left no commit in '${checkout}'`,
+        )
+      }
+      // The invariant, asserted where the pair is MANUFACTURED: no check is
+      // ever handed X..X. The containment probe above already refuses the one
+      // known way to land here, and it is a probe — `isAncestorCommit` reads a
+      // non-zero exit as "not an ancestor", so a git that errored rather than
+      // answered falls through to this merge and composes nothing. That is the
+      // case this catches, and it is Yrd's own reasoning disagreeing with
+      // itself rather than anything the author can repair, so it is
+      // infrastructure and not a refusal.
+      if (composed === baseSha) {
+        if (!keepOnFailure) {
+          await worktrees.remove(checkout, {
+            operation: `CLI pre-submit degenerate-composition cleanup ${candidateSha}`,
+          })
+          await rm(checkoutRoot, { recursive: true, force: true })
+        }
+        const retained = keepOnFailure ? `; ${retainedWorkspaceNote({ path: checkout, cleanup: "worktree" })}` : ""
+        raiseFailure(
+          "infrastructure",
+          "required-check-composition-degenerate",
+          `yrd: composing required-check candidate '${candidateSha}' onto base '${baseSha}' produced the base ` +
+            `itself, so required check '${name}' would compare ${baseSha} against ${baseSha} and measure nothing. ` +
+            `The candidate is already reachable from the base and Yrd's containment probe did not answer that ` +
+            `before the merge ran. No verdict was computed${retained}`,
         )
       }
       candidate = composed
@@ -775,7 +852,14 @@ export function configuredChecks(
       if (definition?.run === undefined) {
         raiseFailure("configuration", "required-check-command-missing", `yrd: required check '${name}' has no command`)
       }
-      return runInCheckout(name, definition, cwd, context?.ref, context?.keepOnFailure === true)
+      return runInCheckout(
+        name,
+        definition,
+        cwd,
+        context?.ref,
+        context?.keepOnFailure === true,
+        context?.carrier === true,
+      )
     },
     install(_cwd) {
       mkdirSync(join(stateDir, "hooks"), { recursive: true })

@@ -192,6 +192,27 @@ async function staleBaseCandidateRepository(): Promise<{ repo: string; featureSh
   return { repo, featureSha, baseSha }
 }
 
+/** The shape a LANDED change leaves behind: the branch was fast-forwarded onto
+ * the base after it merged, and the base then moved on. Base is no longer an
+ * ancestor of the branch tip, so a required check composes — and the merge is a
+ * no-op, because the tip is already reachable from the base. Composition then
+ * yields the base itself and the pair is X..X.
+ * Measured on `task/hub-yrd-split-brain` (2026-08-28). */
+async function landedCandidateRepository(): Promise<{ repo: string; candidateSha: string; baseSha: string }> {
+  const { repo } = await repository()
+  await git(repo, "switch", "-q", "main")
+  await writeFile(join(repo, "landed.txt"), "the branch's work, already on main\n")
+  await git(repo, "add", "landed.txt")
+  await git(repo, "commit", "-qm", "the change lands on main")
+  const candidateSha = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "branch", "-f", "issue/feature", candidateSha)
+  await writeFile(join(repo, "after.txt"), "main moved on afterwards\n")
+  await git(repo, "add", "after.txt")
+  await git(repo, "commit", "-qm", "main moves on")
+  const baseSha = await git(repo, "rev-parse", "HEAD")
+  return { repo, candidateSha, baseSha }
+}
+
 async function candidatePackageRepository(
   options: Readonly<{ postinstall?: string }> = {},
 ): Promise<{ repo: string; featureSha: string }> {
@@ -1212,6 +1233,147 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(composed).not.toBe(featureSha)
     await git(repo, "merge-base", "--is-ancestor", baseSha, composed!)
     await git(repo, "merge-base", "--is-ancestor", featureSha, composed!)
+    // The control for the refusals below: an ordinary stale candidate STILL
+    // gets a real pair, so those refusals fire on the degenerate range and not
+    // on staleness. Both variables named the same commit on
+    // `task/hub-yrd-split-brain`; here they cannot.
+    expect(composed).not.toBe(baseSha)
+  })
+
+  it("refuses a required check whose composition would collapse onto the base, before the check runs", async () => {
+    const { repo, candidateSha, baseSha } = await landedCandidateRepository()
+    const marker = join(repo, "the-check-ran.marker")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["substrate-pair"],
+      requires: [],
+      // Any check reading the pair as a range measures nothing here. This one
+      // records that it ran at all, which is the assertion that matters: a
+      // verdict computed from X..X must not exist.
+      definitions: { "substrate-pair": { run: `touch ${marker}`, runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["substrate-pair"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const stateDir = join(repo, ".git", "yrd")
+    const checks = configuredChecks(process, stateDir, config, { PATH: globalThis.process.env.PATH })
+
+    let failure: unknown
+    try {
+      await checks.run("substrate-pair", repo, { ref: "issue/feature" })
+    } catch (cause) {
+      failure = cause
+    }
+
+    const classified = classifyFailure(failure)
+    expect(classified).toMatchObject({
+      exitCode: 1,
+      failure: { kind: "refusal", code: "required-check-degenerate-range" },
+    })
+    // Both shas by name, so the reader can see the collapse without re-deriving
+    // it, and the cure — the half a bare "check failed" withholds.
+    const message = (classified as { failure: { message: string } }).failure.message
+    expect(message).toContain(candidateSha)
+    expect(message).toContain(baseSha)
+    expect(message).toContain("no candidate range")
+    expect(message).toContain("commit the work this branch is meant to carry")
+    expect(existsSync(marker), "the check must not run on an empty range").toBe(false)
+    // Refused BEFORE the checkout, so nothing was spent materializing a
+    // candidate that could not be measured. Asserted as "no workspace exists"
+    // rather than "the workspace parent is absent": where the parent gets
+    // created is an implementation detail, and none being materialized is the
+    // claim.
+    const workspaces = join(stateDir, "pre-submit-worktrees")
+    expect(existsSync(workspaces) ? await readdir(workspaces) : []).toEqual([])
+  })
+
+  it("refuses a composition that produced the base itself when the containment probe could not answer", async () => {
+    const { repo, candidateSha, baseSha } = await landedCandidateRepository()
+    const marker = join(repo, "the-check-ran.marker")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["substrate-pair"],
+      requires: [],
+      definitions: { "substrate-pair": { run: `touch ${marker}`, runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["substrate-pair"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    // `isAncestorCommit` reads any non-zero exit as "not an ancestor", so a git
+    // that ERRORED rather than answered sends the containment probe's caller
+    // down the composing path. That is the one way past the refusal above, and
+    // this is the assertion that the invariant still holds there.
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        const containmentProbe =
+          request.argv.includes("--is-ancestor") &&
+          request.argv.at(-2) === candidateSha &&
+          request.argv.at(-1) === baseSha
+        if (!containmentProbe) return runtimeProcess.run(request)
+        return runtimeProcess.run({ ...request, argv: ["sh", "-c", 'printf "fatal: fixture\\n" >&2; exit 128'] })
+      },
+    }
+    const stateDir = join(repo, ".git", "yrd")
+    await mkdir(stateDir, { recursive: true })
+    const checks = configuredChecks(process, stateDir, config, { PATH: globalThis.process.env.PATH })
+
+    let failure: unknown
+    try {
+      await checks.run("substrate-pair", repo, { ref: "issue/feature" })
+    } catch (cause) {
+      failure = cause
+    }
+
+    const classified = classifyFailure(failure)
+    expect(classified).toMatchObject({
+      // Infrastructure, not a refusal: Yrd's own probe disagreed with Yrd's own
+      // merge, and there is nothing here for the author to repair. Exit 3 is
+      // that classification's own code, so the exit distinguishes it from the
+      // author-actionable refusal without reading the message.
+      exitCode: 3,
+      failure: { kind: "infrastructure", code: "required-check-composition-degenerate" },
+    })
+    expect((classified as { failure: { message: string } }).failure.message).toContain(baseSha)
+    expect(existsSync(marker), "the check must not run on an empty range").toBe(false)
+    expect(await readdir(join(stateDir, "pre-submit-worktrees"))).toEqual([])
+  })
+
+  it("refuses a carrier whose tip is the base itself, and still runs the same check for a local reading", async () => {
+    const { repo } = await repository()
+    await git(repo, "switch", "-q", "main")
+    const baseSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "branch", "-f", "issue/feature", baseSha)
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["substrate-pair"],
+      requires: [],
+      definitions: { "substrate-pair": { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["substrate-pair"] },
+    }
+    await using process = createProcess({ cwd: repo })
+    const checks = configuredChecks(process, join(repo, ".git", "yrd"), config, {
+      PATH: globalThis.process.env.PATH,
+    })
+
+    let failure: unknown
+    try {
+      await checks.run("substrate-pair", repo, { ref: "issue/feature", carrier: true })
+    } catch (cause) {
+      failure = cause
+    }
+    const classified = classifyFailure(failure)
+    expect(classified).toMatchObject({
+      exitCode: 1,
+      failure: { kind: "refusal", code: "required-check-degenerate-range" },
+    })
+    expect((classified as { failure: { message: string } }).failure.message).toContain(baseSha)
+
+    // The control, and the reason the refusal is carrier-scoped: `yrd check`
+    // points at whatever tree it was given, and a tree sitting on the base is
+    // an ordinary local reading rather than an empty carrier.
+    const local = await checks.run("substrate-pair", repo, { ref: "issue/feature" })
+    expect(local.exitCode).toBe(0)
   })
 
   it("overrides an inherited tmpfs TMPDIR with a run-scoped dir for an in-place check, then removes it", async () => {
@@ -4055,6 +4217,66 @@ checks: [{check: {run: "true"}}]
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
     }
+  })
+
+  it("refuses a pr submit of a landed branch instead of gating it against itself", async () => {
+    const { repo, candidateSha, baseSha } = await landedCandidateRepository()
+    await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
+    await git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    await git(repo, "update-ref", "refs/remotes/origin/issue/feature", candidateSha)
+
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--track", "--json"],
+      {
+        cwd: repo,
+        stdout() {},
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+
+    // The end-to-end claim: the submit path, not just the check host, refuses a
+    // candidate that carries nothing. The wiring is what fails silently —
+    // `substrate-pair` had to catch this one from inside the check, after
+    // `typecheck` and `manifest-co-change` had already passed over the same
+    // empty range.
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: { kind: "refusal", code: "required-check-degenerate-range" },
+    })
+  })
+
+  it("refuses a pr submit whose branch tip is the base itself", async () => {
+    const { repo } = await repository()
+    await git(repo, "switch", "-q", "main")
+    const baseSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "branch", "-f", "issue/feature", baseSha)
+    await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
+    await git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    await git(repo, "update-ref", "refs/remotes/origin/issue/feature", baseSha)
+
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--track", "--json"],
+      {
+        cwd: repo,
+        stdout() {},
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+
+    // Nothing composes here, so this fires only if `pr submit` actually
+    // DECLARES that it is gating a carrier. `yrd check` declares the opposite
+    // and keeps running (22600), which is what makes this assertion about the
+    // wiring rather than about the condition.
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: { kind: "refusal", code: "required-check-degenerate-range" },
+    })
   })
 
   it("binds current-branch pr submit to the invoking linked-worktree candidate", async () => {
