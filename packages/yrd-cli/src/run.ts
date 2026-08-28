@@ -4295,6 +4295,12 @@ function gatherBayStatusFacts(
     .prs()
     .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
     .map((pr) => pr.id)
+  // The derived lane writes refs/yrd/submit/<branch> directly and never mints a
+  // Change record for it (model.ts recordLaneOwnsBranch), so a live derived-lane
+  // submission is invisible to openChangeIds above. BaysState.submits is the only
+  // inbound signal it leaves; a standing entry for this Bay's branch means a live
+  // submission still depends on this workspace (@yrd/22290-bay-reaper derived-lane gap).
+  const derivedLaneSubmitLive = stateOf(app).bays.submits[bay.branch] !== undefined
   const openedAt = Date.parse(bay.openedAt)
   const ageMs = Number.isFinite(openedAt) ? Math.max(0, now - openedAt) : undefined
 
@@ -4331,6 +4337,7 @@ function gatherBayStatusFacts(
     stashAttributed,
     ...(stashUnknown === undefined ? {} : { stashUnknown }),
     openChangeIds,
+    derivedLaneSubmitLive,
   }
 }
 
