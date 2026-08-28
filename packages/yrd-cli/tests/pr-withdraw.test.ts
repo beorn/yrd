@@ -21,6 +21,7 @@ import {
   createMemoryJournal,
   createYrd,
   createYrdDef,
+  failureFact,
   JsonSchema,
   pipe,
   type Journal,
@@ -49,7 +50,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createPruneGitFacts } from "../src/pr-withdraw.ts"
+import { createPruneGitFacts, preflightRemerge } from "../src/pr-withdraw.ts"
 import * as runInternals from "../src/run.ts"
 
 function runYrd(
@@ -432,6 +433,133 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
     ...overrides,
   }
 }
+
+describe("remerge preflight subsumption proof", () => {
+  it("renders a fail-closed verdict when every apparent proof is unmeasured", async () => {
+    const app = await createCliApp({ resolveBase: (base) => ({ base, baseSha: TARGET_BASE_SHA }) })
+    await app.bays.submit({
+      branch: "specimen/vacuous-subsumption",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: TARGET_BASE_SHA,
+    })
+    const output = outputIO({
+      pruneGit: () =>
+        remergePreflightGit({
+          isAncestor: () => true,
+          mergeTree: () => {
+            throw new Error("mergeTree must stay skipped after an ancestry result")
+          },
+          pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+          patchMatch: () => ({}),
+        }),
+    })
+
+    const error = await preflightRemerge(app, "PR1", {}, output.io).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+    expect(failureFact(error)).toEqual({
+      kind: "refusal",
+      code: "recut-preflight-subsumption-unmeasured",
+      message: [
+        "yrd: change 'PR1' revision 1 cannot conclude SUBSUMED-WITHDRAW because content equivalence was not measured",
+        `pin-distance: NOT-MEASURED (degenerate range ${TARGET_BASE_SHA.slice(0, 12)}..${TARGET_BASE_SHA.slice(0, 12)})`,
+        "patch-id-match-target: NOT-MEASURED (patch-id=none)",
+        "tree-proof: NOT-MEASURED (ancestor=yes, merge-tree=skipped)",
+        "next: REFUSE (payload-spend remedy withheld)",
+      ].join("\n"),
+    })
+    expect(output.stdout()).toBe("")
+    expect(JSON.stringify(failureFact(error))).not.toContain("--burn-payload")
+  })
+
+  it.each([
+    {
+      name: "a degenerate source-to-target range",
+      sourceBaseSha: TARGET_BASE_SHA,
+      facts: {
+        isAncestor: (): boolean => false,
+        mergeTree: () => BASE_TREE,
+        pinDistance: () => ({ sourceOnly: 0, targetOnly: 0 }),
+        patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
+      },
+    },
+    {
+      name: "a missing patch id",
+      sourceBaseSha: BASE_SHA,
+      facts: {
+        isAncestor: (): boolean => false,
+        mergeTree: () => BASE_TREE,
+        patchMatch: () => ({}),
+      },
+    },
+    {
+      name: "a skipped merge-tree comparison",
+      sourceBaseSha: BASE_SHA,
+      facts: {
+        isAncestor: (): boolean => true,
+        mergeTree: () => {
+          throw new Error("mergeTree must stay skipped after an ancestry result")
+        },
+      },
+    },
+  ])("refuses subsumption from $name", async ({ sourceBaseSha, facts }) => {
+    const app = await createCliApp(
+      sourceBaseSha === TARGET_BASE_SHA
+        ? { resolveBase: (base) => ({ base, baseSha: TARGET_BASE_SHA }) }
+        : undefined,
+    )
+    await app.bays.submit({
+      branch: "specimen/incomplete-subsumption",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: sourceBaseSha,
+    })
+    const output = outputIO({ pruneGit: () => remergePreflightGit(facts) })
+
+    const error = await preflightRemerge(app, "PR1", {}, output.io).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+    expect(failureFact(error)).toMatchObject({
+      kind: "refusal",
+      code: "recut-preflight-subsumption-unmeasured",
+    })
+    expect(failureFact(error)?.message).toContain("next: REFUSE (payload-spend remedy withheld)")
+    expect(failureFact(error)?.message).not.toContain("--burn-payload")
+  })
+
+  it("prints the payload-spend remedy only after a nondegenerate tree comparison", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({
+      branch: "specimen/measured-subsumption",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    const output = outputIO({
+      pruneGit: () =>
+        remergePreflightGit({
+          isAncestor: () => false,
+          mergeTree: () => BASE_TREE,
+          patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
+        }),
+    })
+
+    const result = await preflightRemerge(app, "PR1", {}, output.io)
+    expect(result).toMatchObject({
+      verdict: "SUBSUMED-WITHDRAW",
+      evidence: {
+        pinDistance: { sourceOnly: 0, targetOnly: 3 },
+        patchId: "c".repeat(40),
+        tree: "identical",
+      },
+    })
+    expect(result.next).toContain("yrd pr withdraw PR1 --burn-payload")
+    expect(output.stdout()).toContain("tree-proof: ancestor=no, merge-tree=identical")
+  })
+})
 
 describe("pr withdraw", () => {
   it("withdraws a live change, records the reason, and terminalizes its Queue work", async () => {

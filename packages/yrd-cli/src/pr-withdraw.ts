@@ -443,6 +443,31 @@ export async function preflightRemerge(
   }
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
   const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
+  const degenerateRange = source.baseSha === targetBaseSha
+  const patchUnmeasured = patch.patchId === undefined
+  const treeUnmeasured = checks.mergeTree === "skipped"
+  if (subsumed && (degenerateRange || patchUnmeasured || treeUnmeasured)) {
+    const pinEvidence = degenerateRange
+      ? `pin-distance: NOT-MEASURED (degenerate range ${short(source.baseSha)}..${short(targetBaseSha)})`
+      : `pin-distance: source-only=${distance.sourceOnly}, target-only=${distance.targetOnly} (${short(source.baseSha)}..${short(targetBaseSha)})`
+    const patchEvidence = patchUnmeasured
+      ? "patch-id-match-target: NOT-MEASURED (patch-id=none)"
+      : `patch-id-match-target: ${patch.targetSha === undefined ? "none" : short(patch.targetSha)} (patch-id=${patch.patchId})`
+    const treeEvidence = treeUnmeasured
+      ? `tree-proof: NOT-MEASURED (ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=skipped)`
+      : `tree-proof: ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${checks.mergeTree}`
+    raiseFailure(
+      "refusal",
+      "recut-preflight-subsumption-unmeasured",
+      [
+        `yrd: change '${pr.id}' revision ${source.n} cannot conclude SUBSUMED-WITHDRAW because content equivalence was not measured`,
+        pinEvidence,
+        patchEvidence,
+        treeEvidence,
+        "next: REFUSE (payload-spend remedy withheld)",
+      ].join("\n"),
+    )
+  }
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
   const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
