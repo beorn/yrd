@@ -9523,6 +9523,12 @@ export type PreSubmitCheckVerdict = Readonly<{
  * MESSAGE — the one artifact an unwind carries, and the one that reaches both
  * human stderr and the single `--json` failure document without becoming a
  * second document that `JSON.parse(stderr)` would choke on.
+ *
+ * `carrier` defaults to TRUE — the strict reading — so a run has to DECLARE
+ * that it is not gating a carrier to get the permissive one. A new caller that
+ * forgets the argument gets the refusal, not a vacuous verdict over an empty
+ * range; the opposite default would make the silent answer the one you get by
+ * saying nothing. `yrd check` is the only declared exception.
  */
 async function runRequiredChecks(
   services: YrdCliServices,
@@ -9531,6 +9537,7 @@ async function runRequiredChecks(
   ref?: string,
   keepOnFailure = false,
   json = false,
+  carrier = true,
 ): Promise<readonly PreSubmitCheckVerdict[]> {
   const checks = services.checks
   if (checks === undefined) configuration("required-check capability is not installed")
@@ -9539,13 +9546,11 @@ async function runRequiredChecks(
   await checks.install(io.cwd ?? process.cwd())
   const results: PreSubmitCheckVerdict[] = []
   for (const name of names) {
-    const context =
-      ref === undefined && !keepOnFailure
-        ? undefined
-        : {
-            ...(ref === undefined ? {} : { ref }),
-            ...(keepOnFailure ? { keepOnFailure: true } : {}),
-          }
+    const context = {
+      ...(ref === undefined ? {} : { ref }),
+      ...(keepOnFailure ? { keepOnFailure: true } : {}),
+      ...(carrier ? { carrier: true } : {}),
+    }
     const result = await checks.run(name, io.cwd ?? process.cwd(), context)
     if (result.signal === "SIGKILL" || (result.signal === null && result.exitCode === 137)) {
       const retained =
@@ -9657,7 +9662,11 @@ async function checkRequired(
   // The envelope below reports the verdicts only when every check passed; the
   // ledger inside reports them on the failing path too, where the passes that
   // preceded the failure used to vanish with the throw.
-  const checks = await runRequiredChecks(services, io, names, undefined, false, jsonEnabled(options))
+  // Not a carrier gate: `yrd check` runs the named check against whatever tree
+  // it was pointed at, including one sitting exactly on the base. Submit and
+  // ready judge something that has to carry a change and refuse a candidate
+  // that adds nothing; this reading has no carrier to be empty.
+  const checks = await runRequiredChecks(services, io, names, undefined, false, jsonEnabled(options), false)
   await printResult(
     io,
     jsonEnabled(options),

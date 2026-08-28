@@ -133,7 +133,16 @@ export type YrdCliChecks = Readonly<{
   run(
     name: string,
     cwd: string,
-    context?: Readonly<{ ref?: string; keepOnFailure?: boolean }>,
+    /**
+     * `carrier` declares that this run gates a CARRIER — a candidate that must
+     * add something to the base for the run to mean anything, which is what
+     * `pr submit` and `pr ready` judge. A carrier whose tip IS the base carries
+     * nothing, so the check would compare a commit against itself; that is
+     * refused rather than answered. `yrd check` sets no flag: it judges
+     * whatever tree it was pointed at, and pointing it at a tree that happens
+     * to sit on the base is an ordinary local reading, not a defect.
+     */
+    context?: Readonly<{ ref?: string; keepOnFailure?: boolean; carrier?: boolean }>,
   ): Promise<YrdCliCheckResult>
   install(cwd: string): Promise<string>
 }>
