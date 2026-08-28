@@ -276,21 +276,40 @@ describe("store-deletion migration: PR-number mint harvest", { timeout: 30_000 }
     expect(createDurablePrNumberMint({ dir: stateDir }).highWater()).toBe(2144)
   })
 
-  // KNOWN RED — names a real defect, measured on /hh's own journal, not invented.
+  // Was a KNOWN RED; the union fix turned it green — `maxChangeIdIn` on the
+  // migration edge plus the standing `raisePrNumberMintFloor`, both in host.ts.
+  // Disabling the standing half alone reproduces the original failure exactly
+  // ("expected 2144 to be greater than or equal to 2148"), so this stays the
+  // fence for that half.
   //
   // The harvest reads `bays.prs` alone, but the record set is NOT the only place
-  // the journal names a PR id: retained Run member snapshots name them too, and
-  // they OUTRANK the records. Measured 2026-08-28 on the production journal
-  // (cursor 97714): record-set max PR2144, run-snapshot max PR2148, with PR2145
-  // and PR2148 present in run history and absent from the record set. So an
-  // ENOENT restore lifts the mint to 2144 and the very next id minted is PR2145
-  // — an id the history already names. That is 22986 reproduced through the
-  // mitigation built to prevent it.
+  // the journal names a PR id, and the others OUTRANK it. Re-measured on a
+  // read-only copy of /hh's journal at cursor 97912 (2026-08-28 00:09 PDT):
   //
-  // The fix is a union, not a bigger number: harvest max(bays.prs, retained
-  // snapshots, admissionRefusals). The snapshot half needs no "last chance" —
-  // those rows SURVIVE the deletion, so it can equally be a standing startup
-  // invariant instead of a one-shot migration step.
+  //   bays.prs        destroyed by the edge   max PR2149, 2140 records, SPARSE
+  //   queues.records  Run snapshots           max PR2148
+  //   queues.admissionRefusals                no ids at all — 0 rows
+  //   queues.candidates                       max PR2152
+  //   jobs.byId.*                             max PR2152
+  //   live pr-mint.json                       PR2152
+  //
+  // Sparseness is what makes it bite: PR2145 and PR2148 are absent from the
+  // record set while PR2144 and PR2149 are present. So an ENOENT restore that
+  // harvests records alone lifts the mint to PR2149 and then mints PR2150,
+  // PR2151, PR2152 — the last two already named by retained candidates. That is
+  // 22986 reproduced through the mitigation built to prevent it.
+  //
+  // An earlier version of this note reported record-set max PR2144 and a next id
+  // of PR2145. Those were this fixture's own values read back as though measured;
+  // the real pair is 2149 and 2152. The fixture below keeps 2144/2148 on purpose
+  // — a smaller miniature of the same shape, and the numbers the original red was
+  // recorded against.
+  //
+  // The fix is a union, and the halves are NOT interchangeable. The record half
+  // must ride the migration, because those rows are destroyed there and that is
+  // the last moment they are readable. The surviving sources need a STANDING
+  // startup invariant instead: the edge fires ONCE, so a mint lost after a
+  // deployment has already crossed it is never rescued by the migration at all.
   it("lifts the mint above every id the journal names, not just the records", async () => {
     const { repo, stateDir, mintPath } = await deploymentAtRetiredStoreIdentity(["PR1", "PR2144"], {
       runSnapshotIds: ["PR2148"],

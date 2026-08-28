@@ -42,7 +42,14 @@ import { installDeclaredYrdEntry } from "./support/declared-yrd-entry.ts"
 /** The identity the live deployment's checkpoint carries — the immediate
  * predecessor of the store deletion, and the one boot that still holds the
  * record set. Same constant as `RETIRED_CHANGE_STORE_CHECKPOINT_IDENTITY` in
- * `host.ts`; spelled here so a conscious identity bump has to update both. */
+ * `host.ts`, which does not export it.
+ *
+ * PREDECESSOR identities are historical and cannot move: they name checkpoints
+ * deployments already stored. The TARGET identity does move, on every
+ * projection bump — so nothing in this file pins one, and nothing here should.
+ * Every fixture seeds a predecessor and lets the migration resolve whatever the
+ * current target happens to be, which is what keeps the suite correct across a
+ * bump instead of one commit behind it. */
 const RETIRED_CHANGE_STORE_IDENTITY = "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c"
 /** One hop earlier: the released identity every retained predecessor merges
  * on. Entering here proves the record set survives an intermediate edge and
