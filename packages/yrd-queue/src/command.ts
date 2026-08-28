@@ -4230,7 +4230,12 @@ function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepEx
   return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
 }
 
-const SUBMODULE_MODEL_CHANGE_PROP = "component-model-change"
+/** The revision prop that carries a @cto ruling authorizing a component-model
+ * add or remove. Exported so the CLI's refusal projection can PRINT the exact
+ * prop a blocked author must carry (actionable-error.ts's escalation census)
+ * rather than keeping a second copy of the spelling that can drift from this
+ * parser. */
+export const SUBMODULE_MODEL_CHANGE_PROP = "component-model-change"
 const SUBMODULE_MODEL_CHANGE_VALUE =
   /^(?<operation>add|remove) (?<path>[^;\s][^;]*); ruling (?<ruling>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/u
 
