@@ -2589,12 +2589,46 @@ function derivedTrackerDelivery(
   // or the author re-pushes. That covers a run that PASSED without an
   // integration proof (check-only / admission-only passes: the merge is still
   // pending, and skipping the row would blind the bridge to the
-  // staged-but-unlanded window) and a failed/canceled run alike: projecting
-  // "submitted" there is true (not terminally resolved) but imprecise —
-  // needs-author precision for derived members arrives with the durable
-  // refusal ledger (wave item).
+  // staged-but-unlanded window) and a canceled run alike: projecting
+  // "submitted" there is true (not terminally resolved) and imprecise, but a
+  // cancel is the queue's act, not a verdict on the author's code.
+  //
+  // A run that RAN AND FAILED is the one shape that narrows. `submitted` was
+  // true of it too, and a consumer could not tell "waiting to run" from "ran
+  // and failed" — the blur this closes.
+  //
+  // The failure fact is read off the run, NOT off `queues.admissionRefusals`.
+  // The ledger looks like the right source and is not: measured on this base,
+  // the row a failed derived member earns is
+  // `queue-submit-authority-consumed` — the queue declining to re-serve a
+  // fact run R1 already consumed. That is bookkeeping, and the same row is
+  // written for a member whose run has not failed, so attributing it would
+  // trade this blur for an affirmative lie. The run record carries the typed
+  // receipt and its own clock; that is the verdict.
+  const failure =
+    record.failure ??
+    (run?.status === "completed" && run.conclusion === "failure" && run.error !== undefined
+      ? { at: run.finishedAt ?? record.startedAt, error: run.error }
+      : undefined)
   const submit = state.bays.submits[member.branch]
   if (submit !== undefined && submit.sha === member.headSha) {
+    // Inside the fact-stands branch on purpose: a failed run whose fact has
+    // MOVED is superseded, and the tail below must keep answering `undefined`
+    // for it — the author already re-pushed, and that newer fact's own
+    // composition projects the next row.
+    if (failure !== undefined) {
+      return {
+        ...identity,
+        status: "needs-author",
+        at: failure.at,
+        // `detail` carries the message because trackerBridge v1 maps
+        // needs-author to `rejected` and keeps only `bounce` — without it the
+        // v1 consumer (the tent delivery projection) gets a failed row with an
+        // empty diagnostic column.
+        bounce: { run: record.id, detail: failure.error.message },
+        attributedResult: failure.error,
+      }
+    }
     return { ...identity, status: "submitted", at: submit.at }
   }
   const terminal =
@@ -2626,6 +2660,30 @@ function derivedTrackerDelivery(
  * NOTHING here: the pending window between `pr submit` and the first compose
  * is a declared blind spot of this bridge (known wave item, alongside the
  * durable refusal ledger), not a silent one.
+ *
+ * That blind spot SWALLOWS A FAILURE. This is NOT unfinished work waiting to
+ * be picked up here — do not reach for a wider scan in this loop, because the
+ * data it would scan for does not exist. A branch REFUSED at admission — its
+ * required check ran and exited non-zero — is inside the same window, so it
+ * gets no row: the queue never composes it, so no member and no run record
+ * exist for this loop to visit. Nor is the failure recoverable from
+ * `queues.admissionRefusals`. Measured on this base: three refused drains of
+ * one branch produced three admission Jobs, all `completed`/`failure` with a
+ * typed error, and left that ledger EMPTY the whole time — `noteCandidateRefusal`
+ * attributes through `resolveMemberById`, which needs a record or a retained
+ * snapshot, a refused branch has neither, and the attribution hits `continue`.
+ * The only durable trace is an `admission:<id>:<revision>:…` Job key whose id
+ * is freshly minted every cycle (PR1, PR2, PR3 over those three drains) and
+ * which names no branch, so it carries neither a stable delivery identity nor
+ * the `issueRef` this row type requires (`ProjectedBranchSubmit` is
+ * `{sha, base, at}`; the issue reaches a member only via `readSubmitEnrichment`
+ * at admission).
+ *
+ * So the missing piece is a DURABLE REFUSAL LEDGER for recordless members, not
+ * a projection fallback: the producer must record the refusal and key it by
+ * branch before any reader here can report it. That is an architectural door
+ * (@i/10-yrd/23237 case B), and it is decided, not slipped in beside a
+ * projection fix.
  *
  * Disjointness with the record rows is by construction: record rows project
  * from `bays.prs`, derived rows only from members whose id has no record
