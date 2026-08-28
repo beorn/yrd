@@ -85,7 +85,8 @@ await yrd.contests.finish({
 })
 
 await yrd.contests.select({ contest: ready.id, attempt: "A2" })
-const promoted = await yrd.contests.promote({ contest: ready.id }, { runner: "local", leaseMs: 60_000, concurrency: 2 })
+// Verifies the pin, then refuses `contest-promotion-record-retired`. See below.
+await yrd.contests.promote({ contest: ready.id }, { runner: "local", leaseMs: 60_000, concurrency: 2 })
 ```
 
 `get()` and `list()` are synchronous signal-backed reads. Attempt runner,
@@ -110,9 +111,24 @@ Qualitative reviews normally belong in the advisory category.
 Selection requires every configured evaluation to be terminal and one manually
 chosen passing attempt. A durable verification Job first resolves the attempt's
 write-once Git ref and proves that it still names the selected commit. Contest
-then asks Bay to intake and submit that exact
-commit as a PR and records finalization only after the PR exists. It never
-substitutes the current branch tip.
+never substitutes the current branch tip.
+
+Contest stops at that proof. It cannot finalize a promotion.
+`yrd contest promote` refuses with `contest-promotion-record-retired` as soon as
+verification passes, the contest stays in `promoting`, and Contest delivers
+nothing. `contest/promoted` still records a change-record identity — a `pr` id
+plus a `revision` — and the change-record store is gone. Contest holds no queue
+handle, so it cannot ask compose for the member id that would replace it.
+
+Deliver the winner yourself. The refusal names the verified commit, its bay, and
+its branch:
+
+1. Push that branch.
+2. Run `yrd pr submit <branch>`.
+
+The queue then runs the branch as a derived member. Restoring automatic
+finalization needs a ruling on what identity `contest/promoted` records: the
+branch plus its submit sha, or the composed member id.
 
 Runner and evaluator definitions receive `JobContext.signal`. Local command
 adapters inject the shared `@yrd/process` capability, which owns argv execution,

@@ -171,7 +171,7 @@ preserved legacy files are operator recovery evidence, not a fallback lane.
 
 ## Detached orphan audit
 
-`yrd journal import-orphan <path>` imports a detached v3 lane into
+`yrd admin journal import-orphan <source>` imports a detached v3 lane into
 `journal_orphans` with its source hash, origin row, importer, timestamp, and
 collision policy. Import refuses atomically when a command, cause, event, or
 canonical payload identity already exists live. Repeating the same complete

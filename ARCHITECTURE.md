@@ -24,7 +24,7 @@ function per implementation detail.
 | `Process`       | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                        |
 | `Jobs`          | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
 | `Issues`        | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
-| `Bays`          | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, check requests, lifecycle mutations |
+| `Bays`          | `withBays()`                                 | Query isolated bays and project the live `refs/yrd/submit/<branch>` facts                  | `state`, `get()`, `list()`, `branchLifecycles()`, `open()`, `refresh()`, `checkpoint()`, `orphan()`, `certifyHandoff()`, `submitSelection()`, `effectiveBase()`, `close()`, `recordBranchSubmit()`, `recordBranchUnsubmit()` |
 | `Queue`         | `withQueue()`                                | Run required checks and integrate eligible PRs through one scheduler                        | `state`, check/eligibility projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`                              |
 | `Contests`      | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
 
@@ -40,25 +40,32 @@ and knows nothing about providers or process harnesses.
 
 The objects above operate on plain records:
 
-| Record                 | Meaning                                                                                 |
-| ---------------------- | --------------------------------------------------------------------------------------- |
-| `Command`              | Serializable request naming one registered handler and its arguments                    |
-| `Event`                | Validated fact emitted by a command                                                     |
-| `CommandResult`        | Dispatched command, committed events, and optional JSON result value                    |
-| `Issue`                | Versioned unit of intent from a configured issue source                                 |
-| `Bay`                  | Isolated worktree and its current Git facts                                             |
-| `StepDef[]` (plan)     | The one validated ordered step list `.yrd.yml` declares (flows retired, 5e cut 3)       |
-| `PR`                   | GitHub-shaped open/closed state, merged fact, and immutable revision history            |
-| `PRRev`                | One immutable submitted head, composition, timing, and terminal evidence                |
-| `Candidate`            | Immutable queue/base plus ordered PR revision content selected for one or more attempts |
-| `Job`                  | Durable executable lifecycle and evidence                                               |
-| `Run`                  | Pinned PR set, base, installed-step plan, reusable results, and integration facts       |
-| `Runner`               | Submit/observe/cancel control-plane adapter with bounded execution                      |
-| `Context`              | Acquired execution location and candidate-access evidence recorded on a Job             |
-| `Step`                 | Configured typed transition in a Queue                                                  |
-| `Contest`              | Issue, competitors, attempts, selection, and promotion facts                            |
-| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin               |
-| `Artifact`             | Named evidence with a path or URL and media type                                        |
+| Record                  | Meaning                                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------------------- |
+| `Command`               | Serializable request naming one registered handler and its arguments                      |
+| `Event`                 | Validated fact emitted by a command                                                       |
+| `CommandResult`         | Dispatched command, committed events, and optional JSON result value                      |
+| `Issue`                 | Versioned unit of intent from a configured issue source                                   |
+| `Bay`                   | Isolated worktree and its current Git facts                                               |
+| `StepDef[]` (plan)      | The one validated ordered step list `.yrd.yml` declares (flows retired, 5e cut 3)         |
+| `ProjectedBranchSubmit` | One standing `refs/yrd/submit/<branch>` fact: the approved sha, its base, and its time    |
+| `ChangeSnapshot`        | One queue member a run retained: id, change id, branch, base, revision, head, composition |
+| `Change`                | A queue member materialized in memory from its live submit fact and its admitted identity |
+| `Candidate`             | Immutable queue/base plus ordered PR revision content selected for one or more attempts   |
+| `Job`                   | Durable executable lifecycle and evidence                                                 |
+| `Run`                   | Pinned PR set, base, installed-step plan, reusable results, and integration facts         |
+| `Runner`                | Submit/observe/cancel control-plane adapter with bounded execution                        |
+| `Context`               | Acquired execution location and candidate-access evidence recorded on a Job               |
+| `Step`                  | Configured typed transition in a Queue                                                    |
+| `Contest`               | Issue, competitors, attempts, selection, and promotion facts                              |
+| `ContestEvaluationRun`  | One versioned evaluator Job and typed result for an immutable attempt pin                 |
+| `Artifact`              | Named evidence with a path or URL and media type                                          |
+
+A branch and its standing submit fact are the delivery. Yrd stores no change
+record: `BaysState` holds bays and submit facts only, and every `pr/*` journal
+frame still parses on replay but projects nothing. Delivery history comes from
+retained run snapshots, the merge-record notes, and main's own ancestry. Ids
+still print as `PRnnn`, but that is a label on a member, not a stored object.
 
 Persisted records contain JSON data only. Zod schemas validate every untyped
 boundary: CLI/config input, commands, events, Job input/output, adapter output,
@@ -200,8 +207,10 @@ Core's private receipt cache retains the latest 4,096 frames. Job and Queue
 compactors run only when the Journal supplies immutable history: all
 nonterminal work remains live, along with the latest 512 terminal Queue roots
 and their complete trees/Jobs plus 512 standalone terminal Jobs. A failed
-required-check root that still determines a live PR's retry budget remains as live
-decision evidence beyond that terminal window. Archive reads do not repopulate
+single-member admission root remains as live decision evidence beyond that
+terminal window while the branch's live submit fact still stands at exactly the
+refused sha. A moved or retired fact supersedes that decision, and the root
+then ages out like any other terminal. Archive reads do not repopulate
 live projection state; retrying an archived failed or lost Job appends an
 explicit restore of the same Job id before it runs again. A complete replay
 accepts that restore only when its embedded terminal Job exactly matches the
@@ -230,11 +239,12 @@ The CLI may wrap the Journal with a signal observer. A successful append only
 wakes the observer; it never awaits delivery. The observer reads those same
 committed frames and atomically records its journal cursor plus successful
 event-id/recipient sends and terminal unsubscribe actions for crash replay. It
-may project a needs-review signal from a committed submission under the trusted
-review policy, aggregate integration facts that share one landing, and route a
-typed failed-Run fact; it does not own PR state, schedule work, or append facts.
-Delivery is at-least-once: a crash after an external action but before its local
-cursor record may repeat that action.
+may aggregate integration facts that share one landing, and it may route a typed
+failed-Run fact. It owns no domain state, schedules no work, and appends no
+facts. It cannot project a review signal: no runtime emits `pr/reviewed` or
+`pr/review-requested`, and a materialized `Change` always carries an empty
+`reviews` list. Delivery is at-least-once: a crash after an external action but
+before its local cursor record may repeat that action.
 
 When a strict consumer needs a typed fact that old replay-only history omitted,
 the repair is an explicit domain command that appends a validated compensating
