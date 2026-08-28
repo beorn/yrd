@@ -2068,25 +2068,57 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .object({ records: z.record(z.string(), z.unknown()) })
       .passthrough()
       .parse(checkpointValue.value.state["queues"])
-    const runIds = Object.keys(queues.records)
     // Loud, not skipped: with no retained Run the fold has no surviving witness
     // and this test would pass while proving only that a dropped field dropped.
-    expect(runIds, "the predecessor must retain a Run to carry the surviving label").not.toEqual([])
-    const legacyRuns = Object.fromEntries(
-      Object.entries(queues.records).map(([id, run]) => {
-        const parsed = z
-          .object({ prs: z.array(z.record(z.string(), z.unknown())) })
-          .passthrough()
-          .parse(run)
-        return [
-          id,
-          {
-            ...parsed,
-            prs: parsed.prs.map(({ props: _props, ...member }) => ({ ...member, correlation: legacyLabel })),
-          },
-        ]
-      }),
-    )
+    //
+    // Counted through the index rather than off `Object.keys(records)`, which
+    // answers `["root"]` for an EMPTY index as readily as a full one — the
+    // guard passed on the index's own root node while the fixture below found
+    // no runs at all.
+    const countRuns = (node: unknown): number => {
+      const parsed = z
+        .object({ children: z.record(z.string(), z.unknown()), entries: z.array(z.unknown()) })
+        .passthrough()
+        .parse(node)
+      return parsed.entries.length + Object.values(parsed.children).reduce<number>((n, c) => n + countRuns(c), 0)
+    }
+    const retainedRuns = Object.values(queues.records).reduce<number>((n, node) => n + countRuns(node), 0)
+    expect(retainedRuns, "the predecessor must retain a Run to carry the surviving label").toBeGreaterThan(0)
+    // `queues.records` is a PREFIX INDEX, not a flat run map — it has been one
+    // since the journal moved to SQLite (2026-07-19), which is well before the
+    // correlation-era identity below, so a real checkpoint of that vintage is
+    // indexed too. The runs live in `entries[].value` at every depth, and the
+    // rewrite has to walk to them.
+    const relabelRuns = (node: unknown): unknown => {
+      const parsed = z
+        .object({
+          prefix: z.string(),
+          children: z.record(z.string(), z.unknown()),
+          entries: z.array(z.object({ key: z.string(), value: z.record(z.string(), z.unknown()) }).passthrough()),
+        })
+        .passthrough()
+        .parse(node)
+      return {
+        ...parsed,
+        children: Object.fromEntries(
+          Object.entries(parsed.children).map(([segment, child]) => [segment, relabelRuns(child)]),
+        ),
+        entries: parsed.entries.map((entry) => {
+          const run = z
+            .object({ prs: z.array(z.record(z.string(), z.unknown())) })
+            .passthrough()
+            .parse(entry.value)
+          return {
+            ...entry,
+            value: {
+              ...run,
+              prs: run.prs.map(({ props: _props, ...member }) => ({ ...member, correlation: legacyLabel })),
+            },
+          }
+        }),
+      }
+    }
+    const legacyRuns = Object.fromEntries(Object.entries(queues.records).map(([id, node]) => [id, relabelRuns(node)]))
     // The PRODUCTION composition's correlation-era identity — the same value
     // the retained list carries, so this test also pins that the edge a live
     // deployment needs to cross the props cut actually exists.
