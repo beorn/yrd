@@ -34,132 +34,38 @@ function short(sha: string): string {
   return sha.length > 12 ? sha.slice(0, 12) : sha
 }
 
-/** Resolve one live change or raise the typed refusal that names why it cannot be
- * withdrawn. An unknown selector and a terminal change are both loud failures —
- * never a silent no-op. */
-function requiredLivePr(app: YrdCliApp, selector: string): Change {
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) {
-    raiseFailure("refusal", "pr-missing", changeNotFoundMessage(app.state().bays, selector))
-  }
-  const delivery = changeDeliveryState(pr)
-  if (!isLiveChange(pr)) {
-    raiseFailure(
-      "refusal",
-      "pr-terminal",
-      `yrd: change '${pr.id}' is ${delivery}; a terminal change cannot be withdrawn`,
-    )
-  }
-  return pr as Change
-}
-
-/** Withdraw the selected live change revision: emit pr/withdrawn with the recorded
- * reason and terminalize any Queue work still holding that authority — the one
- * withdrawal mechanism, so nothing can terminalize differently. */
-async function withdrawOne(
-  app: YrdCliApp,
-  id: string,
-  reason: string | undefined,
-  io: YrdCliIO,
-): Promise<Change> {
-  await app.bays.closePr({ pr: id, ...(reason === undefined ? {} : { reason }) })
-  const withdrawn = app.bays.pr(id)
-  if (withdrawn === undefined) throw new Error(`yrd: change '${id}' disappeared after withdraw`)
-  await app.queue.cancel({ prs: [id], by: io.runner ?? "operator", reason: reason ?? DEFAULT_WITHDRAW_REASON })
-  return withdrawn as Change
-}
-
 /** What closing this revision spends, in the operator's own terms: the exact
  * revision leaving delivery — so an operator acting on a STALE read sees the
  * mismatch here, before the spend, not after it (the PR78 specimen) — and the
  * one command that brings the payload back. */
-type PayloadSpend = Readonly<{ pr: string; revision: number; headSha: string; branch: string; reopen: string }>
-
-function payloadSpend(pr: Change): PayloadSpend {
-  const revision = currentChangeRev(pr)
-  return {
-    pr: pr.id,
-    revision: revision.n,
-    headSha: revision.head,
-    branch: pr.branch,
-    reopen: `yrd pr submit ${pr.branch}`,
-  }
-}
-
-function spendLine(spend: PayloadSpend): string {
-  return `${spend.pr} r${spend.revision} head ${spend.headSha} on '${spend.branch}'`
-}
-
 /** Closing an unmerged change is not housekeeping: it spends the
  * payload identity, and every other branch is barred from that commit
  * afterwards. The verb reads reversible, so the spend is stated and
  * acknowledged BEFORE the first event — never a silent success. The
  * acknowledgement is an explicit flag, not a prompt, so a non-TTY caller gets
  * the same typed refusal instead of hanging. */
-function refuseUnacknowledgedSpend(verb: string, spends: readonly PayloadSpend[]): never {
-  raiseFailure(
-    "refusal",
-    "withdraw-unacknowledged",
-    `yrd: ${verb} spends payload identity permanently — ${spends.map(spendLine).join("; ")}; ` +
-      "a closed commit can never be resubmitted as-is on any other branch, and only its own branch reopens it. " +
-      "Re-read each revision above, then pass --burn-payload to acknowledge the spend.",
-  )
-}
-
 export type WithdrawPrsOptions = JsonOption & Readonly<{ reason?: string; burnPayload?: boolean }>
 
-/** `yrd change withdraw <selector...> --burn-payload [--reason <text>]` —
- * withdraw live PRs, recording the operator's reason on each pr/withdrawn
- * event. Every selector is validated, and the whole spend disclosed and
- * acknowledged, before the first event is emitted, so a mixed batch refuses
- * whole.
- *
- * `change close` and the hidden `withdraw` alias are ONE act: the withdrawn
- * record with its reason is written FIRST, then queue work terminalizes — a
- * close that fails partway still leaves the reason behind. Only the printed
- * envelope name follows the invoked spelling. */
+/** S7: record withdrawal retired with the store — a branch IS the change and
+ * its "withdrawal" is two acts the author already owns: cancel the queued
+ * work, and retire the standing consent. The refusal teaches both. The
+ * spent-payload disclosure died with payload identity itself: content
+ * re-enters through the derived lane on any branch, so there is nothing to
+ * burn and nothing to reopen. */
 export async function withdrawPrs(
-  app: YrdCliApp,
-  selectors: readonly string[],
-  options: WithdrawPrsOptions,
-  io: YrdCliIO,
+  _app: YrdCliApp,
+  _selectors: readonly string[],
+  _options: WithdrawPrsOptions,
+  _io: YrdCliIO,
   command: "pr.close" | "pr.withdraw" = "pr.withdraw",
 ): Promise<void> {
-  const verb = command === "pr.close" ? "change close" : "change withdraw"
-  if (selectors.length === 0) usage(`${verb} requires at least one change selector`)
-  const reason = options.reason?.trim()
-  if (options.reason !== undefined && (reason === undefined || reason === "")) {
-    usage("--reason requires non-empty text")
-  }
-  const targets: Change[] = []
-  const seen = new Set<string>()
-  for (const selector of selectors) {
-    const pr = requiredLivePr(app, selector)
-    if (seen.has(pr.id)) usage(`${verb} selectors resolve to change '${pr.id}' more than once`)
-    seen.add(pr.id)
-    targets.push(pr)
-  }
-  const spends = targets.map(payloadSpend)
-  if (options.burnPayload !== true) refuseUnacknowledgedSpend(verb, spends)
-  // Disclosed BEFORE the first event, so a spend that fails partway has still
-  // told the operator exactly which revision it was about to burn.
-  for (const spend of spends) {
-    io.stderr(`yrd: spending payload identity: ${spendLine(spend)} — reopen only with '${spend.reopen}'\n`)
-  }
-  const withdrawn: Change[] = []
-  for (const target of targets) {
-    withdrawn.push(await withdrawOne(app, target.id, reason, io))
-  }
-  await printResult(
-    io,
-    jsonEnabled(options),
-    {
-      command,
-      ...(reason === undefined ? {} : { reason }),
-      spent: spends,
-      prs: withdrawn.map(projectChangeTaskStatus),
-    },
-    createElement(ChangeResultView, { prs: withdrawn, runs: [] }),
+  const verb = command === "pr.close" ? "close" : "withdraw"
+  raiseFailure(
+    "refusal",
+    `${verb}-retired`,
+    `yrd: change ${verb} retired with the record store — cancel queued work with 'yrd cancel <branch>', ` +
+      `and retire the standing submission by deleting its submit ref ` +
+      `(git push <receiver> :refs/yrd/submit/<branch>) or shelving the branch ('yrd archive <branch>')`,
   )
 }
 
@@ -226,6 +132,32 @@ export type RemergePreflightOptions = JsonOption &
  * mechanical caller (the habitant's self-applied-remedy pass, 22474) runs the
  * same `next` a human would have read off the terminal — one decision function,
  * never a second copy of the verdict rules. */
+/** TRANSITION-ONLY resolver for the remedy preflight's record arm: a LIVE
+ * record can exist only until the S7 cutover drain retires the last one — the
+ * mint is gone, so the population can only shrink. Reads the frozen store
+ * directly (the bay's resolution verbs deleted with the record surface) and
+ * dies with the store field. Post-drain this raises pr-missing for every
+ * selector, which is the honest answer: the fact-keyed remedy arm owns
+ * everything that still moves. */
+function requiredLivePr(app: YrdCliApp, selector: string): Change {
+  const store = app.state().bays.prs
+  const exact =
+    store[selector] ??
+    Object.values(store).find((candidate) => candidate.branch === selector && isLiveChange(candidate as Change))
+  if (exact === undefined) {
+    raiseFailure("refusal", "pr-missing", changeNotFoundMessage(app.state().bays, selector))
+  }
+  const pr = exact as Change
+  if (!isLiveChange(pr)) {
+    raiseFailure(
+      "refusal",
+      "pr-terminal",
+      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; a terminal change cannot re-merge`,
+    )
+  }
+  return pr
+}
+
 export async function preflightRemerge(
   app: YrdCliApp,
   selector: string,

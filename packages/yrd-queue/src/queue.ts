@@ -1117,9 +1117,6 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               settleOrphanedRun: (args) => yrd.dispatch(commands.queue.settleOrphanedRun, args),
               admissionRefused: (args) => yrd.dispatch(commands.queue.admissionRefused, args),
               settleAdmissionRefusal: (args) => yrd.dispatch(commands.queue.settleAdmissionRefusal, args),
-              recordAdmission: (args) => yrd.bays.recordAdmission(args),
-              requestChecks: (pr, baseSha) =>
-                yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
             },
             steps,
             options.defaultBase,
@@ -1170,8 +1167,6 @@ type QueueActions = Readonly<{
   settleOrphanedRun(args: SettleOrphanedRunArgs): Promise<CommandResult>
   admissionRefused(args: AdmissionRefusedArgs): Promise<CommandResult>
   settleAdmissionRefusal(args: SettleAdmissionRefusalArgs): Promise<CommandResult>
-  recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
-  requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
 
 function createQueue<Shape extends ChangeShape>(
@@ -1656,22 +1651,15 @@ function createQueue<Shape extends ChangeShape>(
    * strength of a housekeeping pass.
    */
   const refreshCheckIdentities = async (
-    prs: readonly DeepReadonly<Change>[],
-    resolveCycleBase: CycleBaseResolver | undefined,
+    _prs: readonly DeepReadonly<Change>[],
+    _resolveCycleBase: CycleBaseResolver | undefined,
   ): Promise<void> => {
-    if (resolveCycleBase === undefined) return
-    for (const pr of prs) {
-      if (!checksRequested(pr)) continue
-      // Derived member (S6): its check authority IS the live submit fact,
-      // pinned to exactly the submit sha — no `pr/checks-requested` event
-      // exists to re-point, and dispatching one would refuse pr-not-found.
-      // Admission pins the cycle base per dispatch instead.
-      if (runtime().bays.prs[pr.id] === undefined) continue
-      const base = baseIdentity(pr.base)
-      const baseSha = await resolveCycleBase(base)
-      if (checkRequest(pr)?.baseSha === baseSha) continue
-      await actions.requestChecks(pr.id, baseSha)
-    }
+    // S7: check authority is the live submit fact, pinned to exactly the
+    // submit sha — admission pins the cycle base per dispatch. The record
+    // lane's `pr/checks-requested` re-point verb is deleted with the mint;
+    // record members exist only as replayed history and never re-enter
+    // admission (the cutover gate drains active record runs first), so there
+    // is nothing left to re-point for anyone.
   }
 
   const resolveCandidateBaseSha = async (
@@ -1777,20 +1765,14 @@ function createQueue<Shape extends ChangeShape>(
     candidateFactsForSnapshots(prs.map(Queues.snapshot), baseSha)
 
   const recordRevisionAdmission = (
-    pr: DeepReadonly<Change>,
-    admission: ChangeAdmissionRecord,
+    _pr: DeepReadonly<Change>,
+    _admission: ChangeAdmissionRecord,
   ): Promise<CommandResult | undefined> => {
-    // Derived member (S6 census #9): the record-side admission copy is the
-    // duplicated authority this program deletes. The verdict already persists
-    // in the admission Jobs and the queues-slice refusal streak; dispatching
-    // `recordAdmission` for a recordless member would only refuse pr-not-found.
-    if (runtime().bays.prs[pr.id] === undefined) return Promise.resolve(undefined)
-    return actions.recordAdmission({
-      pr: pr.id,
-      revision: changeRevisionNumber(pr),
-      headSha: changeHead(pr),
-      admission,
-    })
+    // S7: the record-side admission copy was the duplicated authority this
+    // program deletes — the verdict persists in the admission Jobs and the
+    // queues-slice refusal streak, and the bay's `recordAdmission` verb is
+    // gone with the mint. Nothing writes an admission onto a record again.
+    return Promise.resolve(undefined)
   }
 
   /** The authority count this verdict may record, announcing an unresolved one.

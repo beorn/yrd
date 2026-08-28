@@ -560,6 +560,7 @@ async function drainReceiverInbox(
         // write (the record-intake dual-write retired with the store); a
         // failed validation keeps the result pending and retries next drain.
         if (result.change !== undefined) {
+          await materializeSubmitCarrier(receiver, result.branch, result.headSha, options.env)
           await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
         } else if (!ZERO_SHA.test(result.oldSha)) {
           // An ordinary push to an EXISTING branch (never creation — that is
@@ -1025,6 +1026,40 @@ async function validatePin(
     `pushed head ${update.newSha.slice(0, 12)} does not descend from pinned base ` +
       `${target.baseSha.slice(0, 12)}; rebase the change onto '${target.base}' and push again`,
   )
+}
+
+/** S7: the drain owns carrier materialization. The host's record-intake
+ * callback that used to fast-forward `refs/heads/<branch>` retired with the
+ * store, and a submission whose fact stands without its carrier is exactly
+ * the undeliverable state that callback existed to prevent — so the carrier
+ * moves here, BEFORE the submit ref, keeping fact-without-carrier
+ * unrepresentable. Replay-safe (already-at-head no-ops) and CAS'd on the
+ * observed current so a concurrent writer fails loudly and the result
+ * retries next drain; a non-descending current already refused at prepare
+ * ({@link validateSubmitCarrier}). */
+async function materializeSubmitCarrier(
+  receiver: GitPushReceiver,
+  branch: string,
+  headSha: string,
+  env?: Environment,
+): Promise<void> {
+  const exact = `refs/heads/${branch}`
+  const output = await mainGit(receiver.process, receiver.mainRepo, [
+    "for-each-ref",
+    "--format=%(refname)%00%(objectname)",
+    exact,
+  ])
+  const current = output.stdout
+    .split("\n")
+    .map((line) => line.split("\0"))
+    .find(([ref]) => ref === exact)?.[1]
+  if (current === headSha) return
+  await mainGit(receiver.process, receiver.mainRepo, [
+    "update-ref",
+    exact,
+    headSha,
+    ...(current === undefined ? [] : [current]),
+  ], { env })
 }
 
 async function validateSubmitCarrier(

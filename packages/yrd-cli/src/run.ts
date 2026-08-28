@@ -22,16 +22,14 @@ import {
   changeDeliveryState,
   changeHead,
   isLiveChange,
-  isTracked,
   changeNeedsAuthor,
   changeRevisionNumber,
-  changeRevisionLineage,
   changeNotFoundMessage,
-  changeSourceReadyAt,
   deploymentJobKey,
   HabGenerationReleaseResultSchema,
   ReleaseDeploymentJobInputSchema,
   isConcurrentCheckabilityConflict,
+  needsReview as changeNeedsReview,
   resolveBay,
   resolveBase,
   resolveChange,
@@ -41,7 +39,6 @@ import {
   type CompositionV1,
   type ChangeProps,
   type Change,
-  type ChangeFreshnessTransition,
   type ChangeDeliveryState,
   type ChangeRev,
   type DerivedSubmission,
@@ -3262,7 +3259,13 @@ function bayOpenIdentity(
     }
   }
   const claim = issue ?? branchSeed
-  const claimPrs = issue === undefined ? [] : app.bays.prs().filter((pr) => pr.issue === issue && isLiveChange(pr))
+  // TRANSITION-ONLY read of the frozen change-record store (the record surface
+  // deleted with S7): claim reattachment binds to a LIVE record, a population
+  // the retired mint can only shrink, so this arm dies with the store field.
+  const claimPrs =
+    issue === undefined
+      ? []
+      : Object.values(stateOf(app).bays.prs).filter((pr) => pr.issue === issue && isLiveChange(pr))
   if (claimPrs.length > 1) {
     refusal(
       `claim '${claim}' has multiple live PRs (${claimPrs.map((pr) => pr.id).join(", ")}); ` +
@@ -3275,7 +3278,10 @@ function bayOpenIdentity(
   }
 
   const bays = app.bays.list()
-  const prs = app.bays.prs()
+  // Branch-ownership history: live foreign work answers from the bay list; the
+  // frozen record store keeps answering for pre-S7 deliveries (a terminal
+  // record spent its branch name for this issue exactly as before).
+  const prs = Object.values(stateOf(app).bays.prs)
   const defaultBranch = `task/${branchSeed}`
   const branchOwners = (branch: string) => [
     ...bays.filter((bay) => bay.branch === branch).map((bay) => bay.issue),
@@ -3307,10 +3313,15 @@ async function resolveBayOpen(
   if (issue !== undefined && resolved.issueResolved !== true) {
     await app.issues.resolve(app.issues.ref(issue))
   }
+  // TRANSITION-ONLY: --pr reattaches a bay to a LIVE change record, and the
+  // resolution verb died with the record surface — resolve from the frozen
+  // store directly; this arm dies with the store field (bayOpenIdentity
+  // refuses a non-live target).
   const targetedPr =
     options.pr === undefined
       ? undefined
-      : (app.bays.pr(options.pr) ?? refusal(`no change '${options.pr}'; create it explicitly before using --pr`))
+      : (resolveChange(stateOf(app).bays, options.pr) ??
+        refusal(`no change '${options.pr}'; create it explicitly before using --pr`))
   const generated = generatedBayName()
   const branchSeed =
     issue === undefined
@@ -4042,9 +4053,14 @@ async function closeBays(
       )
     }
     try {
+      // TRANSITION-ONLY read of the frozen record store: --withdraw retires
+      // LIVE grandfathered records (the derived lane refused above), a
+      // population the deleted mint can only shrink — dies with the store.
       const withdrawing =
         options.withdraw === true
-          ? app.bays.prs().filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
+          ? Object.values(stateOf(app).bays.prs).filter(
+              (pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr),
+            )
           : []
       const current = await closeBayWithProcessReap(
         app,
@@ -4297,9 +4313,11 @@ function gatherBayStatusFacts(
     app.queue.deriveChange(bay.branch).authority.lane === "derived"
       ? [latestMemberForBranch(app, bay.branch)?.id ?? `refs/yrd/submit/${bay.branch}`]
       : []
+  // TRANSITION-ONLY record arm: live grandfathered records still block a close
+  // while the S7 drain retires them; reads the frozen store directly and dies
+  // with it (the derived arm above reads the standing submit fact first).
   const openChangeIds = [
-    ...app.bays
-      .prs()
+    ...Object.values(stateOf(app).bays.prs)
       .filter((pr) => (pr.bay === bay.id || pr.branch === bay.branch) && isLiveChange(pr))
       .map((pr) => pr.id),
     ...liveSubmitEntry,
@@ -4876,255 +4894,6 @@ async function requireQueueableSubmodulePinsForCommand(
   }
 }
 
-type ExecuteRemergeChangeOptions = Readonly<{
-  revision?: number
-  proposedHeadSha?: string
-  queue?: boolean
-  force?: boolean
-  admit?: boolean
-  transition?: ChangeFreshnessTransition
-  expectedCurrent?: Readonly<{ revision: number; headSha: string; track?: boolean }>
-}>
-
-async function cancelSupersededRevisionRuns(
-  app: YrdCliApp,
-  identity: Readonly<{ pr: string; revision: number; headSha: string }>,
-  by: string,
-  reason: string,
-): Promise<void> {
-  const runs = allQueueRuns(app).filter(
-    (run) =>
-      !Queues.terminal(run) &&
-      run.prs.some(
-        (member) =>
-          member.id === identity.pr && member.revision === identity.revision && member.headSha === identity.headSha,
-      ),
-  )
-  for (const run of runs) {
-    try {
-      await app.queue.cancelRun({ run: run.id, by, reason })
-    } catch (error) {
-      const failure = failureFact(error)
-      if (failure?.kind === "refusal" && failure.code === "run-terminal") continue
-      throw error
-    }
-  }
-}
-
-async function executeRemergeChange(
-  app: YrdCliApp,
-  services: Pick<YrdCliServices, "process" | "recut">,
-  selector: string,
-  options: ExecuteRemergeChangeOptions,
-  io: YrdCliIO,
-) {
-  const service = services.recut ?? configuration("pr.recut capability is not installed")
-  const pr = requiredPr(app, selector)
-  const delivery = changeDeliveryState(pr)
-  const currentRevision = currentChangeRev(pr)
-  const proposedHeadSha = options.proposedHeadSha
-  const expectedCurrent = options.expectedCurrent ?? {
-    revision: currentRevision.n,
-    headSha: currentRevision.head,
-  }
-  if (
-    currentRevision.n !== expectedCurrent.revision ||
-    currentRevision.head !== expectedCurrent.headSha ||
-    (expectedCurrent.track !== undefined && isTracked(pr) !== expectedCurrent.track)
-  ) {
-    raiseFailure(
-      "refusal",
-      "recut-current-changed",
-      `yrd: change '${pr.id}' current revision changed from ${expectedCurrent.revision}@${expectedCurrent.headSha} ` +
-        `to ${currentRevision.n}@${currentRevision.head} before the re-merge was computed`,
-    )
-  }
-  if (
-    delivery === "integrated" ||
-    delivery === "already-landed" ||
-    delivery === "withdrawn" ||
-    delivery === "canceled"
-  ) {
-    raiseFailure(
-      "refusal",
-      "terminal-target",
-      `yrd: change '${pr.id}' is ${delivery}; a finished change cannot be re-merge`,
-    )
-  }
-  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
-    usage("--revision must be a positive integer")
-  }
-  const fromRevision = options.revision ?? currentRevision.n
-  const source = pr.revs.find((revision) => revision.n === fromRevision)
-  if (source === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${fromRevision}`)
-  }
-  // Refuse to silently discard a green check: if the change's current head already
-  // holds a passing check for its current revision, re-merging supersedes that
-  // revision and throws the passing result away. Require an explicit --force so
-  // the discard is a deliberate operator choice, never a mechanical accident.
-  const checksPassed = app.queue.eligibility(pr.id).checks.status === "passed"
-  if (options.force !== true && checksPassed) {
-    raiseFailure(
-      "refusal",
-      "recut-would-discard-green",
-      `yrd: change '${pr.id}' revision ${currentRevision.n} already passed its checks; re-merge would discard that result. ` +
-        "Tracked changes re-merge implicitly when the branch moves; the runner applies force only when its own " +
-        "preflight verdict warrants discarding the green check.",
-    )
-  }
-  const sourceReview = pr.reviews.findLast((review) => review.revision === source.n && review.headSha === source.head)
-  const approval = sourceReview?.decision === "approve" ? sourceReview : undefined
-  const remergeExpectedCurrent = expectedCurrent
-  const remergeInput: Parameters<typeof service.recut>[0] = {
-    id: pr.id,
-    ...(pr.bay === undefined ? {} : { bay: pr.bay }),
-    ...(pr.name === undefined ? {} : { name: pr.name }),
-    branch: pr.branch,
-    base: pr.base,
-    revision: source.n,
-    headSha: source.head,
-    ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
-    ...(source.props === undefined ? {} : { props: source.props }),
-    ...(proposedHeadSha === undefined ? {} : { proposedHeadSha }),
-    ...(currentRevision.recut === undefined
-      ? {}
-      : {
-          current: {
-            revision: currentRevision.n,
-            headSha: currentRevision.head,
-            ...(currentRevision.baseSha === undefined ? {} : { baseSha: currentRevision.baseSha }),
-            treeSha: currentRevision.recut.treeSha,
-            patchId: currentRevision.recut.patchId,
-            fromRevision: currentRevision.recut.fromRevision,
-          },
-        }),
-  }
-  const result = await service.recut(remergeInput)
-  if (options.transition !== undefined && result.headSha === result.baseSha) {
-    await app.bays.settleSuperseded({
-      pr: pr.id,
-      revision: currentRevision.n,
-      headSha: currentRevision.head,
-      baseSha: result.baseSha,
-      baseTreeSha: result.treeSha,
-      patchId: result.patchId,
-    })
-    await app.queue.cancelAdmissionJobs({
-      pr: pr.id,
-      revision: currentRevision.n,
-      by: io.runner ?? "operator",
-      reason: `PR revision ${currentRevision.n} settled because its payload is already contained`,
-    })
-    const current = requiredPr(app, pr.id)
-    return {
-      current,
-      output: {
-        pr: current.id,
-        revision: changeRevisionNumber(current),
-        baseSha: result.baseSha,
-        treeSha: result.treeSha,
-        patchId: result.patchId,
-        reviewCarried: approval !== undefined,
-        ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
-        sourceReadyAt: changeSourceReadyAt(current),
-        lineage: changeRevisionLineage(current).map((revision) => revision.n),
-        unchanged: false,
-        settlement: "payload-already-contained" as const,
-      },
-      result,
-      unchanged: false,
-      settlement: "payload-already-contained" as const,
-    }
-  }
-  const sources =
-    result.unchanged && currentRevision.recut?.sources !== undefined
-      ? currentRevision.recut.sources
-      : [
-          {
-            repo: ".",
-            fromHeadSha: source.head,
-            toHeadSha: result.headSha,
-            patchId: result.patchId,
-            rangeDiff: "=" as const,
-          },
-        ]
-  // Re-merge Phase 1 (22925 family, staged-interim per (A)): this call still
-  // mints a ChangeRev — the OLD handle, kept as transition staging, not new
-  // persistence semantics. `result` is computed by MERGE (or, for a tracked
-  // drift, is the author's own proposed tip recorded verbatim), and
-  // `result.patchId` is an honest plain identity — no equivalence was
-  // certified, there is nothing to certify against under merge. Review
-  // carry-over for a proposed tip is gated on plain patch equivalence
-  // (`result.reviewEquivalent`), the rule that replaced payload certificates.
-  // Phase 2 deletes this mint entirely for the direct path (candidate-ref +
-  // checks-cache tracking replaces it) — see the plan doc's DoD row.
-  const recorded = await app.bays.recut({
-    pr: pr.id,
-    fromRevision: source.n,
-    headSha: result.headSha,
-    baseSha: result.baseSha,
-    treeSha: result.treeSha,
-    patchId: result.patchId,
-    reviewCarried: approval !== undefined && result.reviewEquivalent !== false,
-    sources,
-    expectedCurrent: remergeExpectedCurrent,
-    ...(options.transition === undefined ? {} : { transition: options.transition }),
-  })
-  const unchanged = recorded.events.length === 0
-
-  const queueExpectedCurrent = {
-    pr: pr.id,
-    revision: unchanged ? expectedCurrent.revision : expectedCurrent.revision + 1,
-    headSha: unchanged ? expectedCurrent.headSha : result.headSha,
-    ...(expectedCurrent.track === undefined ? {} : { track: expectedCurrent.track }),
-  }
-  let current = requiredPr(app, pr.id)
-  if (options.queue === true) {
-    await requireQueueableSubmodulePins(current, services, io)
-    await app.bays.ready({ pr: pr.id, expectedCurrent: queueExpectedCurrent })
-    current = requiredPr(app, pr.id)
-    if (!unchanged) {
-      const by = io.runner ?? "operator"
-      const reason = `PR re-merge superseded revision ${source.n}`
-      await app.queue.cancelAdmissionJobs({ pr: pr.id, revision: expectedCurrent.revision, by, reason })
-      if (expectedCurrent.track === true) {
-        await cancelSupersededRevisionRuns(
-          app,
-          { pr: pr.id, revision: expectedCurrent.revision, headSha: expectedCurrent.headSha },
-          by,
-          reason,
-        )
-      } else {
-        await app.queue.cancel({ prs: [current.id], by, reason })
-      }
-    }
-    current = requiredPr(app, current.id)
-    const currentDelivery = changeDeliveryState(current)
-    if (currentDelivery !== "submitted" && currentDelivery !== "ready") {
-      raiseFailure("refusal", "recut-not-ready", `yrd: change '${current.id}' is ${currentDelivery}, not ready`)
-    }
-    if (!app.bays.checksRequested(current.id)) {
-      await app.bays.requestChecks({ pr: current.id, expectedCurrent: queueExpectedCurrent })
-    }
-    await app.bays.ready({ pr: current.id, expectedCurrent: queueExpectedCurrent })
-    current = requiredPr(app, current.id)
-  }
-  const output = {
-    pr: current.id,
-    revision: changeRevisionNumber(current),
-    baseSha: result.baseSha,
-    treeSha: result.treeSha,
-    patchId: result.patchId,
-    reviewCarried: approval !== undefined,
-    ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
-    sourceReadyAt: changeSourceReadyAt(current),
-    lineage: changeRevisionLineage(current).map((revision) => revision.n),
-    unchanged,
-  }
-  return { current, output, result, unchanged, settlement: undefined }
-}
-
 async function changeChecks(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -5219,14 +4988,6 @@ async function requiredParents(sha: string, io: YrdCliIO): Promise<readonly stri
   return parents(sha, cwd)
 }
 
-async function optionalCommitMeta(
-  ref: string,
-  io: YrdCliIO,
-): Promise<Readonly<{ subject: string; body?: string }> | undefined> {
-  const cwd = io.cwd ?? process.cwd()
-  return io.resolveCommitMeta?.(ref, cwd)
-}
-
 /** True when a commit body already ends with an `Issue: <ref>` trailer for the
  * SAME issue. Commit bodies written with the GitHub "closing keyword in the
  * body" convention often carry the trailer themselves, so composeDescription
@@ -5284,43 +5045,18 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
   return [...groups.entries()].map(([base, group]) => ({ base, ...group }))
 }
 
-/** Effective title/description for a submit: an explicit flag wins, else a
- * value already on the change is carried forward, else the head commit subject/body
- * (with an issue reference) seeds the default. The commit is only read when a default
- * is actually needed, so carried-forward revisions never re-derive it. */
-async function resolveSubmitMetadata(
-  app: YrdCliApp,
-  selector: string,
-  options: Readonly<{ title?: string; description?: string; issue?: string }>,
-  io: YrdCliIO,
-): Promise<Readonly<{ title?: string; description?: string }>> {
-  const existing = app.bays.pr(selector)
-  const bay = app.bays.get(selector)
-  // Commit-derived defaults exist to BIND onto a change record, so they only
-  // travel where a record will take them: a bay selector, or a branch whose
-  // LIVE record the submit revises. Everything else routes to the DERIVED
-  // lane, where the head commit itself is the metadata — forwarding a
-  // commit-derived copy there only trips the record-only-drop warning,
-  // telling the author to amend a commit to carry the title it was read
-  // from. Explicit flags still travel (and warn) so the drop stays loud.
-  if (bay === undefined && (existing === undefined || !isLiveChange(existing))) {
-    return {
-      ...(options.title === undefined ? {} : { title: options.title }),
-      ...(options.description === undefined ? {} : { description: options.description }),
-    }
-  }
-  const needTitle = options.title === undefined && existing?.title === undefined
-  const needDescription = options.description === undefined && existing?.description === undefined
-  const issue = options.issue ?? existing?.issue
-  let commit: Readonly<{ subject: string; body?: string }> | undefined
-  if (needTitle || needDescription) {
-    commit = await optionalCommitMeta(bay?.branch ?? existing?.branch ?? selector, io)
-  }
-  const title = options.title ?? existing?.title ?? commit?.subject
-  const description = options.description ?? existing?.description ?? composeDescription(commit?.body, issue)
+/** Effective title/description for a submit: explicit flags only. Commit-derived
+ * defaults existed to BIND onto a change record; with the record mint retired
+ * every submission routes to the derived lane, where the head commit itself is
+ * the metadata — deriving a copy from the commit here would only trip the
+ * record-only-drop warning on every submit. Explicit flags still travel (and
+ * warn) so the drop stays loud. */
+function resolveSubmitMetadata(
+  options: Readonly<{ title?: string; description?: string }>,
+): Readonly<{ title?: string; description?: string }> {
   return {
-    ...(title === undefined ? {} : { title }),
-    ...(description === undefined ? {} : { description }),
+    ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.description === undefined ? {} : { description: options.description }),
   }
 }
 
@@ -5422,6 +5158,9 @@ async function applyChangeSelection(
   const cwd = io.cwd ?? process.cwd()
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
+  // Always empty since S7: submitSelection routes every submission to the
+  // derived lane. Kept while the selection envelope's record half drains out
+  // of its consumers.
   const prs: Change[] = []
   const derived: DerivedSubmission[] = []
   // Advisory warnings for submissions that SUCCEED with a caveat (e.g. a dirty
@@ -5433,17 +5172,23 @@ async function applyChangeSelection(
   if (composition !== undefined && inferred.length !== 1) {
     usage("--composition requires exactly one bay or branch selector")
   }
-  const reviewers = options.reviewer ?? []
+  // Requested-reviewer records died with the change-record store; like the
+  // retired track flags, a flag that binds to nothing refuses instead of
+  // silently accepting (fail fast, before any selector submits).
+  if ((options.reviewer ?? []).length > 0) refuseRetiredChangeRecordVerb("pr request-review")
   for (const selector of inferred) {
     const selectedBay = app.bays.get(selector)
-    const previous = app.bays.pr(selectedBay?.branch ?? selector)
+    // TRANSITION-ONLY read of the frozen record store: the create-only guard
+    // below still refuses against a grandfathered record's delivery state
+    // while the S7 drain retires them — dies with the store field.
+    const previous = resolveChange(state.bays, selectedBay?.branch ?? selector)
     if (createOnly) {
       const delivery = previous === undefined ? undefined : changeDeliveryState(previous)
       if (previous !== undefined && delivery !== "pushed" && delivery !== "rejected") {
         createOnlyRefusal(selectedBay, previous, changeDeliveryState(previous))
       }
     }
-    const metadata = await resolveSubmitMetadata(app, selector, options, io)
+    const metadata = resolveSubmitMetadata(options)
     // Internal compatibility seam: `draft` means emit `pr/pushed` without
     // `pr/submitted`; it is deliberately not part of either submit CLI.
     const submission = await app.bays.submitSelection(selector, {
@@ -5463,40 +5208,10 @@ async function applyChangeSelection(
       run: runtimeOptions(io),
       warnings,
     })
-    if ("lane" in submission) {
-      // Routed to the derived lane: the fact is the submission. Record-lane
-      // aftercare (supersede-cancel, reviewers, check requests) does not apply.
-      derived.push(submission)
-      continue
-    }
-    let pr = submission
-    if (previous !== undefined) {
-      const priorRevision = currentChangeRev(previous)
-      const currentRevision = currentChangeRev(pr)
-      if (priorRevision.n !== currentRevision.n || priorRevision.head !== currentRevision.head) {
-        await app.queue.cancelAdmissionJobs({
-          pr: previous.id,
-          revision: priorRevision.n,
-          by: io.runner ?? "operator",
-          reason: `a newer submit superseded revision ${priorRevision.n}`,
-        })
-      }
-    }
-    const delivery = changeDeliveryState(pr)
-    if (createOnly && delivery !== "pushed") {
-      createOnlyRefusal(selectedBay, pr, delivery)
-    }
-    if (reviewers.length > 0 && delivery !== "integrated" && delivery !== "already-landed") {
-      await app.bays.requestReview({
-        pr: pr.id,
-        reviewers: [...reviewers],
-        ...(io.runner === undefined ? {} : { by: io.runner }),
-      })
-      const requested = app.bays.pr(pr.id)
-      if (requested === undefined) throw new Error(`yrd: change '${pr.id}' disappeared after request-review`)
-      pr = requested
-    }
-    prs.push(pr)
+    // Routed to the derived lane — the only lane submitSelection has: the fact
+    // is the submission. Record-lane aftercare (supersede-cancel, reviewers,
+    // check requests) died with the change-record store.
+    derived.push(submission)
   }
   return { prs, derived, warnings }
 }
@@ -5571,7 +5286,9 @@ function submitRequiredCheckContexts(
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentBranch)
   return inferred.map((selector) => {
     const bay = app.bays.get(selector)
-    const branch = app.bays.pr(selector)?.branch ?? bay?.branch ?? selector
+    // Frozen-store read: a record id/alias still names its branch (records are
+    // the legacy/history source; the resolution verb died with the surface).
+    const branch = resolveChange(state.bays, selector)?.branch ?? bay?.branch ?? selector
     if (branch !== currentBranch) return { cwd, ref: branch }
     // Standing on the branch: the checks below will read this WORKING TREE, so
     // refuse before they can earn a verdict about content the record will not
@@ -5595,16 +5312,19 @@ function refuseTerminalBaySubmitBinding(app: YrdCliApp, selectors: readonly stri
   const cwd = io.cwd ?? process.cwd()
   const local = currentBay(stateOf(app).bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
+  // TRANSITION-ONLY reads of the frozen record store: terminal Bay bindings
+  // and live-record redirect targets are record-lane history whose population
+  // the deleted mint can only shrink — this preflight dies with the store.
   for (const selector of inferred) {
     const bay = app.bays.get(selector)
     if (bay === undefined) continue
-    const bound = app.bays.pr(bay.id)
+    const bound = resolveChange(stateOf(app).bays, bay.id)
     if (bound === undefined || isLiveChange(bound)) continue
     const delivery = changeDeliveryState(bound)
     if (delivery !== "withdrawn" && delivery !== "canceled") continue
     const branch = currentGitBranch(bay.path ?? cwd, io)
     if (branch === undefined || branch === bay.branch) continue
-    const branchPr = app.bays.pr(branch)
+    const branchPr = resolveChange(stateOf(app).bays, branch)
     const target = branchPr !== undefined && isLiveChange(branchPr) ? branchPr.id : branch
     bayBindingRefusal(
       bay,
@@ -5749,7 +5469,8 @@ async function applyChangeSelectionVerb(
     const refusalExit = await requireQueueableSubmodulePinsForCommand(pr, services, options, io)
     if (refusalExit !== undefined) return refusalExit
   }
-  for (const pr of checkable) await app.bays.requestChecks({ pr: pr.id })
+  // Check requests were record-store bookkeeping; on the derived lane the
+  // submit fact queues the branch and compose runs its required checks.
   const selected = checkable.map((pr) => pr.id)
   // A submit routed entirely to the derived lane admitted nothing on the
   // record side and is still a SUCCESS: the facts are written, compose picks
@@ -5873,8 +5594,13 @@ async function readComposition(path: string | undefined, io: YrdCliIO): Promise<
   }
 }
 
+/** TRANSITION-ONLY record resolver: the arms that still address a
+ * grandfathered change record (queue finish for a revision admission, the
+ * selection-envelope refresh) resolve it from the frozen store directly — the
+ * resolution verb died with the record surface, and this helper dies with the
+ * store field. */
 function requiredPr(app: YrdCliApp, selector: string): Change {
-  return app.bays.pr(selector) ?? requireLiveChange(stateOf(app).bays, selector)
+  return resolveChange(stateOf(app).bays, selector) ?? requireLiveChange(stateOf(app).bays, selector)
 }
 
 /**
@@ -5936,7 +5662,9 @@ function resolveDelivery(app: YrdCliApp, selector: string): ResolvedDelivery | u
   if (branch !== undefined && app.queue.deriveChange(branch).authority.lane === "derived") {
     return derivedDeliveryForBranch(app, branch)
   }
-  const record = app.bays.pr(selector)
+  // Frozen-store read: records stay the legacy/history source (see the block
+  // comment above) — the store's deletion turns this arm into a no-op.
+  const record = resolveChange(stateOf(app).bays, selector)
   if (record !== undefined) return { lane: "record", pr: record }
   const member = app.queue.resolveMember(selector)
   if (member !== undefined && member.source === "snapshot") {
@@ -6090,16 +5818,25 @@ async function listBays(
         ? allBays.filter(isTerminal)
         : allBays.filter((bay) => !isTerminal(bay))
   const visibleBayIds = new Set(bays.map((bay) => bay.id))
-  const prs = app.bays.prs()
   const jsonBays = bays.map((bay) => {
+    // Both worlds through the S7 resolver: a derived-lane branch reports its
+    // live submission's status (the member id once compose has minted one),
+    // while the frozen record store keeps answering for legacy deliveries.
+    const delivery = resolveDelivery(app, bay.id)
     const pr =
-      prs.findLast((candidate) => candidate.bay === bay.id) ??
-      prs.findLast((candidate) => candidate.branch === bay.branch)
+      delivery === undefined
+        ? undefined
+        : delivery.lane === "record"
+          ? { id: delivery.pr.id, status: changeDeliveryState(delivery.pr) }
+          : {
+              id: delivery.member?.id ?? `refs/yrd/submit/${delivery.branch}`,
+              status: derivedDeliveryStatus(app, delivery).state,
+            }
     return {
       ...bay,
       nativeStatus: bay.status,
       status: statuses.get(bay.id),
-      ...(pr === undefined ? {} : { pr: { id: pr.id, status: changeDeliveryState(pr) } }),
+      ...(pr === undefined ? {} : { pr }),
     }
   })
   const open = bays.filter((bay) => !isTerminal(bay))
@@ -6319,8 +6056,10 @@ async function listPrs(
   const state = stateOf(app)
   const base = options.base === undefined ? undefined : selectedBase(state, options.base)
   const explicitlyFiltered = options.base !== undefined || options.state !== undefined || options.issue !== undefined
-  const matching = app.bays
-    .prs()
+  // The record half of the list is the frozen store — replayed history plus
+  // the live grandfathered records the S7 drain is retiring; the derived
+  // lane's submissions are the LIVE section below.
+  const matching = Object.values(state.bays.prs)
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
     .toSorted((left, right) => compareNatural(left.id, right.id))
@@ -6338,7 +6077,9 @@ async function listPrs(
     .map((pr) => ({
       pr,
       eligibility: app.queue.eligibility(pr.id),
-      needsReview: app.bays.needsReview(pr.id),
+      // The review-state surface verb died with the record store; the pure
+      // model projection answers from the frozen record itself.
+      needsReview: changeNeedsReview(pr),
     }))
     .filter(
       ({ pr, eligibility }) =>
@@ -10038,29 +9779,23 @@ export type RefusalRemedyOutcome =
       resolution: readonly string[]
     }>
 
-/** Re-record the branch's corrected head onto the change — the in-process spelling
- * of the `yrd pr submit|create <branch>` step the printed remedy leads with. */
+/** Redeliver the branch's corrected head — the in-process spelling of the
+ * `yrd pr submit|create <branch>` step the printed remedy leads with. Every
+ * submission routes to the derived lane: the fact is the submission; compose
+ * admits it and runs its checks — nothing further to request here. */
 async function applyRedeliveryStep(
   app: YrdCliApp,
-  services: YrdCliServices,
   step: Extract<RemedyStep, { verb: "submit" | "create" }>,
   io: YrdCliIO,
 ): Promise<void> {
   const warnings: string[] = []
-  const submitted = await app.bays.submitSelection(step.branch, {
+  await app.bays.submitSelection(step.branch, {
     ...(step.verb === "create" ? { draft: true } : {}),
     resolveRevision: (ref) => optionalRevision(ref, io),
     resolveParents: (sha) => requiredParents(sha, io),
     run: runtimeOptions(io),
     warnings,
   })
-  // Routed to the derived lane: the fact is the submission; compose admits it
-  // and runs its checks — nothing further to request here.
-  if ("lane" in submitted) return
-  const delivery = changeDeliveryState(submitted)
-  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") return
-  await requireQueueableSubmodulePins(submitted, services, io)
-  if (!app.bays.checksRequested(submitted.id)) await app.bays.requestChecks({ pr: submitted.id })
 }
 
 /** Execute the re-merge preflight's verdict in-process. The verdict IS the
@@ -10068,64 +9803,31 @@ async function applyRedeliveryStep(
  * human who reads the same refusal can never diverge. */
 async function applyPreflightVerdict(
   app: YrdCliApp,
-  services: YrdCliServices,
   preflight: RemergePreflightResult,
+  branch: string,
   io: YrdCliIO,
-  requirements: Readonly<{ track?: true }> = {},
 ): Promise<void> {
-  const remergeExpectedCurrent = {
-    revision: preflight.evidence.expectedCurrent?.revision ?? preflight.revision,
-    headSha: preflight.evidence.expectedCurrent?.headSha ?? preflight.evidence.headSha,
-    ...(preflight.evidence.expectedCurrent?.track === undefined
-      ? {}
-      : { track: preflight.evidence.expectedCurrent.track }),
-    ...requirements,
-  }
-  const expectedCurrent = { pr: preflight.pr, ...remergeExpectedCurrent }
   if (preflight.verdict === "SUBSUMED-WITHDRAW") {
-    // Withdrawal ENDS a delivery, and `yrd admin pr prune` already owns unattended
-    // subsumption on its own schedule. The runner's job is to unwedge the line,
-    // not to retire someone's PR mid-cycle.
+    // Withdrawal ENDS a delivery: compose settles already-contained payloads
+    // itself, and burning a payload identity stays an operator decision. The
+    // runner's job is to unwedge the line, not to retire someone's PR
+    // mid-cycle.
     raiseFailure(
       "refusal",
       "refusal-remedy-needs-withdraw",
       `yrd: change '${preflight.pr}' preflight verdict SUBSUMED-WITHDRAW is an operator decision; run: ${preflight.next}`,
     )
   }
-  if (preflight.verdict === "FRESH-NOOP") {
-    await app.bays.ready({ pr: preflight.pr, expectedCurrent })
-    const pr = requiredPr(app, preflight.pr)
-    await requireQueueableSubmodulePins(pr, services, io)
-    if (!app.bays.checksRequested(pr.id)) {
-      await app.bays.requestChecks({ pr: pr.id, expectedCurrent })
-    }
-    await app.bays.ready({ pr: pr.id, expectedCurrent })
-    return
-  }
-  // `admit: false` for the same reason the freshness pass uses it: the compose
-  // that follows in THIS cycle owns admission. The remedy's job is to leave a
-  // queueable revision behind, not to start a second admission path.
-  await executeRemergeChange(
-    app,
-    services,
-    preflight.pr,
-    {
-      revision: preflight.revision,
-      ...(preflight.evidence.proposedHeadSha === undefined
-        ? {}
-        : { proposedHeadSha: preflight.evidence.proposedHeadSha }),
-      expectedCurrent: remergeExpectedCurrent,
-      queue: true,
-      admit: false,
-      ...(preflight.verdict === "RECUT-FORCE" ? { force: true } : {}),
-    },
-    io,
-  )
+  // FRESH-NOOP and RECUT (forced or not) share one in-process spelling now —
+  // the verdict's own printed `next`: resubmit from the branch tip. The submit
+  // fact routes the change to the derived lane, where compose rebuilds by
+  // merge and runs required checks itself; the record-side re-mint and its
+  // ready/check-request bookkeeping died with the change-record store.
+  await applyRedeliveryStep(app, { verb: "submit", branch }, io)
 }
 
 async function applyRefusalRemedy(
   app: YrdCliApp,
-  services: YrdCliServices,
   plan: RefusalRemedyPlan,
   steps: readonly RemedyStep[],
   commands: string[],
@@ -10136,17 +9838,16 @@ async function applyRefusalRemedy(
     commands.push(formatRemedyCommand(step))
     // A create step, or a submit naming a DIFFERENT branch, is a plain
     // redelivery. The submit step for the change under remedy is honoured
-    // through the implicit re-merge preflight instead of a blind re-record:
-    // tracked changes re-merge implicitly, and the runner takes the same
-    // queue-safe verdict path a moved head would (FRESH-NOOP re-readies,
-    // RECUT refreshes with certification, SUBSUMED refuses).
+    // through the re-merge preflight first, so the verdict — not a blind
+    // resubmit — decides: FRESH-NOOP and RECUT resubmit from the branch tip
+    // onto the derived lane, SUBSUMED refuses to the operator.
     if (step.verb === "create" || step.branch !== plan.branch) {
-      await applyRedeliveryStep(app, services, step, io)
+      await applyRedeliveryStep(app, step, io)
       continue
     }
     const preflight = await preflightRemerge(app, plan.pr, { queue: true }, io)
     commands.push(preflight.next)
-    await applyPreflightVerdict(app, services, preflight, io)
+    await applyPreflightVerdict(app, preflight, step.branch, io)
     verdict = preflight.verdict
   }
   if (verdict === undefined) throw new Error(`yrd: change '${plan.pr}' remedy ran no preflight step`)
@@ -10172,7 +9873,9 @@ async function applyRefusalRemedy(
  */
 export async function applyRefusalRemedies(
   app: YrdCliApp,
-  services: YrdCliServices,
+  // Unused since the record-side remedy machinery died with the change-record
+  // store; kept so the exported signature (and its callers) stay stable.
+  _services: YrdCliServices,
   io: YrdCliIO,
   attempted: Set<string>,
 ): Promise<readonly RefusalRemedyOutcome[]> {
@@ -10190,7 +9893,10 @@ export async function applyRefusalRemedies(
     // remedies its own output; a human's next push mints a different revision
     // again and is eligible as normal.
     const settleAttempt = (): void => {
-      const current = app.bays.pr(plan.pr)
+      // TRANSITION-ONLY: the plan's record arm came from the frozen store
+      // (planRefusalRemedies reads snapshot.bays.prs), so the attempt key
+      // re-reads it directly — dies with the store field.
+      const current = stateOf(app).bays.prs[plan.pr]
       if (current === undefined) return
       const revision = currentChangeRev(current)
       attempted.add(refusalRemedyKey(current.id, revision.n, revision.head))
@@ -10198,7 +9904,8 @@ export async function applyRefusalRemedies(
     const identity = { pr: plan.pr, revision: plan.revision, code: plan.failure.code, count: plan.count }
     const projected = actionableFailure(plan.failure)
     const settleNeedsPerson = async (reason: string): Promise<void> => {
-      const current = app.bays.pr(plan.pr)
+      // TRANSITION-ONLY frozen-store read, same as settleAttempt above.
+      const current = stateOf(app).bays.prs[plan.pr]
       const refusal = stateOf(app).queues.admissionRefusals[plan.pr]
       if (current === undefined || refusal === undefined) return
       const revision = currentChangeRev(current)
@@ -10233,7 +9940,7 @@ export async function applyRefusalRemedies(
     }
     const commands: string[] = []
     try {
-      const verdict = await applyRefusalRemedy(app, services, plan, plan.remedy.steps, commands, io)
+      const verdict = await applyRefusalRemedy(app, plan, plan.remedy.steps, commands, io)
       outcomes.push({ status: "applied", ...identity, commands, verdict })
       app.log.info?.(`Applied PR ${plan.pr}'s own printed remedy.`, {
         action: "queue-refusal-remedy-applied",
@@ -11297,7 +11004,10 @@ async function explainMerge(
       return verdict === "merged" ? 0 : 1
     }
   }
-  const pr = app.bays.pr(selector)
+  // Frozen-store read: `why` answers merge provenance from history, and the
+  // record store is the replayed history for pre-S7 deliveries (the resolution
+  // verb died with the record surface).
+  const pr = resolveChange(stateOf(app).bays, selector)
   if (pr === undefined) {
     await printResult(
       io,
@@ -12034,7 +11744,7 @@ function buildProgram(
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
-      "request a review from <reviewer> right after create (repeatable)",
+      "retired: refuses and names why",
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
@@ -12070,7 +11780,7 @@ function buildProgram(
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
     .option(
       "--reviewer <reviewer>",
-      "request a review from <reviewer> right after submit (repeatable)",
+      "retired: refuses and names why",
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )

@@ -32,7 +32,6 @@ import {
   type ReceiverTarget,
   changeIdTrailerCandidates,
   findChangeId,
-  recordLaneOwnsBranch,
 } from "@yrd/bay"
 import {
   createHeldOutCommandEvaluator,
@@ -155,7 +154,6 @@ import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, habitantObservability, resolveYrdObservability } from "./observability.ts"
 import { formatHabitantLogLine, habitantArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
-import { createChangePublicationService } from "./pr-publication.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { repositoryGitDir } from "./repository-authority.ts"
 import {
@@ -1908,10 +1906,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
       ...options.workspaceLifecycle,
     }))
-  const bayJobs = createBayJobDefs(
-    workspace,
-    createChangePublicationService({ repo: options.repo, process: options.process }),
-  )
+  const bayJobs = createBayJobDefs(workspace)
   let deploymentStorePromise: ReturnType<typeof createGitDeploymentStore> | undefined
   const deploymentStore = () => {
     deploymentStorePromise ??= createGitDeploymentStore({
@@ -2039,7 +2034,6 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     }),
     withBays({
       jobs: bayJobs,
-      prNumberMint,
       defaultBase: baseIdentity(options.config.base),
       ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
       resolveBase: async (base, context) => {
@@ -2526,38 +2520,6 @@ export async function readDerivedSubmitEnrichment(
   }
 }
 
-export async function materializeCarrier(
-  process: Pick<Process, "run">,
-  repo: string,
-  pushResult: Readonly<ReceiverResult>,
-): Promise<void> {
-  if (pushResult.change === undefined) return
-  const ref = `refs/heads/${pushResult.branch}`
-  const current = await resolveCommit(process, repo, ref)
-  // Replaying a result must not fail; the carrier is already where it belongs.
-  if (current === pushResult.headSha) return
-  if (current !== undefined && !(await isAncestorCommit(process, repo, current, pushResult.headSha))) {
-    throw new Error(
-      `yrd: carrier '${pushResult.branch}' is at ${current.slice(0, 12)}, which the pushed head ` +
-        `${pushResult.headSha.slice(0, 12)} does not descend from; rebase the change onto it and push again`,
-    )
-  }
-  const previous = current ?? "0".repeat(pushResult.headSha.length)
-  const args = ["update-ref", ref, pushResult.headSha, previous]
-  const result = await process.run({
-    argv: ["git", "-C", repo, ...args],
-    cwd: repo,
-    env: cleanGitEnvironment(globalThis.process.env),
-    timeoutMs: GIT_TIMEOUT_MS,
-  })
-  assertGitDidNotTimeOut(result, args)
-  if (result.exitCode !== 0) {
-    throw new Error(
-      result.stderr.trim() ||
-        `yrd: could not create carrier '${pushResult.branch}' at ${pushResult.headSha.slice(0, 12)}`,
-    )
-  }
-}
 
 async function isAncestorCommit(
   process: Pick<Process, "run">,
@@ -2576,29 +2538,6 @@ async function isAncestorCommit(
   return result.exitCode === 0
 }
 
-async function intakeResult(
-  app: YrdCliApp,
-  result: Readonly<ReceiverResult>,
-  process: Pick<Process, "run">,
-  repo: string,
-): Promise<void> {
-  // Before the dispatch, never after: a change that exists without its carrier is
-  // exactly the undeliverable state this exists to prevent, and a failure here
-  // leaves the result for the next drain to retry.
-  await materializeCarrier(process, repo, result)
-  // S6 door — the receiver's conditional dispatch: intake only when a live
-  // record owns the branch (a grandfathered revision append). Otherwise the
-  // branch is the DERIVED lane's, the submit-ref write that follows in the
-  // drain IS the submission, and dispatching intake would refuse
-  // `record-mint-retired` and wedge the drain retrying the result forever.
-  const branch = result.intake.branch ?? result.branch
-  if (branch !== undefined && !recordLaneOwnsBranch(app.state().bays, branch)) return
-  await app.dispatch(
-    app.commands.bay.intake,
-    { ...result.intake, receipt: result.id },
-    { key: `receiver:${result.id}` },
-  )
-}
 
 /** How many most-recent root Runs `queue audit` compares against git when the
  * caller does not say. Each distinct base sha costs two git reads, so the
@@ -3320,7 +3259,6 @@ async function createYrdRuntimeHost(
       const result = await receiver.drain({
         resolveTarget,
         intakePolicy: INTAKE_POLICY,
-        intake: (result) => intakeResult(runtimeApp, result, process, repository.repo),
         lockTimeoutMs: 30_000,
       })
       if (result.failed.length > 0 || result.ambiguous.length > 0) {
@@ -3529,17 +3467,11 @@ async function runReceiverHook(
       process: runtimeProcess,
       resolveTarget: receiverTarget(runtimeApp, runtimeProcess, repository.repo),
       intakePolicy: INTAKE_POLICY,
-      intake: (result) => intakeResult(runtimeApp, result, runtimeProcess, repository.repo),
       // The queue's own admission gate: an invalid pushed `.yrd.yml` is refused
       // at the push itself, so it can never reach the base ref queue.audit /
       // loadYrdConfig reads. See validatePushedYrdConfig's doc for the PR1337
       // incident this closes.
       validateConfig: validatePushedYrdConfig,
-      // Push-time half of the derived lane's Change-Id contract: exempt only
-      // carriers a LIVE record owns — the same predicate the S6 door dispatch
-      // (`intakeResult`) consults, so the gate and the lane never disagree
-      // about which branch owes a tip trailer.
-      recordOwnsBranch: (branch) => recordLaneOwnsBranch(runtimeApp.state().bays, branch),
       // branch-is-change phase 2a: an accepted refs/yrd/submit/<branch> write
       // becomes a journal fact the queue projects; before this the ref stood
       // in git and no reader could see it (@yrd/core/22991).
