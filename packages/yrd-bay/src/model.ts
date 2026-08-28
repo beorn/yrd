@@ -283,12 +283,14 @@ type BranchLifecycleBase = Readonly<{
   issue?: string
   /** Bay/runtime ownership: the process or person that owns the workspace lifecycle. */
   by?: string
-  /** Logical owner of the exact immutable PR revision projected by this lifecycle. */
-  submitter?: string
   branch: string
   openedAt: string
 }>
 
+/** S7 (branch-is-change): the record joins are gone. "submitted" derives from
+ * the branch's standing submit fact at the bay head, and "landed" is no longer
+ * derivable inside this package — run history / merged-truth are the landing
+ * authority, joined by the host if a landed row is wanted. */
 export type BranchLifecycle =
   | Readonly<BranchLifecycleBase & { status: "open"; headSha?: string }>
   | Readonly<
@@ -309,14 +311,7 @@ export type BranchLifecycle =
       BranchLifecycleBase & {
         status: "submitted"
         headSha: string
-        submitted: Readonly<{ pr: PRId; revision: number; at: string }>
-      }
-    >
-  | Readonly<
-      BranchLifecycleBase & {
-        status: "landed"
-        headSha: string
-        landed: Readonly<{ pr: PRId; revision: number; at: string; commit: string }>
+        submitted: Readonly<{ sha: string; base: string; at: string }>
       }
     >
   | Readonly<
@@ -773,7 +768,10 @@ export function isChangeRevisionSelector(pr: string): boolean {
  * about a corrupt journal, not an operator whose selector found nothing.
  */
 export function changeNotFoundMessage(state: BaysState, selector: string): string {
-  const searched = `searched ${Object.keys(state.prs).length} change(s)`
+  // S7: the denominator counts the SURVIVING population a selector can name —
+  // replayed record history plus live submit facts — so the falsifiable-empty
+  // contract outlives the record store (`searched 0` stays honest absence).
+  const searched = `searched ${Object.keys(state.prs).length + Object.keys(state.submits).length} change(s)`
   if (parseChangeSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
     return `yrd: no change '${selector}' — ${searched}`
   }
@@ -949,7 +947,10 @@ export type BranchSubmit = z.infer<typeof BranchSubmitSchema>
  */
 export type DerivedSubmission = Readonly<{ lane: "derived"; branch: string; sha: string; base: string }>
 
-/** CLOSED: a new reason is a schema change, never a string (@cto efd1fa9a, constraint 1). */
+/** CLOSED: a new reason is a schema change, never a string (@cto efd1fa9a, constraint 1).
+ * `superseded` is REPLAY-ONLY since S7: its writer, the queue's
+ * submitFactRetirement (record-lane approval takeover), retired with the
+ * record store; the member stays so journals carrying it keep parsing. */
 export const BranchUnsubmitReasonSchema = z.enum(["deleted", "archived", "superseded"])
 export type BranchUnsubmitReason = z.infer<typeof BranchUnsubmitReasonSchema>
 export const BranchUnsubmitSchema = z
@@ -1091,59 +1092,20 @@ export function emptyBaysState(): BaysState {
   return { byId: {}, prs: {}, receipts: {}, submits: {} }
 }
 
-function submitterForLifecycleHead(state: BaysState, bay: Bay, headSha: string | undefined): string | undefined {
-  if (headSha === undefined) return undefined
-  // Branch-submitted carriers (refs/for, `bay.submit` of a bare branch) never
-  // record an explicit bay pointer, and journal history cannot gain one, so a
-  // missing association falls back to branch-ref equality. This joins to the
-  // submitter RECORDED on the exact-head revision — it never derives a seat
-  // from the branch name, and any ambiguity stays unknown below.
-  const associated = changeForBay(state, bay.id)
-  const candidates =
-    associated === undefined ? Object.values(state.prs).filter((pr) => pr.branch === bay.branch) : [associated]
-  const revisions = candidates.flatMap((pr) => pr.revs.filter((revision) => revision.head === headSha))
-  if (revisions.length === 0 || revisions.some((revision) => revision.submitter === undefined)) return undefined
-  const submitters = new Set(revisions.map((revision) => revision.submitter))
-  return submitters.size === 1 ? revisions[0]?.submitter : undefined
-}
-
 /** Projects the current lifecycle of every Bay-registered work branch from the
- * same journal-backed aggregate used by the Bay and PR APIs. */
+ * same journal-backed aggregate used by the Bay APIs. S7: record joins are
+ * gone — "submitted" reads the branch's standing submit fact at the bay head,
+ * and no "landed" row projects here (run history / merged-truth own landing). */
 export function projectBranchLifecycles(state: BaysState): readonly BranchLifecycle[] {
   return Object.values(state.byId)
     .map((bay): BranchLifecycle => {
-      const pr = changeForBay(state, bay.id)
-      const current = pr === undefined ? undefined : currentChangeRev(pr)
-      const lifecycleHead = bay.archive?.headSha ?? bay.headSha
-      const submitter = submitterForLifecycleHead(state, bay, lifecycleHead)
       const base = {
         bay: bay.id,
         name: bay.name,
         ...(bay.issue === undefined ? {} : { issue: bay.issue }),
         ...(bay.by === undefined ? {} : { by: bay.by }),
-        ...(submitter === undefined ? {} : { submitter }),
         branch: bay.branch,
         openedAt: bay.openedAt,
-      }
-      const mergedAt = pr?.alreadyLandedAt ?? pr?.integratedAt
-      if (
-        bay.headSha !== undefined &&
-        current?.head === bay.headSha &&
-        pr?.merged === true &&
-        mergedAt !== undefined &&
-        pr.integration !== undefined
-      ) {
-        return {
-          ...base,
-          status: "landed",
-          headSha: bay.headSha,
-          landed: {
-            pr: pr.id,
-            revision: current.n,
-            at: mergedAt,
-            commit: pr.integration.commit,
-          },
-        }
       }
       if (bay.archive !== undefined) {
         return {
@@ -1157,13 +1119,13 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           },
         }
       }
-      const revision = bay.headSha === undefined || current?.head !== bay.headSha ? undefined : current
-      if (bay.headSha !== undefined && pr !== undefined && revision?.submittedAt !== undefined && pr.state === "open") {
+      const submit = state.submits[bay.branch]
+      if (bay.headSha !== undefined && submit !== undefined && submit.sha === bay.headSha) {
         return {
           ...base,
           status: "submitted",
           headSha: bay.headSha,
-          submitted: { pr: pr.id, revision: revision.n, at: revision.submittedAt },
+          submitted: { sha: submit.sha, base: submit.base, at: submit.at },
         }
       }
       if (bay.status === "closed") {
@@ -1177,12 +1139,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           reason: "archive-proof-unavailable",
         }
       }
-      if (
-        bay.headSha !== undefined &&
-        bay.handoff?.headSha === bay.headSha &&
-        (pr === undefined ||
-          (current?.head === bay.headSha && ["pushed", "withdrawn", "canceled"].includes(changeDeliveryState(pr))))
-      ) {
+      if (bay.headSha !== undefined && bay.handoff?.headSha === bay.headSha) {
         return {
           ...base,
           status: "handoff-ready",
@@ -1203,19 +1160,6 @@ export function isLiveChange(pr: Change): boolean {
   return pr.state === "open"
 }
 
-/**
- * S6 receiver-dispatch rule: intake is the grandfathered RECORD lane's act,
- * and only a branch a LIVE record already owns takes a revision through it. A
- * recordless (or terminal-record) branch belongs to the DERIVED lane — the
- * receiver's submit-ref write IS its submission, and dispatching intake for
- * it would only refuse `record-mint-retired` and wedge the drain retrying.
- * The lane is decided here, AT WRITE TIME, so read-side arbitration never
- * meets the live-record×different-sha ambiguity (s6-door-design §2).
- */
-export function recordLaneOwnsBranch(bays: Pick<BaysState, "prs">, branch: string): boolean {
-  return Object.values(bays.prs).some((pr) => pr.branch === branch && isLiveChange(pr))
-}
-
 /** The one reader of `Change.track`. The fallback IS the fleet-wide default
  * for records that never wrote the bit: tracked, since 2026-08-25
  * (@yrd/core/tracked-delivery step 2, operator-approved) — an absent bit
@@ -1226,6 +1170,10 @@ export function isTracked(pr: Change): boolean {
   return pr.track ?? true
 }
 
+/** @deprecated S7 read-survivor: joins a bay to its REPLAYED record history
+ * (`state.prs`), which no live command grows any more. Kept only for
+ * cross-package readers (@yrd/contest promotion pins); deletes with the store
+ * once those rewire onto run snapshots / merged-truth. */
 export function changeForBay(state: BaysState, bay: BayId): Change | undefined {
   return Object.values(state.prs).find((pr) => pr.bay === bay)
 }
@@ -1251,10 +1199,17 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
  * most-recent-first (highest id) so the read-biased fallback resolves the most
  * recent terminal when a branch has ONLY terminal PRs. An exact canonical id
  * always addresses that specific PR, terminal or not, ahead of this preference.
- * Mutating verbs enforce the live requirement themselves via requireLivePR —
- * this primitive stays verb-agnostic and read-biased. */
+ * This primitive stays verb-agnostic and read-biased; {@link requireLiveChange}
+ * layers the live requirement on top. */
 export type ChangeSelectorMatch = SelectorMatch<Change> & Readonly<{ revision?: ChangeRev }>
 
+/** @deprecated S7 read-survivor (with {@link resolveChange},
+ * {@link requireLiveChange}, {@link changeNotFoundMessage}): resolves over the
+ * REPLAYED record store, which no live command grows any more. Kept because
+ * @yrd/queue and @yrd/cli still import these for reads; each deletes with the
+ * store once its owner rewires onto the queue's snapshot resolver
+ * (`resolveMemberById`) + live submit facts. The selector GRAMMAR
+ * ({@link parseChangeSelector}) is permanent and stays. */
 export function resolveChangeMatch(state: BaysState, selector: string): ChangeSelectorMatch | undefined {
   const parsed = parseChangeSelector(selector)
   const candidates = Object.values(state.prs)
@@ -1300,20 +1255,18 @@ export function resolveChange(state: BaysState, selector: string): Change | unde
 
 declare const liveBrand: unique symbol
 
-/** A change that has passed through {@link requireLiveChange} — the shared mutation
- * boundary guard. Mutating reducers annotate their resolved PR as `LivePR`, so
- * `tsc` rejects any swap back to a raw `resolvePR` / `required(...)` (which
- * yields an unbranded {@link Change}) — the type system, not a source-grep test,
- * enforces that every change-selector mutation routes through the live guard. */
+/** A change that has passed through {@link requireLiveChange}. The brand was
+ * the shared mutation-boundary guard while record verbs existed; S7 deleted
+ * every mutating verb, so it survives only as the return shape of the
+ * deprecated read-survivor below. */
 export type LiveChange = Change & { readonly [liveBrand]: true }
 
-/** Resolve a change for a MUTATING verb: a branch/name selector must name the live
- * delivery of that branch. Returns the live change; a terminal change is returned only
- * when the operator addressed it by its exact canonical id (the verb's own
- * state guard then decides what a terminal target permits). A branch/alias
- * selector whose PRs are all terminal refuses loudly here at the mutation
- * boundary — resolvePR stays verb-agnostic and read-biased, so this is the one
- * shared guard every mutating verb routes through instead of hand-rolling it. */
+/** @deprecated S7 read-survivor (see {@link resolveChangeMatch}): the
+ * live-preference resolution — a branch/name selector must name the live
+ * delivery of that branch; a terminal change resolves only by its exact
+ * canonical id. No mutating verb remains behind it; kept because @yrd/cli
+ * still imports it, and it deletes with the store once that caller rewires
+ * onto the queue's snapshot resolver + live submit facts. */
 export function requireLiveChange(state: BaysState, selector: string): LiveChange {
   const resolution = resolveChangeMatch(state, selector)
   if (resolution === undefined) {

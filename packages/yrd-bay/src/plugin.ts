@@ -4,14 +4,12 @@ import {
   journalEvent,
   observeYrdLifecycle,
   raiseFailure,
-  resolveSelector,
   type CommandHandler,
   type CommandResult,
   type CommandTree,
   type DeepReadonly,
   type Event,
   type YrdDef,
-  type YrdDeliveryIdentity,
   type YrdLifecycleOptions,
 } from "@yrd/core"
 import {
@@ -29,7 +27,7 @@ import type { PrNumberMint } from "@yrd/persistence"
 import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
-import { ChangeIdSchema, changeIdForCommand, type ChangeId } from "./change-identity.ts"
+import { ChangeIdSchema } from "./change-identity.ts"
 import { RECEIVER_REMOTE_NAME } from "./git.ts"
 import {
   BayIdSchema,
@@ -46,7 +44,6 @@ import {
   ChangeAdmissionRecordedFactSchema,
   ChangeRemergeCertificateSchema,
   ChangeRemergeSourceSchema,
-  ChangeReviewDecisionSchema,
   ChangeReviewSchema,
   ChangeNeedsAuthorFactSchema,
   ChangeRejectedFactSchema,
@@ -57,47 +54,30 @@ import {
   RemoteBranchSnapshotSchema,
   baseIdentity,
   defaultBayBranch,
-  checksRequested,
   currentChangeRev,
   emptyBaysState,
   isLiveChange,
-  isTracked,
-  needsReview,
   normalizeV2By,
   normalizeLegacyChangeKeys,
   normalizeV1CorrelationToProps,
-  changeBaseSha,
-  changeComposition,
   changeProps,
   changeDeliveryState,
-  changeForBay,
-  requireLiveChange,
   changeHead,
-  changeNeedsAuthor,
-  changeRemerge,
   changeRevisionNumber,
-  ChangeCheckabilityConflict,
   projectBranchLifecycles,
-  reviewState,
   resolveBay,
-  resolveChange,
-  resolveChangeMatch,
   type Bay,
   type BranchLifecycle,
   type BaysState,
   type CheckpointBayInput,
   type CheckpointedBay,
-  type CompositionV1,
   type ChangeProps,
   type DeprovisionBayInput,
   type DeprovisionedBay,
-  type LiveChange,
   type Change,
-  type ChangeAdmissionRecordedFact,
   type ChangeComment,
   type ChangeRemergeProof,
   type ChangeReview,
-  type ChangeReviewState,
   type ChangeRev,
   type ChangeRevClock,
   type ProvisionBayInput,
@@ -175,7 +155,6 @@ const ChangeExpectedCurrentSchema = z
     track: z.boolean().optional(),
   })
   .strict()
-type ChangeExpectedCurrent = Readonly<z.infer<typeof ChangeExpectedCurrentSchema>>
 
 const IntakeChangeArgsSchema = z
   .object({
@@ -264,8 +243,8 @@ export type SubmitSelectionOptions = Readonly<{
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
 export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 
-const ChangeCloseArgsSchema = z.object({ pr: TextSchema, reason: TextSchema.optional() }).strict()
-export type ChangeCloseArgs = z.infer<typeof ChangeCloseArgsSchema>
+/** Journal decoder for `pr/edited` rows. The `pr edit` command retired with
+ * the record store (S7 branch-is-change, @i/10 22991); only replay reads this. */
 const ChangeEditArgsSchema = z
   .object({
     pr: TextSchema,
@@ -285,106 +264,6 @@ const ChangeEditArgsSchema = z
       track !== undefined,
     { message: "'issue', 'note', 'title', 'description', or 'track' is required" },
   )
-export type ChangeEditArgs = z.infer<typeof ChangeEditArgsSchema>
-
-const ChangeReadyArgsSchema = z
-  .object({ pr: TextSchema, expectedCurrent: ChangeExpectedCurrentSchema.optional() })
-  .strict()
-export type ChangeReadyArgs = z.infer<typeof ChangeReadyArgsSchema>
-const ChangeRemergeExpectedCurrentSchema = z
-  .object({
-    revision: RevisionSchema,
-    headSha: GitShaSchema,
-    track: z.boolean().optional(),
-  })
-  .strict()
-const ChangeRemergeArgsSchema = z
-  .object({
-    pr: TextSchema,
-    fromRevision: RevisionSchema,
-    headSha: GitShaSchema,
-    baseSha: GitShaSchema,
-    treeSha: GitShaSchema,
-    patchId: GitShaSchema,
-    reviewCarried: z.boolean(),
-    sources: z.array(ChangeRemergeSourceSchema).min(1).readonly().optional(),
-    expectedCurrent: ChangeRemergeExpectedCurrentSchema.optional(),
-    transition: ChangeFreshnessTransitionSchema.optional(),
-  })
-  .strict()
-export type ChangeRemergeArgs = z.infer<typeof ChangeRemergeArgsSchema>
-const ChangeSettleSupersededArgsSchema = z
-  .object({
-    pr: TextSchema,
-    revision: RevisionSchema,
-    headSha: GitShaSchema,
-    baseSha: GitShaSchema,
-    baseTreeSha: GitShaSchema,
-    patchId: GitShaSchema,
-  })
-  .strict()
-export type ChangeSettleSupersededArgs = z.infer<typeof ChangeSettleSupersededArgsSchema>
-const ChangeRequestChecksArgsSchema = z
-  .object({ pr: TextSchema, baseSha: GitShaSchema.optional(), expectedCurrent: ChangeExpectedCurrentSchema.optional() })
-  .strict()
-export type ChangeRequestChecksArgs = z.infer<typeof ChangeRequestChecksArgsSchema>
-const ChangeRequestReviewArgsSchema = z
-  .object({ pr: TextSchema, reviewers: z.array(TextSchema), by: TextSchema.optional() })
-  .strict()
-export type ChangeRequestReviewArgs = z.infer<typeof ChangeRequestReviewArgsSchema>
-
-const ChangePublicationSubmoduleSchema = z.object({ path: TextSchema, pin: GitShaSchema }).strict()
-export const ChangePublicationInputSchema = z
-  .object({
-    pr: PRIdSchema,
-    revision: RevisionSchema,
-    headSha: GitShaSchema,
-    baseSha: GitShaSchema,
-    branch: GitRefSchema,
-    sourceRoot: TextSchema,
-    components: z.array(ChangePublicationSubmoduleSchema).readonly(),
-    continuation: z.enum(["none", "queue"]),
-  })
-  .strict()
-export type ChangePublicationInput = z.infer<typeof ChangePublicationInputSchema>
-const PublishedRefSchema = z.object({ path: TextSchema, sha: GitShaSchema, ref: GitRefSchema }).strict()
-export const ChangePublicationOutputSchema = z
-  .object({ pr: PRIdSchema, revision: RevisionSchema, refs: z.array(PublishedRefSchema).readonly() })
-  .strict()
-export type ChangePublicationOutput = z.infer<typeof ChangePublicationOutputSchema>
-export type ChangePublicationService = Readonly<{
-  revision: string
-  publish(
-    input: ChangePublicationInput,
-    context: JobContext,
-  ): JobResult<ChangePublicationOutput> | Promise<JobResult<ChangePublicationOutput>>
-}>
-
-export function changePublicationJobKey(identity: Pick<ChangePublicationInput, "pr" | "revision" | "headSha">): string {
-  return `pr-publication:${identity.pr}:${String(identity.revision)}:${identity.headSha}`
-}
-
-const ChangeReviewArgsSchema = z
-  .object({
-    pr: TextSchema,
-    by: TextSchema,
-    decision: ChangeReviewDecisionSchema,
-    ref: TextSchema.optional(),
-    note: TextSchema.optional(),
-  })
-  .strict()
-export type ChangeReviewArgs = z.infer<typeof ChangeReviewArgsSchema>
-
-const ChangeCommentArgsSchema = z
-  .object({
-    pr: TextSchema,
-    by: TextSchema,
-    note: TextSchema,
-    ref: TextSchema.optional(),
-    expectedCurrent: ChangeExpectedCurrentSchema.optional(),
-  })
-  .strict()
-export type ChangeCommentArgs = z.infer<typeof ChangeCommentArgsSchema>
 
 const BayOpenedSchema = z.preprocess(
   normalizeV2By,
@@ -647,20 +526,9 @@ export type BayJobDefs = Readonly<{
   "bay.refresh": JobDef<RefreshBayInput, RefreshedBay>
   "bay.checkpoint": JobDef<CheckpointBayInput, CheckpointedBay>
   "bay.deprovision": JobDef<DeprovisionBayInput, DeprovisionedBay>
-  "pr.publish": JobDef<ChangePublicationInput, ChangePublicationOutput>
 }>
 
-export function createBayJobDefs(workspace: BayWorkspace, publication?: ChangePublicationService): BayJobDefs {
-  const publisher: ChangePublicationService =
-    publication ??
-    Object.freeze({
-      revision: "publication-unavailable-v1",
-      publish: (): JobResult<ChangePublicationOutput> => ({
-        status: "completed",
-        conclusion: "failure",
-        error: { code: "publication-unavailable", message: "PR publication service is not installed" },
-      }),
-    })
+export function createBayJobDefs(workspace: BayWorkspace): BayJobDefs {
   return Object.freeze({
     "bay.provision": createJobDef({
       name: "bay.provision",
@@ -694,19 +562,6 @@ export function createBayJobDefs(workspace: BayWorkspace, publication?: ChangePu
       output: DeprovisionedBaySchema,
       execute: (input, context) => workspace.deprovision(input, context),
     }),
-    "pr.publish": createJobDef({
-      name: "pr.publish",
-      title: "Publish an immutable PR revision",
-      revision: publisher.revision,
-      input: ChangePublicationInputSchema,
-      output: ChangePublicationOutputSchema,
-      observe: (input) => ({
-        lifecycle: "publication",
-        identity: { pr: input.pr, revision: input.revision, headSha: input.headSha },
-        attributes: { continuation: input.continuation, submoduleCount: input.components.length },
-      }),
-      execute: (input, context) => publisher.publish(input, context),
-    }),
   })
 }
 
@@ -723,19 +578,6 @@ export type BayCommands = Readonly<{
     submit: CommandHandler<SubmitArgs, BayState>
     close: CommandHandler<CloseBayArgs, BayState>
   }>
-  pr: Readonly<{
-    close: CommandHandler<ChangeCloseArgs, BayState>
-    edit: CommandHandler<ChangeEditArgs, BayState>
-    recut: CommandHandler<ChangeRemergeArgs, BayState>
-    settleSuperseded: CommandHandler<ChangeSettleSupersededArgs, BayState>
-    ready: CommandHandler<ChangeReadyArgs, BayState>
-    review: CommandHandler<ChangeReviewArgs, BayState>
-    comment: CommandHandler<ChangeCommentArgs, BayState>
-    requestChecks: CommandHandler<ChangeRequestChecksArgs, BayState>
-    recordAdmission: CommandHandler<ChangeAdmissionRecordedFact, BayState>
-    requestReview: CommandHandler<ChangeRequestReviewArgs, BayState>
-    publish: CommandHandler<ChangePublicationInput, BayState>
-  }>
   branch: Readonly<{
     recordSubmit: CommandHandler<BranchSubmit, BayState>
     recordUnsubmit: CommandHandler<BranchUnsubmit, BayState>
@@ -747,36 +589,24 @@ export type Bays = Readonly<{
   get(selector: string): DeepReadonly<Bay> | undefined
   list(): readonly DeepReadonly<Bay>[]
   branchLifecycles(): readonly DeepReadonly<BranchLifecycle>[]
-  pr(selector: string): DeepReadonly<Change> | undefined
-  prs(): readonly DeepReadonly<Change>[]
-  reviewState(selector: string): DeepReadonly<ChangeReviewState>
-  needsReview(selector: string, reviewer?: string): boolean
-  checksRequested(selector: string): boolean
   open(args: OpenBayArgs): Promise<CommandResult>
   refresh(args: RefreshBayArgs): Promise<CommandResult>
   checkpoint(args: CheckpointBayArgs): Promise<CommandResult>
   orphan(args: OrphanBayArgs): Promise<CommandResult>
   certifyHandoff(args: CertifyHandoffArgs): Promise<CommandResult>
+  /** Retired (S7): refuses `record-mint-retired` with the push-path cure — the
+   * receiver's accepted push IS the intake. Kept on the surface so callers get
+   * the cure instead of a missing method. */
   intake(args: IntakeChangeArgs): Promise<CommandResult>
+  /** Retired (S7): refuses `record-mint-retired` naming `yrd pr submit <branch>`. */
   submit(args: SubmitArgs): Promise<CommandResult>
-  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<Change> | DerivedSubmission>
+  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DerivedSubmission>
   /** Live queue SHA `pr create` will consume for this bay — not the historical pin. */
   effectiveBase(selector: string, requestedBase?: string): Promise<BayBaseTarget>
   close(args: CloseBayArgs): Promise<CommandResult>
-  closePr(args: ChangeCloseArgs): Promise<CommandResult>
-  editPr(args: ChangeEditArgs): Promise<CommandResult>
-  recut(args: ChangeRemergeArgs): Promise<CommandResult>
-  settleSuperseded(args: ChangeSettleSupersededArgs): Promise<CommandResult>
-  ready(args: ChangeReadyArgs): Promise<CommandResult>
-  review(args: ChangeReviewArgs): Promise<CommandResult>
-  comment(args: ChangeCommentArgs): Promise<CommandResult>
-  requestChecks(args: ChangeRequestChecksArgs): Promise<CommandResult>
-  recordAdmission(args: ChangeAdmissionRecordedFact): Promise<CommandResult>
-  requestReview(args: ChangeRequestReviewArgs): Promise<CommandResult>
-  requestPublication(args: ChangePublicationInput): Promise<CommandResult>
   /** The receiver ACCEPTED a `refs/yrd/submit/<branch>` write — project the approval fact. */
   recordBranchSubmit(args: BranchSubmit): Promise<CommandResult>
-  /** The receiver removed a submit ref (delete, archival sweep) or a record superseded it. */
+  /** The receiver removed a submit ref (delete, archival sweep). */
   recordBranchUnsubmit(args: BranchUnsubmit): Promise<CommandResult>
 }>
 
@@ -792,17 +622,6 @@ type BayActions = Pick<
   | "intake"
   | "submit"
   | "close"
-  | "closePr"
-  | "editPr"
-  | "recut"
-  | "settleSuperseded"
-  | "ready"
-  | "review"
-  | "comment"
-  | "requestChecks"
-  | "recordAdmission"
-  | "requestReview"
-  | "requestPublication"
   | "recordBranchSubmit"
   | "recordBranchUnsubmit"
 >
@@ -890,418 +709,138 @@ export function createBays(
     )
     return actions.open({ ...args, ...resolved })
   }
-  const intake = async (args: IntakeChangeArgs): Promise<CommandResult> => {
-    const selectedPR = (): DeepReadonly<Change> | undefined => {
-      const snapshot = state()
-      const bay = args.bay === undefined ? undefined : resolveBay(snapshot, args.bay)
-      return bay === undefined
-        ? args.branch === undefined
-          ? undefined
-          : resolveChange(snapshot, args.branch)
-        : changeForBay(snapshot, bay.id)
-    }
-    const before = selectedPR()
-    return observe(
-      {
-        lifecycle: "intake",
-        identity: before === undefined ? undefined : changeIdentity(before),
-        attributes: {
-          ...(args.bay === undefined ? {} : { bay: args.bay }),
-          ...(args.branch === undefined ? {} : { branch: args.branch }),
-        },
-        resultAttributes: () => {
-          const selected = selectedPR()
-          return selected === undefined ? {} : changeIdentity(selected)
-        },
-      },
-      async () => {
-        const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
-        const recorded = selectedPR()
-        // Historical bay/PR pins are not an authority against the live queue.
-        // Only an explicit caller baseSha may contradict resolveBase (AC2).
-        const resolved = await target(args.base ?? bay?.base ?? recorded?.base, args.baseSha)
-        return actions.intake({ ...args, ...resolved })
-      },
-    )
-  }
-  const submitOperation = async (args: SubmitArgs): Promise<CommandResult> => {
-    if ("pr" in args) return actions.submit(args)
-    const resolved = await target(args.base, args.baseSha)
-    return actions.submit({ ...args, ...resolved })
-  }
-  const submit = (args: SubmitArgs): Promise<CommandResult> => {
-    const selector = "pr" in args ? args.pr : args.branch
-    const before = resolveChange(state(), selector)
-    return observe(
-      {
-        lifecycle: "submit",
-        identity: before === undefined ? undefined : changeIdentity(before),
-        attributes: { selector },
-        resultAttributes: () => {
-          const selected = resolveChange(state(), selector)
-          return selected === undefined ? {} : changeIdentity(selected)
-        },
-      },
-      () => submitOperation(args),
-    )
-  }
-  const bindProps = async (pr: DeepReadonly<Change>, props: ChangeProps | undefined): Promise<DeepReadonly<Change>> => {
-    if (props === undefined) return pr
-    await submitOperation({ pr: pr.id, props })
-    const bound = resolveChange(state(), pr.id)
-    if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after props bind`)
-    }
-    return bound
-  }
-  const bindIssue = async (pr: DeepReadonly<Change>, issue: string | undefined): Promise<DeepReadonly<Change>> => {
-    if (issue === undefined || pr.issue === issue) return pr
-    if (pr.issue !== undefined) {
-      raiseFailure(
-        "refusal",
-        "issue-conflict",
-        `yrd: change '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
-      )
-    }
-    const delivery = changeDeliveryState(pr)
-    if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
-      raiseFailure(
-        "refusal",
-        "issue-too-late",
-        `yrd: change '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
-      )
-    }
-    await actions.editPr({ pr: pr.id, issue })
-    const bound = resolveChange(state(), pr.id)
-    if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after issue bind`)
-    }
-    return bound
-  }
-  const bindMetadata = async (
-    pr: DeepReadonly<Change>,
-    metadata: Pick<SubmitSelectionOptions, "title" | "description" | "track" | "warnings">,
-  ): Promise<DeepReadonly<Change>> => {
-    const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
-    const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
-    // Tracking only governs FUTURE habitant preparation or a manual implicit
-    // re-merge, which a terminal change (an integrated/already-landed same-head
-    // resubmit reaches this seam at exit 0) no longer has. Recording it there
-    // would refuse the whole submit, so state loudly that the flag was not
-    // recorded instead of pretending it was.
-    const trackable = isLiveChange(pr)
-    const trackChanged = metadata.track !== undefined && metadata.track !== isTracked(pr)
-    if (trackChanged && !trackable) {
-      const warning =
-        `change '${pr.id}' is ${changeDeliveryState(pr)}; --track was NOT recorded. ` +
-        "Tracking governs future rebuilds, and this change has none."
-      metadata.warnings?.push(warning)
-      log?.warn?.(warning, { action: "submit-track-terminal", pr: pr.id })
-    }
-    const recordTrack = trackChanged && trackable
-    if (!titleChanged && !descriptionChanged && !recordTrack) return pr
-    await actions.editPr({
-      pr: pr.id,
-      ...(titleChanged ? { title: metadata.title } : {}),
-      ...(descriptionChanged ? { description: metadata.description } : {}),
-      ...(recordTrack ? { track: metadata.track } : {}),
-    })
-    const bound = resolveChange(state(), pr.id)
-    if (bound === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after metadata bind`)
-    }
-    return bound
-  }
-  const bindSubmission = async (
-    pr: DeepReadonly<Change>,
-    submission: Pick<SubmitSelectionOptions, "issue" | "props">,
-  ): Promise<DeepReadonly<Change>> => bindProps(await bindIssue(pr, submission.issue), submission.props)
-
   const submitSelectionOperation = async (
     selector: string,
     options: SubmitSelectionOptions,
-  ): Promise<DeepReadonly<Change> | DerivedSubmission> => {
-    let snapshot = state()
-    const resolved = resolveChangeMatch(snapshot, selector)
-    if (resolved?.revision !== undefined) requireLiveChange(snapshot, selector)
+  ): Promise<DerivedSubmission> => {
+    const snapshot = state()
     const selectedBay = resolveBay(snapshot, selector)
-    let pr = resolved?.value ?? (selectedBay === undefined ? undefined : resolveChange(snapshot, selectedBay.branch))
     // A closed Bay is archive evidence, not permanent ownership of its branch
     // alias. Addressing that branch again must use the direct-branch delivery
     // path; canonical Bay id/name selectors still resolve the closed Bay and
     // receive the ordinary not-active refusal.
     const closedBranchAlias =
       selectedBay?.status === "closed" && selectedBay.branch.toLowerCase() === selector.toLowerCase()
-    let bay = closedBranchAlias
-      ? undefined
-      : (selectedBay ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay)))
-    // D2 — a branch whose PR reached a non-merged terminal status
-    // (withdrawn/canceled) mints its next revision automatically down the
-    // direct-branch resubmit path below (the reopen preserves the change identity,
-    // so branch→PR stays 1:1). The author no longer hand-makes a delivery branch.
-    //
-    // Q1 — an integrated/already-landed branch identity is FROZEN evidence, never reopened:
-    //  - addressed by its branch, resubmitting the SAME merged head is an
-    //    informational "already merged" no-op (returns the integrated change, exit
-    //    0 — delivered work is not a dark queue), while a NEW head mints a fresh
-    //    delivery PR (revision 1) via the direct-branch path below, so no
-    //    hand-made `<branch>-delivery-<nonce>` branch is needed;
-    //  - addressed by its id, it stays idempotent.
-    if (
-      pr !== undefined &&
-      (changeDeliveryState(pr) === "integrated" || changeDeliveryState(pr) === "already-landed")
-    ) {
-      // Addressed by its canonical id, an integrated change is frozen evidence:
-      // idempotent. Addressed by a moving alias (its branch), a new head mints a
-      // fresh delivery. The canonical-vs-alias fold lives in resolveSelectorMatch.
-      if (resolved?.matchedBy === "canonical") return bindSubmission(pr, options)
-      const mergedHead = await options.resolveRevision(selector)
-      if (mergedHead === undefined) {
-        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
-      }
-      if (mergedHead === changeHead(pr)) return bindSubmission(pr, options)
-      // A new head on a merged branch mints a fresh delivery identity below.
-    }
-
-    if (bay?.status === "active") {
-      // An active Bay asks "which commit is checked out in the managed authored
-      // workspace after refresh?" It does not ask what the same branch name
-      // currently means on origin; direct/non-active submission asks that
-      // remote question through resolveRevision below.
-      const refreshed = await actions.refresh({ bay: bay.id })
-      await execute(refreshed, options.run, `bay '${bay.id}' refresh`)
-      snapshot = state()
-      bay = resolveBay(snapshot, bay.id)
-      if (bay === undefined) {
-        raiseFailure("infrastructure", "bay-state-invalid", `yrd: bay '${selector}' disappeared after refresh`)
-      }
-      if (bay.dirty === true) {
-        // D3 — a dirty worktree no longer refuses the submit. Submit is a ledger
-        // write: it records the committed HEAD (resolved just below) and warns
-        // loudly that the uncommitted worktree changes are NOT part of this
-        // submission. The warning rides the result envelope (options.warnings)
-        // AND the log stream — loud by construction, never a silent fallback.
-        const warning =
-          `Bay '${bay.id}' has uncommitted work; the change includes only committed changes. ` +
-          "The uncommitted changes remain in the Bay."
-        options.warnings?.push(warning)
-        log?.warn?.(warning, { action: "submit-dirty-worktree", bay: bay.id })
-      }
-      if (bay.headSha === undefined) {
-        raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
-      }
-      pr = changeForBay(snapshot, bay.id) ?? resolveChange(snapshot, bay.branch)
-      const composition = pr === undefined ? undefined : changeComposition(pr)
-      if (pr === undefined || changeHead(pr) !== bay.headSha || !sameComposition(composition, changeComposition(pr))) {
-        await intake({
-          bay: bay.id,
-          headSha: bay.headSha,
-          ...(options.base === undefined ? {} : { base: options.base }),
-          ...(options.issue === undefined ? {} : { issue: options.issue }),
-          ...(composition === undefined ? {} : { composition }),
-        })
-        pr = changeForBay(state(), bay.id) ?? resolveChange(state(), bay.branch)
-      }
-    }
-
-    // Re-submitting a change that has no LIVE workspace must re-resolve the branch's current tip
-    // rather than reuse the recorded revision's head: a pushed (e.g. draft) or submitted PR
-    // whose branch has since moved would otherwise re-register the stale head. Only an ACTIVE
-    // bay asks for the managed workspace's committed HEAD (handled above); every other shape — bay-less
-    // direct branch, and a change whose bay is closing/closed/failed (reachable by PR id or by the
-    // retired bay's id, where the closedBranchAlias escape above does not apply) — resolves the
-    // branch tip here. Without this, an idempotent retry re-presented the recorded head at
-    // exit 0 and an automated driver concluded the carrier matched its branch when it did not.
-    if (
-      pr !== undefined &&
-      (changeDeliveryState(pr) === "submitted" ||
-        changeDeliveryState(pr) === "ready" ||
-        changeDeliveryState(pr) === "needs-author" ||
-        changeDeliveryState(pr) === "pushed") &&
-      bay?.status !== "active"
-    ) {
-      const headSha = await options.resolveRevision(pr.branch)
-      if (headSha === undefined && (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready")) {
-        // A submitted PR whose branch no longer resolves cannot be re-submitted from a tip.
-        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${pr.branch}'`)
-      }
-      if (headSha !== undefined) {
-        const resolved = await target(options.base ?? pr.base, undefined)
-        const composition = changeComposition(pr)
-        if (
-          headSha !== changeHead(pr) ||
-          resolved.base !== pr.base ||
-          resolved.baseSha !== changeBaseSha(pr) ||
-          !sameComposition(composition, changeComposition(pr))
-        ) {
-          await intake({
-            branch: pr.branch,
-            headSha,
-            ...resolved,
-            ...(options.issue === undefined ? {} : { issue: options.issue }),
-            ...(composition === undefined ? {} : { composition }),
-          })
-          pr = resolveChange(state(), pr.id)
-          if (pr === undefined) {
-            raiseFailure(
-              "infrastructure",
-              "pr-state-invalid",
-              `yrd: change '${selector}' disappeared after revision intake`,
-            )
-          }
-        }
-      }
-    }
-
-    // Only a live change binds an issue in place. A terminal change resolved
-    // here is a withdrawn/canceled branch whose resubmit falls through to the
-    // DERIVED lane below (the reopen door retired with the legacy mint), so
-    // binding here (which refuses on a terminal change) is skipped.
-    if (pr !== undefined && isLiveChange(pr)) pr = await bindIssue(pr, options.issue)
-    if (
-      pr !== undefined &&
-      (changeDeliveryState(pr) === "submitted" ||
-        changeDeliveryState(pr) === "ready" ||
-        changeDeliveryState(pr) === "needs-author")
-    ) {
-      return bindProps(pr, options.props)
-    }
-    if (pr !== undefined && changeDeliveryState(pr) === "pushed") {
-      pr = await bindProps(pr, options.props)
-      // stage stops exactly where draft stops: the staging pass may record a
-      // revision (intake above, draft semantics) but must never run the real
-      // submit — that write reopened the pre-gate mutation window (PR1128).
-      if (options.draft === true || options.stage === true) return pr
-      await submitOperation({ pr: pr.id })
-      const submitted = resolveChange(state(), pr.id)
-      if (submitted === undefined) {
-        raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${pr.id}' disappeared after submit`)
-      }
-      return submitted
-    }
-
-    if (bay === undefined) {
-      const headSha = await options.resolveRevision(selector)
-      if (headSha === undefined) {
-        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
-      }
-      const resolved = await target(options.base, undefined)
-      const live = Object.values(snapshot.prs).find(
-        (candidate) =>
-          (changeDeliveryState(candidate) === "pushed" ||
-            changeDeliveryState(candidate) === "submitted" ||
-            changeDeliveryState(candidate) === "ready" ||
-            changeDeliveryState(candidate) === "needs-author") &&
-          changeHead(candidate) === headSha &&
-          candidate.base === resolved.base &&
-          changeComposition(candidate) === undefined,
-      )
-      if (live !== undefined) {
-        const correlated = await bindSubmission(live, options)
-        if (changeDeliveryState(correlated) === "submitted" || changeDeliveryState(correlated) === "ready") {
-          return correlated
-        }
-        if (options.draft === true || options.stage === true) return correlated
-        await submitOperation({ pr: correlated.id })
-        const submitted = resolveChange(state(), live.id)
-        if (submitted === undefined) {
-          raiseFailure("infrastructure", "pr-state-invalid", `yrd: change '${live.id}' disappeared after submit`)
-        }
-        return submitted
-      }
-      // THE LEGACY MINT IS RETIRED (A2 fact-keyed grandfather, purged
-      // 2026-08-27): a recordless direct branch routes to the DERIVED lane —
-      // the branch/submitted fact is the submission, compose admits it under
-      // the synthetic identity, and no record ever mints here again. The
-      // staging pass previews without writing; pr.create's draft records were
-      // a record-lane feature and refuse with the cure.
-      if (options.stage === true) {
-        return { lane: "derived", branch: selector, sha: headSha, base: resolved.base }
-      }
-      if (options.draft === true) {
-        raiseFailure(
-          "refusal",
-          "record-mint-retired",
-          `yrd: draft records are retired — push '${selector}' and submit it plainly ('yrd pr submit ${selector}'), which runs it as a derived member`,
-        )
-      }
-      // Record-only options have no record to bind on the derived lane. The
-      // common ones are commit-derived by the CLI anyway (title/description
-      // from the head commit), so dropping them loses nothing — but dropping
-      // them SILENTLY would be a silent error, so the drop rides the result
-      // envelope's warnings sink and the log, D3-style, and names the cure.
-      const recordOnly = [
-        options.title !== undefined ? "title" : undefined,
-        options.description !== undefined ? "description" : undefined,
-        options.issue !== undefined ? "issue" : undefined,
-        options.track !== undefined ? "track" : undefined,
-        options.props !== undefined && Object.keys(options.props).length > 0 ? "props" : undefined,
-      ].filter((field): field is string => field !== undefined)
-      if (recordOnly.length > 0) {
-        const dropped = recordOnly.join("/")
-        options.warnings?.push(
-          `${dropped} ${recordOnly.length > 1 ? "bind" : "binds"} to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${selector}' to carry them`,
-        )
-        log?.warn?.("record-only submit options dropped on the derived lane", {
-          action: "submit-derived-metadata-dropped",
-          branch: selector,
-          dropped: recordOnly,
-        })
-      }
-      await actions.recordBranchSubmit({ branch: selector, sha: headSha, base: resolved.base })
-      log?.info?.("submit routed to the derived lane; the fact is the submission, no record minted", {
-        action: "submit-derived-routed",
-        branch: selector,
-        sha: headSha,
-        base: resolved.base,
-      })
-      return { lane: "derived", branch: selector, sha: headSha, base: resolved.base }
-    }
-
-    if (bay.status !== "active") {
+    const bay = closedBranchAlias ? undefined : selectedBay
+    if (bay !== undefined && bay.status !== "active") {
       raiseFailure("refusal", "bay-not-active", `yrd: bay '${bay.id}' is ${bay.status}, not active`)
     }
-    if (pr === undefined) {
-      raiseFailure("infrastructure", "pr-state-invalid", `yrd: bay '${bay.id}' intake did not create a change`)
+
+    let branch: string
+    let headSha: string
+    let baseSelector = options.base
+    if (bay !== undefined) {
+      // S7 (branch-is-change): a bay submission is a branch push like every
+      // other submission. Refresh answers "which commit is checked out in the
+      // managed workspace", checkpoint commits any WIP and pushes the branch,
+      // and the branch/submitted fact below is the submission itself — the
+      // record intake this arm used to run retired with the store.
+      const refreshed = await actions.refresh({ bay: bay.id })
+      await execute(refreshed, options.run, `bay '${bay.id}' refresh`)
+      let live = resolveBay(state(), bay.id)
+      if (live === undefined) {
+        raiseFailure("infrastructure", "bay-state-invalid", `yrd: bay '${selector}' disappeared after refresh`)
+      }
+      if (live.headSha === undefined) {
+        raiseFailure("refusal", "bay-head-missing", `yrd: bay '${live.id}' has no committed head to submit`)
+      }
+      if (options.stage !== true) {
+        // D3 (revised at S7): a dirty worktree no longer means "committed head
+        // only" — checkpoint folds the uncommitted work into a `wip: submit`
+        // commit and pushes it, so the submission carries exactly what the
+        // workspace held. Silent inclusion would be a silent error, so the
+        // fold rides the result envelope's warnings sink AND the log.
+        const dirtyBefore = live.dirty === true
+        const checkpointed = await actions.checkpoint({ bay: live.id, claim: "submit" })
+        await execute(checkpointed, options.run, `bay '${live.id}' checkpoint`)
+        live = resolveBay(state(), bay.id)
+        if (live?.headSha === undefined) {
+          raiseFailure("infrastructure", "bay-state-invalid", `yrd: bay '${selector}' disappeared after checkpoint`)
+        }
+        if (dirtyBefore) {
+          const warning =
+            `Bay '${live.id}' had uncommitted work; checkpoint committed it ('wip: submit') and it IS part of ` +
+            "this submission."
+          options.warnings?.push(warning)
+          log?.warn?.(warning, { action: "submit-dirty-worktree-checkpointed", bay: live.id })
+        }
+      }
+      branch = live.branch
+      headSha = live.headSha
+      baseSelector = options.base ?? live.base
+    } else {
+      branch = selector
+      const resolvedHead = await options.resolveRevision(selector)
+      if (resolvedHead === undefined) {
+        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
+      }
+      headSha = resolvedHead
     }
-    raiseFailure("refusal", "pr-not-pushed", `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
+    const resolved = await target(baseSelector, undefined)
+
+    // THE RECORD LANE IS RETIRED (S7, @i/10 22991): every submission routes to
+    // the DERIVED lane — the branch/submitted fact is the submission, compose
+    // admits it under the synthetic identity, and no record ever mints. The
+    // staging pass previews without recording the fact; draft records were a
+    // record-lane feature and refuse with the cure.
+    if (options.stage === true) {
+      return { lane: "derived", branch, sha: headSha, base: resolved.base }
+    }
+    if (options.draft === true) {
+      raiseFailure(
+        "refusal",
+        "record-mint-retired",
+        `yrd: draft records are retired — push '${branch}' and submit it plainly ('yrd pr submit ${branch}'), which runs it as a derived member`,
+      )
+    }
+    // Record-only options have no record to bind on the derived lane. The
+    // common ones are commit-derived by the CLI anyway (title/description
+    // from the head commit), so dropping them loses nothing — but dropping
+    // them SILENTLY would be a silent error, so the drop rides the result
+    // envelope's warnings sink and the log, D3-style, and names the cure.
+    const recordOnly = [
+      options.title !== undefined ? "title" : undefined,
+      options.description !== undefined ? "description" : undefined,
+      options.issue !== undefined ? "issue" : undefined,
+      options.track !== undefined ? "track" : undefined,
+      options.props !== undefined && Object.keys(options.props).length > 0 ? "props" : undefined,
+    ].filter((field): field is string => field !== undefined)
+    if (recordOnly.length > 0) {
+      const dropped = recordOnly.join("/")
+      options.warnings?.push(
+        `${dropped} ${recordOnly.length > 1 ? "bind" : "binds"} to change records; the derived lane reads identity from the branch and metadata from the commit, so they were not recorded — amend the commit on '${branch}' to carry them`,
+      )
+      log?.warn?.("record-only submit options dropped on the derived lane", {
+        action: "submit-derived-metadata-dropped",
+        branch,
+        dropped: recordOnly,
+      })
+    }
+    await actions.recordBranchSubmit({ branch, sha: headSha, base: resolved.base })
+    log?.info?.("submit routed to the derived lane; the fact is the submission, no record minted", {
+      action: "submit-derived-routed",
+      branch,
+      sha: headSha,
+      base: resolved.base,
+    })
+    return { lane: "derived", branch, sha: headSha, base: resolved.base }
   }
 
-  const submitSelection = (
-    selector: string,
-    options: SubmitSelectionOptions,
-  ): Promise<DeepReadonly<Change> | DerivedSubmission> => {
-    const before = resolveChange(state(), selector)
-    return observe(
+  const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DerivedSubmission> =>
+    observe(
       {
         lifecycle: "submit",
-        identity: before === undefined ? undefined : changeIdentity(before),
         attributes: { selector },
-        resultAttributes: (result) => ("lane" in result ? { branch: result.branch } : changeIdentity(result)),
+        resultAttributes: (result) => ({ branch: result.branch }),
       },
-      // Bind the resolved title/description in one seam AFTER the change is
-      // materialized, so every submit path (bay, direct branch, resubmit,
-      // draft, integrated) records the same metadata without threading it
-      // through each early return. A derived-routed submission has no record
-      // to bind metadata on; the fact is the whole submission.
-      async () => {
-        const result = await submitSelectionOperation(selector, options)
-        return "lane" in result ? result : bindMetadata(result, options)
-      },
+      () => submitSelectionOperation(selector, options),
     )
-  }
 
   return Object.freeze({
     state,
     get: (selector) => resolveBay(state(), selector),
     list: () => Object.freeze(Object.values(state().byId)),
     branchLifecycles: () => Object.freeze(projectBranchLifecycles(state())),
-    pr: (selector) => resolveChange(state(), selector),
-    prs: () => Object.freeze(Object.values(state().prs)),
-    reviewState: (selector) => reviewState(required(resolveChange(state(), selector), "change", selector)),
-    needsReview: (selector, reviewer) =>
-      needsReview(required(resolveChange(state(), selector), "change", selector), reviewer),
-    checksRequested: (selector) => checksRequested(required(resolveChange(state(), selector), "change", selector)),
     submitSelection,
     effectiveBase: async (selector, requestedBase) => {
       const snapshot = state()
@@ -1317,20 +856,9 @@ export function createBays(
     checkpoint: actions.checkpoint,
     orphan: actions.orphan,
     certifyHandoff: actions.certifyHandoff,
-    intake,
-    submit,
+    intake: actions.intake,
+    submit: actions.submit,
     close: actions.close,
-    closePr: actions.closePr,
-    editPr: actions.editPr,
-    recut: actions.recut,
-    settleSuperseded: actions.settleSuperseded,
-    ready: actions.ready,
-    review: actions.review,
-    comment: actions.comment,
-    requestChecks: actions.requestChecks,
-    recordAdmission: actions.recordAdmission,
-    requestReview: actions.requestReview,
-    requestPublication: actions.requestPublication,
     recordBranchSubmit: actions.recordBranchSubmit,
     recordBranchUnsubmit: actions.recordBranchUnsubmit,
   })
@@ -1364,19 +892,13 @@ export function volatilePrNumberMint(initial = 0): PrNumberMint {
 
 export type WithBaysOptions = Readonly<{
   jobs: BayJobDefs
-  /** Durable authority for new PR numbers. Deliberately not optional: an
-   * omitted mint would silently degrade to the record-set scan whose recycling
-   * this option exists to end (22986). */
-  prNumberMint: PrNumberMint
   defaultBase?: string
-  defaultSubmitter?: string
   resolveBase?: ResolveBayBase
 }>
 
 export function withBays(options: WithBaysOptions) {
   const defaultBase = baseIdentity(options.defaultBase ?? "main")
-  const defaultSubmitter = TextSchema.parse(options.defaultSubmitter ?? "operator")
-  const commands = createBayCommands(options.jobs, defaultBase, defaultSubmitter, options.prNumberMint)
+  const commands = createBayCommands(options.jobs, defaultBase)
 
   return <State extends object, Commands extends CommandTree, Features extends HasJobs>(
     definition: YrdDef<State, Commands, Features>,
@@ -1463,17 +985,6 @@ export function withBays(options: WithBaysOptions) {
               intake: (args) => yrd.dispatch(commands.bay.intake, args),
               submit: (args) => yrd.dispatch(commands.bay.submit, args),
               close: (args) => yrd.dispatch(commands.bay.close, args),
-              closePr: (args) => yrd.dispatch(commands.pr.close, args),
-              editPr: (args) => yrd.dispatch(commands.pr.edit, args),
-              recut: (args) => yrd.dispatch(commands.pr.recut, args),
-              settleSuperseded: (args) => yrd.dispatch(commands.pr.settleSuperseded, args),
-              ready: (args) => yrd.dispatch(commands.pr.ready, args),
-              review: (args) => yrd.dispatch(commands.pr.review, args),
-              comment: (args) => yrd.dispatch(commands.pr.comment, args),
-              requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
-              recordAdmission: (args) => yrd.dispatch(commands.pr.recordAdmission, args),
-              requestReview: (args) => yrd.dispatch(commands.pr.requestReview, args),
-              requestPublication: (args) => yrd.dispatch(commands.pr.publish, args),
               recordBranchSubmit: (args) => yrd.dispatch(commands.branch.recordSubmit, args),
               recordBranchUnsubmit: (args) => yrd.dispatch(commands.branch.recordUnsubmit, args),
             },
@@ -1488,15 +999,6 @@ export function withBays(options: WithBaysOptions) {
     })
 }
 
-function changeIdentity(pr: DeepReadonly<Change>): YrdDeliveryIdentity {
-  return {
-    pr: pr.id,
-    revision: changeRevisionNumber(pr),
-    headSha: changeHead(pr),
-    ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
-  }
-}
-
 function jobDetail(job: DeepReadonly<Job>): string {
   if (job.status === "completed" && job.conclusion === "failure") return job.error.message
   if (job.status === "completed" && job.conclusion === "timed_out") return job.lostReason
@@ -1505,12 +1007,7 @@ function jobDetail(job: DeepReadonly<Job>): string {
   return job.status
 }
 
-function createBayCommands(
-  jobs: BayJobDefs,
-  defaultBase: string,
-  defaultSubmitter: string,
-  prNumberMint: PrNumberMint,
-): BayCommands {
+function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
   return {
     bay: {
       open: command({
@@ -1541,95 +1038,42 @@ function createBayCommands(
         params: CertifyHandoffArgsSchema,
         apply: (state: BayState, args: CertifyHandoffArgs) => certifyBayHandoff(state, args),
       }),
+      // S7 (branch-is-change, @i/10 22991): the record store's two remaining
+      // mint sites — intakePR and submitWork — are retired. Both commands
+      // survive as refusals so every caller receives the cure instead of a
+      // missing method; the receiver's accepted push is the intake, and the
+      // branch/submitted fact (recordBranchSubmit) is the submission.
       intake: command({
-        title: "Record pushed revision",
+        title: "Record pushed revision (retired)",
         params: IntakeChangeArgsSchema,
-        apply: (state: BayState, args: IntakeChangeArgs, context) =>
-          intakePR(state, args, defaultBase, defaultSubmitter, prNumberMint, context.command.id),
+        apply: (_state: BayState, args: IntakeChangeArgs): never =>
+          raiseFailure(
+            "refusal",
+            "record-mint-retired",
+            `yrd: record intake is retired (S7 branch-is-change): the receiver's accepted push IS the intake — ` +
+              `push the branch and submit it in one act ` +
+              `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${args.base ?? defaultBase}/<issue>'), or approve ` +
+              `an existing branch's tip ('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/yrd/submit/<branch>')`,
+          ),
       }),
       submit: command({
-        title: "Submit work",
+        title: "Submit work (retired record lane)",
         visibility: "public",
         params: SubmitArgsSchema,
-        apply: (state: BayState, args: SubmitArgs, context) =>
-          submitWork(state, args, defaultBase, defaultSubmitter, prNumberMint, context.command.id),
+        apply: (_state: BayState, args: SubmitArgs): never =>
+          raiseFailure(
+            "refusal",
+            "record-mint-retired",
+            `yrd: record submission is retired (S7 branch-is-change): run ` +
+              `'yrd pr submit ${"pr" in args ? args.pr : args.branch}' — the branch push is the change and the ` +
+              `submit fact is the submission; no record mints`,
+          ),
       }),
       close: command({
         title: "Close bay",
         visibility: "public",
         params: CloseBayArgsSchema,
         apply: (state: BayState, args: CloseBayArgs) => closeBay(state, args, jobs["bay.deprovision"]),
-      }),
-    },
-    pr: {
-      close: command({
-        title: "Close a change",
-        visibility: "public",
-        params: ChangeCloseArgsSchema,
-        apply: (state: BayState, args: ChangeCloseArgs) => closePr(state, args),
-      }),
-      edit: command({
-        title: "Edit a change",
-        visibility: "public",
-        params: ChangeEditArgsSchema,
-        apply: (state: BayState, args: ChangeEditArgs) => editPr(state, args),
-      }),
-      // The R-b escape hatch (5e unit 8): the CLI verb is retired, but this
-      // public command remains the sanctioned drill for untracked changes,
-      // wedge repair, and pre-TD adoption — the habitant's self-remedy
-      // machine and any surviving printed recut drill dispatch through it.
-      // Death condition: this command dies when the last pre-TD draft is
-      // adopted or withdrawn (adoption census 0). Comment only — no mechanism.
-      recut: command({
-        title: "Record a mechanically equivalent PR re-merge",
-        visibility: "public",
-        params: ChangeRemergeArgsSchema,
-        apply: (state: BayState, args: ChangeRemergeArgs) => remergeChange(state, args, defaultSubmitter),
-      }),
-      settleSuperseded: command({
-        title: "Settle a queued PR whose payload current main already contains",
-        params: ChangeSettleSupersededArgsSchema,
-        apply: (state: BayState, args: ChangeSettleSupersededArgs) => settleSupersededPr(state, args),
-      }),
-      ready: command({
-        title: "Mark a change ready",
-        visibility: "public",
-        params: ChangeReadyArgsSchema,
-        apply: (state: BayState, args: ChangeReadyArgs) => readyPr(state, args, defaultSubmitter, prNumberMint),
-      }),
-      review: command({
-        title: "Review a change revision",
-        visibility: "public",
-        params: ChangeReviewArgsSchema,
-        apply: (state: BayState, args: ChangeReviewArgs) => reviewPr(state, args),
-      }),
-      comment: command({
-        title: "Comment on a change revision",
-        visibility: "public",
-        params: ChangeCommentArgsSchema,
-        apply: (state: BayState, args: ChangeCommentArgs) => commentPr(state, args),
-      }),
-      requestChecks: command({
-        title: "Request checks for a change revision",
-        params: ChangeRequestChecksArgsSchema,
-        apply: (state: BayState, args: ChangeRequestChecksArgs) => requestChangeChecks(state, args),
-      }),
-      recordAdmission: command({
-        title: "Record checks-before-queueing evidence for a change revision",
-        params: ChangeAdmissionRecordedFactSchema,
-        apply: (state: BayState, args: ChangeAdmissionRecordedFact) => recordChangeAdmission(state, args),
-      }),
-      requestReview: command({
-        title: "Replace the requested reviewers for a change",
-        visibility: "public",
-        params: ChangeRequestReviewArgsSchema,
-        apply: (state: BayState, args: ChangeRequestReviewArgs) => requestChangeReview(state, args, defaultSubmitter),
-      }),
-      publish: command({
-        title: "Request immutable PR publication",
-        params: ChangePublicationInputSchema,
-        apply: (state: BayState, args: ChangePublicationInput) =>
-          requestChangePublication(state, args, jobs["pr.publish"]),
       }),
     },
     branch: {
@@ -1655,38 +1099,6 @@ function createBayCommands(
       }),
     },
   }
-}
-
-function requestChangePublication(
-  state: DeepReadonly<BayState>,
-  args: ChangePublicationInput,
-  publication: BayJobDefs["pr.publish"],
-) {
-  const pr = required(resolveChange(state.bays, args.pr), "change", args.pr)
-  const revision = currentChangeRev(pr)
-  if (changeDeliveryState(pr) !== "pushed") {
-    raiseFailure(
-      "refusal",
-      "publication-pr-not-draft",
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`,
-    )
-  }
-  if (revision.n !== args.revision || revision.head !== args.headSha || pr.branch !== args.branch) {
-    raiseFailure(
-      "refusal",
-      "publication-revision-moved",
-      `yrd: change '${pr.id}' is revision ${revision.n} head '${revision.head}' on '${pr.branch}', not requested ` +
-        `revision ${args.revision} head '${args.headSha}' on '${args.branch}'`,
-    )
-  }
-  if (changeBaseSha(pr) !== args.baseSha) {
-    raiseFailure(
-      "refusal",
-      "publication-base-moved",
-      `yrd: change '${pr.id}' base is '${changeBaseSha(pr) ?? "missing"}', not requested '${args.baseSha}'`,
-    )
-  }
-  return { events: [publication.request(args, { key: changePublicationJobKey(args) })] }
 }
 
 function openBay(
@@ -1826,322 +1238,9 @@ function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffAr
   }
 }
 
-function requireExpectedChangeCurrent(
-  state: DeepReadonly<BaysState>,
-  expected: ChangeExpectedCurrent,
-  operation: "intake" | "submit" | "ready" | "request-checks" | "comment",
-): LiveChange {
-  const pr = resolveChange(state, expected.pr)
-  const matches =
-    pr !== undefined &&
-    isLiveChange(pr) &&
-    changeRevisionNumber(pr) === expected.revision &&
-    changeHead(pr) === expected.headSha &&
-    (expected.track === undefined || isTracked(pr) === expected.track)
-  if (matches) return pr as LiveChange
-  const actual =
-    pr === undefined
-      ? "missing"
-      : `${changeDeliveryState(pr)} revision ${changeRevisionNumber(pr)}@${changeHead(pr)} track=${String(isTracked(pr))}`
-  const expectedTracking = expected.track === undefined ? "" : ` track=${String(expected.track)}`
-  raiseFailure(
-    "refusal",
-    `${operation}-current-changed`,
-    `yrd: change '${expected.pr}' changed from revision ${expected.revision}@${expected.headSha}` +
-      `${expectedTracking} to ${actual} before ${operation}`,
-  )
-}
-
-function requireExpectedChangeTargetCurrent(
-  state: DeepReadonly<BaysState>,
-  target: string,
-  expected: ChangeExpectedCurrent,
-  operation: "submit" | "ready" | "request-checks" | "comment",
-): LiveChange {
-  const pr = requireExpectedChangeCurrent(state, expected, operation)
-  const targetPr = resolveChange(state, target)
-  if (targetPr?.id === pr.id) return pr
-  raiseFailure(
-    "refusal",
-    `${operation}-current-changed`,
-    `yrd: expected change '${pr.id}' does not match ${operation} target '${target}'`,
-  )
-}
-
-function changeIdForRevision(existing: DeepReadonly<Change> | undefined, commandId: string): ChangeId {
-  if (existing === undefined) return changeIdForCommand(commandId)
-  const changeId = currentChangeRev(existing).changeId
-  if (changeId !== undefined) return changeId
-  raiseFailure(
-    "refusal",
-    "legacy-change-id-missing",
-    `yrd: change '${existing.id}' predates stable Change-Id identity; migrate it before rebuilding`,
-  )
-}
-
-function intakePR(
-  state: DeepReadonly<BayState>,
-  args: IntakeChangeArgs,
-  defaultBase: string,
-  defaultSubmitter: string,
-  mint: PrNumberMint,
-  commandId: string,
-) {
-  const current = state.bays
-  const bay = args.bay === undefined ? undefined : required(resolveBay(current, args.bay), "bay", args.bay)
-  if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
-  const branch = args.branch ?? bay?.branch
-  if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
-  const expected =
-    args.expectedCurrent === undefined
-      ? undefined
-      : requireExpectedChangeCurrent(current, args.expectedCurrent, "intake")
-  if (expected !== undefined && expected.branch !== branch) {
-    raiseFailure(
-      "refusal",
-      "intake-current-changed",
-      `yrd: expected change '${expected.id}' branch '${expected.branch}' does not match intake branch '${branch}'`,
-    )
-  }
-  const associated = bay === undefined ? undefined : changeForBay(current, bay.id)
-  const branchPR = resolveChange(current, branch)
-  const existing = associated ?? (branchPR !== undefined && isLiveChange(branchPR) ? branchPR : undefined)
-  // An omitted receiver base belongs to the recorded PR before the process
-  // default. Otherwise replaying an unchanged needs-author PR against a
-  // non-default base silently looks like a new authored revision.
-  const base = baseIdentity(args.base ?? bay?.base ?? existing?.base ?? defaultBase)
-  if (args.receipt !== undefined) {
-    const received = current.receipts[args.receipt]
-    if (received !== undefined) {
-      const matches =
-        received.branch === branch &&
-        received.headSha === args.headSha &&
-        received.base === base &&
-        received.baseSha === args.baseSha &&
-        sameComposition(received.composition, args.composition)
-      if (!matches) throw new Error(`yrd: receiver result '${args.receipt}' does not match its recorded intake`)
-      return { events: [] }
-    }
-  }
-  if (existing !== undefined && !isLiveChange(existing)) {
-    throw new Error(`yrd: change '${existing.id}' is ${changeDeliveryState(existing)}; start a new bay`)
-  }
-  const issue = attachedIssue(existing, args.issue, bay?.issue)
-  const name = args.name ?? bay?.name ?? existing?.name
-  // Omitted receiver fields inherit the recorded payload for idempotence, while
-  // an explicit base/composition delta remains an authored re-merge and may resume
-  // the change. Display-name drift alone never mints a content revision.
-  const replayBaseSha = args.baseSha ?? (existing === undefined ? undefined : changeBaseSha(existing))
-  const replayComposition = args.composition ?? (existing === undefined ? undefined : changeComposition(existing))
-  refuseDuplicatePayload(current, args.headSha, base, replayComposition, existing?.id)
-  const resumesSubmission =
-    existing !== undefined &&
-    (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
-  const submitsRevision = args.submit === true || resumesSubmission
-  if (
-    existing !== undefined &&
-    changeHead(existing) === args.headSha &&
-    baseIdentity(existing.base) === base &&
-    changeBaseSha(existing) === replayBaseSha &&
-    sameComposition(changeComposition(existing), replayComposition) &&
-    existing.issue === issue
-  ) {
-    return { events: [] }
-  }
-  // S6 door: a branch with a LIVE SUBMIT FACT and no live record is the
-  // derived lane's — the fact IS the submission, and minting a record beside
-  // it would run both lanes for one push (A4 made structural at the mint).
-  // A factless branch keeps the legacy mint: it is exactly the population no
-  // receiver delivered (pre-door fixtures, a hand-driven legacy submit), it
-  // stays visible to the S7 drain gauge, and the receiver path can never
-  // reach here recordless — its conditional dispatch skips intake first.
-  if (existing === undefined && current.submits[branch] !== undefined) {
-    raiseFailure(
-      "refusal",
-      "record-mint-retired",
-      `yrd: record creation is retired (S6 door): branch '${branch}' has a live submit ref and no live change ` +
-        `record — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
-        `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
-    )
-  }
-  const id = existing?.id ?? mintChangeId(mint, current.prs)
-  const changeId = changeIdForRevision(existing, commandId)
-  const submitter = args.submitter ?? defaultSubmitter
-  const revision = (existing === undefined ? 0 : changeRevisionNumber(existing)) + 1
-  const pushed = {
-    pr: id,
-    changeId,
-    ...(bay === undefined ? {} : { bay: bay.id }),
-    ...(name === undefined ? {} : { name }),
-    ...(issue === undefined ? {} : { issue }),
-    branch,
-    base,
-    headSha: args.headSha,
-    ...(replayBaseSha === undefined ? {} : { baseSha: replayBaseSha }),
-    ...(replayComposition === undefined ? {} : { composition: replayComposition }),
-    ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
-    revision,
-    submitter,
-  }
-  return {
-    events: [
-      event("pr/pushed", pushed),
-      ...(submitsRevision
-        ? [
-            event("pr/submitted", { pr: id, revision, headSha: args.headSha, submitter }),
-            event("pr/checks-requested", {
-              pr: id,
-              revision,
-              headSha: args.headSha,
-              ...(replayBaseSha === undefined ? {} : { baseSha: replayBaseSha }),
-            }),
-          ]
-        : []),
-    ],
-  }
-}
-
-function submitWork(
-  state: DeepReadonly<BayState>,
-  args: SubmitArgs,
-  defaultBase: string,
-  defaultSubmitter: string,
-  mint: PrNumberMint,
-  commandId?: string,
-) {
-  const current = state.bays
-  if ("pr" in args) {
-    // Submit-by-id routes through the same live guard as the other 9 mutating
-    // verbs (no resolve exemption): an id-addressed terminal change passes through
-    // (matchedBy canonical) to the state check below; a live-less branch
-    // selector refuses no-live-pr here. The D2/Q1 terminal-branch reopen/mint
-    // semantics live entirely in the {branch} path and submitSelectionOperation,
-    // never this {pr} path, so no pre-guard resolution is needed here.
-    const pr: LiveChange =
-      args.expectedCurrent === undefined
-        ? requireLiveChange(current, args.pr)
-        : requireExpectedChangeTargetCurrent(current, args.pr, args.expectedCurrent, "submit")
-    if (args.props !== undefined) return bindChangeProps(pr, args.props)
-    if (changeDeliveryState(pr) !== "pushed") {
-      throw new Error(`yrd: change '${pr.id}' is ${changeDeliveryState(pr)}, not pushed`)
-    }
-    return {
-      events: [
-        event("pr/submitted", {
-          pr: pr.id,
-          ...revisionIdentity(pr),
-          submitter: args.submitter ?? defaultSubmitter,
-          ...(args.flow === undefined ? {} : { flow: args.flow }),
-        }),
-      ],
-    }
-  }
-
-  const existing = resolveChange(current, args.branch)
-  const resumesSubmission =
-    existing !== undefined &&
-    (changeNeedsAuthor(existing) !== undefined || changeDeliveryState(existing) === "rejected")
-  const base = baseIdentity(args.base ?? (resumesSubmission ? existing.base : defaultBase))
-  if (
-    existing !== undefined &&
-    !resumesSubmission &&
-    (changeDeliveryState(existing) === "pushed" ||
-      changeDeliveryState(existing) === "submitted" ||
-      changeDeliveryState(existing) === "ready")
-  ) {
-    throw new Error(`yrd: branch '${args.branch}' already has live change '${existing.id}'`)
-  }
-  const baseSha = args.baseSha ?? (resumesSubmission ? changeBaseSha(existing) : undefined)
-  const composition = resumesSubmission ? changeComposition(existing) : undefined
-  if (
-    resumesSubmission &&
-    changeHead(existing) === args.headSha &&
-    baseIdentity(existing.base) === base &&
-    changeBaseSha(existing) === baseSha &&
-    sameComposition(changeComposition(existing), composition)
-  ) {
-    return { events: [] }
-  }
-  refuseDuplicatePayload(current, args.headSha, base, composition, existing?.id)
-  // D2 — reopen the existing PR identity (next revision) for a non-merged
-  // terminal branch, not just a rejected one. `rejected` already reopened;
-  // `withdrawn`/`canceled` now do too, so resubmitting the branch mints the
-  // next revision in place instead of demanding a hand-made delivery branch.
-  // The pr/pushed projection clears the terminal markers on reopen. `pushed`/
-  // `submitted` are already refused above, and `integrated`/`already-landed` are intercepted by
-  // the terminal-branch guard before this path (its redelivery is parked).
-  const resubmitted =
-    existing !== undefined &&
-    (changeNeedsAuthor(existing) !== undefined ||
-      (["rejected", "withdrawn", "canceled"] as const).includes(
-        changeDeliveryState(existing) as "rejected" | "withdrawn" | "canceled",
-      ))
-      ? existing
-      : undefined
-  if (commandId === undefined) {
-    raiseFailure("infrastructure", "change-id-command-missing", "yrd: change creation requires its durable command id")
-  }
-  // S6 door — same rule as intake's mint arm: a live submit fact owns the
-  // branch (derived lane), so neither a fresh mint nor a D2 reopen may run
-  // beside it; a factless branch keeps the legacy mint/reopen surface.
-  if (resubmitted === undefined && current.submits[args.branch] !== undefined) {
-    raiseFailure(
-      "refusal",
-      "record-mint-retired",
-      `yrd: record creation is retired (S6 door): branch '${args.branch}' has a live submit ref and no change ` +
-        `record to reopen — it runs as a derived member from that ref; re-push the branch and its submit ref ` +
-        `('git push ${RECEIVER_REMOTE_NAME} HEAD:refs/for/${base}/<issue>' does both) instead of minting a record`,
-    )
-  }
-  const id = resubmitted?.id ?? mintChangeId(mint, current.prs)
-  const changeId = changeIdForRevision(resubmitted, commandId)
-  const revision = (resubmitted === undefined ? 0 : changeRevisionNumber(resubmitted)) + 1
-  const issue = attachedIssue(resubmitted, args.issue)
-  const submitter = args.submitter ?? defaultSubmitter
-  const pushed = {
-    pr: id,
-    changeId,
-    ...(args.name === undefined ? {} : { name: args.name }),
-    ...(issue === undefined ? {} : { issue }),
-    branch: args.branch,
-    base,
-    headSha: args.headSha,
-    ...(baseSha === undefined ? {} : { baseSha }),
-    ...(args.props === undefined ? {} : { props: args.props }),
-    ...(composition === undefined ? {} : { composition }),
-    revision,
-    submitter,
-  }
-  return {
-    events: [
-      event("pr/pushed", pushed),
-      ...(args.draft === true
-        ? []
-        : [
-            event("pr/submitted", {
-              pr: id,
-              revision,
-              headSha: args.headSha,
-              submitter,
-              ...(args.flow === undefined ? {} : { flow: args.flow }),
-              ...(args.props === undefined ? {} : { props: args.props }),
-            }),
-          ]),
-      ...(args.reviewers === undefined || args.reviewers.length === 0
-        ? []
-        : [event("pr/review-requested", { pr: id, reviewers: args.reviewers, requestedBy: submitter })]),
-    ],
-  }
-}
-
 function propsEqual(left: DeepReadonly<ChangeProps>, right: DeepReadonly<ChangeProps>): boolean {
   const entries = Object.entries(left)
   return entries.length === Object.keys(right).length && entries.every(([key, value]) => right[key] === value)
-}
-
-/** True when every entry of `next` is already recorded with the same value. */
-function propsCovered(current: DeepReadonly<ChangeProps> | undefined, next: DeepReadonly<ChangeProps>): boolean {
-  return current !== undefined && Object.entries(next).every(([key, value]) => current[key] === value)
 }
 
 /** The first key `next` would overwrite with a different value, if any. */
@@ -2155,79 +1254,6 @@ function propsConflictKey(
     if (existing !== undefined && existing !== value) return key
   }
   return undefined
-}
-
-function propsLabel(props: DeepReadonly<ChangeProps>): string {
-  return Object.entries(props)
-    .map(([key, value]) => `${key}=${value}`)
-    .join(" ")
-}
-
-function bindChangeProps(pr: DeepReadonly<Change>, props: ChangeProps) {
-  const currentProps = changeProps(pr)
-  if (propsCovered(currentProps, props)) return { events: [] }
-  const conflict = propsConflictKey(currentProps, props)
-  if (conflict !== undefined) {
-    raiseFailure(
-      "refusal",
-      "prop-conflict",
-      `yrd: change '${pr.id}' already carries prop '${conflict}=${currentProps?.[conflict]}'; a prop is a fact, set once`,
-    )
-  }
-  const delivery = changeDeliveryState(pr)
-  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-    raiseFailure(
-      "refusal",
-      "prop-too-late",
-      `yrd: change '${pr.id}' is ${delivery}; props can only be set while pushed, submitted, or needs-author`,
-    )
-  }
-  return {
-    events: [
-      event("pr/props-set", {
-        pr: pr.id,
-        revision: changeRevisionNumber(pr),
-        headSha: changeHead(pr),
-        props,
-      }),
-    ],
-  }
-}
-
-function revisionIdentity(pr: DeepReadonly<Change>) {
-  return {
-    revision: changeRevisionNumber(pr),
-    headSha: changeHead(pr),
-    ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
-  }
-}
-
-function currentRevisionSubmitter(pr: DeepReadonly<Change>): string | undefined {
-  return currentChangeRev(pr).submitter
-}
-
-function terminalIdentity(pr: DeepReadonly<Change>) {
-  const submitter = currentRevisionSubmitter(pr)
-  return {
-    ...revisionIdentity(pr),
-    ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-    ...(submitter === undefined ? {} : { submitter }),
-  }
-}
-
-function attachedIssue(
-  existing: DeepReadonly<Change> | undefined,
-  requested: string | undefined,
-  fallback?: string,
-): string | undefined {
-  if (existing?.issue !== undefined && requested !== undefined && existing.issue !== requested) {
-    raiseFailure(
-      "refusal",
-      "issue-conflict",
-      `yrd: change '${existing.id}' is already linked to issue '${existing.issue}'; close it before linking another issue`,
-    )
-  }
-  return requested ?? existing?.issue ?? fallback
 }
 
 function propsPatch(pr: DeepReadonly<Change>, props: DeepReadonly<ChangeProps>) {
@@ -2296,374 +1322,6 @@ function associateRejectedTerminalRun(
   return { ...pr, revs: revisions, ...(current ? { terminalRun: run } : {}) }
 }
 
-function readyPr(state: DeepReadonly<BayState>, args: ChangeReadyArgs, defaultSubmitter: string, mint: PrNumberMint) {
-  const pr: LiveChange =
-    args.expectedCurrent === undefined
-      ? requireLiveChange(state.bays, args.pr)
-      : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "ready")
-  if (changeDeliveryState(pr) === "submitted" || changeDeliveryState(pr) === "ready") return { events: [] }
-  return submitWork(state, args, "main", defaultSubmitter, mint)
-}
-
-function settleSupersededPr(state: DeepReadonly<BayState>, args: ChangeSettleSupersededArgs) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  const current = currentChangeRev(pr)
-  if (current.n !== args.revision || current.head !== args.headSha) {
-    raiseFailure(
-      "refusal",
-      "recut-current-changed",
-      `yrd: change '${pr.id}' current revision changed from ${args.revision}@${args.headSha} ` +
-        `to ${current.n}@${current.head} while the refresh proof was computed`,
-    )
-  }
-  const delivery = changeDeliveryState(pr)
-  if ((delivery !== "submitted" && delivery !== "ready") || !checksRequested(pr)) {
-    raiseFailure(
-      "refusal",
-      "recut-transition-not-admitted",
-      `yrd: change '${pr.id}' revision ${current.n} is not the accepted revision selected for refresh`,
-    )
-  }
-  if (current.recut !== undefined && current.recut.patchId !== args.patchId) {
-    raiseFailure(
-      "refusal",
-      "recut-patch-drift",
-      `yrd: change '${pr.id}' automatic refresh changed patch identity from ${current.recut.patchId} to ${args.patchId}`,
-    )
-  }
-  return {
-    events: [
-      event("pr/already-landed", {
-        pr: pr.id,
-        revision: current.n,
-        headSha: current.head,
-        ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-        ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
-        ...(current.submitter === undefined ? {} : { submitter: current.submitter }),
-        baseSha: args.baseSha,
-        candidateSha: args.baseSha,
-        candidateTreeSha: args.baseTreeSha,
-        baseTreeSha: args.baseTreeSha,
-        settlement: {
-          kind: "refresh-superseded",
-          proof: "payload-already-contained",
-          patchId: args.patchId,
-        },
-      }),
-    ],
-  }
-}
-
-function remergeChange(state: DeepReadonly<BayState>, args: ChangeRemergeArgs, defaultSubmitter: string) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  if (!isLiveChange(pr)) {
-    raiseFailure(
-      "refusal",
-      "terminal-target",
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; a finished change cannot be rebuilt`,
-    )
-  }
-  const predecessor = pr.revs.find((revision) => revision.n === args.fromRevision)
-  if (predecessor === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${args.fromRevision}`)
-  }
-  const remerge = changeRemerge(pr)
-  const payloadUnchanged = changeHead(pr) === args.headSha && changeBaseSha(pr) === args.baseSha
-  const unchanged =
-    payloadUnchanged &&
-    remerge?.fromRevision === args.fromRevision &&
-    remerge.patchId === args.patchId &&
-    remerge.treeSha === args.treeSha &&
-    remerge.reviewCarried === args.reviewCarried &&
-    JSON.stringify(remerge.sources) === JSON.stringify(args.sources) &&
-    remerge.transition?.from === args.transition?.from &&
-    remerge.transition?.to === args.transition?.to
-  if (args.expectedCurrent?.track !== undefined && isTracked(pr) !== args.expectedCurrent.track) {
-    raiseFailure(
-      "refusal",
-      "recut-current-changed",
-      `yrd: change '${pr.id}' tracking changed from ${String(args.expectedCurrent.track)} ` +
-        `to ${String(isTracked(pr))} while the rebuild was being computed`,
-    )
-  }
-  if (
-    args.expectedCurrent !== undefined &&
-    (changeRevisionNumber(pr) !== args.expectedCurrent.revision || changeHead(pr) !== args.expectedCurrent.headSha) &&
-    !unchanged
-  ) {
-    raiseFailure(
-      "refusal",
-      "recut-current-changed",
-      `yrd: change '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha}` +
-        ` to ${changeRevisionNumber(pr)}@${changeHead(pr)} while the rebuild was being computed`,
-    )
-  }
-  // Only Queue authority-consumption results make an identical re-merge an
-  // author reauthorization act. Authored-content failures need new bytes;
-  // minting the same bytes would manufacture the same refusal at revision N+1.
-  const needsAuthorCode = changeNeedsAuthor(pr)?.receipt.code
-  const reauthorizesConsumedQueueAuthority =
-    needsAuthorCode === "queue-submit-authority-consumed" || needsAuthorCode === "queue-checks-authority-consumed"
-  if (!reauthorizesConsumedQueueAuthority && (unchanged || (needsAuthorCode !== undefined && payloadUnchanged))) {
-    return { events: [] }
-  }
-
-  if (args.transition !== undefined) {
-    if (args.expectedCurrent === undefined) {
-      raiseFailure(
-        "refusal",
-        "recut-transition-current-required",
-        `yrd: change '${pr.id}' Queue freshness transition requires an expected current revision`,
-      )
-    }
-    if (
-      (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready") ||
-      !checksRequested(pr) ||
-      args.fromRevision !== changeRevisionNumber(pr)
-    ) {
-      raiseFailure(
-        "refusal",
-        "recut-transition-not-admitted",
-        `yrd: change '${pr.id}' revision ${changeRevisionNumber(pr)} is not the accepted revision selected for refresh`,
-      )
-    }
-    if (predecessor.recut !== undefined && predecessor.recut.patchId !== args.patchId) {
-      raiseFailure(
-        "refusal",
-        "recut-patch-drift",
-        `yrd: change '${pr.id}' automatic refresh changed patch identity from ${predecessor.recut.patchId} to ${args.patchId}`,
-      )
-    }
-  }
-
-  const effectiveReview = pr.reviews.findLast(
-    (review) => review.revision === predecessor.n && review.headSha === predecessor.head,
-  )
-  const approved = effectiveReview?.decision === "approve" ? effectiveReview : undefined
-  if (args.reviewCarried && approved === undefined) {
-    raiseFailure(
-      "refusal",
-      "review-carry-invalid",
-      `yrd: change '${pr.id}' revision ${predecessor.n} has no approval to carry`,
-    )
-  }
-  const successor = { revision: changeRevisionNumber(pr) + 1, headSha: args.headSha, baseSha: args.baseSha }
-  const changeId = predecessor.changeId
-  if (changeId === undefined) {
-    raiseFailure(
-      "refusal",
-      "legacy-change-id-missing",
-      `yrd: change '${pr.id}' predates stable Change-Id identity; migrate it before rebuilding`,
-    )
-  }
-  const successorSubmitter = predecessor.submitter ?? defaultSubmitter
-  return {
-    events: [
-      event("pr/recut", {
-        pr: pr.id,
-        changeId,
-        fromRevision: predecessor.n,
-        patchId: args.patchId,
-        baseSha: args.baseSha,
-        treeSha: args.treeSha,
-        reviewCarried: args.reviewCarried,
-        submitter: successorSubmitter,
-        ...(args.sources === undefined ? {} : { sources: args.sources }),
-        predecessor: {
-          revision: predecessor.n,
-          headSha: predecessor.head,
-          ...(predecessor.baseSha === undefined ? {} : { baseSha: predecessor.baseSha }),
-        },
-        successor,
-        ...(args.transition === undefined ? {} : { transition: args.transition }),
-      }),
-      ...(args.transition === undefined
-        ? []
-        : [
-            event("pr/submitted", {
-              pr: pr.id,
-              revision: successor.revision,
-              headSha: successor.headSha,
-              submitter: successorSubmitter,
-              ...(predecessor.props === undefined ? {} : { props: predecessor.props }),
-            }),
-            event("pr/checks-requested", {
-              pr: pr.id,
-              revision: successor.revision,
-              headSha: successor.headSha,
-              baseSha: successor.baseSha,
-            }),
-          ]),
-    ],
-  }
-}
-
-function requestChangeReview(state: DeepReadonly<BayState>, args: ChangeRequestReviewArgs, defaultSubmitter: string) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  const delivery = changeDeliveryState(pr)
-  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
-    raiseFailure(
-      "refusal",
-      "terminal-target",
-      `yrd: change '${pr.id}' is ${delivery}; terminal PRs cannot change requested reviewers`,
-    )
-  }
-  const requested = pr.requestedReviewers ?? []
-  const unchanged =
-    requested.length === args.reviewers.length &&
-    requested.every((reviewer, index) => reviewer === args.reviewers[index])
-  if (unchanged) return { events: [] }
-  return {
-    events: [
-      event("pr/review-requested", { pr: pr.id, reviewers: args.reviewers, requestedBy: args.by ?? defaultSubmitter }),
-    ],
-  }
-}
-
-function reviewPr(state: DeepReadonly<BayState>, args: ChangeReviewArgs) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  const fact = ChangeReviewFactSchema.parse({
-    pr: pr.id,
-    revision: changeRevisionNumber(pr),
-    headSha: changeHead(pr),
-    by: args.by,
-    decision: args.decision,
-    ...(args.ref === undefined ? {} : { ref: args.ref }),
-    ...(args.note === undefined ? {} : { note: args.note }),
-  })
-  return reviewFact(pr, fact, "review")
-}
-
-function commentPr(state: DeepReadonly<BayState>, args: ChangeCommentArgs) {
-  const pr: LiveChange =
-    args.expectedCurrent === undefined
-      ? requireLiveChange(state.bays, args.pr)
-      : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "comment")
-  const fact = ChangeCommentFactSchema.parse({
-    pr: pr.id,
-    revision: changeRevisionNumber(pr),
-    headSha: changeHead(pr),
-    by: args.by,
-    note: args.note,
-    ...(args.ref === undefined ? {} : { ref: args.ref }),
-  })
-  return reviewFact(pr, fact, "comment")
-}
-
-function requestChangeChecks(state: DeepReadonly<BayState>, args: ChangeRequestChecksArgs) {
-  const pr: LiveChange =
-    args.expectedCurrent === undefined
-      ? requireLiveChange(state.bays, args.pr)
-      : requireExpectedChangeTargetCurrent(state.bays, args.pr, args.expectedCurrent, "request-checks")
-  const delivery = changeDeliveryState(pr)
-  if (
-    delivery !== "pushed" &&
-    delivery !== "submitted" &&
-    delivery !== "ready" &&
-    delivery !== "rejected" &&
-    delivery !== "needs-author"
-  ) {
-    throw new ChangeCheckabilityConflict(pr.id, delivery)
-  }
-  const baseSha = args.baseSha ?? changeBaseSha(pr)
-  return {
-    events: [
-      event("pr/checks-requested", {
-        pr: pr.id,
-        revision: changeRevisionNumber(pr),
-        headSha: changeHead(pr),
-        ...(baseSha === undefined ? {} : { baseSha }),
-      }),
-    ],
-  }
-}
-
-function recordChangeAdmission(state: DeepReadonly<BayState>, args: ChangeAdmissionRecordedFact) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  if (changeRevisionNumber(pr) !== args.revision || changeHead(pr) !== args.headSha) {
-    raiseFailure(
-      "refusal",
-      "stale-pr",
-      `yrd: entry checks target stale revision ${args.revision} (${args.headSha}) of change '${pr.id}'`,
-    )
-  }
-  const delivery = changeDeliveryState(pr)
-  if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-    throw new ChangeCheckabilityConflict(pr.id, delivery)
-  }
-  const prior = currentChangeRev(pr).admission
-  if (
-    prior !== undefined &&
-    JSON.stringify({ ...prior, at: undefined }) === JSON.stringify({ ...args.admission, at: undefined })
-  ) {
-    return { events: [] }
-  }
-  return { events: [event("pr/admission-recorded", args)] }
-}
-
-function reviewFact(
-  pr: DeepReadonly<Change>,
-  fact: z.infer<typeof ChangeReviewFactSchema> | z.infer<typeof ChangeCommentFactSchema>,
-  kind: "review" | "comment",
-) {
-  if (fact.ref !== undefined) {
-    const prior = [...pr.reviews, ...pr.comments].find((candidate) => candidate.ref === fact.ref)
-    if (prior !== undefined) {
-      const same =
-        prior.revision === fact.revision &&
-        prior.headSha === fact.headSha &&
-        prior.by === fact.by &&
-        prior.ref === fact.ref &&
-        (kind === "review"
-          ? "decision" in prior && "decision" in fact && prior.decision === fact.decision && prior.note === fact.note
-          : !("decision" in prior) && !("decision" in fact) && prior.note === fact.note)
-      if (same) return { events: [] }
-      throw new Error(`yrd: review ref '${fact.ref}' already records a different fact`)
-    }
-  }
-  return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
-}
-
-/** A withdrawn/canceled PR still holds its payload, so no OTHER branch may
- * carry that commit — but its OWN branch reopens it in place (D2), which is the
- * whole remedy. Naming it here is the difference between a one-line rebuild and
- * forging a tree-identical commit whose only purpose is to change a hash. A
- * live or merged duplicate has no such door, so it keeps the bare refusal
- * rather than a remedy its state would refuse. */
-function duplicatePayloadRemedy(duplicate: DeepReadonly<Change>): string {
-  const delivery = changeDeliveryState(duplicate)
-  if (delivery !== "withdrawn" && delivery !== "canceled") return ""
-  const at = delivery === "withdrawn" ? duplicate.withdrawnAt : duplicate.canceledAt
-  return (
-    `; ${duplicate.id} is ${delivery}${at === undefined ? "" : ` (${at})`} and still holds this payload, ` +
-    "so no other branch can carry it — resubmitting its own branch reopens it in place, " +
-    `no rebuilt commit needed; run 'yrd pr submit ${duplicate.branch}'`
-  )
-}
-
-function refuseDuplicatePayload(
-  state: DeepReadonly<BaysState>,
-  headSha: string,
-  base: string,
-  composition: CompositionV1 | undefined,
-  except?: string,
-): void {
-  const identity = baseIdentity(base)
-  const duplicate = Object.values(state.prs).find(
-    (pr) =>
-      pr.id !== except &&
-      changeHead(pr) === headSha &&
-      baseIdentity(pr.base) === identity &&
-      sameComposition(changeComposition(pr), composition),
-  )
-  if (duplicate !== undefined) {
-    throw new Error(
-      `yrd: payload already recorded as change '${duplicate.id}' on queue '${identity}'` +
-        duplicatePayloadRemedy(duplicate),
-    )
-  }
-}
-
 function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision: BayJobDefs["bay.deprovision"]) {
   const current = state.bays
   const bay = required(resolveBay(current, args.bay), "bay", args.bay)
@@ -2671,17 +1329,24 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
     throw new Error(`yrd: bay '${bay.id}' is ${bay.status}; wait for its workspace job`)
   }
   if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
-  const pr = changeForBay(current, bay.id) ?? resolveChange(current, bay.branch)
-  if (pr !== undefined && changeDeliveryState(pr) !== "pushed" && isLiveChange(pr) && args.withdraw !== true) {
+  // S7: the "run it through the queue before closing" guard re-keys on the
+  // branch's standing submit fact — the record join it used to read retired
+  // with the store. Closing the workspace does not retract the submission
+  // (the receiver's branch and submit ref outlive the bay), so `--withdraw`
+  // now means "close the workspace while the submission stands"; retracting
+  // the submission itself is a receiver ref delete, named in the cure. No
+  // pr/withdrawn fact is emitted — no live command writes pr/* events.
+  const submit = current.submits[bay.branch]
+  if (submit !== undefined && args.withdraw !== true) {
     throw new Error(
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; run it through the merge queue before closing, or pass --withdraw`,
+      `yrd: branch '${bay.branch}' has a live submission (${submit.sha.slice(0, 12)} for '${submit.base}'); ` +
+        `run it through the merge queue before closing, retract it ` +
+        `('git push ${RECEIVER_REMOTE_NAME} :refs/yrd/submit/${bay.branch}'), or pass --withdraw to close the ` +
+        `workspace while the submission stands`,
     )
   }
   return {
     events: [
-      ...(args.withdraw === true && pr !== undefined && isLiveChange(pr)
-        ? [event("pr/withdrawn", { pr: pr.id, ...terminalIdentity(pr) })]
-        : []),
       event("bay/closing", { bay: bay.id }),
       deprovision.request({
         bay: bay.id,
@@ -2693,77 +1358,23 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
 }
 
-function closePr(state: DeepReadonly<BayState>, args: ChangeCloseArgs) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  if (!isLiveChange(pr)) {
-    throw new Error(`yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; only a live change can be closed`)
-  }
-  return {
-    events: [
-      event("pr/withdrawn", {
-        pr: pr.id,
-        ...terminalIdentity(pr),
-        ...(args.reason === undefined ? {} : { reason: args.reason }),
-      }),
-    ],
-  }
-}
-
-function editPr(state: DeepReadonly<BayState>, args: ChangeEditArgs) {
-  const pr: LiveChange = requireLiveChange(state.bays, args.pr)
-  const issueChanged = args.issue !== undefined && args.issue !== pr.issue
-  if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
-    raiseFailure(
-      "refusal",
-      "issue-conflict",
-      `yrd: change '${pr.id}' is already linked to issue '${pr.issue}'; close it before linking another issue`,
-    )
-  }
-  const delivery = changeDeliveryState(pr)
-  if (issueChanged && delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready") {
-    raiseFailure(
-      "refusal",
-      "issue-too-late",
-      `yrd: change '${pr.id}' is ${delivery}; issue can only be linked while pushed or submitted`,
-    )
-  }
-  // Title, description and tracking are mutable delivery metadata (unlike the
-  // immutable issue join): a later edit overwrites the prior value with no conflict.
-  const titleChanged = args.title !== undefined && args.title !== pr.title
-  const descriptionChanged = args.description !== undefined && args.description !== pr.description
-  const trackChanged = args.track !== undefined && args.track !== isTracked(pr)
-  // requireLiveChange admits a terminal change addressed by canonical id, so
-  // a track edit must re-check liveness here or it records a bit nothing will
-  // ever read — silently, unlike bindMetadata's warned skip on the submit path.
-  if (trackChanged && !isLiveChange(pr)) {
-    raiseFailure(
-      "refusal",
-      "track-terminal",
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; tracking governs future rebuilds and a terminal ` +
-        `change has none, so the flag was not recorded`,
-    )
-  }
-  if (!issueChanged && args.note === undefined && !titleChanged && !descriptionChanged && !trackChanged) {
-    return { events: [] }
-  }
-  return {
-    events: [
-      event("pr/edited", {
-        pr: pr.id,
-        ...(issueChanged ? { issue: args.issue } : {}),
-        ...(args.note === undefined ? {} : { note: args.note }),
-        ...(titleChanged ? { title: args.title } : {}),
-        ...(descriptionChanged ? { description: args.description } : {}),
-        ...(trackChanged ? { track: args.track } : {}),
-      }),
-    ],
-  }
-}
-
 function bayState(bays: BaysState): BayState {
   return { bays }
 }
 
+/**
+ * S7 replay contract (branch-is-change, @i/10 22991): every `pr/*` event stays
+ * PARSEABLE forever, and — until the checkpoint migration deletes
+ * `BaysState.prs` in the integration step — the reducers below stay LIVE, so
+ * an old journal still materializes its record history exactly as written.
+ * What S7 removed is every COMMAND that could emit a NEW `pr/*` record event:
+ * the only live writers left in this plugin are the `bay/*`, `branch/*` and
+ * job events. Two projection changes ride this boundary: the `receipts`
+ * satellite is no longer written (its only reader, intake idempotence, retired
+ * with intakePR), and the four terminal reducers that threw on a missing
+ * record (withdrawn/rejected/canceled/recut) relax to no-ops — queue-side
+ * terminals for DERIVED members name no record by design.
+ */
 function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   const current = state.bays
   const saveBay = (bay: Bay): BayState => bayState({ ...current, byId: { ...current.byId, [bay.id]: bay } })
@@ -2914,31 +1525,19 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               cancelReason: undefined,
               detail: undefined,
             }
-      const next = { ...current, prs: { ...current.prs, [pr.id]: pr } }
-      return bayState(
-        pushed.receipt === undefined
-          ? next
-          : {
-              ...next,
-              receipts: {
-                ...next.receipts,
-                [pushed.receipt]: {
-                  pr: pushed.pr,
-                  branch: pushed.branch,
-                  headSha: pushed.headSha,
-                  base,
-                  ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
-                  ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
-                },
-              },
-            },
-      )
+      // S7: the receipts satellite is write-dead — intake idempotence, its
+      // only reader, retired with intakePR. The `receipt` field still parses
+      // (journal contract); it just projects nothing.
+      return bayState({ ...current, prs: { ...current.prs, [pr.id]: pr } })
     }
     case "pr/recut": {
       const parsed = ChangeRemergeFactSchema.safeParse(data)
       const remerge = parsed.success ? parsed.data : ChangeRemergeReplaySchema.parse(data)
       const pr = current.prs[remerge.pr]
-      if (pr === undefined) throw new Error(`yrd: no change '${remerge.pr}' to rebuild`)
+      // S7 relaxation: with no live mint a recut can name a record this state
+      // never materialized; the parse above is the contract, the store write
+      // is best-effort history.
+      if (pr === undefined) return state
       const predecessor = pr.revs.find(
         (revision) => revision.n === remerge.predecessor.revision && revision.head === remerge.predecessor.headSha,
       )
@@ -3108,7 +1707,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         ? parsed.data
         : LegacyChangeWithdrawnSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
+      // S7 relaxation: a terminal fact for a DERIVED member names no record.
+      if (pr === undefined) return state
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         state: "closed",
@@ -3150,7 +1750,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/rejected": {
       const changed = ChangeReplayRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
+      // S7 relaxation: a terminal fact for a DERIVED member names no record.
+      if (pr === undefined) return state
       assertTerminalApplies(pr, changed, applied.name)
       const rejected: Change = {
         ...pr,
@@ -3235,7 +1836,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         : LegacyChangeCanceledSchema.parse(normalizeV1CorrelationToProps(data))
       const pr = current.prs[changed.pr]
       const run = parsed.success ? parsed.data.run : undefined
-      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing change '${changed.pr}'`)
+      // S7 relaxation: a terminal fact for a DERIVED member names no record.
+      if (pr === undefined) return state
       assertTerminalApplies(pr, changed, applied.name)
       return patchPR(pr, {
         state: "closed",
@@ -3446,10 +2048,6 @@ function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: Jo
 function required<Value>(value: Value | undefined, kind: "bay" | "change", selector: string): Value {
   if (value === undefined) throw new Error(`yrd: no ${kind} '${selector}'`)
   return value
-}
-
-function sameComposition(left: CompositionV1 | undefined, right: CompositionV1 | undefined): boolean {
-  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 function maxRecordNumber(prefix: string, records: Readonly<Record<string, unknown>>): number {
