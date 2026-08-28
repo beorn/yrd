@@ -137,7 +137,7 @@ import {
   latestRunForCurrentRevision,
   projectedChangeStatus,
   queuePauseWarnings,
-  queueRunRevisionClocks,
+  queueRunRevisionReads,
   queueTimelineAdmissionTimes,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   RUNNER_STALE_MS,
@@ -8335,7 +8335,7 @@ async function logRuns(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
   const attempts = (await queueAttempts(services)).filter((attempt) => runIds.has(attempt.run))
-  const revisionClocks = queueRunRevisionClocks(
+  const revisionReads = queueRunRevisionReads(
     Object.values(state.bays.prs),
     summaries.flatMap((summary) => summary.finished),
   )
@@ -8346,7 +8346,8 @@ async function logRuns(
     changeStatusById,
     attempts,
     new Map(),
-    revisionClocks,
+    revisionReads.clocks,
+    revisionReads.faults,
   )
   const filteredRows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
   const revisionSubjects = await resolveQueueLogSubjects(filteredRows, io)
@@ -8355,6 +8356,10 @@ async function logRuns(
     return subject === undefined ? row : { ...row, subject }
   })
   const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
+  // From the whole read, not from `rows`: --since/--limit/--pr can filter the
+  // unreadable member out of the display, and a caller who is not told believes
+  // the history is whole (@i/10-yrd/23228).
+  const readFaults = [...revisionReads.faults.values()]
   await printResult(
     io,
     jsonEnabled(options),
@@ -8371,8 +8376,9 @@ async function logRuns(
           }
         : {}),
       ...(coverage === undefined ? {} : { coverage }),
+      ...(readFaults.length === 0 ? {} : { unreadable: readFaults }),
     },
-    createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
+    createElement(QueueLogView, { rows, coverage, readFaults, columns: Math.min(io.columns ?? 120, 120) }),
   )
 }
 

@@ -117,6 +117,8 @@ import {
   type QueueLogResult,
   queueLogSubmissionTime,
   queueMemberKind,
+  type QueueMemberReadFault,
+  queueMemberReadFaultSummary,
   queueMerge,
   queueMergeLabel,
   queueOutcomeIntegration,
@@ -159,6 +161,7 @@ import {
   type RunnerSourcePin,
   runOutputQueueageIndex,
   runRevisionClock,
+  runRevisionClockRead,
   safeText,
   singleQueue,
   STALE_CODES,
@@ -309,6 +312,8 @@ export {
   type QueueLogAttempt,
   queueLogAttempts,
   type QueueLogCoverage,
+  type QueueMemberReadFault,
+  queueMemberReadFaultSummary,
   queueMergeLabel,
   queuePauseWarnings,
   queueRevisionKey,
@@ -318,7 +323,11 @@ export {
   type QueueRunPresentationKind,
   queueRunRevisionClocks,
   queueRunRevisionKey,
+  queueRunRevisionReads,
+  type QueueRunRevisionReads,
   type QueueStatusResult,
+  type QueueTimelineAdmissionReads,
+  queueTimelineAdmissionReads,
   queueTimelineAdmissionTimes,
   queueTimelineFilterBuckets,
   type QueueTimelineGroup,
@@ -333,6 +342,7 @@ export {
   RUNNER_VIEW_STALE_MS,
   type RunnerSourcePin,
   runRevisionClock,
+  runRevisionClockRead,
   stepNamesOfRun,
   type UncarriedBuckets,
   uncarriedCoverageFloor,
@@ -449,6 +459,9 @@ export type QueueTimelineProjectedRow = Readonly<{
   mergeVerdict?: MergeVerdict
   /** Step names in run order — scripts must not infer merge from glyph alone. */
   stepNames?: readonly string[]
+  /** Set when the record store could not answer for this member's admission
+   * clock; see {@link QueueLogRow.unreadable}. */
+  unreadable?: QueueMemberReadFault
 }>
 
 export type QueueTimelineDisplayRow = QueueTimelineProjectedRow & Readonly<{ repeat?: QueueTimelineRepeat }>
@@ -629,6 +642,14 @@ export type QueueTimelineProjection = Readonly<{
   timeStatsFacts: readonly QueueTerminalFact[]
   /** Oldest timestamped journal record (ms), or null when none — drives the "-" coverage gate. */
   earliestFactMs: number | null
+  /**
+   * Every run member this read could not resolve against the record store, over
+   * the WHOLE population it traversed — not just the rows that survived the
+   * window and filters. A fault is data the journal lost; a caller who narrowed
+   * to five rows still gets told, which is the difference between "40 rows and 1
+   * unreadable" and an abort that teaches nothing (@i/10-yrd/23228).
+   */
+  readFaults: readonly QueueMemberReadFault[]
 }>
 
 export type QueueTimelineProjectionOptions = Readonly<{
@@ -700,6 +721,11 @@ export type QueueLogRow = Readonly<{
   integration?: IntegrationProof
   props?: ChangeProps
   merge: string
+  /** Set when the record store could not answer for this member's admission
+   * clock. The row still renders — that is the whole point — carrying the run,
+   * the change, the revision@sha and WHY, so an unreadable member is reported
+   * rather than aborting the read or vanishing from it (@i/10-yrd/23228). */
+  unreadable?: QueueMemberReadFault
 }>
 
 type Row = Readonly<{
@@ -1367,7 +1393,9 @@ function timelineRunMemberRows(
     // Member AGE anchors on the causal admission clock of THIS run, so a
     // later resubmission of the same revision can never postdate an earlier
     // run's finish (the 21106 timestamp-crash class).
-    const admission = current !== undefined && current.revs.length > 0 ? runRevisionClock(current, run) : undefined
+    const read = current !== undefined && current.revs.length > 0 ? runRevisionClockRead(current, run) : undefined
+    const admission = read?.clock
+    const unreadable = read?.fault
     const sourceReadyAt =
       admission === undefined
         ? (lineage.sourceReadyAt ?? submittedAt)
@@ -1376,6 +1404,11 @@ function timelineRunMemberRows(
           : (admission.checkRequestedAt ?? admission.pushedAt)
     const submitter = current === undefined ? undefined : revisionSubmitter(current, member.revision, member.headSha)
     const issue = presentFact(current?.issue ?? member.issue)
+    // The detail cell carries the mark too, so an operator reading the timeline
+    // sees WHICH row the fault line below is about without cross-referencing.
+    const lineageDetail = withTimelineLineage(baseDetail, [lineage])
+    const memberDetail =
+      unreadable === undefined ? lineageDetail : `${lineageDetail} · unreadable: ${unreadable.reason}`
     return {
       id: `${run.base}:run:${run.id}:${member.id}:${member.revision}`,
       base: run.base,
@@ -1397,7 +1430,8 @@ function timelineRunMemberRows(
       subject: timelineMemberSubject(result, member, state),
       ...(submitter === undefined ? {} : { submitter }),
       ...(stepLabel === undefined ? {} : { step: stepLabel }),
-      detail: withTimelineLineage(baseDetail, [lineage]),
+      ...(unreadable === undefined ? {} : { unreadable }),
+      detail: memberDetail,
       ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
       revisionLineage: [lineage],
       ...(failure === undefined ? {} : { failure }),
@@ -1834,6 +1868,10 @@ function buildQueueTimelineProjection(
     metrics: queueFlowMetrics(terminalFacts, { now: options.now, windowMs: metricsWindowMs, oldestOpenMs }),
     timeStatsFacts,
     earliestFactMs,
+    // From `rawRows`, deliberately: the faults report what the READ traversed,
+    // not what the window kept, so narrowing to five rows never hides that a
+    // member of this queue is unreadable.
+    readFaults: rawRows.flatMap((row) => (row.unreadable === undefined ? [] : [row.unreadable])),
   }
   return { projection, metricFacts: terminalFacts }
 }
@@ -4926,6 +4964,15 @@ function ProjectedQueueTimeline({
                 retained since {projection.coverage.retainedSince}
               </Text>
             )}
+            {/* Deliberately NOT gated on `fillHeight`: the two facts above are
+                display niceties, this one is journal data the read could not
+                resolve. Hiding it would let the pane claim a whole population
+                it does not have (@i/10-yrd/23228). */}
+            {projection.readFaults.length === 0 ? null : (
+              <Text color="$fg-warning" wrap="truncate">
+                {queueMemberReadFaultSummary(projection.readFaults)}
+              </Text>
+            )}
           </Box>
           <Box flexDirection="row" justifyContent="flex-end" minWidth={0} flexShrink={0}>
             <TimelineFilterLine
@@ -5083,6 +5130,12 @@ export function queueLogRows(
   attempts: readonly QueueLogAttempt[] = [],
   revisionSubjects: ReadonlyMap<string, string> = new Map(),
   revisionClocks?: ReadonlyMap<string, ChangeRunRevisionClock>,
+  /** The faults the SAME clock read produced ({@link queueRunRevisionReads}).
+   * Passing them is what turns a member the record store cannot answer for
+   * from an abort into a marked row; omitting them keeps the historical loud
+   * refusal, because a caller with no fault accounting genuinely does not know
+   * why a record member has no clock. */
+  readFaults?: ReadonlyMap<string, QueueMemberReadFault>,
 ): QueueLogRow[] {
   const rows: QueueLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
@@ -5137,7 +5190,8 @@ export function queueLogRows(
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
-        const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr, recordIds)
+        const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr, recordIds, readFaults)
+        const unreadable = readFaults?.get(queueRunRevisionKey(run, pr))
         const ageMs = elapsedMs(submittedAt, finishedAt, `change '${pr.id}' submitted-to-terminal age`)
         const showLocation = changeStatus?.get(pr.id) === "withdrawn" ? undefined : location
         const taskStatus = runTaskStatusOf(run)
@@ -5181,6 +5235,7 @@ export function queueLogRows(
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
           error: safeText(runError),
+          ...(unreadable === undefined ? {} : { unreadable }),
           ...propsField(pr),
           locations,
           ...(showLocation === undefined
@@ -5463,10 +5518,15 @@ export function queueShowData(
 export function QueueLogView({
   rows,
   coverage,
+  readFaults,
   columns = 120,
 }: {
   rows: readonly QueueLogRow[]
   coverage?: QueueLogCoverage
+  /** Every fault the clock read produced, from the caller that holds the whole
+   * read. Absent falls back to the faults the DISPLAYED rows carry, which is
+   * right for a caller that projected exactly what it shows. */
+  readFaults?: readonly QueueMemberReadFault[]
   columns?: number
 }) {
   const compact = columns <= 80
@@ -5524,6 +5584,10 @@ export function QueueLogView({
     { header: "WAIT", key: "waitValue" as const, align: "right" as const },
   ]
   const hidden = Math.max(0, rows.length - visibleRows.length)
+  // Every unreadable member across the rows this log projected — reported even
+  // when the row itself fell outside the visible window, because a reader who
+  // is not told simply believes the history is whole (@i/10-yrd/23228).
+  const faults = readFaults ?? rows.flatMap((row) => (row.unreadable === undefined ? [] : [row.unreadable]))
   void coverage
   return (
     <Box flexDirection="column">
@@ -5533,6 +5597,11 @@ export function QueueLogView({
         <Table data={tableRows} columns={logColumns} padding={1} showHeader={false} />
       )}
       {hidden === 0 ? null : <Text color="$fg-muted">... {hidden} more</Text>}
+      {faults.length === 0 ? null : (
+        <Text color="$fg-warning" wrap="truncate">
+          {queueMemberReadFaultSummary(faults)}
+        </Text>
+      )}
     </Box>
   )
 }

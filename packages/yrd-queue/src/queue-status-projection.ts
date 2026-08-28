@@ -458,13 +458,30 @@ export function queueRunRevisionKey(run: Pick<Run, "id">, revision: PinnedChange
   return JSON.stringify([run.id, revision.id, revision.revision, revision.headSha])
 }
 
-export function queueRunRevisionClocks(
-  prs: Iterable<Change>,
-  runs: Iterable<Run>,
-): Map<string, ChangeRunRevisionClock> {
+/** What one whole-population clock read produced: the clocks it could build,
+ * and one {@link QueueMemberReadFault} per member it could not. The faults are
+ * keyed the same way the clocks are, so a renderer holding both can mark
+ * exactly the rows that are unreadable. */
+export type QueueRunRevisionReads = Readonly<{
+  clocks: Map<string, ChangeRunRevisionClock>
+  faults: Map<string, QueueMemberReadFault>
+}>
+
+/**
+ * Build every run member's causal admission clock, collecting — never
+ * throwing — the members whose clock the record store cannot answer for.
+ *
+ * This is a whole-population read: one member whose revision was never
+ * journaled used to abort `yrd log` for every caller, including the caller who
+ * asked for five rows that did not include it (@i/10-yrd/23228). The unreadable
+ * member is REPORTED through `faults` and rendered marked; it is never
+ * silently dropped, which would trade a loud failure for a quiet one.
+ */
+export function queueRunRevisionReads(prs: Iterable<Change>, runs: Iterable<Run>): QueueRunRevisionReads {
   const byId = new Map([...prs].map((pr) => [pr.id, pr]))
   const recordIds = new Set(byId.keys())
   const clocks = new Map<string, ChangeRunRevisionClock>()
+  const faults = new Map<string, QueueMemberReadFault>()
   for (const run of runs) {
     for (const revision of run.prs) {
       const pr = byId.get(revision.id)
@@ -478,10 +495,22 @@ export function queueRunRevisionClocks(
         if (isDerivedMemberId(revision.id, recordIds)) continue
         throw new Error(`yrd: run '${run.id}' has no retained change '${revision.id}'`)
       }
-      clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
+      const read = runRevisionClockRead(pr, run)
+      const key = queueRunRevisionKey(run, revision)
+      if (read.fault !== undefined) faults.set(key, read.fault)
+      else clocks.set(key, read.clock)
     }
   }
-  return clocks
+  return { clocks, faults }
+}
+
+/** The clock half of {@link queueRunRevisionReads}, for callers that hold no
+ * surface to report a fault on. */
+export function queueRunRevisionClocks(
+  prs: Iterable<Change>,
+  runs: Iterable<Run>,
+): Map<string, ChangeRunRevisionClock> {
+  return queueRunRevisionReads(prs, runs).clocks
 }
 
 /** Compatibility projector for injected/custom runtimes without the installed
@@ -793,13 +822,79 @@ export function timestamp(value: string, subject: string): number {
   return parsed
 }
 
-export function runRevisionClock(pr: Change, run: Run): ChangeRunRevisionClock {
+/**
+ * One run member a read surface could not resolve against the retained record
+ * store: the run pins a change revision the record does not carry the clock
+ * for, because the write that would have carried it never reached the journal.
+ *
+ * It is a defect in ONE row. A READ answers a question about a population, so
+ * it renders every member it can and marks the ones it cannot — aborting the
+ * whole surface teaches the caller nothing about the 40 rows that were fine
+ * (@i/10-yrd/23228). Writers and gates keep the throwing
+ * {@link runRevisionClock}; only readers take the fault.
+ *
+ * `reason` separates the two shapes an unjournaled write leaves behind, and
+ * both are distinguishable from a change that WAS journaled and later evicted:
+ * retention reports that as the `history-evicted` refusal and the log's
+ * coverage floor, never as a fault here.
+ */
+export type QueueMemberReadFault = Readonly<{
+  run: string
+  change: string
+  revision: number
+  headSha: string
+  /** `revision-not-retained`: the record holds no clock for the pinned
+   * revision@sha at all. `no-causal-clock`: the revision is retained, but
+   * neither a submission nor a check request was journaled at or before the
+   * run started, so nothing dates the member's admission. */
+  reason: "revision-not-retained" | "no-causal-clock"
+  message: string
+}>
+
+/**
+ * One line naming what a read could not answer for — the count, then each
+ * member by run, change, revision@sha and reason.
+ *
+ * A read surface that hides this is worse than the abort it replaced: the
+ * caller would believe the population was whole. So the summary renders even
+ * where display niceties are suppressed.
+ */
+export function queueMemberReadFaultSummary(faults: readonly QueueMemberReadFault[], limit = 3): string | undefined {
+  if (faults.length === 0) return undefined
+  const named = faults
+    .slice(0, limit)
+    .map(
+      (fault) => `${fault.change} rev${fault.revision}@${fault.headSha.slice(0, 12)} in ${fault.run} (${fault.reason})`,
+    )
+  const rest = faults.length - named.length
+  const row = faults.length === 1 ? "row" : "rows"
+  return `${faults.length} unreadable ${row}: ${named.join("; ")}${rest === 0 ? "" : `; +${rest} more`}`
+}
+
+export type QueueMemberRead =
+  | Readonly<{ clock: ChangeRunRevisionClock; fault?: undefined }>
+  | Readonly<{ clock?: undefined; fault: QueueMemberReadFault }>
+
+/** The shared core of {@link runRevisionClock}: resolve a run member's causal
+ * admission clock, handing back the fault instead of throwing it so a read
+ * surface can mark the row and continue. */
+export function runRevisionClockRead(pr: Change, run: Run): QueueMemberRead {
   const pinned = run.prs.find((member) => member.id === pr.id)
+  // Not a data fault but a caller-contract violation — asking a run for the
+  // clock of a change it does not carry. Nothing in the read path can reach
+  // it, so it stays loud on both paths.
   if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain change '${pr.id}'`)
+  const fault = (
+    reason: QueueMemberReadFault["reason"],
+    message: string,
+  ): Readonly<{ fault: QueueMemberReadFault }> => ({
+    fault: { run: run.id, change: pr.id, revision: pinned.revision, headSha: pinned.headSha, reason, message },
+  })
   const revision = pr.revs.find((revision) => revision.n === pinned.revision && revision.head === pinned.headSha)
   if (revision === undefined) {
-    throw new Error(
-      `yrd: run '${run.id}' has no retained revision clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
+    return fault(
+      "revision-not-retained",
+      `yrd: run '${run.id}' has no retained revision clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha} — the change record retains no such revision, so the write was never journaled`,
     )
   }
   const historyClock = revisionHistoryClock(pr, revision)
@@ -810,19 +905,28 @@ export function runRevisionClock(pr: Change, run: Run): ChangeRunRevisionClock {
       startedAt
   ) {
     const clock = validateRevisionClock(pr, historyClock)
-    return { ...clock, admittedBy: "submission", submittedAt: revision.submittedAt }
+    return { clock: { ...clock, admittedBy: "submission", submittedAt: revision.submittedAt } }
   }
   const checkRequest = revisionCheckRequests(pr, historyClock)
     .filter((request) => timestamp(request.at, `change '${pr.id}' check request`) <= startedAt)
     .toSorted((left, right) => left.at.localeCompare(right.at))
     .at(-1)
   if (checkRequest === undefined) {
-    throw new Error(
-      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
+    return fault(
+      "no-causal-clock",
+      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pinned.revision}@${pinned.headSha} — no submission or check request was journaled at or before the run started`,
     )
   }
   const clock = validateRevisionClock(pr, historyClock)
-  return { ...clock, admittedBy: "check-request", checkRequestedAt: checkRequest.at }
+  return { clock: { ...clock, admittedBy: "check-request", checkRequestedAt: checkRequest.at } }
+}
+
+/** The throwing projection of {@link runRevisionClockRead}, for every caller
+ * that is NOT a read surface — a missing clock there is a real refusal. */
+export function runRevisionClock(pr: Change, run: Run): ChangeRunRevisionClock {
+  const read = runRevisionClockRead(pr, run)
+  if (read.fault !== undefined) throw new Error(read.fault.message)
+  return read.clock
 }
 
 type JobDisplayStatus =
@@ -1270,8 +1374,26 @@ export function timelineQueueWaits(run: Run, submissionTimes: ReadonlyMap<string
   })
 }
 
-export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
+/** What one whole-population admission read produced: the times it could date,
+ * and one {@link QueueMemberReadFault} per member it could not. Faults are
+ * keyed by {@link queueRunRevisionKey}, exactly like the times. */
+export type QueueTimelineAdmissionReads = Readonly<{
+  submissionTimes: Map<string, string | null>
+  faults: Map<string, QueueMemberReadFault>
+}>
+
+/**
+ * Date every run member's admission, collecting — never throwing — the members
+ * the record store cannot date.
+ *
+ * Same whole-population rule as {@link queueRunRevisionReads}: one member whose
+ * revision was never journaled used to abort `yrd queue status` and the whole
+ * timeline for every caller (@i/10-yrd/23228). The member is reported through
+ * `faults` and its row renders marked, never dropped.
+ */
+export function queueTimelineAdmissionReads(results: readonly QueueStatusResult[]): QueueTimelineAdmissionReads {
   const submissionTimes = new Map<string, string | null>()
+  const faults = new Map<string, QueueMemberReadFault>()
   for (const result of results) {
     const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
     const recordIds = new Set(byId.keys())
@@ -1284,9 +1406,14 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
           )
         }
       }
-      const current = currentChangeRev(pr)
+      // A record with no retained revision has no CURRENT revision to key a
+      // time on — the same legal state the run-member branch below already
+      // handles by reading `pr.submittedAt`. Nothing is swallowed here: if a
+      // run pins one of this record's revisions, that member takes a
+      // `revision-not-retained` fault and its row says so.
+      const current = pr.revs.length === 0 ? undefined : currentChangeRev(pr)
       const submittedAt = current?.submittedAt ?? pr.submittedAt
-      if (submittedAt !== undefined) {
+      if (current !== undefined && submittedAt !== undefined) {
         submissionTimes.set(queueRevisionKey({ id: pr.id, revision: current.n, headSha: current.head }), submittedAt)
       }
     }
@@ -1305,8 +1432,13 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
         }
         const runKey = queueRunRevisionKey(run, member)
         if (pr.revs.length > 0) {
-          const clock = runRevisionClock(pr, run)
-          submissionTimes.set(runKey, clock.admittedBy === "submission" ? clock.submittedAt : null)
+          const read = runRevisionClockRead(pr, run)
+          if (read.fault !== undefined) {
+            faults.set(runKey, read.fault)
+            submissionTimes.set(runKey, null)
+            continue
+          }
+          submissionTimes.set(runKey, read.clock.admittedBy === "submission" ? read.clock.submittedAt : null)
           continue
         }
         const submittedAt = pr.submittedAt
@@ -1320,7 +1452,13 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
       }
     }
   }
-  return submissionTimes
+  return { submissionTimes, faults }
+}
+
+/** The times half of {@link queueTimelineAdmissionReads}, for callers that hold
+ * no surface to report a fault on. */
+export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
+  return queueTimelineAdmissionReads(results).submissionTimes
 }
 
 /**
@@ -1514,9 +1652,11 @@ export function queueLogSubmissionTime(
   run: Run,
   pr: PinnedChangeRevision,
   recordIds: ReadonlySet<string>,
+  readFaults?: ReadonlyMap<string, QueueMemberReadFault>,
 ): string | undefined {
   if (revisionClocks === undefined) return undefined
-  const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
+  const key = queueRunRevisionKey(run, pr)
+  const clock = revisionClocks.get(key)
   if (clock === undefined) {
     // Intent members never mint a revision clock (no submission precedes the
     // run). Derived members (recordless post-S6) never mint one either: their
@@ -1528,6 +1668,11 @@ export function queueLogSubmissionTime(
     // member must still have a clock; that absence stays a loud failure.
     if (pr.intent !== undefined) return undefined
     if (isDerivedMemberId(pr.id, recordIds)) return undefined
+    // The clock read already ACCOUNTED for this member and reported why it
+    // could not date it. The row renders carrying that fault, so the absence
+    // is loud on the surface rather than here — a caller that passes no fault
+    // map has no such accounting and still refuses.
+    if (readFaults?.has(key) === true) return undefined
     throw new Error(
       `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
     )
