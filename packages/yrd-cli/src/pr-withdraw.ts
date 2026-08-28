@@ -7,10 +7,12 @@ import {
   changeDeliveryState,
   changeNeedsAuthor,
   changeNotFoundMessage,
+  type BaysState,
   type Change,
+  type ProjectedBranchSubmit,
 } from "@yrd/bay"
-import { raiseFailure } from "@yrd/core"
-import { Queues, type Run } from "@yrd/queue"
+import { raiseFailure, type DeepReadonly } from "@yrd/core"
+import { alreadyLandedSubmits, derivedLaneBranches, Queues, type Run } from "@yrd/queue"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
@@ -177,12 +179,24 @@ type PruneChecks = Readonly<{
   mergeTree?: "identical" | "divergent" | "conflicts" | "skipped"
 }>
 
-type PruneVerdict = "withdraw" | "would-withdraw" | "keep" | "error"
+type PruneVerdict = "withdraw" | "would-withdraw" | "keep" | "stale-fact" | "error"
+
+/** Which population a row was scanned from. `record` rows are live changes in
+ * the record store; `derived` rows are live submit facts the derived lane owns
+ * — recordless BY DESIGN, so `app.bays.prs()` structurally cannot contain one
+ * and a scan of the store alone answers about the wrong population
+ * (@i/10-yrd/24002-prune-blind-to-derived). */
+type PruneLane = "record" | "derived"
 
 type PruneRow = Readonly<{
-  pr: string
+  lane: PruneLane
+  /** The record-lane change id. Absent on a derived row: a derived member's
+   * identity is minted at ADMISSION, so a standing fact no run has admitted
+   * has no id yet and its branch is the only name it has. */
+  pr?: string
   branch: string
-  revision: number
+  /** Absent on a derived row, for the same reason `pr` is. */
+  revision?: number
   headSha: string
   base: string
   baseSha?: string
@@ -192,6 +206,11 @@ type PruneRow = Readonly<{
   error?: string
   detail: string
 }>
+
+/** A row the RECORD lane produced. Every record-lane row carries the change id
+ * and revision the withdrawal path needs, and typing that here is what keeps
+ * the withdrawal loop closed to derived rows without a runtime filter. */
+type RecordPruneRow = PruneRow & Readonly<{ pr: string; revision: number }>
 
 export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
 
@@ -231,7 +250,8 @@ export type RemergePreflightResult = Readonly<{
 
 function pruneLine(row: PruneRow): string {
   const base = row.baseSha === undefined ? row.base : `${row.base}@${short(row.baseSha)}`
-  return `[${row.verdict}] ${row.pr} ${row.branch} r${row.revision}: head ${short(row.headSha)} vs ${base} — ${row.detail}`
+  const name = row.pr === undefined ? `derived ${row.branch}` : `${row.pr} ${row.branch} r${String(row.revision)}`
+  return `[${row.verdict}] ${name}: head ${short(row.headSha)} vs ${base} — ${row.detail}`
 }
 
 function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: unknown): string {
@@ -239,10 +259,11 @@ function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: 
   return `change '${pr}' could not be ${action}: ${cause}`
 }
 
-function pruneError(pr: Change, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
+function pruneError(pr: Change, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): RecordPruneRow {
   const message = pruneFailureMessage(pr.id, "judged", error)
   const revision = currentChangeRev(pr)
   return {
+    lane: "record",
     pr: pr.id,
     branch: pr.branch,
     revision: revision.n,
@@ -256,7 +277,7 @@ function pruneError(pr: Change, baseSha: string | undefined, error: unknown, che
   }
 }
 
-function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
+function replaceWithPruneError(row: RecordPruneRow, error: unknown): RecordPruneRow {
   const { verdict: _verdict, reason: _reason, error: _error, detail: _detail, ...identity } = row
   const message = pruneFailureMessage(row.pr, "withdrawn", error)
   return { ...identity, verdict: "error", error: message, detail: message }
@@ -282,10 +303,11 @@ function mergeRunOwningRevision(app: YrdCliApp, pr: Change): Run | undefined {
     })
 }
 
-function mergeOwnedPruneRow(pr: Change, run: Run): PruneRow {
+function mergeOwnedPruneRow(pr: Change, run: Run): RecordPruneRow {
   const revision = currentChangeRev(pr)
   const reason = `merge run '${run.id}' owns the in-flight merge for revision ${revision.n} (${revision.head})`
   return {
+    lane: "record",
     pr: pr.id,
     branch: pr.branch,
     revision: revision.n,
@@ -298,7 +320,7 @@ function mergeOwnedPruneRow(pr: Change, run: Run): PruneRow {
   }
 }
 
-function changedPruneRow(row: PruneRow, pr: Change): PruneRow {
+function changedPruneRow(row: RecordPruneRow, pr: Change): RecordPruneRow {
   const revision = currentChangeRev(pr)
   const reason =
     `PR changed during prune from revision ${row.revision} (${row.headSha}) ` +
@@ -347,9 +369,10 @@ async function authoredContent(
 /** Prove one change's superseded verdict against its resolved base tip. Every
  * check that ran (and every check that was skipped, with why) is named in the
  * returned row so the operator sees exactly what was verified. */
-async function pruneVerdict(pr: Change, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
+async function pruneVerdict(pr: Change, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<RecordPruneRow> {
   const revision = currentChangeRev(pr)
   const identity = {
+    lane: "record" as const,
     pr: pr.id,
     branch: pr.branch,
     revision: revision.n,
@@ -646,10 +669,143 @@ export async function preflightRemerge(
   return result
 }
 
-/** `yrd admin pr prune [--dry-run]` — scan every live change against its base tip and
- * withdraw the ones whose content already merged (head is an ancestor of the
- * base, or merging head into the base reproduces the base tree exactly).
- * Prints one explicit verdict per change; --dry-run emits no events. */
+/** The one cure for a stale standing fact, worded exactly as the compose words
+ * it when it refuses to derive an admission for already-landed content — so an
+ * operator reads ONE command wherever the same ghost surfaces. */
+function retireFactCommand(branch: string): string {
+  return `git push bay :refs/yrd/submit/${branch}`
+}
+
+/**
+ * Judge one DERIVED member — a live submit fact on a branch the derived lane
+ * owns — with the same content proof the record lane gets. Prune's tree
+ * equality is the STRONGER oracle here: the compose's own
+ * `isSubmitContentLanded` is ancestry-only and misses a rebased landing, which
+ * `git merge-tree` catches.
+ *
+ * Prune never withdraws one, and that is a structural fact rather than a
+ * conservatism: withdrawal spends a RECORD's payload identity, a derived member
+ * has no record to spend, and the fact itself lives in a git ref the journal
+ * does not own — closing anything here would report success against a store the
+ * queue never reads. The honest disposition is `stale-fact` plus the cure.
+ *
+ * No `authoredContent` proof runs, and it is not missing by oversight: a
+ * `ProjectedBranchSubmit` records no source base commit, so the
+ * already-landed / never-authored ambiguity that guard resolves cannot be
+ * resolved here. It also does not need to be. That guard exists to stop a
+ * payload BURN on ambiguous evidence; nothing is burnt on this path, and both
+ * readings of the ambiguity share one disposition — an empty carrier's
+ * standing fact is as stale as a merged one's, and retirement is the cure for
+ * either.
+ */
+async function derivedVerdict(
+  branch: string,
+  submit: DeepReadonly<ProjectedBranchSubmit>,
+  baseSha: string,
+  git: PruneGitFacts,
+): Promise<PruneRow> {
+  const identity = { lane: "derived" as const, branch, headSha: submit.sha, base: submit.base, baseSha }
+  const checks = await contentChecks(submit.sha, baseSha, git)
+  if (checks.headPresent !== true) {
+    return {
+      ...identity,
+      checks,
+      verdict: "keep",
+      detail: "head commit is not present in this repository; nothing could be verified — kept",
+    }
+  }
+  const ancestor = checks.ancestorOfBase === true
+  const mergeTree = checks.mergeTree ?? "conflicts"
+  const checked = `ancestor-of-base=${ancestor ? "yes" : "no"}, merge-tree=${mergeTree === "skipped" ? "skipped (head already reachable)" : mergeTree}`
+  if (!(ancestor || mergeTree === "identical")) {
+    return { ...identity, checks, verdict: "keep", detail: `${checked} — live content not on base — kept` }
+  }
+  const reason =
+    `superseded: content already in ${baseSha} — a standing fact with no record, so prune cannot withdraw it; ` +
+    `retire the fact instead (${retireFactCommand(branch)})`
+  return { ...identity, checks, verdict: "stale-fact", reason, detail: `${checked} — ${reason}` }
+}
+
+/** A derived member's judgement failed. Named for what it is — prune judged a
+ * branch, not a change — so the row can never be read as a change id. */
+function derivedError(
+  branch: string,
+  submit: DeepReadonly<ProjectedBranchSubmit>,
+  baseSha: string | undefined,
+  error: unknown,
+): PruneRow {
+  const cause = error instanceof Error && error.message.trim() !== "" ? error.message : String(error)
+  const message = `derived member on '${branch}' could not be judged: ${cause}`
+  return {
+    lane: "derived",
+    branch,
+    headSha: submit.sha,
+    base: submit.base,
+    ...(baseSha === undefined ? {} : { baseSha }),
+    checks: {},
+    verdict: "error",
+    error: message,
+    detail: message,
+  }
+}
+
+export type PruneExcludedSubmit = Readonly<{ branch: string; sha: string; reason: string; next?: string }>
+
+/**
+ * Standing submit facts NEITHER pass reached, with why — so a clean count can
+ * never imply prune looked at every fact in the estate.
+ *
+ * Every branch in `bays.submits` belongs to exactly one lane: the record pass
+ * covers it when a LIVE record owns it, the derived pass when
+ * {@link derivedLaneBranches} offers it. Two cells fall through both — a fact
+ * standing at a terminal record's landing commit (the PR2139 signature) and a
+ * terminal record's same-sha fact — and both are stale refs whose cure is
+ * retirement, not a run.
+ */
+function unscannedSubmits(bays: DeepReadonly<BaysState>, scanned: ReadonlySet<string>): PruneExcludedSubmit[] {
+  const landed = new Map(alreadyLandedSubmits(bays).map((row) => [row.branch, row.record]))
+  return Object.entries(bays.submits)
+    .filter(([branch]) => !scanned.has(branch))
+    .map(([branch, submit]) => {
+      const record = landed.get(branch)
+      const terminal = Object.values(bays.prs).findLast((pr) => pr.branch === branch && !isLiveChange(pr as Change))
+      if (record !== undefined) {
+        return {
+          branch,
+          sha: submit.sha,
+          reason: `fact stands at terminal change ${record}'s landing commit — content the record lane already merged`,
+          next: retireFactCommand(branch),
+        }
+      }
+      if (terminal !== undefined) {
+        return {
+          branch,
+          sha: submit.sha,
+          reason: `terminal change ${terminal.id} already accounts for this head`,
+          next: retireFactCommand(branch),
+        }
+      }
+      // Unreachable by the lane partition above; reported rather than dropped,
+      // because a fact no lane claims is exactly the state a count must not
+      // silently absorb.
+      return { branch, sha: submit.sha, reason: "no lane claims this fact" }
+    })
+    .toSorted((left, right) => left.branch.localeCompare(right.branch))
+}
+
+/** `yrd admin pr prune [--dry-run]` — scan BOTH queue populations against their
+ * base tip and withdraw the record-lane changes whose content already merged
+ * (head is an ancestor of the base, or merging head into the base reproduces
+ * the base tree exactly). Prints one explicit verdict per member; --dry-run
+ * emits no events.
+ *
+ * The two populations are scanned and REPORTED separately, and the facts
+ * neither lane reached are named. Iterating `app.bays.prs()` alone was the
+ * 2026-08-28 defect: derived members are recordless by definition, so the
+ * record store structurally cannot hold one, and prune reported "2 changes
+ * checked, nothing to prune" over an estate holding four derived ghosts
+ * (@i/10-yrd/24002-prune-blind-to-derived). A count is only ever printed
+ * beside the name and size of the population it was counted over. */
 export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: YrdCliIO): Promise<void> {
   const dryRun = options.dryRun === true
   const cwd = io.cwd ?? process.cwd()
@@ -665,7 +821,13 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
       (left, right) => left.id.localeCompare(right.id, "en", { numeric: true }), // collator-hoist-allow: locale-pinned, cold path
     ) as readonly Change[]
 
-  const rows: PruneRow[] = []
+  const bays = app.state().bays
+  // The DERIVED population, enumerated by the same function the compose selects
+  // from, so prune and admission never disagree about who is in the lane.
+  const derivedBranches = derivedLaneBranches(bays)
+  const excluded = unscannedSubmits(bays, new Set([...live.map((pr) => pr.branch), ...derivedBranches]))
+
+  const rows: RecordPruneRow[] = []
   for (const pr of live) {
     const mergeOwner = mergeRunOwningRevision(app, pr)
     if (mergeOwner !== undefined) {
@@ -686,6 +848,28 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
     }
   }
 
+  const derivedRows: PruneRow[] = []
+  for (const branch of derivedBranches) {
+    const submit = bays.submits[branch]
+    if (submit === undefined) continue
+    let baseSha: string | undefined
+    try {
+      baseSha = (await git.resolveCommit(`origin/${submit.base}`)) ?? (await git.resolveCommit(submit.base))
+      if (baseSha === undefined) {
+        throw new Error(
+          `target base '${submit.base}' did not resolve: neither 'origin/${submit.base}' nor '${submit.base}' is a commit here`,
+        )
+      }
+      derivedRows.push(await derivedVerdict(branch, submit, baseSha, git))
+    } catch (error) {
+      derivedRows.push(derivedError(branch, submit, baseSha, error))
+    }
+  }
+
+  // Only record-lane rows can reach a withdrawal: `withdrawOne` closes a Change
+  // and cancels the Queue work holding its authority, and a derived member has
+  // neither. The loop stays over `rows` so that is structural, not a filter
+  // somebody can drop.
   const withdrawn: Change[] = []
   if (!dryRun) {
     for (const [index, row] of rows.entries()) {
@@ -712,28 +896,56 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
     }
   }
 
-  const kept = rows.filter((row) => row.verdict === "keep").length
-  const wouldWithdraw = rows.filter((row) => row.verdict === "would-withdraw").length
-  const errors = rows.filter((row) => row.verdict === "error").length
-  const summary =
-    rows.length === 0
-      ? "pr prune: no live PRs to check"
-      : `pr prune: checked ${rows.length} live change${rows.length === 1 ? "" : "s"} — ${
-          dryRun ? `${wouldWithdraw} would be withdrawn` : `${withdrawn.length} withdrawn`
-        }, ${kept} kept${errors === 0 ? "" : `, ${errors} error${errors === 1 ? "" : "s"}`}${
+  const checked = [...rows, ...derivedRows]
+  const kept = checked.filter((row) => row.verdict === "keep").length
+  const wouldWithdraw = checked.filter((row) => row.verdict === "would-withdraw").length
+  const staleFacts = checked.filter((row) => row.verdict === "stale-fact").length
+  const errors = checked.filter((row) => row.verdict === "error").length
+  // Both populations are named with their sizes even when one is empty: the
+  // sentence a reader acts on must say what was scanned, never just how much.
+  const scanned =
+    `scanned ${rows.length} live change${rows.length === 1 ? "" : "s"} (record lane) and ` +
+    `${derivedRows.length} derived member${derivedRows.length === 1 ? "" : "s"} (derived lane)`
+  const disposition =
+    checked.length === 0
+      ? "nothing to check"
+      : `${dryRun ? `${wouldWithdraw} would be withdrawn` : `${withdrawn.length} withdrawn`}, ${kept} kept${
+          staleFacts === 0 ? "" : `, ${staleFacts} stale fact${staleFacts === 1 ? "" : "s"} to retire`
+        }${errors === 0 ? "" : `, ${errors} error${errors === 1 ? "" : "s"}`}${
           dryRun ? " (dry run: no events emitted)" : ""
         }`
+  const summary = [`pr prune: ${scanned} — ${disposition}`]
+  if (excluded.length > 0) {
+    summary.push(
+      `pr prune: ${excluded.length} standing submit fact${excluded.length === 1 ? "" : "s"} neither lane scanned — ` +
+        excluded.map((row) => `${row.branch} (${row.reason})`).join("; "),
+    )
+  }
   await printResult(
     io,
     jsonEnabled(options),
     {
       command: "pr.prune",
       dryRun,
-      checked: rows.map(({ detail: _detail, ...row }) => row),
-      summary: { checked: rows.length, withdrawn: withdrawn.length, wouldWithdraw, kept, errors },
+      // The populations, in the machine-readable result too, so a mechanical
+      // reader cannot mistake a clean count for a complete one either.
+      scanned: { record: rows.length, derived: derivedRows.length },
+      excluded,
+      checked: checked.map(({ detail: _detail, ...row }) => row),
+      summary: {
+        checked: checked.length,
+        record: rows.length,
+        derived: derivedRows.length,
+        withdrawn: withdrawn.length,
+        wouldWithdraw,
+        kept,
+        staleFacts,
+        errors,
+        excluded: excluded.length,
+      },
       withdrawn: withdrawn.map(projectChangeTaskStatus),
     },
-    [...rows.map(pruneLine), summary].join("\n"),
+    [...checked.map(pruneLine), ...summary].join("\n"),
   )
 }
 

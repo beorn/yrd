@@ -69,6 +69,10 @@ const HEAD3_SHA = "3".repeat(40)
 const BASE_SHA = "a".repeat(40)
 const TARGET_BASE_SHA = "d".repeat(40)
 const MERGED_SHA = "b".repeat(40)
+/** A recordless branch's standing fact pointing at content the base already holds. */
+const GHOST_SHA = "9".repeat(40)
+/** A recordless branch's standing fact whose content is genuinely not on the base. */
+const DERIVED_LIVE_SHA = "8".repeat(40)
 const BASE_TREE = "e".repeat(40)
 const OTHER_TREE = "f".repeat(40)
 const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
@@ -750,6 +754,152 @@ describe("pr withdraw journal replay", () => {
 })
 
 describe("pr prune", () => {
+  /**
+   * The 2026-08-28 freeze: `yrd admin pr prune` reported "2 changes checked,
+   * nothing to prune" over an estate holding four derived ghosts. It iterated
+   * `app.bays.prs()`, and a derived member has no record BY DEFINITION, so the
+   * store it scanned could not contain the answer it reported on
+   * (@i/10-yrd/24002-prune-blind-to-derived).
+   */
+  it("scans the derived population and names it beside the record population", async () => {
+    const app = await createCliApp()
+    // Record lane: two live changes whose content is genuinely not on the base.
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.submit({ branch: "topic/two", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    // Derived lane: a recordless branch whose content the base already contains.
+    await app.bays.recordBranchSubmit({ branch: "issue/ghost", sha: GHOST_SHA, base: "main" })
+    expect(app.state().bays.prs["PR1"]?.branch, "the ghost holds no record").toBe("topic/one")
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1", "PR2"])
+
+    const output = outputIO({
+      pruneGit: () =>
+        pruneGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main"
+              ? BASE_SHA
+              : ref === HEAD_SHA || ref === HEAD2_SHA || ref === GHOST_SHA
+                ? ref
+                : undefined,
+          isAncestor: (ancestor) => ancestor === GHOST_SHA,
+          mergeTree: () => OTHER_TREE,
+        }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    const result = JSON.parse(output.stdout())
+    // The verb must not answer over a population it did not scan: the derived
+    // member is scanned, judged, and counted under its own lane.
+    expect(result).toMatchObject({
+      scanned: { record: 2, derived: 1 },
+      checked: [
+        { lane: "record", pr: "PR1", branch: "topic/one", verdict: "keep" },
+        { lane: "record", pr: "PR2", branch: "topic/two", verdict: "keep" },
+        {
+          lane: "derived",
+          branch: "issue/ghost",
+          headSha: GHOST_SHA,
+          base: "main",
+          baseSha: BASE_SHA,
+          checks: { headPresent: true, ancestorOfBase: true, mergeTree: "skipped" },
+          verdict: "stale-fact",
+        },
+      ],
+      summary: { checked: 3, record: 2, derived: 1, kept: 2, staleFacts: 1, wouldWithdraw: 0, errors: 0, excluded: 0 },
+    })
+    // A derived member has no record to name, so the row carries no change id
+    // to be mistaken for one.
+    expect(result.checked[2].pr).toBeUndefined()
+    // Prune cannot withdraw it — there is nothing to close — so the row names
+    // the cure that does work instead of a spend that does not.
+    expect(result.checked[2].reason).toContain("prune cannot withdraw it")
+    expect(result.checked[2].reason).toContain("git push bay :refs/yrd/submit/issue/ghost")
+
+    const human = outputIO({
+      pruneGit: () =>
+        pruneGit({
+          resolveCommit: (ref) =>
+            ref === "origin/main"
+              ? BASE_SHA
+              : ref === HEAD_SHA || ref === HEAD2_SHA || ref === GHOST_SHA
+                ? ref
+                : undefined,
+          isAncestor: (ancestor) => ancestor === GHOST_SHA,
+          mergeTree: () => OTHER_TREE,
+        }),
+      columns: 400,
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
+    const humanText = human.stdout().replace(/\s+/g, " ")
+    expect(humanText).toContain("[stale-fact] derived issue/ghost")
+    // The summary sentence names BOTH populations and their sizes, so "nothing
+    // to prune" can never be read as a statement about the whole estate.
+    expect(humanText).toContain("scanned 2 live changes (record lane) and 1 derived member (derived lane)")
+    expect(humanText).toContain("0 would be withdrawn, 2 kept, 1 stale fact to retire")
+  })
+
+  it("keeps a derived member whose content is not on its base", async () => {
+    const app = await createCliApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/live", sha: DERIVED_LIVE_SHA, base: "main" })
+
+    const output = outputIO({
+      pruneGit: () =>
+        pruneGit({
+          resolveCommit: (ref) => (ref === "origin/main" ? BASE_SHA : ref === DERIVED_LIVE_SHA ? ref : undefined),
+          isAncestor: () => false,
+          mergeTree: () => OTHER_TREE,
+          treeOf: (sha) => (sha === BASE_SHA ? BASE_TREE : OTHER_TREE),
+        }),
+    })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      scanned: { record: 0, derived: 1 },
+      checked: [
+        {
+          lane: "derived",
+          branch: "issue/live",
+          checks: { headPresent: true, ancestorOfBase: false, mergeTree: "divergent" },
+          verdict: "keep",
+        },
+      ],
+      summary: { checked: 1, record: 0, derived: 1, kept: 1, staleFacts: 0, errors: 0 },
+    })
+  })
+
+  it("names the standing facts neither lane scanned instead of counting past them", async () => {
+    const app = await createCliApp()
+    // A record-lane change that merged, whose submit fact survived at the
+    // landing commit — the PR2139 signature. The derived lane excludes it and
+    // the record pass skips it (terminal), so nothing scans it; saying so is
+    // the difference between a clean count and a complete one.
+    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.queue.run({ prs: ["PR1"], steps: ["merge"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
+    expect(app.state().bays.prs.PR1?.integration?.commit).toBe(MERGED_SHA)
+    await app.bays.recordBranchSubmit({ branch: "topic/landed", sha: MERGED_SHA, base: "main" })
+
+    const output = outputIO({ pruneGit: () => pruneGit() })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    const result = JSON.parse(output.stdout())
+    expect(result).toMatchObject({
+      scanned: { record: 0, derived: 0 },
+      checked: [],
+      excluded: [
+        {
+          branch: "topic/landed",
+          sha: MERGED_SHA,
+          next: "git push bay :refs/yrd/submit/topic/landed",
+        },
+      ],
+      summary: { checked: 0, record: 0, derived: 0, excluded: 1 },
+    })
+    expect(result.excluded[0].reason).toContain("terminal change PR1's landing commit")
+
+    const human = outputIO({ pruneGit: () => pruneGit(), columns: 400 })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
+    const humanText = human.stdout().replace(/\s+/g, " ")
+    expect(humanText).toContain("scanned 0 live changes (record lane) and 0 derived members (derived lane)")
+    expect(humanText).toContain("1 standing submit fact neither lane scanned — topic/landed")
+  })
+
   it("does not trust --quiet when a sibling directory entry masks a content conflict", async () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-prune-quiet-false-negative-"))
     try {
@@ -903,7 +1053,9 @@ describe("pr prune", () => {
     const humanText = human.stdout().replace(/\s+/g, " ")
     expect(humanText).toContain("[error] PR2 topic/broken r1")
     expect(humanText).toContain("change 'PR2' could not be judged: simulated merge-base transport failure")
-    expect(humanText).toContain("checked 3 live changes — 1 would be withdrawn, 1 kept, 1 error")
+    expect(humanText).toContain(
+      "scanned 3 live changes (record lane) and 0 derived members (derived lane) — 1 would be withdrawn, 1 kept, 1 error",
+    )
   })
 
   it("keeps the exact revision owned by an active merge run", async () => {
@@ -1163,7 +1315,9 @@ describe("pr prune", () => {
     expect(human.stdout()).toContain("merge-tree=conflicts")
     expect(human.stdout()).toContain("[keep] PR3 topic/unfetched r1")
     expect(human.stdout()).toContain("head commit is not present in this repository")
-    expect(human.stdout()).toContain("checked 3 live changes — 0 withdrawn, 3 kept")
+    expect(human.stdout()).toContain(
+      "scanned 3 live changes (record lane) and 0 derived members (derived lane) — 0 withdrawn, 3 kept",
+    )
   })
 
   it("emits nothing under --dry-run while naming what it would withdraw", async () => {
