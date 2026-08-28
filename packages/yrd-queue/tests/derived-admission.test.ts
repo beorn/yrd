@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
 import {
   ChangeIdSchema,
+  changeDeliveryState,
   changeIdForDerivedSubmit,
   createBayJobDefs,
   recordLaneOwnsBranch,
@@ -111,6 +112,19 @@ const passingMerge = () =>
     { revision: "merge-v1" },
   )
 
+const DeployResultSchema = z.object({ environment: z.string() }).strict()
+type DeployResult = z.infer<typeof DeployResultSchema>
+
+const passingDeploy = (onCall: () => void) =>
+  withStep(
+    "deploy",
+    (_input: StepExecution): JobResult<DeployResult> => {
+      onCall()
+      return { status: "completed", conclusion: "success", output: { environment: "staging" } }
+    },
+    { revision: "deploy-v1", kind: "action", output: DeployResultSchema },
+  )
+
 const authorFailingMerge = () =>
   withMerge(
     async (): Promise<JobResult<IntegrationProof>> => ({
@@ -126,7 +140,7 @@ async function createApp(
     journal?: ReturnType<typeof createMemoryJournal>
     id?: () => string
     log?: ReturnType<typeof createLogger>
-    steps?: readonly ReturnType<typeof passingCheck | typeof passingMerge>[]
+    steps?: readonly ReturnType<typeof passingCheck | typeof passingMerge | typeof passingDeploy>[]
     defaultSteps?: readonly string[]
     /** Arms the door's compose self-derivation (S6): the durable mint derived
      * admission commits identities to, and the git-enrichment reader. */
@@ -439,7 +453,9 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     await app.bays.submit({ branch: "issue/derived", headSha: "6".repeat(40), base: "main", baseSha: BASE })
     const reopened = app.state().bays.prs.PR1
     expect(reopened?.state).toBe("open")
-    expect(() => materializeDerivedRunMembers(app.state().bays, [entry])).toThrow(/record lane owns it/)
+    expect(() => materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])).toThrow(
+      /record lane owns it/,
+    )
     // The selectorless compose skips the derived entry loudly instead of
     // running both lanes; the record lane owns the branch now.
     await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
@@ -454,11 +470,11 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
 
     // Moved: the CAS refuses an entry derived at a superseded sha.
     await app.bays.recordBranchSubmit({ branch: "issue/derived", sha: RESUBMIT_SHA, base: "main" })
-    expect(() => materializeDerivedRunMembers(app.state().bays, [entry])).toThrow(/now stands at/)
+    expect(() => materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])).toThrow(/now stands at/)
 
     // Vanished: no fact at all refuses with the re-push cure.
     const gone = { ...app.state().bays, submits: {} }
-    expect(() => materializeDerivedRunMembers(gone, [entry])).toThrow(/no live submit fact/)
+    expect(() => materializeDerivedRunMembers(gone, app.state().queues, [entry])).toThrow(/no live submit fact/)
     expect(() => doorEntry(app, "issue/never-submitted")).toThrow(/no live submit fact/)
 
     // Duplicate payload: another open record already carries this exact
@@ -467,7 +483,7 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     const duplicate = doorEntry(app, "issue/derived")
     const collision = (() => {
       try {
-        materializeDerivedRunMembers(app.state().bays, [duplicate])
+        materializeDerivedRunMembers(app.state().bays, app.state().queues, [duplicate])
         return undefined
       } catch (error) {
         return error
@@ -871,5 +887,99 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
     // Live record: the grandfathered record lane.
     await app.bays.submit({ branch: "issue/live", headSha: "6".repeat(40), base: "main", baseSha: BASE })
     expect(recordLaneOwnsBranch(app.state().bays, "issue/live")).toBe(true)
+  })
+  it("a derived member's merged truth is PROJECTED from its merging run, so a deploy-only follow-on is admitted instead of refused for spent authority", async () => {
+    // The defect this replaced: `materializeDerivedRunMember` built every
+    // member with `state: "open"` and `merged: false` as adjacent literals and
+    // nothing ever recomputed them, so a member read "never landed" for its
+    // whole life. `integratedChangeShape` gates on `.merged`, so
+    // `alreadyIntegrated` arrived false at the authority gate, the
+    // `if (alreadyIntegrated) return undefined` exemption was unreachable, and
+    // a deploy-only plan — which contains no merge step and needs no authority
+    // at all — was refused with "checks authority was consumed by queue run
+    // 'R1'". The word *checks* in that refusal was the tell.
+    let deployCalls = 0
+    await using app = await createApp({
+      steps: [
+        passingCheck(),
+        passingMerge(),
+        passingDeploy(() => {
+          deployCalls += 1
+        }),
+      ],
+      defaultSteps: ["check", "merge"],
+    })
+    await strandDerivedBranch(app, "issue/derived")
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(1) })
+
+    // Negative control: BEFORE anything merges it, the member reads open and
+    // un-merged — the projection answers "still open" honestly rather than
+    // trading one hardcode for another.
+    const beforeMerge = materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])[0]
+    if (beforeMerge === undefined) throw new Error("expected a materialized member")
+    expect(beforeMerge).toMatchObject({ state: "open", merged: false })
+    expect(beforeMerge.integration).toBeUndefined()
+    expect(changeDeliveryState(beforeMerge)).toBe("submitted")
+
+    await expect(app.queue.run({ derived: [entry], steps: ["check", "merge"] }, runtime)).resolves.toMatchObject([
+      { id: "R1", status: "completed", conclusion: "success" },
+    ])
+
+    // The merging run now carries the proof on its own record — the durable
+    // home, stamped beside `passedAt`, that outlives Job retention.
+    const merging = Queues.get(app.state().queues, "R1")
+    expect(merging).toMatchObject({ passedAt: expect.any(String), integration: { commit: MERGED, baseSha: BASE } })
+
+    // ...and the member re-materializes closed+merged, carrying that proof.
+    const afterMerge = materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])[0]
+    if (afterMerge === undefined) throw new Error("expected a materialized member")
+    expect(afterMerge).toMatchObject({
+      state: "closed",
+      merged: true,
+      terminalRun: "R1",
+      integration: { commit: MERGED, baseSha: BASE },
+      integratedAt: expect.any(String),
+    })
+
+    // The headline consequence: the deploy-only follow-on runs. It asks for no
+    // merge step, so it needs no authority, and the exemption is now reachable.
+    await expect(app.queue.run({ derived: [entry], steps: ["deploy"] }, runtime)).resolves.toMatchObject([
+      { status: "completed", conclusion: "success" },
+    ])
+    expect(deployCalls).toBe(1)
+  })
+
+  it('changeDeliveryState reaches its `integrated` arm for a derived member — the arm the sibling `state: "open"` hardcode made dead code', async () => {
+    // Second consequence named by the bead: `changeDeliveryState` gates its
+    // whole closed arm on `pr.state === "closed"`, so `integrated`,
+    // `already-landed`, `canceled` and `withdrawn` were all unreachable on the
+    // derived lane no matter what landed.
+    await using app = await createApp()
+    await strandDerivedBranch(app, "issue/derived")
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(1) })
+    await app.queue.run({ derived: [entry] }, runtime)
+
+    const member = materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])[0]
+    if (member === undefined) throw new Error("expected a materialized member")
+    expect(changeDeliveryState(member)).toBe("integrated")
+  })
+
+  it("a member whose merging run FAILED still reads open and un-merged — the projection needs a settled proof, not merely a run", async () => {
+    // The positive control for the negative: a run that named this branch and
+    // planned a merge is not enough. Only a run that SETTLED passed and
+    // retained its proof makes the member merged, so a failed merge cannot
+    // silently mark a change landed.
+    await using app = await createApp({ steps: [passingCheck(), authorFailingMerge()] })
+    await strandDerivedBranch(app, "issue/derived")
+    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(1) })
+    await app.queue.run({ derived: [entry] }, runtime)
+
+    const failed = Queues.get(app.state().queues, "R1")
+    expect(failed?.integration).toBeUndefined()
+
+    const member = materializeDerivedRunMembers(app.state().bays, app.state().queues, [entry])[0]
+    if (member === undefined) throw new Error("expected a materialized member")
+    expect(member).toMatchObject({ state: "open", merged: false })
+    expect(changeDeliveryState(member)).not.toBe("integrated")
   })
 })

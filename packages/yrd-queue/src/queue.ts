@@ -2393,7 +2393,7 @@ function createQueue<Shape extends ChangeShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
-    admissionOrder: () => admissionOrderChanges(runtime().bays).map((pr) => pr.id),
+    admissionOrder: () => admissionOrderChanges(runtime()).map((pr) => pr.id),
     async reconcileMerge(args) {
       await actions.reconcileMerge(args)
     },
@@ -2596,7 +2596,7 @@ function createQueue<Shape extends ChangeShape>(
             const cycle: DerivedRunMember[] = []
             for (const member of [...(args.derived ?? []), ...selfDerived]) {
               try {
-                materializeDerivedRunMembers(runtime().bays, [member])
+                materializeDerivedRunMembers(runtime().bays, runtime().queues, [member])
                 cycle.push(member)
               } catch (error) {
                 const fact = failureFact(error)
@@ -2619,10 +2619,10 @@ function createQueue<Shape extends ChangeShape>(
             cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
           const derivedEntry = (id: string): DerivedRunMember | undefined =>
             cycleDerived.find((member) => member.id === id)
-          const materializedDerived = (bays: DeepReadonly<BaysState>): Change[] =>
+          const materializedDerived = (slices: DeepReadonly<RuntimeState>): Change[] =>
             cycleDerived.flatMap((member) => {
               try {
-                return materializeDerivedRunMembers(bays, [member])
+                return materializeDerivedRunMembers(slices.bays, slices.queues, [member])
               } catch (error) {
                 // Mirrors the record path's tolerance for changes that
                 // disappeared mid-cycle: the authoritative CAS refuses loudly
@@ -2655,7 +2655,7 @@ function createQueue<Shape extends ChangeShape>(
               run.prs.filter((pr) => pinnedChangeError(snapshot, [pr], run.id) === undefined).map((pr) => pr.id),
             ),
           )
-          const requested = requestedPRs(snapshot.bays, cycleArgs, consumed, intentCutoff)
+          const requested = requestedPRs(snapshot, cycleArgs, consumed, intentCutoff)
           const authoritySteps = requestedOrDeclaredSteps(steps, args.steps, args.declaredPlan)
           const cycleAuthority = derivedAuthorityLookup(snapshot)
           const authorityGaps = selectorless
@@ -2751,7 +2751,7 @@ function createQueue<Shape extends ChangeShape>(
           // their admission still matches their request, so `admissionQueue`
           // drops them structurally.
           const admissible = selectorless
-            ? admissionQueue(snapshot, steps, undefined, materializedDerived(snapshot.bays)).filter(
+            ? admissionQueue(snapshot, steps, undefined, materializedDerived(snapshot)).filter(
                 (pr) => !authorityGapIds.has(pr.id),
               )
             : []
@@ -2775,7 +2775,7 @@ function createQueue<Shape extends ChangeShape>(
             // runs without changing WHICH carriers it admits once it does. It
             // also makes the returned set the set actually admitted from, rather
             // than dropping every pushed carrier the drain took.
-            const enteringDerived = materializedDerived(runtime().bays)
+            const enteringDerived = materializedDerived(runtime())
             const entering = refreshable.flatMap((pr) => {
               const current =
                 resolveChange(runtime().bays, pr.id) ?? enteringDerived.find((member) => member.id === pr.id)
@@ -2812,7 +2812,7 @@ function createQueue<Shape extends ChangeShape>(
             )
           }
           snapshot = runtime()
-          const settledDerived = materializedDerived(snapshot.bays)
+          const settledDerived = materializedDerived(snapshot)
           const currentChecked = checked.flatMap((pr) => {
             const current = resolveChange(snapshot.bays, pr.id) ?? settledDerived.find((member) => member.id === pr.id)
             return current === undefined ? [] : [current]
@@ -4696,6 +4696,57 @@ function terminalAuthorityMatches(
   return true
 }
 
+/** The merge proof a terminal fact names, in the two shapes the emitters use:
+ * `pr/integrated` carries the merge commit, `pr/already-landed` proves the base
+ * already contained the content and its own reducer records `baseSha` as both. */
+const RunIntegrationFactSchema = z.object({
+  run: RunIdSchema.optional(),
+  commit: GitShaSchema.optional(),
+  baseSha: GitShaSchema,
+  candidateSha: GitShaSchema.optional(),
+  candidateTreeSha: GitShaSchema.optional(),
+  baseTreeSha: GitShaSchema.optional(),
+})
+
+/**
+ * Copy the merge proof a terminal fact carries onto the run that produced it.
+ *
+ * The run's proof is otherwise readable only through the merge step's Job
+ * output, which Job retention prunes — the same hole `passedAt` was added to
+ * close, and the reason a run could keep "it passed" while losing WHAT it
+ * landed. It matters most for a DERIVED member: recordless by design, its
+ * `pr/integrated` is a store no-op (the S6 relaxation), so this record is the
+ * ONLY projected home its merged truth can have (see `derivedIntegration`).
+ *
+ * Deliberately sourced from the terminal fact rather than from a new field on
+ * `queue/run/settled`: the checkpoint identity hashes every registered event
+ * schema, so widening one costs a projection-version bump and a migration edge
+ * on every deployment. These facts already carry the proof and already reach
+ * this projector, so the durable answer is free.
+ *
+ * Write-once per run: the first terminal to name it wins, so the batch's later
+ * members cannot rewrite a proof, and replay is idempotent.
+ */
+function stampRunIntegration(queues: DeepReadonly<QueuesState>, data: unknown): QueuesState {
+  const parsed = RunIntegrationFactSchema.safeParse(data)
+  if (!parsed.success || parsed.data.run === undefined) return queues as QueuesState
+  const record = Queues.get(queues, parsed.data.run)
+  if (record === undefined || record.integration !== undefined) return queues as QueuesState
+  const { commit, baseSha, candidateSha, candidateTreeSha, baseTreeSha } = parsed.data
+  const alreadyLanded =
+    candidateSha !== undefined && candidateTreeSha !== undefined && baseTreeSha !== undefined
+      ? { candidateSha, candidateTreeSha, baseTreeSha }
+      : undefined
+  const integration: IntegrationProof = {
+    // `pr/already-landed` names no merge commit: the base tip IS the landing,
+    // exactly as the record-lane reducer records it.
+    commit: commit ?? baseSha,
+    baseSha,
+    ...(alreadyLanded === undefined ? {} : { alreadyLanded }),
+  }
+  return { ...queues, records: Queues.set(queues.records, { ...record, integration }) }
+}
+
 function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event): QueueState {
   const settled = SettledEventSchema.parse(applied.data)
   const record = Queues.get(state.queues, settled.run)
@@ -4929,26 +4980,28 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/integrated") {
     const integrated = QueueAuthorityTokenFactSchema.parse(applied.data)
+    const stamped = stampRunIntegration(state.queues, applied.data)
     // S6 relaxation: a DERIVED member's terminal names no current token — its
     // authority was the submit fact, never a token, so there is nothing to
     // invalidate and nothing to require. Tolerant (never the old throw); the
     // stale-terminal invariant still fires when a token EXISTS and disagrees.
-    if (!terminalAuthorityMatches(state.queues.authority, integrated, applied.name, false)) return state
+    if (!terminalAuthorityMatches(stamped.authority, integrated, applied.name, false)) return { queues: stamped }
     return {
       queues: {
-        ...state.queues,
-        authority: invalidateChangeAuthority(state.queues.authority, integrated.pr),
+        ...stamped,
+        authority: invalidateChangeAuthority(stamped.authority, integrated.pr),
       },
     }
   }
   if (applied.name === "pr/already-landed") {
     const alreadyMerged = ChangeAlreadyMergedSchema.parse(applied.data)
+    const stamped = stampRunIntegration(state.queues, applied.data)
     // S6 relaxation — same rule as pr/integrated above.
-    if (!terminalAuthorityMatches(state.queues.authority, alreadyMerged, applied.name, false)) return state
+    if (!terminalAuthorityMatches(stamped.authority, alreadyMerged, applied.name, false)) return { queues: stamped }
     return {
       queues: {
-        ...state.queues,
-        authority: invalidateChangeAuthority(state.queues.authority, alreadyMerged.pr),
+        ...stamped,
+        authority: invalidateChangeAuthority(stamped.authority, alreadyMerged.pr),
       },
     }
   }
@@ -7063,16 +7116,17 @@ function compareQueuePosition(left: QueuePosition, right: QueuePosition): number
 }
 
 function requestedPRs(
-  state: DeepReadonly<BaysState>,
+  runtime: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>,
   args: QueueRunArgs,
   excluded: ReadonlySet<string> = new Set(),
   implicitBefore?: QueuePosition,
 ): Change[] {
+  const state = runtime.bays
   const explicit = explicitPRs(state, args)
   // Derived members (S6): materialized beside the records and ranked by the
   // same submit clock. Explicit selections append them verbatim — the driver
   // only passes what it selected — while the implicit queue interleaves them.
-  const derived = materializeDerivedRunMembers(state, args.derived ?? [])
+  const derived = materializeDerivedRunMembers(state, runtime.queues, args.derived ?? [])
   const bySubmitClock = (left: Change, right: Change): number => {
     const leftSubmittedAt = currentChangeRev(left).submittedAt
     const rightSubmittedAt = currentChangeRev(right).submittedAt
@@ -7376,16 +7430,19 @@ function queueProgressTime(pr: DeepReadonly<Change>): string {
  * out of the next pass. A position is where you stand in the queue, not a claim
  * that the next pass will take you.
  */
-function admissionOrderChanges(bays: DeepReadonly<BaysState>): Change[] {
-  return requestedPRs(bays, {}).toSorted(
+function admissionOrderChanges(runtime: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>): Change[] {
+  return requestedPRs(runtime, {}).toSorted(
     (left, right) =>
       queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
   )
 }
 
 /** This PR's one-based place in the published queue order; absent when it holds none. */
-function admissionPosition(bays: DeepReadonly<BaysState>, pr: string): number | undefined {
-  const index = admissionOrderChanges(bays).findIndex((candidate) => candidate.id === pr)
+function admissionPosition(
+  runtime: DeepReadonly<Pick<RuntimeState, "bays" | "queues">>,
+  pr: string,
+): number | undefined {
+  const index = admissionOrderChanges(runtime).findIndex((candidate) => candidate.id === pr)
   return index < 0 ? undefined : index + 1
 }
 
@@ -7575,7 +7632,7 @@ function checkEligibility(
   // One derivation, shared with `admissionOrder()`. Ranking the admission queue
   // separately here is what let a single response report two positions for one
   // PR — the two lists neither hold the same members nor rank them the same way.
-  const position = admissionPosition(state.bays, pr.id)
+  const position = admissionPosition(state, pr.id)
   return { status: "queued", ...timing, ...(position === undefined ? {} : { position }) }
 }
 
@@ -7977,7 +8034,7 @@ function runnableChangeSelection(
   excluded: ReadonlySet<string> = new Set(),
   options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
 ): Readonly<{ prs: Change[]; decisions: RunnableChangeDecision[] }> {
-  const requested = requestedPRs(state.bays, args, excluded, options.implicitBefore)
+  const requested = requestedPRs(state, args, excluded, options.implicitBefore)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const ignoredClaims = new Set(
     options.explicitStepAuthority === true

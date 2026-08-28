@@ -639,6 +639,18 @@ export type QueueRecord = Readonly<{
   // the run settles. Projection-only; no started run carries it, so
   // QueueRecordSchema stays unchanged.
   passedAt?: string
+  // Record-level copy of the merge proof this run produced, for the same reason
+  // as `passedAt`: the proof is otherwise readable only through the merge step's
+  // Job output, so Job retention takes it and the run keeps `passedAt` while
+  // losing WHAT it landed. A DERIVED member has no store row to absorb its
+  // `pr/integrated`, so this record IS the only projected home its merged truth
+  // can have (see `derivedIntegration`). Stamped by `stampRunIntegration` from
+  // the `pr/integrated`/`pr/already-landed` fact that names the run — those
+  // already carry the proof, so no registered event schema widens and the
+  // checkpoint identity does not move. Projection-only; no started run carries
+  // it, so QueueRecordSchema stays unchanged. Distinct from
+  // `initialIntegration`, which is a proof the run was HANDED, not one it made.
+  integration?: IntegrationProof
 }>
 
 export type QueueStep = InstalledStep & Readonly<{ job?: Job }>

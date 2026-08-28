@@ -55,6 +55,7 @@ import {
   latestChangeSnapshot,
   Queues,
   type ChangeSnapshot,
+  type IntegrationProof,
   type QueueRecord,
   type QueuesState,
   type RunId,
@@ -110,6 +111,7 @@ export type DerivedRunMember = Readonly<z.infer<typeof DerivedRunMemberSchema>>
  */
 export function materializeDerivedRunMembers(
   bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
   derived: readonly DerivedRunMember[],
 ): Change[] {
   const seen = new Set<string>()
@@ -119,11 +121,55 @@ export function materializeDerivedRunMembers(
     }
     seen.add(member.id)
     seen.add(member.branch)
-    return materializeDerivedRunMember(bays, member)
+    return materializeDerivedRunMember(bays, queues, member)
   })
 }
 
-function materializeDerivedRunMember(bays: DeepReadonly<BaysState>, member: DerivedRunMember): Change {
+/**
+ * The merge proof a settled run holds for exactly this (branch, sha) — the
+ * projected home of a DERIVED member's merged truth.
+ *
+ * A derived member is recordless by design, so its `pr/integrated` is a store
+ * no-op (the S6 relaxation) and no `Change` row ever records that it landed.
+ * The run that merged it does: that same terminal fact stamps the proof onto
+ * the run record (`stampRunIntegration`), and the pair — settled `passed`, proof
+ * retained — IS the member's landing.
+ *
+ * Retention-bounded, deliberately: prune the merging run and the member reads
+ * un-merged again, exactly as pruning it already erases the run's own history.
+ * That is strictly better than the literal `merged: false` this replaced, which
+ * was wrong for a member's entire life rather than only after its run aged out.
+ *
+ * Answers `undefined` when nothing merged this sha — the honest "still open".
+ */
+function derivedIntegration(
+  queues: DeepReadonly<QueuesState>,
+  member: Readonly<{ branch: string; headSha: string }>,
+): Readonly<{ run: RunId; at: string; proof: IntegrationProof }> | undefined {
+  let landed: Readonly<{ run: RunId; at: string; proof: IntegrationProof }> | undefined
+  for (const record of Queues.values(queues as QueuesState) as readonly DeepReadonly<QueueRecord>[]) {
+    if (record.parent !== undefined) continue
+    if (record.passedAt === undefined || record.integration === undefined) continue
+    if (!record.steps.some((step) => step.kind === "merge")) continue
+    if (
+      !record.prs.some((pr) => pr.intent === undefined && pr.branch === member.branch && pr.headSha === member.headSha)
+    ) {
+      continue
+    }
+    // Latest run wins, matching `consumingRun`'s tie-break: a re-run over the
+    // same sha supersedes the proof an earlier one left.
+    if (landed === undefined || record.id.localeCompare(landed.run) > 0) {
+      landed = { run: record.id, at: record.passedAt, proof: record.integration as IntegrationProof }
+    }
+  }
+  return landed
+}
+
+function materializeDerivedRunMember(
+  bays: DeepReadonly<BaysState>,
+  queues: DeepReadonly<QueuesState>,
+  member: DerivedRunMember,
+): Change {
   const submit = bays.submits[member.branch]
   if (submit === undefined) {
     raiseFailure(
@@ -171,12 +217,31 @@ function materializeDerivedRunMember(bays: DeepReadonly<BaysState>, member: Deri
         `'${duplicate.id}' (${duplicate.branch}) — one payload under two identities needs a human`,
     )
   }
+  // `state` and `merged` are PROJECTED, never literal: a member whose merging
+  // run settled reads closed+merged, carrying the same proof shape the record
+  // lane's `pr/integrated`/`pr/already-landed` reducers write. Both fields are
+  // set from one source so they can never disagree — `integratedChangeShape`
+  // throws on a merged change with no proof, so a half-projection is a crash.
+  const landed = derivedIntegration(queues, member)
+  const alreadyLanded = landed?.proof.alreadyLanded
   return {
     id: member.id,
     branch: member.branch,
     base: submit.base,
-    state: "open",
-    merged: false,
+    state: landed === undefined ? "open" : "closed",
+    merged: landed !== undefined,
+    ...(landed === undefined
+      ? {}
+      : {
+          terminalRun: landed.run,
+          integration: { commit: landed.proof.commit, baseSha: landed.proof.baseSha },
+          ...(alreadyLanded === undefined
+            ? { integratedAt: landed.at }
+            : {
+                alreadyLandedAt: landed.at,
+                alreadyLanded: { baseSha: landed.proof.baseSha, ...alreadyLanded },
+              }),
+        }),
     ...(member.title === undefined ? {} : { title: member.title }),
     ...(member.issue === undefined ? {} : { issue: member.issue }),
     submittedAt: submit.at,
@@ -364,7 +429,6 @@ export function alreadyLandedSubmits(
     })
     .toSorted((left, right) => left.branch.localeCompare(right.branch))
 }
-
 
 /**
  * The door-side driver step, exported so tests (and, at the door, the compose)
