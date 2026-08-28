@@ -273,6 +273,36 @@ describe("classifyBayStatus", () => {
     })
   })
 
+  it("blocks removal while a derived-lane submission still references the Bay's branch with no Change record", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 1,
+      ownerAlive: false,
+      openChangeIds: [],
+      derivedLaneSubmitLive: true,
+    })
+    expect(report).toMatchObject({ exit: 1, safe: false })
+    expect(report.lines.find((line) => line.class === "pr")).toMatchObject({
+      verdict: "BLOCK",
+      evidence: expect.stringMatching(/derived-lane submission for task\/example is still live/u),
+    })
+  })
+
+  it("passes the pr class when neither a Change record nor a derived-lane submit references the branch", () => {
+    const report = classifyBayStatus({
+      ...base,
+      ownerPid: 1,
+      ownerAlive: false,
+      openChangeIds: [],
+      derivedLaneSubmitLive: false,
+    })
+    expect(report).toMatchObject({ exit: 0, safe: true })
+    expect(report.lines.find((line) => line.class === "pr")).toMatchObject({
+      verdict: "PASS",
+      evidence: "no live change references this Bay",
+    })
+  })
+
   it("human format names every class with evidence", () => {
     const text = formatBayStatusHuman(
       classifyBayStatus({

@@ -95,6 +95,12 @@ export type BayStatusFacts = Readonly<{
   stashUnknown?: boolean
   /** Live changes whose submit/repair path still consumes this Bay. */
   openChangeIds?: readonly string[]
+  /** `BaysState.submits[branch]` still holds a live, standing `refs/yrd/submit/<branch>`
+   * fact for this Bay's branch. The derived lane writes that ref directly and never
+   * mints a Change record for it (yrd-bay/src/model.ts `recordLaneOwnsBranch`), so a
+   * derived-lane submission is invisible to `openChangeIds` — closing this Bay would
+   * destroy the workspace a live submission still depends on. */
+  derivedLaneSubmitLive?: boolean
   /** Live queue SHA `pr create` will consume. */
   effectiveBase?: Readonly<{ base: string; baseSha?: string }>
 }>
@@ -223,15 +229,22 @@ function protectionProviderText(value: unknown, index: number, field: string): s
   return value
 }
 
-function livePRLine(prs: readonly string[]): BayStatusLine {
-  return {
-    class: "pr",
-    verdict: prs.length === 0 ? "PASS" : "BLOCK",
-    evidence:
-      prs.length === 0
-        ? "no live change references this Bay"
-        : `live change(s) ${prs.join(", ")} still references this Bay; submit/repair requires its workspace carrier`,
+function livePRLine(prs: readonly string[], branch: string, derivedLaneSubmitLive: boolean): BayStatusLine {
+  if (prs.length > 0) {
+    return {
+      class: "pr",
+      verdict: "BLOCK",
+      evidence: `live change(s) ${prs.join(", ")} still references this Bay; submit/repair requires its workspace carrier`,
+    }
   }
+  if (derivedLaneSubmitLive) {
+    return {
+      class: "pr",
+      verdict: "BLOCK",
+      evidence: `derived-lane submission for ${branch} is still live (refs/yrd/submit) with no Change record; workspace still required`,
+    }
+  }
+  return { class: "pr", verdict: "PASS", evidence: "no live change references this Bay" }
 }
 
 function classifyClosedDegenerateBay(facts: BayStatusFacts): BayStatusReport {
@@ -255,7 +268,7 @@ function classifyClosedDegenerateBay(facts: BayStatusFacts): BayStatusReport {
     { class: "worktree", verdict: "PASS", evidence: "closed-degenerate: no worktree path was ever recorded" },
     { class: "commits", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace tip to preserve" },
     { class: "stash", verdict: "PASS", evidence: "closed-degenerate Bay has no workspace stash" },
-    livePRLine(facts.openChangeIds ?? []),
+    livePRLine(facts.openChangeIds ?? [], facts.branch, facts.derivedLaneSubmitLive === true),
   ]
   const blocked = lines.some((line) => line.verdict === "BLOCK")
   const unknown = lines.some((line) => line.verdict === "UNKNOWN")
@@ -461,7 +474,7 @@ export function classifyBayStatus(facts: BayStatusFacts): BayStatusReport {
 
   // pr — submit and repair still consume the Bay until an immutable carrier
   // replaces that dependency, so a live change is a hard inbound reference.
-  lines.push(livePRLine(facts.openChangeIds ?? []))
+  lines.push(livePRLine(facts.openChangeIds ?? [], facts.branch, facts.derivedLaneSubmitLive === true))
 
   const materialBlock = lines.some((line) => line.verdict === "BLOCK")
   const materialUnknown = lines.some((line) => line.verdict === "UNKNOWN")
