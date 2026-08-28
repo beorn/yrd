@@ -23,6 +23,7 @@ import {
   changeSourceReadyAt,
   resolveBase,
   changeNotFoundMessage,
+  parseChangeSelector,
   reviewState,
   type ChangeProps,
   type BaysState,
@@ -2406,15 +2407,7 @@ function createQueue<Shape extends ChangeShape>(
     async pause(args) {
       const snapshot = runtime()
       const base = queueBase(snapshot, args.base)
-      // S7: a pause allow-list member is named by its retained run snapshot —
-      // the same seam `pauseMemberStatus` reads it back through.
-      const allowedPRs = args.allowedPRs.map((selector) => {
-        const member = resolveMemberById(snapshot.queues, selector)
-        if (member === undefined) {
-          raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
-        }
-        return member.id
-      })
+      const allowedPRs = args.allowedPRs.map((selector) => pauseAllowanceId(snapshot, derivedMint, selector))
       await actions.pause({ ...args, base, allowedPRs })
       const pause = state().pauses[base]
       if (pause === undefined) throw new Error(`yrd: queue '${base}' did not retain its pause`)
@@ -2497,7 +2490,6 @@ function createQueue<Shape extends ChangeShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
-          const selection = args.prs !== undefined && args.prs.length > 0 ? "explicit" : undefined
           const explicitStepAuthority = args.steps !== undefined
           // A selectorless compose is a multi-candidate drain (the long-lived
           // habitant's default path, and any bare `queue run`): one candidate lost
@@ -2505,7 +2497,19 @@ function createQueue<Shape extends ChangeShape>(
           // habitant. Skip it LOUD and continue. A targeted one-shot run has no
           // other candidate to fall through to, so it stays fail-loud, and a
           // non-refusal (a real bug) always propagates.
-          const selectorless = args.prs === undefined || args.prs.length === 0
+          //
+          // ONE reading of the caller's shape for the whole compose, because
+          // `selection` and this were exact complements computed apart and S7
+          // moved the shape under both. `prs: []` beside a non-empty `derived`
+          // is a NAMED batch — the S7 spelling of what `prs: [<ids>]` used to
+          // say, and what `explicitPRs` already reads it as — while a bare
+          // empty or absent `prs` stays the implicit queue. Read the old way,
+          // every named batch became a drain: its refusals were swallowed
+          // (a paused queue answered `[]` instead of saying it was paused) and
+          // the targeted early-outs below stopped firing for the exact callers
+          // they were written for.
+          const selectorless = args.prs === undefined || (args.prs.length === 0 && (args.derived?.length ?? 0) === 0)
+          const selection = selectorless ? undefined : ("explicit" as const)
           const settleCandidate = async (candidateId: RunId): Promise<void> => {
             try {
               await settle(candidateId, runOptions)
@@ -2572,10 +2576,24 @@ function createQueue<Shape extends ChangeShape>(
           // selector against the two identity homes a compose leaves behind —
           // a retained snapshot, a refusal-ledger row — and derives only what
           // the selection can keep.
-          const selfDerived = await deriveRefOnlyMembers(
-            new Set((args.derived ?? []).map((member) => member.branch)),
-            selectorless ? undefined : args.prs,
-          )
+          //
+          // A caller that already handed us a batch is the one case that
+          // derives NOTHING extra. `prs: []` beside a non-empty `derived`
+          // names exactly those members (`explicitPRs`' reading of the shape),
+          // so widening it runs work nobody asked for: measured on a 21-member
+          // batch, the compose derived the two branches its caller had
+          // filtered OUT, minted PR24/PR25 for them, and merged them — the
+          // caller's exclusion silently undone, and the per-branch-per-run
+          // mint burn above paid in full. The reason every OTHER compose still
+          // derives is untouched: those callers pass no batch, so refusing to
+          // derive would leave them nothing to select from.
+          const namedDerivedBatch = !selectorless && args.prs?.length === 0
+          const selfDerived = namedDerivedBatch
+            ? []
+            : await deriveRefOnlyMembers(
+                new Set((args.derived ?? []).map((member) => member.branch)),
+                selectorless ? undefined : args.prs,
+              )
           // Admit only the entries whose live submit fact still stands as
           // derived (caller-passed entries first, this compose's own
           // derivations after). The loud-edge policy: a typed refusal
@@ -2810,7 +2828,27 @@ function createQueue<Shape extends ChangeShape>(
             const current = settledDerived.find((member) => member.id === pr.id)
             return current === undefined ? [] : [current]
           })
-          const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
+          // A member whose checks the freeze never let START is NOT this tick's
+          // admission work, and counting it as such is what made a paused queue
+          // answer silently: `dispatchAdmissions` skips every blocked member
+          // without admitting it, so its checks stay queued for exactly as long
+          // as the freeze does — yet `pendingIds` below then held it out of
+          // merge selection, the one place that would have said "paused" out
+          // loud. Excluding a member because the admission phase owns it is
+          // right; excluding one because the queue refused to touch it hides
+          // the refusal.
+          //
+          // The freeze explains a QUEUED check and nothing else — the same
+          // boundary `ChangeEligibility` draws when it lets the pause outrank
+          // `checks-pending` alone. A check admitted before the pause landed
+          // settles under it (that is the contract this compose keeps), and its
+          // running or failed state is real admission work whose outcome the
+          // targeted early-out below still owes its caller.
+          const unsettled = currentChecked.filter((pr) => {
+            const status = checkEligibility(snapshot, pr, steps).status
+            if (status === "passed") return false
+            return status !== "queued" || blockingQueuePause(snapshot, pr) === undefined
+          })
           const pending = unsettled.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")
           const pendingIds = new Set(pending.map((pr) => pr.id))
           if (unsettled.length > 0) {
@@ -2839,6 +2877,7 @@ function createQueue<Shape extends ChangeShape>(
           cycleArgs = cycleDerived.length === 0 ? { ...args, derived: undefined } : { ...args, derived: cycleDerived }
           const runnable = runnableChangeSelection(snapshot, cycleArgs, steps, needsPersonOwner, unavailable, {
             explicitStepAuthority,
+            implicitQueue: selectorless,
             ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
           })
           const prs = runnable.prs.filter((pr) => !activeBases.has(baseIdentity(pr.base)))
@@ -2849,6 +2888,7 @@ function createQueue<Shape extends ChangeShape>(
             // it broadens evidence only, never what may run.
             const diagnostic = runnableChangeSelection(snapshot, cycleArgs, steps, needsPersonOwner, consumed, {
               explicitStepAuthority,
+              implicitQueue: selectorless,
               ...(intentCutoff === undefined ? {} : { implicitBefore: intentCutoff }),
             })
             const rejected = diagnostic.decisions.filter(({ eligibility }) => !eligibility.runnable)
@@ -7415,6 +7455,75 @@ function blockingQueuePause(
   return pause === undefined || pause.allowedPRs.includes(pr.id) ? undefined : pause
 }
 
+/** The one sentence a blocking pause says about one member, shared by both
+ * verdict sites so the freeze reads identically wherever it is reported. */
+function queuePausedReason(
+  pause: DeepReadonly<QueuePause>,
+  pr: DeepReadonly<Change>,
+): NonNullable<ChangeEligibility["reason"]> {
+  return {
+    code: "queue-paused",
+    message: `queue '${baseIdentity(pr.base)}' is paused: ${pause.reason}; change '${pr.id}' is not in the allowed set`,
+  }
+}
+
+/**
+ * The id one `queue pause --allow` selector names, resolved against the DERIVED
+ * LANE — the population every compose selects from — rather than against
+ * retained run snapshots.
+ *
+ * Snapshot keying inverted the capability the allow-list exists for. Under
+ * branch-is-change a member exists from its standing submit fact and is
+ * NUMBERED at its first compose, so keying the allow-list on a retained run
+ * snapshot let an operator allow only what had already run — while in a freeze
+ * the members worth allowing are precisely the ones that have not. A live
+ * submitted branch answered `pr-not-found`: the same lie-shape as the retired
+ * `admit` verb, blaming the change for a limit that belongs to the resolver.
+ *
+ * Two namespaces, folded the way {@link explicitPRs} folds them (the @chief
+ * ruling): ours and git's.
+ *
+ * - A change id is OUR namespace. It resolves through the two durable identity
+ *   homes {@link anchoredDerivedId} reads — a retained run snapshot, a
+ *   refusal-ledger row — and is otherwise taken as given, because a member no
+ *   compose has served yet HAS no durable home ({@link unservedMemberIdentity}:
+ *   a never-composed branch holds no number at all). The mint that issues every
+ *   number is the one thing that can still falsify it, and it must be asked:
+ *   an id above the high-water was issued to nobody, so an allow-list carrying
+ *   it can never match a member and would sit there as a silent no-op.
+ * - A branch is GIT's namespace and matches exactly. It resolves through the
+ *   same anchored pair, so an allow-list entry and the number the next compose
+ *   derives cannot disagree. A submitted branch nothing has numbered yet has no
+ *   id to store, and refuses saying that rather than reporting it missing.
+ */
+function pauseAllowanceId(state: DeepReadonly<RuntimeState>, mint: PrNumberMint | undefined, selector: string): string {
+  const id = parseChangeSelector(selector)?.pr
+  if (id !== undefined && PRIdSchema.safeParse(id).success) {
+    const resolved = resolveMemberById(state.queues, id)
+    if (resolved !== undefined) return resolved.id
+    if (state.queues.admissionRefusals[id] !== undefined) return id
+    const highWater = mint?.highWater()
+    if (highWater === undefined || Number(id.slice(2)) <= highWater) return id
+    raiseFailure(
+      "refusal",
+      "pr-not-found",
+      `yrd: no change '${selector}' — the change-number mint has issued up to 'PR${String(highWater)}', so no ` +
+        `member can ever run under that id`,
+    )
+  }
+  if (state.bays.submits[selector] !== undefined) {
+    const anchored = anchoredDerivedId(state.queues, selector)
+    if (anchored !== undefined) return anchored
+    raiseFailure(
+      "refusal",
+      "pr-not-found",
+      `yrd: branch '${selector}' is submitted but no compose has numbered it yet, and a pause allow-list holds ` +
+        `change ids — allow it by the id its first compose mints, which the compose reports as it derives it`,
+    )
+  }
+  raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, selector))
+}
+
 function hasFreshRevisionCheckAuthority(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<Change>,
@@ -7844,10 +7953,29 @@ function runnableChangeSelection(
   steps: readonly RuntimeStep[],
   needsPersonOwner: string,
   excluded: ReadonlySet<string> = new Set(),
-  options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition }> = {},
+  options: Readonly<{ explicitStepAuthority?: boolean; implicitBefore?: QueuePosition; implicitQueue?: boolean }> = {},
 ): Readonly<{ prs: Change[]; decisions: RunnableChangeDecision[] }> {
   const requested = requestedPRs(state.bays, args, excluded, options.implicitBefore)
-  const implicitQueue = args.prs === undefined || args.prs.length === 0
+  // Whether a refusal ESCAPES: a named selection owes its caller the reason, an
+  // implicit drain must skip and keep draining.
+  //
+  // The fallback is exactly {@link explicitPRs}'s reading of the same shape,
+  // and it has to stay exactly that: `prs: []` beside a non-empty `derived` is
+  // an EXPLICIT selection of those members, a bare empty/absent `prs` is the
+  // implicit queue. S7 moved every batch spelling from `prs: [<ids>]` to
+  // `prs: [], derived: [<members>]` and left this predicate reading the old
+  // one, so a NAMED batch read as implicit and swallowed the refusals this
+  // raise exists to deliver — the shape a paused queue answered `[]` through
+  // instead of saying it was paused.
+  //
+  // A caller holding the pristine arguments passes the answer instead, and the
+  // compose MUST: it replaces `args.derived` with the batch it derived for the
+  // cycle before calling here, so by this point a bare `yrd queue run` carries
+  // the same shape a named batch does. Reading it here made every drain raise
+  // its first ineligible member — the habitant's whole job is to skip that one
+  // and keep going.
+  const implicitQueue =
+    options.implicitQueue ?? (args.prs === undefined || (args.prs.length === 0 && (args.derived?.length ?? 0) === 0))
   const ignoredClaims = new Set(
     options.explicitStepAuthority === true
       ? activeQueueRuns(state.queues, state.jobs)
@@ -8544,6 +8672,15 @@ function ChangeEligibility(
       })
     }
     if (options.ignoreChecks !== true && checks.status === "queued") {
+      // The freeze OUTRANKS the wait it causes. A paused queue never dispatches
+      // the admission that would start these checks, so "queued at position N"
+      // describes a wait with no end and hides the only fact that explains it.
+      // The settled verdicts BELOW still outrank the pause — a failed check and
+      // a rejected review are true whether or not the queue is frozen, and they
+      // are what the author acts on — so this asks only where the alternative
+      // answer would have been the freeze's own consequence.
+      const frozen = blockingQueuePause(state, pr)
+      if (frozen !== undefined) return verdict(queuePausedReason(frozen, pr))
       const position = checks.position === undefined ? "" : ` at position ${checks.position}`
       return verdict({ code: "checks-pending", message: `change '${pr.id}' checks are queued${position}` })
     }
@@ -8577,14 +8714,8 @@ function ChangeEligibility(
       })
     }
   }
-  const base = baseIdentity(pr.base)
   const pause = blockingQueuePause(state, pr)
-  if (pause !== undefined) {
-    return verdict({
-      code: "queue-paused",
-      message: `queue '${base}' is paused: ${pause.reason}; change '${pr.id}' is not in the allowed set`,
-    })
-  }
+  if (pause !== undefined) return verdict(queuePausedReason(pause, pr))
   const claimed = activeQueueRuns(state.queues, state.jobs).find(
     (run) =>
       !Queues.terminal(run) &&

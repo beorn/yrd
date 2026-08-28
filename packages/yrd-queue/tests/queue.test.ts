@@ -1709,9 +1709,7 @@ describe("Queue", () => {
 
     await expect(
       app.queue.run({ prs: [habitantSecond.id], derived: [habitantSecond] }, runtime),
-    ).resolves.toMatchObject([
-      { id: "R2", status: "completed", conclusion: "success" },
-    ])
+    ).resolves.toMatchObject([{ id: "R2", status: "completed", conclusion: "success" }])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
   })
 
@@ -2808,9 +2806,7 @@ describe("Queue", () => {
     const mismatched = memberOf(replayed, "issue/mismatched-resume")
     await expect(
       replayed.queue.run({ prs: [mismatched.id], derived: [mismatched], steps: ["merge"] }, runtime),
-    ).rejects.toThrow(
-      "change 'PR1' is already in active queue run 'R1'",
-    )
+    ).rejects.toThrow("change 'PR1' is already in active queue run 'R1'")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
@@ -4334,6 +4330,15 @@ describe("Queue", () => {
    * the derived batch `admissionQueue` needs. Restoring this coverage needs an
    * admission-only surface, or a compose-level rewrite that asserts the
    * admission Jobs without asserting the absence of a Run.
+   *
+   * IT FAILS EARLIER THAN THAT, on a SECOND real gap of the same shape:
+   * `queue.eligibility(pr.id)` resolves through `resolveMemberById`, so it
+   * answers `pr-not-found` for a live submitted branch no compose has served —
+   * the defect `pauseAllowanceId` fixed for the pause verb, still standing at
+   * this verb. It is NOT fixed here because it cannot be: eligibility must
+   * return a materialized member, and a never-composed branch has no identity
+   * home to materialize one from (`unservedMemberIdentity`). Naming it needs
+   * the number a compose mints, which is the same design question.
    */
   it("lets an admitted check settle but suppresses every retry once the queue is paused", async () => {
     const journal = createMemoryJournal()
@@ -5555,58 +5560,42 @@ describe("Queue", () => {
   })
 
   /**
-   * QUEUE PAUSE — DELIBERATE REDS (S7). Two independent src changes, both
-   * observed, neither a fixture problem:
+   * QUEUE PAUSE — the two S7 defects these fixtures caught, and where each was
+   * fixed. Kept as the map: every one of them was a src change, none a fixture
+   * problem, and each has a live guard here.
    *
-   * 1. A pause allow-list can only name a member that has ALREADY run.
-   *    `queue.pause` resolves each `allowedPRs` selector through
-   *    `resolveMemberById(snapshot.queues, ...)`, which reads RETAINED RUN
-   *    SNAPSHOTS ("a pause allow-list member is named by its retained run
-   *    snapshot"). A branch that has never been composed resolves to nothing,
-   *    so `pause({ allowedPRs: [branch] })` refuses `pr-not-found` — and
-   *    pausing BEFORE anything has run is exactly when an operator freezes a
-   *    queue. Same seam as the known `pauseMemberStatus` defect.
+   * 1. A pause allow-list could only name a member that had ALREADY run —
+   *    `queue.pause` resolved each selector through `resolveMemberById`, which
+   *    reads retained run snapshots, while post-S7 every member starts
+   *    never-run. Fixed by `pauseAllowanceId`, which resolves against the
+   *    DERIVED LANE.
    *
-   * 2. A paused queue no longer REFUSES; it returns no runs. The pause is now
-   *    an eligibility verdict (`code: "queue-paused"`, message
-   *    "...; change 'PRn' is not in the allowed set") rather than a thrown
-   *    refusal, so `queue.run` resolves `[]` where these tests expect a
-   *    rejection. Checked that this is not the selectorless refusal-swallow:
-   *    naming the member explicitly (`prs: [id]` beside its `derived` entry,
-   *    the mode whose refusals DO propagate) still returns `[]`.
-   *
-   * Whether (2) is an intended contract change or a lost fail-loud guarantee
-   * needs a src owner's ruling — the operator-facing effect is that
-   * `yrd queue run` on a paused queue returns nothing instead of saying
-   * "paused", with the reason surviving only in the `no-runnable-prs` warn.
+   * 2. A paused queue stopped REFUSING and returned no runs, the reason
+   *    surviving only in the `no-runnable-prs` warn. Three src changes, all
+   *    the same S7 seam:
+   *      - `ChangeEligibility` answered `checks-pending` for a member the
+   *        freeze itself had kept queued, so the `queue-paused` verdict below
+   *        it was unreachable;
+   *      - the compose counted that member as this tick's admission work, and
+   *        `pendingIds` then held it out of the selection that would have said
+   *        "paused" out loud;
+   *      - `selectorless`/`implicitQueue` still read the pre-S7 batch spelling,
+   *        so `prs: [], derived: [...]` — a NAMED batch — read as a drain and
+   *        swallowed the refusal. Reading that shape is only safe on the
+   *        caller's PRISTINE args: the compose swaps in its own cycle batch,
+   *        after which a bare `yrd queue run` is shape-identical to a named
+   *        one, so the compose hands `runnableChangeSelection` the answer.
+   *    That third one is why naming the member explicitly looked like it did
+   *    not help either: `prs: [id]` beside its derived entry hit the second
+   *    defect's early-out instead.
    */
   /**
-   * RED, and it names a real operator-facing gap rather than stale idiom.
-   *
-   * SITE: `pause` maps its allow-list through `resolveMemberById`
-   * (queue.ts, `const allowedPRs = args.allowedPRs.map(...)`; the resolver is
-   * model.ts:945), which walks queue RUN records ONLY. A submitted member that
-   * has never run has no snapshot, so it cannot be named — and post-S7 EVERY
-   * member starts never-run.
-   *
-   * REACHABLE FROM THE CLI: `yrd queue pause --allow <id>` passes raw operator
-   * selectors straight through (run.ts:6513-6516, `allowedPRs: csv(options.allow)`),
-   * so freezing a queue and allowing one freshly-submitted branch answers
-   * `pr-not-found` for a live branch. That is the same lie-shape as the retired
-   * `admit` verb: it blames the change for a limit that belongs to the resolver.
-   * In a freeze, the members an operator most wants to allow are precisely the
-   * ones that have NOT run yet.
-   *
-   * WEIGH THIS BEFORE FIXING: the snapshot keying is deliberate and documented
-   * in place — "a pause allow-list member is named by its retained run snapshot
-   * — the same seam `pauseMemberStatus` reads it back through." So the read-back
-   * seam has to move with the write side.
-   *
-   * CORRECT: resolve the allow-list against the derived lane (the population
-   * `materializedDerived` / `admissionQueue` already use) and keep
-   * `pauseMemberStatus` reading through the same seam; or keep snapshot keying
-   * and make the refusal SAY the member must have run, instead of reporting it
-   * missing.
+   * Guards the allow-list half of the pause contract: an operator freezes a
+   * queue and lets ONE live, never-composed branch through. `pauseAllowanceId`
+   * resolves the selector against the derived lane; `pauseMemberStatus` still
+   * reads its own resolution through `resolveMemberById`, which is honest —
+   * the write side no longer REQUIRES a snapshot, and an id with no durable
+   * home reads back `unknown` rather than a guess.
    */
   it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
     const journal = createMemoryJournal()
@@ -5875,32 +5864,12 @@ describe("Queue", () => {
   })
 
   /**
-   * RED, and it names a real operator-facing gap rather than stale idiom.
-   *
-   * SITE: `pause` maps its allow-list through `resolveMemberById`
-   * (queue.ts, `const allowedPRs = args.allowedPRs.map(...)`; the resolver is
-   * model.ts:945), which walks queue RUN records ONLY. A submitted member that
-   * has never run has no snapshot, so it cannot be named — and post-S7 EVERY
-   * member starts never-run.
-   *
-   * REACHABLE FROM THE CLI: `yrd queue pause --allow <id>` passes raw operator
-   * selectors straight through (run.ts:6513-6516, `allowedPRs: csv(options.allow)`),
-   * so freezing a queue and allowing one freshly-submitted branch answers
-   * `pr-not-found` for a live branch. That is the same lie-shape as the retired
-   * `admit` verb: it blames the change for a limit that belongs to the resolver.
-   * In a freeze, the members an operator most wants to allow are precisely the
-   * ones that have NOT run yet.
-   *
-   * WEIGH THIS BEFORE FIXING: the snapshot keying is deliberate and documented
-   * in place — "a pause allow-list member is named by its retained run snapshot
-   * — the same seam `pauseMemberStatus` reads it back through." So the read-back
-   * seam has to move with the write side.
-   *
-   * CORRECT: resolve the allow-list against the derived lane (the population
-   * `materializedDerived` / `admissionQueue` already use) and keep
-   * `pauseMemberStatus` reading through the same seam; or keep snapshot keying
-   * and make the refusal SAY the member must have run, instead of reporting it
-   * missing.
+   * Guards the allow-list half of the pause contract: an operator freezes a
+   * queue and lets ONE live, never-composed branch through. `pauseAllowanceId`
+   * resolves the selector against the derived lane; `pauseMemberStatus` still
+   * reads its own resolution through `resolveMemberById`, which is honest —
+   * the write side no longer REQUIRES a snapshot, and an id with no durable
+   * home reads back `unknown` rather than a guess.
    */
   it("selects the first queue-ordered eligible submitted PR under a pause", async () => {
     let tick = 0
