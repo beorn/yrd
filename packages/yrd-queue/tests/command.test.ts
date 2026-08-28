@@ -7591,6 +7591,90 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
   }, 30_000)
 
+  // 2026-08-28: the run that pushed the root and then failed submodule
+  // promotion returned `submoduleMainFailureResult` and produced no
+  // IntegrationProof, so the queue durably FORGOT a merge it had performed. Its
+  // own retry could not tell itself apart from a candidate that had never
+  // merged, and three downstream tautologies — `is-ancestor X X`,
+  // `candidateSha === baseSha`, `tree(X) === tree(X)` — grew up to answer the
+  // question the lost fact should have answered.
+  it("keeps the root-merge fact when promotion fails, and a later run can read it", async () => {
+    const fixture = await submoduleMainMergeRepository()
+    await using process = createProcess()
+    let failedPromotion = false
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          !failedPromotion &&
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.submoduleRemote)
+        ) {
+          failedPromotion = true
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "transient submodule push failure",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    // The run FAILED, and that stays true — this change does not touch what a
+    // promotion failure means for the run's own outcome.
+    expect(failedPromotion).toBe(true)
+    expect(first).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "component-main-promotion-failed" },
+    })
+    // The merge nonetheless happened: the root is on the remote.
+    expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+
+    // ...and unlike before, it is on the record. A failed run that merged the
+    // root now says so.
+    const afterFirst = await git(fixture.repo, [
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      "refs/yrd/root-merged/",
+    ])
+    expect(afterFirst, "a merge that happened must leave a record").not.toBe("")
+    const firstRows = afterFirst.split("\n")
+    expect(firstRows).toHaveLength(1)
+
+    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
+
+    // The point of keying by CHANGE and not by run: the second run reads the
+    // first run's fact under the same prefix. `mergeAttemptRefs` is keyed by
+    // `input.run`, which is exactly why a retry could see nothing its
+    // predecessor wrote.
+    const afterRetry = await git(fixture.repo, [
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      "refs/yrd/root-merged/",
+    ])
+    const retryRows = afterRetry.split("\n")
+    expect(retryRows.length, "both runs are legible under one change prefix").toBeGreaterThanOrEqual(1)
+    expect(afterRetry).toContain(firstRows[0]?.split(" ")[1] ?? " ")
+    // One prefix, so a later run looks the change up without knowing which run
+    // merged it.
+    const prefixes = new Set(retryRows.map((row) => row.split(" ")[1]?.split("/").slice(0, 4).join("/")))
+    expect(prefixes.size).toBe(1)
+  }, 30_000)
+
   it("keeps earlier submodule fast-forwards and converges the remaining origins on retry", async () => {
     const fixture = await multiSubmoduleMainMergeRepository()
     const [firstSubmodule, secondSubmodule] = fixture.submodules
