@@ -504,7 +504,11 @@ describe("queue timeline chrome 21106", () => {
       const errorX = failedLine.indexOf("fail")
 
       expect(app.cell(borderX, titleY).fg, "stalled RUNNER border uses error fg").toEqual(app.cell(errorX, failedY).fg)
-      expect(titleLine).toContain("uptime 1:00:00 · no merge for 1:05:00")
+      // S7: the merge clock reads journal terminal facts only — the record
+      // store's copy of the merge history is retired. With no retained
+      // integrated fact the timer is uptime-bounded, exactly like a fresh
+      // runner that has never merged.
+      expect(titleLine).toContain("uptime 1:00:00 · no merge for 1:00:00")
       expect(app.text).toContain("NO PROGRESS")
       expect(app.text).toContain("BLOCKED PR1 · Prepare release notes")
       expect(app.text).toContain("position 1 · recut-gitlink-conflict")

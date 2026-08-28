@@ -1324,9 +1324,13 @@ describe("runYrd", () => {
         finished: readonly unknown[]
       }>[]
     }
-    // Nothing composed yet: no record row, no run — and the submitted branch
-    // stays loudly visible as the queue's own pending unrecorded-submit row.
-    expect(queuePayload.projection.rows).toEqual([])
+    // Nothing composed yet: no record row, no run — the submitted branch
+    // renders as the derived lane's own PENDING row (S7: the fact IS the
+    // submission; a submitted branch must be visible before compose picks it
+    // up, not only inside the audit).
+    expect(queuePayload.projection.rows).toMatchObject([
+      { pr: "topic/direct", revision: 0, status: "ready", factOnly: true, headSha: HEAD_SHA },
+    ])
     expect(
       queuePayload.results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished]),
     ).toEqual([])

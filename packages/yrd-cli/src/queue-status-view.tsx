@@ -26,7 +26,7 @@ import {
 } from "@yrd/bay"
 import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import { isDerivedMemberId } from "@yrd/queue"
+import { derivedLaneBranches } from "@yrd/queue"
 import type {
   Candidate,
   InstalledStep,
@@ -421,6 +421,14 @@ export type QueueTimelineProjectedRow = Readonly<{
    * (@i/10-merge-queue/22924-pr-prefix-on-non-pr). `undefined` means neither
    * schema claimed it — a renderer must not then assume `pr`. */
   kind?: QueueMemberKind
+  /** A live submit-fact row (derived lane, pre-admission): the branch has been
+   * submitted in git but no retained run has admitted this exact sha, so there
+   * is NO minted change identity yet — `pr` holds the BRANCH and `revision`
+   * holds the impossible value 0. Renderers must branch on this flag instead
+   * of formatting `pr`/`revision` as a change id; the deliberately-invalid 0
+   * makes any renderer that forgets show a visibly wrong `.0`, never a
+   * plausible one (NO SILENT ERRORS). */
+  factOnly?: true
   revision: number
   headSha: string
   branch: string
@@ -1345,17 +1353,17 @@ function timelineRunMemberRows(
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
   const stepNames = stepNamesOfRun(run)
   const mergeVerdict = running ? ("running" as const) : mergeVerdictOfOutcome(status)
-  const recordIds = new Set(result.prs.map((candidate) => candidate.id))
   return run.prs.map((member, index) => {
+    // S7 invariant: EVERY member renders its full row from its own snapshot —
+    // identity (id, branch, revision, headSha), subject (`name`), and issue all
+    // live on the `ChangeSnapshot` the run journals. The record join below is
+    // the LEGACY enrichment arm only (revision-lineage history, the causal
+    // admission clock, submitter identity — facts only the record store ever
+    // held); a recordless member is the NORMAL derived-lane shape, never
+    // corruption, so the old "no retained change" throw is deliberately gone.
+    // The loud edge moved to parse time: a snapshot missing an identity field
+    // cannot pass ChangeSnapshotSchema, so no silent-blank row can exist here.
     const current = result.prs.find((candidate) => candidate.id === member.id)
-    // An intent member's snapshot is its complete record: render from it and
-    // skip the change-only enrichments (lineage history, admission clock,
-    // submitter). A derived member (S6: minted above the frozen store's
-    // frontier) renders the same way — recordless BY DESIGN. A recordless
-    // member at or below the frontier is journal corruption and stays loud.
-    if (current === undefined && member.intent === undefined && !isDerivedMemberId(member.id, recordIds)) {
-      throw new Error(`yrd: run '${run.id}' has no retained change '${member.id}'`)
-    }
     const lineage =
       current === undefined
         ? { pr: member.id, revisions: [member.revision] }
@@ -1375,7 +1383,10 @@ function timelineRunMemberRows(
           ? (lineage.sourceReadyAt ?? admission.submittedAt)
           : (admission.checkRequestedAt ?? admission.pushedAt)
     const submitter = current === undefined ? undefined : revisionSubmitter(current, member.revision, member.headSha)
-    const issue = presentFact(current?.issue ?? member.issue)
+    // Derived world first: the snapshot's own issue is the journaled truth for
+    // THIS revision; the record's is the legacy arm (it can only be newer by a
+    // post-hoc `pr edit`, a verb that retires with the store).
+    const issue = presentFact(member.issue ?? current?.issue)
     return {
       id: `${run.base}:run:${run.id}:${member.id}:${member.revision}`,
       base: run.base,
@@ -1422,6 +1433,69 @@ function revisionDetail(pr: Change, runs: readonly Run[]): string {
 }
 
 /**
+ * One PENDING row per live submit fact the DERIVED lane owns that no retained
+ * run has admitted at its exact sha — the fact lane's pre-run band. The
+ * branch/submitted fact IS the submission on the derived lane, so a standing
+ * fact with no run member must surface here or a submitted branch stays
+ * INVISIBLE until compose picks it up (the s5-silent-rows class, one band
+ * earlier). The population rule is core's, reused rather than re-derived:
+ * `derivedLaneBranches` (live fact, no live record, arbitration says derived,
+ * the PR2139 already-landed cell excluded) minus branches a retained run
+ * member already carries at the fact's exact sha — "a branch the derived lane
+ * has ADMITTED at exactly this sha is a MEMBER; its truth lives in run/status
+ * rows" (the `unrecordedSubmits` rule, projected over this result's runs).
+ *
+ * Nothing is minted before admission, so the row makes NO change-id claim:
+ * `factOnly` marks it, `pr` carries the branch, `revision` the impossible 0.
+ * Identity is the fact itself (branch, sha, base, at as the clock); the
+ * subject and issue join through the owning BAY when one tracks the branch —
+ * bays and composed runs are the only issue sources the derived world has.
+ */
+function timelineSubmitFactRows(
+  result: QueueStatusResult,
+  nowIso: string,
+  state: BaysState | undefined,
+): QueueTimelineProjectedRow[] {
+  if (state === undefined) return []
+  const members = [...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs)
+  return derivedLaneBranches(state).flatMap((branch): QueueTimelineProjectedRow[] => {
+    const fact = state.submits[branch]
+    if (fact === undefined) return []
+    if (baseIdentity(fact.base) !== baseIdentity(result.base)) return []
+    if (members.some((member) => member.branch === branch && member.headSha === fact.sha)) return []
+    const bay = Object.values(state.byId).find((candidate) => candidate.branch === branch)
+    const issue = presentFact(bay?.issue)
+    const queueWaitMs = timelineAge(fact.at, nowIso, `branch '${branch}' queue wait`)
+    return [
+      {
+        id: `${result.base}:submit:${branch}:${fact.sha}`,
+        base: result.base,
+        group: "pending" as const,
+        status: "ready" as const,
+        glyph: statusGlyph("ready"),
+        timestamp: fact.at,
+        timestampMs: parsedTimelineTimestamp(fact.at, `branch '${branch}' submit fact`),
+        pr: branch,
+        factOnly: true as const,
+        revision: 0,
+        headSha: fact.sha,
+        branch,
+        ...(issue === undefined ? {} : { issue }),
+        subject: boundedQueue(bay?.path ?? bay?.name ?? `${fact.sha.slice(0, 12)} base ${fact.base}`, 80),
+        detail: "submitted — awaiting compose",
+        sourceReadyAt: fact.at,
+        revisionLineage: [],
+        ageMs: timelineAge(fact.at, nowIso, `branch '${branch}' source-ready age`),
+        totalMs: null,
+        activeMs: null,
+        waitMs: queueWaitMs,
+        queueWaitMs,
+      },
+    ]
+  })
+}
+
+/**
  * One row per non-integrated change that is not currently a run member, each carrying
  * a derived, display-only status (`queueDisplayState().preRun`): `draft`/`rev` for
  * a registered-but-unsubmitted PR (bay status `pushed`) and `ready` for one
@@ -1431,6 +1505,11 @@ function revisionDetail(pr: Change, runs: readonly Run[]): string {
  * queue-wait accounting it always had. `draft`/`rev` anchor AGE and the TIME
  * cell on the current revision's registration (`pushedAt`); `ready` keeps its
  * submission clock. BY is the current revision's author throughout.
+ *
+ * S7: these are the RECORD lane's pre-run rows — the legacy arm while the
+ * store still holds live records. The derived lane's pre-run band is
+ * {@link timelineSubmitFactRows}, prepended here so both lanes share one
+ * entry point and the pending group.
  */
 function timelineNonIntegratedRows(
   result: QueueStatusResult,
@@ -1443,7 +1522,8 @@ function timelineNonIntegratedRows(
   )
   const positions = queueAdmissionPositions(result.admissionOrder)
   const runs = [...result.running, ...result.waiting, ...result.finished]
-  return result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
+  const factRows = timelineSubmitFactRows(result, nowIso, state)
+  const recordRows = result.prs.flatMap((pr): QueueTimelineProjectedRow[] => {
     const revision = currentChangeRev(pr)
     const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
     const eligibility = eligibilityForCurrentRevision(result, pr)
@@ -1536,6 +1616,7 @@ function timelineNonIntegratedRows(
       },
     ]
   })
+  return [...factRows, ...recordRows]
 }
 
 type QueueTimelineSortableRow = Readonly<{
@@ -2078,6 +2159,67 @@ function projectPR(
   }
 }
 
+/**
+ * A HumanChangeProjection for a RECORDLESS run member (derived/intent): the
+ * snapshot carries identity and subject, the run carries the terminal truth.
+ * Facts only the record store held — the source-ready/admission clock,
+ * pre-run candidate joins, bay paths — render the explicit "-" marker, never
+ * a fabricated value and never a silent blank (the same absence contract as
+ * the derived log rows' age "-").
+ */
+function projectFinishedRunMember(member: Run["prs"][number], run: Run, now: number): HumanChangeProjection {
+  const step = relevantStep(run)
+  const job = step?.job
+  const outcome = run.status === "completed" ? terminalProjection(run) : null
+  const nativeStatus: ChangeDeliveryState =
+    outcome === null
+      ? "submitted"
+      : outcome.outcome === "integrated" || outcome.outcome === "already-landed" || outcome.outcome === "canceled"
+        ? outcome.outcome
+        : outcome.outcome === "passed"
+          ? // A non-landing pass closes nothing delivery-wise: the submit fact
+            // stands and the branch re-queues on content change.
+            "submitted"
+          : "rejected"
+  const touchedAt = latest(run.startedAt, run.finishedAt)
+  const runDurationMs = elapsedMs(
+    run.startedAt,
+    run.finishedAt ?? new Date(now).toISOString(),
+    `run '${run.id}' duration`,
+  )
+  const fact = failureFact(run, step)
+  const failure = fact === undefined ? undefined : projectFailure(fact, failureEvidence(step))
+  const artifacts = stepArtifacts(step)
+  const artifact = artifactHref(artifacts[0])
+  return {
+    pr: member.id,
+    revision: member.revision,
+    branch: member.branch,
+    subject: boundedQueue(member.name ?? member.branch, 80),
+    nativeStatus,
+    state: queueOutcome(run),
+    ...taskStatusFields(runTaskStatusOf(run)),
+    ...(run.candidateId === undefined ? {} : { candidateId: run.candidateId }),
+    runId: run.id,
+    revisionLineage: [member.revision],
+    target: member.base,
+    age: "-",
+    touched: age(touchedAt, now, `change '${member.id}' touched age`),
+    ...(touchedAt === undefined ? {} : { touchedAt }),
+    run: runDurationMs === undefined ? "-" : formatDuration(runDurationMs),
+    step: step?.name ?? "-",
+    result: failure?.summary ?? (step === undefined ? "-" : jobStatus(step)),
+    ...(job !== undefined && "url" in job && job.url !== undefined ? { log: job.url } : {}),
+    artifactCount: artifacts.length,
+    ...(artifact === undefined ? {} : { artifact }),
+    ...(failure === undefined ? {} : { failure }),
+  }
+}
+
+/** S7: `result.prs` is the record store's LEGACY projection arm — it drains
+ * to empty as the store purges. Recordless members join the human projection
+ * through {@link projectFinishedRunMember}; pre-run submit facts surface on
+ * the timeline via `timelineSubmitFactRows`. */
 function projectedChangeRows(
   state: BaysState | undefined,
   result: QueueStatusResult,
@@ -2118,9 +2260,15 @@ export function humanQueueProjection(
     .toSorted((left, right) => left.position - right.position)
   const historical = result.finished.flatMap((run) =>
     run.prs.flatMap((member) => {
-      const pr = result.prs.find((candidate) => candidate.id === member.id)
-      if (pr === undefined) return []
       if (selected.size === 0 && (run.status !== "completed" || run.conclusion !== "failure")) return []
+      const pr = result.prs.find((candidate) => candidate.id === member.id)
+      if (pr === undefined) {
+        // Recordless (derived/intent) member: the snapshot + run terminal are
+        // the whole truth. Dropping the row here silently erased every derived
+        // member from RECENT (the s5-silent-rows class).
+        if (selected.size > 0 && !selected.has(member.id)) return []
+        return [projectFinishedRunMember(member, run, now)]
+      }
       const delivery = changeDeliveryState(pr)
       if (selected.size > 0 && (!selected.has(pr.id) || delivery === "submitted" || delivery === "ready")) {
         return []
@@ -2955,7 +3103,10 @@ export function activeWatchRow(
     run: run.id,
     pr: member.id,
     revision: member.revision,
-    subject: boundedQueue(pr?.title ?? pr?.name ?? member.id, 80),
+    // Record enrichment first, then the member snapshot's own name/branch — a
+    // recordless (derived) member must fall back to snapshot identity, never
+    // silently to a bare id (NSE-2).
+    subject: boundedQueue(pr?.title ?? pr?.name ?? member.name ?? member.branch, 80),
     step: step?.name ?? "-",
     steps: queueRunSteps(run),
     status: run.status,
@@ -2982,7 +3133,6 @@ export function QueueWatchView({
         })),
       )
       .find(({ pr: candidate }) => candidate.id === pr)
-    if (selected === undefined) return <Text color="$fg-muted">No change '{pr}' recorded.</Text>
     const runs = [
       ...new Map(
         results
@@ -2990,6 +3140,31 @@ export function QueueWatchView({
           .map((run) => [run.id, run] as const),
       ).values(),
     ]
+    if (selected === undefined) {
+      // The record store is only ONE of the two populations a selector can
+      // live in — a derived member exists solely as a retained run snapshot,
+      // and a miss that says "no change" about one trains the reader to
+      // distrust the surface (NSE-3). Name what was searched, always.
+      const memberRun = runs.find((run) =>
+        run.prs.some((member) => member.id === pr || member.branch === pr),
+      )
+      if (memberRun !== undefined) {
+        return (
+          <Text color="$fg-muted">
+            Change '{pr}' has no retained record — it rides run {memberRun.id} as a derived member. Its truth lives
+            in the run rows: yrd queue show {memberRun.id}.
+          </Text>
+        )
+      }
+      const recordCount = results.reduce((count, result) => count + result.prs.length, 0)
+      const memberCount = runs.reduce((count, run) => count + run.prs.length, 0)
+      return (
+        <Text color="$fg-muted">
+          No change '{pr}' — searched {recordCount} retained records and {memberCount} retained run members (live
+          facts surface as run members once composed).
+        </Text>
+      )
+    }
     return <ChangeDetailView pr={selected.pr} eligibility={selected.eligibility} runs={runs} now={now} />
   }
 
@@ -3872,8 +4047,17 @@ function TimelineProjectedRow({
         // the branch name, which lives only in the detail pane's per-change
         // box header (`pr#id.rev ⎇ branch`). The live step / terminal failure
         // code keeps its parenthesized colorized suffix (status, not identity).
+        // A `factOnly` row (pre-admission submit fact) has NO minted id — the
+        // branch IS its identity, so it renders `⎇ branch` here instead of a
+        // fabricated change id.
         <>
-          <QueueChangeId pr={row.pr} revision={row.revision} color={forcedFg} flexShrink={0} />
+          {row.factOnly === true ? (
+            <Text color={forcedFg} flexShrink={0}>
+              <Text color={forcedFg ?? BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {row.branch}
+            </Text>
+          ) : (
+            <QueueChangeId pr={row.pr} revision={row.revision} color={forcedFg} flexShrink={0} />
+          )}
           {row.repeat?.collapsed === true ? (
             <Text color={forcedFg ?? "$fg-warning"} flexShrink={0}>
               {` ${timelineRepeatLabel(row.repeat)}`}
@@ -4015,20 +4199,13 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
-/** Newest proven merge from authoritative Bays state, falling back to the
- * retained fact horizon when state is unavailable. Unlike the last-drained
- * clock, this ignores refusals/rejections and display filters. */
-function timelineLastMergeMs(projection: QueueTimelineProjection, state: BaysState | undefined): number | null {
-  if (state !== undefined) {
-    return Object.values(state.prs).reduce<number | null>((latest, pr) => {
-      if (baseIdentity(pr.base) !== baseIdentity(projection.base)) return latest
-      const terminal = currentChangeRev(pr).terminal
-      if (terminal?.kind !== "integrated") return latest
-      const at = Date.parse(terminal.at)
-      if (!Number.isFinite(at)) return latest
-      return latest === null ? at : Math.max(latest, at)
-    }, null)
-  }
+/** Newest proven merge over the retained journal-terminal horizon
+ * (`timeStatsFacts` folds every retained row before any display window or
+ * status filter binds). S7: the record-store arm is gone — journal terminals
+ * ARE the merge history; the store's copy was a second derivation of the same
+ * fact. Unlike the last-drained clock, this ignores refusals/rejections and
+ * display filters. */
+function timelineLastMergeMs(projection: QueueTimelineProjection): number | null {
   return projection.timeStatsFacts.reduce<number | null>(
     (latest, fact) =>
       fact.outcome !== "integrated"
@@ -4049,10 +4226,28 @@ function queueHeadBlockDetails(
   const runner = projection.runner
   if (runner?.queueProgress?.state !== "stalled") return undefined
   const result = results?.find((candidate) => baseIdentity(candidate.base) === baseIdentity(projection.base))
-  const resultPrs = result === undefined ? undefined : new Set(result.prs.map((pr) => pr.id))
+  // The identities THIS base knows, across both lanes: retained records
+  // (legacy arm), run-member snapshots (id AND branch — derived refusals key
+  // on either), and live submit-fact branches. Scoping on record ids alone
+  // silently dropped every derived member's admission-refusal-loop finding
+  // the moment results were present.
+  const resultIds =
+    result === undefined
+      ? undefined
+      : new Set([
+          ...result.prs.map((pr) => pr.id),
+          ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
+            run.prs.flatMap((member) => [member.id, member.branch]),
+          ),
+          ...(state === undefined
+            ? []
+            : Object.entries(state.submits)
+                .filter(([, fact]) => baseIdentity(fact.base) === baseIdentity(result.base))
+                .map(([branch]) => branch)),
+        ])
   const finding = runner.queueProgress.findings.find((candidate) => {
     if (candidate.code !== "admission-refusal-loop" || candidate.pr === undefined) return false
-    if (resultPrs !== undefined) return resultPrs.has(candidate.pr)
+    if (resultIds !== undefined) return resultIds.has(candidate.pr)
     const blocked = state === undefined ? undefined : resolveChange(state, candidate.pr)
     if (blocked !== undefined) return baseIdentity(blocked.base) === baseIdentity(projection.base)
     return projection.rows.some(
@@ -4076,9 +4271,16 @@ function queueHeadBlockDetails(
   const blockedMs =
     Number.isFinite(since) && Number.isFinite(nowMs) ? Math.max(0, nowMs - since) : (finding.blockedMs ?? 0)
   const row = projection.rows.find((candidate) => candidate.pr === finding.pr)
+  // Recordless (derived) finding: the member snapshot is the identity source.
+  const member =
+    result === undefined
+      ? undefined
+      : [...result.running, ...result.waiting, ...result.finished]
+          .flatMap((run) => run.prs)
+          .find((candidate) => candidate.id === finding.pr || candidate.branch === finding.pr)
   return {
     pr: finding.pr,
-    subject: blocked?.title ?? blocked?.name ?? blocked?.branch ?? row?.subject ?? finding.pr,
+    subject: blocked?.title ?? blocked?.name ?? blocked?.branch ?? member?.name ?? member?.branch ?? row?.subject ?? finding.pr,
     ...(position === undefined ? {} : { position }),
     ...(queuedBehind === undefined ? {} : { queuedBehind }),
     blockedMs,
@@ -4327,7 +4529,7 @@ function TimelineRunnerBox({
   const pauseHealth = pause === undefined || state === undefined ? undefined : queuePauseHealth(state, pause)
   const pauseAllowed = pause === undefined ? "none" : queuePauseAllowedText(pause, pauseHealth)
   const drained = timelineLastDrainedMs(projection)
-  const lastMerge = timelineLastMergeMs(projection, state)
+  const lastMerge = timelineLastMergeMs(projection)
   const downMs =
     runner === null
       ? drained === null
@@ -5088,6 +5290,12 @@ export function queueLogRows(
   const finished = results.flatMap((result) => result.finished)
   // Record membership decides derived-member clock tolerance in
   // queueLogSubmissionTime — the set-membership rule, never a number frontier.
+  // S7 makes the tolerance direction explicit: `results[].prs` is the LEGACY
+  // history arm; as the store drains this set shrinks toward empty, at which
+  // point every member is derived and the tolerance is unconditional BY THE
+  // SAME RULE (an empty set has no members), not by accident. What must stay
+  // loud is the other direction: a member that IS in this set and still has
+  // no clock throws inside queueLogSubmissionTime.
   const recordIds = new Set(results.flatMap((result) => result.prs ?? []).map((record) => record.id))
 
   for (const result of results) {
@@ -5198,13 +5406,15 @@ export function queueLogRows(
     const status = runPrs?.get(changeFilter)
     const matching = rows.filter((row) => row.pr === changeFilter)
     if (status === "withdrawn" && matching.length === 0) {
-      const currentPr = results.flatMap((result) => result.prs ?? []).find((pr) => pr.id === changeFilter)
+      // Derived world first: the retained run-member snapshot is the journaled
+      // identity; the record (when the store still holds one) is the legacy
+      // enrichment arm.
+      const memberMatch = Array.from(results)
+        .flatMap((result) => result.finished)
+        .flatMap((run) => run.prs)
+        .find((candidate) => candidate.id === changeFilter)
       const exampleResult =
-        currentPr ??
-        Array.from(results)
-          .flatMap((result) => result.finished)
-          .flatMap((run) => run.prs)
-          .find((candidate) => candidate.id === changeFilter)
+        memberMatch ?? results.flatMap((result) => result.prs ?? []).find((pr) => pr.id === changeFilter)
       const exampleRevision =
         exampleResult === undefined
           ? undefined
@@ -5249,6 +5459,58 @@ export function queueLogRows(
         result: "-",
         error: "-",
         ...propsField(exampleResult),
+        locations: [],
+      })
+    } else if (
+      matching.length === 0 &&
+      // A change riding a live (running/waiting) run is not unretained — the
+      // log simply has no FINISHED run for it yet; that state stays rowless.
+      !results.some((result) =>
+        [...result.running, ...result.waiting].some((run) =>
+          run.prs.some((member) => member.id === changeFilter || member.branch === changeFilter),
+        ),
+      ) &&
+      // A LIVE record with no terminal rows is a normal pre-run state (a
+      // pushed draft, a pending submit) — the view's plain empty message is
+      // the right answer and the timeline carries the live row. The loud
+      // absence row is for a change the snapshot does not know AT ALL, which
+      // post-purge (empty `prs`) is every unretained selector.
+      !results.some((result) => (result.prs ?? []).some((record) => record.id === changeFilter))
+    ) {
+      // NSE-4: a filtered change with no retained run must say so and name
+      // what was searched — zero rows reads as "the log is empty", which is a
+      // different fact. Post-purge the withdrawn arm above cannot fire (its
+      // status map is record-derived), so this is the loud floor for EVERY
+      // filtered miss.
+      const memberCount = finished.reduce((count, run) => count + run.prs.length, 0)
+      const taskStatus = runTaskStatusOf({ status: "retired" })
+      rows.push({
+        run: "-",
+        base: results[0]?.base ?? "-",
+        pr: changeFilter,
+        branch: "-",
+        subject: changeFilter,
+        ...taskStatusFields(taskStatus),
+        revision: "0",
+        headSha: "-",
+        baseSha: "-",
+        outcome: "unretained",
+        startedAt: "-",
+        started: "-",
+        finished: "-",
+        age: "-",
+        duration: "-",
+        totalDuration: "-",
+        activeDuration: "-",
+        waitDuration: "-",
+        attempts: [],
+        activeSteps: [],
+        retries: "0",
+        merge: "-",
+        parent: "-",
+        isolationPart: "-",
+        result: `no retained runs for '${changeFilter}' — searched ${finished.length} retained runs (${memberCount} members)`,
+        error: "-",
         locations: [],
       })
     }
@@ -5912,16 +6174,22 @@ function changeMetadataGroups(
       ? []
       : [{ key: "composition", value: boundedQueue(safeText(retained.composition), 160) }]),
   ]
+  // Revision 0 is the unminted submit-fact contract: the branch is submitted
+  // but no revision exists until admission mints one, so the revision count
+  // and the `(rN)` head suffix would both be fabrications here.
+  const unminted = member.revision === 0
   const revisionCount = pr?.revs.filter((candidate) => candidate.n <= member.revision).length ?? 1
-  const dates: ChangeMetadataFact[] = [
-    // CREATED and UPDATED join this group when the pr-dates retrofit merges
-    // them on the record; fabricating them from other clocks would be the
-    // silent-fallback bug this file bans.
-    { key: "commits", value: `${revisionCount} ${revisionCount === 1 ? "revision" : "revisions"}` },
-  ]
+  const dates: ChangeMetadataFact[] = unminted
+    ? []
+    : [
+        // CREATED and UPDATED join this group when the pr-dates retrofit merges
+        // them on the record; fabricating them from other clocks would be the
+        // silent-fallback bug this file bans.
+        { key: "commits", value: `${revisionCount} ${revisionCount === 1 ? "revision" : "revisions"}` },
+      ]
   const headSha = retained?.head ?? (pr === undefined ? member.headSha : changeHead(pr))
   const code: ChangeMetadataFact[] = [
-    { key: "head", value: `${headSha.slice(0, 8)} (r${member.revision})` },
+    { key: "head", value: unminted ? headSha.slice(0, 8) : `${headSha.slice(0, 8)} (r${member.revision})` },
     { key: "base", value: retained?.base ?? pr?.base ?? member.base ?? "-" },
   ]
   return [identity, dates, code].filter((group) => group.length > 0)
@@ -6032,7 +6300,11 @@ export function QueueDetailRunChangeBlocks({
         )
         const pr = prs.find((candidate) => candidate.id === member.id)
         const subject = memberSubject(member, pr, memberRow)
-        const issue = presentFact(pr?.issue)
+        // Derived world first: the run-journaled snapshot's issue is this
+        // revision's truth; the record's is the legacy enrichment arm. A
+        // recordless member with a snapshot issue used to render this cell
+        // blank.
+        const issue = presentFact(("issue" in member ? member.issue : undefined) ?? pr?.issue)
         const description = descriptionWithoutDuplicatedIssue(presentFact(pr?.description), issue)
         // Newest first (operator spec item 4: "reverse-chronological
         // history") — both prTerminalLineageEntries and prActivityEntries
@@ -6046,7 +6318,12 @@ export function QueueDetailRunChangeBlocks({
                   {
                     at: memberRow.timestamp,
                     rank: 20,
-                    text: `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
+                    // Revision 0 = unminted submit fact: the submission exists,
+                    // a revision does not (it mints at admission).
+                    text:
+                      member.revision === 0
+                        ? "submitted — awaiting compose"
+                        : `r${member.revision} submitted by ${memberRow.submitter ?? "-"}`,
                   },
                 ]
             : data?.status === "completed" && member.revision === changeRevisionNumber(pr)
@@ -6059,16 +6336,23 @@ export function QueueDetailRunChangeBlocks({
           <TitledBox key={`${member.id}:${member.revision}:${member.headSha}`} title="" marginTop={index === 0 ? 0 : 1}>
             {/* Header line (items 4.a + 25): `pr#id.rev ⎇ branch` on EVERY
                 member's box, the cursor member included — the pane title no
-                longer carries any identity, so no member may skip its own. */}
+                longer carries any identity, so no member may skip its own.
+                Revision 0 is the unminted submit-fact contract (a `factOnly`
+                timeline row): no change id exists yet, so the header is the
+                `⎇ branch` identity alone. */}
             <Box flexDirection="row" minWidth={0}>
-              <QueueChangeId
-                pr={member.id}
-                revision={member.revision}
-                color="$fg-warning"
-                wrap="truncate"
-                flexShrink={0}
-              />
-              <Text flexShrink={0}> </Text>
+              {member.revision === 0 ? null : (
+                <>
+                  <QueueChangeId
+                    pr={member.id}
+                    revision={member.revision}
+                    color="$fg-warning"
+                    wrap="truncate"
+                    flexShrink={0}
+                  />
+                  <Text flexShrink={0}> </Text>
+                </>
+              )}
               {/* The ⎇ branch idiom (items 4/32d) — the same glyph the queue
                   pills spell, so the two surfaces share one convention. */}
               <Text internal_dim flexShrink={0}>
