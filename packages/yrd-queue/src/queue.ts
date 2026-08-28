@@ -6539,8 +6539,15 @@ function requiredCheckQueueHead(
 
 /** The refusal-ledger row a branch currently carries, if any. Keyed by branch
  * rather than by id because a refused derived member's id is minted by the very
- * compose being refused — the row is what makes the id stable across cycles. */
-function branchAdmissionRefusal(
+ * compose being refused — the row is what makes the id stable across cycles.
+ *
+ * The READ side (@yrd/cli `derivedDeliveryStatus`) had the same problem and
+ * solved it the wrong way: it looked the ledger up as
+ * `admissionRefusals[member.id]`, gating the one lookup that can report a
+ * failure on the member that the failure prevented — so every operator surface
+ * read a refused branch as "pending". It calls this instead; do not grow a
+ * second copy, which is how the next cutover leaves one of them behind. */
+export function branchAdmissionRefusal(
   queues: DeepReadonly<QueuesState>,
   branch: string,
 ): DeepReadonly<QueueAdmissionRefusal> | undefined {

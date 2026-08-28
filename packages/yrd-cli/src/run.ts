@@ -77,6 +77,7 @@ import {
   applyHostFindingFilter,
   parseSubmoduleModelChangeAuthorizationValue,
   sweepUncarriedRefs,
+  branchAdmissionRefusal,
   type CandidateRefSweepResult,
   type ChangeSnapshot,
   type QueueRecord,
@@ -5919,7 +5920,16 @@ function derivedDeliveryStatus(
   const member = delivery.member
   const runs = member === undefined ? [] : allQueueRuns(app).filter((run) => run.prs.some(({ id }) => id === member.id))
   if (delivery.submit === undefined) return { state: "history", runs }
-  const refusal = member === undefined ? undefined : stateOf(app).queues.admissionRefusals[member.id]
+  // Member-keyed FIRST, then branch-keyed — and the fallback is the whole
+  // point. A branch refused at admission never gets a retained run member, so
+  // the member-keyed lookup alone is `undefined` for exactly the deliveries
+  // that carry a refusal, and every surface built on this projection reported
+  // them as `pending`: `pr merge` told the author to wait for a pass that
+  // could not come. The ledger row carries `branch`, so it resolves with no
+  // member at all.
+  const refusal =
+    (member === undefined ? undefined : stateOf(app).queues.admissionRefusals[member.id]) ??
+    branchAdmissionRefusal(stateOf(app).queues, delivery.branch)
   const active = runs.findLast((run) => !Queues.terminal(run))
   if (active !== undefined) {
     return { state: active.status === "in_progress" ? "running" : "queued", runs }
@@ -5991,11 +6001,15 @@ async function viewDerivedDelivery(
         lane: "derived",
         branch: delivery.branch,
         state: status.state,
+        // Beside the state it explains, not beside the command. A reader who
+        // finds `state: "refused"` looks for the reason in the same object;
+        // hoisting it a level up meant `pr list` and `pr view` disagreed about
+        // where a refusal lives, for one delivery, in one process.
+        ...(status.refusal === undefined ? {} : { refusal: status.refusal }),
         ...(submit === undefined ? {} : { sha: submit.sha, base: submit.base, at: submit.at }),
       },
       ...(member === undefined ? {} : { member }),
       runs: status.runs.map(projectQueueRunTaskStatus),
-      ...(status.refusal === undefined ? {} : { refusal: status.refusal }),
     },
     lines.join("\n"),
   )
@@ -6191,12 +6205,29 @@ function derivedCheckRecords(
   app: YrdCliApp,
   delivery: Extract<ResolvedDelivery, { lane: "derived" }>,
 ): ChangeCheckViewRecord[] {
+  const state = stateOf(app)
   const member = delivery.member
-  if (member === undefined) {
+  // A REFUSED branch has no retained member and its checks really did run, so
+  // the member-only read reported `not-requested` for a check that exited
+  // non-zero — the one row here that was affirmatively WRONG rather than
+  // merely absent. The ledger row carries the minted `pr` and `revision`,
+  // which is exactly the identity the admission Jobs are keyed by, so the
+  // scan below works unchanged from either source.
+  const refusal = member === undefined ? branchAdmissionRefusal(state.queues, delivery.branch) : undefined
+  const identity =
+    member !== undefined
+      ? { id: member.id, revision: member.revision }
+      : refusal === undefined
+        ? undefined
+        : // A ledger row predating the revision field still names a real
+          // refusal; 0 matches the revision this function already reported for
+          // a member-less delivery, so the column stays truthful rather than
+          // the row vanishing over a missing legacy field.
+          { id: refusal.pr, revision: refusal.revision ?? 0 }
+  if (identity === undefined) {
     return [{ pr: delivery.branch, revision: 0, status: "not-requested" }]
   }
-  const state = stateOf(app)
-  const prefix = `admission:${member.id}:${String(member.revision)}:`
+  const prefix = `admission:${identity.id}:${String(identity.revision)}:`
   const rows = Object.entries(state.jobs.byKey)
     .filter(([key]) => key.startsWith(prefix))
     .flatMap(([key, id]) => {
@@ -6216,17 +6247,37 @@ function derivedCheckRecords(
             : "queued"
       return [
         {
-          pr: member.id,
-          revision: member.revision,
+          pr: identity.id,
+          revision: identity.revision,
           status,
           job: job.id,
           ...(step === undefined ? {} : { step }),
+          // The ledger's own code and reason, so the row says WHY rather than
+          // only that something failed. Without it `pr checks` reported a
+          // failed row with an empty diagnostic column and the operator had to
+          // go looking for a code that was already recorded.
+          ...(refusal === undefined || status !== "failed"
+            ? {}
+            : { error: { code: refusal.code, message: refusal.reason } }),
           position: Number(index),
         } satisfies ChangeCheckViewRecord,
       ]
     })
     .toSorted((left, right) => (left.position ?? 0) - (right.position ?? 0))
-  return rows.length === 0 ? [{ pr: member.id, revision: member.revision, status: "not-requested" }] : rows
+  // A refusal with no admission Job left is still not `not-requested`: the
+  // ledger row is proof a verdict existed. Report the failure it recorded.
+  if (rows.length > 0) return rows
+  if (refusal !== undefined) {
+    return [
+      {
+        pr: identity.id,
+        revision: identity.revision,
+        status: "failed",
+        error: { code: refusal.code, message: refusal.reason },
+      },
+    ]
+  }
+  return [{ pr: identity.id, revision: identity.revision, status: "not-requested" }]
 }
 
 function changeCheckRecords(app: YrdCliApp, selectors: readonly string[]): ChangeCheckViewRecord[] {
