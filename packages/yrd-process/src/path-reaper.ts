@@ -8,7 +8,7 @@
  * process in the Bay lifecycle even after reparenting.
  */
 
-import { readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
+import { lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises"
 import { resolve, sep } from "node:path"
 
 export type PathHolder = Readonly<{
@@ -22,7 +22,15 @@ export type PathHolderUnavailableCoverage = Readonly<{
   exited: number
   /** EACCES/EPERM: the entry remained but the caller was not allowed to inspect it. */
   denied: number
+  /** EACCES/EPERM from a process the kernel marks non-dumpable. Counted apart
+   * from {@link denied} because it is PERMANENT: the same retry, a longer wait
+   * and a later run all reproduce it exactly. */
+  uninspectable: number
 }>
+
+/** A same-UID process whose proc entries cannot be read on any attempt, named
+ * so a refusal can identify it and an operator can accept exactly it. */
+export type UninspectableProcess = Readonly<{ pid: number; comm: string }>
 
 export type PathHolderSourceCoverage = Readonly<{
   readable: number
@@ -36,6 +44,10 @@ export type LinuxPathHolderCoverage = Readonly<{
   procRoot: string
   /** False only when permission denial may have hidden a same-UID holder. Exited entries are not gaps. */
   complete: boolean
+  /** The non-dumpable processes behind any `uninspectable` count. Empty is the
+   * normal case; a populated list is the only gap an operator can clear, and
+   * only by accepting those pids explicitly. */
+  uninspectable: readonly UninspectableProcess[]
   processes: Readonly<{
     enumerated: number
     sameUid: number
@@ -130,17 +142,58 @@ export function pathReapFailure(result: PathReapResult): string | undefined {
  * Settlement failure plus the stronger coverage proof required before deleting
  * an owned path. Blindness is a deletion refusal, not a generic process-run failure.
  */
-export function pathReapDeletionFailure(result: PathReapResult): string | undefined {
+export function pathReapDeletionFailure(
+  result: PathReapResult,
+  options: Readonly<{
+    /** Non-dumpable pids an operator has inspected by other means and accepted.
+     * Never implicit: a pid not named here still refuses. */
+    acceptUninspectablePids?: readonly number[]
+  }> = {},
+): string | undefined {
   const parts = [pathReapFailure(result)]
   if (result.survivorCoverage === undefined) {
     parts.push("path-holder census coverage missing; deletion cannot be certified")
-  } else if (!result.survivorCoverage.complete) {
-    parts.push(
-      `path-holder census incomplete; deletion cannot be certified: ${JSON.stringify(result.survivorCoverage)}`,
-    )
+  } else {
+    parts.push(censusCoverageRefusal(result.survivorCoverage, options.acceptUninspectablePids ?? []))
   }
   const failures = parts.filter((part): part is string => part !== undefined)
   return failures.length === 0 ? undefined : failures.join("; ")
+}
+
+/**
+ * Why an incomplete census refuses, in terms an operator can act on.
+ *
+ * A DENIAL may clear — the process exits, the race closes — so it stays a plain
+ * incompleteness refusal that a retry can satisfy. A NON-DUMPABLE process never
+ * clears on any machine, so refusing on it forever is not a safety property; it
+ * is an outage wearing one. Those are named by pid and comm and can be accepted
+ * individually, which keeps the caution (nothing is waved through silently)
+ * while giving the refusal an exit that exists.
+ */
+function censusCoverageRefusal(coverage: PathHolderCoverage, acceptedPids: readonly number[]): string | undefined {
+  if (coverage.complete) return undefined
+  if (coverage.platform !== "linux") {
+    return `path-holder census incomplete; deletion cannot be certified: ${JSON.stringify(coverage)}`
+  }
+  const accepted = new Set(acceptedPids)
+  const unaccepted = coverage.uninspectable.filter(({ pid }) => !accepted.has(pid))
+  const denied =
+    coverage.processes.unavailable.denied > 0 ||
+    Object.values(coverage.sources).some((source) => source.unavailable.denied > 0)
+  const parts: string[] = []
+  if (denied) {
+    parts.push(`path-holder census incomplete; deletion cannot be certified: ${JSON.stringify(coverage)}`)
+  }
+  if (unaccepted.length > 0) {
+    const one = unaccepted.length === 1
+    parts.push(
+      `path-holder census cannot inspect ${unaccepted.map(({ pid, comm }) => `pid ${pid} (${comm})`).join(", ")}: ` +
+        `the kernel marks ${one ? "it" : "them"} non-dumpable, so no retry will ever read ` +
+        `${one ? "its" : "their"} open files. Confirm ${one ? "it holds" : "they hold"} nothing under the path, ` +
+        `then accept ${one ? "that pid" : "those pids"} explicitly`,
+    )
+  }
+  return parts.length === 0 ? undefined : parts.join("; ")
 }
 
 /** Render read-only holder evidence into an actionable destructive-operation refusal. */
@@ -251,7 +304,7 @@ async function darwinPathProcessHolderCensus(root: string): Promise<PathHolderCe
   }
 }
 
-type SourceAvailability = "readable" | "exited" | "denied"
+type SourceAvailability = "readable" | "exited" | "denied" | "uninspectable"
 type SourceObservation<T> = Readonly<{ availability: SourceAvailability; value: T }>
 
 async function linuxPathProcessHolderCensus(root: string, procRoot: string): Promise<PathHolderCensus> {
@@ -267,8 +320,9 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
     enumerated: numericEntries.length,
     sameUid: 0,
     otherUid: 0,
-    unavailable: { exited: 0, denied: 0 },
+    unavailable: { exited: 0, denied: 0, uninspectable: 0 },
   }
+  const uninspectable: UninspectableProcess[] = []
   const sourceCoverage: Record<"cwd" | "exe" | "root" | "maps" | "fd", MutableSourceCoverage> = {
     cwd: emptySourceCoverage(),
     exe: emptySourceCoverage(),
@@ -290,13 +344,32 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
         return []
       }
       processCoverage.sameUid += 1
+      // One status read per same-UID process. It is what lets the census tell
+      // a CONTRADICTION from a gap: a zombie denies `fd` while provably
+      // holding nothing, and a non-dumpable process denies everything forever.
+      const status = await readProcessStatus(proc)
+      const factsFor = (relative: string) => async (): Promise<ProcessEntryFacts> => ({
+        ...status,
+        processUid: uid,
+        entryUid: await lstat(`${proc}/${relative}`).then(
+          (stats) => stats.uid,
+          () => undefined,
+        ),
+      })
       const [cwd, executable, processRoot, mappedFiles, descriptors] = await Promise.all([
-        observeProcessLink(`${proc}/cwd`),
-        observeProcessLink(`${proc}/exe`),
-        observeProcessLink(`${proc}/root`),
-        observeProcessMaps(`${proc}/maps`),
-        observeProcessDescriptors(`${proc}/fd`),
+        observeProcessLink(`${proc}/cwd`, factsFor("cwd")),
+        observeProcessLink(`${proc}/exe`, factsFor("exe")),
+        observeProcessLink(`${proc}/root`, factsFor("root")),
+        observeProcessMaps(`${proc}/maps`, factsFor("maps")),
+        observeProcessDescriptors(`${proc}/fd`, factsFor("fd")),
       ])
+      if (
+        [cwd, executable, processRoot, mappedFiles, descriptors].some(
+          (observation) => observation.availability === "uninspectable",
+        )
+      ) {
+        uninspectable.push({ pid, comm: status.comm ?? "unknown" })
+      }
       recordSourceCoverage(sourceCoverage.cwd, cwd.availability)
       recordSourceCoverage(sourceCoverage.exe, executable.availability)
       recordSourceCoverage(sourceCoverage.root, processRoot.availability)
@@ -323,9 +396,14 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       return holders
     }),
   )
+  // Both gap classes sink completeness. They are kept apart because only one
+  // of them can ever be cleared, and by a different act: waiting out a denial
+  // versus an operator accepting a named pid.
+  const gapless = (coverage: PathHolderUnavailableCoverage): boolean =>
+    coverage.denied === 0 && coverage.uninspectable === 0
   const complete =
-    processCoverage.unavailable.denied === 0 &&
-    Object.values(sourceCoverage).every((coverage) => coverage.unavailable.denied === 0)
+    gapless(processCoverage.unavailable) &&
+    Object.values(sourceCoverage).every((coverage) => gapless(coverage.unavailable))
   return {
     holders: uniquePathHolders(matches.flat()),
     coverage: {
@@ -333,6 +411,7 @@ async function linuxPathProcessHolderCensus(root: string, procRoot: string): Pro
       scope: "same-uid",
       procRoot,
       complete,
+      uninspectable: uninspectable.toSorted((left, right) => left.pid - right.pid),
       processes: processCoverage,
       sources: sourceCoverage,
     },
@@ -402,11 +481,11 @@ function darwinHolderSource(field: string): PathHolder["source"] {
 
 type MutableSourceCoverage = {
   readable: number
-  unavailable: { exited: number; denied: number }
+  unavailable: { exited: number; denied: number; uninspectable: number }
 }
 
 function emptySourceCoverage(): MutableSourceCoverage {
-  return { readable: 0, unavailable: { exited: 0, denied: 0 } }
+  return { readable: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } }
 }
 
 function recordSourceCoverage(coverage: MutableSourceCoverage, availability: SourceAvailability): void {
@@ -414,22 +493,34 @@ function recordSourceCoverage(coverage: MutableSourceCoverage, availability: Sou
   else coverage.unavailable[availability] += 1
 }
 
-async function observeSource<T>(read: () => Promise<T>, unavailableValue: T): Promise<SourceObservation<T>> {
+async function observeSource<T>(
+  read: () => Promise<T>,
+  unavailableValue: T,
+  facts?: () => Promise<ProcessEntryFacts>,
+): Promise<SourceObservation<T>> {
   try {
     return { availability: "readable", value: await read() }
   } catch (error) {
-    const availability = processEntryUnavailability(error)
+    // Resolved lazily. The ownership read costs one lstat and runs only on a
+    // denial, so nothing is added to the path every healthy process takes.
+    const availability = classifyProcessEntryUnavailability(errorCode(error), facts === undefined ? {} : await facts())
     if (availability === undefined) throw error
     return { availability, value: unavailableValue }
   }
 }
 
-function observeProcessLink(path: string): Promise<SourceObservation<string | undefined>> {
-  return observeSource(() => readlink(path), undefined)
+function observeProcessLink(
+  path: string,
+  facts?: () => Promise<ProcessEntryFacts>,
+): Promise<SourceObservation<string | undefined>> {
+  return observeSource(() => readlink(path), undefined, facts)
 }
 
-async function observeProcessMaps(path: string): Promise<SourceObservation<string[]>> {
-  const observed = await observeSource(() => readFile(path, "utf8"), "")
+async function observeProcessMaps(
+  path: string,
+  facts?: () => Promise<ProcessEntryFacts>,
+): Promise<SourceObservation<string[]>> {
+  const observed = await observeSource(() => readFile(path, "utf8"), "", facts)
   if (observed.availability !== "readable") return { availability: observed.availability, value: [] }
   const contents = observed.value
   const mappedFiles: string[] = []
@@ -445,17 +536,20 @@ async function observeProcessMaps(path: string): Promise<SourceObservation<strin
 
 async function observeProcessDescriptors(
   path: string,
+  facts?: () => Promise<ProcessEntryFacts>,
 ): Promise<SourceObservation<Array<Readonly<{ name: string; target: string }>>>> {
-  const directory = await observeSource(() => readdir(path), [] as string[])
+  const directory = await observeSource(() => readdir(path), [] as string[], facts)
   if (directory.availability !== "readable") return { availability: directory.availability, value: [] }
   const links = await Promise.all(
-    directory.value.map(async (name) => ({ name, observed: await observeProcessLink(`${path}/${name}`) })),
+    directory.value.map(async (name) => ({ name, observed: await observeProcessLink(`${path}/${name}`, facts) })),
   )
   const availability = links.some(({ observed }) => observed.availability === "denied")
     ? "denied"
-    : links.some(({ observed }) => observed.availability === "exited")
-      ? "exited"
-      : "readable"
+    : links.some(({ observed }) => observed.availability === "uninspectable")
+      ? "uninspectable"
+      : links.some(({ observed }) => observed.availability === "exited")
+        ? "exited"
+        : "readable"
   return {
     availability,
     value: links.flatMap(({ name, observed }) =>
@@ -464,15 +558,62 @@ async function observeProcessDescriptors(
   }
 }
 
-function processEntryUnavailability(error: unknown): Exclude<SourceAvailability, "readable"> | undefined {
-  const code = errorCode(error)
-  // `/proc` is live: ENOENT/ESRCH means the observed entry exited and cannot
-  // still hold the path. EACCES/EPERM means it remains but may hide a holder;
-  // preserving that distinction is what keeps an incomplete empty census from
-  // masquerading as a complete clean result.
+/** What the process itself says about a proc entry the census could not read. */
+export type ProcessEntryFacts = Readonly<{
+  /** Single-letter `State:` from `/proc/<pid>/status`; absent when unread. */
+  state?: string
+  /** Owner of `/proc/<pid>`. */
+  processUid?: number
+  /** Owner of the specific entry whose read failed. */
+  entryUid?: number
+}>
+
+/**
+ * One proc-entry read failure, resolved against what the process itself says.
+ *
+ * `/proc` is live: ENOENT/ESRCH means the entry exited and cannot still hold
+ * the path. EACCES/EPERM means it remains — but that errno is ambiguous in
+ * both directions, which is the whole reason this function exists:
+ *
+ *  - a ZOMBIE denies `/proc/<pid>/fd`, because the directory outlives the
+ *    process while holding nothing, and reports ENOENT on cwd, exe and root.
+ *    Reading that denial as a gap contradicts the process state: a zombie has
+ *    released every resource, so it cannot be hiding a holder;
+ *  - a NON-DUMPABLE process — one that dropped privileges and set
+ *    PR_SET_DUMPABLE=0, as `sshd-session` does — denies every source
+ *    PERMANENTLY. The kernel re-owns the inner proc entries to root while
+ *    `/proc/<pid>` stays ours, so comparing those two owners detects it with
+ *    no ptrace and no privilege. Kernels that expose no `Dumpable:` line in
+ *    status (this one does not) leave ownership as the only available read.
+ *
+ * ORDER IS LOAD-BEARING: a zombie's inner entries are root-owned too, measured
+ * on every zombie present when this was written. The state test therefore has
+ * to run first, or every zombie is misread as non-dumpable.
+ */
+export function classifyProcessEntryUnavailability(
+  code: string | undefined,
+  facts: ProcessEntryFacts,
+): Exclude<SourceAvailability, "readable"> | undefined {
   if (code === "ENOENT" || code === "ESRCH") return "exited"
-  if (code === "EACCES" || code === "EPERM") return "denied"
-  return undefined
+  if (code !== "EACCES" && code !== "EPERM") return undefined
+  if (facts.state === "Z") return "exited"
+  const { processUid, entryUid } = facts
+  if (processUid !== undefined && entryUid !== undefined && processUid !== entryUid) return "uninspectable"
+  return "denied"
+}
+
+/** `State:` and `Name:` from `/proc/<pid>/status`. An absent or unreadable
+ * status is an empty reading, never a failure: a process may exit between
+ * enumeration and inspection, and a synthetic proc root need not carry one. */
+async function readProcessStatus(proc: string): Promise<Readonly<{ state?: string; comm?: string }>> {
+  const status = await readFile(`${proc}/status`, "utf8").catch(() => undefined)
+  if (status === undefined) return {}
+  const state = /^State:\s*(\S)/mu.exec(status)?.[1]
+  const comm = /^Name:\s*(.*)$/mu.exec(status)?.[1]?.trim()
+  return {
+    ...(state === undefined ? {} : { state }),
+    ...(comm === undefined || comm === "" ? {} : { comm }),
+  }
 }
 
 function errorCode(error: unknown): string | undefined {

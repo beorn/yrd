@@ -15,7 +15,15 @@ import {
   pathReapFailure,
   type PathHolder,
 } from "../src/index.ts"
-import { inspectPathHolderCensusInProc, inspectPathHoldersInProc } from "../src/path-reaper.ts"
+// Package-private: the classification decision and the coverage type it feeds.
+// Imported by source path rather than widened onto the package surface, the way
+// the synthetic-proc seam beside it already is.
+import {
+  classifyProcessEntryUnavailability,
+  inspectPathHolderCensusInProc,
+  inspectPathHoldersInProc,
+} from "../src/path-reaper.ts"
+import type { LinuxPathHolderCoverage } from "../src/path-reaper.ts"
 
 const scratch: string[] = []
 
@@ -186,13 +194,19 @@ describe("inspectPathHolders", () => {
           scope: "same-uid",
           procRoot,
           complete: true,
-          processes: { enumerated: 0, sameUid: 0, otherUid: 0, unavailable: { exited: 0, denied: 0 } },
+          uninspectable: [],
+          processes: {
+            enumerated: 0,
+            sameUid: 0,
+            otherUid: 0,
+            unavailable: { exited: 0, denied: 0, uninspectable: 0 },
+          },
           sources: {
-            cwd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            exe: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            root: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            maps: { readable: 0, unavailable: { exited: 0, denied: 0 } },
-            fd: { readable: 0, unavailable: { exited: 0, denied: 0 } },
+            cwd: { readable: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+            exe: { readable: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+            root: { readable: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+            maps: { readable: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+            fd: { readable: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
           },
         },
       })
@@ -208,6 +222,194 @@ describe("inspectPathHolders", () => {
 
     await expect(inspectPathHolderCensusInProc(ownedPath, procRoot)).rejects.toThrow(
       `Linux path-holder census requires readable proc root '${procRoot}'`,
+    )
+  })
+})
+
+describe("proc-entry unavailability is resolved against what the process says", () => {
+  // A permission errno is ambiguous in both directions. These are the eight
+  // readings the census can reach; the four that do NOT move are the controls
+  // that keep the two new rules from firing on ordinary processes.
+  test.each([
+    {
+      case: "a zombie's fd survives the process and holds nothing",
+      code: "EACCES",
+      state: "Z",
+      entryUid: 0,
+      expected: "exited",
+    },
+    { case: "a zombie's cwd is already gone", code: "ENOENT", state: "Z", entryUid: 0, expected: "exited" },
+    {
+      case: "a non-dumpable process re-owns its entries to root",
+      code: "EACCES",
+      state: "S",
+      entryUid: 0,
+      expected: "uninspectable",
+    },
+    { case: "EPERM reads the same way as EACCES", code: "EPERM", state: "S", entryUid: 0, expected: "uninspectable" },
+    {
+      case: "control: a live process whose entries are still ours",
+      code: "EACCES",
+      state: "S",
+      entryUid: 3001,
+      expected: "denied",
+    },
+    { case: "control: an exited entry is never a gap", code: "ENOENT", state: "S", entryUid: 3001, expected: "exited" },
+    { case: "control: ESRCH is the same exit", code: "ESRCH", state: "S", entryUid: 3001, expected: "exited" },
+    {
+      case: "control: an unrelated errno is nobody's business here",
+      code: "EIO",
+      state: "S",
+      entryUid: 3001,
+      expected: undefined,
+    },
+  ])("$case", ({ code, state, entryUid, expected }) => {
+    expect(classifyProcessEntryUnavailability(code, { state, processUid: 3001, entryUid })).toBe(expected)
+  })
+
+  test("an unreadable status degrades to the conservative answer, never to a certification", () => {
+    // The status read can lose a race with the process exiting. Losing it must
+    // cost coverage, not correctness: with no facts the census answers exactly
+    // what it answered before this rule existed.
+    expect(classifyProcessEntryUnavailability("EACCES", {})).toBe("denied")
+    expect(classifyProcessEntryUnavailability("EACCES", { state: "S" })).toBe("denied")
+    expect(classifyProcessEntryUnavailability("EACCES", { processUid: 3001 })).toBe("denied")
+  })
+
+  test("the zombie state is read BEFORE ownership, because a zombie is root-owned too", () => {
+    // Measured on every zombie present when this was written: their inner proc
+    // entries are owned by root exactly like a non-dumpable process's. If the
+    // ownership rule ran first, every zombie would be misclassified as a
+    // permanent gap and the deletion refusal would never clear.
+    expect(classifyProcessEntryUnavailability("EACCES", { state: "Z", processUid: 3001, entryUid: 0 })).toBe("exited")
+    expect(classifyProcessEntryUnavailability("EACCES", { state: "S", processUid: 3001, entryUid: 0 })).toBe(
+      "uninspectable",
+    )
+  })
+})
+
+describe("a zombie's denied fd is a contradiction, not a coverage gap", () => {
+  /** A zombie as `/proc` really presents one: cwd, exe and root already gone,
+   * `maps` readable and empty, and `fd` a surviving directory that denies. */
+  function zombieProc(withStatus: boolean): { ownedPath: string; procRoot: string; fdPath: string } {
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-path-coverage-zombie-"))
+    scratch.push(fixture)
+    const ownedPath = join(fixture, "owned")
+    const procRoot = join(fixture, "proc")
+    const processRoot = join(procRoot, "4242")
+    mkdirSync(ownedPath)
+    mkdirSync(join(processRoot, "fd"), { recursive: true })
+    writeFileSync(join(processRoot, "maps"), "")
+    if (withStatus) writeFileSync(join(processRoot, "status"), "Name:\tsh\nState:\tZ (zombie)\nPid:\t4242\n")
+    const fdPath = join(processRoot, "fd")
+    chmodSync(fdPath, 0o000)
+    return { ownedPath, procRoot, fdPath }
+  }
+
+  test.runIf(process.platform === "linux")("a zombie costs no coverage and certifies deletion", async () => {
+    const { ownedPath, procRoot, fdPath } = zombieProc(true)
+    try {
+      const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+
+      expect(census.holders).toEqual([])
+      expect(census.coverage).toMatchObject({
+        complete: true,
+        uninspectable: [],
+        sources: {
+          // The denial the process contradicts: recorded as the exit it is.
+          fd: { readable: 0, unavailable: { exited: 1, denied: 0, uninspectable: 0 } },
+          cwd: { readable: 0, unavailable: { exited: 1, denied: 0, uninspectable: 0 } },
+          maps: { readable: 1, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+        },
+      })
+    } finally {
+      chmodSync(fdPath, 0o755)
+    }
+  })
+
+  test.runIf(process.platform === "linux")(
+    "control: the SAME fixture without the state read is still a denial",
+    async () => {
+      // Without this the test above proves nothing — a census that certified
+      // everything would pass it just as happily. The only difference between
+      // the two fixtures is the status file the classification reads.
+      const { ownedPath, procRoot, fdPath } = zombieProc(false)
+      try {
+        const census = await inspectPathHolderCensusInProc(ownedPath, procRoot)
+
+        expect(census.coverage).toMatchObject({
+          complete: false,
+          uninspectable: [],
+          sources: { fd: { readable: 0, unavailable: { exited: 0, denied: 1, uninspectable: 0 } } },
+        })
+      } finally {
+        chmodSync(fdPath, 0o755)
+      }
+    },
+  )
+})
+
+describe("a permanent gap is named and can be accepted; a clearable one cannot", () => {
+  function coverage(
+    uninspectable: readonly Readonly<{ pid: number; comm: string }>[],
+    denied = 0,
+  ): LinuxPathHolderCoverage {
+    return {
+      platform: "linux",
+      scope: "same-uid",
+      procRoot: "/proc",
+      complete: false,
+      uninspectable,
+      processes: { enumerated: 1, sameUid: 1, otherUid: 0, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+      sources: {
+        cwd: { readable: 0, unavailable: { exited: 0, denied, uninspectable: uninspectable.length } },
+        exe: { readable: 1, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+        root: { readable: 1, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+        maps: { readable: 1, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+        fd: { readable: 1, unavailable: { exited: 0, denied: 0, uninspectable: 0 } },
+      },
+    }
+  }
+  const reapOf = (survivorCoverage: LinuxPathHolderCoverage) => ({
+    targetedPids: [],
+    survivorPids: [],
+    survivorHolders: [],
+    survivorCoverage,
+    forcedKill: false,
+    signalFailures: [],
+  })
+
+  test("the refusal names the pid and comm instead of dumping the census", () => {
+    const failure = pathReapDeletionFailure(reapOf(coverage([{ pid: 2217355, comm: "sshd-session" }])))
+
+    expect(failure).toBe(
+      "path-holder census cannot inspect pid 2217355 (sshd-session): the kernel marks it non-dumpable, so no " +
+        "retry will ever read its open files. Confirm it holds nothing under the path, then accept that pid explicitly",
+    )
+  })
+
+  test("accepting the named pid certifies deletion", () => {
+    const reap = reapOf(coverage([{ pid: 2217355, comm: "sshd-session" }]))
+
+    expect(pathReapDeletionFailure(reap, { acceptUninspectablePids: [2217355] })).toBeUndefined()
+  })
+
+  test("accepting some OTHER pid certifies nothing", () => {
+    // Acceptance is per-pid and never implicit; the operator's judgement is
+    // about one process they inspected by other means, not about the class.
+    const reap = reapOf(coverage([{ pid: 2217355, comm: "sshd-session" }]))
+
+    expect(pathReapDeletionFailure(reap, { acceptUninspectablePids: [999] })).toMatch(/cannot inspect pid 2217355/u)
+  })
+
+  test("accepting a permanent gap never waives a clearable denial standing beside it", () => {
+    // The two classes are independent: a denial may be hiding a live holder and
+    // may clear on its own, so no acceptance of a non-dumpable process can
+    // speak for it.
+    const reap = reapOf(coverage([{ pid: 2217355, comm: "sshd-session" }], 1))
+
+    expect(pathReapDeletionFailure(reap, { acceptUninspectablePids: [2217355] })).toMatch(
+      /census incomplete.*deletion cannot be certified/u,
     )
   })
 })

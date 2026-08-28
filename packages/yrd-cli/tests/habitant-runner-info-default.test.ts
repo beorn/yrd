@@ -53,7 +53,12 @@ async function queuedRunnerRepo(config?: string): Promise<{ repo: string }> {
   await git(repo, "switch", "-qc", "issue/live-row", "main")
   await writeFile(join(repo, "live-row.txt"), "live row\n")
   await git(repo, "add", "live-row.txt")
-  await git(repo, "commit", "-qm", "live row")
+  // The `Bead:` trailer, not the submit fact and not `submitSelection`'s
+  // `issue` option, is how an issue reaches a DERIVED member: the queue reads
+  // it off the tip commit (`readDerivedSubmitEnrichment`) at admission. A
+  // fixture that passed `issue` instead would assert a row the real path
+  // cannot produce.
+  await git(repo, "commit", "-qm", "live row\n\nBead: @yrd/core/21096-cli-ux/21706-runner-log-tag-link")
   await git(repo, "switch", "-q", "main")
   await using submitter = await createYrdHost({ cwd: repo, log: createLogger("test", [{ level: "silent" }]) })
   // S7 (branch-is-change): the branch's standing submit fact IS the submission,
@@ -61,7 +66,6 @@ async function queuedRunnerRepo(config?: string): Promise<{ repo: string }> {
   // record and is retired — it refuses by name rather than seeding anything.
   const submission = await submitter.app.bays.submitSelection("issue/live-row", {
     base: "main",
-    issue: "@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
     // Answered from the fixture's own repository rather than stubbed: the
     // branch is not checked out here, so resolving its ref IS the step that
     // finds the head being submitted.
@@ -127,24 +131,29 @@ checks:
 
     await expect(followQueueRuns(host.app, [], { interval: 1 }, io, async () => undefined)).resolves.toBe(3)
 
-    // The waiting runner owns its internal settlement retries. The outer queue
-    // admission remains one structured event and therefore one human row.
-    const runStarts = events.filter(
-      (event): event is Extract<LogEvent, { kind: "log" }> =>
-        event.kind === "log" &&
-        event.namespace === "yrd:queue:run" &&
-        event.props?.run === "R1" &&
-        event.props?.outcome === "started",
-    )
-    expect(runStarts).toHaveLength(1)
-    const admittedRows = runStarts
+    // S7 moved required checks to ADMISSION, one cycle before any Run, so a
+    // WAITING check holds the member there and no run is minted at all while
+    // it waits. The subject is unchanged — a waiting runner's internal
+    // settlement retries must not multiply the operator's rows — but the row
+    // that has to stay singular is now the admission, not the run.
+    const logs = events.filter((event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log")
+    const admissions = logs.filter((event) => event.props?.action === "compose-derived-admitted")
+    expect(admissions).toHaveLength(1)
+    expect(admissions[0]?.props).toMatchObject({ branch: "issue/live-row", pr: "PR1", revision: 1 })
+
+    // Not "one run row" — NO run row. A run while the required check is still
+    // waiting would mean the queue admitted on unsettled evidence.
+    expect(logs.filter((event) => event.namespace === "yrd:queue:run")).toEqual([])
+
+    const rows = logs
       .map((event) => formatHabitantLogLine(event, { color: false }))
-      .filter((line): line is string => line?.includes("[main#1] admitted") === true)
-    expect(admittedRows).toHaveLength(1)
-    expect(stripAnsi(admittedRows[0]!)).toContain(
-      "[main#1] admitted pr#1.1 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
-    )
-    expect(runStarts.map((event) => event.props?.continuation === true)).toEqual([false])
+      .filter((line): line is string => typeof line === "string")
+      .map((line) => stripAnsi(line))
+    // Exactly one row opens the waiting check and none closes it — that is what
+    // "waiting" means here, and a second opening row is the duplication this
+    // test exists to catch.
+    expect(rows.filter((row) => /\[main#admission:PR1:1:[0-9a-f]{40}\/0-check\] starting$/u.test(row))).toHaveLength(1)
+    expect(rows.filter((row) => row.includes("/0-check] finished"))).toEqual([])
     log.end()
   }, 15_000)
 
@@ -171,8 +180,11 @@ checks:
       await vi.waitFor(
         () => {
           const visible = stripAnsi(stderrText)
-          expect(visible).toMatch(/\[main#\d+\/0-check\] starting/u)
-          expect(visible).toMatch(/\[main#\d+\/0-check\] finished duration=/u)
+          // The check runs at ADMISSION, so its step rows are keyed by the
+          // admission (`admission:<pr>:<revision>:<baseSha>`) rather than by a
+          // run number — the run that follows carries only the merge step.
+          expect(visible).toMatch(/\[main#admission:PR1:1:[0-9a-f]{40}\/0-check\] starting/u)
+          expect(visible).toMatch(/\[main#admission:PR1:1:[0-9a-f]{40}\/0-check\] finished duration=/u)
         },
         { timeout: 20_000, interval: 200 },
       )
@@ -190,7 +202,50 @@ checks:
     const finishedRows = rows.filter((row) => row.includes("/0-check] finished "))
     expect(startingRows).toHaveLength(1)
     expect(finishedRows).toHaveLength(1)
+    // NOT asserted here, and the absence is the finding: the admitted row is
+    // rendered from a DEBUG `yrd:queue:run` event, so at explicit INFO the
+    // operator sees the check and the merge but never learns WHICH change was
+    // admitted. The row itself is proved in the trace-level test below.
+    expect(rows.filter((row) => row.includes("] admitted "))).toEqual([])
     for (const row of [...startingRows, ...finishedRows]) expect(row).not.toMatch(/TITLE|[◆◇◉○✓✗×]/u)
+  }, 30_000)
+
+  it("names the admitted change once, with the issue its tip commit declared", async () => {
+    // The coverage the waiting-runner test above can no longer carry: with a
+    // settling check the member is admitted, and the admitted row is the only
+    // place the operator is told which change entered on which revision. The
+    // issue on it can only have come from the tip commit's `Bead:` trailer,
+    // since the submit fact carries none.
+    const { repo } = await queuedRunnerRepo()
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using host = await createYrdHost({ cwd: repo, log })
+    const signal = { aborted: false }
+    let sleeps = 0
+    const io = {
+      stdout: () => undefined,
+      stderr: () => undefined,
+      runner: "test-habitant",
+      scope: {
+        signal,
+        sleep: async () => {
+          sleeps += 1
+          if (sleeps === 2) signal.aborted = true
+        },
+      },
+    } as unknown as YrdCliIO
+
+    await followQueueRuns(host.app, [], { interval: 1 }, io, async () => undefined)
+
+    const rows = events
+      .filter((event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log")
+      .map((event) => formatHabitantLogLine(event, { color: false }))
+      .filter((line): line is string => typeof line === "string")
+      .map((line) => stripAnsi(line))
+    expect(rows.filter((row) => row.includes("] admitted "))).toEqual([
+      "[main#1] admitted pr#1.1 issue=@yrd/core/21096-cli-ux/21706-runner-log-tag-link",
+    ])
+    log.end()
   }, 30_000)
 
   it("keeps routine compose successes at DEBUG with timing", async () => {
