@@ -22,6 +22,7 @@
  * derived member rather than a fault.
  */
 import { describe, expect, it } from "vitest"
+import type { ChangeDeliveryState } from "@yrd/bay"
 
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
@@ -198,7 +199,13 @@ describe("reader unreadable-member gate — one unresolvable member never blinds
 
   it("a healthy population reads exactly as before — no fault, no mark, no extra row", () => {
     const reads = readsOf(healthy)
-    const args = [new Set<string>(), undefined, new Map(), [], new Map()] as const
+    const args = [
+      new Set<string>(),
+      undefined,
+      new Map<string, ChangeDeliveryState>(),
+      [],
+      new Map<string, string>(),
+    ] as const
     const rows = queueLogRows(healthy, ...args, reads.clocks, reads.faults)
     expect(rows.some((row) => row.unreadable !== undefined)).toBe(false)
     expect(project(healthy).rows.some((row) => row.unreadable !== undefined)).toBe(false)

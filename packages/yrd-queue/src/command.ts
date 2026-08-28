@@ -1024,7 +1024,7 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
   const finish = async (
     stdout: string,
     stderr: string,
-    truncated: ReadonlySet<ArtifactStream> = new Set(),
+    truncated: ReadonlySet<ArtifactStream> = new Set<ArtifactStream>(),
   ): Promise<StepArtifact[]> => {
     await drain()
     for (const stream of Object.values(streams)) {

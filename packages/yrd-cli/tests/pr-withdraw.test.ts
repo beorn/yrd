@@ -442,6 +442,11 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
   }
 }
 
+type PruneJson = {
+  readonly checked: readonly { readonly pr?: string; readonly reason?: string }[]
+  readonly excluded: readonly { readonly reason: string }[]
+}
+
 describe("pr withdraw", () => {
   it("withdraws a live change, records the reason, and terminalizes its Queue work", async () => {
     const app = await createCliApp()
@@ -785,7 +790,7 @@ describe("pr prune", () => {
         }),
     })
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
-    const result = JSON.parse(output.stdout())
+    const result = JSON.parse(output.stdout()) as PruneJson
     // The verb must not answer over a population it did not scan: the derived
     // member is scanned, judged, and counted under its own lane.
     expect(result).toMatchObject({
@@ -807,11 +812,11 @@ describe("pr prune", () => {
     })
     // A derived member has no record to name, so the row carries no change id
     // to be mistaken for one.
-    expect(result.checked[2].pr).toBeUndefined()
+    expect(result.checked[2]!.pr).toBeUndefined()
     // Prune cannot withdraw it — there is nothing to close — so the row names
     // the cure that does work instead of a spend that does not.
-    expect(result.checked[2].reason).toContain("prune cannot withdraw it")
-    expect(result.checked[2].reason).toContain("git push bay :refs/yrd/submit/issue/ghost")
+    expect(result.checked[2]!.reason).toContain("prune cannot withdraw it")
+    expect(result.checked[2]!.reason).toContain("git push bay :refs/yrd/submit/issue/ghost")
 
     const human = outputIO({
       pruneGit: () =>
@@ -878,7 +883,7 @@ describe("pr prune", () => {
 
     const output = outputIO({ pruneGit: () => pruneGit() })
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
-    const result = JSON.parse(output.stdout())
+    const result = JSON.parse(output.stdout()) as PruneJson
     expect(result).toMatchObject({
       scanned: { record: 0, derived: 0 },
       checked: [],
@@ -891,7 +896,7 @@ describe("pr prune", () => {
       ],
       summary: { checked: 0, record: 0, derived: 0, excluded: 1 },
     })
-    expect(result.excluded[0].reason).toContain("terminal change PR1's landing commit")
+    expect(result.excluded[0]!.reason).toContain("terminal change PR1's landing commit")
 
     const human = outputIO({ pruneGit: () => pruneGit(), columns: 400 })
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
