@@ -765,6 +765,27 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   readSubmitEnrichment?(
     input: Readonly<{ branch: string; sha: string }>,
   ): DerivedSubmitEnrichment | Promise<DerivedSubmitEnrichment>
+  /**
+   * Has the base branch ALREADY delivered this standing fact's content?
+   *
+   * `alreadyLandedSubmits` asks the same question of the record store, and
+   * cannot answer it in two cases that are now the common ones. It needs a
+   * terminal RECORD for the branch — post-purge a merged branch usually has
+   * none — and it compares the fact's sha to that record's integration
+   * commit, while the queue REBUILDS a candidate at merge and mints a new
+   * head, so the equality it tests does not survive a real merge.
+   *
+   * Git answers it directly, for every branch, with or without a record. This
+   * layer is pure over `BaysState` and never reads git itself, so the host
+   * supplies the answer — the same shape and reason as
+   * {@link QueueOptions.readSubmitEnrichment} above.
+   *
+   * Absent, the compose keeps its record-keyed exclusion alone, which is the
+   * pre-2026-08-28 behaviour: a merged branch whose fact was never retired
+   * composes again on every pass. Measured that day, four of them held the
+   * admission phase and the queue did not merge for 2h25m.
+   */
+  isSubmitSuperseded?(input: Readonly<{ branch: string; sha: string; base: string }>): boolean | Promise<boolean>
   /** Repository-truth sink for one immutable terminal merge record. */
   recordMerge?: (input: Readonly<{ run: Run; candidate: Candidate }>) => Promise<void>
   runner?: (jobs: Jobs) => Runner
@@ -1115,6 +1136,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.recordMerge,
             options.prNumberMint,
             options.readSubmitEnrichment,
+            options.isSubmitSuperseded,
             configuredRunner,
             progress,
             needsPersonOwner,
@@ -1174,6 +1196,7 @@ function createQueue<Shape extends ChangeShape>(
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
   derivedMint: PrNumberMint | undefined,
   readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
+  isSubmitSuperseded: QueueOptions<readonly AnyStepDef[]>["isSubmitSuperseded"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
   needsPersonOwner: string,
@@ -1364,7 +1387,52 @@ function createQueue<Shape extends ChangeShape>(
         },
       )
     }
-    const branches = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
+    // The git-sourced half of the same question `alreadyLandedSubmits` asks of
+    // the record store. A fact whose content the base already holds is a stale
+    // re-projection, never new work — and unlike the record-keyed check this
+    // one answers for a recordless branch and survives a merge-time rebuild.
+    const offered = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
+    const branches: string[] = []
+    for (const branch of offered) {
+      const submit = snapshot.bays.submits[branch]
+      if (submit === undefined) continue
+      // One branch's unreadable oracle must not starve every healthy sibling
+      // — the same per-branch boundary the derive loop below already keeps.
+      // Degrading to "compose it" restores the pre-fix behaviour for this one
+      // branch, which is loud on every later pass; the alternative reading
+      // would silently drop a live submission.
+      let superseded = false
+      try {
+        superseded =
+          isSubmitSuperseded !== undefined && (await isSubmitSuperseded({ branch, sha: submit.sha, base: submit.base }))
+      } catch (error) {
+        log.warn?.(
+          "queue compose could not determine whether a submitted branch's content is already on its base; " +
+            "composing it, so a stale fact stays visible rather than silently dropping live work",
+          {
+            action: "compose-derived-superseded-unknown",
+            branch,
+            sha: submit.sha,
+            base: submit.base,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+        )
+      }
+      if (superseded) {
+        log.warn?.(
+          "queue compose will not derive an admission for a submit fact whose content the base already " +
+            "contains; the fact is stale — retire it (git push bay :refs/yrd/submit/" + branch + ")",
+          {
+            action: "compose-derived-fact-superseded",
+            branch,
+            sha: submit.sha,
+            base: submit.base,
+          },
+        )
+        continue
+      }
+      branches.push(branch)
+    }
     if (branches.length === 0) return []
     if (derivedMint === undefined) {
       log.warn?.(
