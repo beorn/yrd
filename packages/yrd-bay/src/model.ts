@@ -777,7 +777,8 @@ export function changeNotFoundMessage(state: BaysState, selector: string): strin
   // as any other miss, because there is no population left to draw an example
   // from: suggesting a form nothing can satisfy would be worse than saying
   // nothing. Branch names are the selectors that resolve.
-  return `yrd: no change '${selector}' — searched ${Object.keys(state.submits).length} submitted branch(es)`
+  const searched = Object.keys(state.submits).length
+  return `yrd: no change '${selector}' — searched ${searched} submitted ${searched === 1 ? "branch" : "branches"}`
 }
 
 export function currentChangeRev(pr: Pick<Change, "id" | "revs">): ChangeRev {
