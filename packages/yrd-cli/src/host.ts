@@ -115,6 +115,7 @@ import {
   createReadOnlyJournal,
   importOrphanJournal,
   type MutableJournal,
+  type PrNumberMint,
   type ResolvedRetention,
 } from "@yrd/persistence"
 import {
@@ -1901,6 +1902,81 @@ function contestAdapters(options: DefaultYrdDefinitionOptions): {
   return { runners, evaluators, git: options.contestGit ?? localContestGit(options.process, options.repo) }
 }
 
+/**
+ * TWO HALVES OF ONE INVARIANT: the mint's high-water must never sit below an id
+ * the deployment can still name. They are deliberately in different places, and
+ * a later reader who tidies them together deletes the half that actually works.
+ *
+ * - The LAST-CHANCE half rides the store-deletion migration edge, because the
+ *   change-record set is destroyed there and that is the final moment it is
+ *   readable. It fires once, for a deployment crossing that one edge.
+ * - The STANDING half runs at every boot over state that SURVIVES. That is what
+ *   protects a `pr-mint.json` lost next month, long after the edge has been
+ *   crossed and can never fire again. For the surviving sources it is not an
+ *   alternative to the migration half — it is the only thing that works at all.
+ *
+ * Both fold a MAXIMUM and never an assignment: a mint already ahead of the
+ * state is the healthy case and must not be dragged down to it.
+ *
+ * Measured on the live journal before this was written (read-only copy of
+ * `/hh/dev/.git/yrd/journal.sqlite`, 2026-08-28 00:09 PDT, checkpoint cursor
+ * 97912 at `381cdb9e…`): `bays.prs` stopped at PR2149 while `queues.candidates`
+ * and `jobs.byId.*` both reached PR2152 and `pr-mint.json` read 2152. Harvesting
+ * the record set alone would have re-issued PR2150, PR2151 and PR2152. Reading
+ * the two sources that seemed obvious — retained Run snapshots plus the
+ * admission-refusal ledger — would have been WORSE than doing nothing:
+ * `queues.records` topped out at PR2148 and `admissionRefusals` was empty.
+ */
+function raisePrNumberMint(mint: PrNumberMint, candidate: number): boolean {
+  if (!Number.isSafeInteger(candidate) || candidate < 1 || candidate <= mint.highWater()) return false
+  mint.commit(candidate)
+  return true
+}
+
+/**
+ * Highest `PR<n>` anywhere in `value`, as a key or a string, or 0 when it holds
+ * none.
+ *
+ * Shape-blind ON PURPOSE. Naming the containers is exactly how both earlier
+ * attempts went wrong: each author found one source of ids, it fit, and they
+ * stopped looking. The live measurement above found ids in seven containers
+ * across two top-level slices, and any enumerated list silently misses the
+ * container added next quarter. A walk that reads every string cannot.
+ *
+ * The tradeoff is stated rather than hidden: an unrelated field whose value
+ * happens to spell `PR<digits>` would push the floor up and burn id space. That
+ * is the mint's own asymmetry — a skipped number costs nothing, a recycled one
+ * cannot be taken back — so the scan errs upward deliberately. Iterative, not
+ * recursive: production state is ~76MB and a recursive walk risks the stack.
+ */
+export function maxChangeIdIn(value: unknown): number {
+  let max = 0
+  const consider = (candidate: string): void => {
+    const digits = /^PR(\d+)$/u.exec(candidate)?.[1]
+    if (digits === undefined) return
+    const parsed = Number(digits)
+    if (Number.isSafeInteger(parsed) && parsed > max) max = parsed
+  }
+  const stack: unknown[] = [value]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (typeof node === "string") {
+      consider(node)
+      continue
+    }
+    if (typeof node !== "object" || node === null) continue
+    if (Array.isArray(node)) {
+      for (const entry of node) stack.push(entry)
+      continue
+    }
+    for (const [key, entry] of Object.entries(node as Record<string, unknown>)) {
+      consider(key)
+      stack.push(entry)
+    }
+  }
+  return max
+}
+
 /** Compose the built-in workflow from immutable plugins and injected resources. */
 async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) {
   validateConfig(options.config)
@@ -2175,17 +2251,22 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // site removed the backstop, and after this migration the record set is
         // gone for good, so the vote can never be recast.
         //
-        // Folding the max into the mint HERE makes the deletion self-healing:
-        // the file ends up at least as high as the records it is replacing, and
-        // every future id is above every id history holds. Writing a file from
-        // a migrate callback is deliberate impurity — the alternative is a
-        // silent id collision weeks later with no way left to detect it.
-        for (const id of Object.keys(retiredRecords ?? {})) {
-          const number = /^PR(\d+)$/u.exec(id)?.[1]
-          if (number === undefined) continue
-          const value = Number(number)
-          if (Number.isSafeInteger(value) && value > prNumberMint.highWater()) prNumberMint.commit(value)
-        }
+        // Folding the max into the mint HERE makes the deletion self-healing
+        // for the records: the file ends up at least as high as the container
+        // it is replacing. Writing a file from a migrate callback is deliberate
+        // impurity — the alternative is a silent id collision weeks later with
+        // no way left to detect it. It is idempotent under a repeat crossing,
+        // which matters because this callback CAN run more than once: a
+        // read-only journal has `checkpoint.inspect` but no `checkpoint.save`,
+        // so every read-only boot migrates again and never retires the row.
+        //
+        // THIS HALF IS NOT SUFFICIENT AND WAS NEVER SUFFICIENT ALONE. It reads
+        // only the destroyed container, it fires only for a deployment crossing
+        // this edge, and on the live journal it lands 3 ids short (PR2149 vs a
+        // surviving PR2152). `raisePrNumberMintFloor` at every boot is the half
+        // that covers the surviving sources and the losses that happen after
+        // this edge is behind us; see the contract on `raisePrNumberMint`.
+        raisePrNumberMint(prNumberMint, maxChangeIdIn(retiredRecords))
         return { ...state, bays: baysWithoutRecordStore }
       },
     },
@@ -2378,7 +2459,53 @@ async function createDefaultYrdRuntimeApp(options: DefaultYrdRuntimeAppOptions):
     },
   })
   checkpoint.identity = (await options.journal.checkpoint?.inspect?.())?.identity ?? targetIdentity
+  // Only a process that can MINT needs the floor, and only a mutable journal
+  // can: admission runs on the active runtime, never in a viewer. The tell is
+  // the one Core already uses to decide whether a checkpoint can be written
+  // (`saveProjection` requires `checkpoint.save`), so this is that established
+  // discriminator rather than a second notion of read-only.
+  //
+  // Skipping viewers is not a hole, it is the scope: a viewer issues no ids, so
+  // a floor established there protects nothing, while establishing it anyway
+  // would make `yrd pr list` walk the whole 76MB state and write a file beside
+  // the journal — and REFUSE TO BOOT on a state dir this process cannot write,
+  // which is a failure mode read-only commands do not have today.
+  if (options.journal.checkpoint?.save !== undefined) {
+    raisePrNumberMintFloor(createDurablePrNumberMint({ dir: options.stateDir }), app.state())
+  }
   return app
+}
+
+/**
+ * The STANDING half of the mint invariant: on every boot, lift the durable
+ * high-water to at least the highest id the projected state still names.
+ *
+ * Runs after `createYrd` has opened — so after any checkpoint migration — and
+ * therefore reads post-deletion state, where `bays.prs` is already gone. The two
+ * halves compose: the migration lifts the floor out of the container it is
+ * destroying, this lifts it the rest of the way out of everything that lived.
+ *
+ * Why a boot-time invariant rather than a second migration edge: an edge fires
+ * once. `readHighWater` returns 0 on ENOENT, so a `pr-mint.json` lost to a
+ * re-clone, a wiped state dir, or a restore from a backup older than the mint
+ * re-issues ids from 1 — and nothing about that loss is tied to crossing an
+ * identity boundary. It has to be re-established every time the process starts
+ * or it is not established at all.
+ *
+ * Cost is a full walk of projected state: ~130ms on the live 76MB checkpoint,
+ * against ~3.1s that boot already spends reading, parsing and cloning it. Paid
+ * unconditionally — gating the walk on `highWater() === 0` would cover the
+ * ENOENT case and silently miss the stale-backup one, which is the same
+ * "it fit, so I stopped looking" mistake in a cheaper disguise.
+ *
+ * Touches nothing hashed by `projectionCheckpointIdentity`: no event, no
+ * initial state, no projection version. It reads state and writes a file beside
+ * the journal, exactly as the migration half does.
+ */
+export function raisePrNumberMintFloor(mint: PrNumberMint, state: unknown): number {
+  const floor = maxChangeIdIn(state)
+  raisePrNumberMint(mint, floor)
+  return floor
 }
 
 export function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
