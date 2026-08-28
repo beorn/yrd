@@ -3586,6 +3586,80 @@ describe("Queue command adapters", () => {
     expect(new Date(terminal.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(terminal.startedAt).getTime())
   }, 10_000)
 
+  it("keeps the complete streamed artifact when the in-memory capture was truncated", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-truncated-"))
+    roots.push(cwd)
+    const artifactRoot = join(cwd, "artifacts")
+    const started = Promise.withResolvers<ProcessRequest>()
+    const completed = Promise.withResolvers<ProcessResult>()
+    const process: Pick<Process, "run"> = {
+      run(request) {
+        started.resolve(request)
+        return completed.promise
+      },
+    }
+    const step = configuredCommandStep<ChangeShape>({
+      inject: { process },
+      command: ["noisy-check"],
+      cwd,
+      purpose: "check",
+      artifactRoot,
+    })
+    const input = {
+      run: "R-trunc",
+      step: "check",
+      index: 0,
+      prs: [
+        {
+          id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
+          branch: "issue/feature",
+          base: "main",
+          revision: 1,
+          headSha: "a".repeat(40),
+        },
+      ],
+      shape: { results: {} },
+    } as StepExecution<ChangeShape>
+    const context = { id: "J-trunc", attempt: 1, runner: "test", signal: new AbortController().signal }
+    const running = Promise.resolve(step(input, context))
+    const request = await started.promise
+    const encoder = new TextEncoder()
+    const full = "HEAD-line\n" + "middle-line\n".repeat(50) + "TAIL-line\n"
+    request.onOutput?.({ stream: "stdout", chunk: encoder.encode(full) })
+
+    const dir = join(artifactRoot, "R-trunc", "0-check", "attempt-1")
+    const stdoutPath = join(dir, "stdout.log")
+    await vi.waitFor(
+      async () => {
+        expect(await readFile(stdoutPath, "utf8")).toBe(full)
+      },
+      { timeout: 5_000, interval: 10 },
+    )
+
+    // What @yrd/process returns when the capture overflowed: a head, a notice,
+    // and a tail. It is DELIBERATELY shorter than the bytes streamed to disk.
+    const captured = `HEAD-line\n\n\n[yrd: stdout truncated — 600 bytes dropped here.]\n\nTAIL-line\n`
+    completed.resolve({
+      exitCode: 1,
+      signal: null,
+      stdout: captured,
+      stderr: "",
+      durationMs: 10,
+      timedOut: false,
+      outputTruncation: [{ stream: "stdout", totalBytes: 620, keptBytes: 20, droppedBytes: 600, limitBytes: 20 }],
+    })
+    await expect(running).resolves.toMatchObject({ status: "completed", conclusion: "failure" })
+
+    // The reconciliation in finish() overwrites stdout.log whenever the streamed
+    // hash disagrees with the returned string — which is exactly what truncation
+    // makes happen, every time. Left alone it would replace the only copy of the
+    // dropped middle with the truncated view, turning a loud truncation back
+    // into silent evidence loss.
+    expect(await readFile(stdoutPath, "utf8")).toBe(full)
+    expect(await readFile(join(dir, "output.log"), "utf8")).toBe(full)
+  }, 10_000)
+
   it("grows a real slow command artifact while the child is still running", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-slow-stream-"))
     roots.push(cwd)

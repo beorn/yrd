@@ -70,6 +70,26 @@ export type ProcessRequest = Readonly<{
   signal?: AbortSignal
 }>
 
+/**
+ * One stream's capture overflow. A child's output VOLUME is not a correctness
+ * signal, so passing {@link createProcess}'s `maxOutputBytes` truncates the
+ * CAPTURE and lets the command run to its real exit status; it never terminates
+ * the child and never fails the run. The dropped bytes are reported here AND
+ * named in the returned text, because a truncation nobody can see would corrupt
+ * every verdict read from that text (docs/principles.md § Fail Loud, Fail Now).
+ */
+export type OutputTruncation = Readonly<{
+  stream: "stdout" | "stderr"
+  /** Every byte the child wrote to this stream, including the dropped ones. */
+  totalBytes: number
+  /** Bytes retained in the returned text, excluding the notice itself. */
+  keptBytes: number
+  /** Bytes discarded between the retained head and the retained tail. */
+  droppedBytes: number
+  /** The per-stream capture budget this stream ran past. */
+  limitBytes: number
+}>
+
 type ProcessResultBase = Readonly<{
   exitCode: number
   signal: NodeJS.Signals | null
@@ -79,6 +99,14 @@ type ProcessResultBase = Readonly<{
   timedOut: boolean
   lastProgressAtMs?: number
   lastProgressBytes?: number
+  /**
+   * Set, stdout before stderr, when a stream wrote past `maxOutputBytes` and
+   * its capture kept only a head and a tail. Loud and never swallowed: the same
+   * fact is written into {@link ProcessResultBase.stdout}/`stderr` where a
+   * human reading a verdict sees it, and machine consumers read it from here
+   * rather than by matching the notice text.
+   */
+  outputTruncation?: readonly OutputTruncation[]
   /**
    * Set when a settlement signal could not reach the process GROUP (non-ESRCH
    * kill failure) — descendants may survive; loud, never swallowed (21012 S1).
@@ -420,9 +448,10 @@ export function createProcess(
         // pipe open past the child's exit so the bounded reads stop waiting for
         // an EOF that is never coming, returning the bytes captured so far.
         const drainAbort = new AbortController()
+        const truncations: { stdout?: OutputTruncation; stderr?: OutputTruncation } = {}
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {
-            return await readBounded(
+            const read = await readBounded(
               stream,
               maxOutputBytes,
               name,
@@ -430,6 +459,17 @@ export function createProcess(
               request.onOutput,
               drainAbort.signal,
             )
+            if (read.truncation !== undefined) {
+              // Recorded per stream rather than pushed to a shared array: the
+              // two captures race inside Promise.all, and a verdict reader
+              // comparing two runs must not see the order flip between them.
+              truncations[name] = read.truncation
+              log.warn?.("The command produced more output than Yrd captures; the middle of the stream was dropped.", {
+                argv,
+                ...read.truncation,
+              })
+            }
+            return read.text
           } catch (error) {
             outputError ??= error
             terminate()
@@ -518,6 +558,9 @@ export function createProcess(
         cancelReap?.()
         if (outputError !== undefined) throw outputError
         propagateStartObserverError(startObserverError)
+        const outputTruncation = [truncations.stdout, truncations.stderr].filter(
+          (entry): entry is OutputTruncation => entry !== undefined,
+        )
         const result: ProcessResult = {
           exitCode,
           signal: child.signalCode,
@@ -531,6 +574,7 @@ export function createProcess(
           lastProgressBytes,
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
           ...(escapedDescendant ? { escapedDescendant: true } : {}),
+          ...(outputTruncation.length === 0 ? {} : { outputTruncation: Object.freeze(outputTruncation) }),
         } as ProcessResult
         log.debug?.("Command finished.", {
           argv,
@@ -550,6 +594,9 @@ export function createProcess(
             signal: result.signal,
             timedOut: result.timedOut,
             stalled: result.stalled,
+            ...(outputTruncation.length === 0
+              ? {}
+              : { outputDroppedBytes: outputTruncation.reduce((total, entry) => total + entry.droppedBytes, 0) }),
           })
         }
         return result
@@ -579,6 +626,146 @@ export function createProcess(
 
 const ABANDONED = Symbol("drain-abandoned")
 
+type BoundedRead = Readonly<{ text: string; truncation?: OutputTruncation }>
+
+/**
+ * A retained head and a retained tail, plus the count of everything dropped
+ * between them.
+ *
+ * The head carries the child's setup and its FIRST failure; the tail carries
+ * the summary and the exit, which is where a gate's verdict is written. Both
+ * ends matter, so the budget is split evenly rather than spent on whichever
+ * arrives first.
+ */
+class OutputWindow {
+  readonly #headLimit: number
+  readonly #tailLimit: number
+  readonly #head: Uint8Array[] = []
+  readonly #tail: Uint8Array[] = []
+  #headSize = 0
+  #tailSize = 0
+  #total = 0
+  readonly #limit: number
+
+  constructor(limit: number) {
+    this.#limit = limit
+    this.#headLimit = Math.max(1, Math.floor(limit / 2))
+    this.#tailLimit = limit - this.#headLimit
+  }
+
+  admit(chunk: Uint8Array): void {
+    this.#total += chunk.byteLength
+    let rest = chunk
+    if (this.#headSize < this.#headLimit) {
+      const take = Math.min(this.#headLimit - this.#headSize, rest.byteLength)
+      this.#head.push(rest.subarray(0, take))
+      this.#headSize += take
+      rest = rest.subarray(take)
+    }
+    if (rest.byteLength === 0) return
+    this.#tail.push(rest)
+    this.#tailSize += rest.byteLength
+    // Evict from the FRONT of the tail so the retained bytes stay the most
+    // recent ones, slicing the oldest surviving chunk rather than dropping it
+    // whole — otherwise a single large chunk makes the retained tail an
+    // unpredictable multiple of its budget.
+    while (this.#tailSize > this.#tailLimit) {
+      const oldest = this.#tail[0]
+      if (oldest === undefined) break
+      const excess = this.#tailSize - this.#tailLimit
+      if (oldest.byteLength <= excess) {
+        this.#tail.shift()
+        this.#tailSize -= oldest.byteLength
+      } else {
+        this.#tail[0] = oldest.subarray(excess)
+        this.#tailSize -= excess
+      }
+    }
+  }
+
+  /**
+   * Nothing is dropped until the stream runs PAST the limit, and the eviction
+   * above cannot fire before that, so an at-or-under-limit read decodes as one
+   * buffer exactly as it did before truncation existed — no seam, no notice,
+   * and no multi-byte code point split across the join.
+   */
+  finish(name: "stdout" | "stderr"): BoundedRead {
+    const decoder = new TextDecoder()
+    if (this.#total <= this.#limit) {
+      return { text: decoder.decode(Buffer.concat([...this.#head, ...this.#tail], this.#total)) }
+    }
+    const head = withoutPartialTrailingCodePoint(Buffer.concat(this.#head, this.#headSize))
+    const tail = withoutPartialLeadingCodePoint(Buffer.concat(this.#tail, this.#tailSize))
+    const truncation: OutputTruncation = {
+      stream: name,
+      totalBytes: this.#total,
+      keptBytes: head.byteLength + tail.byteLength,
+      // Derived by subtraction from two directly counted numbers, so the notice
+      // can never disagree with the bytes actually returned.
+      droppedBytes: this.#total - head.byteLength - tail.byteLength,
+      limitBytes: this.#limit,
+    }
+    return {
+      text: decoder.decode(head) + truncationNotice(truncation) + decoder.decode(tail),
+      truncation,
+    }
+  }
+}
+
+/**
+ * The drop notice, in the returned text where a reader of a check verdict
+ * cannot miss it. It names what was dropped, how much, why, and where the
+ * complete stream still is — a truncation that only a structured field records
+ * is a silent one to every human consumer of stdout.
+ */
+function truncationNotice(truncation: OutputTruncation): string {
+  const { stream, droppedBytes, totalBytes, limitBytes, keptBytes } = truncation
+  return (
+    `\n\n[yrd: ${stream} truncated — ${droppedBytes} bytes dropped here. ` +
+    `The command wrote ${totalBytes} bytes, past the ${limitBytes}-byte capture limit, ` +
+    `so only ${keptBytes} bytes are kept — a head and a tail — and the middle is gone. ` +
+    `Yrd still streamed every byte to this run's output observer; the queue persists that as the step's ` +
+    `${stream}.log artifact, which is where the dropped middle can be read.]\n\n`
+  )
+}
+
+/** UTF-8 continuation bytes match 0b10xxxxxx. */
+function isContinuationByte(byte: number): boolean {
+  return (byte & 0xc0) === 0x80
+}
+
+function codePointLength(lead: number): number {
+  if (lead >= 0xf0) return 4
+  if (lead >= 0xe0) return 3
+  if (lead >= 0xc0) return 2
+  return 1
+}
+
+/**
+ * Cut the head back to a whole code point. The drop boundary lands wherever the
+ * byte budget ran out, which is regularly mid-character in any output carrying
+ * box drawing, arrows or emoji — and a decoder given half a code point emits a
+ * replacement character that reads like corrupted program output rather than
+ * like a truncation. The few bytes surrendered here are counted as dropped.
+ */
+function withoutPartialTrailingCodePoint(bytes: Uint8Array): Uint8Array {
+  let index = bytes.byteLength - 1
+  let continuations = 0
+  while (index >= 0 && continuations < 3 && isContinuationByte(bytes[index] as number)) {
+    index -= 1
+    continuations += 1
+  }
+  if (index < 0) return bytes
+  return codePointLength(bytes[index] as number) === continuations + 1 ? bytes : bytes.subarray(0, index)
+}
+
+/** The same cut at the other seam: drop continuation bytes the tail begins with. */
+function withoutPartialLeadingCodePoint(bytes: Uint8Array): Uint8Array {
+  let index = 0
+  while (index < bytes.byteLength && index < 3 && isContinuationByte(bytes[index] as number)) index += 1
+  return index === 0 ? bytes : bytes.subarray(index)
+}
+
 async function readBounded(
   stream: ReadableStream<Uint8Array>,
   limit: number,
@@ -586,10 +773,9 @@ async function readBounded(
   onProgress: (bytes: number) => void = () => {},
   onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void = () => {},
   abandon?: AbortSignal,
-): Promise<string> {
+): Promise<BoundedRead> {
   const reader = stream.getReader()
-  const chunks: Uint8Array[] = []
-  let size = 0
+  const window = new OutputWindow(limit)
   // When the caller abandons the drain (a descendant is holding this pipe open
   // past the child's exit), race each read against the abort so the loop stops
   // waiting on an EOF that is never coming; cancel() releases our read end and
@@ -610,16 +796,21 @@ async function readBounded(
       const outcome = abandoned === undefined ? await next : await Promise.race([next, abandoned])
       if (outcome === ABANDONED) {
         await reader.cancel().catch(() => {})
-        return new TextDecoder().decode(Buffer.concat(chunks, size))
+        return window.finish(name)
       }
       const { done, value } = outcome
-      if (done) return new TextDecoder().decode(Buffer.concat(chunks, size))
-      if (size + value.byteLength > limit) {
-        await reader.cancel()
-        throw new RangeError(`yrd: Process ${name} exceeded ${limit} bytes`)
-      }
-      chunks.push(value)
-      size += value.byteLength
+      if (done) return window.finish(name)
+      window.admit(value)
+      // Both observers see EVERY byte, including the ones the window drops.
+      //
+      // onProgress is the no-progress lease: a flooding child is the single
+      // most active kind there is, so withholding its bytes would have the
+      // stall detector kill exactly the process this truncation exists to let
+      // finish — the same outage in a different costume.
+      //
+      // onOutput is the caller's own sink, and forwarding in full is what makes
+      // the drop notice's promise true: the queue's artifact writer holds the
+      // complete stream on disk even when this in-memory capture cannot.
       onProgress(value.byteLength)
       onOutput({ stream: name, chunk: value })
     }

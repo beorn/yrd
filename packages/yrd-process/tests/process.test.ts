@@ -236,22 +236,174 @@ describe("Process", () => {
     await expect(running).resolves.toMatchObject({ exitCode: 137 })
   })
 
-  it("bounds captured stdout and terminates a process that exceeds it", async () => {
+  // Output VOLUME is not a correctness signal. This cap used to THROW, which
+  // propagated out of run() and killed the long-lived queue runner: restarts 257
+  // through 261 on 2026-08-28, four of them exit code 3, each losing whatever
+  // check was in flight (`job-lost`). One verbose Vitest run took the merge queue
+  // down for every seat. The cap now truncates and the command still finishes.
+  it("truncates a flooding stream instead of killing the child, and keeps its real exit status", async () => {
     const killed: NodeJS.Signals[] = []
     const spawn: Spawn = () => ({
       pid: 4242,
-      stdout: bytes("too much output"),
+      stdout: bytes("HEAD-abcdefghijklmnopqrstuvwxyz-TAIL"),
       stderr: bytes(""),
-      exited: Promise.resolve(0),
+      exited: Promise.resolve(7),
       signalCode: null,
       kill(signal = "SIGTERM") {
         killed.push(signal as NodeJS.Signals)
       },
     })
-    await using process = createProcess({ maxOutputBytes: 4, inject: { spawn } })
+    await using process = createProcess({ maxOutputBytes: 12, inject: { spawn } })
 
-    await expect(process.run({ argv: ["noisy"] })).rejects.toThrow("stdout exceeded 4 bytes")
-    expect(killed).toContain("SIGTERM")
+    const result = await process.run({ argv: ["noisy"] })
+
+    expect(result.exitCode).toBe(7)
+    expect(killed).toEqual([])
+    expect(result.stdout).toContain("HEAD-a")
+    expect(result.stdout).toContain("z-TAIL")
+    expect(result.stdout).not.toContain("jklmnopq")
+  })
+
+  it("states the dropped byte count in the output a reader sees", async () => {
+    const output = "x".repeat(1000)
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes(output),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 100, inject: { spawn } })
+
+    const { stdout } = await process.run({ argv: ["noisy"] })
+
+    // The arithmetic is checked against the bytes actually returned, not against
+    // a number the notice asserts about itself: a drop notice that can disagree
+    // with its own text is the silent truncation this whole change exists to
+    // prevent (docs/principles.md § Fail Loud, Fail Now).
+    const notice =
+      /\n\n\[yrd: stdout truncated — (\d+) bytes dropped here\. The command wrote (\d+) bytes, past the (\d+)-byte capture limit, so only (\d+) bytes are kept[^\]]*\]\n\n/.exec(
+        stdout,
+      )
+    expect(notice).not.toBeNull()
+    const [, dropped, total, limit, kept] = notice as RegExpExecArray
+    expect(Number(total)).toBe(1000)
+    expect(Number(limit)).toBe(100)
+    expect(Number(kept)).toBe(100)
+    expect(Number(dropped)).toBe(900)
+    expect(Number(dropped) + Number(kept)).toBe(Number(total))
+    // Stripping the whole notice, blank lines included, must leave exactly the
+    // retained bytes and nothing else.
+    expect(stdout.replace(notice?.[0] as string, "")).toHaveLength(100)
+  })
+
+  it("reports the truncation as a structured fact as well as in the text", async () => {
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes("y".repeat(500)),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 40, inject: { spawn } })
+
+    const result = await process.run({ argv: ["noisy"] })
+
+    expect(result.outputTruncation).toEqual([
+      { stream: "stdout", totalBytes: 500, keptBytes: 40, droppedBytes: 460, limitBytes: 40 },
+    ])
+  })
+
+  it("gives stdout and stderr independent budgets and reports each one", async () => {
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes("o".repeat(300)),
+      stderr: bytes("e".repeat(200)),
+      exited: Promise.resolve(1),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 50, inject: { spawn } })
+
+    const result = await process.run({ argv: ["noisy"] })
+
+    // Independent, not shared: a chatty stdout must not shrink the stderr
+    // budget, because stderr is where the failure a reader needs usually is.
+    expect(result.outputTruncation).toEqual([
+      { stream: "stdout", totalBytes: 300, keptBytes: 50, droppedBytes: 250, limitBytes: 50 },
+      { stream: "stderr", totalBytes: 200, keptBytes: 50, droppedBytes: 150, limitBytes: 50 },
+    ])
+    expect(result.stdout).toContain("stdout truncated")
+    expect(result.stderr).toContain("stderr truncated")
+  })
+
+  it("leaves output at or under the limit byte-identical and unannotated", async () => {
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes("exactly-32-bytes-of-plain-output"),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 32, inject: { spawn } })
+
+    const result = await process.run({ argv: ["quiet"] })
+
+    expect(result.stdout).toBe("exactly-32-bytes-of-plain-output")
+    expect(result.outputTruncation).toBeUndefined()
+  })
+
+  it("hands every dropped byte to the output observer so the full stream survives elsewhere", async () => {
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes("z".repeat(400)),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 20, inject: { spawn } })
+
+    let observed = 0
+    const result = await process.run({
+      argv: ["noisy"],
+      onOutput: ({ chunk }) => {
+        observed += chunk.byteLength
+      },
+    })
+
+    // What makes the notice's promise true: the queue's artifact writer holds
+    // the complete stdout.log even though this capture kept 20 bytes.
+    expect(observed).toBe(400)
+    expect(result.outputTruncation?.[0]?.droppedBytes).toBe(380)
+  })
+
+  it("does not split a multi-byte code point across the truncation seam", async () => {
+    // 3 bytes per arrow, and a 40-byte budget splits 20/20 — a boundary that
+    // lands mid-character. A decoder handed half a code point emits U+FFFD,
+    // which reads like corrupted program output rather than like a truncation.
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes("→".repeat(100)),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 40, inject: { spawn } })
+
+    const result = await process.run({ argv: ["unicode"] })
+
+    expect(result.stdout).not.toContain("\uFFFD")
+    const truncation = result.outputTruncation?.[0]
+    expect(truncation?.totalBytes).toBe(300)
+    // Surrendering the partial code points is itself counted as dropped, so the
+    // arithmetic still closes exactly.
+    expect((truncation?.keptBytes as number) + (truncation?.droppedBytes as number)).toBe(300)
+    expect(truncation?.keptBytes).toBeLessThan(40)
   })
 
   it("escalates timed-out children from SIGTERM to SIGKILL after the grace period", async () => {
@@ -272,6 +424,48 @@ describe("Process", () => {
 
     expect(result.timedOut).toBe(true)
     expect(killed).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
+  it("lets a real flooding child run to completion and reports its own exit code", async () => {
+    await using process = createProcess({ env: { PATH: Bun.env.PATH }, maxOutputBytes: 2_000 })
+
+    const result = await process.run({
+      argv: shellCommand("yes FLOODLINE | head -n 20000; exit 3"),
+      timeoutMs: 30_000,
+    })
+
+    // Exit 3 is the code the queue runner itself died with while this cap threw.
+    expect(result.exitCode).toBe(3)
+    expect(result.timedOut).toBe(false)
+    expect(result.stalled).not.toBe(true)
+    expect(result.stdout).toContain("FLOODLINE")
+    expect(result.stdout).toContain("bytes dropped here")
+    const truncation = result.outputTruncation?.[0]
+    expect(truncation?.stream).toBe("stdout")
+    expect(truncation?.totalBytes).toBe(200_000)
+    expect(truncation?.droppedBytes).toBeGreaterThan(190_000)
+  })
+
+  it("counts dropped bytes as progress so the stall detector cannot kill a flooding child", async () => {
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes("f".repeat(5_000)),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill() {},
+    })
+    await using process = createProcess({ maxOutputBytes: 100, inject: { spawn } })
+
+    const result = await process.run({ argv: ["noisy"], noProgressTimeoutMs: 500 })
+
+    // A flooding child is the MOST active kind there is. If the no-progress
+    // lease were renewed only by bytes the window keeps, the stall detector
+    // would terminate exactly the process this truncation exists to let finish —
+    // the same outage wearing a different costume. The lease must see all 5000.
+    expect(result.lastProgressBytes).toBe(5_000)
+    expect(result.stalled).not.toBe(true)
+    expect(result.verdict).toBe("EXITED")
   })
 
   it("refuses work after close", async () => {

@@ -515,7 +515,11 @@ function configuredCommand<Shape extends ChangeShape>(
       throw cause
     }
     const endedAt = new Date().toISOString()
-    const artifacts = await artifactSink.finish(result.stdout, result.stderr)
+    const artifacts = await artifactSink.finish(
+      result.stdout,
+      result.stderr,
+      new Set((result.outputTruncation ?? []).map((entry) => entry.stream)),
+    )
     const message = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter((part) => part !== "").join("\n")
     const detail = commandDetail(message)
     const diagnostics = commandDiagnostics(message)
@@ -1008,7 +1012,20 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
     await writes
     if (writeFailure !== undefined) throw writeFailure
   }
-  const finish = async (stdout: string, stderr: string): Promise<StepArtifact[]> => {
+  /**
+   * `truncated` names the streams whose in-memory capture is only a head and a
+   * tail (`ProcessResult.outputTruncation`). For those, the STREAMED file is the
+   * complete text and the passed-in string is deliberately shorter, so the
+   * reconciliation below must not "repair" the file by overwriting it — that
+   * would delete the only copy of the dropped middle, turning a loud truncation
+   * back into silent evidence loss. Every other mismatch still overwrites: it
+   * means the live write really did lose bytes.
+   */
+  const finish = async (
+    stdout: string,
+    stderr: string,
+    truncated: ReadonlySet<ArtifactStream> = new Set(),
+  ): Promise<StepArtifact[]> => {
     await drain()
     for (const stream of Object.values(streams)) {
       const remainder = stream.decoder.decode()
@@ -1035,7 +1052,7 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
       }
       const finalHash = createHash("sha256").update(content).digest("hex")
       const streamedHash = stream.seen ? stream.hash.digest("hex") : undefined
-      if (streamedHash !== finalHash) {
+      if (streamedHash !== finalHash && !(truncated.has(name) && stream.seen)) {
         streamsMatch = false
         await writeFile(stream.path, content)
       }
@@ -1043,7 +1060,7 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
     }
     const fallback = [stdout, stderr].filter((content) => content !== "").join("")
     if (fallback === "") await rm(combined.path, { force: true })
-    else if (!combined.seen || !streamsMatch) await writeFile(combined.path, fallback)
+    else if (!combined.seen || (!streamsMatch && truncated.size === 0)) await writeFile(combined.path, fallback)
     return artifacts
   }
   return Object.freeze({ drain, finish, write })
