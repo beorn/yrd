@@ -994,6 +994,28 @@ async function checkedQueue(
 }
 
 type TestQueueApp = Awaited<ReturnType<typeof checkedQueue>>
+
+/**
+ * The admission refusal ledger row a branch earned. Post-S7 a required check
+ * that returns a VERDICT refuses the member at admission and NO run record is
+ * ever created, so this — not `queue.run(...)[0]` — is where that verdict
+ * lands. A machinery failure is different in kind and propagates instead; see
+ * the reachability tables below.
+ */
+function admissionRefusalFor(app: TestQueueApp, branch: string) {
+  return Object.values(app.state().queues.admissionRefusals).find((row) => row.branch === branch)
+}
+
+/**
+ * The admission Job that produced a member's verdict. Post-S7 the check's own
+ * evidence lives HERE and not on a run step, because a member refused at
+ * admission never becomes a run at all.
+ */
+function admissionJobFor(app: TestQueueApp, pr: string) {
+  return Object.values(app.state().jobs.byId)
+    .filter((job) => job.key?.startsWith(`admission:${pr}:`) === true)
+    .at(-1)
+}
 type CarrierSubmissionApp = Pick<TestQueueApp, "bays" | "state">
 type CarrierSubmission = Readonly<{
   branch: string
@@ -2145,9 +2167,8 @@ describe("Queue command adapters", () => {
     const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
     const mainBefore = await git(repo, ["rev-parse", "origin/main"])
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
-
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
     await git(repo, ["fetch", "-q", "origin", "main"])
     expect(await git(repo, ["rev-parse", "origin/main"])).toBe(mainBefore)
   })
@@ -3920,9 +3941,9 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
-    const job = run?.steps[0]?.job
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
+    const job = admissionJobFor(app, pr.id)
     if (job?.status !== "completed" || job.conclusion !== "failure") {
       throw new Error("plain exit-code step did not fail")
     }
@@ -4330,12 +4351,10 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "check-checkpoint-migration-surface-disagreement" },
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({
+      code: "check-checkpoint-migration-surface-disagreement",
+      kind: "failure",
     })
   })
 
@@ -4347,12 +4366,10 @@ describe("Queue command adapters", () => {
     })
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "checkpoint-migration-certificate-missing" },
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({
+      code: "checkpoint-migration-certificate-missing",
+      kind: "failure",
     })
     expect(await git(repo, ["rev-parse", "main"])).not.toBe(featureSha)
   })
@@ -4375,12 +4392,10 @@ describe("Queue command adapters", () => {
     })
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "checkpoint-migration-path-missing" },
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({
+      code: "checkpoint-migration-path-missing",
+      kind: "failure",
     })
   })
 
@@ -4432,12 +4447,10 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`))
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "check-checkpoint-migration-invalid" },
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({
+      code: "check-checkpoint-migration-invalid",
+      kind: "failure",
     })
   })
 
@@ -4468,8 +4481,8 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
     expect(configuredRuns).toBe(1)
   })
 
@@ -4536,8 +4549,8 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
     expect(configuredRuns).toBe(1)
   })
 
@@ -4551,11 +4564,10 @@ describe("Queue command adapters", () => {
     })
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "check-comparison-not-ready" },
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({
+      code: "check-comparison-not-ready",
+      kind: "failure",
     })
   })
 
@@ -4567,11 +4579,10 @@ describe("Queue command adapters", () => {
     })
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "check-gate-report-invalid" },
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({
+      code: "check-gate-report-invalid",
+      kind: "failure",
     })
   })
 
@@ -4588,8 +4599,8 @@ describe("Queue command adapters", () => {
     })
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-strict-residual" } })
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-strict-residual", kind: "failure" })
   })
 
   it("strict mode keeps an inherited diagnostics failure terminal and skips the parent run", async () => {
@@ -4610,9 +4621,9 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
-    const job = run?.steps[0]?.job
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
+    const job = admissionJobFor(app, pr.id)
     if (job?.status !== "completed" || job.conclusion !== "failure") {
       throw new Error("strict inherited failure did not fail")
     }
@@ -4659,9 +4670,9 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
-    const job = run?.steps[0]?.job
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
+    const job = admissionJobFor(app, pr.id)
     if (job?.status !== "completed" || job.conclusion !== "failure") {
       throw new Error("parent command failure did not fail the run")
     }
@@ -4705,8 +4716,14 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({
+    // A check that RETURNS a verdict — even an infrastructure-coded one — is
+    // ledgered as a refusal and creates no run; only a LOST job, a cancelled
+    // one, or a thrown callback propagates. The rich evidence lives on the
+    // admission Job, because the refusal row is a streak ledger (code, kind,
+    // reason) and carries none.
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "queue-environment-refused" })
+    expect(admissionJobFor(app, pr.id)).toMatchObject({
       status: "completed",
       conclusion: "failure",
       error: {
@@ -4748,8 +4765,14 @@ describe("Queue command adapters", () => {
       await using app = await checkedQueue(killed, repo, shellCommand("exit 0"), { waiting })
       const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-      expect(run).toMatchObject({
+      // A check that RETURNS a verdict — even an infrastructure-coded one — is
+      // ledgered as a refusal and creates no run; only a LOST job, a cancelled
+      // one, or a thrown callback propagates. The rich evidence lives on the
+      // admission Job, because the refusal row is a streak ledger (code, kind,
+      // reason) and carries none.
+      await app.queue.run({ prs: [], derived: [pr] }, runtime)
+      expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "queue-environment-refused" })
+      expect(admissionJobFor(app, pr.id)).toMatchObject({
         status: "completed",
         conclusion: "failure",
         error: {
@@ -4781,9 +4804,9 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
-    const job = run?.steps[0]?.job
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
+    const job = admissionJobFor(app, pr.id)
     if (job?.status !== "completed" || job.conclusion !== "failure") {
       throw new Error("Vitest-shaped failure did not fail the run")
     }
@@ -4815,9 +4838,9 @@ describe("Queue command adapters", () => {
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
-    const job = run?.steps[0]?.job
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "check-failed", kind: "failure" })
+    const job = admissionJobFor(app, pr.id)
     if (job?.status !== "completed" || job.conclusion !== "failure") {
       throw new Error("opaque Candidate did not fail")
     }
@@ -4847,8 +4870,14 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(unavailable, repo, shellCommand("printf 'YRD_THROW_CANDIDATE\\n'"))
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
-    expect(run).toMatchObject({
+    // A check that RETURNS a verdict — even an infrastructure-coded one — is
+    // ledgered as a refusal and creates no run; only a LOST job, a cancelled
+    // one, or a thrown callback propagates. The rich evidence lives on the
+    // admission Job, because the refusal row is a streak ledger (code, kind,
+    // reason) and carries none.
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "queue-environment-refused" })
+    expect(admissionJobFor(app, pr.id)).toMatchObject({
       status: "completed",
       conclusion: "failure",
       error: {
@@ -6402,29 +6431,33 @@ describe("Queue command adapters", () => {
         headSha: fixture.featureSha,
       })
 
-      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
-
-      expect(run).toMatchObject({
-        status: "completed",
-        conclusion: "failure",
-        error: {
-          code: "queue-environment-refused",
-          evidence: {
-            kind: "submodule-reachability-refusal",
-            operation: "filtered-fetch",
-            sha: fixture.moduleSha,
-            exitCode: failure.exitCode,
-            timedOut: failure.timedOut,
-            signal: failure.signal,
-            ...("stalled" in failure
-              ? {
-                  stalled: failure.stalled,
-                  verdict: failure.verdict,
-                  sweepFailure: failure.sweepFailure,
-                }
-              : {}),
-            retryable: true,
-          },
+      // These were already failing BEFORE the harness gained a Runner and a
+      // Candidate preparer: they are not S7 regressions, and the wiring only
+      // let them reach the real disagreement asserted here.
+      //
+      // A derived member has no record to carry an infrastructure verdict, so
+      // admission PROPAGATES a machinery failure instead of absorbing it into a
+      // refusal that would leave it recorded NOWHERE while the compose resolves
+      // clean. That split is deliberate: a check VERDICT is a fact about the
+      // change and gets ledgered as a refusal; a lost job, a cancelled job or a
+      // thrown callback is a fact about US, and needs a human, not a retry loop.
+      await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toMatchObject({
+        failure: { kind: "infrastructure", code: "queue-environment-refused" },
+        evidence: {
+          kind: "submodule-reachability-refusal",
+          operation: "filtered-fetch",
+          sha: fixture.moduleSha,
+          exitCode: failure.exitCode,
+          timedOut: failure.timedOut,
+          signal: failure.signal,
+          ...("stalled" in failure
+            ? {
+                stalled: failure.stalled,
+                verdict: failure.verdict,
+                sweepFailure: failure.sweepFailure,
+              }
+            : {}),
+          retryable: true,
         },
       })
       expect(configuredCheckRan).toBe(false)
@@ -6537,21 +6570,25 @@ describe("Queue command adapters", () => {
         headSha: fixture.featureSha,
       })
 
-      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
-
-      expect(run).toMatchObject({
-        status: "completed",
-        conclusion: "failure",
-        error: {
-          code: "queue-environment-refused",
-          evidence: {
-            kind: "submodule-reachability-refusal",
-            operation: failure.operation,
-            exitCode: failure.exitCode,
-            timedOut: failure.timedOut,
-            signal: failure.signal,
-            retryable: true,
-          },
+      // These were already failing BEFORE the harness gained a Runner and a
+      // Candidate preparer: they are not S7 regressions, and the wiring only
+      // let them reach the real disagreement asserted here.
+      //
+      // A derived member has no record to carry an infrastructure verdict, so
+      // admission PROPAGATES a machinery failure instead of absorbing it into a
+      // refusal that would leave it recorded NOWHERE while the compose resolves
+      // clean. That split is deliberate: a check VERDICT is a fact about the
+      // change and gets ledgered as a refusal; a lost job, a cancelled job or a
+      // thrown callback is a fact about US, and needs a human, not a retry loop.
+      await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toMatchObject({
+        failure: { kind: "infrastructure", code: "queue-environment-refused" },
+        evidence: {
+          kind: "submodule-reachability-refusal",
+          operation: failure.operation,
+          exitCode: failure.exitCode,
+          timedOut: failure.timedOut,
+          signal: failure.signal,
+          retryable: true,
         },
       })
       expect(configuredCheckRan).toBe(false)
@@ -7702,9 +7739,8 @@ describe("Queue command adapters", () => {
     mints.set(app, mint)
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
-
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
+    await app.queue.run({ prs: [], derived: [pr] }, runtime)
+    expect(admissionRefusalFor(app, "issue/feature")).toMatchObject({ code: "stale-check", kind: "failure" })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)
     expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
   })
