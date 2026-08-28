@@ -198,6 +198,7 @@ import {
 } from "./refusal-remedy.ts"
 import { unobservableBranchRemedy } from "./remedy-admissibility.ts"
 import { reconcileChangeMerges, type ChangeMerge } from "./pr-merged.ts"
+import { projectHandoffReadyLanding } from "./bay-handoff-landing.ts"
 import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { applyChangeState, changeStateDeps, type ChangeState } from "./change-state.ts"
@@ -6183,9 +6184,42 @@ function changeQueueRuns(app: YrdCliApp, pr: Change): Run[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
 }
 
+/**
+ * `bay.list` lifecycles, optionally carrying the two DERIVED facts the handoff-ready SLA
+ * alarm needs but has never had: did this branch's work land, and is the certification that
+ * named its head still fresh?
+ *
+ * Opt-in, because deriving them resolves the base through origin — an unconditional fetch
+ * would put a network round trip behind a plain `yrd bay` and turn an offline listing into a
+ * queue-authority refusal. Only handoff-ready rows are enriched; nothing else has a
+ * certification to age.
+ */
+async function projectedLifecycles(
+  app: YrdCliApp,
+  bays: readonly DeepReadonly<Bay>[],
+  visibleBayIds: ReadonlySet<string>,
+  landing: boolean,
+  cwd: string,
+): Promise<readonly unknown[]> {
+  const lifecycles = app.bays.branchLifecycles().filter((lifecycle) => visibleBayIds.has(lifecycle.bay))
+  if (!landing) return lifecycles
+  const bases = new Map(bays.map((bay) => [bay.id, bay.base]))
+  await using process = createProcess()
+  return await Promise.all(
+    lifecycles.map(async (lifecycle) => {
+      const base = bases.get(lifecycle.bay)
+      if (lifecycle.status !== "handoff-ready" || base === undefined) return lifecycle
+      return {
+        ...lifecycle,
+        ...(await projectHandoffReadyLanding({ process, repo: cwd, head: lifecycle.headSha, base })),
+      }
+    }),
+  )
+}
+
 async function listBays(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ all?: boolean; check?: boolean; closed?: boolean }>,
+  options: JsonOption & Readonly<{ all?: boolean; check?: boolean; closed?: boolean; landing?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
   if (options.all === true && options.closed === true) usage("--all and --closed are mutually exclusive")
@@ -6246,7 +6280,7 @@ async function listBays(
     {
       command: "bay.list",
       bays: jsonBays,
-      lifecycles: app.bays.branchLifecycles().filter((lifecycle) => visibleBayIds.has(lifecycle.bay)),
+      lifecycles: await projectedLifecycles(app, bays, visibleBayIds, options.landing === true, cwd),
       ...(reports === undefined ? {} : { reports }),
     },
     createElement(BayStatusView, {
@@ -12109,6 +12143,10 @@ function buildProgram(
     .option("--all", "include open and terminal Bays")
     .option("--closed", "show terminal Bays only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
+    .option(
+      "--landing",
+      "derive whether handoff-ready work landed and whether its certification is still fresh (fetches origin; may be slow)",
+    )
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("list")
@@ -12117,6 +12155,10 @@ function buildProgram(
     .option("--all", "include open and terminal Bays")
     .option("--closed", "show terminal Bays only")
     .option("--check", "compute live destroy-safety status (fetches origin; may be slow)")
+    .option(
+      "--landing",
+      "derive whether handoff-ready work landed and whether its certification is still fresh (fetches origin; may be slow)",
+    )
     .action(async (options) => listBays(installed(), options, io))
   bay
     .command("open")
