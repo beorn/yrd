@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type Change } from "@yrd/bay"
+import { createBayJobDefs, volatilePrNumberMint, withBays, type Change } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
@@ -73,6 +73,13 @@ async function renderRows(rows: readonly ChangeListRow[]): Promise<string> {
 
 function renderedIds(output: string): number[] {
   return [...output.matchAll(/pr#(\d+)\./gu)].map(([, id]) => Number(id))
+}
+
+/** The same reading against the CLI's own delivery list, which prints the bare
+ * `PR7.1` member identity where `ChangeListView` prints the `pr#7.1` display
+ * form. */
+function listedIds(output: string): number[] {
+  return [...output.matchAll(/\bPR(\d+)\.\d/gu)].map(([, id]) => Number(id))
 }
 
 describe("pr list row losslessness (22376)", () => {
@@ -144,24 +151,38 @@ function workspace() {
   }
 }
 
-async function createCliApp(seeds?: readonly ChangeSeed[]) {
+async function createCliApp(
+  seeds?: readonly ChangeSeed[],
+  checkRun?: () => JobResult<JsonValue>,
+  mergeRun?: () => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>,
+) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
-    (): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    checkRun ?? ((): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: { checked: true } })),
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
-    async (
-      _input: StepExecution<ChangeShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
-    }),
+    mergeRun ??
+      (async (
+        _input: StepExecution<ChangeShape>,
+      ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
+        status: "completed",
+        conclusion: "success",
+        output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+      })),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // S7 (branch-is-change, @i/10 22991): a derived member's identity mints at
+  // ADMISSION, and it carries no baseSha of its own. Without both, derived
+  // admission refuses, the compose swallows the refusal as an empty batch,
+  // and every surface below sees zero retained run members.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   const contests = withContests({ runners: [], evaluators: [], git })
   const base = pipe(
@@ -230,28 +251,46 @@ function mergeGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
 
 describe("pr list bounded-window disclosure (22376)", () => {
   it("names how many rows the default window withheld", async () => {
-    // S7: records no longer mint — the record window is seeded as journal
-    // history. The six oldest go terminal: open PRs are never windowed out
-    // (see live-work-visibility.test.ts), so only terminal rows exercise the
-    // cut.
+    // S7: the windowed population is DELIVERY HISTORY — retained run members,
+    // not records. Every branch is composed once by a merge that cannot land,
+    // so all 26 end up as `ended` history rows and the window has something to
+    // cut; a still-standing submission is a `live` row and is never windowed
+    // out (see live-work-visibility.test.ts).
+    //
+    // Branch names are zero-padded on purpose. Identities mint in
+    // `derivedLaneBranches` order, which is LEXICOGRAPHIC, so unpadded
+    // `window-2` would mint after `window-19` and the id a row renders would
+    // stop tracking the order the assertions below reason about.
     const app = await createCliApp(
       Array.from({ length: 26 }, (_, offset) => offset + 1).map(
         (index): ChangeSeed => ({
           pr: `PR${index}`,
-          branch: `topic/window-${index}`,
+          branch: `topic/window-${String(index).padStart(2, "0")}`,
           base: "main",
           revs: [{ headSha: index.toString(16).padStart(40, "0"), baseSha: BASE_SHA }],
-          ...(index <= 6 ? { terminal: { kind: "withdrawn", reason: "window specimen" } } : {}),
         }),
       ),
+      undefined,
+      async () => ({
+        status: "completed" as const,
+        conclusion: "failure" as const,
+        error: { code: "merge-conflict", message: "conflict" },
+      }),
     )
+    await app.queue.run({}, { runner: "pr-list-test", leaseMs: 60_000 })
+    for (let index = 1; index <= 26; index += 1) {
+      await app.bays.recordBranchUnsubmit({
+        branch: `topic/window-${String(index).padStart(2, "0")}`,
+        reason: "superseded",
+      })
+    }
 
     const human = outputIO()
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
     const output = human.stdout()
 
     // Every windowed row is present…
-    expect(renderedIds(output)).toEqual(Array.from({ length: 20 }, (_, offset) => 7 + offset))
+    expect(listedIds(output)).toEqual(Array.from({ length: 20 }, (_, offset) => 7 + offset))
     // …and the six it withheld are stated, not silent.
     expect(output).toMatch(/\b6\b[^\n]*hidden/iu)
     expect(output).toContain("--json")
@@ -267,6 +306,38 @@ describe("pr list bounded-window disclosure (22376)", () => {
   })
 })
 
+/**
+ * The S7 spelling of "this delivery ended, and then git disagreed".
+ *
+ * Pre-S7 the specimen was a RECORD in the `withdrawn` state. There is no such
+ * state now: a delivery's outcome comes from its retained run, and the author's
+ * withdrawal is the removal of the submit ref (`branch/unsubmitted`, whose
+ * vocabulary is deleted/archived/superseded — "withdrawn" is not a word the
+ * derived lane has). So the specimen is built the way production reaches it:
+ * compose once with a merge that cannot land, which retains a member whose
+ * delivery ENDED, then withdraw the standing fact.
+ */
+async function endedDelivery(branch: string, headSha: string) {
+  const app = await createCliApp(
+    [{ pr: "PR1", branch, base: "main", revs: [{ headSha, baseSha: BASE_SHA }] }],
+    undefined,
+    async () => ({
+      status: "completed" as const,
+      conclusion: "failure" as const,
+      error: { code: "merge-conflict", message: "conflict" },
+    }),
+  )
+  await app.queue.run({}, { runner: "pr-list-test", leaseMs: 60_000 })
+  await app.bays.recordBranchUnsubmit({ branch, reason: "superseded" })
+  return app
+}
+
+type HistoryRow = Readonly<{
+  id: string
+  state: string
+  alreadyLanded?: Readonly<{ code: string; recorded: string; headSha: string; baseSha: string }>
+}>
+
 describe("pr list merge reconciliation (22376)", () => {
   /**
    * The live specimen: `pr list` reported `pr#1658.5 − withdrawn` while
@@ -277,49 +348,40 @@ describe("pr list merge reconciliation (22376)", () => {
    * content are exactly what the ancestry model cannot clean up afterwards.
    */
   it("reports the merge when a withdrawal arrives on top of it", async () => {
-    const app = await createCliApp([
-      {
-        pr: "PR1",
-        branch: "topic/merged",
-        base: "main",
-        revs: [{ headSha: MERGED_HEAD, baseSha: BASE_SHA }],
-        terminal: { kind: "withdrawn", reason: "author changed their mind" },
-      },
-    ])
+    const app = await endedDelivery("topic/merged", MERGED_HEAD)
 
     const json = outputIO({ pruneGit: () => mergeGit() })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
-    const listed = JSON.parse(json.stdout()) as {
-      prs: readonly Readonly<{ id: string; status: string; nativeStatus?: string }>[]
-    }
-    expect(listed.prs).toHaveLength(1)
-    expect(listed.prs[0]).toMatchObject({
+    const listed = JSON.parse(json.stdout()) as { history: readonly HistoryRow[] }
+    expect(listed.history).toHaveLength(1)
+    // The contradiction survived S7 intact; only its spelling moved. The row's
+    // own outcome (`recorded`) still says the content never landed, and the
+    // repository proof beside it still overrides that for the reader.
+    expect(listed.history[0]).toMatchObject({
       id: "PR1",
-      status: "already-landed",
-      nativeStatus: "withdrawn",
+      state: "ended",
+      alreadyLanded: { code: "ended-after-landing", recorded: "ended", headSha: MERGED_HEAD },
     })
 
     const human = outputIO({ pruneGit: () => mergeGit(), columns: 200 })
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain("already-landed")
-    expect(human.stdout()).toContain("withdrawn-after-landing")
+    // Never the bare "ended" claim once git has contradicted it.
+    expect(human.stdout()).toContain("ended without landing, but its head IS on main")
   })
 
   it("leaves a withdrawal whose content is not on the base alone", async () => {
-    const app = await createCliApp([
-      {
-        pr: "PR1",
-        branch: "topic/live",
-        base: "main",
-        revs: [{ headSha: LIVE_HEAD, baseSha: BASE_SHA }],
-        terminal: { kind: "withdrawn", reason: "superseded by a different design" },
-      },
-    ])
+    const app = await endedDelivery("topic/live", LIVE_HEAD)
 
     const json = outputIO({ pruneGit: () => mergeGit() })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
-    const listed = JSON.parse(json.stdout()) as { prs: readonly Readonly<{ id: string; status: string }>[] }
-    expect(listed.prs[0]).toMatchObject({ id: "PR1", status: "withdrawn" })
+    const listed = JSON.parse(json.stdout()) as { history: readonly HistoryRow[] }
+    expect(listed.history[0]).toMatchObject({ id: "PR1", state: "ended" })
+    // The override is the whole point of the pair: absent here, present above.
+    expect(listed.history[0]?.alreadyLanded, "an unlanded head must earn no repository override").toBeUndefined()
+
+    const human = outputIO({ pruneGit: () => mergeGit(), columns: 200 })
+    expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("ended without landing (last run")
   })
 
   /** The fake above proves the projection; this proves the plumbing under it —
@@ -382,8 +444,11 @@ describe("pr list merge reconciliation (22376)", () => {
       }),
     })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
-    expect((JSON.parse(json.stdout()) as { prs: readonly Readonly<{ status: string }>[] }).prs[0]).toMatchObject({
-      status: "submitted",
+    // S7: a standing submit fact is a `live` row, and `pending` is the state a
+    // submission carries before any compose. The git fake throws on every
+    // capability, so reaching exit 0 IS the proof that none was consulted.
+    expect((JSON.parse(json.stdout()) as { live: readonly Readonly<{ state: string }>[] }).live[0]).toMatchObject({
+      state: "pending",
     })
   })
 })
@@ -448,3 +513,4 @@ describe("pr list WHY reason message", () => {
     expect(row?.whyMessage).toBeUndefined()
   })
 })
+

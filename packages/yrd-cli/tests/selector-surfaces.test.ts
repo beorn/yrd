@@ -13,7 +13,7 @@
  * runs in a bare standalone clone.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -126,7 +126,17 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue>; see
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // The queue owns the mint (S7 branch-is-change, @i/10 22991): a derived
+  // member's identity mints at ADMISSION, and it carries no baseSha of its own,
+  // so the fixture supplies both. Without them derived admission refuses, the
+  // compose swallows the refusal as an empty batch, and every selector below
+  // misses against "0 retained run member(s)".
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -195,45 +205,77 @@ const ONE_PR_SEED: readonly ChangeSeed[] = [
   { pr: "PR1", branch: "Topic/One", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] },
 ]
 
+/**
+ * Mint the seeded branch's derived identity by composing once.
+ *
+ * S7 (branch-is-change, @i/10 22991) moved the `PRn` mint from intake to
+ * ADMISSION: a submit fact alone carries no id, and `PR1` first exists on the
+ * `ChangeSnapshot` a compose retains (`mintDerivedMemberIdentity`). Every row
+ * below names a canonical identity, so the fixture has to have run once — a
+ * bare submit fact resolves to nothing and the surface refuses with
+ * `searched 1 submitted branch and 0 retained run member(s)`.
+ */
+async function primeIdentity(app: CliApp): Promise<void> {
+  await app.queue.run({}, { runner: "selector-test", leaseMs: 60_000 })
+}
+
 describe("case-insensitive CLI selector surfaces", () => {
   it.each([
     {
+      // S7: `pr.runs` answers with the retained run MEMBER, not a `pr` record —
+      // the member snapshot is the identity now (`resolveDelivery`).
       surface: "pr runs",
       args: ["pr", "runs", "pr1", "--json"],
-      expected: { command: "pr.runs", pr: { id: "PR1" } },
+      expected: { command: "pr.runs", member: { id: "PR1" } },
     },
     {
+      // `pr#1.1` folds through `parseChangeSelector`; the revision it carries
+      // is the member's own `revision`, not a `revs[]` array.
       surface: "pr runs (copy-pasted display identity)",
       args: ["pr", "runs", "pr#1.1", "--json"],
-      expected: { command: "pr.runs", pr: { id: "PR1", revs: [{ n: 1 }] } },
+      expected: { command: "pr.runs", member: { id: "PR1", revision: 1 } },
     },
     {
+      // KNOWN RED — do not "fix" by folding the seed's branch to lowercase.
+      // Pre-S7 a branch alias folded case-insensitively; `derivedSelectorBranch`
+      // now looks the selector up as an EXACT key in `bays.submits`, so
+      // `topic/one` misses the seeded `Topic/One`. That is the regression this
+      // file's @failure contract exists to catch, and the fix belongs in src.
       surface: "pr runs (branch alias, folded)",
       args: ["pr", "runs", "topic/one", "--json"],
-      expected: { command: "pr.runs", pr: { id: "PR1", branch: "Topic/One" } },
+      expected: { command: "pr.runs", member: { id: "PR1", branch: "Topic/One" } },
     },
     // "pr close" row deleted (S7 branch-is-change, @i/10 22991): `pr close`
     // refuses close-retired before resolving any selector, so the fold is no
     // longer observable on that surface.
     {
+      // KNOWN RED — src defect, and NOT a folding one: `queue run` refuses
+      // every selector form on the derived lane, `pr1`, `PR1` and the exact
+      // `Topic/One` alike (measured). `resumableQueueRoots` selects with
+      // `explicitPRs(state.bays, args, materializeDerivedRunMembers(state.bays,
+      // args.derived ?? []))`, and the CLI's `runQueues` sends only `prs`, so
+      // the batch a selector is matched against is always EMPTY. Composes its
+      // own batch, so this row must NOT be primed.
       surface: "queue run",
       args: ["queue", "run", "pr1", "--json"],
+      prime: false,
       expected: { command: "queue.run", results: [{ prs: [{ id: "PR1" }] }] },
     },
     {
       surface: "pr checks",
       args: ["pr", "checks", "pr1", "--json"],
-      expected: { kind: "pr.check", pr: "PR1" },
       // This row's subject is the SELECTOR, and the canonical row it prints is
-      // unchanged. The exit moved because nothing has judged this PR yet, and
-      // `pr checks` no longer reads an absent verdict as a pass
-      // (@i/10-merge-queue/failed-check-erased).
-      exit: 1,
+      // unchanged. Exit is 0 because minting the identity means composing, and
+      // that compose ran the check — the "nothing has judged this yet" exit-1
+      // case moved to required-check-verdicts.test.ts, which owns it.
+      expected: { kind: "pr.check", pr: "PR1", status: "passed" },
     },
     {
+      // S7: `pr.list` answers `live` (standing facts and their retained
+      // members) plus `history`, not the deleted store's flat `prs`.
       surface: "pr list base filter",
       args: ["pr", "list", "--base", "MAIN", "--json"],
-      expected: { command: "pr.list", prs: [{ id: "PR1", base: "main" }] },
+      expected: { command: "pr.list", live: [{ id: "PR1", base: "main" }] },
     },
     {
       surface: "queue list base filter",
@@ -247,8 +289,21 @@ describe("case-insensitive CLI selector surfaces", () => {
     },
   ])(
     "$surface resolves the folded selector and preserves canonical output",
-    async ({ args, expected, exit }: { args: readonly string[]; expected: object; exit?: number }) => {
+    async ({
+      args,
+      expected,
+      exit,
+      prime,
+    }: {
+      args: readonly string[]
+      expected: object
+      exit?: number
+      prime?: boolean
+    }) => {
       const app = await createCliApp({ seeds: ONE_PR_SEED })
+      // Surfaces that READ an identity need one to exist first; the surface that
+      // composes its own batch mints as it runs and must start from the fact.
+      if (prime !== false) await primeIdentity(app)
       const output = outputIO()
 
       expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(exit ?? 0)
@@ -258,14 +313,23 @@ describe("case-insensitive CLI selector surfaces", () => {
 
   it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
     const app = await createCliApp({ seeds: ONE_PR_SEED })
+    await primeIdentity(app)
     const output = outputIO()
 
     expect(await runYrd(app, yrd("pr", "merge", "pr1", "--json"), output.io)).toBe(1)
     expect(JSON.parse(output.stderr())).toMatchObject({ command: "pr.merge", pr: "PR1" })
   })
 
+  /**
+   * KNOWN RED on the `--pr` leg — src defect, and a genuine FOLDING one, unlike
+   * `queue run` above. Measured on this fixture: `watch --pr PR1` and
+   * `watch --pr Topic/One` both answer 0, `watch --pr pr1` refuses. So the
+   * scope resolver reaches the right population and simply never canonicalizes
+   * the operator's string. The `--base` leg (`MAIN` → `main`) still folds.
+   */
   it("applies canonical PR and base scopes to bounded watch projections", async () => {
     const app = await createCliApp({ seeds: ONE_PR_SEED })
+    await primeIdentity(app)
 
     for (const scope of [
       ["--pr", "pr1"],
@@ -295,14 +359,27 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(output.stderr()).toContain("base selector 'MAIN' is ambiguous: Main, main")
   })
 
-  it("teaches an accepted form when a copied PR-shaped selector is malformed", async () => {
+  /**
+   * S7 retired the `pr#N.R` half of this message along with the records it
+   * described (`changeNotFoundMessage`): with no record store there is no
+   * population to draw an example form FROM, and teaching a form nothing can
+   * satisfy is worse than teaching nothing. What survives — and what an
+   * operator who pasted a malformed identity actually needs — is the forensic
+   * half: the selector back, and both populations that were searched.
+   */
+  it("says what it searched when a copied PR-shaped selector is malformed", async () => {
     const app = await createCliApp({ seeds: ONE_PR_SEED })
+    await primeIdentity(app)
     const output = outputIO()
 
     expect(await runYrd(app, yrd("pr", "runs", "pr#1.bad", "--json"), output.io)).toBe(1)
-    expect(output.stderr()).toContain("accepted form: pr#1.1")
+    expect(output.stderr()).toContain("no change 'pr#1.bad'")
+    expect(output.stderr()).toContain("searched 1 submitted branch and 1 retained run member(s)")
   })
 
+  /** KNOWN RED — blocked on the same `queue run` selection defect as the row
+   * above: the setup step (`queue run PR1`) cannot select anything, so the log
+   * assertions never get a run to project. */
   it("applies canonical PR and base scopes to log projections", async () => {
     const app = await createCliApp({ seeds: ONE_PR_SEED })
     const setup = outputIO()
@@ -342,17 +419,33 @@ describe("case-insensitive CLI selector surfaces", () => {
   // "pr withdraw" row deleted (S7 branch-is-change, @i/10 22991): withdraw
   // refuses withdraw-retired before searching anything, so it no longer emits
   // the searched-population sentence.
+  // S7 replaced the single `searched N change(s)` denominator with the two
+  // populations a selector can still name: the live submit facts, and — on the
+  // CLI resolver, which can also answer from history — the retained run
+  // members. `queue run` selects out of the compose's own batch and so names
+  // only the first.
   it.each([
-    { surface: "queue run", args: ["queue", "run", "nope", "--json"] },
-    { surface: "log --pr", args: ["log", "--pr", "nope", "--json"] },
-    { surface: "pr view", args: ["pr", "view", "nope", "--json"] },
-  ])("$surface says what it searched when a selector finds nothing", async ({ args }) => {
+    { surface: "queue run", args: ["queue", "run", "nope", "--json"], searched: "searched 1 submitted branch" },
+    {
+      // `log --pr` resolves through the queue, so it names the queue's single
+      // denominator rather than the CLI resolver's two.
+      surface: "log --pr",
+      args: ["log", "--pr", "nope", "--json"],
+      searched: "searched 1 submitted branch",
+    },
+    {
+      surface: "pr view",
+      args: ["pr", "view", "nope", "--json"],
+      searched: "searched 1 submitted branch and 1 retained run member(s)",
+    },
+  ])("$surface says what it searched when a selector finds nothing", async ({ args, searched }) => {
     const app = await createCliApp({ seeds: ONE_PR_SEED })
+    await primeIdentity(app)
     const output = outputIO()
 
     expect(await runYrd(app, yrd(...args), output.io)).toBe(1)
     expect(output.stderr()).toContain("no change 'nope'")
-    expect(output.stderr()).toContain("searched 1 change(s)")
+    expect(output.stderr()).toContain(searched)
   })
 
   /** A remerger whose output never depends on selector casing. */
@@ -370,6 +463,8 @@ describe("case-insensitive CLI selector surfaces", () => {
     }
   }
 
+  /** KNOWN RED — blocked on the same `queue run` selection defect: every
+   * `queue run <selector>` form refuses before a check can fail. */
   it("retries a required-check-failed PR through folded selectors without renaming it", async () => {
     let attempts = 0
     const app = await createCliApp({
@@ -398,3 +493,6 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(refused.stderr()).toContain("change 'PR1' required check failed in R1")
   })
 })
+
+
+

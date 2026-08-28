@@ -7,8 +7,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import type { InstalledStep, QueueRecord } from "@yrd/queue"
+import { deriveRunMemberArgs, type InstalledStep, type QueueRecord } from "@yrd/queue"
 import { failureFact } from "@yrd/core"
+import { volatilePrNumberMint } from "@yrd/bay"
 import { createLogger } from "loggily"
 import { createYrdHost as createYrdHostRaw, runYrdProcess } from "../src/host.ts"
 import { queueAuditComparisonLine, requireInstalledDeclaredPlan } from "../src/run.ts"
@@ -456,7 +457,11 @@ async function featureBranch(repo: string, name: string): Promise<string> {
   return sha
 }
 
-describe("the derived plan audit against a real repository", () => {
+// Every test here drives a REAL repository through a real host, and since S7
+// each queue pass costs an extra admission cycle of git work — enough to blow
+// the 5s default under full-suite load (measured 2026-08-28: green standalone,
+// timed out inside the 131-file run).
+describe("the derived plan audit against a real repository", { timeout: 20_000 }, () => {
   it("prints an empty journal as zero runs compared against the tip it read, with the installed leg equal", async () => {
     const repo = await queueRepository()
     const tipSha = await git(repo, "rev-parse", "HEAD")
@@ -561,8 +566,18 @@ describe("the derived plan audit against a real repository", () => {
     const featureSha = await featureBranch(repo, "issue/feature")
     const host = await createYrdHost({ cwd: repo })
     try {
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+      // S7: a run's batch IS its derived membership, and `prs` selects out of
+      // it. A bare `prs: ["<selector>"]` cannot work at all right now — the
+      // resume path materializes only `args.derived`, so every explicit
+      // selector refuses `pr-not-found`; reported as a src defect.
+      const member = deriveRunMemberArgs({
+        bays: host.app.state().bays,
+        queues: host.app.state().queues,
+        mint: volatilePrNumberMint(),
+        branch: "issue/feature",
+      })
+      const run = (await host.app.queue.run({ prs: [], derived: [member] }, { runner: "test", leaseMs: 60_000 }))[0]
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
       expect(run?.stepSelection).toMatchObject({
         source: "declared-at-base",
@@ -578,9 +593,17 @@ describe("the derived plan audit against a real repository", () => {
         compared: 1,
         explicit: 0,
         unrecorded: 0,
-        latest: { run: run?.id, baseSha, configBlobSha: baseBlob, steps: ["check", "merge"] },
+        // S7: `check` is a carrier check and runs at ADMISSION, so the Run
+        // itself carries only `merge`; the audit accounts for the other half
+        // separately (asserted on `sinceLatest` below).
+        latest: { run: run?.id, baseSha, configBlobSha: baseBlob, steps: ["merge"] },
       })
       expect(before?.comparison.runs?.sinceLatest).toContain("the plan the tip declares")
+      // Both halves of the plan are accounted for, at the Run's own base.
+      expect(before?.comparison.runs?.sinceLatest).toContain("merge ran in the Run")
+      expect(before?.comparison.runs?.sinceLatest).toContain(
+        `check ran as checks before queueing for base ${baseSha.slice(0, 8)}`,
+      )
 
       // The merge moved main; a config change on top of it is the next tip.
       const tipSha = await commitConfig(repo, TWO_CHECKS, "declare a second check")
@@ -592,7 +615,11 @@ describe("the derived plan audit against a real repository", () => {
       expect(after?.comparison.runs?.sinceLatest).toBe(
         `config changed since run ${run?.id} (blob ${baseBlob.slice(0, 8)} → ${tipBlob.slice(0, 8)}): ` +
           "step 'second' is declared at the tip and was not in that run's plan. " +
-          "That run: check, merge ran in the Run. The next run uses the new plan check→second→merge.",
+          // S7: the sentence names where each half of the plan executed — the
+          // carrier check at admission, the merge in the Run — instead of
+          // listing both as run steps.
+          `That run: merge ran in the Run; check ran as checks before queueing for base ${baseSha.slice(0, 8)}, ` +
+          "the Run's base. The next run uses the new plan check→second→merge.",
       )
       const text = queueAuditComparisonLine(after?.comparison)
       expect(text).toContain("plan audit: 1 of the 1 most recent runs compared against git at their base shas.")
@@ -607,8 +634,11 @@ describe("the derived plan audit against a real repository", () => {
     const featureSha = await featureBranch(repo, "issue/feature")
     const host = await createYrdHost({ cwd: repo })
     try {
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      await host.app.bays.requestChecks({ pr: "PR1" })
+      // S7: the branch/submitted fact IS the submission (the record-lane
+      // `bays.submit` command refuses `record-mint-retired`), and that same
+      // fact is the standing check authority for its sha — which is why the
+      // separate `requestChecks` call retired with the record store.
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
       // The selectorless drain runs the checks-before-queueing stage first,
       // then the integrating Run reuses that evidence and executes only merge
       // — the exact live shape (PR1946/R3404) the audit misread as "did not
@@ -641,8 +671,16 @@ describe("the derived plan audit against a real repository", () => {
     const featureSha = await featureBranch(repo, "issue/feature")
     const host = await createYrdHost({ cwd: repo })
     try {
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      const run = (await host.app.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 }))[0]
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+      const member = deriveRunMemberArgs({
+        bays: host.app.state().bays,
+        queues: host.app.state().queues,
+        mint: volatilePrNumberMint(),
+        branch: "issue/feature",
+      })
+      const run = (
+        await host.app.queue.run({ prs: [], derived: [member], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+      )[0]
       expect(run?.stepSelection).toMatchObject({ source: "explicit", steps: ["check"] })
       const audit = await host.services.queue?.auditEnvironment?.()
       expect(audit?.findings).toEqual([])

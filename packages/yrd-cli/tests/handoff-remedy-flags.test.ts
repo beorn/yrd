@@ -53,6 +53,27 @@ describe("handoff-bay-missing remedy prescribes only flags `bay open` really has
 
   it("the remedy is copy-pasteable: it embeds the packet's branch, not a placeholder", () => {
     const remedy = handoffBayMissingRemedy("task/example", "task/23055-branch")
-    expect(remedy).toContain("yrd bay open --pr task/23055-branch")
+    expect(remedy).toContain("yrd in <name> -- git switch task/23055-branch")
+  })
+
+  it("names no retired flag — the defect this remedy shipped TWICE", () => {
+    // Flavour 2 round one prescribed `--branch`, which `bay open` never had.
+    // The fix substituted `--pr`, which S7 then retired, so round two was
+    // already false when it shipped: the flag is still DECLARED (a runbook
+    // reader gets a typed refusal rather than "unknown option"), and
+    // `bay open --help` therefore still lists it — which is exactly why the
+    // flags-exist check above cannot catch this and this one must exist.
+    const remedy = handoffBayMissingRemedy("task/example", "task/23055-branch")
+    expect(remedy).not.toContain("--pr")
+    expect(remedy).not.toContain("--branch")
+  })
+
+  it("prescribes a bay the operator can actually open on their own branch", () => {
+    // `bay open --bay <name>` opens the workspace; `yrd in` puts the branch in
+    // it. Both live, and the cure is single-sourced with `bay open --pr`'s own
+    // retirement message so the next retirement is one edit, not two.
+    const remedy = handoffBayMissingRemedy("task/example", "task/23055-branch")
+    expect(remedy).toContain("yrd bay open --bay <name>")
+    expect(liveBayOpenHelp()).toContain("--bay")
   })
 })

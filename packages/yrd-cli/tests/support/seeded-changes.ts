@@ -1,12 +1,18 @@
 /**
- * S7 (branch-is-change, @i/10 22991): the record store's mint retired with the
- * bay record verbs, but records remain replayed HISTORY — the pr/* reducers
- * stay live for replay until the store field deletes at integration. Fixtures
- * that need a record state therefore seed it the only way production can still
- * produce one: as journal events, mirroring
- * packages/yrd-bay/tests/require-live-pr.test.ts. The modern pushed-event arm
- * requires changeId and submitter together; pr/submitted replays through the
- * legacy arm with just the revision identity.
+ * S7 (branch-is-change, @i/10 22991): the change-record store is GONE, so the
+ * `pr/*` frames a seed writes are pure HISTORY — every `pr/*` reducer is a bare
+ * `return state`, and replaying them projects nothing. They stay because a
+ * journal carrying them must still parse (the events/replayEvents registries
+ * are the acceptance authority), and because a fixture's intent is easiest to
+ * read in the vocabulary the delivery actually used.
+ *
+ * What a seed PROJECTS is the branch/submitted fact: a live seed (revisions
+ * ending submitted, no terminal) stands as `bays.submits[branch]`, which since
+ * S7 is the whole of a branch's delivery. A terminal seed writes no submit fact
+ * — an integrated, withdrawn, rejected or canceled delivery has no standing
+ * submit ref — so such a seed is history only, and a test that needs its
+ * identity back must resolve it the way production does, through a retained run
+ * member.
  */
 import { Command } from "@yrd/core"
 
@@ -115,6 +121,18 @@ export function seededChangesEntry(
         })
       }
     })
+    // The one PROJECTED fact: a live seed's standing submit ref. Written after
+    // the revision history so its `at` is the newest, exactly as a real submit
+    // lands after the push it approves.
+    if (seed.terminal === undefined && (seed.revs.at(-1)?.delivery ?? "submitted") === "submitted") {
+      if (lastRevision === 0) throw new Error(`seed ${seed.pr}: a live seed needs at least one revision`)
+      events.push({
+        id: nextId(),
+        name: "branch/submitted",
+        ts: at,
+        data: { branch: seed.branch, sha: lastHead, base },
+      })
+    }
     const terminal = seed.terminal
     if (terminal !== undefined) {
       if (lastRevision === 0) throw new Error(`seed ${seed.pr}: a terminal seed needs at least one revision`)

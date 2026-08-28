@@ -378,7 +378,7 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 120, rows: 40 })(
       createElement(QueueTimelineView, {
         projection,
-        state: { byId: {}, prs: {}, receipts: {}, submits: {} },
+        state: { byId: {}, submits: {} },
         columns: 120,
       }),
     )

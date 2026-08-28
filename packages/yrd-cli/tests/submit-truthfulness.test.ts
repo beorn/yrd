@@ -1,22 +1,21 @@
 /**
- * @failure `pr submit` exits 0 while the change it returns needs its author (needs-author), reports success for a submission that wrote nothing, emits a poorer envelope on the refused branch than on success, or keeps advisory warnings --json-only so a human resubmitting a merged branch reads silence.
+ * @failure `pr submit` reports success for a submission that wrote nothing, or
+ * refuses a resubmit whose branch's previous delivery ended — so exit 0 stops
+ * meaning "a submit fact was written", and a re-push after a rejection has no
+ * way back into the queue.
  * @level l2
  * @consumer @yrd/cli pr submit
  *
- * The reproduction needs no concurrency: `@yrd/bay` submitSelection short-
- * circuits a needs-author change back unmodified without throwing (the
- * live-change early return), so the submit result set carries a change the
- * author must act on while the command exits 0. A REJECTED record is terminal
- * post-purge: its branch falls through to the derived lane instead, and exit 0
- * is truthful only because the branch-submit fact was actually written.
- *
- * Q1 fence (cli.test.ts "Same merged head -> informational already merged,
- * exit 0"): only needs-author bills exit 1 — integrated/already-landed
- * resubmits stay informational exit 0, and a rejected-record branch re-enters
- * the derived lane (exit 0, no reopen).
+ * Since S7 (branch-is-change, @i/10 22991) there is one lane and one durable
+ * effect: `pr submit` writes the branch's submit fact. Exit 0 is truthful
+ * exactly when that fact was written, and that is what these tests pin. The
+ * delivery-state arms this file used to fence — needs-author billing, the
+ * already-merged advisory, the per-change `prs[].eligibility` envelope — all
+ * read the change record and died with it; a record's terminal state can no
+ * longer refuse, reopen, or annotate a submission.
  */
 import { describe, expect, it } from "vitest"
-import { changeDeliveryState, createBayJobDefs, resolveChange, withBays, type BaysState } from "@yrd/bay"
+import { createBayJobDefs, volatilePrNumberMint, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { withContests, type ContestGit } from "@yrd/contest"
@@ -90,7 +89,16 @@ async function createCliApp(
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // S7 (branch-is-change, @i/10 22991): a derived member's identity mints at
+  // ADMISSION, and it carries no baseSha of its own. Without both, derived
+  // admission refuses, the compose swallows the refusal as an empty batch,
+  // and every surface below sees zero retained run members.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   const contests = withContests({ runners: [], evaluators: [], git })
   const base = pipe(
@@ -156,13 +164,20 @@ function services(app: CliApp): YrdCliServices {
       run: async (request: ProcessRequest) => {
         const target = request.argv.find((arg) => arg.startsWith("refs/remotes/origin/") && arg.endsWith("^{commit}"))
         const branch = target?.slice("refs/remotes/origin/".length, -"^{commit}".length)
-        const observed = branch === undefined ? undefined : resolveChange(app.bays.state() as BaysState, branch)
+        // The standing submit fact IS the branch's head since S7 — the
+        // record's revision list is gone, and `submits[branch]` is the one
+        // place a live head is written down.
+        const observed = branch === undefined ? undefined : app.bays.state().submits[branch]
         return {
           stdout: request.argv.includes("merge-base")
             ? `${"0".repeat(39)}1\n`
-            : observed === undefined
+            : // The pre-admission gitlink gate enumerates the merge base's tree
+              // (`ls-tree -r -z --full-tree`). This fixture's repository has no
+              // submodules, so that listing is empty — a bare newline is not an
+              // empty listing, it is a malformed entry.
+              request.argv.includes("ls-tree")
               ? ""
-              : `${observed.revs[observed.revs.length - 1]?.head ?? ""}\n`,
+              : `${observed?.sha ?? ""}\n`,
           stderr: "",
           exitCode: 0,
           signal: null,
@@ -182,32 +197,11 @@ function services(app: CliApp): YrdCliServices {
   }
 }
 
-function recordOf(app: CliApp, selector: string) {
-  const pr = resolveChange(app.bays.state() as BaysState, selector)
-  if (pr === undefined) throw new Error(`no seeded change '${selector}'`)
-  return pr
-}
-
-/** A change whose failed run attributed the failure to its author. S7: the
- * submitted record is seeded as journal history; the failing run then writes
- * the durable pr/needs-author fact exactly as before. */
-async function needsAuthorApp(): Promise<CliApp> {
-  const app = await createCliApp({
-    failingCheckCode: "composition-retired",
-    seeds: [
-      { pr: "PR1", branch: "topic/needs-author", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] },
-    ],
-  })
-  await app.queue.run({ prs: ["PR1"] }, { runner: "submit-truthfulness-test", leaseMs: 60_000 })
-  expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("needs-author")
-  return app
-}
-
-/** A change in the legacy `rejected` delivery state. No live command emits
- * `pr/rejected` any more, so the fixture replays it the way such changes really
- * exist in the fleet: from the journal (pr/pushed + pr/submitted + pr/rejected
- * in one seeded frame). */
-async function rejectedApp(): Promise<CliApp> {
+/** A branch whose delivery ENDED: the journal carries its whole record history
+ * (pushed, submitted, then a legacy `pr/rejected`), and no submit fact stands
+ * for it — which is exactly how such a branch exists in the fleet now. No live
+ * command emits `pr/rejected` any more, so the frame can only be replayed. */
+async function endedDeliveryApp(): Promise<CliApp> {
   const app = await createCliApp({
     idStart: 0x100,
     seeds: [
@@ -216,52 +210,41 @@ async function rejectedApp(): Promise<CliApp> {
         branch: "topic/rejected",
         base: "main",
         revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }],
-        terminal: { kind: "rejected", run: "R1", step: "check", detail: "legacy rejection: payload does not typecheck" },
+        terminal: {
+          kind: "rejected",
+          run: "R1",
+          step: "check",
+          detail: "legacy rejection: payload does not typecheck",
+        },
       },
     ],
   })
-  expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("rejected")
+  expect(app.state().bays.submits["topic/rejected"], "an ended delivery stands no submit fact").toBeUndefined()
   return app
 }
 
-/** A change integrated by a completed run — the Q1 frozen-identity fixture.
- * S7: the submitted record is seeded; the run itself records its own check
- * request at admission (a PRE-seeded request row wedges compose — measured
- * 2026-08-27). */
-async function integratedApp(): Promise<CliApp> {
+/** A branch with a STANDING submit fact at `HEAD_SHA` — a live delivery, which
+ * since S7 is all a submitted change is. */
+async function liveApp(): Promise<CliApp> {
   const app = await createCliApp({
-    seeds: [{ pr: "PR1", branch: "topic/merged", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] }],
+    seeds: [{ pr: "PR1", branch: "topic/live", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] }],
   })
-  await app.queue.run({ prs: ["PR1"] }, { runner: "submit-truthfulness-test", leaseMs: 60_000 })
-  expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("integrated")
+  expect(app.state().bays.submits["topic/live"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
   return app
 }
 
-describe("pr submit exit truthfulness", () => {
-  it("a resubmit that hands back a needs-author change exits 1", async () => {
-    await using app = await needsAuthorApp()
-    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
-
-    const exit = await runYrd(app, yrd("pr", "submit", "topic/needs-author", "--json"), output.io, services(app))
-    const envelope = JSON.parse(output.stdout()) as { prs: readonly { id: string; status: string }[] }
-    expect(envelope.prs).toMatchObject([{ id: "PR1", status: "needs-author" }])
-    // The change still needs its author; a 0 here reads as "submitted fine".
-    expect(exit, "needs-author submit must bill the author with exit 1").toBe(1)
-  })
-
-  it("a same-head resubmit of a rejected change re-enters the derived lane with exit 0 and a written fact", async () => {
-    await using app = await rejectedApp()
+describe("pr submit exit truthfulness — exit 0 means a submit fact was written", () => {
+  it("re-enters a branch whose delivery ended, writing a fresh fact and exiting 0", async () => {
+    await using app = await endedDeliveryApp()
     const output = outputIO({ resolveRevision: async () => HEAD_SHA })
 
     const exit = await runYrd(app, yrd("pr", "submit", "topic/rejected", "--json"), output.io, services(app))
-    // The record is terminal and stays terminal: the resubmit must not reopen
-    // it (the legacy record mint's reopen door is retired).
-    expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("rejected")
+
     const envelope = JSON.parse(output.stdout()) as {
-      prs: readonly { id: string; status: string }[]
       derived?: readonly { lane: string; branch: string; sha: string; base: string }[]
     }
-    expect(envelope.prs).toEqual([])
+    // The rejection is frozen history and cannot refuse the branch: there is no
+    // record left to reopen, and no terminal state left to consult.
     expect(envelope.derived).toEqual([{ lane: "derived", branch: "topic/rejected", sha: HEAD_SHA, base: "main" }])
     // Exit 0 is truthful only because the submission DID something durable:
     // the branch-submit fact is written, so the next queue pass composes it.
@@ -269,44 +252,42 @@ describe("pr submit exit truthfulness", () => {
     expect(exit, "a derived acceptance is a success and exits 0").toBe(0)
   })
 
-  it("Q1: a same-head resubmit of an integrated branch still exits 0", async () => {
-    await using app = await integratedApp()
+  it("re-writes the fact for a same-head resubmit of a live branch and exits 0", async () => {
+    // Q1 (was: "a same-head resubmit of an integrated branch still exits 0").
+    // The record's frozen identity is gone, so the question that survives is
+    // whether a redundant-looking resubmit still lands a fact — it must, since
+    // a re-push of the submit ref is the ONLY retry gesture left.
+    await using app = await liveApp()
     const output = outputIO({ resolveRevision: async () => HEAD_SHA })
 
-    const exit = await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), output.io, services(app))
+    const exit = await runYrd(app, yrd("pr", "submit", "topic/live", "--json"), output.io, services(app))
+
     expect(exit, output.stderr()).toBe(0)
     const envelope = JSON.parse(output.stdout()) as {
-      prs: readonly { id: string; status: string }[]
-      warnings?: readonly string[]
+      derived?: readonly { lane: string; branch: string; sha: string; base: string }[]
     }
-    expect(envelope.prs).toMatchObject([{ id: "PR1", status: "integrated" }])
-    expect((envelope.warnings ?? []).join("\n")).toContain("already merged as change 'PR1'")
-  })
-})
-
-describe("pr submit refused-branch envelope", () => {
-  it("a refused submit's JSON carries the same per-change eligibility key as success", async () => {
-    await using app = await needsAuthorApp()
-    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
-
-    await runYrd(app, yrd("pr", "submit", "topic/needs-author", "--json"), output.io, services(app))
-    const envelope = JSON.parse(output.stdout()) as {
-      prs: readonly { id: string; eligibility?: { reason?: { code: string; message: string } } }[]
-    }
-    // The success branch projects projectChangeTaskStatusWithEligibility plus
-    // an `eligibility` key per change; the refused branch must not be poorer.
-    expect(envelope.prs[0]?.eligibility, "refused submit must carry eligibility like success does").toBeDefined()
-    expect(envelope.prs[0]?.eligibility?.reason).toMatchObject({ code: "needs-author" })
+    expect(envelope.derived).toEqual([{ lane: "derived", branch: "topic/live", sha: HEAD_SHA, base: "main" }])
+    expect(app.state().bays.submits["topic/live"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
   })
 
-  it("the already-merged warning reaches human stderr, not only --json", async () => {
-    await using app = await integratedApp()
-    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
+  it("refuses instead of exiting 0 when there is no head to submit", async () => {
+    // The fence the whole file exists for: a submission that produced no fact
+    // must never answer 0. A branch nobody pushed resolves to no commit, so
+    // the refusal lands before any fact is written. (`pr submit`'s other
+    // no-write arm, `change-selection-empty`, guards a selection that resolves
+    // a head but yields no submission; this fixture cannot reach it, and
+    // nothing in this suite covers it.)
+    await using app = await liveApp()
+    const output = outputIO({ resolveRevision: async () => undefined })
 
-    const exit = await runYrd(app, yrd("pr", "submit", "topic/merged"), output.io, services(app))
-    expect(exit).toBe(0)
-    // cli.test.ts pins the JSON half; this is the human half the JSON test
-    // cannot see: without printResultWithWarnings the advisory evaporates.
-    expect(output.stderr()).toContain("already merged as change 'PR1'")
+    const exit = await runYrd(app, yrd("pr", "submit", "topic/unpushed", "--json"), output.io, services(app))
+
+    expect(exit, output.stdout()).toBe(1)
+    expect(output.stdout()).toBe("")
+    const refusal = JSON.parse(output.stderr()) as { failure: { code: string; message: string } }
+    expect(refusal.failure.code).toBe("git-commit-missing")
+    expect(app.state().bays.submits["topic/unpushed"]).toBeUndefined()
+    // The live branch is untouched: a refused selection writes nothing at all.
+    expect(app.state().bays.submits["topic/live"]).toMatchObject({ sha: HEAD_SHA })
   })
 })

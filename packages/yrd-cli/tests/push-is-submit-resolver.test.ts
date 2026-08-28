@@ -13,8 +13,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import type { ReceiverRefUpdate, ReceiverSubmitIntent } from "@yrd/bay"
-import type { ReceiverResult } from "@yrd/bay"
-import { materializeCarrier, receiverTarget, type ReceiverBayView } from "../src/host.ts"
+import { receiverTarget, type ReceiverBayView } from "../src/host.ts"
 
 const process = createProcess()
 const zero = "0".repeat(40)
@@ -147,68 +146,23 @@ describe("push-is-submit target resolution", () => {
   })
 })
 
-describe("push-is-submit carrier materialization", () => {
-  /** A result shaped exactly as the receiver writes one for a submit push. */
-  function result(headSha: string, overrides: Partial<ReceiverResult> = {}): ReceiverResult {
-    return {
-      version: 1,
-      id: "a".repeat(64),
-      receivedAt: "2026-08-12T00:00:00.000Z",
-      ref: "refs/for/main/my-change",
-      branch: "issue/my-change",
-      change: "my-change",
-      oldSha: zero,
-      headSha,
-      intake: { name: "my-change", base: "main", baseSha: zero, branch: "issue/my-change", headSha },
-      ...overrides,
-    } as ReceiverResult
-  }
-
-  it("creates the carrier the submit push named, at the head it pushed", async () => {
-    const { repo, mainSha } = await repository()
-    // The whole point: this ref does not exist, and nothing else would create
-    // it. Without it the change is admitted and then refused forever by the
-    // pre-submit gate with `required-check candidate '<branch>' is missing`.
-    await expect(git(repo, "rev-parse", "--verify", "refs/heads/issue/my-change")).rejects.toThrow()
-
-    await materializeCarrier(process, repo, result(mainSha))
-    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
-  })
-
-  it("fast-forwards an existing carrier, and is a no-op on replay", async () => {
-    const { repo, mainSha, releaseSha } = await repository()
-    // `release/2` is one behind `main`, so this is a genuine fast-forward.
-    await git(repo, "update-ref", "refs/heads/issue/my-change", releaseSha)
-    await materializeCarrier(process, repo, result(mainSha))
-    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
-
-    // Draining the same result twice must not fail — the carrier is already
-    // where it belongs, which is success, not a collision.
-    await materializeCarrier(process, repo, result(mainSha))
-    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(mainSha)
-  })
-
-  it("refuses to move a carrier the pushed head does not descend from", async () => {
-    const { repo, mainSha } = await repository()
-    // A sibling commit: neither head contains the other, so overwriting would
-    // silently drop whatever the carrier already carried.
-    await git(repo, "checkout", "-q", "-b", "sibling", "release/2")
-    await writeFile(join(repo, "sibling.txt"), "sibling\n")
-    await git(repo, "add", "-A")
-    await git(repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "sibling")
-    const siblingSha = await git(repo, "rev-parse", "HEAD")
-    await git(repo, "update-ref", "refs/heads/issue/my-change", siblingSha)
-
-    await expect(materializeCarrier(process, repo, result(mainSha))).rejects.toThrow(/does not descend from/u)
-    // And it left the carrier exactly where it was.
-    expect(await git(repo, "rev-parse", "refs/heads/issue/my-change")).toBe(siblingSha)
-  })
-
-  it("does nothing for a branch push, which already is its own branch", async () => {
-    const { repo, mainSha } = await repository()
-    const branchPush = result(mainSha, { ref: "refs/heads/task/one", branch: "task/one", change: undefined })
-    await materializeCarrier(process, repo, branchPush)
-    // No ref invented: a refs/heads push created its branch by pushing it.
-    await expect(git(repo, "rev-parse", "--verify", "refs/heads/task/one")).rejects.toThrow()
-  })
-})
+/*
+ * S7 (branch-is-change, @i/10 22991): the "push-is-submit carrier
+ * materialization" block was deleted here with the function it drove.
+ * `materializeCarrier` (src/host.ts) ran as the host's intake callback; the
+ * receiver now materializes the carrier inside its own drain
+ * (`materializeSubmitCarrier`, @yrd/bay receiver.ts) under a CAS against the
+ * carrier ref, before the submit fact — a fact without its carrier branch is
+ * unrepresentable — and the host callback is gone. The successor is private to
+ * that module and reachable only through the drain, so nothing in THIS package
+ * can drive it.
+ *
+ * LOST COVERAGE, four cases: (1) the carrier ref the submit push named is
+ * CREATED at the pushed head; (2) an existing carrier fast-forwards; (3) a
+ * replay of the same result is a no-op rather than a collision; (4) a pushed
+ * head the carrier does not descend from is refused, carrier unmoved.
+ * packages/yrd-bay/tests/receiver.test.ts covers (4)'s message and the
+ * carrier-moved refusal, but models materialization by hand (`update-ref`)
+ * rather than proving the drain performs it, so (1)-(3) are currently unproven
+ * anywhere. They belong in that file, against the drain.
+ */

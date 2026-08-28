@@ -11,9 +11,15 @@ import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import type { BaysState } from "@yrd/bay"
+import { volatilePrNumberMint, type BaysState } from "@yrd/bay"
 import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
-import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
+import {
+  deriveRunMemberArgs,
+  DIAGNOSTICS_COMPARISON_READY,
+  GitCheckEvidenceSchema,
+  IntegrationProofSchema,
+  Queues,
+} from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
@@ -73,6 +79,39 @@ async function initBareMain(cwd: string, remote: string): Promise<void> {
 
 async function journalEnvelope(repo: string) {
   return Array.fromAsync(createReadOnlyJournal({ dir: join(repo, ".git", "yrd") }).read())
+}
+
+/**
+ * The job an ADMISSION cycle ran for a required check.
+ *
+ * S7 (branch-is-change, @i/10 22991): every member is derived, and a derived
+ * member's required checks execute at admission — one cycle BEFORE the Run that
+ * merges what they judged. A check's evidence therefore lives on a standalone
+ * job (keyed `admission:<pr>:<revision>:<baseSha>`), not on a Run step, and a
+ * check that fails stops the member before any Run is minted at all.
+ *
+ * Loud on purpose: a scenario that produced two check jobs, or none, is a
+ * different scenario than the caller believes it is asserting on.
+ */
+function admissionCheckJobs<Job extends { definition: string; requestedAt: string }>(
+  jobs: Readonly<Record<string, Job>>,
+  step: string,
+): Job[] {
+  const definition = `queue.step.${step}`
+  return Object.values(jobs)
+    .filter((job) => job.definition === definition)
+    .toSorted((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+}
+
+function admissionCheckJob<Job extends { definition: string; requestedAt: string }>(
+  jobs: Readonly<Record<string, Job>>,
+  step: string,
+): Job {
+  const found = admissionCheckJobs(jobs, step)
+  if (found[0] === undefined || found.length !== 1) {
+    throw new Error(`expected exactly one admission '${step}' job, found ${found.length}`)
+  }
+  return found[0]
 }
 
 function testJournal(dir: string, log?: ConditionalLogger) {
@@ -891,7 +930,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })).resolves.toBeDefined()
+    await expect(
+      app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" }),
+    ).resolves.toBeDefined()
     await expect(Array.fromAsync(journal.read())).resolves.toHaveLength(1)
   })
 
@@ -921,15 +962,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })).rejects.toMatchObject(
-      {
-        failure: {
-          kind: "refusal",
-          code: "journal-write-version-floor",
-          message: expect.stringContaining("yrd admin journal bump 3"),
-        },
+    await expect(
+      app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "journal-write-version-floor",
+        message: expect.stringContaining("yrd admin journal bump 3"),
       },
-    )
+    })
     await expect(Array.fromAsync(journal.read())).resolves.toEqual([])
   })
 
@@ -1085,9 +1126,18 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
 
-    expect(provisioned).toHaveLength(2)
+    // Four executions of the two checks, not two: since S7 the checks run once
+    // at ADMISSION and again inside the Run this plan produces (it declares no
+    // merge step, so the Run has nothing else to execute and no admission
+    // evidence to substitute for). Every one of them provisions first, which is
+    // what this test is about — and all four land in the SAME warm worktree, so
+    // provisioning is per execution, never per worktree.
+    expect(provisioned).toHaveLength(4)
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(new Set(provisioned)).toHaveLength(1)
+    expect(run?.steps.map((step) => step.name)).toEqual(["typecheck", "lint"])
+    // `.size`, not `toHaveLength`: a Set has no `length`, so the old spelling
+    // could not have failed on a second worktree.
+    expect(new Set(provisioned).size).toBe(1)
   })
 
   it("regenerates a manifest-changing pin lockfile before the candidate identity is fixed", async () => {
@@ -1532,9 +1582,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       })
       await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
-      const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
+      const runs = await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
-      expect(run).toMatchObject({
+      // S7: the required check runs at ADMISSION, so a candidate environment
+      // refusal now stops the member before any Run is minted — the pass ends
+      // with no runs at all, and the streak lands in the queue's own
+      // admission-refusal ledger.
+      expect(runs).toEqual([])
+      expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+        pr: "PR1",
+        branch: "issue/feature",
+        code: "queue-environment-refused",
+        kind: "failure",
+        reason: expect.stringContaining(expectedMessage),
+      })
+      // The structured evidence — which is what makes the refusal RETRYABLE
+      // rather than a wedge — rides the admission job, since the ledger row
+      // flattens its cause to prose.
+      expect(admissionCheckJob(app.state().jobs.byId, "typecheck")).toMatchObject({
         status: "completed",
         conclusion: "failure",
         error: {
@@ -2501,8 +2566,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
-    expect(run.steps[0]?.job).toMatchObject({ runner: "yrd-local", context: "worktree-context:1" })
+    // The installed plan is still the three configured steps (asserted above),
+    // but a carrier check runs at ADMISSION now, one cycle before the Run that
+    // merges what it judged — so the Run itself carries the remainder.
+    expect(run.steps.map((step) => step.name)).toEqual(["merge", "publish"])
+    // Context 2, not 1: the admission check took the first worktree context.
+    expect(run.steps[0]?.job).toMatchObject({ runner: "yrd-local", context: "worktree-context:2" })
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     const evaluatorRevision = app.jobs.definition("contest.evaluator.security").revision
     const queueRevision = app.jobs.definition("queue.step.security").revision
@@ -2732,12 +2801,21 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const runCycle = async (submits: readonly (readonly [string, string])[]): Promise<void> => {
       for (const [branch, sha] of submits) await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
       commands.length = 0
-      const runs = await app.queue.run({}, { runner: "test", leaseMs: 60_000, continueAdmissions: () => false })
+      // The cycle runs to completion. `continueAdmissions: () => false` used to
+      // stop it after the admission scan, which is how this test observed the
+      // refresh without composing anything; since S7 the authority refresh
+      // happens INSIDE admission, so that shortcut observes zero fetches and
+      // proves nothing.
+      const runs = await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
       const rootFetches = commands.filter(
         (argv) => argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && argv[3] === "fetch",
       )
-      expect(runs).toEqual([])
-      // Every same-base change shares this cycle's one authoritative root refresh.
+      // Every change submitted for this cycle rode it — the plan declares no
+      // merge step, so earlier cycles' members are still live and ride along,
+      // which is exactly the "one per change" fan-out this fetch count fences.
+      const composed = runs.flatMap((run) => run.prs.map((pr) => pr.branch))
+      for (const [branch] of submits) expect(composed, `${branch} must ride this cycle`).toContain(branch)
+      // …and shared its single authoritative root refresh.
       expect(rootFetches).toHaveLength(1)
       expect(rootFetches.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
       commands.length = 0
@@ -3167,7 +3245,9 @@ checks: [{check: {run: "true"}}]
       stderr,
     ).toBe(0)
 
-    expect(JSON.parse(stdout)).toMatchObject({ command: "pr.list", prs: [] })
+    // S7: `pr list` has no record half. An untouched repository has no standing
+    // submit fact and no retained run member, so both sections are empty.
+    expect(JSON.parse(stdout)).toMatchObject({ command: "pr.list", live: [], history: [] })
     expect(await Bun.file(join(repo, ".git", "yrd", "prs.git", "HEAD")).exists()).toBe(false)
     expect(await Bun.file(join(repo, ".git", "yrd", "receiver-inbox")).exists()).toBe(false)
     expect(existsSync(stateDir)).toBe(false)
@@ -3301,14 +3381,12 @@ checks: [{check: {run: "true"}}]
       stderr,
     ).toBe(0)
 
+    // The standing submit fact IS the listed delivery: it shows up under `live`
+    // at the submitted head, with no run yet and no record behind it.
     expect(JSON.parse(stdout)).toMatchObject({
       command: "pr.list",
-      prs: [
-        expect.objectContaining({
-          branch: "issue/feature",
-          revs: [expect.objectContaining({ head: featureSha })],
-        }),
-      ],
+      live: [expect.objectContaining({ branch: "issue/feature", sha: featureSha, base: "main" })],
+      history: [],
     })
     expect(await byteManifest(stateDir)).toEqual(stateBefore)
     expect(await git(repo, "config", "--local", "--list")).toBe(configBefore)
@@ -4045,7 +4123,6 @@ checks: [{check: {run: "true"}}]
       // to a pass, and the submit fact — not a record — is the result.
       expect(JSON.parse(stdout)).toMatchObject({
         command: "pr.submit",
-        prs: [],
         derived: [{ lane: "derived", branch: "issue/feature", base: "main" }],
         requiredChecks: [{ name: "typecheck", status: "passed", exitCode: 0 }],
       })
@@ -4159,7 +4236,6 @@ checks: [{check: {run: "true"}}]
       expect(exitCode, stderr).toBe(0)
       expect(JSON.parse(stdout)).toMatchObject({
         command: "pr.submit",
-        prs: [],
         derived: [{ lane: "derived", branch: "issue/feature", base: "main" }],
         requiredChecks: [{ name: "typecheck", status: "passed", exitCode: 0 }],
       })
@@ -4249,7 +4325,6 @@ checks: [{check: {run: "true"}}]
     // and the passing pre-submit check proved $YRD_CANDIDATE_SHA was that head.
     expect(JSON.parse(stdout)).toMatchObject({
       command: "pr.submit",
-      prs: [],
       derived: [{ lane: "derived", branch: "issue/linked-check", sha: linkedSha, base: "main" }],
       requiredChecks: [{ name: "candidate", status: "passed", exitCode: 0 }],
     })
@@ -4288,7 +4363,9 @@ checks: [{check: {run: "true"}}]
         journalCompatibilityYaml().trimEnd(),
         "base: main",
         "batch: 1",
-        "requires: [review]",
+        // `requires: [review]` used to ride along in this shipping config; it is
+        // a hard `invalid-config` refusal since S7 (no record can carry an
+        // approval), and it was never what this test is about.
         "checks:",
         "  - main-health:",
         "      classification: base",
@@ -4470,7 +4547,6 @@ checks: [{check: {run: "true"}}]
     ).toBe(0)
     expect(JSON.parse(submitJson)).toMatchObject({
       command: "pr.submit",
-      prs: [],
       derived: [{ lane: "derived", branch: "issue/feature", sha: featureSha, base: "main" }],
     })
 
@@ -4504,10 +4580,11 @@ checks: [{check: {run: "true"}}]
     let stdout = ""
     let stderr = ""
 
-    // Post-purge the submit itself is a derived acceptance — the unpublished
-    // pin no longer refuses at submit time. The gate moved to compose, which
-    // must refuse the member LOUDLY (min-commit-unpublished) instead of
-    // queuing or merging the docs change with its incidental pin.
+    // Gate 1 — submit. The pre-admission gitlink gate previews the derived
+    // submission and refuses it before any fact is written. It read the record
+    // half of the selection until S7, which `applyChangeSelection` had already
+    // hard-coded empty, so the gate was silently dead; it now reads the derived
+    // preview and fires again.
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "submit", branch, "--json"], {
         cwd: repo,
@@ -4518,13 +4595,22 @@ checks: [{check: {run: "true"}}]
           stderr += text
         },
       }),
-      stderr,
-    ).toBe(0)
-    expect(JSON.parse(stdout)).toMatchObject({
-      command: "pr.submit",
-      prs: [],
-      derived: [{ lane: "derived", branch, sha: head, base: "main" }],
+    ).toBe(1)
+    expect(stdout).toBe("")
+    expect(JSON.parse(stderr)).toMatchObject({
+      failure: { kind: "refusal", code: "submodule-pin-unpublished", message: expect.stringContaining(pin) },
     })
+
+    // Gate 2 — compose. A submit fact does not have to come through this CLI:
+    // a direct `refs/yrd/submit/<branch>` push lands one at the receiver, and a
+    // branch can also acquire an unpublished pin AFTER its fact stands. So the
+    // fact is planted the way the receiver plants it, and compose must refuse
+    // the member LOUDLY (min-commit-unpublished) instead of queuing or merging
+    // the docs change with its incidental pin.
+    {
+      await using planted = await createYrdHost({ cwd: repo })
+      await planted.app.bays.recordBranchSubmit({ branch, sha: head, base: "main" })
+    }
 
     stdout = ""
     stderr = ""
@@ -4559,7 +4645,12 @@ checks: [{check: {run: "true"}}]
         stderr: () => undefined,
       }),
     ).toBe(0)
-    expect(JSON.parse(listed)).toMatchObject({ prs: [] })
+    // The refused compose consumed nothing: the planted fact still stands as a
+    // live submission, and no delivery reached history.
+    expect(JSON.parse(listed)).toMatchObject({
+      live: [expect.objectContaining({ branch, sha: head, base: "main" })],
+      history: [],
+    })
 
     // Once the pin merges on the submodule's own MAIN, the backstop this test used to hit here
     // no longer applies — step (d)'s admission flip lets a published, on-main, single-update
@@ -4594,7 +4685,6 @@ checks: [{check: {run: "true"}}]
     expect(exit, stderr).toBe(0)
     expect(JSON.parse(stdout)).toMatchObject({
       command: "pr.submit",
-      prs: [],
       derived: [{ lane: "derived", branch, base: "main" }],
     })
 
@@ -4645,7 +4735,6 @@ checks: [{check: {run: "true"}}]
     // branch first instead of submitting the observer's stale tracking ref.
     expect(JSON.parse(stdout)).toMatchObject({
       command: "pr.submit",
-      prs: [],
       derived: [{ lane: "derived", branch, sha: liveHead, base: "main" }],
     })
     expect(await git(observer, "rev-parse", `refs/remotes/origin/${branch}`)).toBe(liveHead)
@@ -4657,9 +4746,12 @@ checks: [{check: {run: "true"}}]
     let stdout = ""
     let stderr = ""
 
+    // `pr create` drove this before S7; it is now a `record-mint-retired`
+    // refusal that never reaches the fetch, so the live-branch refresh is
+    // exercised through the verb that still performs it.
     expect(
       await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "create", branch, "--json"],
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", observer, "pr", "submit", branch, "--json"],
         {
           cwd: observer,
           stdout: (text) => {
@@ -4729,12 +4821,17 @@ checks: [{check: {run: "true"}}]
         },
       })
 
-    expect(await invoke(["pr", "submit", branch, "--json"]), stderr).toBe(0)
-    expect(JSON.parse(stdout)).toMatchObject({
-      command: "pr.submit",
-      prs: [],
-      derived: [{ lane: "derived", branch, sha: head, base: "main" }],
-    })
+    // The fact is planted the way the receiver plants it — a direct
+    // `refs/yrd/submit/<branch>` push. `pr submit` cannot plant it here: its
+    // pre-admission gitlink gate refuses this exact shape at submit time (see
+    // "refuses to compose a docs submission whose incidental submodule pin is
+    // unpublished"), and the durability contract under test is about the FACT,
+    // not about which door wrote it.
+    {
+      await using planted = await createYrdHost({ cwd: repo })
+      await planted.app.bays.recordBranchSubmit({ branch, sha: head, base: "main" })
+      expect(planted.app.state().bays.submits[branch]).toMatchObject({ sha: head, base: "main" })
+    }
 
     // First pass: the unpublished pin refuses the compose — loudly, naming the
     // cure — and integrates nothing. The submit fact is NOT consumed.
@@ -4837,7 +4934,6 @@ checks: [{check: {run: "true"}}]
     ).toBe(0)
     expect(JSON.parse(submitOutput)).toMatchObject({
       command: "bay.submit",
-      prs: [],
       derived: [{ lane: "derived", branch: "issue/feature", sha: featureSha, base: "main" }],
     })
 
@@ -4909,6 +5005,12 @@ checks: [{check: {run: "true"}}]
     }
     const inner = testJournal(stateDir)
     let refuseFinish = true
+    // S7: required checks run at ADMISSION, before any root run exists, so the
+    // first job finish in the journal belongs to an admission job whose refusal
+    // would leave a candidate and no root at all. The interruption this fixture
+    // needs is the first finish INSIDE a run, which is what the run-start gate
+    // below selects.
+    let sawRunStart = false
     const legacyJournal: typeof inner = {
       read: (after, before) => inner.read(after, before),
       append: (value, cursor) => {
@@ -4920,6 +5022,7 @@ checks: [{check: {run: "true"}}]
         }
         for (const event of frame.events ?? []) {
           if (event.name === "queue/run/started" && event.data?.run !== undefined) {
+            sawRunStart = true
             delete event.data.run.settlement
           }
           if (event.name === "job/transitioned" && event.data?.type === "start") {
@@ -4928,6 +5031,7 @@ checks: [{check: {run: "true"}}]
         }
         if (
           refuseFinish &&
+          sawRunStart &&
           frame.events?.some((event) => event.name === "job/transitioned" && event.data?.type === "finish")
         ) {
           refuseFinish = false
@@ -4948,9 +5052,20 @@ checks: [{check: {run: "true"}}]
         config,
       })
       await legacy.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+      // S7: a run's batch IS its derived membership, and `prs` selects out of
+      // it. (A bare `prs: ["<selector>"]` cannot work at all right now — the
+      // resume path materializes only `args.derived`, so every explicit
+      // selector refuses `pr-not-found`; reported as a src defect, and this
+      // fixture names its member the way the compose path does either way.)
+      const member = deriveRunMemberArgs({
+        bays: legacy.state().bays,
+        queues: legacy.state().queues,
+        mint: volatilePrNumberMint(),
+        branch: "issue/feature",
+      })
       await expect(
         legacy.queue.run(
-          { prs: ["PR1"] },
+          { prs: [], derived: [member] },
           { runner: "legacy", leaseMs: 60_000, now: () => Date.parse("2026-01-01T00:00:00.000Z") },
         ),
       ).rejects.toThrow("host legacy fixture")
@@ -5109,6 +5224,7 @@ checks: [{check: {run: "true"}}]
       )
       return { child, logPath, stdout: new Response(child.stdout).text(), stderr: new Response(child.stderr).text() }
     }
+    const mainBefore = await git(repo, "rev-parse", "main")
     const first = spawnFollow("w1:p1")
     let second: ReturnType<typeof spawnFollow> | undefined
     let replacement: ReturnType<typeof spawnFollow> | undefined
@@ -5131,6 +5247,14 @@ checks: [{check: {run: "true"}}]
         ),
       )
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
+      // S7: the required check runs at ADMISSION, one cycle BEFORE the Run that
+      // merges the admitted member — so the check marker above no longer means
+      // "PR1's run exists". Wait for the integration itself (main moves) before
+      // signalling, or the SIGTERM lands between the two cycles and PR1 never
+      // gets a Run at all.
+      await vi.waitFor(async () => expect(await git(repo, "rev-parse", "main")).not.toBe(mainBefore), {
+        timeout: 10_000,
+      })
       // A graceful drain (SIGTERM) lets the first exit after finishing PR1's run.
       first.child.kill("SIGTERM")
       expect(await first.child.exited, `${await first.stdout}\n${await first.stderr}`).toBe(0)
@@ -5141,12 +5265,18 @@ checks: [{check: {run: "true"}}]
         await submitter.app.bays.recordBranchSubmit({ branch: "issue/second", sha: secondSha, base: "main" })
         await submitter.close()
       }
+      const mainAfterFirst = await git(repo, "rev-parse", "main")
       replacement = spawnFollow("w1:p3")
       try {
         await vi.waitFor(
           async () => expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run", "run"]),
           { timeout: 8_000 },
         )
+        // …and, as above, one more cycle for the Run that merges what that
+        // admission check judged.
+        await vi.waitFor(async () => expect(await git(repo, "rev-parse", "main")).not.toBe(mainAfterFirst), {
+          timeout: 10_000,
+        })
       } catch (cause) {
         const replacementLog = await readFile(replacement.logPath, "utf8").catch(() => "<missing replacement log>")
         throw new Error(`replacement habitant did not execute PR2\n${replacementLog}`, { cause })
@@ -5416,7 +5546,6 @@ checks: [{check: {run: "true"}}]
     const submitted = JSON.parse(stdout) as { warnings?: string[] }
     expect(submitted).toMatchObject({
       command: "bay.submit",
-      prs: [],
       derived: [{ lane: "derived", branch: "issue/feature", sha: featureSha, base: "main" }],
     })
     expect(submitted.warnings?.some((warning) => warning.includes("issue") && warning.includes("derived lane"))).toBe(
@@ -5496,7 +5625,6 @@ checks: [{check: {run: "true"}}]
     expect(selected.exitCode, selected.stderr).toBe(0)
     expect(JSON.parse(selected.stdout)).toMatchObject({
       command: "bay.submit",
-      prs: [],
       derived: [{ lane: "derived", branch: "issue/feature", sha: featureSha, base: "main" }],
     })
 
@@ -5504,7 +5632,6 @@ checks: [{check: {run: "true"}}]
     expect(submitted.exitCode, submitted.stderr).toBe(0)
     expect(JSON.parse(submitted.stdout)).toMatchObject({
       command: "pr.submit",
-      prs: [],
       derived: [{ lane: "derived", branch: "issue/feature", sha: featureSha, base: "main" }],
     })
 
@@ -5532,17 +5659,22 @@ checks: [{check: {run: "true"}}]
 
     await using host = await createYrdHost({ cwd: repo })
     await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-    const run = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
+    const runs = await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
-    const failedJob = run.steps.find(
-      (step) => step.job?.status === "completed" && step.job.conclusion === "failure",
-    )?.job
-    if (failedJob?.status !== "completed" || failedJob.conclusion !== "failure") {
+    // The stall is caught at ADMISSION, so the cycle mints no Run — and the
+    // stalled check must still be loud, on the job and in the queue's own
+    // refusal ledger, or a wedge would read as an idle queue.
+    expect(runs).toEqual([])
+    const stalled = admissionCheckJob(host.app.state().jobs.byId, "check")
+    if (stalled.status !== "completed" || stalled.conclusion !== "failure") {
       throw new Error("expected a stalled check job")
     }
-    expect(failedJob.error).toMatchObject({ code: "check-stalled" })
-    const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
+    expect(stalled.error).toMatchObject({ code: "check-stalled" })
+    expect(host.app.state().queues.admissionRefusals.PR1).toMatchObject({
+      branch: "issue/feature",
+      code: "check-stalled",
+    })
+    const evidence = GitCheckEvidenceSchema.parse(stalled.output)
     expect(evidence).toMatchObject({ stageVerdict: "STALLED" })
     // A stall must not merge: the wedged candidate never reached the queue tip.
     expect(await git(repo, "rev-parse", "main")).not.toBe(featureSha)
@@ -5557,12 +5689,12 @@ checks: [{check: {run: "true"}}]
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
     await first.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-    const run = (await first.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
-    expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
-    const failedJob = run.steps.find(
-      (step) => step.job?.status === "completed" && step.job.conclusion === "failure",
-    )?.job
-    if (failedJob?.status !== "completed" || failedJob.conclusion !== "failure") {
+    const runs = await first.app.queue.run({}, { runner: "test", leaseMs: 60_000 })
+    // The configured check fails at ADMISSION, so the cycle mints no Run and
+    // the evidence rides the admission job it ran.
+    expect(runs).toEqual([])
+    const failedJob = admissionCheckJob(first.app.state().jobs.byId, "check")
+    if (failedJob.status !== "completed" || failedJob.conclusion !== "failure") {
       throw new Error("missing failed configured check")
     }
     const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
@@ -5577,8 +5709,10 @@ checks: [{check: {run: "true"}}]
     if (stdoutArtifact === undefined || stderrArtifact === undefined) throw new Error("missing command artifacts")
     expect(await readFile(stdoutArtifact, "utf8")).toBe("real stdout\n")
     expect(await readFile(stderrArtifact, "utf8")).toBe("real stderr\n")
-    const submittedAt = first.app.state().bays.prs.PR1?.submittedAt
-    const finishedAt = run.finishedAt
+    // The standing submit fact carries the submission time since S7 — the
+    // record whose `submittedAt` this read is gone.
+    const submittedAt = first.app.state().bays.submits["issue/feature"]?.at
+    const finishedAt = failedJob.finishedAt
     if (submittedAt === undefined || finishedAt === undefined) throw new Error("missing immutable history timestamps")
     const expectedAgeMs = Date.parse(finishedAt) - Date.parse(submittedAt)
     await first.close()
@@ -5604,6 +5738,16 @@ checks: [{check: {run: "true"}}]
       }),
     ).toBe(0)
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
+    // RED, and deliberately so — a known src defect, not conversion debt.
+    // Since S7 a required check that fails at ADMISSION mints no Run, and the
+    // dashboard renders only runs: it prints "OPEN 0 … No runnable or recent
+    // failed PRs" while a submitted branch sits wedged with a `check-failed`
+    // streak in `queues.admissionRefusals`. `pr list` shows the branch as
+    // plain `pending` with no refusal, and `queue audit` reports "clean", so
+    // the wedge is invisible on every summary surface (only the dead-man line
+    // on stderr hints at it). Measured 2026-08-28 in a clean repository with an
+    // attached HEAD too, so it is not an artifact of this test's detachment.
+    // These assertions stand as the requirement they always were.
     expect(stdout).toMatch(/pr#1\.1\s+→ CANDIDATE C1 → RUN main#1 issue\/feature\s+rejected/u)
     expect(stdout).toContain("OPEN 1")
     expect(stdout).toContain("REJECTED 0")
@@ -5676,8 +5820,14 @@ checks: [{check: {run: "true"}}]
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-      const prior = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
-      expect(prior).toMatchObject({ status: "completed", conclusion: "failure" })
+      // S7: the failing check is judged at ADMISSION, so the journal shape this
+      // test replays — a finish recorded BEFORE a later submission — is made by
+      // the admission job, and the cycle mints no Run at all.
+      expect(await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })).toEqual([])
+      const prior = admissionCheckJob(host.app.state().jobs.byId, "check")
+      if (prior.status !== "completed" || prior.conclusion !== "failure") {
+        throw new Error("expected the prior revision's admission check to have failed")
+      }
       if (prior.finishedAt === undefined) throw new Error("missing prior revision finish time")
 
       await git(repo, "switch", "-q", "issue/feature")
@@ -5687,14 +5837,23 @@ checks: [{check: {run: "true"}}]
       const nextHead = await git(repo, "rev-parse", "HEAD")
       await git(repo, "switch", "-q", "main")
 
-      await host.app.bays.intake({ branch: "issue/feature", headSha: nextHead, base: "main" })
-      await host.app.bays.ready({ pr: "PR1" })
-      const currentSubmittedAt = host.app.state().bays.prs.PR1?.submittedAt
+      // S7: the later submission is a re-push of the branch's submit fact —
+      // `bays.ready` was the record's draft→submitted transition and retired
+      // with the store, and the fact carries the submission time the record's
+      // `submittedAt` used to.
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: nextHead, base: "main" })
+      const currentSubmittedAt = host.app.state().bays.submits["issue/feature"]?.at
       if (currentSubmittedAt === undefined) throw new Error("missing current revision submission time")
       expect(Date.parse(prior.finishedAt)).toBeLessThan(Date.parse(currentSubmittedAt))
 
-      const current = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
+      expect(await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })).toEqual([])
+      // Two admission jobs by now — one per revision; the later one is this
+      // cycle's, and its input names the new head.
+      const checks = admissionCheckJobs(host.app.state().jobs.byId, "check")
+      expect(checks).toHaveLength(2)
+      const current = checks[1]!
       expect(current).toMatchObject({ status: "completed", conclusion: "failure" })
+      expect(current.input).toMatchObject({ prs: [{ headSha: nextHead }] })
     } finally {
       await host.close()
     }
@@ -5714,6 +5873,13 @@ checks: [{check: {run: "true"}}]
 
     expect(exitCode, stderr).toBe(0)
     expect(stderr).toBe("yrd: dead-man: the queue has work but no habitant runner owns the drain lease\n")
+    // RED below, and deliberately so — the same known src defect as "reports a
+    // failed queue against origin when the operator HEAD is detached": a check
+    // that fails at ADMISSION mints no Run, and the dashboard renders only
+    // runs, so it prints "No runnable or recent failed PRs" for a branch that
+    // is wedged with a `check-failed` streak. The replay half above (bare yrd
+    // reads this journal without refusing or reporting "precedes") is what this
+    // test uniquely covers, and it still holds.
     expect(stdout).toContain("Recent failures")
     expect(stdout.match(/pr#1/giu)).toHaveLength(3)
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
@@ -5735,24 +5901,20 @@ checks: [{check: {run: "true"}}]
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
-      const [run] = await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })
-      expect(run).toMatchObject({
-        id: "R1",
-        candidateId: "C1",
-        status: "completed",
-        conclusion: "failure",
-        jobs: [],
-        error: { code: "candidate-conflicting" },
-      })
-      expect(Queues.ids(host.app.state().queues)).toEqual(["R1"])
-      expect(host.app.state().queues.candidates.C1).toMatchObject({
-        id: "C1",
-        mergeability: "conflicting",
-        revs: [{ pr: "PR1", n: 1, head: featureSha }],
-      })
-      expect(host.app.queue.eligibility("PR1")).toMatchObject({
-        runnable: false,
-        reason: { code: "candidate-conflicting", message: "change 'PR1' revision 1 conflicts in Candidate 'C1'" },
+      // S7: the conflict is detected while ADMITTING the derived member — before
+      // any required check runs — so the cycle mints no Run and stores no
+      // candidate. What must survive is the invariant this test is named for:
+      // a conflicting candidate admits NO job, and says so durably.
+      expect(await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })).toEqual([])
+      expect(Queues.ids(host.app.state().queues)).toEqual([])
+      expect(Object.values(host.app.state().jobs.byId), "a conflicting candidate must admit no job").toEqual([])
+      expect(host.app.state().queues.admissionRefusals.PR1).toMatchObject({
+        branch: "issue/feature",
+        headSha: featureSha,
+        revision: 1,
+        code: "candidate-conflicting",
+        kind: "failure",
+        reason: "Candidate 'C1' conflicts before required checks",
       })
     } finally {
       await host.close()
@@ -5774,6 +5936,11 @@ checks: [{check: {run: "true"}}]
       }),
       stderr,
     ).toBe(0)
+    // RED, and deliberately so — the same known src defect the two tests above
+    // name: the dashboard renders runs, and an admission refusal mints none, so
+    // a conflicting candidate now prints "No runnable or recent failed PRs".
+    // The refusal IS durable (asserted above); only the operator's summary
+    // surface has gone blind to it.
     expect(stdout).toContain("candidate-conflict")
     expect(stdout).toContain("C1")
   })
@@ -6083,7 +6250,6 @@ describe("pre-submit checkout isolation and timeout policy (22648)", () => {
       expect(exitCode, stderr).toBe(0)
       expect(JSON.parse(stdout)).toMatchObject({
         command: "pr.submit",
-        prs: [],
         derived: [{ lane: "derived", branch: "issue/feature" }],
       })
     } finally {

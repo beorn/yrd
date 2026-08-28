@@ -52,9 +52,15 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
   })
 
   it("stays quiet below the queue's own wedge threshold — one losable race is not a wedge", () => {
-    expect(planRefusalRemedies({ PR1: refusal("PR1", { count: 1 }) }, subjects({ PR1: subject("PR1") }), new Set())).toEqual([])
-    expect(planRefusalRemedies({ PR1: refusal("PR1", { count: 2 }) }, subjects({ PR1: subject("PR1") }), new Set())).toEqual([])
-    expect(planRefusalRemedies({ PR1: refusal("PR1", { count: 3 }) }, subjects({ PR1: subject("PR1") }), new Set())).toHaveLength(1)
+    expect(
+      planRefusalRemedies({ PR1: refusal("PR1", { count: 1 }) }, subjects({ PR1: subject("PR1") }), new Set()),
+    ).toEqual([])
+    expect(
+      planRefusalRemedies({ PR1: refusal("PR1", { count: 2 }) }, subjects({ PR1: subject("PR1") }), new Set()),
+    ).toEqual([])
+    expect(
+      planRefusalRemedies({ PR1: refusal("PR1", { count: 3 }) }, subjects({ PR1: subject("PR1") }), new Set()),
+    ).toHaveLength(1)
   })
 
   it("keeps a judgment-required environment refusal below the queue's wedge threshold", () => {
@@ -149,8 +155,7 @@ describe("refusal remedy plan — the runner acts on exactly the PRs the queue c
     expect(plans[0]?.remedy).toEqual({
       kind: "judgment",
       reason:
-        "this delivery has ended — no submit fact stands for its branch, " +
-        "so it cannot be redelivered mechanically",
+        "this delivery has ended — no submit fact stands for its branch, " + "so it cannot be redelivered mechanically",
     })
   })
 

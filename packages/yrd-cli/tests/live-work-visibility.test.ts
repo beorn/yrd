@@ -11,7 +11,7 @@
  * @consumer @yrd/cli
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, volatilePrNumberMint, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
@@ -53,7 +53,10 @@ function workspace() {
   }
 }
 
-async function createCliApp(seeds?: readonly ChangeSeed[]) {
+async function createCliApp(
+  seeds?: readonly ChangeSeed[],
+  mergeRun?: () => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>,
+) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -61,16 +64,26 @@ async function createCliApp(seeds?: readonly ChangeSeed[]) {
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
-    async (
-      _input: StepExecution<ChangeShape>,
-    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
-    }),
+    mergeRun ??
+      (async (
+        _input: StepExecution<ChangeShape>,
+      ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
+        status: "completed",
+        conclusion: "success",
+        output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+      })),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // S7 (branch-is-change, @i/10 22991): a derived member's identity mints at
+  // ADMISSION, and it carries no baseSha of its own. Without both, derived
+  // admission refuses, the compose swallows the refusal as an empty batch,
+  // and every surface below sees zero retained run members.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   const contests = withContests({ runners: [], evaluators: [], git })
   const base = pipe(
@@ -125,35 +138,61 @@ function yrd(...args: string[]): string[] {
 
 describe("pr list never hides live work behind the default window", () => {
   it("keeps an open draft visible when 20+ newer PRs are terminal", async () => {
-    // S7: records no longer mint — the record window under test is seeded as
-    // journal history. PR1 is the live draft, oldest id, `pushed` and never
-    // submitted; 21 newer PRs are terminal (withdrawn) so the window is full
-    // of terminal rows and PR1 sits strictly outside the newest-20 cut.
-    const app = await createCliApp([
-      {
-        pr: "PR1",
-        branch: "task/oldest-draft",
-        base: "main",
-        revs: [{ headSha: "1".repeat(40), baseSha: BASE_SHA, delivery: "pushed" }],
-      },
-      ...Array.from({ length: 21 }, (_, offset) => offset + 2).map(
-        (index): ChangeSeed => ({
-          pr: `PR${index}`,
-          branch: `topic/newer-${index}`,
-          base: "main",
-          revs: [{ headSha: index.toString(16).padStart(40, "0"), baseSha: BASE_SHA }],
-          terminal: { kind: "withdrawn", reason: "window filler" },
-        }),
-      ),
-    ])
+    // S7: the windowed population is delivery HISTORY (retained run members),
+    // and a still-standing submission is a `live` row in its own section. All
+    // 22 branches compose under a merge that cannot land, so none is consumed
+    // and every submit fact survives the run; withdrawing the 21 newer ones
+    // (`branch/unsubmitted` — the derived lane's spelling of a withdrawal)
+    // moves them into history and leaves the draft standing live.
+    //
+    // `task/oldest-draft` sorts before every `topic/newer-*`, and identities
+    // mint in `derivedLaneBranches` (lexicographic) order, so the draft still
+    // holds the OLDEST identity — which is what "sits strictly outside the
+    // newest-20 cut" meant when the cut was over records.
+    const draft = "task/oldest-draft"
+    const newer = Array.from({ length: 21 }, (_, offset) => `topic/newer-${String(offset + 2).padStart(2, "0")}`)
+    const app = await createCliApp(
+      [
+        { pr: "PR1", branch: draft, base: "main", revs: [{ headSha: "1".repeat(40), baseSha: BASE_SHA }] },
+        ...newer.map(
+          (branch, offset): ChangeSeed => ({
+            pr: `PR${offset + 2}`,
+            branch,
+            base: "main",
+            revs: [{ headSha: (offset + 2).toString(16).padStart(40, "0"), baseSha: BASE_SHA }],
+          }),
+        ),
+      ],
+      async () => ({
+        status: "completed" as const,
+        conclusion: "failure" as const,
+        error: { code: "merge-conflict", message: "conflict" },
+      }),
+    )
+    await app.queue.run({}, { runner: "live-work-test", leaseMs: 60_000 })
+    for (const branch of newer) await app.bays.recordBranchUnsubmit({ branch, reason: "superseded" })
 
     const human = outputIO()
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
     const output = human.stdout()
     // The live draft must be listed even though 21 terminal rows are newer…
-    expect(output).toContain("pr#1.")
+    expect(output).toContain(draft)
+    expect(output).toContain("PR1.")
     // …and the disclosure line still tells the truth about what was withheld.
     expect(output).toMatch(/hidden/iu)
+
+    // Non-vacuous: the window must actually have had something to cut, and the
+    // draft must be live rather than merely absent from a history section that
+    // happened to render empty.
+    const json = outputIO()
+    expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    const listed = JSON.parse(json.stdout()) as {
+      live: readonly Readonly<{ id: string; branch: string; state: string }>[]
+      history: readonly unknown[]
+    }
+    expect(listed.live).toHaveLength(1)
+    expect(listed.live[0]).toMatchObject({ id: "PR1", branch: draft, state: "pending" })
+    expect(listed.history, "the 21 withdrawn deliveries are the window's population").toHaveLength(21)
   })
 })
 
@@ -270,3 +309,4 @@ describe("root yrd submit", () => {
     expect(help.toLowerCase()).not.toContain("merge request")
   })
 })
+

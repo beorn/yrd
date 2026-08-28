@@ -31,7 +31,7 @@ import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
 import { mintChangeId } from "@yrd/bay"
-import { createDurablePrNumberMint, createJournal } from "@yrd/persistence"
+import { createDurablePrNumberMint, createJournal, createReadOnlyJournal } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createLogger } from "loggily"
 import * as z from "zod"
@@ -80,7 +80,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   return stdout.trim()
 }
 
-async function repository(): Promise<{ repo: string; featureSha: string }> {
+async function repository(): Promise<{ repo: string; featureSha: string; secondSha: string }> {
   const root = await mkdtemp(join(tmpdir(), "yrd-mint-rescue-"))
   roots.push(root)
   const repoPath = join(root, "repo")
@@ -99,7 +99,16 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   await git(repo, "commit", "-qm", `feature\n\nChange-Id: I${"cafe".repeat(10)}`)
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
-  return { repo, featureSha }
+  // A second branch so a fixture can admit TWO members and leave two different
+  // ids in surviving state; the reuse arm would hand a re-submitted branch its
+  // old id back instead of minting.
+  await git(repo, "switch", "-qc", "issue/second")
+  await writeFile(join(repo, "second.txt"), "second\n")
+  await git(repo, "add", "second.txt")
+  await git(repo, "commit", "-qm", `second\n\nChange-Id: I${"beef".repeat(10)}`)
+  const secondSha = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "switch", "-q", "main")
+  return { repo, featureSha, secondSha }
 }
 
 const config: ResolvedYrdProjectConfig = {
@@ -151,6 +160,9 @@ function legacyRecordStore(featureSha: string): Readonly<Record<string, unknown>
 
 /** Highest id `legacyRecordStore` holds. Every future id must clear it. */
 const RECORD_SET_MAX = 41
+/** An id a SURVIVING container names, deliberately above `RECORD_SET_MAX`:
+ * the live journal's `queues.candidates` sits 3 ids above `bays.prs`. */
+const SURVIVING_ID = 44
 
 const CheckpointRowSchema = z
   .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).loose() })
@@ -224,6 +236,27 @@ async function bootPredecessor(repo: string, featureSha: string): Promise<string
   return stateDir
 }
 
+/**
+ * Admit `branch` through a real boot so its minted id lands where production
+ * puts it. The probe that designed this fixture confirmed one run writes the id
+ * into `jobs.byId.*`, `queues.candidates.*`, `queues.records.*` and
+ * `queues.authority.*` — the same containers the live checkpoint carries it in.
+ */
+async function admitBranch(repo: string, stateDir: string, branch: string, sha: string): Promise<void> {
+  await using runtimeProcess = createProcess({ cwd: repo })
+  const app = await createDefaultYrdApp({
+    repo,
+    stateDir,
+    baysRoot: join(repo, ".bays"),
+    journal: testJournal(stateDir),
+    process: runtimeProcess,
+    config,
+  })
+  await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
+  await app.queue.run({ steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+  await app.close()
+}
+
 async function bootAcrossMigration(repo: string, stateDir: string): Promise<void> {
   await using runtimeProcess = createProcess({ cwd: repo })
   const restored = await createDefaultYrdApp({
@@ -241,7 +274,11 @@ async function bootAcrossMigration(repo: string, stateDir: string): Promise<void
   await restored.close()
 }
 
-describe("store-deletion migration rescues the PR-number mint", () => {
+// Each fixture boots a real host two or three times over a real SQLite journal;
+// the heaviest measured 4.4s idle and blew Vitest's 5s default once under load.
+// `host.test.ts` declares 20s for the same class of fixture — this one carries
+// more boots per test, so it takes more headroom.
+describe("store-deletion migration rescues the PR-number mint", { timeout: 30_000 }, () => {
   it("folds the record-set maximum into a LOST mint, so no future id collides with history", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = await bootPredecessor(repo, featureSha)
@@ -311,5 +348,109 @@ describe("store-deletion migration rescues the PR-number mint", () => {
     await bootAcrossMigration(repo, stateDir)
 
     expect(await readMintHighWater(stateDir)).toBe(afterFirst)
+  })
+
+  /**
+   * The union defect, measured on the live journal before it was written.
+   *
+   * Read-only copy of `/hh/dev/.git/yrd/journal.sqlite`, 2026-08-28 00:09 PDT,
+   * checkpoint cursor 97912 at identity `381cdb9e…` — the store-deletion
+   * predecessor, so this is the state the fleet actually crosses on:
+   *
+   *   bays.prs        (DESTROYED by the edge)   max PR2149   2140 records
+   *   queues.records  (Run snapshots, survives)  max PR2148
+   *   queues.candidates            (survives)   max PR2152
+   *   jobs.byId.*                  (survives)   max PR2152
+   *   queues.admissionRefusals     (survives)   no ids at all (0 rows)
+   *   live pr-mint.json high-water              PR2152
+   *
+   * So harvesting the record set alone establishes PR2149 and re-issues PR2150,
+   * PR2151 and PR2152 — ids the surviving state still names. The mint's own
+   * asymmetry ruling is what makes that unrecoverable: a skipped number costs
+   * nothing, a recycled one poisons every citation of it.
+   *
+   * This fixture is that shape in miniature: the record set stops at PR41 while
+   * a surviving container names PR44.
+   */
+  it("clears every id the SURVIVING state names, not just the destroyed record set", async () => {
+    const { repo, featureSha, secondSha } = await repository()
+    const stateDir = await bootPredecessor(repo, featureSha)
+
+    // Advance the mint, then admit a second branch so a genuinely minted id
+    // above the record-set max lands in the surviving containers. Injecting one
+    // by hand would prove only that the scanner reads JSON; this proves it
+    // reads what the queue actually writes.
+    createDurablePrNumberMint({ dir: stateDir }).commit(SURVIVING_ID - 1)
+    await admitBranch(repo, stateDir, "issue/second", secondSha)
+    expect(await readMintHighWater(stateDir)).toBe(SURVIVING_ID)
+
+    seedPredecessorCheckpoint(stateDir, RETIRED_CHANGE_STORE_IDENTITY, featureSha)
+    await rm(join(stateDir, MINT_FILE), { force: true })
+
+    await bootAcrossMigration(repo, stateDir)
+
+    // The floor must clear the SURVIVING maximum, not the record-set maximum.
+    expect.soft(await readMintHighWater(stateDir)).toBeGreaterThanOrEqual(SURVIVING_ID)
+    expect(mintChangeId(createDurablePrNumberMint({ dir: stateDir }), {})).toBe(`PR${String(SURVIVING_ID + 1)}`)
+  })
+
+  it("does not fire when the mint is already ahead: the floor only ever raises", async () => {
+    // The negative control for the invariant itself. A floor that ASSIGNED
+    // rather than maxed would drag a healthy mint down to the state's maximum
+    // and re-issue everything above it — the same defect from the other side,
+    // and one no fixture that starts from a lost mint can see.
+    const { repo, featureSha } = await repository()
+    const stateDir = await bootPredecessor(repo, featureSha)
+    seedPredecessorCheckpoint(stateDir, RETIRED_CHANGE_STORE_IDENTITY, featureSha)
+
+    const ahead = 5000
+    createDurablePrNumberMint({ dir: stateDir }).commit(ahead)
+
+    await bootAcrossMigration(repo, stateDir)
+
+    expect(await readMintHighWater(stateDir)).toBe(ahead)
+    expect(mintChangeId(createDurablePrNumberMint({ dir: stateDir }), {})).toBe(`PR${String(ahead + 1)}`)
+  })
+
+  it("re-establishes the floor with NO migration in play, and never from a viewer", async () => {
+    // The standing half on its own terms. The checkpoint here sits at the
+    // CURRENT identity, so no migration edge fires at all — which is the whole
+    // point: the loss this defends against is not tied to crossing an identity
+    // boundary, and an edge that fires once cannot cover it.
+    const { repo, featureSha } = await repository()
+    const stateDir = await bootPredecessor(repo, featureSha)
+    const minted = await readMintHighWater(stateDir)
+    expect(minted).toBeGreaterThan(0)
+
+    await rm(join(stateDir, MINT_FILE), { force: true })
+
+    // A viewer boot must leave the state dir alone. It cannot mint, so a floor
+    // established here protects nothing, and writing one would make read-only
+    // commands mutate state — and refuse to boot on a state dir they cannot
+    // write.
+    await using viewerProcess = createProcess({ cwd: repo })
+    const viewer = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: createReadOnlyJournal({ dir: stateDir }) as unknown as ReturnType<typeof testJournal>,
+      process: viewerProcess,
+      config,
+    })
+    await viewer.close()
+    expect(await readMintHighWater(stateDir)).toBe(0)
+
+    // The active runtime, over the very same state, restores the floor.
+    await using activeProcess = createProcess({ cwd: repo })
+    const active = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: activeProcess,
+      config,
+    })
+    await active.close()
+    expect(await readMintHighWater(stateDir)).toBe(minted)
   })
 })

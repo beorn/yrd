@@ -933,13 +933,19 @@ describe("runYrd", () => {
     { name: "yrd pr", argv: yrd("pr", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrd("bay", "submit", "topic/draft", "--draft", "--json") },
     { name: "yrd bay", argv: yrdBay("submit", "topic/draft", "--draft", "--json") },
-  ])("rejects the deleted --draft flag through $name and teaches pr create", async ({ argv }) => {
+  ])("rejects the deleted --draft flag through $name and teaches the branch-state verbs", async ({ argv }) => {
     const app = await createApp()
     const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
 
     expect(await runYrd(app, argv, output.io)).toBe(2)
     expect(output.stderr()).toContain("unknown option '--draft'")
-    expect(output.stderr()).toContain("yrd pr create")
+    // This taught `yrd pr create` until 2026-08-27, when that verb was retired
+    // for always refusing `record-mint-retired` — a cure naming a command that
+    // cannot run. A pushed branch IS the draft, so the cure is the pair of
+    // branch-state verbs that really move it.
+    expect(output.stderr()).not.toContain("yrd pr create")
+    expect(output.stderr()).toContain("yrd pr submit <branch>")
+    expect(output.stderr()).toContain("yrd draft <branch>")
     // Refused at parse: nothing was delivered. S7 makes the standing submit
     // facts the whole of what a submit can write, so an empty map IS "no
     // delivery" — there is no record store left to check.
@@ -995,7 +1001,9 @@ describe("runYrd", () => {
     expect(JSON.parse(prefixed.stderr())).toMatchObject({
       failure: {
         cause: "unknown option '--draft'",
-        resolution: ["yrd pr create"],
+        // `yrd pr create` until 2026-08-27, when it was retired for always
+        // refusing. Both replacements are live branch-state verbs.
+        resolution: ["yrd pr submit <branch>", "yrd draft <branch>"],
       },
     })
 
@@ -1004,7 +1012,7 @@ describe("runYrd", () => {
       2,
     )
     expect(optionValue.stderr()).toContain("unknown option '--bogus'")
-    expect(optionValue.stderr()).not.toContain("yrd pr create")
+    expect(optionValue.stderr()).not.toContain("yrd pr submit <branch>")
   })
 
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
@@ -1201,14 +1209,32 @@ describe("runYrd", () => {
 
     const pr = outputIO()
     expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
-    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "close"]) {
+    for (const command of ["submit", "view", "runs", "diff", "checkout", "status"]) {
       expect(pr.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
     expect(pr.stdout()).not.toMatch(/^\s+retry\b/mu)
     // Retired record-write verbs (S7, branch-is-change): hidden from help, but
     // still registered so an old runbook gets a loud typed refusal naming the
     // replacement instead of "unknown command".
-    for (const retired of ["edit", "publish", "ready", "review", "request-review", "comment"]) {
+    //
+    // `create` and `close` joined this list on 2026-08-27. Both were registered
+    // VISIBLE while every argument they accepted refused — `create` always sent
+    // `{draft:true}`, which the bay plugin refuses `record-mint-retired`, and
+    // `close`'s implementation ignored its parameters and raised
+    // unconditionally. A visible verb that can only refuse is a promise the
+    // surface cannot keep, and `yrd cancel`'s own description sent operators to
+    // `close` while `close`'s refusal sent them back to `cancel`.
+    for (const retired of [
+      "create",
+      "close",
+      "withdraw",
+      "edit",
+      "publish",
+      "ready",
+      "review",
+      "request-review",
+      "comment",
+    ]) {
       expect(pr.stdout()).not.toMatch(new RegExp(`^\\s+${retired}\\b`, "mu"))
       const refused = outputIO()
       expect(await runYrd(app, yrd("pr", retired, "PR1", "--json"), refused.io)).toBe(1)
@@ -2669,7 +2695,6 @@ describe("runYrd", () => {
     expect(checkRuns).toEqual(["check"])
   })
 
-
   it("runs configured client-side checks while leaving authoritative checks and integration to queue run", async () => {
     const localChecks: string[] = []
     const checkRuns: string[] = []
@@ -2814,7 +2839,6 @@ describe("runYrd", () => {
       safeRemoveSync(cwdRoot, { within: tmpdir(), allowMissing: true })
     }
   })
-
 
   it("rejects every retired route without journaling an event", async () => {
     const app = await createApp()
@@ -3622,12 +3646,17 @@ describe("runYrd", () => {
       ),
     ).toBe(1)
     const stderr = refusal.stderr()
-    // The remedy, runnable as printed, carrying the author's own branch. The
-    // previous pin here certified `bay open --bay <name> --branch …` — a flag
-    // `bay open` never had, so the "runnable as printed" claim was false in
-    // the field (23055 flavour 2). handoff-remedy-flags.test.ts now validates
-    // the remedy's flags against live `bay open --help`.
-    expect(stderr).toContain("yrd bay open --pr task/22716-runner-supervision")
+    // The remedy, runnable as printed, carrying the author's own branch. This
+    // pin has been WRONG TWICE. It first certified `bay open --bay <name>
+    // --branch …`, a flag `bay open` never had; the fix substituted `--pr`,
+    // which S7 then retired — so the "runnable as printed" claim was false in
+    // the field both times (23055 flavour 2). Two live-surface tests now stand
+    // behind it: handoff-remedy-flags.test.ts validates the flags against real
+    // `bay open --help`, and remedy-executable-in-emitting-state.test.ts
+    // validates the VERBS against the real command tree.
+    expect(stderr).toContain("yrd bay open --bay <name>")
+    expect(stderr).toContain("yrd in <name> -- git switch task/22716-runner-supervision")
+    expect(stderr).not.toContain("--pr")
     // And WHY a Bay, so the step reads as a requirement rather than a ritual:
     // the workspace is the evidence being certified, which is also why this
     // command must not open one for you.
@@ -3707,7 +3736,15 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(check.stdout())).toMatchObject({
       command: "bay.handoff",
-      check: { bay: "B1", branch: "issue/handoff-check", branchMatches: true },
+      check: {
+        bay: "B1",
+        branch: "issue/handoff-check",
+        active: true,
+        branchMatches: true,
+        headMatches: true,
+        ready: true,
+        blockers: [],
+      },
     })
 
     // …and writes nothing: the lifecycle is still "open", not "handoff-ready".
@@ -3741,7 +3778,63 @@ describe("runYrd", () => {
         bayless.io,
       ),
     ).toBe(1)
-    expect(bayless.stderr()).toContain("yrd bay open --pr task/no-such-bay")
+    expect(bayless.stderr()).toContain("yrd bay open --bay <name>")
+    expect(bayless.stderr()).not.toContain("--pr")
+  })
+
+  /**
+   * @failure `--check` reports ready over the refusals it exists to predict.
+   * Until 2026-08-27 it computed `branchMatches`, PRINTED it, and returned —
+   * `options.head` was never compared at all, and the action never called
+   * `setExit`, so the preflight exited 0 while naming its own blocker. A dry run
+   * that says ready in the voice of a zero exit, over a run that will refuse, is
+   * precisely the defect it was built to prevent (23055 flavours 1 and 4).
+   */
+  it("--check exits non-zero and names the blocker for every precondition certification enforces", async () => {
+    const app = await createApp()
+    await openTestBay(app, { name: "handoff-predict" })
+    const preflight = (branch: string, head: string) =>
+      yrd(
+        "bay",
+        "handoff",
+        "B1",
+        "--branch",
+        branch,
+        "--head",
+        head,
+        "--evidence",
+        "@km/handoff/predict.md",
+        "--check",
+        "--json",
+      )
+
+    // Wrong branch: the certification reducer refuses, and refresh cannot save
+    // it — refresh re-observes the head for the bay's OWN branch.
+    const branch = outputIO()
+    expect(await runYrd(app, preflight("task/some-other-branch", HEAD_SHA), branch.io)).toBe(1)
+    expect(JSON.parse(branch.stdout())).toMatchObject({ check: { branchMatches: false, ready: false } })
+    expect(JSON.parse(branch.stdout())).toMatchObject({
+      check: { blockers: [expect.stringContaining("issue/handoff-predict")] },
+    })
+
+    // Wrong head: never compared before, so this exited 0 over a run that
+    // refuses. The projection holds the LAST OBSERVED head and `--check` is
+    // read-only, so the honest answer is "not proven ready" plus the one
+    // command that settles it.
+    const head = outputIO()
+    expect(await runYrd(app, preflight("issue/handoff-predict", MERGED_SHA), head.io)).toBe(1)
+    expect(JSON.parse(head.stdout())).toMatchObject({
+      check: { branchMatches: true, headMatches: false, ready: false },
+    })
+    expect(JSON.parse(head.stdout())).toMatchObject({
+      check: { blockers: [expect.stringContaining("yrd bay refresh B1")] },
+    })
+
+    // Control: the same preflight with both facts right still exits 0, so the
+    // non-zero exits above are the MISMATCH and not the check itself.
+    const ready = outputIO()
+    expect(await runYrd(app, preflight("issue/handoff-predict", HEAD_SHA), ready.io), ready.stderr()).toBe(0)
+    expect(JSON.parse(ready.stdout())).toMatchObject({ check: { ready: true, blockers: [] } })
   })
 
   it("returns the durable certification when an exact handoff retry is already submitted", async () => {
@@ -4040,18 +4133,23 @@ describe("runYrd", () => {
   //   (`pr checks` projects records; a derived member's failed required check
   //   now refuses ADMISSION at compose — see the required-check-failed
   //   resubmit test below for the surviving derived-lane shape).
-  it("refuses pr create on a direct branch: the record mint is retired, and the cure is a plain submit", async () => {
+  it("refuses pr create on a direct branch: the verb is retired, and the cure is a plain submit", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const create = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("pr", "create", "topic/review-me", "--json"), create.io)).toBe(1)
+    // `record-mint-retired` from the bay plugin until 2026-08-27: the verb sent
+    // `{draft:true}` for EVERY argument it accepted, so the plugin refused every
+    // invocation while the CLI still advertised `create` as a visible verb. It
+    // is now retired at the surface with its siblings, one layer earlier, and
+    // the code names the verb rather than the plumbing that caught it.
     expect(JSON.parse(create.stderr())).toMatchObject({
-      failure: { kind: "refusal", code: "record-mint-retired" },
+      failure: { kind: "refusal", code: "pr-create-retired" },
     })
     // The cure rides the refusal itself: submit plainly, run as a derived member.
-    expect(create.stderr()).toContain("yrd pr submit topic/review-me")
+    expect(create.stderr()).toContain("yrd pr submit <branch>")
     // Refused before any write: no submit fact, no events — and the refusal is
     // structural, so the state carries no record store to have written into.
     expect(app.state().bays).not.toHaveProperty("prs")
@@ -4080,8 +4178,8 @@ describe("runYrd", () => {
     // the refusal names the plain submit as the cure. The fact stays untouched.
     const create = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
-    expect(create.stderr()).toContain("draft records are retired")
-    expect(create.stderr()).toContain("resolve: yrd pr submit topic/ready-on-arrival")
+    expect(create.stderr()).toContain("pr create is retired with the change-record store")
+    expect(create.stderr()).toContain("resolve: yrd pr submit <branch>")
     expect(Object.keys(app.bays.state().submits)).toEqual(["topic/ready-on-arrival"])
     expect(app.bays.state().submits["topic/ready-on-arrival"]).toMatchObject({ sha: HEAD_SHA })
   })
@@ -4122,9 +4220,7 @@ describe("runYrd", () => {
     expect(await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       { status: "completed", conclusion: "success" },
     ])
-    const retried = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((pr) => pr.branch === "topic/retry"),
-    )
+    const retried = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.branch === "topic/retry"))
     expect(retried?.prs).toMatchObject([{ branch: "topic/retry", revision: 1, headSha: MERGED_SHA }])
     // The renewed fact is what the second compose admitted: the resubmit moved
     // the branch's standing approval to the new head rather than adding a
@@ -10131,9 +10227,12 @@ describe("runYrd", () => {
     const app = await createApp()
     const typo = outputIO({ columns: 20 })
 
+    // `create` retired on 2026-08-27 and is registered hidden, so Commander no
+    // longer offers it — which is right: suggesting a verb that can only refuse
+    // sends the operator one keystroke further into the same wall.
     expect(await runYrd(app, yrd("pr", "crate"), typo.io)).toBe(2)
     expect(typo.stdout()).toBe("")
-    expect(typo.stderr()).toBe("error: unknown command 'crate' (Did you mean 'create'?)\n")
+    expect(typo.stderr()).toBe("error: unknown command 'crate' (Run 'yrd change --help' for available commands.)\n")
   })
 
   it("offers scoped help for an unsuggested subcommand and retains the structured JSON error", async () => {
@@ -10166,8 +10265,12 @@ describe("runYrd", () => {
       failure: {
         kind: "usage",
         code: "invalid-arguments",
-        message: "error: unknown command 'crate'\n(Did you mean create?)",
-        cause: "unknown command 'crate' (Did you mean create?)",
+        // No "(Did you mean create?)" since 2026-08-27: `create` is registered
+        // hidden, and Commander does not suggest hidden commands. The scoped
+        // help hint rides the human projection only, so the JSON cause is the
+        // bare unknown-command fact.
+        message: "error: unknown command 'crate'",
+        cause: "unknown command 'crate'",
         resolution: ["Correct the cause above, then retry the same Yrd command."],
       },
     })
@@ -10674,9 +10777,7 @@ describe("runYrd", () => {
         startedAt: "2026-08-12T20:00:00.000Z",
         finishedAt: "2026-08-12T20:01:00.000Z",
       },
-      changes: [
-        { pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId, generatedCommit: MERGED_SHA },
-      ],
+      changes: [{ pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId, generatedCommit: MERGED_SHA }],
       evidence: { jobs: [] },
       pins: [],
     }
@@ -10859,7 +10960,11 @@ describe("submit props", () => {
     // The props were warned about and DROPPED: the fact is the whole write, and
     // it carries only branch/sha/base.
     expect(Object.keys(app.bays.state().submits)).toEqual(["topic/correlated"])
-    expect(app.bays.state().submits["topic/correlated"]).toEqual({ sha: HEAD_SHA, base: "main", at: expect.any(String) })
+    expect(app.bays.state().submits["topic/correlated"]).toEqual({
+      sha: HEAD_SHA,
+      base: "main",
+      at: expect.any(String),
+    })
   })
 
   it.each(["bay", "pr"] as const)("rejects malformed props before %s submit appends", async (surface) => {

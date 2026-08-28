@@ -1,44 +1,30 @@
 /**
- * @failure `pr withdraw` silently no-ops instead of refusing loud on unknown or
- * terminal selectors, drops the recorded reason from the pr/withdrawn event, or
- * `pr prune` withdraws live content / keeps superseded content / emits events
- * during --dry-run, or hides what it checked per change.
+ * @failure A retired change-record verb (`pr close`, its hidden `pr withdraw`
+ * alias, `admin pr prune`) half-runs, silently no-ops, or answers "unknown
+ * command" instead of refusing loud and naming the branch-state verbs that
+ * replaced it; or root `cancel` ends the delivery instead of stopping only the
+ * attempt.
  * @level l2
  * @consumer @yrd/cli
  *
  * Drives the real `runYrd` command surface with JSON output like
- * selector-surfaces.test.ts; Git facts for `pr prune` are injected through
- * YrdCliIO.pruneGit so every verdict is deterministic.
+ * selector-surfaces.test.ts. Git facts for the retired prune scan are injected
+ * through YrdCliIO.pruneGit, so the refusal is proven to precede every Git read
+ * the verb used to perform.
  */
-import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { describe, expect, it, vi } from "vitest"
-import { createBayJobDefs, currentChangeRev, changeDeliveryState, withBays, volatilePrNumberMint } from "@yrd/bay"
-import {
-  createFailure,
-  createMemoryJournal,
-  createYrd,
-  createYrdDef,
-  JsonSchema,
-  pipe,
-  type Journal,
-  type JsonValue,
-} from "@yrd/core"
+import { describe, expect, it } from "vitest"
+import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { createJournal } from "@yrd/persistence"
-import { createProcess } from "@yrd/process"
-import { runYrd as runYrdRaw, type PruneGitFacts, type RemergePreflightResult, type YrdCliIO } from "@yrd/cli"
+import { runYrd as runYrdRaw, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
 import {
-  createGitChangeRemerger,
+  deriveRunMemberArgs,
   withMerge,
   withQueue,
   withStep,
-  type CandidatePreparer,
   type ChangeShape,
-  type SourceRewrite,
+  type DerivedRunMember,
   type StepExecution,
 } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
@@ -61,31 +47,13 @@ function runYrd(
 
 const HEAD_SHA = "1".repeat(40)
 const HEAD2_SHA = "2".repeat(40)
-const HEAD3_SHA = "3".repeat(40)
 const BASE_SHA = "a".repeat(40)
-const TARGET_BASE_SHA = "d".repeat(40)
 const MERGED_SHA = "b".repeat(40)
 const BASE_TREE = "e".repeat(40)
-const OTHER_TREE = "f".repeat(40)
-const PR380_PATCH_ID = "cce1b8d2e6b8167b77aa50e0f880b74d3fa8871d"
-const PR380_MERGE_SHA = "868194792c4b2c1b07bd5a67c37ad3e21fd35ce1"
-const PR473_MERGE_SHA = "b47e240a6c3091b4687de96296d39c0a610df200"
-const PR476_PATCH_ID = "172a29302878f4f7fd0dcfad917ddbf434e78d04"
-const PR1640_RECORDED_HEAD = "4d8615400959a1443b1664e707eecee10d6ebe95"
-const PR1640_LIVE_HEAD = "b3fae22ec7a08288b586a28b123a9e11ad3bca91"
-const PR1640_BRANCH = "task/@yrd/core/22366-post-merge-component-main"
-const OVERSIZED_MERGE_TREE_BYTES = 1024 * 1024
 
 function ids(initial = 0): () => string {
   let value = initial
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
-}
-
-function testJournal(dir: string) {
-  return createJournal({
-    dir,
-    inject: { sqliteVersion: "3.53.0" },
-  } as unknown as Parameters<typeof createJournal>[0])
 }
 
 function workspace() {
@@ -110,8 +78,8 @@ function workspace() {
   }
 }
 
-/** Minimal contest adapters so the composed app matches YrdCliApp; withdraw and
- * prune never enter a contest, so passing stubs suffice. */
+/** Minimal contest adapters so the composed app matches YrdCliApp; the retired
+ * verbs and `cancel` never enter a contest, so passing stubs suffice. */
 function contestAdapters() {
   const runner: ContestRunnerDef = {
     id: "fixture",
@@ -148,16 +116,7 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp(
-  options: {
-    journal?: Journal<unknown>
-    resolveBase?: (ref: string) => Readonly<{ base: string; baseSha: string }>
-    merge?: (
-      input: StepExecution<ChangeShape>,
-    ) => Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>>
-    prepareCandidate?: CandidatePreparer
-  } = {},
-) {
+async function createCliApp() {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -169,21 +128,14 @@ async function createCliApp(
     },
   )
   const merge = withMerge(
-    options.merge ??
-      (async (
-        _input: StepExecution<ChangeShape>,
-      ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-        status: "completed",
-        conclusion: "success",
-        output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
-      })),
+    async (_input: StepExecution<ChangeShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => ({
+      status: "completed",
+      conclusion: "success",
+      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+    }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({
-    steps: [check, merge] as const,
-    batch: false,
-    ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
-  })
+  const queue = withQueue({ steps: [check, merge] as const, batch: false })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -193,11 +145,11 @@ async function createCliApp(
     withBays({
       jobs: bayJobs,
       defaultBase: "main",
-      resolveBase: options.resolveBase ?? ((ref) => ({ base: ref, baseSha: BASE_SHA })),
+      resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
     }),
   )
   return createYrd(contests(queue(base)), {
-    inject: { journal: options.journal ?? createMemoryJournal(), clock: () => "2026-07-15T12:00:00.000Z", id: ids() },
+    inject: { journal: createMemoryJournal(), clock: () => "2026-07-15T12:00:00.000Z", id: ids() },
   })
 }
 
@@ -226,143 +178,17 @@ function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
 
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], {
-    encoding: "utf8",
-    maxBuffer: 8 * OVERSIZED_MERGE_TREE_BYTES,
-  }).trim()
-}
-
-function gitResult(cwd: string, ...args: string[]): Readonly<{ code: number; stdout: string }> {
-  try {
-    return {
-      code: 0,
-      stdout: execFileSync("git", ["-C", cwd, ...args], {
-        encoding: "utf8",
-        maxBuffer: 8 * OVERSIZED_MERGE_TREE_BYTES,
-      }),
-    }
-  } catch (error) {
-    const failed = error as Readonly<{ status?: unknown; stdout?: unknown }>
-    if (typeof failed.status !== "number") throw error
-    const stdout =
-      typeof failed.stdout === "string"
-        ? failed.stdout
-        : failed.stdout instanceof Uint8Array
-          ? Buffer.from(failed.stdout).toString("utf8")
-          : ""
-    return { code: failed.status, stdout }
-  }
-}
-
-function sourceOnlyDivergentRemergeRepository(): {
-  root: string
-  repo: string
-  module: string
-  sourceBase: string
-  headSha: string
-  targetSha: string
-  moduleC: string
-} {
-  const root = mkdtempSync(join(tmpdir(), "yrd-recut-apply-"))
-  const repo = join(root, "repo")
-  const module = join(root, "module")
-  execFileSync("git", ["init", "-q", "-b", "main", module])
-  git(module, "config", "user.name", "Yrd Test")
-  git(module, "config", "user.email", "yrd@example.invalid")
-  git(module, "config", "uploadpack.allowAnySHA1InWant", "true")
-  writeFileSync(join(module, "version.txt"), "a\n")
-  git(module, "add", "version.txt")
-  git(module, "commit", "-qm", "module a")
-  const moduleA = git(module, "rev-parse", "HEAD")
-
-  execFileSync("git", ["init", "-q", "-b", "main", repo])
-  git(repo, "config", "user.name", "Yrd Test")
-  git(repo, "config", "user.email", "yrd@example.invalid")
-  git(repo, "config", "protocol.file.allow", "always")
-  writeFileSync(join(repo, "README.md"), "main\n")
-  git(repo, "add", "README.md")
-  git(repo, "commit", "-qm", "root")
-  git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep")
-  git(repo, "commit", "-qam", "add dep at a")
-  const sourceBase = git(repo, "rev-parse", "HEAD")
-
-  git(module, "checkout", "-q", "-B", "carrier-row", moduleA)
-  writeFileSync(join(module, "carrier.txt"), "carrier\n")
-  git(module, "add", "carrier.txt")
-  git(module, "commit", "-qm", "carrier payload")
-  const moduleB = git(module, "rev-parse", "HEAD")
-  git(module, "checkout", "-q", "-B", "base-row", moduleA)
-  writeFileSync(join(module, "current.txt"), "current\n")
-  git(module, "add", "current.txt")
-  git(module, "commit", "-qm", "current payload")
-  const moduleC = git(module, "rev-parse", "HEAD")
-  git(join(repo, "dep"), "fetch", "-q", "origin", "carrier-row", "base-row")
-
-  git(repo, "switch", "-qc", "issue/source", sourceBase)
-  git(repo, "update-index", "--cacheinfo", `160000,${moduleB},dep`)
-  git(repo, "commit", "-qm", "carrier: bump dep only")
-  const headSha = git(repo, "rev-parse", "HEAD")
-  git(repo, "switch", "-q", "main")
-  git(repo, "update-index", "--cacheinfo", `160000,${moduleC},dep`)
-  writeFileSync(join(repo, "upstream.txt"), "upstream\n")
-  git(repo, "add", "upstream.txt")
-  git(repo, "commit", "-qm", "base: bump dep + upstream")
-  const targetSha = git(repo, "rev-parse", "HEAD")
-  const rootOrigin = join(root, "origin.git")
-  execFileSync("git", ["init", "-q", "--bare", rootOrigin])
-  git(repo, "remote", "add", "origin", rootOrigin)
-  git(repo, "push", "-q", "origin", "main", "issue/source")
-  return { root, repo, module, sourceBase, headSha, targetSha, moduleC }
-}
-
-function codeCarrierProposalCliRepository(): {
-  root: string
-  repo: string
-  approvedBaseSha: string
-  approvedSha: string
-  currentBaseSha: string
-  proposedRef: string
-  proposedSha: string
-} {
-  const root = mkdtempSync(join(tmpdir(), "yrd-recut-certification-"))
-  const repo = join(root, "repo")
-  execFileSync("git", ["init", "-q", "-b", "main", repo])
-  git(repo, "config", "user.name", "Yrd Test")
-  git(repo, "config", "user.email", "yrd@example.invalid")
-  writeFileSync(join(repo, "README.md"), "main\n")
-  git(repo, "add", "README.md")
-  git(repo, "commit", "-qm", "base")
-  const approvedBaseSha = git(repo, "rev-parse", "HEAD")
-
-  git(repo, "switch", "-qc", "issue/approved")
-  writeFileSync(join(repo, "approved-a.txt"), "approved a\n")
-  git(repo, "add", "approved-a.txt")
-  git(repo, "commit", "-qm", "approved a")
-  writeFileSync(join(repo, "approved-b.txt"), "approved b\n")
-  git(repo, "add", "approved-b.txt")
-  git(repo, "commit", "-qm", "approved b")
-  const approvedSha = git(repo, "rev-parse", "HEAD")
-
-  git(repo, "switch", "-q", "main")
-  writeFileSync(join(repo, "authority.txt"), "current authority\n")
-  git(repo, "add", "authority.txt")
-  git(repo, "commit", "-qm", "advance authority")
-  const currentBaseSha = git(repo, "rev-parse", "HEAD")
-  git(repo, "switch", "-qc", "proposal/human-composed", currentBaseSha)
-  writeFileSync(join(repo, "approved-a.txt"), "approved a\n")
-  writeFileSync(join(repo, "approved-b.txt"), "approved b\n")
-  git(repo, "add", ".")
-  git(repo, "commit", "-qm", "independently authored proposal")
-  const proposedSha = git(repo, "rev-parse", "HEAD")
-  const proposedRef = "refs/heads/proposal/human-composed"
-
-  git(repo, "switch", "-q", "main")
-  const origin = join(root, "origin.git")
-  execFileSync("git", ["init", "-q", "--bare", origin])
-  git(repo, "remote", "add", "origin", origin)
-  git(repo, "push", "-q", "origin", "main", "issue/approved", "proposal/human-composed")
-  return { root, repo, approvedBaseSha, approvedSha, currentBaseSha, proposedRef, proposedSha }
+/** Submit a branch and derive the run member that admission would carry for it
+ * — the post-S7 spelling of "put this change in front of the queue": there is
+ * no record to name, so a run's batch IS its derived membership. */
+async function submitBranch(app: CliApp, branch: string, sha: string): Promise<DerivedRunMember> {
+  await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint: volatilePrNumberMint(),
+    branch,
+  })
 }
 
 async function journaledEvents(app: CliApp, name: string): Promise<Record<string, unknown>[]> {
@@ -371,8 +197,9 @@ async function journaledEvents(app: CliApp, name: string): Promise<Record<string
 }
 
 /** Deterministic Git facts: origin/main resolves to BASE_SHA, known head SHAs
- * resolve to themselves, and every check not overridden refuses to run so a
- * test proves exactly which plumbing its scenario consulted. */
+ * resolve to themselves, and every check not overridden refuses to run, so a
+ * test proves exactly which plumbing its scenario consulted — none, for a
+ * retired verb. */
 function pruneGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
   return {
     resolveCommit: (ref) =>
@@ -389,297 +216,71 @@ function pruneGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
   }
 }
 
-type RemergePreflightGitFacts = PruneGitFacts &
-  Readonly<{
-    pinDistance(
-      sourceBaseSha: string,
-      targetBaseSha: string,
-    ):
-      | Readonly<{ sourceOnly: number; targetOnly: number }>
-      | Promise<Readonly<{ sourceOnly: number; targetOnly: number }>>
-    patchMatch(
-      sourceBaseSha: string,
-      headSha: string,
-      targetBaseSha: string,
-    ): Readonly<{ patchId?: string; targetSha?: string }> | Promise<Readonly<{ patchId?: string; targetSha?: string }>>
-  }>
-
-function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}): RemergePreflightGitFacts {
-  return {
-    ...pruneGit({
-      resolveCommit: (ref) =>
-        ref === "origin/main"
-          ? TARGET_BASE_SHA
-          : ref === BASE_SHA || ref === HEAD_SHA || ref === HEAD2_SHA
-            ? ref
-            : ref.includes("/")
-              ? HEAD_SHA
-              : undefined,
-      mergeTree: () => BASE_TREE,
-      treeOf: (sha) => {
-        if (sha !== TARGET_BASE_SHA) throw new Error(`treeOf must only inspect the target tip, got ${sha}`)
-        return BASE_TREE
-      },
-    }),
-    // Linear by default: the preflight linear-root gate consults parent count,
-    // and a scenario about merge tips overrides this with two parents.
-    parents: () => [BASE_SHA],
-    pinDistance: () => ({ sourceOnly: 0, targetOnly: 3 }),
-    patchMatch: () => ({ patchId: "c".repeat(40), targetSha: MERGED_SHA }),
-    ...overrides,
-  }
-}
-
-describe("pr withdraw", () => {
-  it("withdraws a live change, records the reason, and terminalizes its Queue work", async () => {
+/**
+ * `pr close` and its hidden `withdraw` alias ended a delivery by writing a
+ * terminal revision onto the change record. Both are retired with that store
+ * (branch-is-change, @i/10 22991): a branch IS the change, so ending its
+ * delivery is `yrd cancel` plus a branch-state verb. They stay REGISTERED and
+ * hidden so an old runbook gets a refusal that teaches the replacement instead
+ * of a command-not-found from the argument parser.
+ */
+describe("retired change-record verbs refuse loud and teach the branch-state verbs", () => {
+  it("pr withdraw refuses as retired, emits nothing, and leaves the submission standing", async () => {
     const app = await createCliApp()
     await app.bays.recordBranchSubmit({ branch: "topic/stale", sha: HEAD_SHA, base: "main" })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
 
     const output = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"),
-        output.io,
-      ),
-      output.stderr(),
-    ).toBe(0)
-    const result = JSON.parse(output.stdout()) as RemergePreflightResult
-    expect(result).toMatchObject({
-      command: "pr.withdraw",
-      reason: "superseded by rework",
-      prs: [
-        {
-          id: "PR1",
-          state: "closed",
-          merged: false,
-          revs: [{ terminal: { kind: "withdrawn" } }],
-          withdrawReason: "superseded by rework",
-          taskStatus: "dropped",
-        },
-      ],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
-    expect(app.state().bays.prs.PR1).toMatchObject({ withdrawReason: "superseded by rework" })
-    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
-      expect.objectContaining({ pr: "PR1", revision: 1, headSha: HEAD_SHA, reason: "superseded by rework" }),
-    ])
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      steps: [
-        {
-          job: {
-            status: "completed",
-            conclusion: "cancelled",
-            canceledBy: "cli-test",
-            cancelReason: "superseded by rework",
-          },
-        },
-      ],
-    })
-
-    // The queue timeline preserves the Run's truthful stale-pr outcome, while
-    // a run-less withdrawn PR gets the dedicated retired row.
-    const log = outputIO()
-    expect(await runYrd(app, yrd("log", "--pr", "PR1", "--json"), log.io), log.stderr()).toBe(0)
-    expect((JSON.parse(log.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual(
-      expect.arrayContaining([expect.objectContaining({ pr: "PR1", run: "R1", outcome: "stale" })]),
+    expect(await runYrd(app, yrd("pr", "withdraw", "topic/stale", "--reason", "superseded by rework"), output.io)).toBe(
+      1,
     )
-    await app.bays.recordBranchSubmit({ branch: "topic/stale-norun", sha: HEAD2_SHA, base: "main" })
-    expect(
-      await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued", "--burn-payload"), outputIO().io),
-    ).toBe(0)
-    const retired = outputIO()
-    expect(await runYrd(app, yrd("log", "--pr", "PR2", "--json"), retired.io), retired.stderr()).toBe(0)
-    expect((JSON.parse(retired.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
-      expect.objectContaining({ pr: "PR2", run: "-", outcome: "retired", taskStatus: "dropped" }),
-    ])
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toContain("pr withdraw is retired with the change-record store")
+    expect(output.stderr()).toContain("yrd cancel <selector>")
+    expect(output.stderr()).toContain("yrd draft <branch>")
+    expect(output.stderr()).toContain("yrd archive <branch>")
+    // Nothing was written: no terminal revision, and the standing submit fact
+    // — which IS the delivery now — is untouched.
+    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([])
+    expect(app.state().bays.submits["topic/stale"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
   })
 
-  it("refuses unknown selectors and terminal PRs loud, without emitting", async () => {
+  it("mr close refuses as retired and says payload identity is not spent", async () => {
     const app = await createCliApp()
     await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-    await app.bays.recordBranchSubmit({ branch: "topic/two", sha: HEAD2_SHA, base: "main" })
-
-    const unknown = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "nope"), unknown.io)).toBe(1)
-    // Two PRs exist here, so `searched 2` proves the index was populated and
-    // still did not match — the discrimination an empty answer cannot make.
-    expect(unknown.stderr()).toBe("error: no change 'nope' — searched 2 change(s)\n")
-
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
-    const terminal = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR2"), terminal.io)).toBe(1)
-    expect(terminal.stderr()).toBe("error: change 'PR2' is withdrawn; a terminal change cannot be withdrawn\n")
-
-    // A mixed batch refuses whole before the first event: PR1 stays live.
-    const mixed = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "PR2"), mixed.io)).toBe(1)
-    expect(mixed.stderr()).toContain("change 'PR2' is withdrawn")
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
-  })
-})
-
-describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
-  it("mr close does both records — withdrawn-with-reason first, then queue terminalization", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
 
     const output = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("mr", "close", "PR1", "--reason", "superseded by rework", "--burn-payload", "--json"),
-        output.io,
-      ),
-      output.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "pr.close",
-      reason: "superseded by rework",
-      prs: [{ id: "PR1", state: "closed", merged: false }],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
-    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
-      expect.objectContaining({ pr: "PR1", reason: "superseded by rework" }),
-    ])
-    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "failure" })
+    expect(await runYrd(app, yrd("mr", "close", "topic/one", "--reason", "looked stale"), output.io)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toContain("pr close is retired with the change-record store")
+    // The pre-spend disclosure this verb used to demand died with payload
+    // identity; the refusal says so rather than leaving an operator hunting
+    // for the acknowledgement flag that no longer gates anything.
+    expect(output.stderr()).toContain("Nothing is spent and nothing needs burning")
+    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([])
+    expect(app.state().bays.submits["topic/one"]).toMatchObject({ sha: HEAD_SHA })
   })
 
-  it("withdraw answers as a hidden alias with its stable envelope name", async () => {
+  it("keeps both spellings registered but hidden, and ignores their old flags", async () => {
     const app = await createCliApp()
     await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const help = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("mr"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).not.toMatch(/^\s{2}withdraw/mu)
-    expect(help.stdout()).toMatch(/^\s{2}close.*--reason|close \[options\]/mu)
+    expect(help.stdout()).not.toMatch(/^\s{2}close/mu)
 
-    const output = outputIO()
-    expect(
-      await runYrd(
-        app,
-        yrd("pr", "withdraw", "PR1", "--reason", "old spelling", "--burn-payload", "--json"),
-        output.io,
-      ),
-    ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.withdraw", reason: "old spelling" })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
-  })
-
-  it("root cancel stops the attempt and leaves the change open", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
-
-    const output = outputIO()
-    expect(
-      await runYrd(app, yrd("cancel", "PR1", "--reason", "bad attempt", "--json"), output.io),
-      output.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({ command: "queue.cancel" })
-    // Attempt-scoped: the run is canceled, the change is NOT withdrawn.
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
-  })
-
-  it("root cancel with no active attempt fails loud and teaches the branch-state verbs", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-
-    const output = outputIO()
-    expect(await runYrd(app, yrd("cancel", "PR1"), output.io)).toBe(1)
-    expect(output.stderr()).toContain("no running or waiting attempt")
-    // Cancel stops an attempt; stopping DELIVERY is the branch-state verbs'
-    // job, and the refusal teaches both spellings (S7: `mr close
-    // --burn-payload` died with payload identity).
-    expect(output.stderr()).toContain("yrd draft topic/one")
-    expect(output.stderr()).toContain("yrd archive topic/one")
-  })
-})
-
-/**
- * Closing an unmerged change spends its payload identity: the commit can
- * never be offered again on another branch. The verb reads like housekeeping,
- * so the spend is disclosed and acknowledged BEFORE any event is emitted.
- */
-describe("pre-spend disclosure on mr close", () => {
-  it("refuses without --burn-payload, naming the revision and head it would spend", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-
-    const output = outputIO()
-    expect(await runYrd(app, yrd("mr", "close", "PR1", "--reason", "looked stale"), output.io)).toBe(1)
-    // The exact revision, so an operator acting on a STALE read sees the
-    // mismatch here rather than after the spend (the PR78 specimen).
-    expect(output.stderr()).toContain("PR1 r1")
-    expect(output.stderr()).toContain(HEAD_SHA)
-    expect(output.stderr()).toContain("topic/one")
-    expect(output.stderr()).toContain("--burn-payload")
-    // Nothing was spent.
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
-  })
-
-  it("--burn-payload discloses the spend, then withdraws", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-
-    const output = outputIO()
-    expect(
-      await runYrd(app, yrd("mr", "close", "PR1", "--reason", "superseded", "--burn-payload"), output.io),
-      output.stderr(),
-    ).toBe(0)
-    expect(output.stderr()).toContain("PR1 r1")
-    expect(output.stderr()).toContain(HEAD_SHA)
-    // The one door that stays open, named at the moment it is being shut.
-    expect(output.stderr()).toContain("yrd pr submit topic/one")
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
-    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
-  })
-
-  it("names every revision in a batch and emits nothing when unacknowledged", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-    await app.bays.recordBranchSubmit({ branch: "topic/two", sha: HEAD2_SHA, base: "main" })
-
-    const output = outputIO()
-    expect(await runYrd(app, yrd("mr", "close", "PR1", "PR2"), output.io)).toBe(1)
-    expect(output.stderr()).toContain("PR1 r1")
-    expect(output.stderr()).toContain("PR2 r1")
-    expect(output.stderr()).toContain(HEAD_SHA)
-    expect(output.stderr()).toContain(HEAD2_SHA)
-    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
-  })
-
-  it("carries the spent revisions in the --json envelope", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-
-    const output = outputIO()
-    expect(await runYrd(app, yrd("mr", "close", "PR1", "--burn-payload", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "pr.close",
-      spent: [{ pr: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one", reopen: "yrd pr submit topic/one" }],
-    })
-  })
-
-  it("the hidden withdraw alias spends under the same acknowledgement", async () => {
-    const app = await createCliApp()
-    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
-
-    const refused = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR1"), refused.io)).toBe(1)
-    expect(refused.stderr()).toContain("--burn-payload")
-    expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
-
-    const spent = outputIO()
-    expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "--burn-payload"), spent.io), spent.stderr()).toBe(0)
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    // Hidden is not absent: the old spellings, with the old flags, still reach
+    // their own refusal instead of the parser's "unknown command".
+    for (const argv of [
+      yrd("pr", "withdraw", "topic/one", "--burn-payload", "--json"),
+      yrd("mr", "close", "topic/one", "--burn-payload", "--json"),
+    ]) {
+      const output = outputIO()
+      expect(await runYrd(app, argv, output.io)).toBe(1)
+      expect(output.stderr()).toContain("is retired with the change-record store")
+      expect(output.stderr()).not.toContain("unknown command")
+    }
+    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([])
   })
 
   it("admin pr prune refuses as retired, naming compose and the archive verb", async () => {
@@ -687,7 +288,9 @@ describe("pre-spend disclosure on mr close", () => {
     // store (branch-is-change, @i/10 22991): compose settles already-contained
     // payloads itself, and `yrd archive <branch>` shelves a branch main
     // already carries. The verb stays registered, hidden, so an old runbook
-    // gets this refusal — and emits nothing.
+    // gets this refusal — and emits nothing. The injected `isAncestor` would
+    // have said "contained" for every candidate, so a verb that still scanned
+    // would have pruned here.
     const app = await createCliApp()
     await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
@@ -697,57 +300,42 @@ describe("pre-spend disclosure on mr close", () => {
     expect(output.stderr()).toContain("admin pr prune is retired with the change-record store")
     expect(output.stderr()).toContain("payload-already-contained")
     expect(output.stderr()).toContain("resolve: yrd archive <branch>")
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(app.state().bays.submits["topic/one"]).toMatchObject({ sha: HEAD_SHA })
   })
 })
 
-describe("pr withdraw journal replay", () => {
-  it("replays reason-bearing and reason-less withdrawals through a fresh session", async () => {
-    // A second yrd invocation in a real repository is a FRESH app replaying the
-    // persisted journal (projectFrame source="replay"), not the appending app.
-    // This is the path where a strict pr/withdrawn schema without `reason`
-    // would refuse the journal with the version-skew guidance.
-    const dir = mkdtempSync(join(tmpdir(), "yrd-withdraw-replay-"))
-    try {
-      const first = await createCliApp({ journal: testJournal(dir) })
-      await first.bays.recordBranchSubmit({ branch: "topic/reasoned", sha: HEAD_SHA, base: "main" })
-      await first.bays.recordBranchSubmit({ branch: "topic/reasonless", sha: HEAD2_SHA, base: "main" })
-      const withdraw = outputIO()
-      expect(
-        await runYrd(
-          first,
-          yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework", "--burn-payload"),
-          withdraw.io,
-        ),
-        withdraw.stderr(),
-      ).toBe(0)
-      expect(await runYrd(first, yrd("pr", "close", "PR2", "--burn-payload"), outputIO().io)).toBe(0)
-      await first.close()
+describe("root cancel (chief ruling b9bf30f2) stops the attempt, never the delivery", () => {
+  it("cancels the run and leaves the branch submitted", async () => {
+    const app = await createCliApp()
+    const member = await submitBranch(app, "topic/one", HEAD_SHA)
+    // `prs: []` beside a non-empty `derived` selects exactly those derived
+    // members — the post-S7 spelling of naming one member explicitly.
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["check"], baseSha: BASE_SHA })
 
-      const second = await createCliApp({ journal: testJournal(dir) })
-      try {
-        expect(second.state().bays.prs.PR1).toMatchObject({
-          state: "closed",
-          merged: false,
-          revs: [{ terminal: { kind: "withdrawn" } }],
-          withdrawReason: "superseded by rework",
-        })
-        expect(second.state().bays.prs.PR2).toMatchObject({
-          state: "closed",
-          merged: false,
-          revs: [{ terminal: { kind: "withdrawn" } }],
-        })
-        expect(second.state().bays.prs.PR2?.withdrawReason).toBeUndefined()
-        const log = outputIO()
-        expect(await runYrd(second, yrd("log", "--pr", "PR1", "--json"), log.io), log.stderr()).toBe(0)
-        expect((JSON.parse(log.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
-          expect.objectContaining({ pr: "PR1", run: "-", outcome: "retired", taskStatus: "dropped" }),
-        ])
-      } finally {
-        await second.close()
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+    const output = outputIO()
+    expect(
+      await runYrd(app, yrd("cancel", "topic/one", "--reason", "bad attempt", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({ command: "queue.cancel" })
+    // Attempt-scoped: the run is canceled, the submission still stands, so the
+    // next queue pass composes the same branch again.
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
+    expect(app.state().bays.submits["topic/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
+    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([])
+  })
+
+  it("fails loud with no active attempt and teaches the branch-state verbs", async () => {
+    const app = await createCliApp()
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("cancel", "topic/one"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("no running or waiting attempt")
+    // Cancel stops an attempt; ending DELIVERY is the branch-state verbs' job,
+    // and the refusal teaches both spellings (S7: `mr close --burn-payload`
+    // died with payload identity).
+    expect(output.stderr()).toContain("yrd draft topic/one")
+    expect(output.stderr()).toContain("yrd archive topic/one")
   })
 })

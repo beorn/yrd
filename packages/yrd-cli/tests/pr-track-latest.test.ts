@@ -218,7 +218,6 @@ const noRequiredChecks: YrdCliServices = {
 
 type SubmitEnvelope = Readonly<{
   command: string
-  prs: readonly unknown[]
   derived: readonly unknown[]
   warnings?: readonly string[]
 }>
@@ -235,14 +234,19 @@ describe("pr submit tracking default", () => {
     )
     const envelope = JSON.parse(output.stdout()) as SubmitEnvelope
     expect(envelope.command).toBe("pr.submit")
-    expect(envelope.prs).toEqual([])
+    // The record half of the envelope is GONE, not empty: an `prs: []` key
+    // would still read as "a record lane exists and matched nothing".
+    expect(envelope).not.toHaveProperty("prs")
     expect(envelope.derived).toEqual([{ lane: "derived", branch: BRANCH, sha: RECORDED_HEAD, base: "main" }])
     // The CLI forwards no track option when neither flag was given, so the
     // derived route drops nothing: the only warning is the acceptance line,
     // never a record-only drop.
     expect(envelope.warnings).toEqual([DERIVED_ACCEPTANCE_LINE])
-    // The fact is the submission — no change record mints.
-    expect(Object.values(app.bays.state().prs)).toEqual([])
+    // The fact IS the submission: one standing submit ref for the branch, and
+    // nothing else — there is no record left to mint.
+    expect(app.bays.state().submits).toEqual({
+      [BRANCH]: expect.objectContaining({ sha: RECORDED_HEAD, base: "main" }),
+    })
   })
 
   it.each(["--track", "--no-track"])("%s refuses as retired before touching any state", async (flag) => {
@@ -258,7 +262,7 @@ describe("pr submit tracking default", () => {
     expect(output.stdout()).toBe("")
     expect(output.stderr()).toContain("track-flags-retired")
     expect(output.stderr()).toContain("push again to refresh")
-    expect(Object.values(app.bays.state().prs)).toEqual([])
+    // Nothing was minted: the refusal fires before the submit fact is written.
     expect(app.bays.state().submits).toEqual({})
   })
 })

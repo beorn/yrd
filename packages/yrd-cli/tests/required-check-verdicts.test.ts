@@ -22,13 +22,13 @@
  *    anything but one agent's `/tmp` scratch file.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, resolveChange, withBays, type BaysState } from "@yrd/bay"
+import { createBayJobDefs, volatilePrNumberMint, withBays } from "@yrd/bay"
 import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
-import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
+import { deriveRunMemberArgs, withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import type { ProcessRequest } from "@yrd/process"
 import { createLogger } from "loggily"
@@ -86,7 +86,19 @@ async function createCliApp(options: { idStart?: number; seeds?: readonly Change
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // S7: a derived member carries no recorded baseSha (the record's revision
+  // list is gone), so the merge-queue base comes from the queue's own resolver
+  // — the seam production reads git through.
+  // S7 (branch-is-change, @i/10 22991): a derived member's identity mints at
+  // ADMISSION, and it carries no baseSha of its own. Without both, derived
+  // admission refuses, the compose swallows the refusal as an empty batch,
+  // and every surface below sees zero retained run members.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   const contests = withContests({ runners: [], evaluators: [], git })
   const base = pipe(
@@ -171,13 +183,20 @@ function services(app: CliApp, options: { failing?: string; log?: CheckLog } = {
       run: async (request: ProcessRequest) => {
         const target = request.argv.find((arg) => arg.startsWith("refs/remotes/origin/") && arg.endsWith("^{commit}"))
         const branch = target?.slice("refs/remotes/origin/".length, -"^{commit}".length)
-        const observed = branch === undefined ? undefined : resolveChange(app.bays.state() as BaysState, branch)
+        // The standing submit fact IS the branch's head since S7 — the
+        // record's revision list is gone, and `submits[branch]` is the one
+        // place a live head is written down.
+        const observed = branch === undefined ? undefined : app.bays.state().submits[branch]
         return {
           stdout: request.argv.includes("merge-base")
             ? `${"0".repeat(39)}1\n`
-            : observed === undefined
+            : // The pre-admission gitlink gate enumerates the merge base's tree
+              // (`ls-tree -r -z --full-tree`). This fixture's repository has no
+              // submodules, so that listing is empty — a bare newline is not an
+              // empty listing, it is a malformed entry.
+              request.argv.includes("ls-tree")
               ? ""
-              : `${observed.revs[observed.revs.length - 1]?.head ?? ""}\n`,
+              : `${observed?.sha ?? ""}\n`,
           stderr: "",
           exitCode: 0,
           signal: null,
@@ -289,14 +308,16 @@ describe("pr checks exit 0 means a recorded pass, never merely the absence of a 
     await using app = await draftedApp("topic/unjudged")
     const output = outputIO()
 
-    const exit = await runYrd(app, yrd("pr", "checks", "PR1", "--json"), output.io, services(app))
+    const exit = await runYrd(app, yrd("pr", "checks", "topic/unjudged", "--json"), output.io, services(app))
 
     // The row itself stays honest and unchanged — `not-requested` IS what the
     // queue-side record says. What changes is that the exit code no longer
     // translates that absence into "fine".
     expect(JSON.parse(output.stdout()) as Record<string, unknown>).toMatchObject({
       kind: "pr.check",
-      pr: "PR1",
+      // The branch IS the identity now: no record mints one, and the selector
+      // that resolved is what the envelope names back.
+      pr: "topic/unjudged",
       status: "not-requested",
     })
     expect(exit, "an absent verdict is a refusal, never a silent pass").toBe(1)
@@ -311,14 +332,27 @@ describe("pr checks exit 0 means a recorded pass, never merely the absence of a 
     // seeded record. (A PRE-seeded pr/checks-requested row wedges compose —
     // measured 2026-08-27 — so the fixture seeds only the submitted state.)
     await using app = await draftedApp("topic/judged")
-    await app.queue.run({ prs: ["PR1"] }, { runner: "required-check-verdicts-test", leaseMs: 60_000 })
+    // S7: a run's batch IS its derived membership — admission derives the
+    // member from the branch's standing submit fact.
+    const member = deriveRunMemberArgs({
+      bays: app.state().bays,
+      queues: app.state().queues,
+      mint: volatilePrNumberMint(),
+      branch: "topic/judged",
+    })
+    await app.queue.run(
+      { prs: [], derived: [member], baseSha: BASE_SHA },
+      { runner: "required-check-verdicts-test", leaseMs: 60_000 },
+    )
     const output = outputIO()
 
-    const exit = await runYrd(app, yrd("pr", "checks", "PR1", "--json"), output.io, services(app))
+    const exit = await runYrd(app, yrd("pr", "checks", "topic/judged", "--json"), output.io, services(app))
 
     expect(JSON.parse(output.stdout()) as Record<string, unknown>).toMatchObject({
       kind: "pr.check",
-      pr: "PR1",
+      // Once a run has composed the branch, its retained member carries the
+      // identity, and the envelope names that rather than the selector.
+      pr: member.id,
       status: "passed",
     })
     expect(exit, output.stderr()).toBe(0)

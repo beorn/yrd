@@ -125,6 +125,45 @@ describe("Yrd v4 config", () => {
     it("refuses malformed YAML loudly rather than treating it as absent", () => {
       expect(() => validatePushedYrdConfig("checks: [typecheck\n")).toThrow()
     })
+
+    it("refuses the unsatisfiable `requires: [review]` at the push, not once work has arrived", () => {
+      // Same schema, same refusal, one layer earlier than the CLI's own load —
+      // a candidate cannot push a config that would wedge the queue it is
+      // pushing to.
+      expect(() => validatePushedYrdConfig("checks: [typecheck]\nrequires: [review]\n")).toThrow("is retired")
+    })
+  })
+
+  /**
+   * @failure `requires: [review]` is accepted at load and wedges the queue
+   * permanently: the gate reads `state.queues.requires.includes("review")` and
+   * refuses `review-required`, but the approval it waits for cannot be produced
+   * — `pr/reviewed` has a no-op reducer arm and no emitters, and `yrd pr review`
+   * is retired with the change-record store. Every change is then refused
+   * "needs approval", the queue drains to zero, and the refusal reads exactly
+   * like ordinary review gating.
+   */
+  describe("requires: — an empty vocabulary that fails when it is SET", () => {
+    it("refuses `review` at load and says what retired it", () => {
+      expect(() => parseYrdConfig({ checks: [], requires: ["review"] })).toThrow(
+        "yrd: config requires names 'review', which is retired",
+      )
+    })
+
+    it("names the replacement, so the refusal is a cure and not just a stop", () => {
+      expect(() => parseYrdConfig({ checks: [], requires: ["review"] })).toThrow(
+        "the pushed submit ref is the recorded consent",
+      )
+    })
+
+    it("still admits the key when it is empty, and still refuses an unknown member", () => {
+      expect(() => parseYrdConfig({ checks: [], requires: [] })).not.toThrow()
+      expect(() => parseYrdConfig({ checks: [], requires: ["approval"] })).toThrow("yrd: config requires")
+    })
+
+    it("control: the same config without the key loads, so the refusal is the KEY and not the fixture", () => {
+      expect(() => parseYrdConfig({ checks: [] })).not.toThrow()
+    })
   })
 
   it("keeps a one-line run escape hatch inside the checks list", async () => {
@@ -136,7 +175,6 @@ base: trunk
 batch: false
 checks:
   - {lint: {run: bun run lint, mode: strict, timeoutMs: 120000, noProgressMs: 30000}}
-requires: [review]
 contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
 `,
     })
@@ -146,7 +184,7 @@ contest: {concurrency: 3, timeoutMs: 60000, evaluators: [lint]}
       batch: false,
       checks: ["lint"],
       steps: ["lint", "merge"],
-      requires: ["review"],
+      requires: [],
       definitions: {
         lint: {
           run: "bun run lint",
