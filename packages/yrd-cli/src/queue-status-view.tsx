@@ -2214,8 +2214,22 @@ function submitFactChangeRows(state: BaysState, result: QueueStatusResult, now: 
  * return a short population rather than an error, which is the very failure
  * 23235 records. A caller that cannot see the bays state cannot honestly
  * report what the queue holds.
+ *
+ * `selected` is the caller's scope — empty for an unscoped surface, otherwise
+ * the identities of the deliveries an operator NAMED. It narrows here because
+ * this is the one seam both lanes pass through: the record lane arrives
+ * already narrowed (`queueStatusSnapshots` filters `result.prs` by the same
+ * scope), while the derived lane is read straight out of `state`, which no
+ * upstream narrowing has ever touched. Without this gate a scope can only ADD
+ * rows, so naming one delivery still rendered another branch's standing fact
+ * (23238).
  */
-function projectedChangeRows(state: BaysState, result: QueueStatusResult, now: number): HumanChangeProjection[] {
+function projectedChangeRows(
+  state: BaysState,
+  result: QueueStatusResult,
+  now: number,
+  selected: ReadonlySet<string> = new Set<string>(),
+): HumanChangeProjection[] {
   return [
     ...result.prs.map((pr) =>
       projectPR(
@@ -2229,7 +2243,10 @@ function projectedChangeRows(state: BaysState, result: QueueStatusResult, now: n
       ),
     ),
     ...submitFactChangeRows(state, result, now),
-  ]
+    // `row.pr` is the change id on a record row and the BRANCH on a derived
+    // one, and the scope carries both spellings of every named delivery
+    // (scopeChangeIdentities), so one membership test answers for both lanes.
+  ].filter((row) => selected.size === 0 || selected.has(row.pr))
 }
 
 /**
@@ -2267,7 +2284,7 @@ export function humanQueueProjection(
   }>,
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
-  const rows = projectedChangeRows(options.state, result, now)
+  const rows = projectedChangeRows(options.state, result, now, selected)
   const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
@@ -2822,17 +2839,38 @@ export function ChangeDetailView({
   )
 }
 
+/**
+ * Two rules, and WHICH one applies is decided by whether the caller named a
+ * scope — never both at once, which is what the old disjunction did.
+ *
+ * Unscoped (`selected` empty) the rule is never-hide-live-work: every
+ * non-terminal row survives, because a queue surface that drops running work
+ * behind a filter is how a wedge goes unnoticed. This is the whole of today's
+ * unscoped behaviour, unchanged — with an empty scope the old first disjunct
+ * could never match, so the second one already decided every row.
+ *
+ * Scoped, the operator has just said which deliveries they are looking at, and
+ * that wins: the named ones survive whatever their state (a named delivery
+ * stays visible once integrated — the first disjunct's real purpose) and
+ * nothing else does. Or'ing the two let a scope only ever ADD rows, so an
+ * unrelated branch's standing submit fact — non-terminal, therefore always
+ * admitted by the second disjunct — rode along (23238).
+ */
 export function queueStatusRows(
   state: BaysState,
   result: QueueStatusResult,
   selected: ReadonlySet<string>,
   now: number,
 ): Row[] {
-  return projectedChangeRows(state, result, now).filter(
-    (row) =>
-      selected.has(row.pr) ||
-      (row.nativeStatus !== "integrated" && row.nativeStatus !== "already-landed" && row.nativeStatus !== "withdrawn"),
-  )
+  const rows = projectedChangeRows(state, result, now, selected)
+  return selected.size > 0
+    ? rows
+    : rows.filter(
+        (row) =>
+          row.nativeStatus !== "integrated" &&
+          row.nativeStatus !== "already-landed" &&
+          row.nativeStatus !== "withdrawn",
+      )
 }
 
 function SummaryQueue({ projection, repositoryRoot }: { projection: HumanQueueProjection; repositoryRoot?: string }) {
