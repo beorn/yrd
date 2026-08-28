@@ -202,10 +202,7 @@ type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
  *   so a fact still at the member's sha, with no terminal for it, is exactly
  *   what `delivery === "submitted"` used to project — {@link standingSubmit}.
  */
-async function terminalFor(
-  app: QueueApp,
-  pr: string,
-): Promise<Readonly<Record<string, unknown>> | undefined> {
+async function terminalFor(app: QueueApp, pr: string): Promise<Readonly<Record<string, unknown>> | undefined> {
   const events = await Array.fromAsync(app.events())
   const terminal = events.find(
     (event) => event.name === "pr/integrated" && (event.data as Readonly<{ pr?: unknown }>).pr === pr,
@@ -742,11 +739,7 @@ async function createQueueApp(
   const mint = mintFor(journal)
   const bayJobs = createBayJobDefs(workspace())
   const queue = queuePlugin(options, mint)
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ jobs: bayJobs }),
-  )
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   const definition = queue(base)
   const app = await createYrd(definition, {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
@@ -1736,7 +1729,9 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp({}, journal, undefined, id)
       const pr = await submitBranch(app, "issue/settled-crash-gap")
-      await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow("settled append refused")
+      await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
+        "settled append refused",
+      )
       expect(app.queue.get("R1")).toMatchObject({
         status: "completed",
         conclusion: "success",
@@ -1832,7 +1827,9 @@ describe("Queue", () => {
   async function seedLegacyStuckRoot(journal: ReturnType<typeof legacyStuckJournal>, id: () => string, branch: string) {
     await using app = await createQueueApp({}, journal, undefined, id)
     const pr = await submitBranch(app, branch)
-    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, leasedRuntime)).rejects.toThrow("job finish refused")
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, leasedRuntime)).rejects.toThrow(
+      "job finish refused",
+    )
   }
 
   it("auto-quiesces an unleased pre-settlement legacy root and results it", async () => {
@@ -2878,7 +2875,12 @@ describe("Queue", () => {
       const first = await submitBranch(app, "issue/batch-policy-one")
       await submitBranch(app, "issue/batch-policy-two")
       await submitBranch(app, "issue/batch-policy-three")
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [first], steps: ["check", "merge"], baseSha: BASE })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [],
+        derived: [first],
+        steps: ["check", "merge"],
+        baseSha: BASE,
+      })
 
       expect(app.state().queues.batchSize).toBe(1)
       expect(app.queue.get("R1")).toMatchObject({
@@ -3192,7 +3194,12 @@ describe("Queue", () => {
     })
     const first = await submitBranch(app, "issue/batch-one")
     const second = await submitBranch(app, "issue/batch-two")
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [first, second], steps: ["check", "merge"], baseSha: BASE })
+    await app.dispatch(app.commands.queue.run, {
+      prs: [],
+      derived: [first, second],
+      steps: ["check", "merge"],
+      baseSha: BASE,
+    })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("expected requested batch check")
     await app.dispatch(app.commands.job.transition, {
@@ -3344,7 +3351,12 @@ describe("Queue", () => {
     const onMain = await submitBranch(app, "issue/ghost-untargeted")
     const onRelease = await submitBranch(app, "issue/ghost-canceled", "release/2.0")
     await app.dispatch(app.commands.queue.run, { prs: [], derived: [onMain], steps: ["check", "merge"], baseSha: BASE })
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [onRelease], steps: ["check", "merge"], baseSha: BASE })
+    await app.dispatch(app.commands.queue.run, {
+      prs: [],
+      derived: [onRelease],
+      steps: ["check", "merge"],
+      baseSha: BASE,
+    })
     const startGhost = async (run: string, runner: string) => {
       const job = app.queue.get(run)?.steps[0]?.job
       if (job === undefined) throw new Error(`expected requested check for ${run}`)
@@ -4091,7 +4103,10 @@ describe("Queue", () => {
       const pr = await submitBranch(app, "issue/bounded-admission-retry")
 
       let drainTurns = 0
-      const refused = await app.queue.run({ prs: [], derived: [pr] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
+      const refused = await app.queue.run(
+        { prs: [], derived: [pr] },
+        { ...runtime, continueAdmissions: () => ++drainTurns <= 6 },
+      )
 
       expect(refused).toEqual([])
       expect(checks).toBe(1)
@@ -4159,7 +4174,10 @@ describe("Queue", () => {
     await using operator = await createQueueApp(options, journal, undefined, id)
 
     let drainTurns = 0
-    const draining = runner.queue.run({ prs: [], derived: [pr] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
+    const draining = runner.queue.run(
+      { prs: [], derived: [pr] },
+      { ...runtime, continueAdmissions: () => ++drainTurns <= 6 },
+    )
     await checkStarted.promise
     await operator.queue.pause({
       base: "main",
@@ -5085,6 +5103,47 @@ describe("Queue", () => {
     },
   )
 
+  /**
+   * RED, deliberately: this test's SUBJECT was deleted, not renumbered.
+   *
+   * At `00fae423` it carried two `await app.bays.requestChecks({ pr: pr.id })`
+   * calls — one before each of the first two runs, none before the third:
+   *
+   *     requestChecks; run -> prepares 1
+   *     requestChecks; run -> prepares 2
+   *                    run -> prepares 2   <- no third request, so no third compose
+   *
+   * That is the contract the name states: ONE check request buys exactly ONE
+   * compose. The 1, 2, 2 was never about parking and never about a threshold.
+   * `95f77070` still carries both calls; `aafb59e0` drops them and switches to
+   * `run({ derived: [pr] })`, because `requestChecks` no longer exists in src.
+   * S7 replaced it — `derived-admission.ts:151` synthesizes `checkRequests`
+   * from the standing submit fact, and `needs-author-eligibility.test.ts:186`
+   * states the model outright: the fact IS the check request, there is no
+   * second `requestChecks` act.
+   *
+   * DO NOT "fix" this by asserting 3. Three runs composing three times is not a
+   * contract, and writing it down would quietly convert a DELETED BRAKE into
+   * expected behaviour. Nothing parks at 3: `queue.ts:6459` is the AUDIT's
+   * reporting threshold — when `queue audit` calls a refusal a wedge — and it
+   * never stops a compose. Parking is a different mechanism
+   * (`structurallyPermanentAdmissionRefusal` at `queue.ts:4202` emits
+   * `queue/admission/settled`, and `ChangeEligibility` at `queue.ts:8494` then
+   * answers `admission-refused`), and only `candidate-already-landed` is in
+   * that set. So the compose repeats unbounded while the audit merely reports.
+   *
+   * CORRECT BEHAVIOUR: a refused member must not re-compose while BOTH sides of
+   * the merge are unchanged — its own head sha AND the base. Keying on the
+   * member's sha alone would strand a member that would now merge cleanly
+   * because main moved, which is the case the spendable request used to cover
+   * by hand. The ledger already records branch + headSha + revision, and
+   * `checkRequest(pr)?.baseSha` (`queue.ts:1430`) has the base.
+   *
+   * Owned by the S7 carrier as a regression, not stale debt: pre-S7 a refused
+   * member re-composed only when someone spent a fresh request; post-S7 the
+   * standing submit fact re-authorizes the compose every cycle, forever, at the
+   * price of a real git merge.
+   */
   it("spends each exact check request once on a pre-Job admission refusal", async () => {
     let prepares = 0
     await using app = await createQueueApp({
@@ -5181,9 +5240,9 @@ describe("Queue", () => {
     await expect(first.queue.run({ prs: [], derived: [blocked] }, runtime)).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
-    await expect(first.dispatch(first.commands.queue.run, { prs: [], derived: [blocked], baseSha: BASE })).rejects.toThrow(
-      `queue 'main' is paused: operator freeze`,
-    )
+    await expect(
+      first.dispatch(first.commands.queue.run, { prs: [], derived: [blocked], baseSha: BASE }),
+    ).rejects.toThrow(`queue 'main' is paused: operator freeze`)
     expect(Queues.ids(first.state().queues)).toEqual([])
     await expect(first.queue.run({ prs: [], derived: [allowed] }, runtime)).resolves.toHaveLength(1)
     await first.queue.resume("main")
@@ -5251,7 +5310,9 @@ describe("Queue", () => {
       expiresAt: "2026-01-01T01:00:00.000Z",
     })
 
-    await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toThrow(`queue 'main' is paused: operator freeze`)
+    await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toThrow(
+      `queue 'main' is paused: operator freeze`,
+    )
     await expect(app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], baseSha: BASE })).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
@@ -5505,11 +5566,7 @@ describe("Queue", () => {
 
     const bayJobs = createBayJobDefs(workspace())
     const withoutSteps = withQueue({ steps: [] as const })
-    const historyBase = pipe(
-      createYrdDef(),
-      withJobs({ definitions: bayJobs }),
-      withBays({ jobs: bayJobs }),
-    )
+    const historyBase = pipe(createYrdDef(), withJobs({ definitions: bayJobs }), withBays({ jobs: bayJobs }))
     await using history = await createYrd(withoutSteps(historyBase), {
       inject: { journal, log: createLogger("test", [{ level: "silent" }]) },
     })
