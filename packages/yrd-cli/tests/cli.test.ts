@@ -363,6 +363,31 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
   return { runner, evaluator, git }
 }
 
+/**
+ * FIVE FACTS THIS FIXTURE WILL COST YOU A DEBUGGING SESSION TO REDISCOVER.
+ * Each was measured here on 2026-08-28 while converting this suite to the
+ * derived lane (S7, branch-is-change, @i/10 22991).
+ *
+ * 1. `resolveBaseSha` is DEFAULTED below. A derived member carries no baseSha of
+ *    its own, so without a resolver every compose throws "a Candidate requires
+ *    the exact merge-queue base SHA". Defaulting it turned 22 failures green in
+ *    one edit. Tests that MOVE the base still pass their own.
+ * 2. A bare `yrd queue run` FOLLOWS by default (#62), where `queue run
+ *    <selector>` was a single pass. Swapping a selector for the selectorless
+ *    form therefore HANGS the test rather than failing it — five 30s timeouts
+ *    that read as slowness, not as a wrong call. Add `--once`.
+ * 3. The LOW-LEVEL `app.dispatch(app.commands.queue.run, …)` builds its batch
+ *    from `derived`, not from the queue: pass
+ *    `derived: [deriveRunMemberArgs({bays, queues, mint, branch})]` (and
+ *    `baseSha`) or it composes an empty batch and mints no run at all.
+ * 4. A waiting CHECK now waits at ADMISSION, one cycle before any Run exists, so
+ *    `waitingCheck` can no longer hold a RUN open. A test that needs a waiting
+ *    run wants `waitingMerge`.
+ * 5. …but a waiting MERGE can only be CANCELLED, never finished externally: a
+ *    merge result must carry `commit`/`baseSha`, so `queue finish` fails output
+ *    validation on it. There is currently no reachable waiting step for an
+ *    external verdict at all — reported as its own defect, not a fixture gap.
+ */
 async function createApp(
   options: {
     waitingCheck?: boolean | ((input: StepExecution<ChangeShape>) => boolean)
@@ -2560,21 +2585,25 @@ describe("runYrd", () => {
               id: "R1",
               prs: [{ id: "PR1", revision: 1 }],
               shape: { results: { check: expect.any(Object) } },
-              steps: [{ name: "check" }, { name: "merge" }],
+              // One step: the carrier check ran at ADMISSION, so the Run holds
+              // the merge it authorised. The run's `shape` still carries the
+              // check's RESULT, which is how the merge-only run proves what
+              // judged it.
+              steps: [{ name: "merge" }],
               integration: expect.any(Object),
             },
           ],
         },
         { base: "retired", finished: [{ id: "R0" }] },
       ],
+      // DELETED: the `check` attempt row. LOST COVERAGE, and it is the surface
+      // that can least afford it — `log --all` exists to be LOSSLESS, and the
+      // admission check's attempt is not in it: the attempt history is built
+      // from runs, and the check's job belongs to no run. Its evidence survives
+      // on the standalone admission job (`admission:<pr>:<rev>:<baseSha>`), so
+      // this is the reachability shape again rather than lost data. Reported
+      // with the rest; measured here on 2026-08-28.
       attempts: [
-        expect.objectContaining({
-          run: "R1",
-          step: "check",
-          attempt: 1,
-          revision: "check-v1",
-          result: { status: "passed", output: { checked: true } },
-        }),
         expect.objectContaining({
           run: "R1",
           step: "merge",
@@ -4352,13 +4381,16 @@ describe("runYrd", () => {
     })
     expect(app.bays.state().submits["topic/retry"]).toMatchObject({ sha: MERGED_SHA })
 
-    // A refused admit journals no snapshot, so the retry derives a FRESH
-    // identity from the renewed fact, passes its check, and lands.
+    // The retry keeps the branch's IDENTITY and advances its revision: the
+    // refusal ledger row is what makes a refused member's id stable across
+    // cycles, so the renewed fact composes as revision 2 of the same delivery
+    // rather than as a fresh revision 1. Continuity is the better answer — an
+    // author who fixes and re-pushes has not started a different change.
     expect(await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       { status: "completed", conclusion: "success" },
     ])
     const retried = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.branch === "topic/retry"))
-    expect(retried?.prs).toMatchObject([{ branch: "topic/retry", revision: 1, headSha: MERGED_SHA }])
+    expect(retried?.prs).toMatchObject([{ branch: "topic/retry", revision: 2, headSha: MERGED_SHA }])
     // The renewed fact is what the second compose admitted: the resubmit moved
     // the branch's standing approval to the new head rather than adding a
     // second delivery beside it.
@@ -4517,13 +4549,49 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events())).toEqual(before)
   })
 
-  it("terminalizes unclaimed Queue work when `bay close --withdraw` closes its PR", async () => {
+  // RENAMED and re-based on what `--withdraw` means now. Its help says it
+  // outright — "close the workspace while the submission STANDS (nothing is
+  // withdrawn; the branch stays submitted)" — and src spells out why: the
+  // record-cancelling scan it used to drive went with the store, so the flag
+  // survives only as @yrd/bay's override for the live-submission close guard.
+  // The old subject (closing the bay terminalizes the change's unclaimed queue
+  // work) therefore has no code path left: nothing is withdrawn, so nothing is
+  // terminalized. LOST COVERAGE: the withdrawal→terminalization chain. Retiring
+  // a standing fact is now `yrd draft <branch>`/`yrd archive <branch>`, and
+  // whether THOSE terminalize unclaimed work is untested here — worth its own
+  // test, on the verbs that actually do it.
+  it("closes the bay while the submission stands, leaving its queue work untouched", async () => {
     const app = await createApp()
     await openAndSubmit(app)
+    // S7: the batch IS the population, and the low-level dispatch below builds
+    // its own from `derived` — so the first pass composes the branch and mints
+    // the member the second one names.
     await expect(
-      app.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "history-runner", leaseMs: 60_000 }),
+      app.queue.run({ steps: ["check"] }, { runner: "history-runner", leaseMs: 60_000 }),
     ).resolves.toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
+    // Name the member the FIRST pass minted rather than deriving a fresh one:
+    // a new mint starts at high-water 0 and refuses to hand back an id the app
+    // has already issued ("an id escaped without its commit").
+    const composed = Queues.values(app.state().queues)
+      .flatMap((run) => run.prs)
+      .find((pr) => pr.branch === "issue/one")
+    if (composed?.changeId === undefined) {
+      throw new Error("expected the first pass to compose issue/one with a change id")
+    }
+    await app.dispatch(app.commands.queue.run, {
+      prs: [],
+      derived: [
+        {
+          branch: composed.branch,
+          id: composed.id,
+          changeId: composed.changeId,
+          revision: composed.revision,
+          headSha: composed.headSha,
+        },
+      ],
+      steps: ["merge"],
+      baseSha: BASE_SHA,
+    })
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
     expect(
@@ -4531,16 +4599,14 @@ describe("runYrd", () => {
       close.stderr(),
     ).toBe(0)
 
-    // S7 (branch-is-change): "closes its PR" is retiring the branch's standing
-    // submit fact — that IS the withdrawal, and it is what must terminalize the
-    // unclaimed queue work below.
-    expect(app.bays.state().submits).toEqual({})
+    // The workspace is gone and the DELIVERY is not: the fact still stands at
+    // its head, and the unclaimed merge work is still queued rather than
+    // cancelled. That is the whole meaning of the flag now, and asserting both
+    // halves is what would catch it quietly going back to cancelling.
+    expect(app.bays.get("B1")).toMatchObject({ status: "closed" })
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(app.queue.get("R2")).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      steps: [{ job: { status: "completed", conclusion: "cancelled", attempt: 0, cancelReason: "PR withdrawn" } }],
-    })
+    expect(app.queue.get("R2")).toMatchObject({ status: "queued" })
   })
 
   // RED on a capability question S7 opened, deliberately left so. A waiting
@@ -4690,7 +4756,21 @@ describe("runYrd", () => {
     const refusals = Object.values(app.state().queues.admissionRefusals)
     expect(refusals).toHaveLength(1)
     expect(refusals[0]).toMatchObject({ code: "authored-gitlink", branch: "issue/one" })
-    expect(app.queue.audit().findings).toEqual([])
+    // The audit reports the streak ONCE, not once per cycle: the quarantine is
+    // what keeps three observations from becoming three findings, and the
+    // single row carries the whole history (count, duration, latest reason).
+    // It used to assert `findings: []` — the refusal was settled silently, so
+    // an immutable revision could sit refused with nothing saying so. Reporting
+    // it once is the same "one observation per streak" contract, said out loud.
+    expect(app.queue.audit().findings).toMatchObject([
+      {
+        code: "admission-refusal-loop",
+        pr: "PR1",
+        refusal: "authored-gitlink",
+        count: 3,
+        specimen: "pr:PR1:refusal:authored-gitlink",
+      },
+    ])
   })
 
   it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
@@ -4894,7 +4974,9 @@ describe("runYrd", () => {
         {
           id: "R1",
           prs: [{ id: "PR1" }],
-          steps: [{ name: "check" }, { name: "merge" }],
+          // One step, not two: the carrier check ran at ADMISSION, one cycle
+          // before the Run that merges what it authorised.
+          steps: [{ name: "merge" }],
           status: "completed",
           conclusion: "success",
         },
@@ -6117,7 +6199,13 @@ describe("runYrd", () => {
       // pending member — there is no separate check request to ask for.
       const stalledHuman = outputIO({ cwd: repo })
       expect(await runYrd(app, yrd("queue", "list"), stalledHuman.io, services)).toBe(0)
-      expect(stalledHuman.stdout()).toContain("position 1 · base-moved")
+      // DELETED: "position 1 · base-moved". A standing fact has no queue
+      // position before a compose (see the deleted "keeps queue positions
+      // lossless" block), so the row identifies the pending work by branch.
+      // LOST COVERAGE: the base-moved annotation rode on the position string
+      // and has no other home on this surface.
+      expect(stalledHuman.stdout()).toContain("issue/one")
+      expect(stalledHuman.stdout()).toContain("ready")
 
       const failedAudit = outputIO({ cwd: repo })
       const failedAuditServices: YrdCliServices = {
@@ -6447,13 +6535,16 @@ describe("runYrd", () => {
             findings: [
               {
                 code: "queue-never-started",
-                pr: "PR1",
+                // S7: a branch nothing has ever composed has no number at all,
+                // so the finding names the BRANCH — and its cure names what the
+                // runner would actually do next, which is compose it. Asking an
+                // operator to verify a check request would send them looking
+                // for a record-lane act that no longer exists.
+                pr: "issue/one",
                 specimen: "queue:main:never-started",
                 since: "2026-07-13T12:00:00.000Z",
                 blockedMs: 30 * 60_000,
-                resolution: [
-                  "Start or restart the habitant queue runner, then verify it requests required checks for 'PR1'.",
-                ],
+                resolution: ["Start or restart the habitant queue runner, then verify it composes branch 'issue/one'."],
               },
             ],
           },
@@ -7486,8 +7577,12 @@ describe("runYrd", () => {
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(15_000)
     expect(props.initial.diffs, "initial paint must not synchronously probe every visible PR").toBeUndefined()
+    // The lazy load still answers, and answers honestly: this member has never
+    // composed, so no candidate ref was ever written for it. `refs-pruned` is
+    // the loader's word for "the ref this diff needs is not there", where the
+    // record lane reached git and failed (`git-error`).
     await expect(props.load({ pr: "PR1", revision: 1 })).resolves.toMatchObject({
-      diffs: [{ pr: "PR1", revision: 1, unavailable: "git-error" }],
+      diffs: [{ pr: "PR1", revision: 1, unavailable: "refs-pruned" }],
     })
     // Exercise the live runtime so useWindowSize sees the mounted 200×50
     // viewport; renderString's first synchronous frame intentionally reports
@@ -7500,12 +7595,17 @@ describe("runYrd", () => {
     try {
       await frameHandle.waitForLayoutStable()
       const frame = stripOsc8Targets(frameHandle.text)
-      expect(frame).toContain("pr#1.1")
+      // S7: an uncomposed submission is named by its BRANCH in every queue row
+      // — `pr#1.1` was the record's revision selector.
+      expect(frame).toContain("issue/one")
       expect(frame).toContain("YRD QUEUES")
-      expect(frame.split("\n").find((row) => row.includes("pr#1.1") && row.includes(" ready "))).toContain("ready")
-      expect(frame).toContain("Queued at position 1")
-      // Item 31: the live POSITION fact left the metadata — the status box
-      // (headline + explanation) is its single home.
+      expect(frame.split("\n").find((row) => row.includes("issue/one") && row.includes(" ready "))).toContain("ready")
+      // DELETED: "Queued at position 1". A standing submit fact has no place in
+      // line until a compose admits it, so the status box has no position to
+      // headline — the same loss the deleted "keeps queue positions lossless"
+      // test records in full. The box still explains the row; it explains it
+      // without a number.
+      expect(frame).toContain("submitted — awaiting compose")
       expect(frame).not.toMatch(/POSITION\s+1/u)
       expect(frame).toContain("AGE")
       expect(frame).toContain("QUEUING")
@@ -7726,13 +7826,17 @@ describe("runYrd", () => {
     })
 
     try {
-      // Item 31: the code group's HEAD row reads `<short-sha> (rN)`.
-      const headRow = `${HEAD_SHA.slice(0, 8)} (r`
+      // Item 31 read `<short-sha> (rN)`, where `rN` was the RECORD revision. A
+      // pre-compose selection has no revision to print, so the head row carries
+      // the sha alone.
+      const headRow = HEAD_SHA.slice(0, 8)
       expect(wide.text).toContain("│")
       // Right-docked: the detail pane opens on its status box (item 23); the
       // member box beneath carries the selected change's identity header
       // (item 25 — a pre-run selection has no run, so no change list).
-      expect(wide.text).toMatch(/pr#\d+\.\d+ ⎇/u)
+      // S7: the member box headlines the BRANCH — `pr#N.M` was the record's
+      // revision selector, and a pre-compose selection has no member id.
+      expect(wide.text).toMatch(/issue\/one/u)
       expect(wide.text).toContain(headRow)
       await wide.press("Escape")
       await wide.waitForLayoutStable()
@@ -7747,7 +7851,8 @@ describe("runYrd", () => {
       // 40-row production geometry must keep the calendar box; the member
       // identity header witnesses an open detail even when HEAD clips.
       expect(below.text).toContain("╭─ STATS ")
-      expect(below.text).toMatch(/pr#\d+\.\d+ ⎇/u)
+      // Same as the right-docked pane above: the member box headlines the branch.
+      expect(below.text).toMatch(/issue\/one/u)
 
       // Compact full tier: the list owns the frame (TIME header), detail
       // replaces it wholesale on Enter and returns on Escape.
@@ -8510,7 +8615,12 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("watch", "--json"), watch.io)).toBe(0)
     expect(watch.stdout()).toContain('"command":"queue.list"')
     expect(watch.stdout()).toContain('"base":"main"')
-    expect(watch.stdout()).toContain('"id":"PR1"')
+    // S7: the row for an uncomposed submission is keyed by its BRANCH — `PR1`
+    // is minted at admission, and this branch has not composed yet. The row id
+    // is the submit fact itself (`main:submit:<branch>:<sha>`), which is the
+    // only stable identity a pending delivery has.
+    expect(watch.stdout()).toContain('"pr":"issue/one"')
+    expect(watch.stdout()).toContain('"id":"main:submit:issue/one:')
     expect(sleeps).toEqual([15_000])
   })
 
@@ -8881,21 +8991,14 @@ describe("runYrd", () => {
       "change 'PR-clock' current revision 1@1111111111111111111111111111111111111111 rejected terminal clock contradicts current PR state",
     )
 
-    expect(() =>
-      queueLogRows(
-        // prs marks PR-clock as a RECORD member: a record with no clock stays a
-        // loud failure, while a recordless (derived) member tolerates instead.
-        [{ ...fakeSummary([run]), prs: [pr] }],
-        new Set<string>(),
-        undefined,
-        new Map([[pr.id, changeDeliveryState(pr)]]),
-        [],
-        new Map(),
-        new Map(),
-      ),
-    ).toThrow(
-      "run 'R-clock' has no causal submit/check-request clock for change 'PR-clock' revision 1@1111111111111111111111111111111111111111",
-    )
+    // DELETED with the record lane (S7): the second leg, which put PR-clock in
+    // the summary's `prs` to mark it a RECORD member and asserted that a record
+    // with no causal clock stays a LOUD failure, where a recordless member
+    // tolerates. Every member is derived now, so the strict arm has no input
+    // that can reach it. LOST COVERAGE: the "record member with no causal
+    // submit/check-request clock throws" branch of `queueLogRows` — unreachable
+    // rather than untested, but if the record half of that function is ever
+    // deleted, this is the assertion that went with it.
   })
 
   it("freezes recent rejected age at the terminal timestamp", () => {
@@ -10348,15 +10451,22 @@ describe("runYrd", () => {
     expect(frozen.stdout()).toBe("")
     expect(frozen.stderr()).toContain("evaluations are frozen")
 
+    // S7 parked automatic promotion rather than guessing: `contest/promoted`
+    // recorded a change-record identity (pr + revision), and what it should
+    // record now — branch + submit sha, or the composed member id — is an open
+    // ruling. So the verb refuses, names the verified commit and the bay, and
+    // hands over the one delivery path that exists. DELETED: the promoted
+    // envelope (`status: "promoted"` with its promotion job). LOST COVERAGE:
+    // automatic finalization end to end; it comes back with the ruling, and
+    // this refusal is what must stop pretending in the meantime.
     const promote = outputIO()
-    expect(await runYrd(app, yrd("contest", "promote", "C1", "--json"), promote.io)).toBe(0)
-    expect(JSON.parse(promote.stdout())).toMatchObject({
-      command: "contest.promote",
-      contest: {
-        status: "promoted",
-        promotion: { attempt: "A1", job: { status: "completed", conclusion: "success" } },
-      },
-    })
+    expect(await runYrd(app, yrd("contest", "promote", "C1", "--json"), promote.io)).toBe(1)
+    expect(promote.stdout()).toBe("")
+    const refusal = JSON.parse(promote.stderr()) as { failure: { code: string; resolution: readonly string[] } }
+    expect(refusal.failure.code).toBe("contest-promotion-record-retired")
+    // The refusal is only honest if it names the evidence and the way forward.
+    expect(promote.stderr()).toContain("cccccccccccccccccccccccccccccccccccccccc")
+    expect(refusal.failure.resolution).toEqual(["yrd pr submit issue/contest-c1-a1"])
   })
 
   it("finishes a waiting remote evaluator through the Contest surface", async () => {
@@ -11438,6 +11548,16 @@ describe("typed issue merge bridge", () => {
     expect(output.stderr()).toContain(`no issue '${issueRef}' is in flight`)
   })
 
+  // RED on the reachability defect catalogued in host.test.ts ("reports a
+  // failed queue against origin when the operator HEAD is detached"), reaching
+  // its furthest consumer: the ISSUE LENS. A branch whose check fails at
+  // admission never composes, and the lens joins issues "from bays, records,
+  // contests, and composed runs only — a submitted branch appears here after
+  // its first compose" — so `issue view` REFUSES for the very delivery that
+  // needs reporting, and `needs-author` never reaches the tracker bridge at
+  // all. That is the status of work leaving the fleet's own boundary, not just
+  // a CLI row. CORRECT BEHAVIOUR is what this test asserts: the failed delivery
+  // appears under its issue, with its attributed result.
   it("adds needs-author with its attributed result in trackerBridge v2 and degrades it explicitly in v1", async () => {
     const issueRef = "@yrd/core/21634-submit-and-stay"
     const failure = "submitted composition cannot be built"
@@ -11549,51 +11669,25 @@ describe("typed issue merge bridge", () => {
     expect(dashboard.stdout()).toContain("REJECTED 0 NEEDS-AUTHOR 1")
   })
 
-  it("refuses to label a historical rejection without a typed Queue bounce as trackerBridge v1", async () => {
-    const nextId = ids()
-    const issueRef = "@yrd/core/21091-legacy-rejection"
-    const at = "2026-07-09T12:00:00.000Z"
-    const seededCommand = { id: nextId(), op: "fixture.legacy-rejected" }
-    const journal = createMemoryJournal([
-      {
-        command: seededCommand,
-        cause: {
-          id: nextId(),
-          commandId: seededCommand.id,
-          op: seededCommand.op,
-          commandHash: Command.hash(seededCommand),
-        },
-        events: [
-          {
-            id: nextId(),
-            name: "pr/pushed",
-            ts: at,
-            data: {
-              pr: "PR1",
-              branch: "topic/legacy-rejected",
-              base: "main",
-              headSha: HEAD_SHA,
-              issue: issueRef,
-              revision: 1,
-            },
-          },
-          {
-            id: nextId(),
-            name: "pr/rejected",
-            ts: at,
-            data: { pr: "PR1", revision: 1, detail: "historical check failure" },
-          },
-        ],
-      },
-    ])
-    await using app = await createApp({ journal })
-    const output = outputIO()
-
-    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io)).toBe(1)
-    expect(output.stdout()).toBe("")
-    expect(output.stderr()).toContain("cannot project rejected change 'PR1' without a typed Queue bounce run")
-  })
-
+  /*
+   * DELETED with the record lane (S7): "refuses to label a historical rejection
+   * without a typed Queue bounce as trackerBridge v1".
+   *
+   * It seeded a journal carrying `pr/pushed` + `pr/rejected` for PR1 and
+   * asserted `issue view` refused rather than labelling the rejection without a
+   * typed Queue bounce to justify it. Every `pr/*` reducer is a bare
+   * `return state` now, so the seed projects nothing: the issue is not in
+   * flight, and the refusal that arrives instead ("no issue … is in flight")
+   * is about the lens's join, not about the labelling guard.
+   *
+   * LOST COVERAGE, and the guard is still LIVE code: `trackerDeliveryV1`
+   * (src/run.ts) throws for a v1 delivery that lost its bounce, its merge, or
+   * its equivalence proof — three TypeErrors that no fixture can reach any
+   * more, because the only input that produced one was a record. If the record
+   * half of that projection is ever deleted, these are the assertions that went
+   * with it; if it is kept, it needs a fixture built from a retained RUN
+   * instead of a seeded record.
+   */
   it("retries a racing pr runs snapshot and refuses three exhausted cuts without partial JSON", async () => {
     const issueRef = "@yrd/core/21091-snapshot-race"
     // S7: an issue reaches a delivery through the head commit's enrichment at
@@ -12501,6 +12595,16 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     }
   })
 
+  // RED on a scope leak S7 opened, deliberately left so. A `--pr <id>` snapshot
+  // resolves its scope to MEMBER IDS and filters rows by them, but a standing
+  // fact with no composed member for its current sha renders a `factOnly` row
+  // whose `pr` is the BRANCH (`main:submit:<branch>:<sha>`) — so it matches no
+  // id, is never excluded, and rides along in every scoped read. Measured here:
+  // scoping to PR2 returns PR2's member and run rows plus a factOnly row for
+  // `issue/one`. CORRECT BEHAVIOUR: a scoped snapshot shows the scoped delivery
+  // only — resolve the scope to a BRANCH as well as an id, and filter factOnly
+  // rows on it. (An unscoped read must keep showing live work; that is the rule
+  // this leak is a misapplication of.)
   it("scopes a change-focused watch snapshot before projecting older terminal runs", async () => {
     const app = await createApp({ batch: 2 })
     try {
@@ -12510,7 +12614,9 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(await runYrd(app, yrd("bay", "open", "two"), open.io)).toBe(0)
       const submit = outputIO({ cwd: "/repo/.bays/B2" })
       expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
-      await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "test", leaseMs: 60_000 })
+      // S7: the batch IS the population, so one selectorless pass composes both
+      // submitted branches — naming them is what mints their ids.
+      await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
       const snapshot = await runInternals.queueListSnapshot(app, [], { pr: "PR2" }, outputIO().io, {
         queueReadModel: testQueueReadModel(app),
@@ -12686,10 +12792,16 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
   })
 
   it("feeds retained journal attempts into queue statistics facts", async () => {
-    const app = await createApp({ failingCheck: true })
+    // S7: a FAILING check refuses at admission and mints no run at all, so the
+    // stats would have nothing to be fed from — the retry this used to count
+    // happens on the admission job, which is not a run and does not reach run
+    // statistics. LOST COVERAGE: the `retries` column of a stats fact is no
+    // longer exercised anywhere; what remains, and is asserted, is that a
+    // retained run's attempts reach the projection at all.
+    const app = await createApp()
     try {
       await openAndSubmit(app)
-      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
       const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO().io, {
         queueReadModel: testQueueReadModel(app),
@@ -12697,7 +12809,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(snapshot.projection.timeStatsFacts).toMatchObject([
         {
           run: "R1",
-          members: [{ pr: "PR1", retries: 1 }],
+          members: [{ pr: "PR1" }],
         },
       ])
     } finally {
