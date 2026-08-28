@@ -88,6 +88,17 @@ export function resolveSelectorMatch<Value>(
   const canonical = indexed.find((candidate) => candidate.canonical === selector)
   if (canonical !== undefined) return { value: canonical.value, matchedBy: "canonical" }
 
+  // A canonical id is our own minted namespace, so folding it below is safe.
+  // An alias is often a git ref, where two can legitimately coexist differing
+  // only by case (@i/10-yrd/23231-selector-case-folding) — a selector that
+  // spells one out EXACTLY must resolve to its own owner, never get pulled
+  // into a same-folding sibling's ambiguity or lose to a `prefer` read-bias
+  // that exists only to break a fold nobody typed their way out of. A literal
+  // alias string shared verbatim by more than one candidate still falls
+  // through to the fold/prefer/ambiguous path below, unchanged.
+  const exactAlias = indexed.filter((candidate) => candidate.selectors.has(selector))
+  if (exactAlias.length === 1) return { value: exactAlias[0]!.value, matchedBy: "alias" }
+
   const folded = selector.toLowerCase()
   const insensitive = indexed.filter((candidate) =>
     [...candidate.selectors].some((candidateSelector) => candidateSelector.toLowerCase() === folded),

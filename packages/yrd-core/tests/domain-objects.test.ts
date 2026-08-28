@@ -1122,6 +1122,45 @@ describe("entity selector resolution", () => {
       })
     }
   })
+
+  /**
+   * Ids are our own minted namespace, so folding them is safe (`pr13` and
+   * `PR13` cannot denote two different things). Branches are git's namespace,
+   * where two refs genuinely can coexist differing only by case
+   * (@i/10-yrd/23231-selector-case-folding) — an exact alias spelling must
+   * resolve to ITS OWN owner, never a same-folding sibling, and never lose to
+   * a `prefer` read-bias that only exists to break UNRESOLVED fold
+   * collisions.
+   */
+  it("resolves an exact-case branch alias to its own owner, never a same-folding sibling", () => {
+    const colliding: readonly Core.SelectorCandidate<{ readonly id: string; readonly live: boolean }>[] = [
+      { canonical: "PR13", aliases: ["Feature-X"], value: { id: "PR13", live: false } },
+      { canonical: "PR14", aliases: ["feature-x"], value: { id: "PR14", live: true } },
+    ]
+
+    expect(Core.resolveSelectorMatch("Feature-X", colliding, { kind: "PR" })).toEqual({
+      value: { id: "PR13", live: false },
+      matchedBy: "alias",
+    })
+    expect(Core.resolveSelectorMatch("feature-x", colliding, { kind: "PR" })).toEqual({
+      value: { id: "PR14", live: true },
+      matchedBy: "alias",
+    })
+
+    // A read-bias `prefer` only disambiguates a genuine fold collision; it must
+    // never override an EXACT request. PR14 is the one `prefer` would pick,
+    // but "Feature-X" names PR13 exactly.
+    expect(Core.resolveSelectorMatch("Feature-X", colliding, { kind: "PR", prefer: (pr) => pr.live })).toEqual({
+      value: { id: "PR13", live: false },
+      matchedBy: "alias",
+    })
+
+    // Neither exact spelling: still genuinely ambiguous, and still refuses
+    // loud rather than guess.
+    expect(() => Core.resolveSelector("FEATURE-X", colliding, { kind: "PR" })).toThrow(
+      "PR selector 'FEATURE-X' is ambiguous: PR13, PR14",
+    )
+  })
 })
 
 describe("Memory Journal", () => {
