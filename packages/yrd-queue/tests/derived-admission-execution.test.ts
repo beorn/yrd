@@ -115,7 +115,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {

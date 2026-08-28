@@ -107,7 +107,7 @@ async function createWaitingCheckApp() {
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -137,7 +137,9 @@ describe("staleRevisionAdmissionJobs — store membership is not staleness (S7 i
     const waiting = admissionJobs(app)
     expect(waiting.length).toBeGreaterThan(0)
     expect(waiting.every((job) => job.status === "waiting")).toBe(true)
-    expect(app.state().bays.prs).toEqual({})
+    // Recordless by construction — the store is deleted, so the member's whole
+    // claim to liveness is the standing submit fact the predicate must read.
+    expect(app.state().bays.submits["issue/derived"]).toMatchObject({ sha: SHA, base: "main" })
 
     // The booby trap: keying "stale" on `bays.prs[prId]` reads EVERY recordless
     // member as stale, and recover cancels the live admission it should keep.

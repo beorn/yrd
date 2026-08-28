@@ -114,7 +114,7 @@ async function createFailingCheckApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -133,8 +133,9 @@ describe("durable derived refusal ledger (wave defect 1 — 22395 for the derive
 
     await app.queue.run({}, runtime)
 
-    // No record, no run — before the fix the resolve-by-id skip left this {}.
-    expect(app.state().bays.prs).toEqual({})
+    // Recordless and runless: the member is nothing but its submit fact, which
+    // is exactly the shape the resolve-by-id skip used to drop on the floor.
+    expect(app.state().bays.submits["issue/derived"]).toMatchObject({ sha: SHA, base: "main" })
     expect(Queues.values(app.state().queues)).toEqual([])
     expect(
       app.state().queues.admissionRefusals.PR1,

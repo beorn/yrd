@@ -5,11 +5,18 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue, Queues, type StepExecution } from "@yrd/queue"
+import {
+  deriveRunMemberArgs,
+  withStep,
+  withQueue,
+  Queues,
+  type DerivedRunMember,
+  type StepExecution,
+} from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -68,7 +75,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -80,12 +87,18 @@ async function createApp(
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+/** The branch's standing submit fact IS the delivery (S7 branch-is-change);
+ * the member the queue would compose from it is derived here so the low-level
+ * `queue.run` dispatch below can name the batch explicitly. One shared `mint`
+ * across the batch keeps the members' identities distinct. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>>,
+  branch: string,
+  mint: PrNumberMint,
+): Promise<DerivedRunMember> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base: "main" })
+  return deriveRunMemberArgs({ bays: app.state().bays, queues: app.state().queues, mint, branch })
 }
 
 /** Seed R1 = a FAILED 2-PR batch (bisectable) whose check step was NOT yet
@@ -94,9 +107,12 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
 async function seedStalePlanBatch(journal: Journal<unknown>, id: () => string, log?: ReturnType<typeof createLogger>) {
   {
     await using app = await createApp("check-v1", journal, id)
-    const a = await submitBranch(app, "issue/batch-a")
-    const b = await submitBranch(app, "issue/batch-b")
-    await app.dispatch(app.commands.queue.run, { prs: [a.id, b.id], steps: ["check"] })
+    const mint = volatilePrNumberMint()
+    const a = await submitBranch(app, "issue/batch-a", mint)
+    const b = await submitBranch(app, "issue/batch-b", mint)
+    // `prs: []` beside a non-empty `derived` selects exactly those derived
+    // members — the post-S7 spelling of naming the batch explicitly.
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [a, b], steps: ["check"] })
     const checkJob = app.queue.get("R1")?.steps[0]?.job
     if (checkJob === undefined) throw new Error("expected requested batch check")
     await app.jobs.run(checkJob.id, runtime)

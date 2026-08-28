@@ -31,13 +31,14 @@
  * instrument whose baseline drifts silently is worth nothing.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createLogger } from "loggily"
 import * as z from "zod"
 import {
   candidateRefFor,
+  Queues,
   withMerge,
   withQueue,
   withStep,
@@ -165,10 +166,10 @@ async function drainDrill(
     defaultSteps: ["check", "review", "merge"],
     resolveBaseSha: () => head,
     prepareCandidate: (input) => {
-      const members = input.prs.map((pr) => (pr as { id: string }).id)
+      const members = input.prs.map((pr) => (pr as { branch: string }).branch)
       // Disjoint payloads: no two members ever touch the same file, so every
       // rebuild counted here is pure tax and never conflict resolution.
-      const touched = members.map((id) => payloads.get(id) ?? id)
+      const touched = members.map((branch) => payloads.get(branch) ?? branch)
       if (new Set(touched).size !== touched.length) {
         throw new Error(`yrd: drill payloads are not disjoint: ${touched.join(",")}`)
       }
@@ -192,7 +193,7 @@ async function drainDrill(
     pipe(
       createYrdDef(),
       withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+      withBays({ jobs: bayJobs }),
     ),
   )
   await using app = await createYrd(definition, {
@@ -206,18 +207,25 @@ async function drainDrill(
 
   for (let index = 0; index < options.candidates; index += 1) {
     const branch = `issue/tput-${index}`
-    await app.bays.submit({ branch, headSha: sha(`head:${index}`), base: "main", baseSha: BASE })
-    const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-    if (pr === undefined) throw new Error(`yrd: drill PR for '${branch}' was not recorded`)
-    payloads.set(pr.id, `file-${index}.txt`)
+    // The standing submit fact IS the delivery (S7 branch-is-change); the
+    // selectorless drain below derives one member per fact. Payloads key by
+    // branch because the member's number is minted by the driver at admission.
+    await app.bays.recordBranchSubmit({ branch, sha: sha(`head:${index}`), base: "main" })
+    payloads.set(branch, `file-${index}.txt`)
   }
   const submitted = payloads.size
   if (submitted !== options.candidates) {
-    throw new Error(`yrd: drill submitted ${submitted} PRs, expected ${options.candidates}`)
+    throw new Error(`yrd: drill submitted ${submitted} branches, expected ${options.candidates}`)
   }
 
+  // Integration is read from the runs that carried each branch, not from a
+  // store: a member has integrated once a settled run names it.
   const integratedCount = (): number =>
-    Object.values(app.state().bays.prs).filter((pr) => pr.integration !== undefined).length
+    new Set(
+      Queues.values(app.state().queues)
+        .filter((run) => run.passedAt !== undefined)
+        .flatMap((run) => run.prs.map((member) => member.branch)),
+    ).size
   const budget = options.cycleBudget ?? options.candidates * 4
   let cycles = 0
   while (cycles < budget && integratedCount() < submitted) {

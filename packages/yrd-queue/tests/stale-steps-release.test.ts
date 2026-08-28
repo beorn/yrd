@@ -5,11 +5,18 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import { createBayJobDefs, changeDeliveryState, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue, Queues, type StepExecution } from "@yrd/queue"
+import {
+  deriveRunMemberArgs,
+  withStep,
+  withQueue,
+  Queues,
+  type DerivedRunMember,
+  type StepExecution,
+} from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -71,7 +78,7 @@ async function createApp(secondRevision: string, journal = createMemoryJournal()
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -83,12 +90,21 @@ async function createApp(secondRevision: string, journal = createMemoryJournal()
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+/** The branch's standing submit fact IS the delivery (S7 branch-is-change);
+ * the member the queue would compose from it is derived here so the low-level
+ * `queue.run` dispatch below can name exactly one. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>>,
+  branch: string,
+): Promise<DerivedRunMember> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base: "main" })
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint: volatilePrNumberMint(),
+    branch,
+  })
 }
 
 describe("stale-steps release — a drifted next step frees the run instead of killing compose", () => {
@@ -98,8 +114,10 @@ describe("stale-steps release — a drifted next step frees the run instead of k
 
     {
       await using app = await createApp("second-v1", journal, id)
-      const pr = await submitBranch(app, "issue/stale-next-step")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "second"] })
+      const member = await submitBranch(app, "issue/stale-next-step")
+      // `prs: []` beside a non-empty `derived` selects exactly those derived
+      // members — the post-S7 spelling of naming one member explicitly.
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -119,9 +137,10 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       conclusion: "failure",
       error: expect.objectContaining({ code: "stale-steps" }),
     })
-    // Authority released and the change stays submitted, so it re-admits fresh.
+    // Authority released and the branch approval survives the release — the
+    // derived lane's "stays submitted", so it re-admits fresh.
     expect(replayed.state().queues.authority.runs).toBeDefined()
-    expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+    expect(replayed.state().bays.submits["issue/stale-next-step"]).toMatchObject({ sha: "1".repeat(40) })
   })
 
   it("releases a queued current step whose requested Job revision drifted before execution", async () => {
@@ -130,8 +149,8 @@ describe("stale-steps release — a drifted next step frees the run instead of k
 
     {
       await using app = await createApp("second-v1", journal, id)
-      const pr = await submitBranch(app, "issue/stale-current-step")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "second"] })
+      const member = await submitBranch(app, "issue/stale-current-step")
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -151,7 +170,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       conclusion: "failure",
       error: expect.objectContaining({ code: "stale-steps" }),
     })
-    expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+    expect(replayed.state().bays.submits["issue/stale-current-step"]).toMatchObject({ sha: "1".repeat(40) })
 
     const readmitted = await replayed.queue.run({ prs: ["PR1"] }, runtime)
     expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
@@ -164,8 +183,8 @@ describe("stale-steps release — a drifted next step frees the run instead of k
 
     {
       await using app = await createApp("second-v1", journal, id)
-      const pr = await submitBranch(app, "issue/recover-stale-current-step")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "second"] })
+      const member = await submitBranch(app, "issue/recover-stale-current-step")
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -192,7 +211,7 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     expect(replayed.queue.audit().findings).not.toContainEqual(
       expect.objectContaining({ code: "step-revision-drift", run: "R1" }),
     )
-    expect(changeDeliveryState(replayed.state().bays.prs.PR1!)).toBe("submitted")
+    expect(replayed.state().bays.submits["issue/recover-stale-current-step"]).toMatchObject({ sha: "1".repeat(40) })
   })
 
   it("re-admits the still-submitted PR under the installed config after a stale-steps release", async () => {
@@ -201,8 +220,8 @@ describe("stale-steps release — a drifted next step frees the run instead of k
 
     {
       await using app = await createApp("second-v1", journal, id)
-      const pr = await submitBranch(app, "issue/stale-then-readmit")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first", "second"] })
+      const member = await submitBranch(app, "issue/stale-then-readmit")
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)

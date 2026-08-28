@@ -5,13 +5,17 @@
  * exist to feed. Post-S7 exactly ONE survives: the `settled` command emits
  * every non-intent member's terminal, sourced from the run's own snapshots,
  * in the SAME journal write as `queue/run/settled` (once-per-run is
- * structural: the settlement retires the root). During the transition window
- * records still exist, so the settled batch must emit a record member's
- * terminal byte-identically to the advance loop it replaced — same fields,
- * same store dedupe, same submit-fact retirement riding the batch — or record
- * terminals double-emit across the cutover. `reconcileMerge` retires with a
- * typed refusal naming the replacement (merged-truth); its repository-proven
+ * structural: the settlement retires the root). `reconcileMerge` retires with
+ * a typed refusal naming the replacement (merged-truth); its repository-proven
  * merges are read directly, never reconciled INTO an index.
+ *
+ * S7 conversion note (branch-is-change, @i/10 22991): the cross-lane parity
+ * legs are gone with the lane. `bays.submit` now refuses `record-mint-retired`,
+ * so no record member can be minted and the advance loop's byte-parity — store
+ * dedupe, and the `branch/unsubmitted` submit-fact retirement riding the
+ * settlement batch — has no reachable subject here (`submitFactRetirement` is
+ * documented record-terminal-only). Every member below is derived, and the
+ * single-writer, once-per-run, and replay-stability contracts are unchanged.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -23,6 +27,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
+  Queues,
   withMerge,
   withQueue,
   withStep,
@@ -34,6 +39,7 @@ import {
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const SHA = "7".repeat(40)
+const FIRST = "1".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
@@ -106,7 +112,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -140,32 +146,33 @@ function eventsNamed(
 }
 
 describe("settlement single-writer — the settled command is the ONE terminal emitter", () => {
-  it("a run with a record member AND a derived member settles BOTH terminals exactly once, in the settlement's own journal write, replay-stable", async () => {
+  it("a run settles BOTH members' terminals exactly once, in the settlement's own journal write, replay-stable", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     const queueMint = volatilePrNumberMint()
     {
       await using app = await createApp({ journal, id, queueMint })
-      // Record member, with a standing submit fact at its head so the record
-      // arm's fact retirement is observable (advance-loop byte parity).
-      await app.bays.submit({ branch: "task/record", headSha: "1".repeat(40), base: "main", baseSha: BASE })
-      const record = Object.values(app.state().bays.prs)[0]
-      if (record === undefined) throw new Error("no record was created")
-      const recordHead = record.revs[0]?.head
-      if (recordHead === undefined) throw new Error("record has no head")
-      await app.bays.recordBranchSubmit({ branch: "task/record", sha: recordHead, base: "main" })
-      // Derived member: a recordless branch submitted only in git.
+      // Two derived members — recordless branches submitted only in git. Post-S7
+      // this is the only lane: `bays.submit` refuses `record-mint-retired`.
+      await app.bays.recordBranchSubmit({ branch: "task/first", sha: FIRST, base: "main" })
       await app.bays.recordBranchSubmit({ branch: "issue/derived", sha: SHA, base: "main" })
 
       const runs = await app.queue.run({}, runtime)
       expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-      expect(runs[0]?.prs.map((member) => member.branch).toSorted()).toEqual(["issue/derived", "task/record"])
+      expect(runs[0]?.prs.map((member) => member.branch).toSorted()).toEqual(["issue/derived", "task/first"])
 
       const frames = await journalFrames(journal)
       const integrated = eventsNamed(frames, "pr/integrated")
       expect(integrated).toHaveLength(2)
-      const byPr = new Map(integrated.map((event) => [(event.data as { pr: string }).pr, event.data]))
-      expect([...byPr.keys()].toSorted()).toEqual([record.id, "PR2"].toSorted())
+      // One terminal per member, each carrying the run's own merge proof — the
+      // fields the deleted advance loop used to write onto the record.
+      const byHead = new Map(
+        integrated.map((event) => [(event.data as { headSha: string }).headSha, event.data as object]),
+      )
+      expect([...byHead.keys()].toSorted()).toEqual([FIRST, SHA].toSorted())
+      for (const terminal of byHead.values()) {
+        expect(terminal).toMatchObject({ commit: MERGED, baseSha: BASE })
+      }
 
       // Single writer: every terminal rides the settlement's OWN write — the
       // frame that carries `queue/run/settled` — never an advance frame.
@@ -178,17 +185,12 @@ describe("settlement single-writer — the settled command is the ONE terminal e
         ).toBe(true)
       }
 
-      // Record arm byte-parity legs: the store absorbed the terminal, and the
-      // merge consumed the branch approval in the SAME write (superseded).
-      expect(app.state().bays.prs[record.id]?.state).not.toBe("open")
-      expect(app.state().bays.submits["task/record"]).toBeUndefined()
-      const retired = eventsNamed(frames, "branch/unsubmitted")
-      expect(retired.map((event) => event.data)).toEqual([{ branch: "task/record", reason: "superseded" }])
-      const retirementFrame = frames.find((frame) => frame.some((event) => event.name === "branch/unsubmitted"))
-      expect(retirementFrame?.some((event) => event.name === "queue/run/settled")).toBe(true)
-
-      // The derived member's fact deliberately outlives its run.
+      // A derived member's fact deliberately outlives its run — consumption is
+      // derived from run history, and a re-push renews authority — so the
+      // settlement retires nothing (`submitFactRetirement` is record-only).
       expect(app.state().bays.submits["issue/derived"]).toMatchObject({ sha: SHA })
+      expect(app.state().bays.submits["task/first"]).toMatchObject({ sha: FIRST })
+      expect(eventsNamed(frames, "branch/unsubmitted")).toEqual([])
 
       // Once per run is structural: another selectorless compose emits no
       // second terminal for either member.
@@ -196,37 +198,39 @@ describe("settlement single-writer — the settled command is the ONE terminal e
       expect(eventsNamed(await journalFrames(journal), "pr/integrated")).toHaveLength(2)
     }
 
-    // Replay converges: the same journal projects the same terminal state and
+    // Replay converges: the same journal projects the same settled run and
     // re-emits nothing.
     await using replayed = await createApp({ journal, id, queueMint })
-    const record = Object.values(replayed.state().bays.prs)[0]
-    expect(record?.integration).toMatchObject({ commit: MERGED, baseSha: BASE })
+    const settled = Queues.values(replayed.state().queues).filter((run) => run.passedAt !== undefined)
+    expect(settled).toHaveLength(1)
+    expect(settled[0]?.prs.map((member) => member.branch).toSorted()).toEqual(["issue/derived", "task/first"])
     expect(eventsNamed(await journalFrames(journal), "pr/integrated")).toHaveLength(2)
   })
 
-  it("reconcileMerge is retired: typed refusal naming the merged-truth replacement, no emission, store untouched", async () => {
+  it("reconcileMerge is retired: typed refusal naming the merged-truth replacement, and no emission", async () => {
     const journal = createMemoryJournal()
     await using app = await createApp({ journal })
-    await app.bays.submit({ branch: "task/record", headSha: "1".repeat(40), base: "main", baseSha: BASE })
-    const record = Object.values(app.state().bays.prs)[0]
-    if (record === undefined) throw new Error("no record was created")
-    const revision = record.revs[0]
-    if (revision === undefined) throw new Error("record has no revision")
+    // A live derived member the reconciler would have indexed. Its args are
+    // synthetic because the record it used to name can no longer be minted —
+    // the refusal fires before any lookup, which is the point.
+    await app.bays.recordBranchSubmit({ branch: "task/first", sha: FIRST, base: "main" })
 
     await expect(
       app.queue.reconcileMerge({
-        pr: record.id,
-        revision: revision.n,
-        headSha: revision.head,
+        pr: "PR1",
+        revision: 1,
+        headSha: FIRST,
         run: "R-recovered",
         commit: MERGED,
         landingSha: MERGED,
         baseSha: BASE,
-        changeId: revision.changeId ?? `I${"c".repeat(40)}`,
+        changeId: `I${"c".repeat(40)}`,
       }),
     ).rejects.toThrow(/retired.*merged-truth|merged-truth.*retired/su)
 
+    // Nothing was emitted and the member's approval is untouched: a retired
+    // command must not be a half-writer.
     expect(eventsNamed(await journalFrames(journal), "pr/integrated")).toHaveLength(0)
-    expect(app.state().bays.prs[record.id]?.state).toBe("open")
+    expect(app.state().bays.submits["task/first"]).toMatchObject({ sha: FIRST })
   })
 })
