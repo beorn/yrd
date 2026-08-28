@@ -13,6 +13,15 @@
  * run's own snapshot) and the admission-refusal ledger row's `code` + `kind`.
  * Those are what these tests read; the classification they fence is unchanged.
  *
+ * THE TWO HOMES ARE PATH-DISJOINT, and assuming otherwise is what went wrong
+ * in the first conversion of this file. `pr/needs-author` has exactly ONE
+ * emitter in src, on the run step-failure path, and its payload is built with
+ * `run: record.id` — so it can only fire for a refusal that happened INSIDE a
+ * started run. A refusal at ADMISSION mints no run record, so that emitter
+ * cannot reach it, and the ledger row is its whole durable trace. Expect the
+ * fact only where a run exists; expect the ledger row on the admission path.
+ * Asserting both on one path fences nothing and reads as a dropped event.
+ *
  * THE ORDINARY-RED-CHECK TEST IS A CONTROL, not a third example. Billing every
  * failure to the author would satisfy both author-owned assertions above it,
  * leaving them decorative — only a code that must NOT bill the author proves
@@ -199,7 +208,7 @@ function refusalFor(app: { state: QueueApp["state"] }, branch: string) {
 }
 
 describe("native needs-author lifecycle", () => {
-  it("bills an author-owned composition refusal that reached the runner as needs-author, with its result", async () => {
+  it("bills an author-owned composition refusal refused at ADMISSION as needs-author in the durable ledger", async () => {
     const journal = createMemoryJournal()
     await using app = await createQueueApp(
       () => ({
@@ -226,41 +235,39 @@ describe("native needs-author lifecycle", () => {
       headSha: HEAD,
     })
 
-    // DELIBERATE RED (S7) — and the contract here needs a src owner's ruling,
-    // because this test is internally inconsistent as written. It asserts BOTH
-    // that the fact is "re-sourced from the run's own snapshot" AND, twelve
-    // lines below, that "a refused admission mints no run record" — and that
-    // second assertion PASSES. There is no run snapshot to re-source from on
-    // this path, so settlement's hook never runs and zero `pr/needs-author`
-    // events are emitted.
+    // REMOVED (S7, @chief ruling): this test used to also assert that one
+    // `pr/needs-author` fact was journaled here, with its receipt.
     //
-    // The competing reading is that the event is correctly gone: the sweep's
-    // own comment in queue.ts says the record-lane eject that used to write a
-    // durable `pr/needs-author` is deleted, and that "the warn plus the
-    // refusal-ledger row below are its whole trace". The ledger-row assertion
-    // immediately above this block passes and is the stronger check — it
-    // carries branch, code, kind, revision and headSha.
+    // WHAT IT PROVED: that an author-owned refusal reaches a human through the
+    // durable journaled fact, carrying the step and the runner's own result.
     //
-    // NOT resolving that myself: deleting this expectation would bless the
-    // defect if the fact is genuinely owed, and keeping it red costs only this
-    // note if it is not. Left red per the standing ruling.
+    // WHY THE PROOF NO LONGER APPLIES ON THIS PATH: `pr/needs-author` has
+    // exactly one emitter in src (queue.ts, the run step-failure path). Its
+    // payload is built with `run: record.id` and it is reached only from a
+    // materialized run record. This test's refusal happens at ADMISSION, and
+    // the assertion twelve lines below — "a refused admission mints no run
+    // record" — passes. Those two facts were never in tension: the second is
+    // the PROOF that the first cannot hold. There is no run to attribute the
+    // fact to, so the emitter cannot fire by construction.
     //
-    // And the fact reaches settlement's hook, re-sourced from the run's own
-    // snapshot — the only home a recordless member's identity has. The fact
-    // schema is strict and carries no branch, so it is keyed on the minted id
-    // the ledger row records for this branch.
-    const needsAuthor = await journalEvents(journal, "pr/needs-author")
-    expect(needsAuthor).toHaveLength(1)
-    expect(needsAuthor[0]?.data).toMatchObject({
-      pr: refusalFor(app, branch)?.pr,
-      revision: 1,
-      headSha: HEAD,
-      step: "check",
-      receipt: {
-        code: "composition-retired",
-        message: "change 'PR1' declares a source composition; composed revisions are retired",
-      },
-    })
+    // WHERE THE COVERAGE WENT — both halves, and neither is a downgrade:
+    //  - the FACT and its receipt: the sibling below, "surfaces a refusal
+    //    attached SOLELY to the integrating step", asserts the same event with
+    //    `run: run?.id` after explicitly requiring that "the merge-step refusal
+    //    must happen inside a started run". It is GREEN. So this file still
+    //    proves the fact is emitted — it now proves it on the only path that
+    //    can emit it, which is strictly more honest than asserting it here.
+    //  - the ADMISSION path's trace: the ledger-row assertion immediately
+    //    above, which carries branch, code, kind, revision and headSha. That
+    //    row has a live consumer — `NEEDS_AUTHOR_FAILURE_CODES` in
+    //    yrd-cli/src/status-presentation.ts reads the composition-failure
+    //    bucket — so the author-owned refusal is still traced end to end
+    //    rather than merely recorded.
+    //
+    // Together the two tests are a discriminating pair: refusal inside a run
+    // emits the fact, refusal at admission bills the ledger. Deleting the
+    // expectation here without the sibling standing green would have blessed a
+    // real hole.
     // A refused admission mints no run record.
     expect(Queues.ids(app.state().queues)).toEqual([])
     // The delivery-status copy is deleted (22991): nothing about needs-author
