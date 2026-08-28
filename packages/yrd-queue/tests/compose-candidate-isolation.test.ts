@@ -5,11 +5,20 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { candidateRefFor, withMerge, withStep, withQueue, type CandidatePreparer, type StepExecution } from "@yrd/queue"
+import {
+  candidateRefFor,
+  deriveRunMemberArgs,
+  withMerge,
+  withStep,
+  withQueue,
+  type CandidatePreparer,
+  type DerivedRunMember,
+  type StepExecution,
+} from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -44,20 +53,32 @@ function workspace(): BayWorkspace {
   }
 }
 
+/** One app's knobs. `mint` is REQUIRED and shared with the test body: post-S7
+ * the queue plugin owns the derived-admission mint, and a test that derives its
+ * own member identities must burn numbers from the SAME mint the compose does,
+ * or the ids the assertions name are not the ids the drain runs. */
+type AppOptions = Readonly<{
+  mint: PrNumberMint
+  journal?: ReturnType<typeof createMemoryJournal>
+  id?: () => string
+  log?: ReturnType<typeof createLogger>
+  mergeRun?: () => JobResult<{ commit: string; baseSha: string }>
+  prepareCandidate?: CandidatePreparer
+  batch?: false | number
+}>
+
 /** merge (integrates) + deploy (needsIntegration) with a caller-tunable deploy
  * revision, so a replay under a bumped deploy revision leaves R1 stuck AFTER the
  * merge integrated but BEFORE the drifted deploy — the throw that must be skipped
  * (not fatal) in a selectorless compose. */
-function mergeDeployPlugin(
-  deployRevision: string,
-  mergeRun: () => JobResult<{ commit: string; baseSha: string }> = () => ({
-    status: "completed",
-    conclusion: "success",
-    output: { commit: MERGED, baseSha: BASE },
-  }),
-  prepareCandidate?: CandidatePreparer,
-  batch: false | number = false,
-) {
+function mergeDeployPlugin(deployRevision: string, options: AppOptions) {
+  const mergeRun =
+    options.mergeRun ??
+    (() => ({
+      status: "completed" as const,
+      conclusion: "success" as const,
+      output: { commit: MERGED, baseSha: BASE },
+    }))
   const merge = withMerge(mergeRun, { revision: "merge-v1" })
   const deploy = withStep(
     "deploy",
@@ -70,59 +91,74 @@ function mergeDeployPlugin(
   )
   return withQueue({
     steps: [merge, deploy] as const,
-    batch,
+    batch: options.batch ?? false,
     defaultSteps: ["merge", "deploy"],
-    ...(prepareCandidate === undefined ? {} : { prepareCandidate }),
+    // A submit FACT carries no baseSha (the record revision that used to carry
+    // one is gone), so the host's base resolver is now the compose's only
+    // source for the exact merge-queue base a Candidate is prepared against.
+    resolveBaseSha: () => BASE,
+    // The derived lane's admission mint lives on the QUEUE plugin post-S7 —
+    // `withBays` lost `prNumberMint` with the record store it minted for.
+    prNumberMint: options.mint,
+    ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
   })
 }
 
-async function createApp(
-  deployRevision: string,
-  journal = createMemoryJournal(),
-  id: () => string = ids(),
-  log?: ReturnType<typeof createLogger>,
-  mergeRun?: () => JobResult<{ commit: string; baseSha: string }>,
-  prepareCandidate?: CandidatePreparer,
-  batch: false | number = false,
-) {
+async function createApp(deployRevision: string, options: AppOptions) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = mergeDeployPlugin(deployRevision, mergeRun, prepareCandidate, batch)
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-  )
+  const queue = mergeDeployPlugin(deployRevision, options)
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: {
-      journal,
-      id,
+      journal: options.journal ?? createMemoryJournal(),
+      id: options.id ?? ids(),
       clock: () => "2026-01-01T00:00:00.000Z",
-      log: log ?? createLogger("test", [{ level: "silent" }]),
+      log: options.log ?? createLogger("test", [{ level: "silent" }]),
     },
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+/** Post-S7 the submit FACT is the delivery: no record is minted, and the member
+ * the compose runs is derived from the fact. Deriving it here (under the app's
+ * own mint) hands the test the very identity the drain will use, so every
+ * `member.id` assertion below still names the member that actually ran. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>>,
+  mint: PrNumberMint,
+  branch: string,
+): Promise<DerivedRunMember> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base: "main" })
+  return deriveRunMemberArgs({ bays: app.state().bays, queues: app.state().queues, mint, branch })
 }
 
 /** Seed R1 with a passed merge whose deploy step was never requested, then reopen
  * under a bumped deploy revision so advancing R1 refuses (the integrated boundary
  * keeps frozen semantics — the drift stays a loud throw, unlike the pre-merge
  * stale-steps release). */
-async function seedStuckRun(deployRevision: string, journal: ReturnType<typeof createMemoryJournal>, id: () => string) {
-  await using app = await createApp("deploy-v1", journal, id)
-  const pr = await submitBranch(app, "issue/stuck-post-merge")
-  await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge", "deploy"] })
+async function seedStuckRun(
+  deployRevision: string,
+  journal: ReturnType<typeof createMemoryJournal>,
+  id: () => string,
+  mint: PrNumberMint,
+): Promise<DerivedRunMember> {
+  await using app = await createApp("deploy-v1", { mint, journal, id })
+  const member = await submitBranch(app, mint, "issue/stuck-post-merge")
+  // `prs: []` beside a non-empty `derived` selects exactly this derived member.
+  // The low-level command has no base resolver, so the driver supplies the
+  // exact base sha the facade's `resolveBaseSha` would have resolved.
+  await app.dispatch(app.commands.queue.run, {
+    prs: [],
+    derived: [member],
+    steps: ["merge", "deploy"],
+    baseSha: BASE,
+  })
   const mergeJob = app.queue.get("R1")?.steps[0]?.job
   if (mergeJob === undefined) throw new Error("expected requested merge")
   await app.jobs.run(mergeJob.id, runtime)
   expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("completed")
   expect(app.queue.get("R1")?.steps[1]?.job).toBeUndefined()
+  return member
 }
 
 describe("compose candidate isolation — one poisoned candidate never aborts the whole selectorless drain", () => {
@@ -146,12 +182,15 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
         mergeability: "mergeable",
       }
     }
-    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), log, undefined, prepareCandidate)
-    const poisoned = await submitBranch(app, "issue/ref-write-refused")
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", { mint, log, prepareCandidate })
+    const poisoned = await submitBranch(app, mint, "issue/ref-write-refused")
     poisonedId = poisoned.id
-    const healthy = await submitBranch(app, "issue/healthy-peer")
+    const healthy = await submitBranch(app, mint, "issue/healthy-peer")
 
-    const drained = await app.queue.run({}, runtime)
+    // `prs` ABSENT keeps the compose selectorless — the tolerance under test —
+    // while `derived` hands it these two identities instead of re-minting.
+    const drained = await app.queue.run({ derived: [poisoned, healthy] }, runtime)
 
     expect(drained).toEqual(
       expect.arrayContaining([
@@ -161,7 +200,13 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
         }),
       ]),
     )
-    expect(app.state().bays.prs[poisoned.id]?.integration).toBeUndefined()
+    // The poisoned member never integrates. A derived member has no record to
+    // read `integration` off, and the run snapshot is its only durable home —
+    // so "not integrated" is "it reached no run in this drain at all".
+    expect(
+      drained.flatMap((run) => run.prs).map((pr) => pr.id),
+      "the poisoned member must not appear in any run the drain produced",
+    ).not.toContain(poisoned.id)
     const skip = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" &&
@@ -186,10 +231,14 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
         message: `yrd: Candidate ref '${candidateRefFor(MERGED)}' could not be created`,
       })
     }
-    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), undefined, undefined, prepareCandidate)
-    const poisoned = await submitBranch(app, "issue/ref-write-refused")
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", { mint, prepareCandidate })
+    const poisoned = await submitBranch(app, mint, "issue/ref-write-refused")
 
-    await expect(app.queue.run({ prs: [poisoned.id] }, runtime)).rejects.toMatchObject({
+    // Naming the target still means naming it: post-S7 the selector resolves
+    // out of the run's own derived batch, so the member rides `derived` and the
+    // NON-EMPTY `prs` is what keeps the compose off its selectorless tolerance.
+    await expect(app.queue.run({ prs: [poisoned.id], derived: [poisoned] }, runtime)).rejects.toMatchObject({
       failure: { kind: "infrastructure", code: "candidate-ref-refused" },
     })
   })
@@ -198,22 +247,27 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
     let mergeCalls = 0
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), log, () => {
-      mergeCalls += 1
-      return mergeCalls === 1
-        ? {
-            status: "completed",
-            conclusion: "failure",
-            error: { code: "merge-conflict", message: "poisoned Candidate does not merge" },
-          }
-        : { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", {
+      mint,
+      log,
+      mergeRun: () => {
+        mergeCalls += 1
+        return mergeCalls === 1
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              error: { code: "merge-conflict", message: "poisoned Candidate does not merge" },
+            }
+          : { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+      },
     })
-    const poisoned = await submitBranch(app, "issue/consumed-authority")
-    const first = await app.queue.run({ prs: [poisoned.id], steps: ["merge"] }, runtime)
+    const poisoned = await submitBranch(app, mint, "issue/consumed-authority")
+    const first = await app.queue.run({ prs: [poisoned.id], derived: [poisoned], steps: ["merge"] }, runtime)
     expect(first).toMatchObject([{ conclusion: "failure", error: { code: "merge-conflict" } }])
-    const healthy = await submitBranch(app, "issue/healthy-peer")
+    const healthy = await submitBranch(app, mint, "issue/healthy-peer")
 
-    const drained = await app.queue.run({}, runtime)
+    const drained = await app.queue.run({ derived: [poisoned, healthy] }, runtime)
 
     expect(drained).toEqual(
       expect.arrayContaining([
@@ -231,38 +285,36 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
         event.namespace === "yrd:queue" &&
         event.props?.action === "compose-candidate-skip",
     )
+    // The eject still names the guilty member AND still hands the author the
+    // remedy — the message the record-lane `pr/needs-author` receipt carried.
     expect(skip?.props).toMatchObject({
       action: "compose-candidate-skip",
       code: "queue-submit-authority-consumed",
       pr: poisoned.id,
+      remedy: expect.stringContaining("tracked changes re-merge implicitly"),
     })
-    const journalEvents = await Array.fromAsync(app.events())
-    const needsAuthor = journalEvents.find(
-      (applied) =>
-        applied.name === "pr/needs-author" && (applied.data as Readonly<{ pr?: unknown }>).pr === poisoned.id,
-    )
-    expect(needsAuthor?.data).toMatchObject({
+    // A derived member has no record for the eject to write `pr/needs-author`
+    // on, so the durable trace of the same fact is the refusal ledger row —
+    // the thing `queue audit` reads, keyed by the guilty member alone.
+    expect(app.state().queues.admissionRefusals[poisoned.id]).toMatchObject({
       pr: poisoned.id,
-      receipt: {
-        code: "queue-submit-authority-consumed",
-        message: expect.stringContaining("tracked changes re-merge implicitly"),
-      },
+      branch: "issue/consumed-authority",
+      code: "queue-submit-authority-consumed",
     })
-    expect(app.state().bays.prs[poisoned.id]).toMatchObject({
-      needsAuthor: { receipt: { code: "queue-submit-authority-consumed" } },
-    })
-    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+    expect(app.state().queues.admissionRefusals[healthy.id]).toBeUndefined()
+    await expect(app.queue.run({ derived: [poisoned, healthy] }, runtime)).resolves.toEqual([])
     log.end()
   })
 
   it("skips a poisoned resumable run with a loud warn and keeps the compose alive", async () => {
     const journal = createMemoryJournal()
     const id = ids()
-    await seedStuckRun("deploy-v2", journal, id)
+    const mint = volatilePrNumberMint()
+    await seedStuckRun("deploy-v2", journal, id, mint)
 
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    await using replayed = await createApp("deploy-v2", journal, id, log)
+    await using replayed = await createApp("deploy-v2", { mint, journal, id, log })
 
     // The selectorless compose survives — it does NOT throw the command-refused
     // that would otherwise kill the habitant.
@@ -272,8 +324,17 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
       (event): event is Extract<LogEvent, { kind: "log" }> =>
         event.kind === "log" && event.level === "warn" && event.namespace === "yrd:queue",
     )
-    const skip = skips.find((event) => event.props?.action === "compose-candidate-skip")
-    expect(skip, "expected a compose-candidate-skip warn").toBeDefined()
+    // The RUN-scoped skip. The same drain also skips the branch's freshly
+    // derived member for the submit authority R1 already spent, so the finder
+    // has to name the run it is about rather than take the first skip it sees.
+    const skip = skips.find((event) => event.props?.action === "compose-candidate-skip" && event.props?.run === "R1")
+    expect(
+      skip,
+      "expected a compose-candidate-skip warn for R1 — absent means the selectorless compose never even SAW the " +
+        "stuck run: `activeQueueRootIds` derives the resumable set from `authority.claims`, `projectRunAuthority` " +
+        "mints a claim only when `authority.current[pr]` exists, and `authority.current` is written solely by the " +
+        "record-lane pr/pushed|recut|submitted|checks-requested events, none of which fire on the derived lane",
+    ).toBeDefined()
     expect(skip?.props).toMatchObject({ action: "compose-candidate-skip", run: "R1", code: "command-refused" })
     expect(String(skip?.props?.reason)).toContain("deploy")
     log.end()
@@ -282,14 +343,17 @@ describe("compose candidate isolation — one poisoned candidate never aborts th
   it("still fails loud for a one-shot targeted run of the same poisoned candidate", async () => {
     const journal = createMemoryJournal()
     const id = ids()
-    await seedStuckRun("deploy-v2", journal, id)
+    const mint = volatilePrNumberMint()
+    const member = await seedStuckRun("deploy-v2", journal, id, mint)
 
-    await using replayed = await createApp("deploy-v2", journal, id)
+    await using replayed = await createApp("deploy-v2", { mint, journal, id })
     // An explicit selector compose names its single target — it is NOT selectorless,
     // so the candidate-skip tolerance never applies: any refusal touching the target
     // propagates (fail-loud) instead of being swallowed. The raw advance proves the
     // underlying drift refusal is real and loud.
-    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["merge", "deploy"] }, runtime)).rejects.toThrow()
+    await expect(
+      replayed.queue.run({ prs: [member.id], derived: [member], steps: ["merge", "deploy"] }, runtime),
+    ).rejects.toThrow()
     await expect(replayed.dispatch(replayed.commands.queue.advance, { run: "R1" })).rejects.toThrow(
       "does not match installed revision",
     )
@@ -331,22 +395,20 @@ describe("compose member isolation — one refusing member never zeroes its whol
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const poisoned: string[] = []
-    await using app = await createApp(
-      "deploy-v1",
-      createMemoryJournal(),
-      ids(),
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", {
+      mint,
       log,
-      undefined,
-      poisonedPreparer(poisoned),
-      BATCH,
-    )
-    const guilty = await submitBranch(app, "issue/recut-poisoned")
+      prepareCandidate: poisonedPreparer(poisoned),
+      batch: BATCH,
+    })
+    const guilty = await submitBranch(app, mint, "issue/recut-poisoned")
     poisoned.push(guilty.id)
-    const firstHealthy = await submitBranch(app, "issue/healthy-one")
-    const secondHealthy = await submitBranch(app, "issue/healthy-two")
+    const firstHealthy = await submitBranch(app, mint, "issue/healthy-one")
+    const secondHealthy = await submitBranch(app, mint, "issue/healthy-two")
 
     // ONE drain. The whole point: the survivors must not wait for a later cycle.
-    const drained = await app.queue.run({}, runtime)
+    const drained = await app.queue.run({ derived: [guilty, firstHealthy, secondHealthy] }, runtime)
 
     expect(drained).toEqual(
       expect.arrayContaining([
@@ -359,7 +421,12 @@ describe("compose member isolation — one refusing member never zeroes its whol
         }),
       ]),
     )
-    expect(app.state().bays.prs[guilty.id]?.integration).toBeUndefined()
+    // Ejected means ejected: the guilty member rides no run this drain produced,
+    // which is what "never integrated" reads as for a recordless member.
+    expect(
+      drained.flatMap((run) => run.prs).map((pr) => pr.id),
+      "the ejected member must not appear in any run the drain produced",
+    ).not.toContain(guilty.id)
 
     const ejection = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
@@ -381,21 +448,18 @@ describe("compose member isolation — one refusing member never zeroes its whol
 
   it("records the refusal against the guilty member ONLY, leaving innocents unstained", async () => {
     const poisoned: string[] = []
-    await using app = await createApp(
-      "deploy-v1",
-      createMemoryJournal(),
-      ids(),
-      undefined,
-      undefined,
-      poisonedPreparer(poisoned),
-      BATCH,
-    )
-    const guilty = await submitBranch(app, "issue/recut-poisoned")
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", {
+      mint,
+      prepareCandidate: poisonedPreparer(poisoned),
+      batch: BATCH,
+    })
+    const guilty = await submitBranch(app, mint, "issue/recut-poisoned")
     poisoned.push(guilty.id)
-    const firstHealthy = await submitBranch(app, "issue/healthy-one")
-    const secondHealthy = await submitBranch(app, "issue/healthy-two")
+    const firstHealthy = await submitBranch(app, mint, "issue/healthy-one")
+    const secondHealthy = await submitBranch(app, mint, "issue/healthy-two")
 
-    await app.queue.run({}, runtime)
+    await app.queue.run({ derived: [guilty, firstHealthy, secondHealthy] }, runtime)
 
     // This record is what `queue audit` reads. A stain here replays as a finding
     // against an innocent carrier every cycle until a human reads the carrier.
@@ -407,23 +471,20 @@ describe("compose member isolation — one refusing member never zeroes its whol
 
   it("ejects TWO poisoned members in one bounded drain and still merges the survivors", async () => {
     const poisoned: string[] = []
-    await using app = await createApp(
-      "deploy-v1",
-      createMemoryJournal(),
-      ids(),
-      undefined,
-      undefined,
-      poisonedPreparer(poisoned),
-      BATCH,
-    )
-    const firstGuilty = await submitBranch(app, "issue/poisoned-one")
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", {
+      mint,
+      prepareCandidate: poisonedPreparer(poisoned),
+      batch: BATCH,
+    })
+    const firstGuilty = await submitBranch(app, mint, "issue/poisoned-one")
     poisoned.push(firstGuilty.id)
-    const firstHealthy = await submitBranch(app, "issue/healthy-one")
-    const secondGuilty = await submitBranch(app, "issue/poisoned-two")
+    const firstHealthy = await submitBranch(app, mint, "issue/healthy-one")
+    const secondGuilty = await submitBranch(app, mint, "issue/poisoned-two")
     poisoned.push(secondGuilty.id)
-    const secondHealthy = await submitBranch(app, "issue/healthy-two")
+    const secondHealthy = await submitBranch(app, mint, "issue/healthy-two")
 
-    const drained = await app.queue.run({}, runtime)
+    const drained = await app.queue.run({ derived: [firstGuilty, firstHealthy, secondGuilty, secondHealthy] }, runtime)
 
     expect(drained).toEqual(
       expect.arrayContaining([
@@ -451,19 +512,12 @@ describe("compose member isolation — one refusing member never zeroes its whol
         message: `yrd: Candidate ref '${candidateRefFor(MERGED)}' could not be created`,
       })
     }
-    await using app = await createApp(
-      "deploy-v1",
-      createMemoryJournal(),
-      ids(),
-      undefined,
-      undefined,
-      unattributable,
-      BATCH,
-    )
-    const first = await submitBranch(app, "issue/one")
-    const second = await submitBranch(app, "issue/two")
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", { mint, prepareCandidate: unattributable, batch: BATCH })
+    const first = await submitBranch(app, mint, "issue/one")
+    const second = await submitBranch(app, mint, "issue/two")
 
-    await app.queue.run({}, runtime)
+    await app.queue.run({ derived: [first, second] }, runtime)
 
     // Unattributable means unattributable: isolation must not invent a culprit,
     // so the pre-existing whole-partition behaviour stands.
@@ -481,11 +535,12 @@ describe("compose member isolation — one refusing member never zeroes its whol
         pr: "PR999",
       })
     }
-    await using app = await createApp("deploy-v1", createMemoryJournal(), ids(), undefined, undefined, foreign, BATCH)
-    const first = await submitBranch(app, "issue/one")
-    const second = await submitBranch(app, "issue/two")
+    const mint = volatilePrNumberMint()
+    await using app = await createApp("deploy-v1", { mint, prepareCandidate: foreign, batch: BATCH })
+    const first = await submitBranch(app, mint, "issue/one")
+    const second = await submitBranch(app, mint, "issue/two")
 
-    await app.queue.run({}, runtime)
+    await app.queue.run({ derived: [first, second] }, runtime)
 
     // A `pr` from somewhere else is not attribution. Acting on it would eject an
     // innocent and leave the real refuser in place, so it degrades to shared.

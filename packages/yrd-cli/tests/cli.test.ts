@@ -25,10 +25,7 @@ import {
   createBayJobDefs,
   createDeploymentJobDefs,
   currentChangeRev,
-  changeAdmission,
-  changeBaseSha,
   changeDeliveryState,
-  changeRevisionLineage,
   withBays,
   volatilePrNumberMint,
   withDeployments,
@@ -163,19 +160,6 @@ function remergeBaseDivergedReason(pr: string, targetRoot: string): string {
     `change '${pr}' revision 2 certifies base '${BASE_SHA}', but the authoritative candidate base is ` +
     `'${targetRoot}', which never descended from it; the certificate cannot become valid without a fresh revision`
   )
-}
-
-function revisionAdmissionJob(
-  app: Awaited<ReturnType<typeof createApp>>,
-  prId: string,
-  index = 0,
-  stepRevision = "check-v1",
-) {
-  const pr = app.bays.pr(prId)
-  if (pr === undefined) return undefined
-  const revision = currentChangeRev(pr)
-  const baseSha = pr.checkRequests.at(-1)?.baseSha ?? changeBaseSha(pr) ?? BASE_SHA
-  return app.jobs.getByKey(`admission:${pr.id}:${revision.n}:${baseSha}:${index}:${stepRevision}`)
 }
 
 function submittedRevision(
@@ -413,6 +397,10 @@ async function createApp(
     log?: ReturnType<typeof createLogger>
     prepareCandidate?: CandidatePreparer
     resolveBaseSha?: (base: string) => string | Promise<string>
+    /** Commit-derived metadata for a submitted sha. S7 (branch-is-change): a
+     * change's subject/issue no longer bind to a record — the derived lane
+     * reads them from the head commit, and this is that boundary. */
+    submitEnrichment?: Readonly<Record<string, Readonly<{ title?: string; issue?: string; changeId?: string }>>>
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -537,6 +525,9 @@ async function createApp(
     // git resolver here). Not defaulted — a standing resolver re-targets
     // record check requests, which the moving-base habitant tests must own.
     ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
+    ...(options.submitEnrichment === undefined
+      ? {}
+      : { readSubmitEnrichment: ({ sha }: Readonly<{ sha: string }>) => options.submitEnrichment?.[sha] ?? {} }),
   })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -599,22 +590,6 @@ function fixtureAdmissionOrder(prs: readonly Change[]): string[] {
     .map((pr) => pr.id)
 }
 
-function remergeIO(app: TestApp, selector = "PR1", overrides: Partial<YrdCliIO> = {}) {
-  const pr = app.bays.pr(selector)
-  if (pr === undefined) throw new Error(`missing ${selector}`)
-  const recorded = changeRevisionLineage(pr)[0]
-  if (recorded === undefined) throw new Error(`missing ${selector} source lineage`)
-  return outputIO({
-    pruneGit: () => ({
-      resolveCommit: (ref) => (ref === `origin/${pr.branch}` || ref === pr.branch ? recorded.head : undefined),
-      isAncestor: () => false,
-      mergeTree: () => undefined,
-      treeOf: () => recorded.head,
-    }),
-    ...overrides,
-  })
-}
-
 function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
@@ -651,13 +626,15 @@ function runYrd(
       run: async (request) => {
         const target = request.argv.find((arg) => arg.startsWith("refs/remotes/origin/") && arg.endsWith("^{commit}"))
         const branch = target?.slice("refs/remotes/origin/".length, -"^{commit}".length)
-        const observed = branch === undefined ? undefined : app.bays.pr(branch)
+        // S7 (branch-is-change): the branch's own standing submit fact is what
+        // says which commit was delivered — there is no record to read it off.
+        const observed = branch === undefined ? undefined : app.bays.state().submits[branch]
         return {
           stdout: request.argv.includes("merge-base")
             ? `${"0".repeat(39)}1\n`
             : observed === undefined
               ? ""
-              : `${currentChangeRev(observed).head}\n`,
+              : `${observed.sha}\n`,
           stderr: "",
           exitCode: 0,
           signal: null,
@@ -706,13 +683,16 @@ async function submitBayFixture(app: TestApp, bay: string): Promise<void> {
   // Domain fixture: callers below explicitly control check-request and Queue
   // timing. Public `bay submit` owns the synchronous handoff behavior proved
   // by its focused regression instead of silently changing these fixtures.
+  // S7 (branch-is-change): every submission routes to the DERIVED lane, so the
+  // fixture proves the branch's standing submit fact — the submission itself —
+  // rather than a record's delivery state.
   const bayResult = await app.bays.submitSelection(bay, {
     resolveRevision: async () => undefined,
     resolveParents: async () => ["0".repeat(40)],
     run: { runner: "cli-test", leaseMs: 60_000 },
   })
-  if ("lane" in bayResult) throw new Error("expected a record-lane Change from a bay submit")
-  expect(changeDeliveryState(bayResult)).toBe("submitted")
+  expect(bayResult).toMatchObject({ lane: "derived" })
+  expect(app.bays.state().submits[bayResult.branch]).toMatchObject({ sha: bayResult.sha, base: bayResult.base })
 }
 
 async function openTestBay(app: TestApp, input: Parameters<TestApp["bays"]["open"]>[0]): Promise<void> {
@@ -960,7 +940,10 @@ describe("runYrd", () => {
     expect(await runYrd(app, argv, output.io)).toBe(2)
     expect(output.stderr()).toContain("unknown option '--draft'")
     expect(output.stderr()).toContain("yrd pr create")
-    expect(app.bays.prs()).toEqual([])
+    // Refused at parse: nothing was delivered. S7 makes the standing submit
+    // facts the whole of what a submit can write, so an empty map IS "no
+    // delivery" — there is no record store left to check.
+    expect(app.bays.state().submits).toEqual({})
   })
 
   it("bay submit of a recordless branch cannot strand a queued record: the fact is the whole write (PR1128)", async () => {
@@ -989,8 +972,9 @@ describe("runYrd", () => {
       prs: [],
       derived: [{ lane: "derived", branch: "topic/wedge", sha: HEAD_SHA, base: "main" }],
     })
-    // The fact is the submission: no record, no check request, no refusal row.
-    expect(app.bays.prs()).toEqual([])
+    // The fact is the WHOLE write: exactly one branch fact, no check request,
+    // no refusal row — and nothing else the submit could have left behind.
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/wedge"])
     expect(app.bays.state().submits["topic/wedge"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(app.state().queues.admissionRefusals).toEqual({})
     // And the queue still reads clean end to end.
@@ -1529,11 +1513,10 @@ describe("runYrd", () => {
     // Acceptance: bay a change while the author still holds the branch. Branch-name checkout refuses;
     // detached HEAD at the revision head is the immutable candidate @ci needs to gate.
     const mismatched = await createApp({ provisionedHead: "f".repeat(40) })
-    await mismatched.bays.submit({
+    await mismatched.bays.recordBranchSubmit({
       branch: "topic/held-by-author",
-      headSha: HEAD_SHA,
+      sha: HEAD_SHA,
       base: "main",
-      baseSha: BASE_SHA,
     })
     const refused = outputIO()
     expect(await runYrd(mismatched, yrd("pr", "checkout", "PR1", "--json"), refused.io)).toBe(1)
@@ -1544,7 +1527,7 @@ describe("runYrd", () => {
 
     const provisions: Array<Record<string, unknown>> = []
     const app = await createApp({ provisions })
-    await app.bays.submit({ branch: "topic/held-by-author", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/held-by-author", sha: HEAD_SHA, base: "main" })
 
     const checkout = outputIO()
     expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
@@ -1562,42 +1545,6 @@ describe("runYrd", () => {
     expect(provisions[0]).toMatchObject({ from: HEAD_SHA })
     expect(provisions[0]?.from).not.toBe("topic/held-by-author")
     expect(app.bays.get("pr-pr1")).toMatchObject({ status: "active", headSha: HEAD_SHA })
-  })
-
-  it("Q1: resubmitting a merged branch reports already-merged for the same head and re-enters the derived lane for a new head", async () => {
-    const app = await createApp()
-    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR1" })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
-    expect(app.bays.pr("PR1")).toMatchObject({ branch: "topic/merged", state: "closed", merged: true })
-    const before = await Array.fromAsync(app.events())
-
-    // Same merged head → informational "already merged", exit 0, no new PR, no event.
-    const merged = outputIO({ resolveRevision: async () => HEAD_SHA })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), merged.io), merged.stderr()).toBe(0)
-    const mergedOut = JSON.parse(merged.stdout()) as Readonly<{
-      prs: readonly { id: string; status: string }[]
-      warnings?: readonly string[]
-    }>
-    expect(mergedOut).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", status: "integrated" }] })
-    expect((mergedOut.warnings ?? []).join("\n")).toContain("already merged as change 'PR1'")
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-
-    // New head → derived re-entry (the legacy record mint is retired): the
-    // submit fact is the submission, compose keys a fresh derived identity
-    // from it on the next queue pass, and the integrated PR1 stays frozen —
-    // no reopen, no new record, no hand-made delivery branch.
-    const reentry = outputIO({ resolveRevision: async () => "2".repeat(40) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/merged", "--json"), reentry.io), reentry.stderr()).toBe(0)
-    expect(JSON.parse(reentry.stdout())).toMatchObject({
-      command: "pr.submit",
-      prs: [],
-      derived: [{ lane: "derived", branch: "topic/merged", sha: "2".repeat(40), base: "main" }],
-    })
-    expect(app.bays.state().submits["topic/merged"]).toMatchObject({ sha: "2".repeat(40) })
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
   })
 
   it.each([
@@ -1777,8 +1724,8 @@ describe("runYrd", () => {
 
   it("reports folded selector collisions instead of choosing the first base", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "Topic/One", headSha: HEAD_SHA, base: "Main" })
-    await app.bays.submit({ branch: "Topic/Two", headSha: MERGED_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "Topic/One", sha: HEAD_SHA, base: "Main" })
+    await app.bays.recordBranchSubmit({ branch: "Topic/Two", sha: MERGED_SHA, base: "main" })
     const output = outputIO()
 
     expect(await runYrd(app, yrd("queue", "--base", "MAIN", "--json"), output.io)).toBe(1)
@@ -1868,9 +1815,13 @@ describe("runYrd", () => {
   it("keeps queue positions lossless beyond the rendered row budget", async () => {
     const app = await createApp()
     for (const index of Array.from({ length: 6 }, (_, offset) => offset + 1)) {
-      await app.bays.submit({ branch: `topic/${index}`, headSha: String(index).repeat(40), base: "main" })
+      await app.bays.recordBranchSubmit({ branch: `topic/${index}`, sha: String(index).repeat(40), base: "main" })
     }
-    expect(app.state().bays.prs.PR1?.submittedAt).toBe(app.state().bays.prs.PR6?.submittedAt)
+    // One injected clock across the batch: the six facts are indistinguishable
+    // by time, so position has to come from queue order and never a timestamp
+    // tiebreak — the exact condition this row budget test needs.
+    const submits = app.bays.state().submits
+    expect(submits["topic/1"]?.at).toBe(submits["topic/6"]?.at)
 
     const humanStatus = outputIO({
       currentBranch: () => "topic/6",
@@ -1902,9 +1853,9 @@ describe("runYrd", () => {
   it("windows only the unfiltered human PR list, says what it withheld, and never wraps revision counts", async () => {
     const app = await createApp()
     for (const index of Array.from({ length: 520 }, (_, offset) => offset + 1)) {
-      await app.bays.submit({
+      await app.bays.recordBranchSubmit({
         branch: `topic/list-${index}`,
-        headSha: index.toString(16).padStart(40, "0"),
+        sha: index.toString(16).padStart(40, "0"),
         base: "main",
       })
     }
@@ -1957,7 +1908,7 @@ describe("runYrd", () => {
 
   it("keeps bare pr on noun help and makes list plus ls the explicit lossless projection", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const help = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr"), help.io), help.stderr()).toBe(0)
@@ -2024,10 +1975,11 @@ describe("runYrd", () => {
     // The run is terminal-canceled and its active check job is aborted...
     expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "cancelled" })
     expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    // ...but the member PR is NOT rejected/canceled — it stays submitted, so a
-    // future drain re-queues it. That is the cancel-vs-reject distinction.
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1 })
+    // ...but the member is NOT rejected/canceled — its approval survives, so a
+    // future drain re-queues it. That is the cancel-vs-reject distinction, and
+    // S7 puts that approval in the branch's standing submit fact: a cancel that
+    // retired the fact would silently unsubmit the author's work.
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(app.queue.eligibility("PR1")).toMatchObject({ runnable: true })
 
     // A recovery pass reconciles runs whose active job is terminal (the canceled
@@ -2035,8 +1987,7 @@ describe("runYrd", () => {
     // not turn a cancel into a pr/canceled and strip PR1 out of the queue. This is
     // the load-bearing guard: without it, recovery rejects/cancels the member PR.
     await app.queue.recover({ recoveryTime: "2026-07-09T12:05:00.000Z", reason: "habitant restart" })
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-    expect(currentChangeRev(app.bays.pr("PR1")!)).toMatchObject({ n: 1 })
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
 
     // Prove the re-queue: a fresh drain admits PR1 into a NEW run, not R1.
     const redrain = await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
@@ -2249,7 +2200,10 @@ describe("runYrd", () => {
       expect(sleeps).toEqual([1_000, 1_000])
       expect(gate, "new durable work must re-open the declared-plan gate").toHaveBeenCalledTimes(2)
       expect(queueRun, "new durable work must wake the queue compose path").toHaveBeenCalledTimes(2)
-      expect(runner.bays.pr("PR1"), "the wake-up cycle must observe the appended PR").toBeDefined()
+      expect(
+        runner.bays.state().submits["issue/one"],
+        "the wake-up cycle must observe the appended submission",
+      ).toMatchObject({ sha: HEAD_SHA })
     } finally {
       await Promise.all([runner.close(), writer.close()])
     }
@@ -2498,9 +2452,9 @@ describe("runYrd", () => {
   it("supports bounded, failed-only, and recent log projections", async () => {
     const app = await createApp()
     for (let index = 1; index <= 3; index += 1) {
-      await app.bays.submit({
+      await app.bays.recordBranchSubmit({
         branch: `topic/log-filter-${index}`,
-        headSha: String(index).repeat(40),
+        sha: String(index).repeat(40),
         base: "main",
       })
       await app.queue.run({ prs: [`PR${index}`] }, { runner: "test", leaseMs: 60_000 })
@@ -2528,10 +2482,10 @@ describe("runYrd", () => {
   it("bounds commit subject resolution to the surviving rows and eight concurrent lookups", async () => {
     const app = await createApp()
     const refs = Array.from({ length: 9 }, (_, index) => String(index + 1).repeat(40))
-    for (const [index, headSha] of refs.entries()) {
-      await app.bays.submit({
+    for (const [index, sha] of refs.entries()) {
+      await app.bays.recordBranchSubmit({
         branch: `topic/log-subject-${index + 1}`,
-        headSha,
+        sha,
         base: "main",
       })
       await app.queue.run({ prs: [`PR${index + 1}`] }, { runner: "test", leaseMs: 60_000 })
@@ -2564,11 +2518,11 @@ describe("runYrd", () => {
 
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/main-one", sha: "1".repeat(40), base: "main" })
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
-    await app.bays.submit({ branch: "topic/main-two", headSha: "2".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/main-two", sha: "2".repeat(40), base: "main" })
     await app.queue.run({ prs: ["PR2"] }, { runner: "test", leaseMs: 60_000 })
-    await app.bays.submit({ branch: "topic/release", headSha: "3".repeat(40), base: "release/2.0" })
+    await app.bays.recordBranchSubmit({ branch: "topic/release", sha: "3".repeat(40), base: "release/2.0" })
     await app.queue.run({ prs: ["PR3"] }, { runner: "test", leaseMs: 60_000 })
 
     const assertScope = async (args: readonly string[], expectedRuns: readonly string[]) => {
@@ -2715,43 +2669,6 @@ describe("runYrd", () => {
     expect(checkRuns).toEqual(["check"])
   })
 
-  it("refreshes PR-id submit output after its writes commit through another live app", async () => {
-    const journal = createMemoryJournal()
-    const writer = await createApp({ journal })
-    await writer.bays.submit({
-      branch: "topic/external-writer",
-      headSha: HEAD_SHA,
-      base: "main",
-      draft: true,
-    })
-    const reader = await createApp({ journal })
-    const routedBays = Object.create(reader.bays) as typeof reader.bays
-    Object.defineProperties(routedBays, {
-      submitSelection: { value: writer.bays.submitSelection },
-      requestChecks: { value: writer.bays.requestChecks },
-    })
-    const app = Object.create(reader) as typeof reader
-    Object.defineProperty(app, "bays", { value: routedBays })
-
-    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
-    expect(await runYrd(app, yrd("pr", "submit", "PR1", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "pr.submit",
-      prs: [{ id: "PR1", status: "submitted", checkRequests: [expect.any(Object)] }],
-    })
-
-    const events = await Array.fromAsync(reader.events())
-    expect(events.filter((event) => event.name === "pr/submitted")).toHaveLength(1)
-    expect(events.filter((event) => event.name === "pr/checks-requested")).toHaveLength(1)
-    const view = outputIO()
-    expect(await runYrd(reader, yrd("pr", "view", "PR1", "--json"), view.io), view.stderr()).toBe(0)
-    expect(JSON.parse(view.stdout())).toMatchObject({
-      command: "pr.view",
-      pr: { id: "PR1", status: "submitted", checkRequests: [expect.any(Object)] },
-      merge: { status: "submitted" },
-    })
-    expect(await Array.fromAsync(reader.events())).toHaveLength(events.length)
-  })
 
   it("runs configured client-side checks while leaving authoritative checks and integration to queue run", async () => {
     const localChecks: string[] = []
@@ -2774,7 +2691,10 @@ describe("runYrd", () => {
       }),
       submit.stderr(),
     ).toBe(0)
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    // Submitted, and nothing authoritative has run: S7 puts "submitted" in the
+    // branch's standing fact, so this is the same claim read off the lane that
+    // now owns it.
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(await app.queue.history()).toEqual([])
     expect(localChecks).toEqual(["typecheck"])
     expect(checkRuns).toEqual([])
@@ -2790,8 +2710,10 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
     expect(checkRuns).toEqual(["check"])
     expect(mergeRuns).toEqual(["merge"])
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
+    // Integration is the run's own terminal fact now that no record mirrors it.
     expect(Queues.values(app.state().queues)).toHaveLength(1)
+    expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(app.queue.get("R1")?.integration).toMatchObject({ commit: MERGED_SHA })
   })
 
   it("gates an explicit Bay selector through its durable branch ref instead of bay.path", async () => {
@@ -2843,8 +2765,11 @@ describe("runYrd", () => {
       await submitBayFixture(app, "B1")
       const branch = app.bays.get("B1")?.branch
       expect(branch).toBeDefined()
-      expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("submitted")
-      const originalHead = currentChangeRev(app.bays.pr("PR1")!).head
+      // S7: the branch's standing submit fact is the submission, and it is what
+      // must survive the workspace's deletion untouched.
+      const submitted = app.bays.state().submits[branch!]
+      expect(submitted).toBeTruthy()
+      const originalHead = submitted!.sha
 
       // The exact fact the fix relies on: the Bay's own workspace is gone.
       safeRemoveSync(bayRoot, { within: tmpdir(), allowMissing: true })
@@ -2880,43 +2805,16 @@ describe("runYrd", () => {
       // ref — never once in the deleted Bay path.
       expect(seenCwds).toEqual([cwdRoot])
 
-      const resubmitted = app.bays.pr("PR1")
-      expect(changeDeliveryState(resubmitted!)).toBe("submitted")
-      expect(resubmitted?.branch).toBe(branch)
-      expect(currentChangeRev(resubmitted!).head).toBe(originalHead)
+      // The resubmission renewed the SAME branch's fact at the same head — the
+      // deleted workspace never entered the delivery.
+      expect(Object.keys(app.bays.state().submits)).toEqual([branch])
+      expect(app.bays.state().submits[branch!]).toMatchObject({ sha: originalHead })
     } finally {
       safeRemoveSync(bayRoot, { within: tmpdir(), allowMissing: true })
       safeRemoveSync(cwdRoot, { within: tmpdir(), allowMissing: true })
     }
   })
 
-  it("leaves a direct submission predecessor for the Queue driver and queues the fresh revision", async () => {
-    const checkedRevisions: string[] = []
-    const app = await createApp({ checkedRevisions })
-    await app.bays.submit({
-      branch: "topic/direct",
-      headSha: HEAD_SHA,
-      base: "main",
-    })
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
-    const predecessorJob = revisionAdmissionJob(app, "PR1")
-    expect(predecessorJob).toMatchObject({ status: "queued" })
-
-    const submit = outputIO({ resolveRevision: () => Promise.resolve(MERGED_SHA) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/direct", "--json"), submit.io), submit.stderr()).toBe(0)
-
-    expect(checkedRevisions).toEqual([])
-    expect(app.jobs.get(predecessorJob!.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    const revision = currentChangeRev(app.state().bays.prs.PR1!)
-    expect(revision).toMatchObject({
-      n: 2,
-      head: MERGED_SHA,
-    })
-    expect(revision).not.toHaveProperty("admission")
-    expect(app.queue.checks(["PR1"])).toMatchObject([{ pr: "PR1", revision: 2, status: "queued" }])
-    expect(Queues.ids(app.state().queues)).toEqual([])
-  })
 
   it("rejects every retired route without journaling an event", async () => {
     const app = await createApp()
@@ -3699,84 +3597,6 @@ describe("runYrd", () => {
     }
   })
 
-  it("closes a draft-backed Bay without withdrawing its PR", async () => {
-    const app = await createApp({ waitingCheck: true })
-    await openTestBay(app, { name: "draft-close" })
-
-    const create = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("pr", "create"), create.io), create.stderr()).toBe(0)
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
-    expect(app.bays.pr("PR1")).toMatchObject({ bay: "B1" })
-    await app.bays.requestChecks({ pr: "PR1" })
-    expect(await app.queue.admit({ prs: ["PR1"] })).toEqual(["PR1"])
-    const checkJob = revisionAdmissionJob(app, "PR1")
-    expect(checkJob).toMatchObject({ status: "queued" })
-
-    const close = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "close", "--force", "B1"), close.io), close.stderr()).toBe(0)
-    expect(app.bays.get("B1")?.status).toBe("closed")
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
-    expect(app.jobs.get(checkJob!.id)).toMatchObject({ status: "queued" })
-  })
-
-  it("names the bay binding and the branch remedy when bare create resolves a finished PR", async () => {
-    const checkRuns: string[] = []
-    const mergeRuns: string[] = []
-    const app = await createApp({ checkRuns, mergeRuns })
-    await openTestBay(app, { name: "finished" })
-
-    const submit = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("pr", "submit"), submit.io), submit.stderr()).toBe(0)
-    const run = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
-
-    // The B94 shape (2026-08-19): the bay still binds its finished PR, and a
-    // bare `pr create` refused by naming that change — a record the caller never
-    // mentioned, on a branch it never named — without saying the bay binding
-    // caused the resolution or that a branch selector is the fix.
-    const create = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("pr", "create"), create.io)).toBe(1)
-    expect(create.stderr()).toContain("bay 'B1' is bound to change 'PR1' (integrated)")
-    expect(create.stderr()).toContain("pass a branch — yrd pr create <branch>")
-  })
-
-  it("refuses a stale implicit Bay binding before gates and names the explicit submit escape", async () => {
-    const app = await createApp()
-    await openTestBay(app, { name: "withdrawn-binding" })
-    await submitBayFixture(app, "B1")
-    await app.bays.closePr({ pr: "PR1" })
-    await app.bays.submit({ branch: "topic/replacement", headSha: MERGED_SHA, base: "main", draft: true })
-
-    const localChecks: string[] = []
-    const checks: YrdCliServices["checks"] = {
-      names: ["typecheck"],
-      run: async (name) => {
-        localChecks.push(name)
-        return { stdout: "", stderr: "", exitCode: 0, signal: null, durationMs: 1, timedOut: false }
-      },
-      install: async () => "/repo/.git/yrd/hooks/pre-submit",
-    }
-    const bare = outputIO({ cwd: "/repo/.bays/B1", currentBranch: () => "topic/replacement" })
-
-    expect(await runYrd(app, yrd("pr", "submit"), bare.io, { checks })).toBe(1)
-    expect(bare.stderr()).toContain("bay 'B1' is bound to change 'PR1' (withdrawn)")
-    expect(bare.stderr()).toContain("yrd pr submit PR2")
-    expect(localChecks).toEqual([])
-
-    // The escape must resolve the record's branch tip: post-purge the staging
-    // pass previews the same resolution path as the real submit, and a live
-    // record whose branch cannot be resolved refuses rather than reusing the
-    // recorded head.
-    const explicit = outputIO({
-      cwd: "/repo/.bays/B1",
-      currentBranch: () => "topic/replacement",
-      resolveRevision: async () => MERGED_SHA,
-    })
-    expect(await runYrd(app, yrd("pr", "submit", "PR2"), explicit.io, { checks }), explicit.stderr()).toBe(0)
-    expect(localChecks).toEqual(["typecheck"])
-  })
-
   it("tells a bayless author which step is missing instead of that a lookup failed", async () => {
     const app = await createApp()
 
@@ -3942,8 +3762,10 @@ describe("runYrd", () => {
     await openTestBay(app, { name: "submitted-retry" })
     const first = outputIO()
     expect(await runYrd(app, args, first.io), first.stderr()).toBe(0)
-    await app.bays.intake({ bay: "B1", headSha: HEAD_SHA })
-    await app.bays.submit({ pr: "PR1" })
+    // S7 (branch-is-change): "already submitted" is the branch's standing
+    // submit fact — the record intake this arm used to run retired with the
+    // store, and `projectBranchLifecycles` reads the fact at the bay's head.
+    await app.bays.recordBranchSubmit({ branch: "issue/submitted-retry", sha: HEAD_SHA, base: "main" })
 
     const retry = outputIO()
     expect(await runYrd(app, args, retry.io), retry.stderr()).toBe(0)
@@ -4068,9 +3890,10 @@ describe("runYrd", () => {
     const app = await createApp()
     await openAndSubmit(app)
 
-    const before = app.state()
-    expect(changeDeliveryState(before.bays.prs.PR1!)).toBe("submitted")
-    expect(before.bays.prs.PR1).toMatchObject({ bay: "B1", revs: [{ head: HEAD_SHA }] })
+    // Submitted at the bay's own head before any queue work: S7 puts that in
+    // the branch's standing fact, and the bay still owns the branch.
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
+    expect(app.bays.get("B1")).toMatchObject({ branch: "issue/one", headSha: HEAD_SHA })
 
     const integrated = outputIO()
     expect(
@@ -4089,11 +3912,9 @@ describe("runYrd", () => {
         },
       ],
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({
-      state: "closed",
-      merged: true,
-      integration: { commit: MERGED_SHA },
-    })
+    // The run's own integration fact is the landing evidence now that no record
+    // mirrors it.
+    expect(app.queue.get("R1")?.integration).toMatchObject({ commit: MERGED_SHA })
 
     const merged = outputIO()
     expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), merged.io), merged.stderr()).toBe(0)
@@ -4115,11 +3936,12 @@ describe("runYrd", () => {
     await openTestBay(clean, { name: "fresh-head" })
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(clean, yrd("bay", "submit"), submit.io)).toBe(0)
-    expect(clean.state().bays.prs.PR1).toMatchObject({
-      bay: "B1",
-      state: "open",
-      merged: false,
-      revs: [{ head: refreshedHead, submittedAt: expect.any(String) }],
+    // The refresh ran first, so the fact carries the REFRESHED head — the whole
+    // subject of this test, now read off the lane that owns the submission.
+    expect(clean.bays.state().submits["issue/fresh-head"]).toMatchObject({
+      sha: refreshedHead,
+      base: "main",
+      at: expect.any(String),
     })
 
     const dirty = await createApp({ dirtyBay: true })
@@ -4128,10 +3950,11 @@ describe("runYrd", () => {
     expect(await runYrd(dirty, yrd("bay", "submit", "--json"), warned.io), warned.stderr()).toBe(0)
     expect(JSON.parse(warned.stdout())).toMatchObject({
       command: "bay.submit",
-      prs: [{ id: "PR1", revs: [{ head: HEAD_SHA }] }],
+      prs: [],
+      derived: [{ lane: "derived", branch: "issue/dirty", sha: HEAD_SHA, base: "main" }],
       warnings: [expect.any(String)],
     })
-    expect(dirty.state().bays.prs.PR1).toMatchObject({ revs: [{ head: HEAD_SHA }] })
+    expect(dirty.bays.state().submits["issue/dirty"]).toMatchObject({ sha: HEAD_SHA })
   })
 
   it("requests checks when bay submit hands off a carrier", async () => {
@@ -4142,9 +3965,11 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "submit", "--json"), submit.io), submit.stderr()).toBe(0)
 
     // PR685/PR687/PR688 waited 100m/24m/2m because the handoff depended on
-    // unrelated runner activity. Submission must create authority now.
-    expect(app.bays.checksRequested("PR1")).toBe(true)
-    expect(app.state().bays.prs.PR1?.checkRequests).toHaveLength(1)
+    // unrelated runner activity. Submission must create authority NOW — and S7
+    // makes the standing submit fact exactly that authority: it exists the
+    // moment `bay submit` returns, with no compose, runner tick or queue run
+    // in between.
+    expect(app.bays.state().submits["issue/handoff"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
@@ -4227,8 +4052,9 @@ describe("runYrd", () => {
     })
     // The cure rides the refusal itself: submit plainly, run as a derived member.
     expect(create.stderr()).toContain("yrd pr submit topic/review-me")
-    // Refused before any write: no record, no submit fact, no events.
-    expect(app.state().bays.prs).toEqual({})
+    // Refused before any write: no submit fact, no events — and the refusal is
+    // structural, so the state carries no record store to have written into.
+    expect(app.state().bays).not.toHaveProperty("prs")
     expect(app.bays.state().submits).toEqual({})
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
@@ -4247,7 +4073,7 @@ describe("runYrd", () => {
       prs: [],
       derived: [{ lane: "derived", branch: "topic/ready-on-arrival", sha: HEAD_SHA, base: "main" }],
     })
-    expect(app.bays.pr("topic/ready-on-arrival")).toBeUndefined()
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/ready-on-arrival"])
     expect(app.bays.state().submits["topic/ready-on-arrival"]).toMatchObject({ sha: HEAD_SHA })
 
     // A standing fact is not a record: create still has nothing to draft, and
@@ -4256,7 +4082,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "create", "topic/ready-on-arrival", "--title", "mutated"), create.io)).toBe(1)
     expect(create.stderr()).toContain("draft records are retired")
     expect(create.stderr()).toContain("resolve: yrd pr submit topic/ready-on-arrival")
-    expect(app.bays.pr("topic/ready-on-arrival")).toBeUndefined()
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/ready-on-arrival"])
     expect(app.bays.state().submits["topic/ready-on-arrival"]).toMatchObject({ sha: HEAD_SHA })
   })
 
@@ -4276,7 +4102,9 @@ describe("runYrd", () => {
     // rejected, and the branch is still the queue's own visible pending row.
     expect(checkRuns).toEqual(["check"])
     expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.state().bays.prs).toEqual({})
+    // A failed required check does not retire the approval: the branch's fact
+    // still stands, unchanged, at the sha that failed.
+    expect(app.bays.state().submits["topic/retry"]).toMatchObject({ sha: HEAD_SHA })
     expect(app.queue.unrecordedSubmits()).toMatchObject([{ branch: "topic/retry", sha: HEAD_SHA }])
 
     behavior.failingCheck = false
@@ -4298,7 +4126,11 @@ describe("runYrd", () => {
       run.prs.some((pr) => pr.branch === "topic/retry"),
     )
     expect(retried?.prs).toMatchObject([{ branch: "topic/retry", revision: 1, headSha: MERGED_SHA }])
-    expect(app.state().bays.prs).toEqual({})
+    // The renewed fact is what the second compose admitted: the resubmit moved
+    // the branch's standing approval to the new head rather than adding a
+    // second delivery beside it.
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/retry"])
+    expect(app.bays.state().submits["topic/retry"]).toMatchObject({ sha: MERGED_SHA })
   })
 
   // An unrecognized --state used to fall through to a row filter that matches
@@ -4309,7 +4141,7 @@ describe("runYrd", () => {
   // value keeps listing exactly as before.
   it("refuses an unrecognized pr list --state value, naming the valid set", async () => {
     const app = await createApp()
-    await app.bays.intake({ branch: "issue/state-value", headSha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/state-value", sha: HEAD_SHA, base: "main" })
 
     const invalid = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--state", "bogus-value", "--json"), invalid.io)).toBe(2)
@@ -4323,77 +4155,13 @@ describe("runYrd", () => {
     expect(invalid.stdout()).toBe("")
   })
 
-  // Every `pr list` row carries TWO state words: `state` from PR.state
-  // (yrd-bay/src/model.ts:643, open | closed) and `status` from
-  // ChangeDeliveryState (yrd-bay/src/model.ts:317). `--state` filtered only
-  // the second, so `--state open` — the record's own word for the field the
-  // flag is named after — matched nothing and returned an empty list. It has
-  // to accept both vocabularies and filter whichever field defines the value.
-  it("filters pr list --state on whichever field defines the value", async () => {
-    const app = await createApp()
-    await app.bays.intake({ branch: "issue/still-open", headSha: HEAD_SHA, base: "main" })
-    await app.bays.submit({ branch: "topic/gone", headSha: MERGED_SHA, base: "main" })
-    await app.bays.closePr({ pr: "PR2" })
-    expect(app.bays.pr("PR1")!.state).toBe("open")
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
-    expect(app.bays.pr("PR2")!.state).toBe("closed")
-    expect(changeDeliveryState(app.bays.pr("PR2")!)).toBe("withdrawn")
-
-    const open = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--state", "open", "--json"), open.io), open.stderr()).toBe(0)
-    expect(JSON.parse(open.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1", state: "open" }] })
-    expect((JSON.parse(open.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
-
-    const closed = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--state", "closed", "--json"), closed.io), closed.stderr()).toBe(0)
-    expect(JSON.parse(closed.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR2", state: "closed" }] })
-    expect((JSON.parse(closed.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
-
-    // The delivery vocabulary keeps filtering the status field, unchanged.
-    const pushed = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), pushed.io), pushed.stderr()).toBe(0)
-    expect(JSON.parse(pushed.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1" }] })
-    expect((JSON.parse(pushed.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
-
-    const withdrawn = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "list", "--state", "withdrawn", "--json"), withdrawn.io),
-      withdrawn.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(withdrawn.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR2" }] })
-    expect((JSON.parse(withdrawn.stdout()) as { prs: readonly unknown[] }).prs).toHaveLength(1)
-
-    // A valid value that matches nothing is still a success with an empty
-    // list — the duality the refusal exists to protect, not to replace.
-    const none = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--state", "integrated", "--json"), none.io), none.stderr()).toBe(0)
-    expect(JSON.parse(none.stdout())).toMatchObject({ command: "pr.list", prs: [] })
-  })
-
-  it("still lists PRs in a valid state after the --state value is validated", async () => {
-    const app = await createApp()
-    await app.bays.intake({ branch: "issue/state-value", headSha: HEAD_SHA, base: "main" })
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("pushed")
-
-    const matching = outputIO()
-    expect(await runYrd(app, yrd("pr", "list", "--state", "pushed", "--json"), matching.io), matching.stderr()).toBe(0)
-    expect(JSON.parse(matching.stdout())).toMatchObject({ command: "pr.list", prs: [{ id: "PR1" }] })
-
-    const nonMatching = outputIO()
-    expect(
-      await runYrd(app, yrd("pr", "list", "--state", "integrated", "--json"), nonMatching.io),
-      nonMatching.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(nonMatching.stdout())).toMatchObject({ command: "pr.list", prs: [] })
-  })
-
   it("pr checks --follow waits for a not-yet-observable check request instead of refusing", async () => {
     // A submit's check request may not be observable yet when the follower
     // arrives; --follow means WAIT, so the not-requested state enters the same
     // 1s poll loop as a queued one (it used to hard-refuse, forcing the
     // submit→follow racer to hand-retry).
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/not-requested", sha: HEAD_SHA, base: "main" })
     let polls = 0
     const controller = new AbortController()
     const following = outputIO({
@@ -4401,10 +4169,11 @@ describe("runYrd", () => {
         signal: controller.signal,
         sleep: async () => {
           polls += 1
-          // The request becomes observable between polls, then completes.
+          // The request becomes observable between polls, then completes. S7
+          // (branch-is-change): compose requests the checks itself when it
+          // admits the branch's standing fact, so the drain is the whole event.
           if (polls === 1) {
-            await app.bays.requestChecks({ pr: "PR1" })
-            await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+            await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
           }
         },
       },
@@ -4425,7 +4194,7 @@ describe("runYrd", () => {
     // longer spells that 0 (@i/10-merge-queue/failed-check-erased — `f35125b1`
     // made `not-requested` followable, which entrenched exit-0-on-nothing).
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/not-requested", sha: HEAD_SHA, base: "main" })
     const before = await Array.fromAsync(app.events())
     const controller = new AbortController()
     const checks = outputIO({
@@ -4451,7 +4220,9 @@ describe("runYrd", () => {
     const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
     expect(await runYrd(app, yrd("pr", "submit", "topic/plain", "--json"), submit.io), submit.stderr()).toBe(0)
     expect(checkRuns).toEqual([])
-    expect(app.state().bays.prs).toEqual({})
+    // The submitter writes the fact and stops: the branch is approved, and no
+    // authoritative check has run yet.
+    expect(app.bays.state().submits["topic/plain"]).toMatchObject({ sha: HEAD_SHA })
     expect(await app.queue.history()).toEqual([])
 
     const drain = outputIO()
@@ -4467,7 +4238,9 @@ describe("runYrd", () => {
       ],
     })
     expect(checkRuns).toEqual(["check"])
-    expect(app.state().bays.prs).toEqual({})
+    // The drain consumed the approval it ran on: the branch was delivered from
+    // its standing fact, and that fact is still the only delivery state there is.
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/plain"])
   })
 
   it("records each direct submission as a fact without executing Queue work in the submitter", async () => {
@@ -4486,7 +4259,9 @@ describe("runYrd", () => {
     const second = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("pr", "submit", "topic/second", "--json"), second.io), second.stderr()).toBe(0)
     expect(app.bays.state().submits["topic/second"]).toMatchObject({ sha: MERGED_SHA })
-    expect(app.state().bays.prs).toEqual({})
+    // Two submissions, two facts, and nothing else: each branch carries its own
+    // approval and neither write disturbed the other.
+    expect(Object.keys(app.bays.state().submits).toSorted()).toEqual(["topic/first", "topic/second"])
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["topic/first", "topic/second"])
     expect(checkRuns).toEqual([])
     expect(await app.queue.history()).toEqual([])
@@ -4516,7 +4291,10 @@ describe("runYrd", () => {
       close.stderr(),
     ).toBe(0)
 
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    // S7 (branch-is-change): "closes its PR" is retiring the branch's standing
+    // submit fact — that IS the withdrawal, and it is what must terminalize the
+    // unclaimed queue work below.
+    expect(app.bays.state().submits).toEqual({})
     expect(app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
     expect(app.queue.get("R2")).toMatchObject({
       status: "completed",
@@ -4646,19 +4424,23 @@ describe("runYrd", () => {
         })
       },
     })
+    // S7 (branch-is-change): the standing submit fact is the whole submission,
+    // and compose owns admission gating — there is no separate check request to
+    // ask for, and no record to carry the refusal receipt. The queue's own
+    // refusal ledger is now the durable trace, which is exactly what
+    // "self-quarantines" has to be read off.
     await openAndSubmit(app)
-    await app.bays.requestChecks({ pr: "PR1" })
 
     for (const at of ["2026-07-09T12:00:00.000Z", "2026-07-09T14:00:00.000Z", "2026-07-09T17:46:00.000Z"]) {
       now = at
       await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
     }
     expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "refused",
-      receipt: { code: "authored-gitlink" },
-    })
+    // Three cycles, ONE quarantined refusal streak on the immutable revision —
+    // not three observations, and never a fresh identity per cycle.
+    const refusals = Object.values(app.state().queues.admissionRefusals)
+    expect(refusals).toHaveLength(1)
+    expect(refusals[0]).toMatchObject({ code: "authored-gitlink", branch: "issue/one" })
     expect(app.queue.audit().findings).toEqual([])
   })
 
@@ -4684,23 +4466,23 @@ describe("runYrd", () => {
         }
       },
     })
-    await app.bays.submit({ branch: "topic/base-chase", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    // S7 (branch-is-change): the fact is the submission and compose requests
+    // its own checks, so there is no separate check-request call to make.
+    await app.bays.recordBranchSubmit({ branch: "topic/base-chase", sha: HEAD_SHA, base: "main" })
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(app.queue.eligibility("PR1")).toMatchObject({ reason: { code: "admission-refused" } })
 
     currentBaseSha = advancedBaseSha
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "refused",
-      baseSha: advancedBaseSha,
-      receipt: { code: "carrier-drops-landed" },
-    })
-    expect(app.bays.pr("PR1")?.checkRequests).toMatchObject([
-      { revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
-      { revision: 1, headSha: HEAD_SHA, baseSha: advancedBaseSha },
-    ])
+    // The base advanced under the SAME head, so the second compose is a
+    // genuinely fresh observation of the same immutable revision. The queue's
+    // refusal ledger — the durable trace that replaced the record's admission
+    // receipt and its check-request list — must show one streak of TWO, not a
+    // reset and not a second row.
+    const chased = app.state().queues.admissionRefusals["PR1"]
+    expect(chased).toMatchObject({ code: "carrier-drops-landed", headSha: HEAD_SHA, count: 2 })
+    expect(Object.keys(app.state().queues.admissionRefusals)).toEqual(["PR1"])
     expect(Queues.ids(app.state().queues)).toEqual([])
 
     const once = outputIO()
@@ -4728,8 +4510,7 @@ describe("runYrd", () => {
       ],
     })
 
-    await app.bays.submit({ branch: "topic/progresses", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/progresses", sha: MERGED_SHA, base: "main" })
 
     const targeted = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR2", "--json"), targeted.io), targeted.stderr()).toBe(0)
@@ -4739,8 +4520,7 @@ describe("runYrd", () => {
     })
     expect(JSON.parse(targeted.stdout())).not.toHaveProperty("blocked")
 
-    await app.bays.submit({ branch: "topic/also-progresses", headSha: "c".repeat(40), base: "main", baseSha: BASE_SHA })
-    await app.bays.requestChecks({ pr: "PR3", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/also-progresses", sha: "c".repeat(40), base: "main" })
     const mixed = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), mixed.io), mixed.stderr()).toBe(0)
     expect(JSON.parse(mixed.stdout())).toMatchObject({
@@ -4762,8 +4542,8 @@ describe("runYrd", () => {
         })
       },
     })
+    // S7: compose requests the checks when it admits the standing fact.
     await openAndSubmit(app)
-    await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
 
     const audit = outputIO({ now: () => Date.parse("2026-07-09T12:10:00.000Z") })
@@ -4813,8 +4593,10 @@ describe("runYrd", () => {
     expect(JSON.parse(finish.stdout())).toMatchObject({
       run: { id: "R1", status: "completed", conclusion: "failure" },
     })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(app.state().bays.prs.PR1).not.toHaveProperty("detail")
+    // The RUN failed; the submission did not. The branch's approval still
+    // stands untouched at its head, so a later drain can retry it — an external
+    // verdict must never quietly unsubmit the author's work.
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     const status = outputIO({ color: true })
     expect(await runYrd(app, yrd(), status.io)).toBe(0)
     expect(status.stdout()).toContain(pathToFileURL(artifact).href)
@@ -4828,7 +4610,9 @@ describe("runYrd", () => {
     const integrated = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--steps", "--json"), integrated.io)).toBe(0)
     expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", publications: [], results: [] })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    // An explicitly empty step selection ran nothing, so the approval is still
+    // standing and the branch is still the queue's pending work.
+    expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA })
 
     const idle = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), idle.io)).toBe(0)
@@ -4852,9 +4636,9 @@ describe("runYrd", () => {
 
   it("persists and releases queue pauses through the operator CLI", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "issue/blocked", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "issue/allowed", headSha: "2".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "issue/also-allowed", headSha: "3".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/blocked", sha: "1".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/allowed", sha: "2".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/also-allowed", sha: "3".repeat(40), base: "main" })
     const pause = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
 
     expect(
@@ -4883,8 +4667,10 @@ describe("runYrd", () => {
     expect(JSON.parse(eligible.stdout())).toMatchObject({
       results: [{ prs: [{ id: "PR2" }], status: "completed", conclusion: "success" }],
     })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(changeDeliveryState(app.state().bays.prs.PR2!)).toBe("integrated")
+    // PR1 stayed blocked by the pause (its approval untouched); PR2 ran and
+    // landed, which is the run's own integration fact.
+    expect(app.bays.state().submits["issue/blocked"]).toMatchObject({ sha: "1".repeat(40) })
+    expect(app.queue.get("R1")?.integration).toMatchObject({ commit: MERGED_SHA })
 
     const partiallyStale = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd(), partiallyStale.io)).toBe(0)
@@ -4897,9 +4683,9 @@ describe("runYrd", () => {
     expect(JSON.parse(secondEligible.stdout())).toMatchObject({
       results: [{ prs: [{ id: "PR3" }], status: "completed", conclusion: "success" }],
     })
-    expect(changeDeliveryState(app.state().bays.prs.PR3!)).toBe("integrated")
+    expect(app.queue.get("R2")?.integration).toMatchObject({ commit: MERGED_SHA })
 
-    await app.bays.submit({ branch: "issue/newly-blocked", headSha: "4".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/newly-blocked", sha: "4".repeat(40), base: "main" })
 
     const status = outputIO()
     expect(await runYrd(app, yrd("--json"), status.io)).toBe(0)
@@ -4993,27 +4779,6 @@ describe("runYrd", () => {
         },
       ],
     })
-  })
-
-  it("prints public queue positions in Queue admission order", async () => {
-    let tick = 0
-    const app = await createApp({
-      batch: 1,
-      clock: () => new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
-    })
-    await app.bays.intake({ branch: "issue/created-first", headSha: "1".repeat(40), base: "main" })
-    await app.bays.intake({ branch: "issue/submitted-first", headSha: "2".repeat(40), base: "main" })
-    await app.bays.submit({ pr: "PR2" })
-    await app.bays.submit({ pr: "PR1" })
-    expect(app.queue.admissionOrder()).toEqual(["PR2", "PR1"])
-
-    const output = outputIO({
-      columns: 120,
-      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
-    })
-    expect(await runYrd(app, yrd("queue", "list"), output.io), output.stderr()).toBe(0)
-    const frame = output.stdout()
-    expect(frame.indexOf("pr#2.1")).toBeLessThan(frame.indexOf("pr#1.1"))
   })
 
   it("uses read capabilities for the dashboard and contest view without appending events", async () => {
@@ -6051,7 +5816,8 @@ describe("runYrd", () => {
         },
       })
 
-      await app.bays.requestChecks({ pr: "PR1", baseSha })
+      // S7: the branch's standing submit fact already makes it the queue's
+      // pending member — there is no separate check request to ask for.
       const stalledHuman = outputIO({ cwd: repo })
       expect(await runYrd(app, yrd("queue", "list"), stalledHuman.io, services)).toBe(0)
       expect(stalledHuman.stdout()).toContain("position 1 · base-moved")
@@ -6358,11 +6124,11 @@ describe("runYrd", () => {
     let now = Date.parse("2026-07-13T12:00:00.000Z")
     const app = await createApp({ clock: () => new Date(now).toISOString() })
     try {
+      // The "never started" precondition, S7-shaped: the branch's approval
+      // stands, and nothing has composed or run against it yet.
       await openAndSubmit(app)
-      const pr = app.bays.pr("PR1")
-      if (pr === undefined) throw new Error("submitted PR was not recorded")
-      expect(changeDeliveryState(pr)).toBe("submitted")
-      expect(app.bays.checksRequested("PR1")).toBe(false)
+      expect(app.bays.state().submits["issue/one"]).toMatchObject({ sha: HEAD_SHA })
+      expect(Queues.ids(app.state().queues)).toEqual([])
 
       now += 30 * 60_000
       const heartbeat = await runInternals.startHabitantRunnerHeartbeat(
@@ -6416,87 +6182,6 @@ describe("runYrd", () => {
    * --check` (the fleet health surface), and `queue list` / `queue list
    * --watch` (the same loader `yrd watch` renders).
    */
-  it("writes page-worthy stale drafts into the habitant heartbeat, gated by the page threshold", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-stale-drafts-"))
-    execFileSync("git", ["init", "-q", repo])
-    const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
-    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
-    const fourHourThresholdMs = 4 * 60 * 60_000
-    try {
-      await app.bays.intake({
-        branch: "issue/stranded-draft",
-        headSha: "3".repeat(40),
-        base: "main",
-        baseSha: BASE_SHA,
-        submitter: "@dev/11",
-      })
-      const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/stranded-draft")
-      if (pr === undefined) throw new Error("intake did not record the change")
-      expect(pr.revs.at(-1)?.submittedAt, "the fixture must be a true draft, never submitted").toBeUndefined()
-
-      // One hour on: a real draft-stranded finding exists (past queue audit's
-      // own 15-minute existence grace) but well under the 4-hour default page
-      // threshold. It must stay OUT of the heartbeat, or every ordinary
-      // push-review-submit pause would page.
-      const stillQuiet = await runInternals.startHabitantRunnerHeartbeat(
-        outputIO({
-          cwd: repo,
-          runner: `yrd-cli:${process.pid}`,
-          now: () => Date.parse("2026-07-09T13:00:00.000Z"),
-        }).io,
-        {
-          intervalMs: 60_000,
-          staleDrafts: (now) => runInternals.staleDraftFindings(app, now, fourHourThresholdMs),
-          driver: { queueId: `${repo}#main`, lastMerged: () => null },
-        },
-      )
-      try {
-        expect(
-          (JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ staleDrafts: unknown }>).staleDrafts,
-          "a real finding exists at +1h, but must stay quiet below the page threshold",
-        ).toEqual([])
-      } finally {
-        await stillQuiet.close(true)
-      }
-
-      // 4.5 hours on: past the page threshold. Must reach the heartbeat WITH
-      // owner attribution, and must never disagree with queue audit's own
-      // reading of the identical PR at the identical clock.
-      const paging = await runInternals.startHabitantRunnerHeartbeat(
-        outputIO({
-          cwd: repo,
-          runner: `yrd-cli:${process.pid}`,
-          now: () => Date.parse("2026-07-09T16:30:00.000Z"),
-        }).io,
-        {
-          intervalMs: 60_000,
-          staleDrafts: (now) => runInternals.staleDraftFindings(app, now, fourHourThresholdMs),
-          driver: { queueId: `${repo}#main`, lastMerged: () => null },
-        },
-      )
-      try {
-        const written = JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ staleDrafts: unknown }>
-        expect(written.staleDrafts).toMatchObject([
-          {
-            code: "draft-stranded",
-            pr: pr.id,
-            submitter: "@dev/11",
-            blockedMs: Date.parse("2026-07-09T16:30:00.000Z") - Date.parse("2026-07-09T12:00:00.000Z"),
-          },
-        ])
-        expect(app.queue.audit({ now: "2026-07-09T16:30:00.000Z" }).findings).toContainEqual(
-          expect.objectContaining({ code: "draft-stranded", pr: pr.id }),
-        )
-        paging.check()
-      } finally {
-        await paging.close(true)
-      }
-    } finally {
-      await app.close()
-      safeRemoveSync(repo, { within: tmpdir(), allowMissing: true })
-    }
-  })
-
   it("surfaces a branch submitted only in git (no record) in audit, list warnings, and the considered rows", async () => {
     // branch-is-change 2a: the receiver projected a direct refs/yrd/submit push
     // as branch/submitted; nothing can run it (no PRnnn), so every surface a
@@ -6540,27 +6225,6 @@ describe("runYrd", () => {
         kind: "no-runnable-prs",
         considered: [expect.objectContaining({ branch: "issue/ref-only", code: "unrecorded-submit" })],
       })
-    } finally {
-      await app.close()
-    }
-  })
-
-  it("offers only reversible submission for a stranded draft, never payload destruction", async () => {
-    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
-    try {
-      await app.bays.intake({
-        branch: "issue/stranded-draft",
-        headSha: "3".repeat(40),
-        base: "main",
-        baseSha: BASE_SHA,
-        submitter: "@dev/11",
-      })
-
-      const audit = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
-      expect(await runYrd(app, yrd("queue", "audit"), audit.io), audit.stderr()).toBe(1)
-      expect(audit.stdout()).toContain("resolve: yrd pr submit issue/stranded-draft --issue <ref>")
-      expect(audit.stdout()).not.toContain("withdraw")
-      expect(audit.stdout()).not.toContain("--burn-payload")
     } finally {
       await app.close()
     }
@@ -6629,91 +6293,26 @@ describe("runYrd", () => {
     }
   })
 
-  it("pages a stranded draft past the threshold in `queue list`, quiet below it — the same loader `yrd watch` renders", async () => {
-    const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
-    try {
-      await app.bays.intake({
-        branch: "issue/stranded-in-watch",
-        headSha: "5".repeat(40),
-        base: "main",
-        baseSha: BASE_SHA,
-        submitter: "@dev/7",
-      })
-
-      const quiet = outputIO({ now: () => Date.parse("2026-07-09T13:00:00.000Z") })
-      expect(await runYrd(app, yrd("queue", "list", "--json"), quiet.io), quiet.stderr()).toBe(0)
-      expect(
-        (JSON.parse(quiet.stdout()) as Readonly<{ warnings?: unknown }>).warnings,
-        "a real finding at +1h must stay quiet below the 4h default page threshold",
-      ).toBeUndefined()
-
-      const paging = outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z") })
-      expect(await runYrd(app, yrd("queue", "list", "--json"), paging.io), paging.stderr()).toBe(0)
-      const pagingBody = JSON.parse(paging.stdout()) as Readonly<{ warnings: readonly string[] }>
-      expect(pagingBody.warnings).toHaveLength(1)
-      expect(pagingBody.warnings[0]).toContain("[draft-stranded]")
-      expect(pagingBody.warnings[0]).toContain("@dev/7")
-      expect(pagingBody.warnings[0]).toContain("issue/stranded-in-watch")
-
-      const humanPaging = outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z"), columns: 120 })
-      expect(await runYrd(app, yrd("queue", "list"), humanPaging.io), humanPaging.stderr()).toBe(0)
-      expect(humanPaging.stderr()).toContain("[draft-stranded]")
-      expect(humanPaging.stderr()).toContain("@dev/7")
-
-      // The interactive `yrd watch` pane and its --json twin share this exact
-      // snapshot builder (buildQueueListSnapshot) — proving the data reaches
-      // it here proves it reaches the pane's footer notice too.
-      const snapshot = await runInternals.queueListSnapshot(
-        app,
-        [],
-        {},
-        outputIO({ now: () => Date.parse("2026-07-09T16:30:00.000Z") }).io,
-        { queueReadModel: testQueueReadModel(app) },
-      )
-      expect(snapshot.staleDrafts).toHaveLength(1)
-      expect(snapshot.staleDrafts?.[0]?.submitter).toBe("@dev/7")
-    } finally {
-      await app.close()
-    }
-  })
-
-  /**
-   * The same consumption gap as the draft-stranded family above, for the
-   * OTHER disposition nothing watched (@i/10-merge-queue/22918-needs-person-unowned):
-   * `applyRefusalRemedies`' judgment half already settles a refusal
-   * `needs-person` (22474), but the ONE finding that used to mark it —
-   * `admission-refusal-loop` — is deliberately dropped the instant it
-   * settles (the loop is over), and nothing replaced it. These three tests
-   * prove the `admission-refusal-needs-person` finding (@yrd/queue
-   * `auditQueues`) reaches a live seat exactly like a stale draft does: the
-   * habitant heartbeat (this test), `queue list --check` (the fleet health
-   * surface), and `queue list` / `queue list --watch` (the same loader
-   * `yrd watch` renders). Unlike a draft, there is no page-after grace: a
-   * settlement already only happens once the queue gave up on its own
-   * retries or mechanical remedy, so it is page-worthy immediately. The
-   * finding's `owner` is the repository's `.yrd.yml` `needsPerson.owner`
-   * ROLE — never the revision's recorded submitter, and never omitted: an
-   * unconfigured repository shows the explicit unowned default.
-   */
   it("writes an unrouted needs-person change into the habitant heartbeat", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-needs-person-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
     try {
-      await app.bays.intake({
-        branch: "issue/permanent-refusal",
-        headSha: "3".repeat(40),
-        base: "main",
-        baseSha: BASE_SHA,
-        submitter: "@dev/11",
-        submit: true,
-      })
-      const pr = Object.values(app.state().bays.prs).find((candidate) => candidate.branch === "issue/permanent-refusal")
-      if (pr === undefined) throw new Error("intake did not record the change")
-      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
+      // S7 (branch-is-change): the branch's standing submit fact is the whole
+      // submission. A DERIVED member refused before any run retained a
+      // snapshot has no record and no snapshot, so the refusal carries the
+      // caller's own identity — the exact case `branch`/`revision`/`headSha`
+      // exist on the refusal args for.
+      const branch = "issue/permanent-refusal"
+      const headSha = "3".repeat(40)
+      const prId = "PR1"
+      await app.bays.recordBranchSubmit({ branch, sha: headSha, base: "main" })
       await app.queue.recordAdmissionRefusal({
-        pr: pr.id,
+        pr: prId,
+        branch,
+        revision: 1,
+        headSha,
         code: "authored-gitlink",
         kind: "refusal",
         reason: "the change touches generated-only gitlinks; an exact ruling is needed",
@@ -6721,9 +6320,9 @@ describe("runYrd", () => {
       // The runner's judgment classification settles a no-mechanical-remedy
       // refusal needs-person; driven explicitly, since no code auto-parks.
       await app.queue.settleAdmissionRefusal({
-        pr: pr.id,
-        revision: currentChangeRev(pr).n,
-        headSha: currentChangeRev(pr).head,
+        pr: prId,
+        revision: 1,
+        headSha,
         disposition: "needs-person",
         reason: "the change touches generated-only gitlinks; an exact ruling is needed",
       })
@@ -6742,23 +6341,22 @@ describe("runYrd", () => {
       )
       try {
         const written = JSON.parse(readFileSync(statusPath, "utf8")) as Readonly<{ needsPerson: unknown }>
-        // A recorded submitter exists ("@dev/11") and deliberately does NOT
-        // become the owner: `owner` is the repository's declared ROLE, and no
-        // repository config here means the explicit unowned default, never an
-        // individual guessed from push identity.
+        // `owner` is the repository's declared ROLE: no repository config here
+        // means the explicit unowned default, never an individual guessed from
+        // push identity.
         expect(written.needsPerson).toMatchObject([
           {
             code: "admission-refusal-needs-person",
-            pr: pr.id,
+            pr: prId,
             refusal: "authored-gitlink",
             owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
           },
         ])
         // Must never disagree with queue audit's own reading of the identical
-        // PR — the habitant projects the canonical audit, never a second
+        // change — the habitant projects the canonical audit, never a second
         // derivation of it.
         expect(app.queue.audit({ now: "2026-07-09T12:05:00.000Z" }).findings).toContainEqual(
-          expect.objectContaining({ code: "admission-refusal-needs-person", pr: pr.id }),
+          expect.objectContaining({ code: "admission-refusal-needs-person", pr: prId }),
         )
         heartbeat.check()
       } finally {
@@ -6839,21 +6437,18 @@ describe("runYrd", () => {
   it("surfaces a needs-person change in `queue list` — the same loader `yrd watch` renders", async () => {
     const app = await createApp({ clock: () => "2026-07-09T12:00:00.000Z" })
     try {
-      await app.bays.intake({
-        branch: "issue/needs-person-in-watch",
-        headSha: "5".repeat(40),
-        base: "main",
-        baseSha: BASE_SHA,
-        submitter: "@dev/7",
-        submit: true,
-      })
-      const pr = Object.values(app.state().bays.prs).find(
-        (candidate) => candidate.branch === "issue/needs-person-in-watch",
-      )
-      if (pr === undefined) throw new Error("intake did not record the change")
-      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE_SHA })
+      // S7 (branch-is-change): the standing submit fact is the submission, and
+      // a derived member refused before any run retains a snapshot carries its
+      // identity on the refusal itself.
+      const branch = "issue/needs-person-in-watch"
+      const headSha = "5".repeat(40)
+      const prId = "PR1"
+      await app.bays.recordBranchSubmit({ branch, sha: headSha, base: "main" })
       await app.queue.recordAdmissionRefusal({
-        pr: pr.id,
+        pr: prId,
+        branch,
+        revision: 1,
+        headSha,
         code: "authored-gitlink",
         kind: "refusal",
         reason: "the change touches generated-only gitlinks; an exact ruling is needed",
@@ -6861,9 +6456,9 @@ describe("runYrd", () => {
       // The runner's judgment classification settles a no-mechanical-remedy
       // refusal needs-person; driven explicitly, since no code auto-parks.
       await app.queue.settleAdmissionRefusal({
-        pr: pr.id,
-        revision: currentChangeRev(pr).n,
-        headSha: currentChangeRev(pr).head,
+        pr: prId,
+        revision: 1,
+        headSha,
         disposition: "needs-person",
         reason: "the change touches generated-only gitlinks; an exact ruling is needed",
       })
@@ -6874,9 +6469,9 @@ describe("runYrd", () => {
       const body = JSON.parse(listing.stdout()) as Readonly<{ warnings: readonly string[] }>
       expect(body.warnings).toHaveLength(1)
       expect(body.warnings[0]).toContain("[admission-refusal-needs-person]")
-      expect(body.warnings[0]).toContain(pr.id)
+      expect(body.warnings[0]).toContain(prId)
       // Unconfigured repository: the empty owner slot is SHOWN, never omitted
-      // and never guessed from the recorded submitter ("@dev/7").
+      // and never guessed from push identity.
       expect(body.warnings[0]).toContain("Owner: unowned — no needsPerson.owner is configured in .yrd.yml.")
 
       const humanListing = outputIO({ now: () => Date.parse("2026-07-09T12:05:00.000Z"), columns: 120 })
@@ -8056,8 +7651,8 @@ describe("runYrd", () => {
 
   it("uses the queue timeline by default while --latest only changes row projection", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/one", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "topic/two", headSha: "2".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: "1".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/two", sha: "2".repeat(40), base: "main" })
 
     const plain = outputIO({
       now: () => Date.parse("2026-07-09T12:01:00.000Z"),
@@ -8136,8 +7731,8 @@ describe("runYrd", () => {
 
   it("keeps queue aliases and plural filters on one lossless JSON projection", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/alpha", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "topic/beta", headSha: "2".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/alpha", sha: "1".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/beta", sha: "2".repeat(40), base: "main" })
     const now = () => Date.parse("2026-07-09T12:01:00.000Z")
     const resolveQueueTarget = async () => ({ base: "main", sha: BASE_SHA })
 
@@ -8653,14 +8248,18 @@ describe("runYrd", () => {
       "    at applyCandidate (/repo/packages/yrd-queue/src/command.ts:404:12)",
     ].join("\n")
     writeFileSync(artifact, `${failure}\n`)
-    const app = await createApp({ checkFailure: { code: "apply-conflict", message: failure, artifact } })
-    await app.bays.submit({
-      branch: "issue/failing",
-      name: "fix(cli): bound operator failures",
-      headSha: HEAD_SHA,
-      base: "main",
-      baseSha: BASE_SHA,
+    // S7 (branch-is-change): a change's subject comes from its head COMMIT, not
+    // from a record `name`, so the fixture supplies it as commit enrichment —
+    // the boundary the derived lane actually reads.
+    const app = await createApp({
+      checkFailure: { code: "apply-conflict", message: failure, artifact },
+      resolveBaseSha: () => BASE_SHA,
+      submitEnrichment: {
+        [HEAD_SHA]: { title: "fix(cli): bound operator failures" },
+        ["2".repeat(40)]: { title: "feat(cli): keep runnable work visible" },
+      },
     })
+    await app.bays.recordBranchSubmit({ branch: "issue/failing", sha: HEAD_SHA, base: "main" })
     expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -8671,13 +8270,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd(), failedOnly.io), failedOnly.stderr()).toBe(0)
     expect.soft(failedOnly.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 1 ACTIVE 0 INTEGRATED 0 REJECTED 0/u)
 
-    await app.bays.submit({
-      branch: "issue/runnable",
-      name: "feat(cli): keep runnable work visible",
-      headSha: "2".repeat(40),
-      base: "origin/main",
-      baseSha: BASE_SHA,
-    })
+    await app.bays.recordBranchSubmit({ branch: "issue/runnable", sha: "2".repeat(40), base: "origin/main" })
 
     // Historical aliases can retain a pause after the canonical queue was resumed.
     await app.queue.pause({
@@ -9082,15 +8675,15 @@ describe("runYrd", () => {
   })
 
   it("spotlights the active run in bounded status output", async () => {
-    const app = await createApp({ waitingCheck: true })
-    await app.bays.submit({
-      branch: "issue/active",
-      name: "fix(cli): show the active queue check",
-      headSha: HEAD_SHA,
-      base: "main",
-      baseSha: BASE_SHA,
+    // S7: the spotlight's subject line comes from the head commit, supplied
+    // here as the commit enrichment the derived lane reads at admission.
+    const app = await createApp({
+      waitingCheck: true,
+      resolveBaseSha: () => BASE_SHA,
+      submitEnrichment: { [HEAD_SHA]: { title: "fix(cli): show the active queue check" } },
     })
-    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]?.status).toBe("waiting")
+    await app.bays.recordBranchSubmit({ branch: "issue/active", sha: HEAD_SHA, base: "main" })
+    expect((await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]?.status).toBe("waiting")
 
     for (const columns of [80, 120]) {
       const status = outputIO({
@@ -9219,8 +8812,8 @@ describe("runYrd", () => {
 
   it("projects local and remote spellings as one queue with command position parity", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "issue/one", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "issue/two", headSha: "2".repeat(40), base: "origin/main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/one", sha: "1".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/two", sha: "2".repeat(40), base: "origin/main" })
     const now = () => Date.parse("2026-07-09T12:01:00.000Z")
     const resolveQueueTarget = (ref: string) =>
       Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: "a".repeat(40) })
@@ -9266,12 +8859,12 @@ describe("runYrd", () => {
     ).toEqual(["R1", "R2", "R10"])
 
     const app = await createApp()
-    await app.bays.submit({ branch: "issue/canonical", headSha: "1".repeat(40), base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/canonical", sha: "1".repeat(40), base: "main" })
     expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
       status: "completed",
       conclusion: "success",
     })
-    await app.bays.submit({ branch: "issue/alias", headSha: "2".repeat(40), base: "origin/main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/alias", sha: "2".repeat(40), base: "origin/main" })
     expect((await app.queue.run({ prs: ["PR2"] }, { runner: "test", leaseMs: 60_000 }))[0]).toMatchObject({
       status: "completed",
       conclusion: "success",
@@ -9395,147 +8988,6 @@ describe("runYrd", () => {
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("merge")
-  })
-
-  it("keeps every submitted revision clock lossless in pr runs", async () => {
-    const nextHead = "2".repeat(40)
-    const pushedOnlyHead = "3".repeat(40)
-    let now = "2026-07-09T12:00:00.000Z"
-    const app = await createApp({ failingCheck: true, clock: () => now })
-    await app.bays.submit({ branch: "topic/history", headSha: HEAD_SHA, base: "main" })
-    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(1)
-
-    now = "2026-07-09T12:10:00.000Z"
-    await app.bays.intake({ branch: "topic/history", headSha: nextHead, base: "main" })
-    await app.bays.ready({ pr: "PR1" })
-    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(1)
-
-    now = "2026-07-09T12:20:00.000Z"
-    await app.bays.intake({ branch: "topic/history", headSha: pushedOnlyHead, base: "main" })
-
-    const human = outputIO({ columns: 80 })
-    expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.1 HEAD ${HEAD_SHA}`)
-    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.2 HEAD ${nextHead}`)
-    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.3 HEAD ${pushedOnlyHead}`)
-    expect(human.stdout()).toContain("PUSHED 2026-07-09T12:00:00.000Z")
-    expect(human.stdout()).toContain("SUBMITTED 2026-07-09T12:00:00.000Z")
-    expect(human.stdout()).not.toContain("TERMINAL rejected")
-    expect(human.stdout()).toContain("PUSHED 2026-07-09T12:10:00.000Z")
-    expect(human.stdout()).toContain("SUBMITTED 2026-07-09T12:10:00.000Z")
-    expect(human.stdout()).toContain("PUSHED 2026-07-09T12:20:00.000Z")
-    expect(human.stdout()).toContain("No runs recorded for this revision.")
-
-    const json = outputIO()
-    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), json.io), json.stderr()).toBe(0)
-    const parsed = JSON.parse(json.stdout()) as {
-      pr: {
-        revs: readonly Readonly<{
-          n: number
-          head: string
-          pushedAt: string
-          submittedAt?: string
-          terminal?: Readonly<{ kind: string; at: string }>
-        }>[]
-      }
-      runs: ReturnType<typeof queueShowData>[]
-    }
-    expect(parsed.pr.revs).toMatchObject([
-      {
-        n: 1,
-        head: HEAD_SHA,
-        submittedAt: "2026-07-09T12:00:00.000Z",
-      },
-      {
-        n: 2,
-        head: nextHead,
-        submittedAt: "2026-07-09T12:10:00.000Z",
-      },
-      { n: 3, head: pushedOnlyHead, pushedAt: "2026-07-09T12:20:00.000Z" },
-    ])
-    expect(parsed.pr.revs.every((revision) => revision.terminal === undefined)).toBe(true)
-    expect(parsed.runs.map((run) => run.revisionClock)).toMatchObject([
-      { pr: "PR1", revision: 1, headSha: HEAD_SHA, submittedAt: "2026-07-09T12:00:00.000Z" },
-      { pr: "PR1", revision: 2, headSha: nextHead, submittedAt: "2026-07-09T12:10:00.000Z" },
-    ])
-  })
-
-  it("records repeated pushed draft-check verdicts without minting Queue runs", async () => {
-    let now = "2026-07-09T12:00:00.000Z"
-    const app = await createApp({ baseFailure: true, clock: () => now })
-    await app.bays.submit({
-      branch: "topic/draft-check",
-      headSha: HEAD_SHA,
-      base: "main",
-      baseSha: BASE_SHA,
-      draft: true,
-    })
-    now = "2026-07-09T12:01:00.000Z"
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    now = "2026-07-09T12:02:00.000Z"
-    expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })).toEqual(["PR1"])
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "refused",
-      kind: "failure",
-      baseSha: BASE_SHA,
-      step: "check",
-    })
-    now = "2026-07-09T12:10:00.000Z"
-    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
-    now = "2026-07-09T12:11:00.000Z"
-    expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })).toEqual(["PR1"])
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "refused",
-      kind: "failure",
-      baseSha: BASE_SHA,
-      step: "check",
-      at: "2026-07-09T12:11:00.000Z",
-    })
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("pushed")
-    expect(app.state().bays.prs.PR1).not.toHaveProperty("submittedAt")
-
-    const human = outputIO({ columns: 80 })
-    expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.1 HEAD ${HEAD_SHA}`)
-    expect(human.stdout()).toContain("SUBMITTED -")
-    expect(human.stdout()).toContain("CHECK REQUESTED 2026-07-09T12:01:00.000Z, 2026-07-09T12:10:00.000Z")
-    expect(human.stdout()).toContain("No runs recorded for this revision.")
-
-    const json = outputIO()
-    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), json.io), json.stderr()).toBe(0)
-    const parsed = JSON.parse(json.stdout()) as { runs: ReturnType<typeof queueShowData>[] }
-    expect(parsed.runs).toEqual([])
-
-    now = "2026-07-09T12:20:00.000Z"
-    const fixedHead = "2".repeat(40)
-    const fixed = outputIO({ resolveRevision: () => Promise.resolve(fixedHead) })
-    expect(await runYrd(app, yrd("pr", "submit", "topic/draft-check"), fixed.io), fixed.stderr()).toBe(0)
-    expect(app.state().bays.prs.PR1).toMatchObject({
-      state: "open",
-      merged: false,
-      submittedAt: now,
-      revs: [
-        { n: 1, head: HEAD_SHA },
-        { n: 2, head: fixedHead, submittedAt: now },
-      ],
-    })
-    expect(app.state().bays.prs.PR1?.revs[0]).not.toHaveProperty("submittedAt")
-    expect(app.state().bays.prs.PR1?.revs[0]).not.toHaveProperty("terminal")
-
-    const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
-    expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    // The old ROWS "oldest=" cell has no place in the calendar STATS surface.
-    expect(laterQueue.stdout()).toContain("STATS")
-
-    const laterHuman = outputIO({ columns: 120 })
-    expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
-    expect(laterHuman.stdout()).toContain("No matching terminal log rows.")
-
-    const laterJson = outputIO()
-    expect(await runYrd(app, yrd("log", "--pr", "PR1", "--json"), laterJson.io), laterJson.stderr()).toBe(0)
-    const rows = (JSON.parse(laterJson.stdout()) as { rows: ReturnType<typeof queueLogRows> }).rows
-    expect(rows).toEqual([])
   })
 
   it("maps the 10-row log and PR-run contract matrix directly from canonical fields", async () => {
@@ -9684,7 +9136,7 @@ describe("runYrd", () => {
       headSha: "f".repeat(40),
     })
     const statusRows = queueStatusRows(
-      { byId: {}, prs: { PR1: statusPr }, receipts: {}, submits: {} },
+      { byId: {}, submits: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr], admissionOrder: ["PR1"] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),
@@ -11180,7 +10632,7 @@ describe("runYrd", () => {
     // change-record store (branch-is-change, @i/10 22991). The merge record
     // itself stays the proof; `why` reports it without the flag.
     await using app = await createApp()
-    await app.bays.submit({ branch: "issue/index-gap", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "issue/index-gap", sha: HEAD_SHA, base: "main" })
     const output = outputIO()
 
     expect(await runYrd(app, yrd("why", "PR1", "--repair", "--json"), output.io)).toBe(1)
@@ -11196,12 +10648,15 @@ describe("runYrd", () => {
   // "nobody wired the projection".
   it("projects a merged merge record as an in-toto Statement attributed to its queue", async () => {
     await using app = await createApp()
-    await app.bays.submit({ branch: "issue/attested", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    const revision = currentChangeRev(app.bays.pr("PR1")!)
-    if (revision.changeId === undefined) throw new Error("expected current PR Change-Id")
+    await app.bays.recordBranchSubmit({ branch: "issue/attested", sha: HEAD_SHA, base: "main" })
     await runYrd(app, yrd("queue", "run", "--once"), outputIO().io)
     const run = Queues.values(app.state().queues).at(0)
     if (run === undefined) throw new Error("expected a queue run in the journal")
+    // S7 (branch-is-change): the member snapshot the run retained carries the
+    // Change-Id — there is no record to read it off, and the snapshot is the
+    // durable identity the attestation must agree with.
+    const changeId = run.prs[0]?.changeId
+    if (changeId === undefined) throw new Error("expected the run member to carry a Change-Id")
     const pointer = {
       ref: "refs/notes/yrd/merge-records" as const,
       target: "2".repeat(40),
@@ -11220,7 +10675,7 @@ describe("runYrd", () => {
         finishedAt: "2026-08-12T20:01:00.000Z",
       },
       changes: [
-        { pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId: revision.changeId, generatedCommit: MERGED_SHA },
+        { pr: "PR1", revision: 1, submittedHead: HEAD_SHA, changeId, generatedCommit: MERGED_SHA },
       ],
       evidence: { jobs: [] },
       pins: [],
@@ -11259,7 +10714,7 @@ describe("runYrd", () => {
 
   it("names why a Statement is unavailable rather than dropping the key", async () => {
     await using app = await createApp()
-    await app.bays.submit({ branch: "issue/unattested", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "issue/unattested", sha: HEAD_SHA, base: "main" })
     const pointer = {
       ref: "refs/notes/yrd/merge-records" as const,
       target: "2".repeat(40),
@@ -11401,8 +10856,10 @@ describe("submit props", () => {
     })
     expect((payload.warnings ?? []).join("\n")).toContain("props binds to change records")
     expect((payload.warnings ?? []).join("\n")).toContain("amend the commit on 'topic/correlated'")
-    expect(app.state().bays.prs).toEqual({})
-    expect(app.bays.state().submits["topic/correlated"]).toMatchObject({ sha: HEAD_SHA })
+    // The props were warned about and DROPPED: the fact is the whole write, and
+    // it carries only branch/sha/base.
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/correlated"])
+    expect(app.bays.state().submits["topic/correlated"]).toEqual({ sha: HEAD_SHA, base: "main", at: expect.any(String) })
   })
 
   it.each(["bay", "pr"] as const)("rejects malformed props before %s submit appends", async (surface) => {
@@ -11418,44 +10875,11 @@ describe("submit props", () => {
       expect(output.stdout()).toBe("")
       expect(output.stderr()).toContain("--prop requires <key>=<value>")
       expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
-      expect(app.state().bays.prs).toEqual({})
+      // Refused at parse, before any fact could be written.
+      expect(app.bays.state().submits).toEqual({})
     }
   })
 })
-
-const PROJECTION_PROPS = { request: "request-20925" } as const
-
-async function correlatedTerminalRun(terminal: "integrated" | "rejected" | "canceled") {
-  const app = await createApp({ failingCheck: terminal === "rejected" })
-  await app.bays.submit({
-    branch: `topic/${terminal}`,
-    headSha: HEAD_SHA,
-    base: "main",
-    props: PROJECTION_PROPS,
-  })
-
-  if (terminal === "canceled") {
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
-    const job = app.queue.get("R1")?.steps[0]?.job
-    if (job === undefined) throw new Error("expected a requested Queue Job to cancel")
-    await app.dispatch(app.commands.job.transition, {
-      type: "start",
-      id: job.id,
-      attempt: 1,
-      runner: "cli-test",
-      leaseExpiresAt: "2026-07-09T12:02:00.000Z",
-    })
-    await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
-    await app.dispatch(app.commands.queue.advance, { run: "R1" })
-  } else {
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-  }
-
-  const pr = app.state().bays.prs.PR1
-  const run = app.queue.get("R1")
-  if (pr === undefined || run === undefined) throw new Error(`expected ${terminal} PR and Run fixtures`)
-  return { app, pr, run }
-}
 
 async function projectedLogRows(app: TestApp, pr = "PR1"): Promise<Record<string, unknown>[]> {
   const output = outputIO()
@@ -11464,61 +10888,9 @@ async function projectedLogRows(app: TestApp, pr = "PR1"): Promise<Record<string
 }
 
 describe("prop projections", () => {
-  it("keeps structured props in terminal Run, show, and log JSON", async () => {
-    for (const terminal of ["integrated", "rejected", "canceled"] as const) {
-      const { app, pr, run } = await correlatedTerminalRun(terminal)
-      const persisted = JSON.parse(JSON.stringify(run)) as Readonly<{
-        prs: readonly Readonly<Record<string, unknown>>[]
-      }>
-
-      expect
-        .soft(changeDeliveryState(pr))
-        .toBe(terminal === "rejected" || terminal === "canceled" ? "submitted" : terminal)
-      expect.soft(persisted.prs).toEqual([expect.objectContaining({ props: PROJECTION_PROPS })])
-      expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ props: PROJECTION_PROPS })])
-      expect
-        .soft(await projectedLogRows(app, pr.id))
-        .toEqual([expect.objectContaining({ pr: pr.id, props: PROJECTION_PROPS })])
-      if (terminal === "canceled") {
-        const human = await renderString(createElement(QueueShowView, { data: queueShowData(run) }), {
-          width: 120,
-          height: 40,
-          plain: true,
-        })
-        expect.soft(human).toContain("NEXT")
-        expect.soft(human).toContain("the change remains submitted and re-queues automatically")
-        expect.soft(human).not.toContain("retry the same Yrd command")
-      }
-    }
-
-    const withdrawn = await createApp()
-    await withdrawn.bays.submit({
-      branch: "topic/withdrawn-no-run",
-      headSha: HEAD_SHA,
-      base: "main",
-      draft: true,
-      props: PROJECTION_PROPS,
-    })
-    await withdrawn.bays.closePr({ pr: "PR1" })
-    expect.soft(withdrawn.state().bays.prs.PR1).toMatchObject({
-      state: "closed",
-      merged: false,
-      revs: [{ props: PROJECTION_PROPS, terminal: { kind: "withdrawn" } }],
-    })
-    expect.soft(withdrawn.queue.status("main").finished).toEqual([])
-    expect.soft(await projectedLogRows(withdrawn)).toEqual([
-      expect.objectContaining({
-        run: "-",
-        pr: "PR1",
-        outcome: "retired",
-        props: PROJECTION_PROPS,
-      }),
-    ])
-  })
-
   it("omits props from uncorrelated Run, show, and log JSON", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/uncorrelated", headSha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/uncorrelated", sha: HEAD_SHA, base: "main" })
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
     const run = app.queue.get("R1")
     if (run === undefined) throw new Error("expected an uncorrelated Run fixture")
@@ -11648,11 +11020,10 @@ describe("typed issue merge bridge", () => {
       async journalSnapshot() {
         const snapshot = await reader.journalSnapshot()
         reads += 1
-        await writer.bays.submit({
+        await writer.bays.recordBranchSubmit({
           branch: `topic/concurrent-issue-${reads}`,
-          headSha: String(reads + 1).repeat(40),
+          sha: String(reads + 1).repeat(40),
           base: "main",
-          issue: `@yrd/core/concurrent-issue-${reads}`,
         })
         return snapshot
       },
@@ -11694,7 +11065,13 @@ describe("typed issue merge bridge", () => {
       derived: [{ lane: "derived", branch: "topic/ready-tracker-bridge", sha: HEAD_SHA, base: "main" }],
     })
     expect((payload.warnings ?? []).join("\n")).toContain("issue binds to change records")
-    expect(app.state().bays.prs).toEqual({})
+    // The issue was warned about and DROPPED: the fact carries only
+    // branch/sha/base, so nothing bound the delivery to the tracker.
+    expect(app.bays.state().submits["topic/ready-tracker-bridge"]).toEqual({
+      sha: HEAD_SHA,
+      base: "main",
+      at: expect.any(String),
+    })
 
     // No record, no delivery: the issue is not in flight, and the reader is
     // told so rather than shown an empty bridge that reads as tracked.
@@ -11703,161 +11080,18 @@ describe("typed issue merge bridge", () => {
     expect(output.stderr()).toContain(`no issue '${issueRef}' is in flight`)
   })
 
-  it("projects native PR states and fresh failed Runs from one exact journal cursor", async () => {
-    for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
-      const issueRef = `@km/all/21091-${status}`
-      const app = await createApp({ failingCheck: status === "rejected" })
-      try {
-        await app.bays.submit({
-          branch: `topic/mentions-2109-${status}`,
-          headSha: HEAD_SHA,
-          base: "main",
-          issue: issueRef,
-          ...(status === "pushed" || status === "withdrawn" ? { draft: true } : {}),
-        })
-
-        if (status === "withdrawn") {
-          await app.bays.closePr({ pr: "PR1" })
-        } else if (status === "rejected" || status === "integrated") {
-          await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-        } else if (status === "canceled") {
-          await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
-          const job = app.queue.get("R1")?.steps[0]?.job
-          if (job === undefined) throw new Error("expected a requested Queue Job to cancel")
-          await app.dispatch(app.commands.job.transition, {
-            type: "start",
-            id: job.id,
-            attempt: 1,
-            runner: "cli-test",
-            leaseExpiresAt: "2026-07-09T12:02:00.000Z",
-          })
-          await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
-          await app.dispatch(app.commands.queue.advance, { run: "R1" })
-        }
-
-        const output = outputIO()
-        expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
-        const bridge = trackerBridge(output.stdout())
-        const projectedStatus = status === "rejected" || status === "canceled" ? "submitted" : status
-        expect(bridge).toMatchObject({
-          version: 1,
-          asOf: { cursor: expect.any(Number), at: "2026-07-09T12:00:00.000Z" },
-          deliveries: [
-            {
-              issueRef,
-              pr: "PR1",
-              revision: 1,
-              headSha: HEAD_SHA,
-              status: projectedStatus,
-              at: "2026-07-09T12:00:00.000Z",
-              runs: status === "rejected" || status === "integrated" || status === "canceled" ? ["R1"] : [],
-            },
-          ],
-        })
-        const delivery = bridge.deliveries[0]
-        if (status === "integrated") expect(delivery).toMatchObject({ landingSha: MERGED_SHA })
-        else expect(delivery).not.toHaveProperty("landingSha")
-        if (status === "rejected") expect(delivery).not.toHaveProperty("bounce")
-
-        const human = outputIO()
-        expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
-        expect(human.stdout()).toContain(issueRef)
-        expect(human.stdout()).toContain("DELIVERIES")
-        expect(human.stdout()).toContain(`PR1 rev1 ${projectedStatus}`)
-        expect(human.stdout()).toContain(`HEAD ${HEAD_SHA}`)
-        if (status === "integrated") expect(human.stdout()).toContain(MERGED_SHA)
-        if (status === "rejected") expect(human.stdout()).not.toContain("BOUNCE")
-      } finally {
-        await app.close()
-      }
-    }
-  })
-
-  it("preserves already-landed equivalence evidence in both tracker bridge versions", async () => {
-    const issueRef = "@yrd/22207-noop-merge-dedup-at-admission"
-    const equivalentTreeSha = "b".repeat(40)
-    await using app = await createApp({
-      mergeCommits: [BASE_SHA],
-      mergeAlreadyLanded: {
-        candidateSha: HEAD_SHA,
-        candidateTreeSha: equivalentTreeSha,
-        baseTreeSha: equivalentTreeSha,
-      },
-    })
-    await app.bays.submit({
-      branch: "topic/already-landed-bridge",
-      headSha: HEAD_SHA,
-      base: "main",
-      issue: issueRef,
-    })
-    const [run] = await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
-    if (run === undefined) throw new Error("expected an already-landed Queue run")
-
-    const mergedPr = app.bays.pr("PR1")
-    expect(mergedPr).toMatchObject({
-      state: "closed",
-      merged: true,
-      integration: { commit: BASE_SHA, baseSha: BASE_SHA },
-      alreadyLanded: {
-        candidateSha: HEAD_SHA,
-        candidateTreeSha: equivalentTreeSha,
-        baseTreeSha: equivalentTreeSha,
-      },
-    })
-    if (mergedPr === undefined) throw new Error("expected the already-landed PR")
-    expect(changeDeliveryState(mergedPr)).toBe("already-landed")
-    expect(
-      humanQueueProjection(
-        {
-          base: "main",
-          prs: [...app.bays.prs()],
-          admissionOrder: [],
-          running: [],
-          waiting: [],
-          finished: [run],
-        },
-        Date.parse("2026-07-09T12:01:00.000Z"),
-        { state: app.state().bays },
-      ),
-    ).toMatchObject({ integrated: 0, alreadyMerged: 1 })
-
-    const output = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
-    const expectedDelivery = {
-      issueRef,
-      pr: "PR1",
-      revision: 1,
-      headSha: HEAD_SHA,
-      status: "already-landed",
-      runs: ["R1"],
-      baseSha: BASE_SHA,
-      candidateSha: HEAD_SHA,
-      candidateTreeSha: equivalentTreeSha,
-      baseTreeSha: equivalentTreeSha,
-    }
-    expect(trackerBridge(output.stdout())).toMatchObject({ version: 1, deliveries: [expectedDelivery] })
-    expect(trackerBridgeV2(output.stdout())).toMatchObject({ version: 2, deliveries: [expectedDelivery] })
-
-    const human = outputIO()
-    expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain("PR1 rev1 already-landed")
-    expect(human.stdout()).toContain(`ALREADY MERGED ${HEAD_SHA} TREE ${equivalentTreeSha} = BASE`)
-    expect(human.stdout()).toContain(`${BASE_SHA} TREE ${equivalentTreeSha}`)
-  })
-
   it("adds needs-author with its attributed result in trackerBridge v2 and degrades it explicitly in v1", async () => {
     const issueRef = "@yrd/core/21634-submit-and-stay"
     const failure = "submitted composition cannot be built"
+    // S7 (branch-is-change): `--issue` no longer binds to a record — the issue
+    // reaches a delivery through the head commit's enrichment at admission.
     await using app = await createApp({
       checkFailure: { code: "composition-retired", message: failure },
+      resolveBaseSha: () => BASE_SHA,
+      submitEnrichment: { [HEAD_SHA]: { issue: issueRef } },
     })
-    await app.bays.submit({
-      branch: "topic/needs-author-bridge",
-      headSha: HEAD_SHA,
-      base: "main",
-      issue: issueRef,
-    })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    await app.bays.recordBranchSubmit({ branch: "topic/needs-author-bridge", sha: HEAD_SHA, base: "main" })
+    await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
@@ -12005,7 +11239,7 @@ describe("typed issue merge bridge", () => {
   it("retries a racing pr runs snapshot and refuses three exhausted cuts without partial JSON", async () => {
     const issueRef = "@yrd/core/21091-snapshot-race"
     await using app = await createApp()
-    await app.bays.submit({ branch: "topic/snapshot-race", headSha: HEAD_SHA, base: "main", issue: issueRef })
+    await app.bays.recordBranchSubmit({ branch: "topic/snapshot-race", sha: HEAD_SHA, base: "main" })
 
     let raced = false
     const racingApp = {
@@ -12034,9 +11268,9 @@ describe("typed issue merge bridge", () => {
         const snapshot = await app.journalSnapshot()
         if (snapshots++ % 2 === 0) {
           advances += 1
-          await app.bays.submit({
+          await app.bays.recordBranchSubmit({
             branch: `topic/concurrent-${advances}`,
-            headSha: String(advances + 2).repeat(40),
+            sha: String(advances + 2).repeat(40),
             base: "main",
           })
         }
@@ -12322,7 +11556,7 @@ describe("PR metadata — title, description, and issue link", () => {
     const app = await createApp()
     const submit = commitMetaIO("feat(bay): pr metadata", "Adds a durable title and description to the change record.")
     expect(await runYrd(app, yrd("pr", "submit", "topic/defaults", "--base", "main"), submit.io)).toBe(0)
-    expect(app.bays.pr("topic/defaults")).toBeUndefined()
+    expect(Object.keys(app.bays.state().submits)).toEqual(["topic/defaults"])
     expect(app.bays.state().submits["topic/defaults"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
     expect(submit.stderr()).toContain("submitted to the derived lane: topic/defaults")
     expect(submit.stderr()).not.toContain("bind to change records")
@@ -13641,11 +12875,11 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     try {
       // The runner submits a change AFTER the viewer app has already mounted.
       await openAndSubmit(runner)
-      expect(Object.keys(runner.state().bays.prs)).toEqual(["PR1"])
+      expect(Object.keys(runner.bays.state().submits)).toEqual(["issue/one"])
 
       // The viewer's mount-time journal projection never tails cross-process
       // appends on its own — app.state() alone stays frozen-empty:
-      expect(Object.keys(viewer.state().bays.prs)).toEqual([])
+      expect(Object.keys(viewer.bays.state().submits)).toEqual([])
 
       // queueListSnapshot refreshes before reading, so its rows reflect the
       // out-of-process submission (stale WITHOUT refresh, fresh WITH it):
@@ -13655,7 +12889,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       expect(snapshot.results.flatMap((result) => result.prs.map((pr) => pr.id))).toContain("PR1")
 
       // The refresh also published, so subsequent plain reads are fresh too:
-      expect(Object.keys(viewer.state().bays.prs)).toEqual(["PR1"])
+      expect(Object.keys(viewer.bays.state().submits)).toEqual(["issue/one"])
     } finally {
       await Promise.all([runner.close(), viewer.close()])
     }

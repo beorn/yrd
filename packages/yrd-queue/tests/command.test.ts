@@ -10,16 +10,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { resolveRelativeSubmoduleOrigin } from "git-super/submodule-origin"
-import {
-  createBayJobDefs,
-  currentChangeRev,
-  changeAdmission,
-  changeDeliveryState,
-  withBays,
-  volatilePrNumberMint,
-  type BayWorkspace,
-  type Change,
-} from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
@@ -37,6 +28,7 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitChangeRemerger,
+  deriveRunMemberArgs,
   findRepositoryChangeMerge,
   findRepositoryMergeRecords,
   CANDIDATE_REF_NAMESPACE,
@@ -52,6 +44,7 @@ import {
   withMerge,
   withStep,
   type AddStepResult,
+  type DerivedRunMember,
   type GitCheckEvidence,
   type GitCheckResultEvidence,
   type ChangeShape,
@@ -83,15 +76,71 @@ function expectNonInteractiveRebases(commands: readonly (readonly string[])[]): 
   }
 }
 
-function changeFacts(pr: Change | undefined) {
-  if (pr === undefined) throw new Error("expected PR")
-  const revision = currentChangeRev(pr)
-  return {
-    ...pr,
-    status: changeDeliveryState(pr),
-    revision: revision.n,
-    headSha: revision.head,
-  }
+/**
+ * The one `PrNumberMint` each test app owns (S7, branch-is-change): the app's
+ * queue plugin and every explicit {@link derivedMember} derivation must share
+ * it, or two derivations of the same branch both mint `PR1`.
+ */
+const mints = new WeakMap<object, PrNumberMint>()
+
+function mintFor(app: object): PrNumberMint {
+  const mint = mints.get(app)
+  if (mint === undefined) throw new Error("test app was created without a derived-member mint")
+  return mint
+}
+
+/** The house Change-Id reader: deterministic in the submitted sha, so a member
+ * derived twice for the same push carries the same identity. */
+const testSubmitEnrichment = ({ sha }: Readonly<{ branch: string; sha: string }>) => ({ changeId: `I${sha}` })
+
+type DerivedSubmissionApp = Readonly<{
+  bays: Readonly<{
+    recordBranchSubmit(args: Readonly<{ branch: string; sha: string; base: string }>): Promise<unknown>
+  }>
+  state: () => Pick<Parameters<typeof deriveRunMemberArgs>[0], "bays" | "queues">
+}>
+
+/** Derive the admissible run member a branch's LIVE submit fact composes to —
+ * the post-S7 replacement for reading a `Change` record out of `bays.prs`. */
+function derivedMember(app: DerivedSubmissionApp, branch: string): DerivedRunMember {
+  const { bays, queues } = app.state()
+  const submit = bays.submits[branch]
+  if (submit === undefined) throw new Error(`no live submit fact for '${branch}'`)
+  return deriveRunMemberArgs({
+    bays,
+    queues,
+    mint: mintFor(app),
+    branch,
+    enrichment: testSubmitEnrichment({ branch, sha: submit.sha }),
+  })
+}
+
+/**
+ * Submit a branch on the only surviving lane: the `branch/submitted` fact IS
+ * the delivery, and the queue member is derived from it. Replaces
+ * `app.bays.submit(...)` plus the `bays.prs` record read that used to follow.
+ */
+async function submitDerived(
+  app: DerivedSubmissionApp,
+  submission: Readonly<{ branch: string; headSha: string; base?: string }>,
+): Promise<DerivedRunMember> {
+  const base = submission.base ?? "main"
+  await app.bays.recordBranchSubmit({ branch: submission.branch, sha: submission.headSha, base })
+  return derivedMember(app, submission.branch)
+}
+
+/**
+ * The delivery facts a queue run emitted for its members. Post-S7 the journal
+ * event IS the durable terminal outcome — no record projects `integrated` /
+ * `needs-author` / `already-landed` any more — so a test that used to read
+ * `changeDeliveryState(bays.prs.PR1)` reads the emitted fact instead.
+ */
+async function terminalChangeFacts(
+  app: Readonly<{ events: () => AsyncIterable<Readonly<{ name: string; data: unknown }>> }>,
+  name: "pr/integrated" | "pr/needs-author" | "pr/already-landed" | "pr/rejected",
+): Promise<unknown[]> {
+  const events = await Array.fromAsync(app.events())
+  return events.filter((event) => event.name === name).map(({ data }) => data)
 }
 
 afterEach(async () => {
@@ -884,6 +933,7 @@ async function checkedQueue(
         }),
     { revision: options.mergeCommand === undefined ? "git-merge-v1" : "configured-merge-v1" },
   )
+  const mint = volatilePrNumberMint()
   const queue = withQueue({
     steps: [check, merge] as const,
     batch: options.batch ?? 1,
@@ -894,15 +944,15 @@ async function checkedQueue(
       ? { prepareCandidate: gitCandidatePreparer({ inject: { process }, repo }) }
       : {}),
     recordMerge: gitMergeRecorder({ inject: { process }, repo }),
+    prNumberMint: mint,
+    readSubmitEnrichment: testSubmitEnrichment,
   })
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-  )
-  return createYrd(queue(base), {
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const app = await createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), log: options.log ?? createLogger("test", [{ level: "silent" }]) },
   })
+  mints.set(app, mint)
+  return app
 }
 
 type TestQueueApp = Awaited<ReturnType<typeof checkedQueue>>
@@ -912,22 +962,26 @@ type CarrierSubmission = Readonly<{
   headSha: string
   base?: string
   baseSha?: string
-  issue?: string
 }>
 
-/** Exercise the supported authored-root intake path used by tests whose real
- * subject is downstream candidate checking, reachability, or merge. */
+/**
+ * Exercise the supported authored-root submission path used by tests whose
+ * real subject is downstream candidate checking, reachability, or merge.
+ *
+ * Post-S7 there is no `recut`/`ready` bookkeeping to certify a record with:
+ * the author re-merges their own branch and RE-PUSHES it, and the renewed
+ * submit fact at the recut head is the whole certification. The member's
+ * identity carries across that re-push — one mint per app, so re-deriving
+ * here instead would burn a second number for the same branch.
+ */
 async function submitCertifiedCarrier(
   app: CarrierSubmissionApp,
   repo: string,
   submission: CarrierSubmission,
-): Promise<Change> {
+): Promise<DerivedRunMember> {
   const base = submission.base ?? "main"
-  await app.bays.submit({ ...submission, base, draft: true })
-  const pr = Object.values(app.state().bays.prs).find(({ branch }) => branch === submission.branch)
-  if (pr === undefined) throw new Error(`missing submitted carrier '${submission.branch}'`)
-  const revision = currentChangeRev(pr)
-  const baseSha = submission.baseSha ?? revision.baseSha ?? (await git(repo, ["merge-base", base, submission.headSha]))
+  const member = await submitDerived(app, { branch: submission.branch, headSha: submission.headSha, base })
+  const baseSha = submission.baseSha ?? (await git(repo, ["merge-base", base, submission.headSha]))
   await using delegate = createProcess()
   const noHooks: Pick<Process, "run"> = {
     run(request) {
@@ -941,26 +995,15 @@ async function submitCertifiedCarrier(
     },
   }
   const remerge = await createGitChangeRemerger({ inject: { process: noHooks }, repo }).recut({
-    id: pr.id,
+    id: member.id,
     branch: submission.branch,
     base,
-    revision: revision.n,
+    revision: member.revision,
     headSha: submission.headSha,
     baseSha,
   })
-  await app.bays.recut({
-    pr: pr.id,
-    fromRevision: revision.n,
-    headSha: remerge.headSha,
-    baseSha: remerge.baseSha,
-    treeSha: remerge.treeSha,
-    patchId: remerge.patchId,
-    reviewCarried: false,
-  })
-  await app.bays.ready({ pr: pr.id })
-  const certified = app.state().bays.prs[pr.id]
-  if (certified === undefined) throw new Error(`missing certified carrier '${pr.id}'`)
-  return certified
+  await app.bays.recordBranchSubmit({ branch: submission.branch, sha: remerge.headSha, base })
+  return { ...member, headSha: remerge.headSha }
 }
 
 async function expectMerged(repo: string, evidence: GitCheckEvidence): Promise<void> {
@@ -1998,19 +2041,12 @@ describe("Queue command adapters", () => {
       (await git(repo, ["log", "--reverse", "--format=%s", `${remerge.baseSha}..${remerge.headSha}`])).split("\n"),
     ).toEqual(["feature dependency", "feature", "yrd: merge PR1 revision 1"])
     await using app = await checkedQueue(process, repo, ["true"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
-    await app.bays.recut({
-      pr: "PR1",
-      fromRevision: 1,
-      headSha: remerge.headSha,
-      baseSha: remerge.baseSha,
-      treeSha: remerge.treeSha,
-      patchId: remerge.patchId,
-      reviewCarried: false,
-    })
-    await app.bays.ready({ pr: "PR1" })
+    // The author re-pushes the recut branch: post-S7 the renewed submit fact at
+    // the recut head IS the delivery, with no record bookkeeping between it and
+    // the queue.
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: remerge.headSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion).toBe("success")
@@ -2047,7 +2083,7 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, couplingSensitiveGate)
     const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
 
-    const run = (await app.queue.run({ prs: [pr.id] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion).toBe("success")
@@ -2071,7 +2107,7 @@ describe("Queue command adapters", () => {
     const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
     const mainBefore = await git(repo, ["rev-parse", "origin/main"])
 
-    const run = (await app.queue.run({ prs: [pr.id] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     await git(repo, ["fetch", "-q", "origin", "main"])
@@ -2090,7 +2126,7 @@ describe("Queue command adapters", () => {
     const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha, baseSha })
     const mainBefore = await git(repo, ["rev-parse", "origin/main"])
 
-    const run = (await app.queue.run({ prs: [pr.id] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     // The carrier never raises dep, so the queue leaves main's own entry in
     // place — base — and the gate's submodule clause fails. This also pins the
@@ -2111,7 +2147,7 @@ describe("Queue command adapters", () => {
     // `authored-gitlink` per the Phase 0 design call (hub/yrd/2026-08-23-
     // remerge-phase0-replay.md) — a min-commit-not-on-main refusal is now
     // distinct from an added/removed gitlink, both still needs-author.
-    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+    const { repo, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
       requiredVersion: "candidate",
@@ -2120,9 +2156,9 @@ describe("Queue command adapters", () => {
     await git(repo, ["config", "diff.ignoreSubmodules", "all"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -2140,7 +2176,10 @@ describe("Queue command adapters", () => {
     })
     // End-to-end through the REAL compose path: the composition refusal commits
     // native needs-author with its typed result, never a terminal rejection.
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "needs-author" })
+    // Post-S7 that fact lives only in the emitted event — nothing projects it.
+    expect(await terminalChangeFacts(app, "pr/needs-author")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha, receipt: { code: "min-commit-unpublished" } },
+    ])
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
     expect(eventNames).not.toContain("pr/rejected")
@@ -2682,9 +2721,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, ["true"], {
       refuse: { paths: ["@", "hub/"], reason: "pm state lives in the sibling state repo — commit it there directly" },
     })
-    await app.bays.submit({ branch: "issue/pm-state", headSha, base: "main", baseSha })
+    const pr = await submitDerived(app, { branch: "issue/pm-state", headSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -2704,12 +2743,11 @@ describe("Queue command adapters", () => {
 
   it("passes a payload outside the armed refuse boundary", async () => {
     const { repo, candidate } = await repository("candidate")
-    const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"], { refuse: { paths: ["@", "hub/"] } })
-    await app.bays.submit({ branch: "issue/candidate", headSha: candidate, base: "main", baseSha })
+    const pr = await submitDerived(app, { branch: "issue/candidate", headSha: candidate })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
   })
@@ -2759,17 +2797,24 @@ describe("Queue command adapters", () => {
         },
         { revision: "merge-v1" },
       )
-      const queue = withQueue({ steps: [check, merge] as const, resolveBaseSha: () => "c".repeat(40) })
+      const mint = volatilePrNumberMint()
+      const queue = withQueue({
+        steps: [check, merge] as const,
+        resolveBaseSha: () => "c".repeat(40),
+        prNumberMint: mint,
+        readSubmitEnrichment: testSubmitEnrichment,
+      })
       const base = pipe(
         createYrdDef(),
         withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-        withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+        withBays({ jobs: bayJobs }),
       )
       const app = await createYrd(queue(base), {
         inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
       })
-      await app.bays.submit({ branch: "issue/progress", headSha: "a".repeat(40), base: "main" })
-      return { aborted, app, completed, mergeRuns, started, [Symbol.asyncDispose]: () => app.close() }
+      mints.set(app, mint)
+      const pr = await submitDerived(app, { branch: "issue/progress", headSha: "a".repeat(40) })
+      return { aborted, app, completed, mergeRuns, pr, started, [Symbol.asyncDispose]: () => app.close() }
     }
 
     const result = (stdout: string): ProcessResult => ({
@@ -2782,7 +2827,7 @@ describe("Queue command adapters", () => {
     })
     await using progressing = await controlledQueue()
     const progressingRun = progressing.app.queue.run(
-      { prs: ["PR1"] },
+      { prs: [], derived: [progressing.pr] },
       { runner: "same-runner", leaseMs: 120, heartbeatMs: 30 },
     )
     const progressingRequest = await progressing.started.promise
@@ -2810,7 +2855,7 @@ describe("Queue command adapters", () => {
 
     await using stalled = await controlledQueue()
     const stalledRun = stalled.app.queue.run(
-      { prs: ["PR1"] },
+      { prs: [], derived: [stalled.pr] },
       { runner: "same-runner", leaseMs: 200, heartbeatMs: 150 },
     )
     await stalled.started.promise
@@ -3660,9 +3705,9 @@ describe("Queue command adapters", () => {
       ),
       { comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     if (run === undefined) throw new Error("missing integration run")
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run.steps[0]?.job
@@ -3697,10 +3742,11 @@ describe("Queue command adapters", () => {
       },
     })
     expect(app.queue.eligibility("PR1").reason?.message).toContain("55 baseline errors unchanged")
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "needs-author",
-      needsAuthor: { receipt: { code: "check-failed" } },
-    })
+    // The emitted terminal fact is where the author attribution now lives —
+    // no record projects `needs-author` post-S7.
+    expect(await terminalChangeFacts(app, "pr/needs-author")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha, receipt: { code: "check-failed" } },
+    ])
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).toContain("pr/needs-author")
     expect(eventNames).not.toContain("pr/rejected")
@@ -3741,9 +3787,9 @@ describe("Queue command adapters", () => {
       repo,
       shellCommand("printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 17"),
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "failure") {
@@ -3751,7 +3797,9 @@ describe("Queue command adapters", () => {
     }
     expect(GitCheckEvidenceSchema.parse(job.output).comparison).toBeUndefined()
     expect(configuredRuns).toBe(1)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
@@ -3768,9 +3816,9 @@ describe("Queue command adapters", () => {
       ),
       { comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -3952,9 +4000,9 @@ describe("Queue command adapters", () => {
         `printf '%s\\n' '${report("bead-hygiene", 3, firstHash)}' '${report("affected-tests", 2, secondHash)}'`,
       ),
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -3999,9 +4047,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`), {
       checkpointIdentity: "a".repeat(64),
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -4035,9 +4083,9 @@ describe("Queue command adapters", () => {
       checkpointIdentity: () => storedIdentity,
     })
     storedIdentity = "a".repeat(64)
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
   })
@@ -4115,9 +4163,9 @@ describe("Queue command adapters", () => {
         }
       },
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("target attestation did not pass")
@@ -4149,9 +4197,9 @@ describe("Queue command adapters", () => {
       shellCommand(`printf '%s\n' 'YRD-CHECKPOINT-MIGRATION ${JSON.stringify(emitted)}'`),
       { checkpointMigration: () => Promise.resolve(generated) },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4166,9 +4214,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand("true"), {
       checkpointIdentity: "a".repeat(64),
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4194,9 +4242,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`), {
       checkpointIdentity: "a".repeat(64),
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4234,9 +4282,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`), {
       checkpointIdentity: "a".repeat(64),
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code } })
   })
@@ -4251,9 +4299,9 @@ describe("Queue command adapters", () => {
       hash: "0".repeat(64),
     })}`
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\n' '${trailer}'`))
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4287,9 +4335,9 @@ describe("Queue command adapters", () => {
         mode: "delta",
       },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     expect(configuredRuns).toBe(1)
   })
@@ -4318,9 +4366,9 @@ describe("Queue command adapters", () => {
         mode: "delta",
       },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -4355,9 +4403,9 @@ describe("Queue command adapters", () => {
         mode: "delta",
       },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     expect(configuredRuns).toBe(1)
   })
@@ -4370,9 +4418,9 @@ describe("Queue command adapters", () => {
       comparisonReady: DIAGNOSTICS_COMPARISON_READY,
       mode: "delta",
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -4386,9 +4434,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand("printf '%s\\n' 'YRD-GATE-REPORT {not-json}'"), {
       mode: "delta",
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -4407,9 +4455,9 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, shellCommand(`printf '%s\\n' '${report}'`), {
       mode: "strict",
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-strict-residual" } })
   })
 
@@ -4429,9 +4477,9 @@ describe("Queue command adapters", () => {
       shellCommand("printf 'src/shared.ts:1:1 - inherited\\n'; exit 17"),
       { comparison: "diagnostics", mode: "strict" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "failure") {
@@ -4452,9 +4500,9 @@ describe("Queue command adapters", () => {
       shellCommand("if test -f feature.txt; then exit 0; else printf 'src/base.ts:7:3 - existing\\n'; exit 17; fi"),
       { comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -4478,9 +4526,9 @@ describe("Queue command adapters", () => {
       ),
       { comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "failure") {
@@ -4494,7 +4542,9 @@ describe("Queue command adapters", () => {
     expect(evidence.comparison).toBeUndefined()
     expect(job.error).not.toHaveProperty("evidence")
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("keeps an incomplete parent diagnostics run retryable as infrastructure refusal", async () => {
@@ -4522,9 +4572,9 @@ describe("Queue command adapters", () => {
       shellCommand("printf 'src/feature.ts:2:1 - net-new\\n'; exit 17"),
       { comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -4541,7 +4591,9 @@ describe("Queue command adapters", () => {
       },
     })
     expect(configuredRuns).toBe(2)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it.each([false, true])(
@@ -4563,9 +4615,9 @@ describe("Queue command adapters", () => {
         },
       }
       await using app = await checkedQueue(killed, repo, shellCommand("exit 0"), { waiting })
-      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
       expect(run).toMatchObject({
         status: "completed",
         conclusion: "failure",
@@ -4579,7 +4631,9 @@ describe("Queue command adapters", () => {
           },
         },
       })
-      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+      // Branch-is-change: the standing submit fact at the authored head IS "still
+      // submitted, payload neither moved nor withdrawn".
+      expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
     },
   )
 
@@ -4594,9 +4648,9 @@ describe("Queue command adapters", () => {
           "'AssertionError: expected true to be false' ' Test Files  1 failed (1)' >&2; exit 1",
       ),
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "failure") {
@@ -4607,7 +4661,9 @@ describe("Queue command adapters", () => {
     expect(evidence.diagnostics).toBeUndefined()
     expect(evidence.comparison).toBeUndefined()
     expect(job.error).not.toHaveProperty("evidence")
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("keeps an opaque candidate failure terminal when diagnostics comparison is declared", async () => {
@@ -4626,9 +4682,9 @@ describe("Queue command adapters", () => {
       shellCommand("printf ' FAIL  tests/guard.test.ts > opaque candidate\\n' >&2; exit 1"),
       { comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "failure") {
@@ -4639,7 +4695,9 @@ describe("Queue command adapters", () => {
     expect(evidence.diagnostics).toBeUndefined()
     expect(evidence.comparison).toBeUndefined()
     expect(configuredRuns).toBe(1)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("keeps a thrown candidate command distinct as a retryable environment refusal", async () => {
@@ -4656,9 +4714,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(unavailable, repo, shellCommand("printf 'YRD_THROW_CANDIDATE\\n'"))
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -4673,7 +4731,9 @@ describe("Queue command adapters", () => {
       },
     })
     expect(candidateAttempts).toBe(1)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("preserves a legacy R1 attempt ref when an empty journal reuses the display run id", async () => {
@@ -4683,9 +4743,9 @@ describe("Queue command adapters", () => {
     await git(repo, ["update-ref", legacyRef, baseSha])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ id: "R1", status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
@@ -4694,7 +4754,11 @@ describe("Queue command adapters", () => {
     expect(evidence.candidateRef).toBe(expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha))
     expect(await git(repo, ["rev-parse", legacyRef])).toBe(baseSha)
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
+    // Integration's only durable home post-S7 is the terminal fact the
+    // settlement batch emits for the run's own member snapshot.
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("preserves an occupied derived candidate ref and publishes the candidate under a fresh identity", async () => {
@@ -4718,9 +4782,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(racingProcess, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ id: "R1", status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
@@ -4730,7 +4794,11 @@ describe("Queue command adapters", () => {
     expect(evidence.candidateRef).not.toBe(occupiedRef)
     expect(await git(repo, ["rev-parse", occupiedRef])).toBe(occupiedSha)
     expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "integrated", headSha: featureSha })
+    // Integration's only durable home post-S7 is the terminal fact the
+    // settlement batch emits for the run's own member snapshot.
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("refuses bounded candidate ref exhaustion without rejecting or moving the submitted payload", async () => {
@@ -4754,9 +4822,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(hostileProcess, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(run).toMatchObject({ id: "R1", status: "waiting" })
     const job = run?.steps[0]?.job
     expect(job).toMatchObject({
@@ -4766,7 +4834,9 @@ describe("Queue command adapters", () => {
     })
     expect(occupiedRefs).toHaveLength(33)
     for (const ref of occupiedRefs) expect(await git(repo, ["rev-parse", ref])).toBe(occupiedSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("merges the exact audited candidate and its durable artifacts", async () => {
@@ -4777,9 +4847,9 @@ describe("Queue command adapters", () => {
       repo,
       shellCommand('git config user.name "Changed After Check" && test -f feature.txt && echo checked'),
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     expect(run.status).toBe("completed")
     expect(await readFile(join(repo, "feature.txt"), "utf8")).toBe("feature\n")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
@@ -4802,9 +4872,9 @@ describe("Queue command adapters", () => {
     const equivalentTreeSha = await git(repo, ["rev-parse", "main^{tree}"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4819,17 +4889,20 @@ describe("Queue command adapters", () => {
         },
       },
     })
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "already-landed",
-      state: "closed",
-      merged: true,
-      integration: { commit: equivalentBaseSha, baseSha: equivalentBaseSha },
-      alreadyLanded: {
+    // The close is the emitted `pr/already-landed` fact now: no record closes,
+    // so the member's terminal carries the equivalence evidence itself.
+    expect(await terminalChangeFacts(app, "pr/already-landed")).toMatchObject([
+      {
+        pr: "PR1",
+        revision: 1,
+        headSha: featureSha,
+        baseSha: equivalentBaseSha,
         candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
         candidateTreeSha: equivalentTreeSha,
         baseTreeSha: equivalentTreeSha,
       },
-    })
+    ])
+    expect(await terminalChangeFacts(app, "pr/integrated")).toEqual([])
     expect(await git(repo, ["rev-parse", "main"])).toBe(equivalentBaseSha)
   })
 
@@ -4847,9 +4920,9 @@ describe("Queue command adapters", () => {
       ),
       { classification: "base", comparison: "diagnostics" },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     expect(run.status).toBe("completed")
     const job = run.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "failure") throw new Error("check did not fail")
@@ -4874,7 +4947,9 @@ describe("Queue command adapters", () => {
     })
     expect(evidence.detail).toContain("[yrd-base-health]")
     expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
     const eligibility = app.queue.eligibility("PR1")
     expect(eligibility).toMatchObject({ reason: { code: "required-check-failed" } })
     expect(eligibility.reason).not.toHaveProperty("result")
@@ -4891,9 +4966,9 @@ describe("Queue command adapters", () => {
     await git(repo, ["branch", "-D", "main"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run.status).toBe("completed")
     expect(await git(repo, ["rev-parse", "HEAD"])).toBe(featureSha)
@@ -4923,7 +4998,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"])
     for (const branch of branches) {
-      await app.bays.submit({ branch: `issue/${branch}`, headSha: heads[branch], base: "main" })
+      await app.bays.recordBranchSubmit({ branch: `issue/${branch}`, sha: heads[branch], base: "main" })
     }
     const operatorSnapshot = async () => ({
       headSha: await git(repo, ["rev-parse", "--verify", "HEAD"]),
@@ -4976,9 +5051,9 @@ describe("Queue command adapters", () => {
     await git(repo, ["push", "-q", "origin", `${remoteBaseSha}:refs/heads/main`])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -4989,11 +5064,11 @@ describe("Queue command adapters", () => {
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     expect(GitCheckEvidenceSchema.parse(job.output).baseSha).toBe(remoteBaseSha)
     expect(await git(repo, ["rev-parse", "main"])).toBe(localBaseSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "integrated",
-    })
+    // Integration's only durable home post-S7 is the terminal fact the
+    // settlement batch emits for the run's own member snapshot.
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("retries authoritative refresh at most three times without changing the change payload", async () => {
@@ -5028,9 +5103,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(flakyProcess, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(recoveryAttempts).toBe(3)
     expect(refreshArgv.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
@@ -5039,11 +5114,11 @@ describe("Queue command adapters", () => {
       conclusion: "success",
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "integrated",
-    })
+    // Integration's only durable home post-S7 is the terminal fact the
+    // settlement batch emits for the run's own member snapshot.
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("retries thrown authoritative refresh timeouts without rejecting the change", async () => {
@@ -5066,9 +5141,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(flakyProcess, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
     expect(run).toMatchObject({
@@ -5076,11 +5151,11 @@ describe("Queue command adapters", () => {
       conclusion: "success",
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "integrated",
-    })
+    // Integration's only durable home post-S7 is the terminal fact the
+    // settlement batch emits for the run's own member snapshot.
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("records exhausted thrown authority timeouts as environment refusal without rejecting the change", async () => {
@@ -5102,9 +5177,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(unavailableOrigin, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("circuit breaker open after 3 consecutive timeouts"))
@@ -5126,11 +5201,13 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[0]?.job).not.toHaveProperty("output")
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "submitted",
-    })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn"; the run's retained
+    // snapshot is the revision's only durable home.
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
+    expect(Queues.values(app.state().queues).flatMap((record) => record.prs)).toMatchObject([
+      { id: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("records exhausted authority refresh as an environment refusal without rejecting the author", async () => {
@@ -5158,9 +5235,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(unavailableOrigin, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
     expect(run).toMatchObject({
@@ -5188,11 +5265,13 @@ describe("Queue command adapters", () => {
         },
       },
     ])
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "submitted",
-    })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn"; the run's retained
+    // snapshot is the revision's only durable home.
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
+    expect(Queues.values(app.state().queues).flatMap((record) => record.prs)).toMatchObject([
+      { id: "PR1", revision: 1, headSha: featureSha },
+    ])
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
@@ -5226,9 +5305,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(unavailableAfterPush, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
@@ -5267,11 +5346,13 @@ describe("Queue command adapters", () => {
       ]),
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "submitted",
-    })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn"; the run's retained
+    // snapshot is the revision's only durable home.
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
+    expect(Queues.values(app.state().queues).flatMap((record) => record.prs)).toMatchObject([
+      { id: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("materializes candidate checks under the injected trusted parent", async () => {
@@ -5281,9 +5362,9 @@ describe("Queue command adapters", () => {
     roots.push(parentRoot)
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["pwd"], { checkoutParent })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const job = run.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
@@ -5317,15 +5398,17 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(guarded, repo, ["test", "-f", "feature.txt"], {
       checkoutParent: join(repo, "..", "checkouts"),
     })
-    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     expect(run).toMatchObject({
       status: "completed",
       conclusion: "failure",
       error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
     })
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted" })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")
     expect(eventNames).not.toContain("pr/needs-author")
@@ -5634,9 +5717,9 @@ describe("Queue command adapters", () => {
         environmentOverrides: { CHECK_DECLARED: "yes" },
         environmentPassthrough: ["CHECK_TOKEN"],
       })
-      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
       expect(run.status).toBe("completed")
       const job = run.steps[0]!.job
       if (job?.status !== "completed" || job.conclusion !== "success") throw new Error("check did not pass")
@@ -5654,11 +5737,11 @@ describe("Queue command adapters", () => {
       shellCommand("test -f one.txt && test -f two.txt && echo checked-batch"),
       { batch: 2 },
     )
-    await app.bays.submit({ branch: "issue/one", headSha: firstSha, base: "main" })
-    await app.bays.submit({ branch: "issue/two", headSha: secondSha, base: "main" })
+    const first = await submitDerived(app, { branch: "issue/one", headSha: firstSha })
+    const second = await submitDerived(app, { branch: "issue/two", headSha: secondSha })
     await git(repo, ["switch", "-q", "--detach", "main"])
 
-    const runs = await app.queue.run({ prs: ["PR1", "PR2"] }, runtime)
+    const runs = await app.queue.run({ prs: [], derived: [first, second] }, runtime)
     await git(repo, ["switch", "-q", "main"])
 
     expect(runs).toHaveLength(1)
@@ -5718,13 +5801,10 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
       prepareCandidate: true,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    const pr = app.state().bays.prs.PR1
-    if (pr === undefined) throw new Error("expected PR1")
-    const changeId = currentChangeRev(pr).changeId
-    if (changeId === undefined) throw new Error("expected PR1 Change-Id")
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
+    const changeId = pr.changeId
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     if (run === undefined) throw new Error("expected Queue run")
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") {
@@ -5739,11 +5819,17 @@ describe("Queue command adapters", () => {
     const integration = IntegrationProofSchema.parse(run.integration)
     expect(integration).toMatchObject({ commit: checked.candidateSha, baseSha: checked.candidateSha })
 
-    expect(app.state().bays.prs.PR1?.integration).toEqual({
-      commit: checked.candidateSha,
-      baseSha: checked.candidateSha,
-      changeId,
-    })
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      {
+        pr: "PR1",
+        revision: 1,
+        headSha: featureSha,
+        commit: checked.candidateSha,
+        landingSha: checked.candidateSha,
+        baseSha: checked.candidateSha,
+        changeId,
+      },
+    ])
     await expect(
       findRepositoryMergeRecords({
         inject: { process },
@@ -5778,13 +5864,10 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
       prepareCandidate: true,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    const pr = app.state().bays.prs.PR1
-    if (pr === undefined) throw new Error("expected PR1")
-    const changeId = currentChangeRev(pr).changeId
-    if (changeId === undefined) throw new Error("expected PR1 Change-Id")
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
+    const changeId = pr.changeId
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     if (run === undefined) throw new Error("expected Queue run")
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") {
@@ -5816,9 +5899,9 @@ describe("Queue command adapters", () => {
       shellCommand("printf 'candidate contract failed\\n' >&2; exit 17"),
       { prepareCandidate: true },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     if (run === undefined) throw new Error("expected Queue run")
     expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
 
@@ -5864,9 +5947,9 @@ describe("Queue command adapters", () => {
       shellCommand(`printf '%s\\n' '{"token":"cancel-me","detail":"queued"}'`),
       { waiting: true },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const active = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const active = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     if (active === undefined) throw new Error("expected active Queue run")
     await app.queue.cancelRun({ run: active.id, by: "operator", reason: "superseded by a newer attempt" })
 
@@ -5895,9 +5978,9 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     const mergeJob = run.steps[1]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
@@ -5955,9 +6038,11 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(unavailableRecordRef, repo, ["true"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("fatal: merge-record transport unavailable")
+    await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toThrow(
+      "fatal: merge-record transport unavailable",
+    )
     expect(failedFetches).toBe(1)
   })
 
@@ -5994,9 +6079,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(missingStagingRef, repo, ["true"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toThrow(
       `yrd: remote merge-record ref '${remoteTip}' fetched into ` +
         `'refs/notes/yrd/merge-record-upstream/${remoteTip}' but resolved to 'missing'`,
     )
@@ -6014,9 +6099,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(traced, repo, ["true"])
-    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run.status, run.error?.message).toBe("completed")
     expect(run.conclusion, run.error?.message).toBe("success")
@@ -6086,9 +6171,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(unsupported, repo, ["true"])
-    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run.status).toBe("completed")
     const proofFetches = requests.filter(({ argv }) => argv.includes("--depth=1"))
@@ -6188,9 +6273,12 @@ describe("Queue command adapters", () => {
         },
       }
       await using app = await checkedQueue(unavailable, fixture.repo, ["true"])
-      await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+      const pr = await submitCertifiedCarrier(app, fixture.repo, {
+        branch: "issue/feature",
+        headSha: fixture.featureSha,
+      })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
       expect(run).toMatchObject({
         status: "completed",
@@ -6224,10 +6312,9 @@ describe("Queue command adapters", () => {
       const depthProbes = requests.filter(({ argv }) => argv.includes("--depth=1"))
       expect(depthProbes.length).toBeGreaterThanOrEqual(1)
       expect(depthProbes.length).toBeLessThanOrEqual(5)
-      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-        status: "submitted",
-        headSha: fixture.featureSha,
-      })
+      // Branch-is-change: the standing submit fact at the authored head IS "still
+      // submitted, payload neither moved nor withdrawn".
+      expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: fixture.featureSha })
     },
     15_000,
   )
@@ -6321,9 +6408,12 @@ describe("Queue command adapters", () => {
         },
       }
       await using app = await checkedQueue(unavailable, fixture.repo, ["true"])
-      await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+      const pr = await submitCertifiedCarrier(app, fixture.repo, {
+        branch: "issue/feature",
+        headSha: fixture.featureSha,
+      })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
       expect(run).toMatchObject({
         status: "completed",
@@ -6342,10 +6432,9 @@ describe("Queue command adapters", () => {
       })
       expect(configuredCheckRan).toBe(false)
       expect(injectedFailure).toBe(true)
-      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-        status: "submitted",
-        headSha: fixture.featureSha,
-      })
+      // Branch-is-change: the standing submit fact at the authored head IS "still
+      // submitted, payload neither moved nor withdrawn".
+      expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: fixture.featureSha })
     },
     15_000,
   )
@@ -6373,9 +6462,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run.status).toBe("completed")
   }, 15_000)
@@ -6413,9 +6502,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -6431,10 +6520,9 @@ describe("Queue command adapters", () => {
       },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "submitted",
-      headSha: fixture.featureSha,
-    })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: fixture.featureSha })
   }, 15_000)
 
   it.each(["seeded", "unseeded"] as const)(
@@ -6474,9 +6562,9 @@ describe("Queue command adapters", () => {
         },
       }
       await using app = await checkedQueue(unreachable, repo, ["true"])
-      await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: fixture.featureSha })
+      const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
       expect(run).toMatchObject({
         status: "completed",
@@ -6488,10 +6576,9 @@ describe("Queue command adapters", () => {
       expect(proofFetches[0]?.argv).toContain("--filter=tree:0")
       expect(configuredCheckRan).toBe(false)
       expect(requests.some(({ argv }) => argv.includes("submodule") && argv.includes("update"))).toBe(false)
-      expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-        status: "submitted",
-        headSha: fixture.featureSha,
-      })
+      // Branch-is-change: the standing submit fact at the authored head IS "still
+      // submitted, payload neither moved nor withdrawn".
+      expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: fixture.featureSha })
     },
     15_000,
   )
@@ -6518,9 +6605,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(traced, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -6528,7 +6615,9 @@ describe("Queue command adapters", () => {
       error: { code: "check-failed", message: expect.stringContaining("has no URL") },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn".
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
   })
 
   it("pushes the landing refspec quarantined and without inheriting recursive submodule pushes", async () => {
@@ -6556,9 +6645,9 @@ describe("Queue command adapters", () => {
         'git -c protocol.file.allow=always submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate',
       ),
     )
-    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run, JSON.stringify(run, null, 2)).toMatchObject({
       status: "completed",
@@ -6611,13 +6700,13 @@ describe("Queue command adapters", () => {
           ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
           : {},
       )
-      await submitCertifiedCarrier(app, fixture.repo, {
+      const pr = await submitCertifiedCarrier(app, fixture.repo, {
         branch: "issue/feature",
         headSha: fixture.featureSha,
         baseSha: fixture.rootBaseSha,
       })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
       expect((run.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
@@ -6687,9 +6776,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(noOpProcess, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -6716,9 +6805,9 @@ describe("Queue command adapters", () => {
     const fixture = await submoduleMainMergeRepository({ nonBareComponentOrigin: true })
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect((run.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
@@ -6733,9 +6822,9 @@ describe("Queue command adapters", () => {
     await writeFile(join(fixture.submodule, "version.txt"), "dirty\n")
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -6789,9 +6878,9 @@ describe("Queue command adapters", () => {
           ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
           : {},
       )
-      await app.bays.submit({ branch: "issue/followup", headSha: followupSha, base: "main" })
+      const pr = await submitDerived(app, { branch: "issue/followup", headSha: followupSha })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
       expect(await git(fixture.rootRemote, ["merge-base", "--is-ancestor", followupSha, "main"])).toBe("")
@@ -6840,9 +6929,9 @@ describe("Queue command adapters", () => {
           ? { mergeCommand: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main') }
           : {},
       )
-      await app.bays.submit({ branch: "issue/followup", headSha: followupSha, base: "main" })
+      const pr = await submitDerived(app, { branch: "issue/followup", headSha: followupSha })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
       // The contains-base guard names the dropped standing-main commit, which
       // supersedes the older generic non-ancestral classification.
@@ -6898,9 +6987,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(submodulePushes).toEqual([])
@@ -6935,9 +7024,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(recordingProcess, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
+    const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -7029,13 +7118,13 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, {
+    const pr = await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/backward-gitlink",
       headSha: carrierHead,
       baseSha: currentBase,
     })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     // The property under test is not "it refused" but "it did not roll the
     // submodule back", so read the pin the run actually wrote.
@@ -7079,13 +7168,13 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, {
+    const pr = await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/feature",
       headSha: fixture.featureSha,
       baseSha: fixture.rootBaseSha,
     })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
 
     expect(run).not.toMatchObject({ error: { code: "carrier-drops-landed" } })
   })
@@ -7123,13 +7212,13 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await using app = await checkedQueue(process, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, {
+    const pr = await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/stale-component",
       headSha: carrierHead,
       baseSha: fixture.rootBaseSha,
     })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "completed",
@@ -7171,13 +7260,13 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, {
+    const pr = await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/feature",
       headSha: fixture.featureSha,
       baseSha: fixture.rootBaseSha,
     })
 
-    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const first = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(failedPromotion).toBe(true)
     expect(first).toMatchObject({
@@ -7201,7 +7290,7 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.submoduleBaseSha)
 
-    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const retried = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
     expect((retried.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
@@ -7255,13 +7344,13 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"])
-    await submitCertifiedCarrier(app, fixture.repo, {
+    const pr = await submitCertifiedCarrier(app, fixture.repo, {
       branch: "issue/feature",
       headSha: fixture.featureSha,
       baseSha: fixture.rootBaseSha,
     })
 
-    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const first = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(failedSecondPromotion).toBe(true)
     expect(first).toMatchObject({
@@ -7294,7 +7383,7 @@ describe("Queue command adapters", () => {
     expect(submodulePushes.filter((argv) => argv.includes(firstSubmodule.remote))).toHaveLength(1)
     expect(submodulePushes.filter((argv) => argv.includes(secondSubmodule.remote))).toHaveLength(1)
 
-    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const retried = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
     expect((retried.integration as unknown as { componentMains?: unknown }).componentMains).toEqual([
@@ -7342,9 +7431,9 @@ describe("Queue command adapters", () => {
       repo,
       shellCommand("git -c protocol.file.allow=always submodule update --init --recursive"),
     )
-    await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
+    const pr = await submitCertifiedCarrier(app, repo, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run, JSON.stringify(run, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
     const landed = await git(remote, ["rev-parse", "main"])
@@ -7363,12 +7452,12 @@ describe("Queue command adapters", () => {
 
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"])
-    await app.bays.submit({ branch: "issue/one", headSha: firstSha, base: "main" })
-    await app.bays.submit({ branch: "issue/two", headSha: secondSha, base: "main" })
+    const first = await submitDerived(app, { branch: "issue/one", headSha: firstSha })
+    const second = await submitDerived(app, { branch: "issue/two", headSha: secondSha })
 
     const settled = await Promise.allSettled([
-      app.queue.run({ prs: ["PR1"] }, { runner: "worker-1", leaseMs: 60_000 }),
-      app.queue.run({ prs: ["PR2"] }, { runner: "worker-2", leaseMs: 60_000 }),
+      app.queue.run({ prs: [], derived: [first] }, { runner: "worker-1", leaseMs: 60_000 }),
+      app.queue.run({ prs: [], derived: [second] }, { runner: "worker-2", leaseMs: 60_000 }),
     ])
     const completed = settled.find((result) => result.status === "fulfilled")
     const refused = settled.find((result) => result.status === "rejected")
@@ -7406,9 +7495,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(racingProcess, repo, ["true"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
@@ -7431,9 +7520,9 @@ describe("Queue command adapters", () => {
       ),
       { waiting: true },
     )
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const waiting = run.steps[0]?.job
     if (waiting?.status !== "waiting") throw new Error("check did not wait")
     const checkpoint = GitCheckEvidenceSchema.parse(waiting.checkpoint)
@@ -7481,21 +7570,21 @@ describe("Queue command adapters", () => {
       { revision: "move-base-v1", output: MovedSchema },
     )
     const merge = withMerge(gitMergeStep<Moved>({ inject: { process }, repo }), { revision: "git-merge-v1" })
+    const mint = volatilePrNumberMint()
     const queue = withQueue({
       steps: [check, move, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
+      prNumberMint: mint,
+      readSubmitEnrichment: testSubmitEnrichment,
     })
-    const base = pipe(
-      createYrdDef(),
-      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-    )
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    mints.set(app, mint)
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)
@@ -7661,9 +7750,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(postPushFailure, repo, ["true"])
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(mergedSha).toBeDefined()
     expect(await git(remote, ["rev-parse", "main"])).toBe(mergedSha)
@@ -7698,21 +7787,21 @@ describe("Queue command adapters", () => {
       }),
       { revision: "delegated-merge-v1" },
     )
+    const mint = volatilePrNumberMint()
     const queue = withQueue({
       steps: [check, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
+      prNumberMint: mint,
+      readSubmitEnrichment: testSubmitEnrichment,
     })
-    const base = pipe(
-      createYrdDef(),
-      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-    )
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    mints.set(app, mint)
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const mergedSha = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
@@ -7726,10 +7815,11 @@ describe("Queue command adapters", () => {
       "",
     )
     expect(mergedSha).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      status: "integrated",
-      integration: { commit: mergedSha, baseSha: mergedSha },
-    })
+    // Integration's only durable home post-S7 is the terminal fact the
+    // settlement batch emits for the run's own member snapshot.
+    expect(await terminalChangeFacts(app, "pr/integrated")).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: featureSha, commit: mergedSha, baseSha: mergedSha },
+    ])
   })
 
   it("reports a broken post-merge ancestry probe instead of claiming the candidate did not merge", async () => {
@@ -7761,9 +7851,9 @@ describe("Queue command adapters", () => {
       },
     }
     await using app = await checkedQueue(brokenAncestryProbe, repo, ["true"], { mergeCommand: ["true"] })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
 
     expect(commandRuns).toBe(2)
     expect(brokenProbes).toBe(1)
@@ -7821,21 +7911,21 @@ describe("Queue command adapters", () => {
       }),
       { revision: "delegated-merge-v1" },
     )
+    const mint = volatilePrNumberMint()
     const queue = withQueue({
       steps: [check, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
+      prNumberMint: mint,
+      readSubmitEnrichment: testSubmitEnrichment,
     })
-    const base = pipe(
-      createYrdDef(),
-      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-    )
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    mints.set(app, mint)
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "completed" || checkJob.conclusion !== "success") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
@@ -7874,11 +7964,13 @@ describe("Queue command adapters", () => {
       ]),
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      revision: 1,
-      headSha: featureSha,
-      status: "submitted",
-    })
+    // Branch-is-change: the standing submit fact at the authored head IS "still
+    // submitted, payload neither moved nor withdrawn"; the run's retained
+    // snapshot is the revision's only durable home.
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ base: "main", sha: featureSha })
+    expect(Queues.values(app.state().queues).flatMap((record) => record.prs)).toMatchObject([
+      { id: "PR1", revision: 1, headSha: featureSha },
+    ])
   })
 
   it("fails a delegated merge command that exits zero without merging the change", async () => {
@@ -7893,21 +7985,21 @@ describe("Queue command adapters", () => {
     const merge = withMerge(configuredMergeStep<Checked>({ inject: { process }, repo, command: ["true"] }), {
       revision: "delegated-merge-v1",
     })
+    const mint = volatilePrNumberMint()
     const queue = withQueue({
       steps: [check, merge] as const,
       resolveBaseSha: (base) => queueBaseSha(repo, base),
+      prNumberMint: mint,
+      readSubmitEnrichment: testSubmitEnrichment,
     })
-    const base = pipe(
-      createYrdDef(),
-      withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-    )
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
     await using app = await createYrd(queue(base), {
       inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    mints.set(app, mint)
+    const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
-    expect((await app.queue.run({ prs: ["PR1"] }, runtime))[0]).toMatchObject({
+    expect((await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]).toMatchObject({
       status: "completed",
       conclusion: "failure",
       error: { code: "merge-command-did-not-land" },

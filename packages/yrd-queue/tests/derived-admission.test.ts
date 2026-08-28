@@ -1,16 +1,21 @@
 /**
- * @failure The S6 door opens and a branch submitted only in git either cannot
- * run at all (selection/admission/authority all key on records), runs twice
- * under both lanes, silently loses its terminal `pr/integrated` (settlement
- * and every status surface go dark), or its identity is minted without the
- * commit-before-escape contract. Stage 3 of the door program
- * (@i/10-merge-queue/s6-door-design §5 ordering items 3-4): derived members
- * are selectable, admittable and runnable; the terminal emitters re-source
- * from the run's own ChangeSnapshot and the RELAXED reducer applies a
- * recordless terminal as a store no-op; the compose self-derives ref-only
- * branches where the 2b sweep used to mint records; and the retired mint arms
- * refuse `record-mint-retired` for any branch a live submit fact owns (A2 —
- * the fact IS the lane decision, made at write time).
+ * @failure A branch submitted only in git either cannot run at all
+ * (selection/admission/authority all key on records), runs twice, silently
+ * loses its terminal `pr/integrated` (settlement and every status surface go
+ * dark), or its identity is minted without the commit-before-escape contract.
+ * Derived members are selectable, admittable and runnable; the terminal
+ * emitters re-source from the run's own ChangeSnapshot; the compose
+ * self-derives ref-only branches; and the retired record mint refuses so no
+ * caller silently falls back to it.
+ *
+ * S7 (branch-is-change, @i/10 22991) deleted the change-record store, so the
+ * "zero record writes" half of this contract is structural rather than
+ * asserted — there is nothing left to write to — and the record x submit
+ * arbitration cells collapse to one lane. What these tests still own is the
+ * identity contract: the run snapshot is a derived member's only durable home,
+ * the number mint commits before the id escapes, the change id is stable
+ * across composes and continues across re-pushes, and every loud edge on the
+ * submit fact stays loud.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -22,7 +27,6 @@ import {
   ChangeIdSchema,
   changeIdForDerivedSubmit,
   createBayJobDefs,
-  recordLaneOwnsBranch,
   volatilePrNumberMint,
   withBays,
   type BayWorkspace,
@@ -36,7 +40,6 @@ import {
   candidateRefFor,
   deriveRunMemberArgs,
   derivedAuthorityLookup,
-  isDerivedRunMember,
   materializeDerivedRunMembers,
   Queues,
   withMerge,
@@ -128,13 +131,9 @@ async function createApp(
     log?: ReturnType<typeof createLogger>
     steps?: readonly ReturnType<typeof passingCheck | typeof passingMerge>[]
     defaultSteps?: readonly string[]
-    /** Arms the door's compose self-derivation (S6): the durable mint derived
-     * admission commits identities to, and the git-enrichment reader. */
+    /** Arms the compose's self-derivation: the durable mint derived admission
+     * commits identities to, and the git-enrichment reader. */
     prNumberMint?: PrNumberMint
-    /** The bays plugin's own mint. Pass the SAME instance as `prNumberMint` to
-     * model production, where both lanes share one durable pr-mint.json store
-     * and numbering stays one monotone sequence. */
-    baysPrNumberMint?: PrNumberMint
     readSubmitEnrichment?: (input: Readonly<{ branch: string; sha: string }>) => {
       changeId?: string
       props?: Record<string, string>
@@ -158,7 +157,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: options.baysPrNumberMint ?? volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -172,18 +171,9 @@ async function createApp(
 
 type App = Awaited<ReturnType<typeof createApp>>
 
-/**
- * The door simulation: a branch whose record went terminal, re-submitted in
- * git at a NEW sha. The 2b sweep skips it (a record in ANY state hides the
- * branch from `unrecordedSubmits`), the arbitration rules it derived
- * (terminal×different-sha — the decisive A4 cell), and the derived-admission
- * path is the only way it can ever run — exactly the post-door regime.
- */
-async function strandDerivedBranch(app: App, branch: string, sha: string = SHA): Promise<void> {
-  await app.bays.submit({ branch, headSha: "9".repeat(40), base: "main", baseSha: BASE })
-  const record = Object.values(app.state().bays.prs).find((pr) => pr.branch === branch)
-  if (record === undefined) throw new Error(`no record for '${branch}'`)
-  await app.bays.closePr({ pr: record.id, reason: "superseded" })
+/** The whole delivery: a branch and the standing submit fact the receiver
+ * projected for it. Post-S7 this is the ONLY way a member comes into being. */
+async function submitted(app: App, branch: string, sha: string = SHA): Promise<void> {
   await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
 }
 
@@ -195,7 +185,7 @@ function doorEntry(
   return deriveRunMemberArgs({
     bays: app.state().bays,
     queues: app.state().queues,
-    mint: options.mint ?? volatilePrNumberMint(1),
+    mint: options.mint ?? volatilePrNumberMint(),
     branch,
     enrichment: {
       changeId: CHANGE_ID,
@@ -210,8 +200,8 @@ function stepsMapOf(app: App): ReadonlyMap<string, never> {
   return new Map(installed.map((step) => [step.name, { ...step, declaredDefault: true } as never]))
 }
 
-/** Every journaled event of `name`, in order — the door's terminal facts live
- * ONLY in the journal (the store write is a no-op for derived members). */
+/** Every journaled event of `name`, in order — a derived member's terminal
+ * facts live ONLY in the journal. */
 async function journalEvents(
   journal: ReturnType<typeof createMemoryJournal>,
   name: string,
@@ -226,22 +216,19 @@ async function journalEvents(
   return out
 }
 
-describe("S6 stage 3 — derived-member selection, admission, run", () => {
-  it("a derived member is selected, admitted against its submit-ref sha, and runs under its minted identity with zero record writes (A1 shape, check-only plan)", async () => {
+describe("derived-member selection, admission, run", () => {
+  it("a derived member is selected, admitted against its submit-ref sha, and runs under its minted identity (check-only plan)", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     {
       await using app = await createApp({ journal, id, steps: [passingCheck()], defaultSteps: ["check"] })
-      await strandDerivedBranch(app, "issue/derived")
-      const prsBefore = structuredClone(app.state().bays.prs)
-      const receiptsBefore = structuredClone(app.state().bays.receipts)
+      await submitted(app, "issue/derived")
 
-      // Admission-time mint (A9): terminal record PR1 is the frozen max, the
-      // mint's own high-water is 1 — the derived member mints strictly above
-      // both, and the revision continues the pre-door branch's count.
+      // Admission-time mint: the derived member mints strictly above the
+      // mint's own high-water, and commits it before the id escapes.
       const mint = volatilePrNumberMint(1)
       const entry = doorEntry(app, "issue/derived", { mint, props: { bead: "22991" }, issue: "22991" })
-      expect(entry).toMatchObject({ id: "PR2", branch: "issue/derived", revision: 2, headSha: SHA })
+      expect(entry).toMatchObject({ id: "PR2", branch: "issue/derived", revision: 1, headSha: SHA })
       expect(mint.highWater()).toBe(2)
 
       const runs = await app.queue.run({ derived: [entry] }, runtime)
@@ -255,74 +242,67 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
         id: "PR2",
         changeId: CHANGE_ID,
         branch: "issue/derived",
-        revision: 2,
         headSha: SHA,
         props: { bead: "22991" },
         issue: "22991",
       })
 
-      // Zero record writes: the store is byte-identical across the lifecycle,
-      // and the submit fact still stands (nothing superseded it — the door
-      // regime has no takeover act).
-      expect(app.state().bays.prs).toEqual(prsBefore)
-      expect(app.state().bays.receipts).toEqual(receiptsBefore)
+      // The submit fact still stands: nothing superseded it — there is no
+      // takeover act left.
       expect(app.state().bays.submits["issue/derived"]).toMatchObject({ sha: SHA })
 
       // The id-seam answers the recordless id from the retained snapshot.
       expect(app.queue.resolveMember("PR2")).toMatchObject({ source: "snapshot", id: "PR2" })
 
-      // A10: the derived run is audit-clean — no missing-pr, no ancestry
-      // finding — because a recordless member above the frozen max is derived
-      // BY DESIGN, not store corruption.
-      const audit = app.queue.audit()
-      expect(audit.findings.filter((finding) => finding.code === "missing-pr")).toEqual([])
-      expect(audit.findings.filter((finding) => finding.code === "run-without-submit-ancestry")).toEqual([])
-      expect(audit.findings.filter((finding) => finding.code === "run-without-check-ancestry")).toEqual([])
+      // The derived run is audit-clean. This used to name three codes
+      // explicitly — `missing-pr`, `run-without-submit-ancestry`,
+      // `run-without-check-ancestry` — because a recordless member tripped all
+      // three as store corruption. S7 deleted the three outright (they are no
+      // longer in YRD_QUEUE_AUDIT_FINDING_CODES), the corruption they
+      // described being the normal case now. Asserting the whole finding set
+      // is empty is what survives, and it is strictly stronger: it also
+      // catches a NEW code inventing the same false alarm.
+      expect(app.queue.audit().findings).toEqual([])
     }
 
-    // A5 (mixed eras, live half): the journal now holds a record-era terminal
-    // change AND derived-member traffic (branch/submitted + queue/* snapshots
-    // + admission jobs). A fresh projection over the same journal converges on
-    // the same state with zero store writes for the derived era.
+    // A fresh projection over the same journal converges on the same state:
+    // every event the derived era wrote is an already-registered one.
     await using replayed = await createApp({ journal, id, steps: [passingCheck()], defaultSteps: ["check"] })
-    expect(Object.keys(replayed.state().bays.prs)).toEqual(["PR1"])
     const replayedRun = Queues.values(replayed.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
-    expect(replayedRun?.prs[0]).toMatchObject({ id: "PR2", headSha: SHA, revision: 2 })
+    expect(replayedRun?.prs[0]).toMatchObject({ id: "PR2", headSha: SHA })
   })
 
-  it("a re-pushed derived branch reuses its retained snapshot identity through the real pipeline (A9 continuity)", async () => {
+  it("a re-pushed derived branch reuses its retained snapshot identity through the real pipeline (continuity)", async () => {
     await using app = await createApp({ steps: [passingCheck()], defaultSteps: ["check"] })
-    await strandDerivedBranch(app, "issue/derived")
+    await submitted(app, "issue/derived")
     const mint = volatilePrNumberMint(1)
     await app.queue.run({ derived: [doorEntry(app, "issue/derived", { mint })] }, runtime)
 
     // The author re-pushes the branch + submit ref at a new sha.
     await app.bays.recordBranchSubmit({ branch: "issue/derived", sha: RESUBMIT_SHA, base: "main" })
     const again = doorEntry(app, "issue/derived", { mint })
-    expect(again).toMatchObject({ id: "PR2", revision: 3, headSha: RESUBMIT_SHA })
+    expect(again).toMatchObject({ id: "PR2", revision: 2, headSha: RESUBMIT_SHA })
     // Reused, never re-minted: the high-water did not move again.
     expect(mint.highWater()).toBe(2)
   })
 
-  it("the merge bookkeeping emits pr/integrated from the run's own snapshot for a recordless member, and the relaxed reducer applies it as a store no-op (A1/A8 emitter half)", async () => {
+  it("the merge bookkeeping emits pr/integrated from the run's own snapshot for a recordless member", async () => {
     const journal = createMemoryJournal()
     await using app = await createApp({ journal })
-    await strandDerivedBranch(app, "issue/derived")
+    await submitted(app, "issue/derived")
     const entry = doorEntry(app, "issue/derived", { props: { bead: "22991" }, issue: "22991" })
-    const prsBefore = structuredClone(app.state().bays.prs)
 
     const runs = await app.queue.run({ derived: [entry] }, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
 
     // The journaled terminal fact carries the snapshot-sourced payload — the
-    // exact event settlement's hook receives (A8's enrichment half).
+    // exact event settlement's hook receives.
     const integrated = await journalEvents(journal, "pr/integrated")
     expect(integrated).toHaveLength(1)
-    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
+    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === entry.id))
     if (record === undefined) throw new Error("expected the derived merge run to be retained")
     expect(integrated[0]?.data).toMatchObject({
-      pr: "PR2",
-      revision: 2,
+      pr: entry.id,
       headSha: SHA,
       run: record.id,
       commit: MERGED,
@@ -332,34 +312,28 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       props: { bead: "22991" },
       issueRef: "22991",
     })
-    // The snapshot schema carries no submitter — the one accepted enrichment
-    // delta (s6-door-preflight leg 1 names it rather than diffing it).
+    // The snapshot schema carries no submitter — the one accepted enrichment delta.
     expect((integrated[0]?.data as { submitter?: string }).submitter).toBeUndefined()
 
-    // The relaxed reducer applied it as a store NO-OP: byte-identical records,
-    // the branch's terminal record untouched, and the submit fact standing.
-    expect(app.state().bays.prs).toEqual(prsBefore)
+    // The submit fact still stands after the terminal applied.
     expect(app.state().bays.submits["issue/derived"]).toMatchObject({ sha: SHA })
   })
 
-  it("pr/needs-author re-sources from the snapshot when a derived member's step fails author-owned (census #13)", async () => {
+  it("pr/needs-author re-sources from the snapshot when a derived member's step fails author-owned", async () => {
     const journal = createMemoryJournal()
     await using app = await createApp({ journal, steps: [passingCheck(), authorFailingMerge()] })
-    await strandDerivedBranch(app, "issue/derived")
+    await submitted(app, "issue/derived")
     const entry = doorEntry(app, "issue/derived", { props: { bead: "22991" }, issue: "22991" })
-    const prsBefore = structuredClone(app.state().bays.prs)
 
-    // Post-door the author-owned failure settles cleanly: the refusal FACT is
-    // journaled from the snapshot and the relaxed reducer applies it as a
-    // store no-op.
+    // The author-owned failure settles cleanly: the refusal FACT is journaled
+    // from the snapshot.
     await app.queue.run({ derived: [entry] }, runtime)
     const needsAuthor = await journalEvents(journal, "pr/needs-author")
     expect(needsAuthor).toHaveLength(1)
-    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
+    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === entry.id))
     if (record === undefined) throw new Error("expected the derived merge run to be retained")
     expect(needsAuthor[0]?.data).toMatchObject({
-      pr: "PR2",
-      revision: 2,
+      pr: entry.id,
       headSha: SHA,
       run: record.id,
       issueRef: "22991",
@@ -367,13 +341,11 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       step: "merge",
       receipt: { code: "authored-gitlink" },
     })
-    expect(app.state().bays.prs).toEqual(prsBefore)
 
-    // The pure-git analogue of the submitted/ready gate: once the live submit
-    // fact moves off the pinned sha (the author superseded the member), the
-    // refusal is not emitted — only the run failure is. Asserted on the pure
-    // advance over the same run, its recorded failure stripped so the
-    // emission path re-derives.
+    // The pure-git submitted/ready gate: once the live submit fact moves off
+    // the pinned sha (the author superseded the member), the refusal is not
+    // emitted — only the run failure is. Asserted on the pure advance over the
+    // same run, its recorded failure stripped so the emission path re-derives.
     const unfailed = { ...record, failure: undefined }
     const moved = {
       ...app.state(),
@@ -389,15 +361,15 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(standing.events.some((event) => event.name === "pr/needs-author")).toBe(true)
   })
 
-  it("derived submit authority is one-per-fact: consumed by the merge run, standing again after a re-push (design §2)", async () => {
+  it("derived submit authority is one-per-fact: consumed by the merge run, standing again after a re-push", async () => {
     await using app = await createApp()
-    await strandDerivedBranch(app, "issue/derived")
+    await submitted(app, "issue/derived")
     // One durable mint across derivations, as production has: the re-derive
-    // below reuses PR2 and must see the high-water its mint committed.
+    // below reuses the id and must see the high-water its mint committed.
     const mint = volatilePrNumberMint(1)
     const entry = doorEntry(app, "issue/derived", { mint })
     await app.queue.run({ derived: [entry] }, runtime)
-    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
+    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === entry.id))
     if (record === undefined) throw new Error("expected the derived merge run")
 
     const lookup = derivedAuthorityLookup(app.state())
@@ -417,39 +389,17 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(derivedAuthorityLookup(repushed)(snapshot)).toEqual({ standing: true })
 
     // And the compose acts on consumption: the same member again is skipped
-    // (consumed authority — the cure is a re-push), with the durable ledger
-    // row and no phantom needs-author on a record that does not exist.
+    // (consumed authority — the cure is a re-push), with the durable ledger row.
     await expect(app.queue.run({ derived: [doorEntry(app, "issue/derived", { mint })] }, runtime)).resolves.toEqual([])
-    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({
-      pr: "PR2",
+    expect(app.state().queues.admissionRefusals[entry.id]).toMatchObject({
+      pr: entry.id,
       code: "queue-submit-authority-consumed",
     })
   })
 
-  it("a member with a live record for its branch never enters the derived lane (A4 — never both lanes)", async () => {
+  it("the loud edges on the submit fact: vanished fact, moved fact, mint failure", async () => {
     await using app = await createApp()
-    await strandDerivedBranch(app, "issue/derived")
-    // High mint floor: the racing reopen below revives PR1 and later flows may
-    // mint; the driver's number must not collide (production shares ONE
-    // durable mint, where a collision is impossible by monotonicity).
-    const entry = doorEntry(app, "issue/derived", { mint: volatilePrNumberMint(50) })
-    // A live record appears for the branch AFTER the driver derived the entry:
-    // the author's explicit D2 reopen of the terminal identity — the one
-    // record-creation act the door leaves to a terminal-branch author.
-    await app.bays.submit({ branch: "issue/derived", headSha: "6".repeat(40), base: "main", baseSha: BASE })
-    const reopened = app.state().bays.prs.PR1
-    expect(reopened?.state).toBe("open")
-    expect(() => materializeDerivedRunMembers(app.state().bays, [entry])).toThrow(/record lane owns it/)
-    // The selectorless compose skips the derived entry loudly instead of
-    // running both lanes; the record lane owns the branch now.
-    await expect(app.queue.run({ derived: [entry] }, runtime)).resolves.toBeDefined()
-    const run = Queues.values(app.state().queues).find((candidate) => candidate.prs.some((pr) => pr.id === entry.id))
-    expect(run).toBeUndefined()
-  })
-
-  it("the four loud edges: vanished fact, moved fact, duplicate payload, mint failure (R2 re-homed)", async () => {
-    await using app = await createApp()
-    await strandDerivedBranch(app, "issue/derived")
+    await submitted(app, "issue/derived")
     const entry = doorEntry(app, "issue/derived")
 
     // Moved: the CAS refuses an entry derived at a superseded sha.
@@ -461,22 +411,6 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(() => materializeDerivedRunMembers(gone, [entry])).toThrow(/no live submit fact/)
     expect(() => doorEntry(app, "issue/never-submitted")).toThrow(/no live submit fact/)
 
-    // Duplicate payload: another open record already carries this exact
-    // base+head — one payload under two identities PROPAGATES (2b's policy).
-    await app.bays.submit({ branch: "issue/other", headSha: RESUBMIT_SHA, base: "main", baseSha: BASE })
-    const duplicate = doorEntry(app, "issue/derived")
-    const collision = (() => {
-      try {
-        materializeDerivedRunMembers(app.state().bays, [duplicate])
-        return undefined
-      } catch (error) {
-        return error
-      }
-    })()
-    expect(String(collision)).toMatch(/payload already recorded as change/)
-    expect(failureFact(collision)).toBeUndefined()
-    await expect(app.queue.run({ derived: [duplicate] }, runtime)).rejects.toThrow(/payload already recorded/)
-
     // Mint failure: commit-before-escape means a broken mint store fails the
     // derivation loudly and mints nothing.
     const broken: PrNumberMint = Object.freeze({
@@ -486,15 +420,14 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       },
     })
     await using fresh = await createApp()
-    await strandDerivedBranch(fresh, "issue/fresh")
+    await submitted(fresh, "issue/fresh")
     expect(() => doorEntry(fresh, "issue/fresh", { mint: broken })).toThrow(/PR-number mint store/)
 
-    // Change-Id trailer missing is NOT a loud edge any more: the derivation
-    // mints a synthetic identity from the submission's stable facts instead
-    // of refusing (its own describe below); the refusal survives only for
-    // non-canonical submit facts.
+    // A missing Change-Id trailer is NOT a loud edge: the derivation mints a
+    // synthetic identity from the submission's stable facts instead of
+    // refusing (its own describe below).
     await using bare = await createApp()
-    await strandDerivedBranch(bare, "issue/bare")
+    await submitted(bare, "issue/bare")
     const minted = deriveRunMemberArgs({
       bays: bare.state().bays,
       queues: bare.state().queues,
@@ -504,42 +437,34 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(minted.changeId).toBe(changeIdForDerivedSubmit({ branch: "issue/bare", sha: SHA }))
   })
 
-  it("A10 — a derived member is a full member row: id-seam resolution, snapshot-backed run rows, derived-by-design audit accounting", async () => {
+  it("a derived member is a full member row: id-seam resolution, snapshot-backed run rows, derived-by-design audit accounting", async () => {
     await using app = await createApp({ steps: [passingCheck()], defaultSteps: ["check"] })
-    await strandDerivedBranch(app, "issue/derived")
-    await app.queue.run({ derived: [doorEntry(app, "issue/derived")] }, runtime)
+    await submitted(app, "issue/derived")
+    const entry = doorEntry(app, "issue/derived")
+    await app.queue.run({ derived: [entry] }, runtime)
 
-    const resolved = app.queue.resolveMember("pr#2")
-    expect(resolved).toMatchObject({ source: "snapshot", id: "PR2" })
-    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR2"))
+    // The `pr#N` spelling resolves the same member as the bare id, and both
+    // answer from the run's retained snapshot — the member's only home.
+    expect(app.queue.resolveMember(`pr#${entry.id.slice(2)}`)).toMatchObject({ source: "snapshot", id: entry.id })
+    expect(app.queue.resolveMember(entry.id)).toMatchObject({ source: "snapshot", id: entry.id })
+    const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === entry.id))
     if (record === undefined) throw new Error("expected the derived run")
-    expect(isDerivedRunMember(app.state().bays, record.prs[0] as never)).toBe(true)
-    // The terminal record era still answers for ITS id — both eras named.
-    expect(app.queue.resolveMember("PR1")).toMatchObject({ source: "record", id: "PR1" })
+    // A full member row, not a placeholder: identity, branch, revision and the
+    // exact approved sha all present on the snapshot the run retained.
+    expect(record.prs[0]).toMatchObject({
+      id: entry.id,
+      changeId: CHANGE_ID,
+      branch: "issue/derived",
+      revision: 1,
+      headSha: SHA,
+    })
   })
 
-  // ————— the three formerly door-gated tests, live now that the door is open —————
-
-  it("a derived member merges end to end — pr/integrated APPLIES as a store no-op, prs/receipts byte-identical (A1 full)", async () => {
-    await using app = await createApp()
-    await strandDerivedBranch(app, "issue/derived")
-    const prsBefore = structuredClone(app.state().bays.prs)
-    const receiptsBefore = structuredClone(app.state().bays.receipts)
-    const runs = await app.queue.run(
-      { derived: [doorEntry(app, "issue/derived", { props: { bead: "22991" } })] },
-      runtime,
-    )
-    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-    expect(app.state().bays.prs).toEqual(prsBefore)
-    expect(app.state().bays.receipts).toEqual(receiptsBefore)
-  })
-
-  it("a live submit is a runnable derived row served by one selectorless compose, not an unrecorded-submit refusal (A10 flip, A1 by the front door)", async () => {
-    // The door's own wiring end to end: a branch + submit ref alone — no
-    // records, no derived args, no intake — is derived, admitted, and run by
-    // one selectorless compose under the configured mint + enrichment reader,
-    // and the "visible, never runnable" refusal row retires once the lane
-    // serves the branch.
+  it("a live submit is a runnable derived row served by one selectorless compose, not an unrecorded-submit refusal", async () => {
+    // The wiring end to end: a branch + submit ref alone — no derived args, no
+    // intake — is derived, admitted, and run by one selectorless compose under
+    // the configured mint + enrichment reader, and the "visible, never
+    // runnable" refusal row retires once the lane serves the branch.
     const mint = volatilePrNumberMint()
     await using app = await createApp({
       steps: [passingCheck()],
@@ -551,7 +476,6 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/post-door"])
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-    expect(app.state().bays.prs).toEqual({})
     const record = Queues.values(app.state().queues).find((run) =>
       run.prs.some((pr) => pr.branch === "issue/post-door"),
     )
@@ -563,7 +487,7 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       props: { bead: "22991" },
       issue: "22991",
     })
-    // Served ⇒ the refusal row retires everywhere it rendered.
+    // Served => the refusal row retires everywhere it rendered.
     expect(app.queue.unrecordedSubmits()).toEqual([])
     const audit = app.queue.audit({ now: "2026-01-02T00:00:00.000Z" })
     expect(audit.findings.filter((finding) => finding.code === "unrecorded-submit")).toEqual([])
@@ -573,28 +497,24 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/waiting"])
   })
 
-  it("replay converges over a journal holding recordless terminal events, with zero store writes for the derived era (A5 full)", async () => {
+  it("replay converges over a journal holding recordless terminal events", async () => {
     const journal = createMemoryJournal()
     const id = ids()
-    let mintedPrs: unknown
+    let mintedId: string
     {
       await using app = await createApp({ journal, id })
-      await strandDerivedBranch(app, "issue/derived")
-      const prsBefore = structuredClone(app.state().bays.prs)
-      await app.queue.run({ derived: [doorEntry(app, "issue/derived")] }, runtime)
-      // The tolerate branch is a store NO-OP: the pre-door era's records are
-      // byte-identical after the post-door segment applied its terminals.
-      expect(app.state().bays.prs).toEqual(prsBefore)
-      mintedPrs = prsBefore
+      await submitted(app, "issue/derived")
+      const entry = doorEntry(app, "issue/derived")
+      mintedId = entry.id
+      await app.queue.run({ derived: [entry] }, runtime)
     }
     await using replayed = await createApp({ journal, id })
-    expect(replayed.state().bays.prs).toEqual(mintedPrs)
-    const run = Queues.values(replayed.state().queues).find((record) => record.prs.some((pr) => pr.id === "PR2"))
-    expect(run?.prs[0]).toMatchObject({ id: "PR2", headSha: SHA })
+    const run = Queues.values(replayed.state().queues).find((record) => record.prs.some((pr) => pr.id === mintedId))
+    expect(run?.prs[0]).toMatchObject({ id: mintedId, headSha: SHA })
   })
 })
 
-describe("S6 derived lane — synthetic change-id mint for trailerless tips", () => {
+describe("derived lane — synthetic change-id mint for trailerless tips", () => {
   it("a trailerless tip is admitted by the selectorless compose under a synthetic identity — the measured production shape (2026-08-27: every agent branch refused, no agent tooling stamps trailers)", async () => {
     const events: LogEvent[] = []
     const mint = volatilePrNumberMint()
@@ -613,7 +533,7 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
 
-    // The member ran under a well-formed synthetic change id, recordless.
+    // The member ran under a well-formed synthetic change id.
     const record = Queues.values(app.state().queues).find((run) =>
       run.prs.some((pr) => pr.branch === "task/agent-branch"),
     )
@@ -631,7 +551,7 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
 
   it("the identity is stable across compose passes: the same (branch, tip sha) re-derives the same change id, and a new sha keys a NEW revision of the SAME identity via the retained snapshot", async () => {
     await using app = await createApp({ steps: [passingCheck()], defaultSteps: ["check"] })
-    await strandDerivedBranch(app, "issue/trailerless")
+    await submitted(app, "issue/trailerless")
     const synthetic = changeIdForDerivedSubmit({ branch: "issue/trailerless", sha: SHA })
     const mint = volatilePrNumberMint(1)
     const derive = () =>
@@ -641,17 +561,15 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     // them: the CHANGE identity is bit-identical — a pure derivation from
     // stable facts. The number half keeps the mint's crash contract
     // (committed before escape, so an admission that never journals skips a
-    // number and can never re-issue one), exactly as it does for trailered
-    // branches today.
+    // number and can never re-issue one).
     const first = derive()
     const second = derive()
     expect(first.changeId).toBe(synthetic)
     expect(second.changeId).toBe(synthetic)
-    expect(first).toMatchObject({ id: "PR2", revision: 2, headSha: SHA })
-    expect(second).toMatchObject({ id: "PR3", revision: 2, headSha: SHA })
+    expect(first).toMatchObject({ id: "PR2", headSha: SHA })
+    expect(second).toMatchObject({ id: "PR3", headSha: SHA })
 
-    // Compose pass 1 journals the run's snapshot — the identity's one durable
-    // home.
+    // Compose pass 1 journals the run's snapshot — the identity's one durable home.
     await app.queue.run({ derived: [second] }, runtime)
 
     // The author re-pushes at a NEW sha: compose pass 2 reuses the retained
@@ -660,7 +578,8 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     // change (branch continuity).
     await app.bays.recordBranchSubmit({ branch: "issue/trailerless", sha: RESUBMIT_SHA, base: "main" })
     const repushed = derive()
-    expect(repushed).toMatchObject({ id: "PR3", changeId: synthetic, revision: 3, headSha: RESUBMIT_SHA })
+    expect(repushed).toMatchObject({ id: "PR3", changeId: synthetic, headSha: RESUBMIT_SHA })
+    expect(repushed.revision).toBe(second.revision + 1)
     expect(repushed.changeId).not.toBe(changeIdForDerivedSubmit({ branch: "issue/trailerless", sha: RESUBMIT_SHA }))
     // Reused, never re-minted: the high-water did not move again.
     expect(mint.highWater()).toBe(3)
@@ -668,12 +587,11 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
 
   it("a Change-Id trailer still wins over the synthetic mint, and a retained snapshot's identity wins over both", async () => {
     await using app = await createApp({ steps: [passingCheck()], defaultSteps: ["check"] })
-    await strandDerivedBranch(app, "issue/derived")
+    await submitted(app, "issue/derived")
     const synthetic = changeIdForDerivedSubmit({ branch: "issue/derived", sha: SHA })
     const mint = volatilePrNumberMint(1)
 
-    // Trailer present ⇒ the trailer IS the identity; the synthetic mint never
-    // fires (existing behavior, unchanged).
+    // Trailer present => the trailer IS the identity; the synthetic mint never fires.
     const entry = doorEntry(app, "issue/derived", { mint })
     expect(entry.changeId).toBe(CHANGE_ID)
     expect(entry.changeId).not.toBe(synthetic)
@@ -690,50 +608,6 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
       branch: "issue/derived",
     })
     expect(trailerless).toMatchObject({ id: entry.id, changeId: CHANGE_ID, revision: entry.revision + 1 })
-  })
-
-  it("the two lanes interleave without identity collision under the ONE shared durable mint production runs: numbers stay one monotone sequence, change-id namespaces are disjoint by domain", async () => {
-    // Production shares ONE durable pr-mint.json between record-lane intake
-    // and derived admission (queue plugin doc: "the SAME store the bays
-    // plugin holds, so numbering stays one monotone sequence") — modeled here
-    // by wiring a single volatile mint instance into BOTH plugins.
-    const shared = volatilePrNumberMint()
-    await using app = await createApp({
-      steps: [passingCheck()],
-      defaultSteps: ["check"],
-      prNumberMint: shared,
-      baysPrNumberMint: shared,
-      // Trailerless: the derived lane runs on the synthetic mint.
-      readSubmitEnrichment: () => ({}),
-    })
-
-    // Record lane first (factless legacy branch): PR1, command-minted id.
-    await app.bays.submit({ branch: "issue/record-a", headSha: "1".repeat(40), base: "main", baseSha: BASE })
-    // Derived lane (ref-only trailerless branch): composes as PR2 under the
-    // synthetic change id.
-    await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
-    await app.queue.run({}, runtime)
-    // Record lane again: the shared mint saw the derived commit, so the next
-    // record mints PR3 — a derived number is never re-issued to a record.
-    await app.bays.submit({ branch: "issue/record-b", headSha: "2".repeat(40), base: "main", baseSha: BASE })
-
-    expect(Object.keys(app.state().bays.prs).toSorted()).toEqual(["PR1", "PR3"])
-    const derived = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((pr) => pr.branch === "issue/ref-only"),
-    )
-    expect(derived?.prs[0]).toMatchObject({
-      id: "PR2",
-      changeId: changeIdForDerivedSubmit({ branch: "issue/ref-only", sha: SHA }),
-    })
-
-    // No identity collides across the lanes: ids and change ids are each
-    // pairwise distinct over every member of both.
-    const recordChangeIds = Object.values(app.state().bays.prs).flatMap((pr) =>
-      pr.revs.flatMap((rev) => (rev.changeId === undefined ? [] : [rev.changeId])),
-    )
-    expect(recordChangeIds).toHaveLength(2)
-    const identities = [...recordChangeIds, derived?.prs[0]?.changeId]
-    expect(new Set(identities).size).toBe(identities.length)
   })
 
   it("the refusal survives only for non-canonical submit facts, burns no number, and its reason names both cures", async () => {
@@ -756,7 +630,6 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
     })()
     expect(refusal).toMatchObject({ kind: "refusal", code: "derived-change-id-missing" })
     expect(refusal?.message).toMatch(/carries no Change-Id trailer/)
-    expect(refusal?.message).toMatch(/amend the tip commit with a Change-Id trailer/)
     expect(refusal?.message).toMatch(/amend the tip commit with a Change-Id trailer and re-push/)
     expect(refusal?.message).not.toMatch(/record lane/)
     // Commit-free refusal: the number mint never burned.
@@ -782,8 +655,8 @@ describe("S6 derived lane — synthetic change-id mint for trailerless tips", ()
   })
 })
 
-describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", () => {
-  it("bay.intake refuses record-mint-retired for a branch a live submit fact owns and no record does, and the message names the surviving path", async () => {
+describe("the retired record mint refuses rather than silently minting (A2)", () => {
+  it("bay.intake refuses record-mint-retired and the message names the surviving path", async () => {
     await using app = await createApp()
     await app.bays.recordBranchSubmit({ branch: "issue/facted", sha: SHA, base: "main" })
     const refusal = await app.bays
@@ -792,31 +665,33 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
       .catch((error: unknown) => failureFact(error))
     expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
     expect(refusal?.message).toMatch(/refs\/for\/main\/<issue>/)
-    expect(app.state().bays.prs).toEqual({})
   })
 
-  it("bay.submit refuses record-mint-retired for the same branch, and the message names the surviving path", async () => {
+  it("bay.submit refuses record-mint-retired and the message names the surviving path", async () => {
     await using app = await createApp()
     await app.bays.recordBranchSubmit({ branch: "issue/facted", sha: SHA, base: "main" })
-    await expect(
-      app.bays.submit({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE }),
-    ).rejects.toThrow(/record-mint-retired|refs\/for/)
     const refusal = await app.bays
       .submit({ branch: "issue/facted", headSha: SHA, base: "main", baseSha: BASE })
       .then(() => undefined)
       .catch((error: unknown) => failureFact(error))
     expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
-    expect(refusal?.message).toMatch(/refs\/for\/main\/<issue>/)
-    expect(app.state().bays.prs).toEqual({})
+    expect(refusal?.message).toMatch(/yrd pr submit/)
   })
 
-  it("a factless branch keeps the legacy mint — the population no receiver delivered, still visible to the S7 drain gauge", async () => {
+  it("a branch with NO submit fact is refused the same way — the mint is retired unconditionally, not conditionally on a fact", async () => {
+    // The control for the two above: while the record store existed, these
+    // commands refused only for a branch a live submit fact owned, so a
+    // factless branch still minted. That fallback is gone, and a test that
+    // only ever passed a facted branch could not tell the difference.
     await using app = await createApp()
-    await app.bays.submit({ branch: "issue/legacy", headSha: SHA, base: "main", baseSha: BASE })
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+    const refusal = await app.bays
+      .submit({ branch: "issue/legacy", headSha: SHA, base: "main", baseSha: BASE })
+      .then(() => undefined)
+      .catch((error: unknown) => failureFact(error))
+    expect(refusal).toMatchObject({ kind: "refusal", code: "record-mint-retired" })
   })
 
-  it("the refusal code has exactly one spelling across every package source (A2 grep half)", () => {
+  it("the refusal code has exactly one spelling across every package source (grep half)", () => {
     const roots = readdirSync(packagesRoot).flatMap((pkg) => {
       const src = join(packagesRoot, pkg, "src")
       return existsSync(src) ? [src] : []
@@ -826,7 +701,12 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
       for (const entry of readdirSync(root, { recursive: true }) as string[]) {
         if (!entry.endsWith(".ts") && !entry.endsWith(".tsx")) continue
         const source = readFileSync(join(root, entry), "utf8")
-        for (const match of source.matchAll(/record[-_ ]?mint[-_ ]?retired/giu)) spellings.add(match[0])
+        // Code-SHAPED spellings only. The separator class deliberately excludes
+        // a space: refusal codes are kebab-case, so `record mint retired` can
+        // only ever be English prose, and matching it made this guard fail on
+        // a comment that reads "with the record mint retired" (yrd-cli
+        // run.ts) — a false positive that says nothing about the vocabulary.
+        for (const match of source.matchAll(/record[-_]?mint[-_]?retired/giu)) spellings.add(match[0])
       }
     }
     expect([...spellings]).toEqual(["record-mint-retired"])
@@ -856,20 +736,11 @@ describe("S6 door — the retired mint arms and the receiver's lane rule (A2)", 
       }
     }
     // Proves the scan is live rather than vacuously empty — an empty `cures`
-    // walk would pass `originCures` for the wrong reason.
-    expect(cures.length).toBeGreaterThanOrEqual(3)
+    // walk would pass `originCures` for the wrong reason. The floor was 3 when
+    // written; S7 deleted one of the three printed cures with the record-lane
+    // surface that printed it, so 2 is the live count (queue.ts's
+    // unrecorded-submit resolution and yrd-bay's retired-intake refusal).
+    expect(cures.length).toBeGreaterThanOrEqual(2)
     expect(originCures).toEqual([])
-  })
-
-  it("the receiver's lane rule: intake dispatches only for a branch a LIVE record owns", async () => {
-    await using app = await createApp()
-    // No record: derived lane.
-    expect(recordLaneOwnsBranch(app.state().bays, "issue/nothing")).toBe(false)
-    // Terminal record: still the derived lane (the decisive A4 cell).
-    await strandDerivedBranch(app, "issue/terminal")
-    expect(recordLaneOwnsBranch(app.state().bays, "issue/terminal")).toBe(false)
-    // Live record: the grandfathered record lane.
-    await app.bays.submit({ branch: "issue/live", headSha: "6".repeat(40), base: "main", baseSha: BASE })
-    expect(recordLaneOwnsBranch(app.state().bays, "issue/live")).toBe(true)
   })
 })

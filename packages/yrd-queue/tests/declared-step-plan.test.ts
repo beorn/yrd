@@ -170,7 +170,8 @@ describe("declared step plan", () => {
 
     {
       await using first = await createApp(["check", "merge"], cache.journal, id, ran)
-      await first.queue.run({ derived: [await submit(first, "topic/one", "1", mint)] }, runtime)
+      await submit(first, "topic/one", "1", mint)
+      await first.queue.run({}, runtime)
       expect(ran).toEqual(["check", "merge"])
     }
     const storedIdentity = cache.stored()?.identity
@@ -183,7 +184,8 @@ describe("declared step plan", () => {
     // journal with an evicted prefix cannot serve.
     expect(cache.loads.at(-1), "a .yrd.yml checks edit must not move the projection identity").toBe(storedIdentity)
 
-    await second.queue.run({ derived: [await submit(second, "topic/two", "2", mint)] }, runtime)
+    await submit(second, "topic/two", "2", mint)
+    await second.queue.run({}, runtime)
     expect(ran, "the newly declared check must run without a --steps flag").toEqual(["check", "review", "merge"])
     expect(second.queue.get("R2")?.steps.map((step) => step.name)).toEqual(["check", "review", "merge"])
   })
@@ -194,17 +196,16 @@ describe("declared step plan", () => {
     const mint = volatilePrNumberMint()
     await using app = await createApp(["check", "review", "merge"], createMemoryJournal(), id, ran)
 
-    await app.queue.run({ derived: [await submit(app, "topic/configured", "1", mint)] }, runtime)
+    await submit(app, "topic/configured", "1", mint)
+    await app.queue.run({}, runtime)
     expect(app.state().queues.records.root?.entries?.[0]?.value?.stepSelection).toEqual({
       authority: "configured",
       source: "declared-at-base",
       steps: ["check", "review", "merge"],
     })
 
-    await app.queue.run(
-      { derived: [await submit(app, "topic/explicit", "2", mint)], steps: ["check", "merge"] },
-      runtime,
-    )
+    await submit(app, "topic/explicit", "2", mint)
+    await app.queue.run({ steps: ["check", "merge"] }, runtime)
     expect(app.queue.get("R2")?.stepSelection).toMatchObject({ authority: "explicit", source: "explicit" })
   })
 
@@ -216,7 +217,8 @@ describe("declared step plan", () => {
       steps: ["check", "review", "merge"],
     }))
 
-    await app.queue.run({ derived: [await submit(app, "topic/declared", "1", volatilePrNumberMint())] }, runtime)
+    await submit(app, "topic/declared", "1", volatilePrNumberMint())
+    await app.queue.run({}, runtime)
 
     // The process was constructed declaring two steps; the base ref declares
     // three. Git is the authority, so three run.
@@ -240,8 +242,8 @@ describe("declared step plan", () => {
     // built. A step the base ref declares but this process never installed has
     // nothing to execute, and running the rest silently is exactly the defect
     // 23192 records — so the run refuses and names what is missing.
-    const member = await submit(app, "topic/unknown", "1", volatilePrNumberMint())
-    await expect(app.queue.run({ derived: [member] }, runtime)).rejects.toThrow(/publish/u)
+    await submit(app, "topic/unknown", "1", volatilePrNumberMint())
+    await expect(app.queue.run({}, runtime)).rejects.toThrow(/publish/u)
     expect(ran, "nothing may execute under a plan this process cannot honour").toEqual([])
   })
 
@@ -252,10 +254,8 @@ describe("declared step plan", () => {
       steps: ["check", "review", "merge"],
     }))
 
-    await app.queue.run(
-      { derived: [await submit(app, "topic/explicit", "1", volatilePrNumberMint())], steps: ["check", "merge"] },
-      runtime,
-    )
+    await submit(app, "topic/explicit", "1", volatilePrNumberMint())
+    await app.queue.run({ steps: ["check", "merge"] }, runtime)
 
     expect(ran).toEqual(["check", "merge"])
     expect(app.queue.get("R1")?.stepSelection).toMatchObject({ authority: "explicit", source: "explicit" })

@@ -3,8 +3,8 @@
  * @level l3
  * @consumer @yrd/contest orchestration
  */
-import { createBayJobDefs, changeDeliveryState, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
+import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, failureFact, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withIssues } from "@yrd/issue"
 import { describe, expect, it } from "vitest"
@@ -167,7 +167,7 @@ async function createApp(journal: Journal<unknown>, setup = fixtures()) {
     createYrdDef(),
     withJobs({ definitions: [bayJobs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Finish Yrd", revision: "r7" }) }] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs, defaultBase: "main" }),
+    withBays({ jobs: bayJobs, defaultBase: "main" }),
   )
   return createYrd(contests(base), {
     inject: {
@@ -195,7 +195,7 @@ async function startContest(app: Awaited<ReturnType<typeof createApp>>): Promise
 }
 
 describe("Contests", () => {
-  it("composes immutable definitions and derives a bounded run, exact promotion, and replay", async () => {
+  it("composes immutable definitions and derives a bounded run, a verified-but-unrecordable promotion, and replay", async () => {
     const journal = createMemoryJournal()
     const setup = fixtures()
     const app = await createApp(journal, setup)
@@ -232,31 +232,29 @@ describe("Contests", () => {
     expect(app.state().jobs.byKey["contest:C1:attempt:A1:runner"]).toBe(ready.attempts.A1?.runner?.id)
 
     await app.contests.select({ contest: "C1", attempt: "A2", selectedBy: "human" })
-    const promoted = await app.contests.promote({ contest: "C1" }, runtime)
+    // S7 (branch-is-change, @i/10 22991): the winner is still VERIFIED at its
+    // write-once pin, but `contest/promoted` records a change-record identity
+    // (pr + revision) and the record store is gone, so finalization refuses
+    // rather than writing an identity it can no longer prove. The refusal
+    // carries the manual cure — submit the winning bay's branch.
+    const refusal = await app.contests.promote({ contest: "C1" }, runtime).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    )
+    expect(failureFact(refusal)).toMatchObject({ kind: "refusal", code: "contest-promotion-record-retired" })
+    expect((refusal as Error).message).toContain("yrd pr submit")
+
+    // What the deletion took is the identity to RECORD, not the proof: the
+    // verification job still ran against the write-once pin and still passed.
+    const promoted = app.contests.get("C1")!
     expect(promoted).toMatchObject({
-      status: "promoted",
       selection: { attempt: "A2", method: "manual" },
-      promotion: {
-        attempt: "A2",
-        commit: THOROUGH_SHA,
-        job: { status: "completed", conclusion: "success" },
-        pr: {
-          id: "PR1",
-          state: "open",
-          merged: false,
-          revs: [{ n: 1, head: THOROUGH_SHA }],
-        },
-      },
+      promotion: { attempt: "A2", commit: THOROUGH_SHA, job: { status: "completed", conclusion: "success" } },
     })
-    const submitted = app.bays.pr("PR1")
-    expect(submitted).toMatchObject({
-      bay: "B2",
-      state: "open",
-      merged: false,
-      revs: [{ n: 1, head: THOROUGH_SHA }],
-    })
-    if (submitted === undefined) throw new Error("promoted PR was not retained")
-    expect(changeDeliveryState(submitted)).toBe("submitted")
+    expect(promoted.promotion).not.toHaveProperty("pr")
+    // And nothing is fabricated on the winner's behalf: no submit fact stands
+    // for the promoted bay's branch, so the operator's push is still the act.
+    expect(app.state().bays.submits).toEqual({})
     expect(app.state().contests.records.C1?.promotion).not.toHaveProperty("status")
     expect(app.state().contests.records.C1?.promotion).not.toHaveProperty("job")
 
@@ -281,7 +279,9 @@ describe("Contests", () => {
       status: "promotion-failed",
       promotion: { job: { status: "completed", conclusion: "failure", error: { code: "pin-moved" } } },
     })
-    expect(app.bays.prs()).toEqual([])
+    // A moved pin delivers NOTHING: no submit fact stands for any bay branch,
+    // so no lane carries the unverified winner forward.
+    expect(app.state().bays.submits).toEqual({})
   })
 
   it("keeps waiting and retry authority on one durable Job", async () => {

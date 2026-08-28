@@ -1,15 +1,24 @@
 /**
  * @failure `queue recover` shared one eager per-row reader with every other queue path, so a single run record that reader rejects threw out of recovery — the tool whose whole job is repairing exactly that record — leaving the state unrecoverable by construction.
+ *
+ * S7 conversion note (branch-is-change, @i/10 22991): every member seeded here
+ * is DERIVED — a branch plus its standing submit fact — because `bays.submit`
+ * refuses `record-mint-retired` and there is no record store to mint into. The
+ * subject is unchanged: the reader walks QUEUE RUN records, and a run record is
+ * as damageable as it ever was. What the derived lane changes is the PR1128
+ * fixture below, where "a submitted carrier with no check request" stops being
+ * an asserted precondition and becomes the structural shape of a derived member.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue } from "@yrd/queue"
+import { deriveRunMemberArgs, withStep, withQueue, type DerivedRunMember } from "@yrd/queue"
+import { Queues } from "../src/model.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -82,19 +91,41 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: { journal, id, clock: () => START, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+/** ONE PR-number mint per app. `deriveRunMemberArgs` commits its number through
+ * the mint it is handed, so a fresh mint per call would re-issue `PR1` for every
+ * branch — and this file seeds two and three members into a single app. */
+const mints = new WeakMap<object, PrNumberMint>()
+function mintFor(app: object): PrNumberMint {
+  const existing = mints.get(app)
+  if (existing !== undefined) return existing
+  const created = volatilePrNumberMint()
+  mints.set(app, created)
+  return created
+}
+
+/** The branch's standing submit fact IS the delivery (S7 branch-is-change);
+ * the member the queue would compose from it is derived here so each `queue.run`
+ * below can name exactly the members its population needs. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>>,
+  branch: string,
+  sha?: string,
+): Promise<DerivedRunMember> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: sha ?? digit.repeat(40), base: "main" })
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint: mintFor(app),
+    branch,
+  })
 }
 
 type Fact = Readonly<{ id?: string; name: string; data?: unknown }>
@@ -161,7 +192,9 @@ async function seedMixedPopulation(
   {
     await using app = await createApp(journal)
     const unreadable = await submitBranch(app, "issue/unreadable-run")
-    await app.queue.run({ prs: [unreadable.id], steps: ["first", "second"] }, RUNTIME)
+    // `prs: []` beside a non-empty `derived` selects exactly those derived
+    // members — the post-S7 spelling of naming one member explicitly.
+    await app.queue.run({ prs: [], derived: [unreadable], steps: ["first", "second"] }, RUNTIME)
     expect(app.queue.get("R1"), "the seed run must finish so both steps carry a Job").toMatchObject({
       status: "completed",
       conclusion: "success",
@@ -169,7 +202,7 @@ async function seedMixedPopulation(
     expect(app.queue.get("R1")?.steps.map((step) => step.job !== undefined)).toEqual([true, true])
 
     const orphan = await submitBranch(app, "issue/jobless-orphan")
-    await app.dispatch(app.commands.queue.run, { prs: [orphan.id], steps: ["first", "second"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [orphan], steps: ["first", "second"] })
     expect(app.queue.get("R2")?.steps[0]?.job, "the orphan seed must start with a Job").toBeDefined()
 
     await seed?.(app)
@@ -183,9 +216,9 @@ async function seedValidPopulation(): Promise<Journal<unknown>> {
   {
     await using app = await createApp(journal)
     const passed = await submitBranch(app, "issue/unreadable-run")
-    await app.queue.run({ prs: [passed.id], steps: ["first", "second"] }, RUNTIME)
+    await app.queue.run({ prs: [], derived: [passed], steps: ["first", "second"] }, RUNTIME)
     const orphan = await submitBranch(app, "issue/jobless-orphan")
-    await app.dispatch(app.commands.queue.run, { prs: [orphan.id], steps: ["first", "second"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [orphan], steps: ["first", "second"] })
   }
   return await withoutJobForKey(journal, "queue:R2:0")
 }
@@ -313,21 +346,33 @@ describe("valid state reads exactly as it did before", () => {
  * the tool the fleet needed and could not run, executing over that change while an
  * unreadable run record stands beside it, and the remedy settlement merge
  * afterwards.
+ *
+ * S7: the wedged carrier is now a DERIVED member — a branch with a standing
+ * submit fact that no run has picked up. That is the same population position
+ * the incident's carrier held, reached without the record store, and "no check
+ * request existed" stops being a record field and becomes the member's shape.
  */
 describe("recover reaches the PR1128 shape with an unreadable record in the same population", () => {
   it("runs over a submitted PR with no check request and lets its refusal be settled", async () => {
     const wedged = { id: "", head: "9".repeat(40) }
     const journal = await seedMixedPopulation(async (app) => {
-      await app.bays.submit({ branch: "task/pr1128-shape", headSha: wedged.head, base: "main", baseSha: BASE })
-      const pr = Object.values(app.state().bays.prs).find((item) => item.branch === "task/pr1128-shape")
-      if (pr === undefined) throw new Error("PR was not recorded")
-      wedged.id = pr.id
-      expect(pr.checkRequests, "the incident's carrier never started required checks").toEqual([])
+      // The incident's carrier never started required checks. Post-S7 that is
+      // not an assertable field but the shape itself: a branch with a standing
+      // submit fact and no run is a member composed from that fact alone —
+      // there is no record to hang a check request on. The refusal below is
+      // therefore ledgered against a member that has never been through a
+      // check, exactly as PR1128 was.
+      const member = await submitBranch(app, "task/pr1128-shape", wedged.head)
+      wedged.id = member.id
+      expect(
+        Queues.values(app.state().queues).filter((run) => run.prs.some((pr) => pr.id === member.id)),
+        "the incident's carrier never started required checks — no run carries it",
+      ).toEqual([])
       await app.queue.recordAdmissionRefusal({
-        pr: pr.id,
+        pr: member.id,
         code: "authored-gitlink",
         kind: "refusal",
-        reason: `change '${pr.id}' changes generated-only gitlinks [ag]`,
+        reason: `change '${member.id}' changes generated-only gitlinks [ag]`,
       })
     })
     await using app = await createApp(journal, ids(100))

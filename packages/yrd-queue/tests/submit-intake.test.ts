@@ -1,31 +1,30 @@
 /**
- * @failure A branch approved only in git (refs/yrd/submit, no PR record)
- * cannot run at all post-door, runs with a silently minted record (the store
- * the S6 door froze), loses a whole compose to one poisoned branch, or its
- * identity is minted without the commit-before-escape contract. This file is
- * the door's compose surface (@i/10-merge-queue/s6-door-design §5 item 4,
- * replacing the retired 2b intake sweep): ref-only approvals run as DERIVED
- * members — selected, admitted and integrated with zero record writes — and
- * the sweep's loud edges keep their exact policy in the derived lane.
+ * @failure A branch approved only in git (refs/yrd/submit) cannot run at all,
+ * loses a whole compose to one poisoned branch, or its identity is minted
+ * without the commit-before-escape contract. This file is the compose surface
+ * for the derived lane (@i/10-merge-queue/s6-door-design §5 item 4, replacing
+ * the retired 2b intake sweep): ref-only approvals run as DERIVED members —
+ * selected, admitted and integrated — and the sweep's loud edges keep their
+ * exact policy in the derived lane.
+ *
+ * S7 (branch-is-change, @i/10 22991) deleted the change-record store, so the
+ * "zero record writes" half of the original contract is now structural rather
+ * than asserted: there is nothing left to write to. What these tests still
+ * own is the identity contract — a derived member's ONLY durable home is the
+ * run snapshot it starts, the number mint commits before the id escapes, and
+ * a branch the compose will not select never burns a number.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import {
-  changeDeliveryState,
-  changeHead,
-  createBayJobDefs,
-  withBays,
-  volatilePrNumberMint,
-  type BayWorkspace,
-  type PrNumberMint,
-} from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, raiseFailure } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
+  duplicatePayloadSubmits,
   Queues,
   withMerge,
   withQueue,
@@ -39,6 +38,8 @@ const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const SHA = "7".repeat(40)
+const RESUBMIT_SHA = "8".repeat(40)
+const OTHER_SHA = "c".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 type CheckResult = z.infer<typeof CheckResultSchema>
@@ -75,14 +76,13 @@ const mergeableCandidate: CandidatePreparer = (input) => {
   return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
 }
 
-/** A queue with no review requirement and no required checks, so a submitted
- * record is runnable and one selectorless compose can carry it to integration. */
+/** A queue with no review requirement and no required checks, so a standing
+ * submit fact is runnable and one selectorless compose carries it to integration. */
 async function createApp(
   options: Readonly<{
     journal?: ReturnType<typeof createMemoryJournal>
     id?: () => string
     log?: ReturnType<typeof createLogger>
-    mint?: PrNumberMint
     /** The queue-side durable mint arming derived admission; defaults to a
      * fresh volatile store. Pass the SAME object across app rebuilds to model
      * the durable pr-mint.json. */
@@ -123,7 +123,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: options.mint ?? volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -137,23 +137,18 @@ async function createApp(
 
 type App = Awaited<ReturnType<typeof createApp>>
 
-/** An authored record via `bay.submit`, for the collision fixtures. */
-async function submitBranch(app: App, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error(`PR for '${branch}' was not recorded`)
-  return pr
-}
-
 function actionsLogged(events: readonly LogEvent[]): string[] {
   return events.flatMap((event) =>
     event.kind === "log" && typeof event.props?.action === "string" ? [event.props.action] : [],
   )
 }
 
-describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () => {
-  it("an author's branch + submit ref alone — no record — is derived, admitted and integrated by one selectorless compose, with zero record writes", async () => {
+function runsForBranch(app: App, branch: string) {
+  return Queues.values(app.state().queues).filter((run) => run.prs.some((member) => member.branch === branch))
+}
+
+describe("queue compose runs ref-only submits as DERIVED members", () => {
+  it("an author's branch + submit ref alone is derived, admitted and integrated by one selectorless compose", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const journal = createMemoryJournal()
@@ -163,19 +158,16 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
       await using app = await createApp({ journal, id, log, queueMint })
       // The author pushed refs/heads/issue/ref-only and refs/yrd/submit/issue/ref-only,
       // nothing else. The receiver accepted the submit ref and projected the fact —
-      // this dispatch IS post-receive's exact write. No `pr create`, no record, ever.
+      // this dispatch IS post-receive's exact write.
       await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
       expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/ref-only"])
-      expect(app.state().bays.prs).toEqual({})
 
       const runs = await app.queue.run({}, runtime)
       expect(runs).toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
 
-      // The DERIVED regime end to end: no record minted, the run's snapshot is
-      // the identity's only durable home, the submit fact still stands (no
-      // takeover act exists post-door), and the served branch's refusal row
-      // retired. The durable mint committed the number before it escaped.
-      expect(app.state().bays.prs).toEqual({})
+      // The run's snapshot is the identity's only durable home, the submit fact
+      // still stands (no takeover act exists), and the served branch's refusal
+      // row retired. The durable mint committed the number before it escaped.
       const record = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR1"))
       expect(record?.prs[0]).toMatchObject({
         id: "PR1",
@@ -188,38 +180,47 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
       expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: SHA, base: "main" })
       expect(app.queue.unrecordedSubmits()).toEqual([])
       expect(actionsLogged(events)).toContain("compose-derived-admitted")
+      // The id-seam answers the recordless id from that retained snapshot.
+      expect(app.queue.resolveMember("PR1")).toMatchObject({ source: "snapshot", id: "PR1" })
 
       // Idempotence: the authority is consumed by the retained merge run, so
       // the next compose derives nothing new and runs nothing.
       await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     }
 
-    // Identity-neutral by construction: every event the door wrote is an
+    // Identity-neutral by construction: every event the compose wrote is an
     // already-registered one, so a fresh projection over the same journal
-    // converges on the same recordless state.
+    // converges on the same state.
     await using replayed = await createApp({ journal, id, queueMint })
-    expect(replayed.state().bays.prs).toEqual({})
     const replayedRun = Queues.values(replayed.state().queues).find((run) => run.prs.some((pr) => pr.id === "PR1"))
     expect(replayedRun?.prs[0]).toMatchObject({ id: "PR1", headSha: SHA })
   })
 
-  it("an explicit run does NOT derive ref-only branches: a derived identity's only durable home is the run it starts", async () => {
+  it("an explicit run never mints an identity for a branch it will not select", async () => {
     const queueMint = volatilePrNumberMint()
     await using app = await createApp({ queueMint })
-    const existing = await submitBranch(app, "issue/existing")
-    await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
+    // One branch the compose has already served, re-approved so it is runnable
+    // again — an explicit run needs a member id, and a derived member only has
+    // one once a run retained its snapshot.
+    await app.bays.recordBranchSubmit({ branch: "issue/existing", sha: SHA, base: "main" })
+    await app.queue.run({}, runtime)
+    expect(queueMint.highWater()).toBe(1)
+    await app.bays.recordBranchSubmit({ branch: "issue/existing", sha: RESUBMIT_SHA, base: "main" })
 
-    await app.queue.run({ prs: [existing.id] }, runtime)
+    // A second branch arrives approved-only-in-git while the explicit run is aimed elsewhere.
+    await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: OTHER_SHA, base: "main" })
+
+    await app.queue.run({ prs: ["PR1"] }, runtime)
 
     // The explicit run integrated its target; the ref-only branch was neither
     // minted nor selected — a number minted during a run that will not select
     // it would escape nowhere and burn. Its row stands for the next
     // selectorless compose.
-    expect(changeDeliveryState(app.state().bays.prs[existing.id] ?? existing)).toBe("integrated")
-    expect(Object.values(app.state().bays.prs).some((pr) => pr.branch === "issue/ref-only")).toBe(false)
-    expect(queueMint.highWater()).toBe(0)
+    expect(runsForBranch(app, "issue/existing").at(-1)?.prs[0]).toMatchObject({ headSha: RESUBMIT_SHA })
+    expect(runsForBranch(app, "issue/ref-only")).toEqual([])
+    expect(queueMint.highWater()).toBe(1)
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/ref-only"])
-    expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: SHA })
+    expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: OTHER_SHA })
   })
 
   it("a mint failure propagates loudly and derives nothing — the refusal row stands for the next compose", async () => {
@@ -233,82 +234,68 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     await app.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: SHA, base: "main" })
 
     await expect(app.queue.run({}, runtime)).rejects.toThrow("PR-number mint store")
-    // Nothing derived, nothing consumed: no record, no run, and the projected
-    // approval still stands as the visible row it was.
-    expect(app.state().bays.prs).toEqual({})
+    // Nothing derived, nothing consumed: no run, and the projected approval
+    // still stands as the visible row it was.
+    expect(runsForBranch(app, "issue/ref-only")).toEqual([])
     expect(app.state().bays.submits["issue/ref-only"]).toMatchObject({ sha: SHA, base: "main" })
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/ref-only"])
   })
 
-  it("a submit whose exact payload an open record already carries fails the compose loudly and derives nothing", async () => {
+  it("two branches approved at the SAME sha are grouped into one collision row naming both", async () => {
+    // Pre-S7 this was a loud REFUSAL, caught because one of the two branches
+    // had a change record carrying the payload. With the store gone the fence
+    // needs no record — the standing submit facts group by sha — but the
+    // policy changed with it (@chief 2026-08-27): a rename or a re-push under
+    // a new name is a legitimate way for one payload to stand under two
+    // branches, so refusing would break real workflows. It reports instead,
+    // and whichever merges second is caught by the already-landed guard on the
+    // next pass. Leaving it unfenced AND unsaid is the silent-loss failure.
     await using app = await createApp({})
-    await app.bays.submit({ branch: "issue/first", headSha: SHA, base: "main", baseSha: BASE })
+    await app.bays.recordBranchSubmit({ branch: "issue/first", sha: SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/duplicate", sha: SHA, base: "main" })
+    // A third branch at its OWN sha is the negative control: without it, a
+    // function that reported EVERY branch would pass the assertion below.
+    await app.bays.recordBranchSubmit({ branch: "issue/distinct", sha: RESUBMIT_SHA, base: "main" })
+
+    // ONE row per collision, not one per branch — a report that fires per
+    // member turns a single ambiguity into recurring noise.
+    expect(duplicatePayloadSubmits(app.state().bays)).toEqual([
+      { sha: SHA, branches: ["issue/duplicate", "issue/first"] },
+    ])
+  })
+
+  it("the collision is not a refusal: both branches still compose", async () => {
+    await using app = await createApp({})
+    await app.bays.recordBranchSubmit({ branch: "issue/first", sha: SHA, base: "main" })
     await app.bays.recordBranchSubmit({ branch: "issue/duplicate", sha: SHA, base: "main" })
 
-    // Deliberately a propagated failure, not a skip: one payload claimed by two
-    // branch identities needs a human. The derived materialization refuses it
-    // as the untyped duplicate-payload error, which the compose never swallows.
-    await expect(app.queue.run({}, runtime)).rejects.toThrow("payload already recorded as change 'PR1'")
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/duplicate"])
-  })
-
-  it("a terminal-record branch re-submitted in git at a NEW head COMPOSES as its derived re-entry (Q1)", async () => {
-    const queueMint = volatilePrNumberMint()
-    await using app = await createApp({ queueMint })
-    const pr = await submitBranch(app, "issue/terminal")
-    await app.bays.closePr({ pr: pr.id, reason: "superseded" })
-    // The author re-pushes the branch and its submit ref at a NEW sha. The
-    // record is HISTORY, not ownership: post-purge (the legacy mint is
-    // retired) the derived lane is the only re-entry for a terminal branch's
-    // next head, so this composes — the PR2139 double-merge stays fenced by
-    // the live-ownership exclusion, the landed-content exclusion, and the
-    // fact-retirement at every merge, none of which this state trips.
-    await app.bays.recordBranchSubmit({ branch: "issue/terminal", sha: SHA, base: "main" })
-
     const runs = await app.queue.run({}, runtime)
-    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
 
-    // The withdrawn record is untouched history; the new head ran under a
-    // FRESH derived identity beside it.
-    const terminal = app.state().bays.prs[pr.id]
-    if (terminal === undefined) throw new Error("expected the withdrawn record to survive")
-    expect(changeDeliveryState(terminal)).toBe("withdrawn")
-    expect(Object.keys(app.state().bays.prs)).toEqual([pr.id])
-    expect(queueMint.highWater()).toBeGreaterThan(0)
-    const reentry = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((member) => member.branch === "issue/terminal" && member.headSha === SHA),
-    )
-    expect(reentry, "the new head must run as a derived member").toBeDefined()
-    expect(reentry?.prs[0]?.id).not.toBe(pr.id)
+    expect(runs.length, "a payload collision must never stop the compose").toBeGreaterThan(0)
   })
 
-  it("the collision rule under the sweep's race: bay.intake mints a fresh identity for a terminal record and no-ops an identical live one", async () => {
-    await using app = await createApp({})
-    const pr = await submitBranch(app, "issue/raced")
-    await app.bays.closePr({ pr: pr.id, reason: "superseded" })
+  it("the compose says the collision out loud, naming both branches", async () => {
+    // The reporting half. `duplicatePayloadSubmits` computing the right answer
+    // is worth nothing if no compose ever calls it — an unread function is the
+    // same silence as no function, which is exactly the state S7 left this in.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createApp({ log })
+    await app.bays.recordBranchSubmit({ branch: "issue/first", sha: SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/duplicate", sha: SHA, base: "main" })
 
-    // The dispatch the sweep would make, arriving after the branch gained a
-    // TERMINAL record: a fresh identity is minted — never a reopen (D2 reopening
-    // belongs to the author's `pr submit`; integrated identities stay frozen per Q1).
-    await app.bays.intake({ branch: "issue/raced", headSha: SHA, base: "main", submit: true, submitter: "yrd/queue" })
-    const fresh = Object.values(app.state().bays.prs).find((item) => item.branch === "issue/raced" && item.id !== pr.id)
-    if (fresh === undefined) throw new Error("expected a fresh identity beside the withdrawn record")
-    expect(fresh.revs[0]?.n).toBe(1)
-    const withdrawn = app.state().bays.prs[pr.id]
-    if (withdrawn === undefined) throw new Error("expected the withdrawn record to survive")
-    expect(changeDeliveryState(withdrawn)).toBe("withdrawn")
+    await app.queue.run({}, runtime)
 
-    // The same dispatch arriving after the branch gained an identical LIVE
-    // record: a zero-event no-op, which the sweep reports and never supersedes.
-    const replay = await app.bays.intake({
-      branch: "issue/raced",
-      headSha: SHA,
-      base: "main",
-      submit: true,
-      submitter: "yrd/queue",
-    })
-    expect(replay.events).toEqual([])
+    const collisions = events.filter(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.props?.action === "compose-derived-duplicate-payload",
+    )
+    expect(collisions, "one warn per collision").toHaveLength(1)
+    expect(collisions[0]?.level).toBe("warn")
+    expect(collisions[0]?.props).toMatchObject({ sha: SHA })
+    // Both colliding branches are named: a warn that says "some branches
+    // collide" without saying WHICH is not actionable.
+    expect(collisions[0]?.props?.branches).toEqual(["issue/duplicate", "issue/first"])
   })
 
   it("a submit whose commit is gone is refused at its OWN derivation — the healthy submit still lands in the same compose", async () => {
@@ -339,13 +326,11 @@ describe("queue compose runs ref-only submits as DERIVED members (S6 door)", () 
     // The vanished one was skipped LOUD at its own derivation and its row
     // stays visible for the audit to age; the healthy one integrated as a
     // derived member in the same compose — one poisoned branch never zeroes
-    // the rest, and no record exists anywhere.
+    // the rest.
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-    expect(app.state().bays.prs).toEqual({})
-    const healthyRun = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((member) => member.branch === "issue/healthy"),
-    )
+    const healthyRun = runsForBranch(app, "issue/healthy")[0]
     expect(healthyRun?.prs[0]).toMatchObject({ headSha: SHA })
+    expect(runsForBranch(app, "issue/gone")).toEqual([])
     expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/gone"])
     const skip = events.find(
       (event) =>

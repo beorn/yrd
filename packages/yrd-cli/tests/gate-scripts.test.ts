@@ -190,7 +190,7 @@ describe("gate scripts execute at the base ref's version", () => {
     })
     const host = await createYrdHost({ cwd: repo })
     try {
-      await host.app.bays.submit({ branch: "issue/weaken", headSha: attacker, base: "main" })
+      await host.app.bays.recordBranchSubmit({ branch: "issue/weaken", sha: attacker, base: "main" })
       const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
       expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
       const gateJob = run?.steps.find((step) => step.name === "gate")?.job
@@ -204,10 +204,14 @@ describe("gate scripts execute at the base ref's version", () => {
     const editor = await branchWith(repo, "issue/legit-edit", { "tools/gate.sh": WEAKENED_GATE })
     const host2 = await createYrdHost({ cwd: repo })
     try {
-      await host2.app.bays.submit({ branch: "issue/legit-edit", headSha: editor, base: "main" })
-      const pr = Object.values(host2.app.state().bays.prs).find((record) => record.branch === "issue/legit-edit")
-      if (pr === undefined) throw new Error("expected the submitted change to have a record")
-      const run = (await host2.app.queue.run({ prs: [pr.id] }, { runner: "test", leaseMs: 60_000 }))[0]
+      // S7: the branch and its standing submit fact ARE the change, so
+      // isolating the compliant editor means retiring the attacker's fact
+      // rather than selecting one record out of a store. Without this the
+      // selectorless drain would compose the still-submitted attacker too.
+      await host2.app.bays.recordBranchUnsubmit({ branch: "issue/weaken", reason: "archived" })
+      await host2.app.bays.recordBranchSubmit({ branch: "issue/legit-edit", sha: editor, base: "main" })
+      expect(Object.keys(host2.app.state().bays.submits)).toEqual(["issue/legit-edit"])
+      const run = (await host2.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
       expect(run).toMatchObject({ status: "completed", conclusion: "success" })
       expect(await git(repo, "show", "main:tools/gate.sh")).toBe(WEAKENED_GATE.trimEnd())
     } finally {

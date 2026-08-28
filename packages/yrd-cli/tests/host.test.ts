@@ -11,7 +11,7 @@ import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { currentChangeRev, changeBaseSha, changeDeliveryState, recordLaneOwnsBranch } from "@yrd/bay"
+import type { BaysState } from "@yrd/bay"
 import { Command, createFailure, createMemoryJournal, parseJournalFrame } from "@yrd/core"
 import { DIAGNOSTICS_COMPARISON_READY, GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal, createReadOnlyJournal } from "@yrd/persistence"
@@ -81,6 +81,52 @@ function testJournal(dir: string, log?: ConditionalLogger) {
     writerVersion: CURRENT_JOURNAL_COMPATIBILITY.version,
     inject: { sqliteVersion: "3.53.0", ...(log === undefined ? {} : { log }) },
   } as unknown as Parameters<typeof createJournal>[0])
+}
+
+/**
+ * The change-record slice a pre-S7 checkpoint carried, spelled as a literal.
+ *
+ * S7 (branch-is-change, @i/10 22991) deleted `bays.prs` and `bays.receipts`
+ * from the state contract, so live code can no longer WRITE one — which means
+ * a migration fixture can no longer obtain the legacy shape by running the
+ * predecessor and reading what it wrote. Spelling it here is also the more
+ * honest fixture: it pins the bytes a DEPLOYED checkpoint actually holds,
+ * instead of whatever today's projector happens to emit. Nothing validates
+ * these records on the way through — the store-deletion edge destructures the
+ * whole container away — so the shape only has to be the shape production
+ * wrote.
+ */
+function legacyRecordStore(
+  featureSha: string,
+  record: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  return {
+    prs: {
+      PR1: {
+        id: "PR1",
+        bay: "B1",
+        name: "feature",
+        branch: "issue/feature",
+        base: "main",
+        by: "test",
+        state: "open",
+        merged: false,
+        revs: [{ n: 1, head: featureSha, submittedAt: "2026-08-25T00:00:00.000Z" }],
+        checkRequests: [],
+        ...record,
+      },
+    },
+    receipts: {},
+  }
+}
+
+/** Every migration fixture asserts the same two things about a boot that
+ * crossed the store deletion: the retired container is GONE from runtime
+ * state, and the delivery truth that replaces it survived the crossing. */
+function expectRecordStoreShed(bays: BaysState, branch: string, sha: string): void {
+  expect(bays).not.toHaveProperty("prs")
+  expect(bays).not.toHaveProperty("receipts")
+  expect(bays.submits[branch]).toMatchObject({ sha, base: "main" })
 }
 
 async function byteManifest(root: string): Promise<readonly string[]> {
@@ -776,7 +822,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
     const batches = await Array.fromAsync(journal.read())
     expect(batches.flatMap(({ values }) => values)).toEqual([
@@ -845,7 +891,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })).resolves.toBeDefined()
+    await expect(app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })).resolves.toBeDefined()
     await expect(Array.fromAsync(journal.read())).resolves.toHaveLength(1)
   })
 
@@ -875,7 +921,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })).rejects.toMatchObject(
+    await expect(app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })).rejects.toMatchObject(
       {
         failure: {
           kind: "refusal",
@@ -932,9 +978,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+    const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -971,9 +1017,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+    const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     const job = run?.steps[0]?.job
     if (job?.status !== "completed" || job.conclusion !== "success") {
@@ -1035,9 +1081,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process,
       config,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+    const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
 
     expect(provisioned).toHaveLength(2)
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
@@ -1484,9 +1530,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         process,
         config,
       })
-      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
-      const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+      const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
 
       expect(run).toMatchObject({
         status: "completed",
@@ -1534,7 +1580,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     try {
       const first = await createApp()
-      await first.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await first.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
       await first.close()
 
       using database = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
@@ -1549,9 +1595,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       events.length = 0
       const restored = await createApp()
       try {
-        const restoredPR = restored.state().bays.prs.PR1!
-        expect(restoredPR).toMatchObject({ branch: "issue/feature" })
-        expect(currentChangeRev(restoredPR)).toMatchObject({ head: featureSha })
+        // S7: the branch and its standing submit fact ARE the delivery, so
+        // that fact — not a record — is what the checkpoint has to restore.
+        expect(restored.state().bays.submits["issue/feature"]).toMatchObject({ sha: featureSha, base: "main" })
         expect(events).toContainEqual(
           expect.objectContaining({
             kind: "span",
@@ -1588,8 +1634,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config: config(10),
     })
-    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await predecessor.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+    await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    await predecessor.queue.run({ steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
     expect(predecessor.state().queues.batchSize).toBe(10)
     const historicalRun = Queues.values(predecessor.state().queues)[0]
     expect(historicalRun?.batchSize).toBe(10)
@@ -1622,7 +1668,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config: config(1),
     })
 
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expect(restored.state().bays.submits["issue/feature"]).toMatchObject({ sha: featureSha, base: "main" })
     expect(restored.state().queues.batchSize).toBe(1)
     expect(historicalRun === undefined ? undefined : restored.queue.get(historicalRun.id)?.batchSize).toBe(10)
   })
@@ -1648,7 +1694,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     await predecessor.close()
 
     using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
@@ -1662,13 +1708,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
       .parse(JSON.parse(checkpoint.checkpoint_json))
-    const bays = z
-      .object({ prs: z.record(z.string(), z.record(z.string(), z.unknown())) })
-      .passthrough()
-      .parse(checkpointValue.value.state["bays"])
+    const bays = z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["bays"])
     const queues = z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["queues"])
-    const pr = bays.prs["PR1"]
-    if (pr === undefined) throw new Error("expected predecessor PR1 projection")
     // A checkpoint written before the intent rail's deletion (2026-08-18) still carries a
     // populated `intents` slice — the shape a real intents-v1/v2 checkpoint held. Nothing reads
     // it anymore; the migrate path must drop it rather than let it leak into every future
@@ -1708,7 +1749,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         state: {
           ...checkpointValue.value.state,
           intents: staleIntents,
-          bays: { ...bays, prs: { ...bays.prs, PR1: { ...pr, regressions: staleRegressions } } },
+          bays: { ...bays, ...legacyRecordStore(featureSha, { regressions: staleRegressions }) },
           queues: { ...queues, terminalAssociations: { pending: {}, applied: {} } },
         },
       },
@@ -1731,9 +1772,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
 
     // Boot succeeds past the stale slices, and runtime state carries no trace of them.
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    // S7 subsumes the per-record `regressions` scrub this edge used to perform: the
+    // successor edge deletes the whole record container, so the field is shed with
+    // its owner rather than field-by-field.
+    expectRecordStoreShed(restored.state().bays, "issue/feature", featureSha)
     expect(restored.state()).not.toHaveProperty("intents")
-    expect(restored.state().bays.prs.PR1).not.toHaveProperty("regressions")
     expect(restored.state().queues).not.toHaveProperty("terminalAssociations")
     await restored.close()
 
@@ -1750,7 +1793,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .passthrough()
       .parse(JSON.parse(rewritten.checkpoint_json))
     expect(rewrittenValue.value.state).not.toHaveProperty("intents")
-    expect(rewrittenValue.value.state).not.toHaveProperty("bays.prs.PR1.regressions")
+    expect(rewrittenValue.value.state).not.toHaveProperty("bays.prs")
+    expect(rewrittenValue.value.state).not.toHaveProperty("bays.receipts")
     expect(rewrittenValue.value.state).not.toHaveProperty("queues.terminalAssociations")
   })
 
@@ -1775,7 +1819,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     await predecessor.close()
 
     using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
@@ -1802,9 +1846,23 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         ...checkpointValue.value,
         state: {
           ...checkpointValue.value.state,
+          // A checkpoint at this identity predates the store deletion, so it
+          // carries the record container the statuses copy shadowed. Both
+          // leave on the way to the current identity, on separate edges.
+          bays: {
+            ...z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["bays"]),
+            ...legacyRecordStore(featureSha),
+          },
           queues: {
             ...queues,
-            authority: { ...authority, statuses: { PR1: "submitted" } },
+            authority: {
+              ...authority,
+              // The token fact the copy shadowed. It is the control for this
+              // test: the drop has to be surgical, taking the derived copy and
+              // leaving the fact it was derived FROM.
+              submits: { PR1: { pr: "PR1", revision: 1, headSha: featureSha } },
+              statuses: { PR1: "submitted" },
+            },
           },
         },
       },
@@ -1827,8 +1885,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
 
     // Boot succeeds past the stored copy; runtime state carries no trace of
-    // it, while the token facts and the change record survive untouched.
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    // it, while the token facts survive untouched. The record store leaves on
+    // its own successor edge, which is a different drop with a different cause.
+    expectRecordStoreShed(restored.state().bays, "issue/feature", featureSha)
     expect(restored.state().queues.authority).not.toHaveProperty("statuses")
     expect(restored.state().queues.authority.submits).toHaveProperty("PR1")
     await restored.close()
@@ -1860,7 +1919,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
     expect(rebooted.state().queues.authority).not.toHaveProperty("statuses")
-    expect(rebooted.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expectRecordStoreShed(rebooted.state().bays, "issue/feature", featureSha)
   })
 
   it("folds a correlation-era checkpoint's revision labels into props while migrating a retained checkpoint", async () => {
@@ -1884,7 +1943,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    // A retained Run is what carries the surviving revision label: post-S7 a
+    // member snapshot is the only place a revision — and so a revision's
+    // props — still lives.
+    await predecessor.queue.run({ steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
     await predecessor.close()
 
     using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
@@ -1905,18 +1968,39 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // boundary, but checkpoint STATE restores structurally, so the migrate
     // path itself must fold or the labels enter a process that only reads
     // `props` and go invisible to settlement and detail views forever.
-    const bays = z
-      .object({ prs: z.record(z.string(), z.unknown()) })
+    const bays = z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["bays"])
+    const legacyLabel = { namespace: "tribe-request", id: "2f333586-27b7-434e-8764-6ae53ec0c468" }
+    // S7 moved where a revision label LIVES. Records carried one per revision
+    // and the store is gone, so the record arm below is the fold's tolerance
+    // case — state the edge must process on the way through, then shed on the
+    // successor edge. The surviving home is a Run's own member snapshot, which
+    // is why the durable assertions read the RUN, not the record.
+    const legacyRecords = legacyRecordStore(featureSha, {
+      revs: [{ n: 1, head: featureSha, submittedAt: "2026-08-25T00:00:00.000Z", correlation: legacyLabel }],
+    })
+    const queues = z
+      .object({ records: z.record(z.string(), z.unknown()) })
       .passthrough()
-      .parse(checkpointValue.value.state["bays"])
-    const pr = z
-      .object({ revs: z.array(z.record(z.string(), z.unknown())) })
-      .passthrough()
-      .parse(bays.prs["PR1"])
-    const legacyRevs = pr.revs.map(({ props: _props, ...rev }) => ({
-      ...rev,
-      correlation: { namespace: "tribe-request", id: "2f333586-27b7-434e-8764-6ae53ec0c468" },
-    }))
+      .parse(checkpointValue.value.state["queues"])
+    const runIds = Object.keys(queues.records)
+    // Loud, not skipped: with no retained Run the fold has no surviving witness
+    // and this test would pass while proving only that a dropped field dropped.
+    expect(runIds, "the predecessor must retain a Run to carry the surviving label").not.toEqual([])
+    const legacyRuns = Object.fromEntries(
+      Object.entries(queues.records).map(([id, run]) => {
+        const parsed = z
+          .object({ prs: z.array(z.record(z.string(), z.unknown())) })
+          .passthrough()
+          .parse(run)
+        return [
+          id,
+          {
+            ...parsed,
+            prs: parsed.prs.map(({ props: _props, ...member }) => ({ ...member, correlation: legacyLabel })),
+          },
+        ]
+      }),
+    )
     // The PRODUCTION composition's correlation-era identity — the same value
     // the retained list carries, so this test also pins that the edge a live
     // deployment needs to cross the props cut actually exists.
@@ -1927,7 +2011,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         ...checkpointValue.value,
         state: {
           ...checkpointValue.value.state,
-          bays: { ...bays, prs: { ...bays.prs, PR1: { ...pr, revs: legacyRevs } } },
+          bays: { ...bays, ...legacyRecords },
+          queues: { ...queues, records: legacyRuns },
         },
       },
       identity: retainedIdentity,
@@ -1950,14 +2035,16 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     // Boot migrates the retained checkpoint and the fold merges each legacy
     // pair as a one-entry props map — visible to everything that reads props.
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
-    const migrated = z
-      .object({ revs: z.array(z.record(z.string(), z.unknown())) })
-      .passthrough()
-      .parse(restored.state().bays.prs.PR1)
-    for (const rev of migrated.revs) {
-      expect(rev).not.toHaveProperty("correlation")
-      expect(rev["props"]).toEqual({ "tribe-request": "2f333586-27b7-434e-8764-6ae53ec0c468" })
+    // The record arm the fold also crossed is gone by now, shed on the
+    // store-deletion edge, which is exactly why the witness is the Run.
+    expectRecordStoreShed(restored.state().bays, "issue/feature", featureSha)
+    const migratedRuns = Queues.values(restored.state().queues)
+    expect(migratedRuns).not.toEqual([])
+    for (const run of migratedRuns) {
+      for (const member of run.prs) {
+        expect(member).not.toHaveProperty("correlation")
+        expect(member.props).toEqual({ "tribe-request": "2f333586-27b7-434e-8764-6ae53ec0c468" })
+      }
     }
     await restored.close()
 
@@ -1999,7 +2086,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     await predecessor.close()
 
     using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
@@ -2012,12 +2099,18 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .passthrough()
       .parse(JSON.parse(checkpoint.checkpoint_json))
     const bays = z.object({ submits: z.unknown() }).passthrough().parse(checkpointValue.value.state["bays"])
-    // Strip the slice the way a checkpoint written before 2a genuinely lacks it.
+    // Strip the slice the way a checkpoint written before 2a genuinely lacks
+    // it, and restore the record store it DID carry: pre-2a is squarely inside
+    // the record era, so a fixture without records would be testing a shape
+    // that never shipped.
     const { submits: _current, ...baysBefore } = bays
     const retainedIdentity = "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37"
     const retainedCheckpoint = JSON.stringify({
       ...checkpointValue,
-      value: { ...checkpointValue.value, state: { ...checkpointValue.value.state, bays: baysBefore } },
+      value: {
+        ...checkpointValue.value,
+        state: { ...checkpointValue.value.state, bays: { ...baysBefore, ...legacyRecordStore(featureSha) } },
+      },
       identity: retainedIdentity,
     })
     const stripped = z
@@ -2040,7 +2133,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    // Both cuts land in one boot: the slice 2a ADDS arrives present and empty
+    // (never `undefined` — the PR1305 outage shape), and the store S7 REMOVES
+    // is gone. A pre-2a deployment crosses both edges or neither.
+    expect(restored.state().bays).not.toHaveProperty("prs")
+    expect(restored.state().bays).not.toHaveProperty("receipts")
     expect(restored.state().bays.submits).toEqual({})
     // And the new fact merges on the migrated state like on any other.
     await restored.bays.recordBranchSubmit({ branch: "issue/ref-only", sha: featureSha, base: "main" })
@@ -2071,8 +2168,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await predecessor.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+    await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    await predecessor.queue.run({ steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
     await predecessor.close()
 
     using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
@@ -2083,9 +2180,27 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       .get()
     if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
     expect(checkpoint.cursor).toBeGreaterThan(1)
-    const checkpointValue = z.record(z.string(), z.unknown()).parse(JSON.parse(checkpoint.checkpoint_json))
+    const checkpointValue = z
+      .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(checkpoint.checkpoint_json))
     const retainedIdentity = "f41d7efff8a3d2eb53b47ae8ab6ca3cf4058e2c37ff325a35c848efea94f9fcd"
-    const retainedCheckpoint = JSON.stringify({ ...checkpointValue, identity: retainedIdentity })
+    // A live checkpoint at this identity predates the store deletion and
+    // carries records; the fixture spells them, since live code no longer can.
+    const retainedCheckpoint = JSON.stringify({
+      ...checkpointValue,
+      value: {
+        ...checkpointValue.value,
+        state: {
+          ...checkpointValue.value.state,
+          bays: {
+            ...z.record(z.string(), z.unknown()).parse(checkpointValue.value.state["bays"]),
+            ...legacyRecordStore(featureSha),
+          },
+        },
+      },
+      identity: retainedIdentity,
+    })
     database
       .query(
         "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
@@ -2110,7 +2225,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expectRecordStoreShed(restored.state().bays, "issue/feature", featureSha)
   })
 
   it("boots a host over ae0d2084, the identity /hh's live journal actually holds", async () => {
@@ -2153,8 +2268,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       })
 
       const predecessor = await createDefaultYrdApp(host())
-      await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      await predecessor.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
+      await predecessor.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+      await predecessor.queue.run({ steps: ["check"] }, { runner: "test", leaseMs: 60_000 })
       await predecessor.close()
 
       using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
@@ -2162,8 +2277,26 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton = 1")
         .get()
       if (stored === null) throw new Error("expected predecessor projection checkpoint")
-      const value = z.record(z.string(), z.unknown()).parse(JSON.parse(stored.checkpoint_json))
-      const json = JSON.stringify({ ...value, identity })
+      const value = z
+        .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
+        .passthrough()
+        .parse(JSON.parse(stored.checkpoint_json))
+      // Every identity this test stores predates the store deletion, so the
+      // stored checkpoint has to carry records for the crossing to be real.
+      const json = JSON.stringify({
+        ...value,
+        value: {
+          ...value.value,
+          state: {
+            ...value.value.state,
+            bays: {
+              ...z.record(z.string(), z.unknown()).parse(value.value.state["bays"]),
+              ...legacyRecordStore(featureSha),
+            },
+          },
+        },
+        identity,
+      })
       database
         .query(
           "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
@@ -2179,12 +2312,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         .run("history_evicted_through", "1")
       database.close()
 
-      return { open: () => createDefaultYrdApp(host()), runtimeProcess }
+      return { open: () => createDefaultYrdApp(host()), runtimeProcess, featureSha }
     }
 
     const live = await bootStoring("ae0d2084bdb1202cf8205a03b4d09ccf915bcccf197e90afbe62617e7c078839")
     const restored = await live.open()
-    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    expectRecordStoreShed(restored.state().bays, "issue/feature", live.featureSha)
     await restored.close()
     await live.runtimeProcess[Symbol.asyncDispose]()
 
@@ -2353,28 +2486,20 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "submit",
       "close",
     ])
-    expect(Object.keys(app.commands.pr)).toEqual([
-      "close",
-      "edit",
-      "recut",
-      "settleSuperseded",
-      "ready",
-      "review",
-      "comment",
-      "requestChecks",
-      "recordAdmission",
-      "requestReview",
-      "publish",
-    ])
+    // S7 (branch-is-change, @i/10 22991): the whole `pr` command namespace —
+    // the record's own verbs (close/edit/recut/ready/review/comment/
+    // requestChecks/recordAdmission/requestReview/publish) — left with the
+    // record store. `branch` is what replaced it: the two verbs that project
+    // an accepted `refs/yrd/submit/<branch>` write and its removal.
+    expect("pr" in app.commands).toBe(false)
+    expect(Object.keys(app.commands.branch)).toEqual(["recordSubmit", "recordUnsubmit"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
-    expect(app.commands.pr.close.metadata?.visibility).toBe("public")
-    expect(app.commands.pr.review.metadata?.visibility).toBe("public")
     expect("admit" in app.commands.queue).toBe(false)
     expect(app.commands.queue.run.metadata?.visibility).toBe("public")
 
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(run.steps[0]?.job).toMatchObject({ runner: "yrd-local", context: "worktree-context:1" })
@@ -2412,7 +2537,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await changedLineTimeout.close()
   })
 
-  it("normalizes remote aliases of the configured queue and refuses duplicate payload admission", async () => {
+  it("normalizes remote aliases of the configured queue onto one submit fact", async () => {
     const { repo, featureSha } = await repository()
     const baseSha = await git(repo, "rev-parse", "main")
     await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
@@ -2434,15 +2559,21 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "origin/main" })
+    // `recordBranchSubmit` is the raw projection of an accepted ref write and
+    // normalizes nothing; `submitSelection` is the entrance that resolves the
+    // operator's base selector, so that is where the alias has to collapse.
+    const submission = await app.bays.submitSelection("issue/feature", {
+      base: "origin/main",
+      resolveRevision: async () => featureSha,
+      run: { runner: "test", leaseMs: 60_000 },
+    })
 
-    const submittedPR = app.state().bays.prs.PR1!
-    expect(submittedPR).toMatchObject({ base: "main" })
-    expect(changeBaseSha(submittedPR)).toBe(baseSha)
-    await expect(
-      app.bays.submit({ branch: "origin/issue/feature", headSha: featureSha, base: "main" }),
-    ).rejects.toThrow("payload already recorded as change 'PR1'")
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+    expect(submission).toEqual({ lane: "derived", branch: "issue/feature", sha: featureSha, base: "main" })
+    // The alias collapses in the projected fact too, keyed once — a second
+    // spelling of the same queue must not stand up a second submission.
+    expect(app.state().bays.submits["issue/feature"]).toMatchObject({ sha: featureSha, base: "main" })
+    expect(Object.keys(app.state().bays.submits)).toEqual(["issue/feature"])
+    expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
   })
 
   it("coalesces Bay base refresh without pruning a recoverable tracking carrier", async () => {
@@ -2475,13 +2606,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: tracedProcess,
       config,
     })
-    await app.bays.submit({
-      branch: "issue/feature",
-      headSha: featureSha,
-      base: "main",
-      issue: "@issue/feature",
-      draft: true,
-    })
+    // S7: `draft`/`issue` were record-lane binds (draft now refuses outright),
+    // and this test only needs the branch DELIVERED so bay open has a tracking
+    // carrier to coalesce against.
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     commands.length = 0
 
     const opened = await app.bays.open({
@@ -2519,13 +2647,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const recoverableSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
     await git(repo, "push", "-q", "origin", "issue/recoverable")
-    await app.bays.submit({
-      branch: "issue/recoverable",
-      headSha: recoverableSha,
-      base: "main",
-      issue: "@issue/recoverable",
-      draft: true,
-    })
+    await app.bays.recordBranchSubmit({ branch: "issue/recoverable", sha: recoverableSha, base: "main" })
     await git(repo, "push", "-q", "origin", "--delete", "issue/recoverable")
     await git(repo, "update-ref", "refs/remotes/origin/issue/recoverable", recoverableSha)
     commands.length = 0
@@ -2601,31 +2723,34 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: tracedProcess,
       config,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
-    await app.bays.submit({ branch: "issue/third", headSha: thirdSha, base: "main" })
-    await app.bays.submit({ branch: "issue/fourth", headSha: fourthSha, base: "main" })
     commands.length = 0
 
-    const runCycle = async (prs: readonly [string, string]): Promise<void> => {
-      for (const pr of prs) await app.bays.requestChecks({ pr })
+    // S7: `pr requestChecks` went with the record store, and a branch becomes
+    // queue-eligible by having a standing submit fact. Submitting inside the
+    // cycle is what keeps the claim intact — the count under test is fetches
+    // PER CYCLE against changes IN it, so each cycle has to bring its own.
+    const runCycle = async (submits: readonly (readonly [string, string])[]): Promise<void> => {
+      for (const [branch, sha] of submits) await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
       commands.length = 0
-      const runs = await app.queue.run(
-        { prs: [...prs] },
-        { runner: "test", leaseMs: 60_000, continueAdmissions: () => false },
-      )
+      const runs = await app.queue.run({}, { runner: "test", leaseMs: 60_000, continueAdmissions: () => false })
       const rootFetches = commands.filter(
         (argv) => argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && argv[3] === "fetch",
       )
       expect(runs).toEqual([])
-      // Every same-base PR shares this cycle's one authoritative root refresh.
+      // Every same-base change shares this cycle's one authoritative root refresh.
       expect(rootFetches).toHaveLength(1)
       expect(rootFetches.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
       commands.length = 0
     }
 
-    await runCycle(["PR1", "PR2"])
-    await runCycle(["PR3", "PR4"])
+    await runCycle([
+      ["issue/feature", featureSha],
+      ["issue/second", secondSha],
+    ])
+    await runCycle([
+      ["issue/third", thirdSha],
+      ["issue/fourth", fourthSha],
+    ])
   })
 
   it("refreshes queue authority without touching dirty behind operator main", async () => {
@@ -2675,7 +2800,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(await git(repo, "rev-parse", "refs/remotes/origin/main")).toBe(remoteBaseSha)
     expect(await git(repo, "rev-parse", "main")).toBe(localBaseSha)
     expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
-    expect(Object.keys(app.state().bays.prs)).toEqual([])
+    expect(app.state().bays).not.toHaveProperty("prs")
     expect(app.state().bays.submits["issue/feature"]).toMatchObject({ sha: featureSha, base: "main" })
   })
 
@@ -2704,8 +2829,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     }
     await using queueHost = await createDefaultYrdApp(options)
     await using submitter = await createDefaultYrdApp(options)
-    await submitter.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    expect(queueHost.state().bays.prs.PR1).toBeUndefined()
+    // The other host wrote the fact; this one has not refreshed yet, so it
+    // cannot see the submission. That staleness is the whole subject: the run
+    // below has to refresh before it selects, or it drains nothing.
+    await submitter.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    expect(queueHost.state().bays.submits).toEqual({})
 
     const runs = await queueHost.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
@@ -2713,10 +2841,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       expect.objectContaining({
         status: "completed",
         conclusion: "success",
-        prs: [expect.objectContaining({ id: "PR1" })],
+        prs: [expect.objectContaining({ id: "PR1", branch: "issue/feature" })],
       }),
     ])
-    expect(changeDeliveryState(queueHost.state().bays.prs.PR1!)).toBe("integrated")
+    // Integration is the RUN's own proof now, not a record's delivery state:
+    // the merge commit it names is what main actually points at.
+    expect(runs[0]?.integration?.commit).toBe(await git(repo, "rev-parse", "main"))
   })
 
   it("uses steps.merge.run as the configured merge step", async () => {
@@ -2744,7 +2874,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
     const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
     const merge = await git(repo, "rev-parse", "main")
@@ -2802,15 +2932,18 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await git(repo, "push", receiverPath, `${featureSha}:refs/for/main/@yrd/core/atomic-submit`)
 
     await using reopened = await createYrdHost({ cwd: repo, defaultSubmitter: "@dev/3" })
-    expect(reopened.app.state().bays.prs).toEqual({})
+    expect(reopened.app.state().bays).not.toHaveProperty("prs")
     expect(reopened.app.state().bays.submits["issue/@yrd/core/atomic-submit"]).toMatchObject({
       sha: featureSha,
       base: "main",
     })
     // The carrier branch exists for the derived member to run from.
     expect((await git(repo, "rev-parse", "refs/heads/issue/@yrd/core/atomic-submit")).trim()).toBe(featureSha)
-    // The lane rule itself, on the live state the dispatch consulted.
-    expect(recordLaneOwnsBranch(reopened.app.state().bays, "issue/@yrd/core/atomic-submit")).toBe(false)
+    // The lane rule the dispatch consulted no longer has a second lane to
+    // arbitrate against — `recordLaneOwnsBranch` went with the store — so what
+    // is left to assert is that only the derived lane is standing: one submit
+    // fact, keyed by this branch, and nothing else claiming it.
+    expect(Object.keys(reopened.app.state().bays.submits)).toEqual(["issue/@yrd/core/atomic-submit"])
 
     const transactions = (await journalEnvelope(repo))
       .flatMap(({ values }) => values)
@@ -2873,16 +3006,33 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(habitantBacking.reads()).toBe(2)
   })
 
-  it("uses an explicit default submitter while generic Yrd stays operator-owned", async () => {
+  it("keeps a submitted branch keyed by branch alone, whatever the host's default submitter", async () => {
+    // S7 (branch-is-change, @i/10 22991): a submission no longer records WHO
+    // submitted it — `ProjectedBranchSubmit` is `{sha, base, at}`, and the
+    // per-revision `submitter` the default bound to went with the record
+    // store. What survives to assert is the consequence: the host's default
+    // submitter cannot change the identity or content of the standing fact.
     const explicit = await repository()
     await using explicitHost = await createYrdHost({ cwd: explicit.repo, defaultSubmitter: "@dev/3" })
-    await explicitHost.app.bays.submit({ branch: "issue/feature", headSha: explicit.featureSha, base: "main" })
-    expect(explicitHost.app.bays.pr("PR1")).toMatchObject({ revs: [{ submitter: "@dev/3" }] })
+    await explicitHost.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: explicit.featureSha, base: "main" })
+    expect(explicitHost.app.state().bays.submits["issue/feature"]).toMatchObject({
+      sha: explicit.featureSha,
+      base: "main",
+    })
 
     const generic = await repository()
     await using genericHost = await createYrdHost({ cwd: generic.repo })
-    await genericHost.app.bays.submit({ branch: "issue/feature", headSha: generic.featureSha, base: "main" })
-    expect(genericHost.app.bays.pr("PR1")).toMatchObject({ revs: [{ submitter: "operator" }] })
+    await genericHost.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: generic.featureSha, base: "main" })
+    expect(genericHost.app.state().bays.submits["issue/feature"]).toMatchObject({
+      sha: generic.featureSha,
+      base: "main",
+    })
+    // Neither host wrote a submitter anywhere in the fact it projected.
+    expect(Object.keys(genericHost.app.state().bays.submits["issue/feature"] ?? {}).toSorted()).toEqual([
+      "at",
+      "base",
+      "sha",
+    ])
   })
 
   it("loads the base-authoritative reader floor and persists current versioned frames", async () => {
@@ -2890,7 +3040,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')
 
     await using host = await createYrdHost({ cwd: repo })
-    await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
 
     const frames = (await journalEnvelope(repo)).flatMap(({ values }) => values)
     expect(frames).toEqual([expect.objectContaining({ compatibility: CURRENT_JOURNAL_COMPATIBILITY })])
@@ -2922,7 +3072,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await commitYrdConfig(repo, 'base: main\nbatch: 1\nchecks: [{check: {run: "true"}}]\n')
     {
       await using host = await createYrdHost({ cwd: repo })
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     }
     const stateDir = join(repo, ".git", "yrd")
     {
@@ -3129,7 +3279,7 @@ checks: [{check: {run: "true"}}]
 `,
     )
     await using seeded = await createYrdHost({ cwd: repo })
-    await seeded.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await seeded.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     await seeded.close()
 
     const stateDir = join(repo, ".git", "yrd")
@@ -4261,14 +4411,13 @@ checks: [{check: {run: "true"}}]
     expect(first.receiver.receiverPath).toBe(join(repo, ".git", "yrd", "prs.git"))
     expect(await Bun.file(join(first.receiver.receiverPath, "hooks", "pre-receive")).exists()).toBe(true)
     const headSha = await git(repo, "rev-parse", "issue/feature")
-    await first.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
+    await first.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: headSha, base: "main" })
     await first.close()
 
     const reopened = await createYrdHost({ cwd: repo })
-    const reopenedPR = reopened.app.state().bays.prs.PR1!
-    expect(reopenedPR).toMatchObject({ branch: "issue/feature", state: "open", merged: false })
-    expect(currentChangeRev(reopenedPR)).toMatchObject({ head: headSha })
-    expect(changeDeliveryState(reopenedPR)).toBe("submitted")
+    // S7: the durable delivery state IS the standing submit fact, so that is
+    // what a reopen has to bring back — same branch key, same approved sha.
+    expect(reopened.app.state().bays.submits["issue/feature"]).toMatchObject({ sha: headSha, base: "main" })
     await reopened.close()
   })
 
@@ -4739,7 +4888,7 @@ checks: [{check: {run: "true"}}]
     expect(host.services.recut).toBeDefined()
     await expect(host.services.queueReadModel?.snapshot()).resolves.toMatchObject({ attempts: [] })
     const headSha = await git(repo, "rev-parse", "issue/feature")
-    await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
+    await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: headSha, base: "main" })
 
     expect((await journalEnvelope(repo)).flatMap((batch) => batch.values)).toHaveLength(1)
     expect(await readFile(oldYrdJournal, "utf8")).toBe("old yrd journal remains opaque\n")
@@ -4798,7 +4947,7 @@ checks: [{check: {run: "true"}}]
         process: runtimeProcess,
         config,
       })
-      await legacy.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await legacy.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
       await expect(
         legacy.queue.run(
           { prs: ["PR1"] },
@@ -4857,7 +5006,7 @@ checks: [{check: {run: "true"}}]
     await commitYrdConfig(repo, `checks: [{check: {run: ${JSON.stringify(command)}, timeoutMs: 30000}}]\n`)
 
     await using submitter = await createYrdHost({ cwd: repo })
-    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await submitter.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
     await submitter.close()
 
     const cli = Bun.spawn(
@@ -4931,7 +5080,7 @@ checks: [{check: {run: "true"}}]
     // after the first runner releases the lease.
     {
       await using submitter = await createYrdHost({ cwd: repo })
-      await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await submitter.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
       await submitter.close()
     }
     const spawnFollow = (pane: string) => {
@@ -4989,7 +5138,7 @@ checks: [{check: {run: "true"}}]
       // With the lease released, submit PR2 and let a replacement reclaim + drain it.
       {
         await using submitter = await createYrdHost({ cwd: repo })
-        await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+        await submitter.app.bays.recordBranchSubmit({ branch: "issue/second", sha: secondSha, base: "main" })
         await submitter.close()
       }
       replacement = spawnFollow("w1:p3")
@@ -5382,8 +5531,8 @@ checks: [{check: {run: "true"}}]
     )
 
     await using host = await createYrdHost({ cwd: repo })
-    await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+    await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    const run = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
 
     expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
     const failedJob = run.steps.find(
@@ -5407,8 +5556,8 @@ checks: [{check: {run: "true"}}]
     )
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
-    await first.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    const run = (await first.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+    await first.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+    const run = (await first.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
     expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
     const failedJob = run.steps.find(
       (step) => step.job?.status === "completed" && step.job.conclusion === "failure",
@@ -5526,8 +5675,8 @@ checks: [{check: {run: "true"}}]
 
     const host = await createYrdHost({ cwd: repo })
     try {
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      const prior = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+      const prior = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
       expect(prior).toMatchObject({ status: "completed", conclusion: "failure" })
       if (prior.finishedAt === undefined) throw new Error("missing prior revision finish time")
 
@@ -5544,7 +5693,7 @@ checks: [{check: {run: "true"}}]
       if (currentSubmittedAt === undefined) throw new Error("missing current revision submission time")
       expect(Date.parse(prior.finishedAt)).toBeLessThan(Date.parse(currentSubmittedAt))
 
-      const current = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+      const current = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
       expect(current).toMatchObject({ status: "completed", conclusion: "failure" })
     } finally {
       await host.close()
@@ -5585,8 +5734,8 @@ checks: [{check: {run: "true"}}]
 
     const host = await createYrdHost({ cwd: repo })
     try {
-      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      const [run] = await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      await host.app.bays.recordBranchSubmit({ branch: "issue/feature", sha: featureSha, base: "main" })
+      const [run] = await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 })
       expect(run).toMatchObject({
         id: "R1",
         candidateId: "C1",

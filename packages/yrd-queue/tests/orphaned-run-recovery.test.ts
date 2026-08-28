@@ -1,15 +1,27 @@
 /**
  * @failure A queue run with no Job at its cursor step projects as `running` forever — `advance` no-ops without a Job and `jobs.recover()` has no Job to reclaim — so a finished PR keeps a phantom `● run` row whose clock ticks up indefinitely (live incident R1582: 45h over an already-integrated change).
+ *
+ * S7 conversion note (branch-is-change, @i/10 22991): every member below is
+ * DERIVED — a branch plus its standing submit fact, composed into a run member
+ * — because `bays.submit` now refuses `record-mint-retired` and there is no
+ * record store to mint into. The run-shaped contracts (jobless projection,
+ * `orphaned-run` audit and settlement, the orphan grace, lease lapse) are
+ * queue-side and unchanged. The file's former `draft stranded` suite is gone
+ * with its subject: `draft-stranded` is a RECORD-lane finding over changes whose
+ * delivery state is `pushed` but never `submitted`, and post-S7 a branch either
+ * carries a submit fact or is not a delivery at all. Its surviving cousin is
+ * `unrecorded-submit` (a submitted branch the queue has not composed), covered
+ * by `derived-admission.test.ts` and `submit-intake.test.ts`.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue } from "@yrd/queue"
+import { deriveRunMemberArgs, withStep, withQueue, type DerivedRunMember } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -64,19 +76,40 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: { journal, id, clock: () => START, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+/** ONE PR-number mint per app. `deriveRunMemberArgs` commits its number through
+ * the mint it is handed, so a fresh mint per call would re-issue `PR1` for every
+ * branch and collide two members of the same run. */
+const mints = new WeakMap<object, PrNumberMint>()
+function mintFor(app: object): PrNumberMint {
+  const existing = mints.get(app)
+  if (existing !== undefined) return existing
+  const created = volatilePrNumberMint()
+  mints.set(app, created)
+  return created
+}
+
+/** The branch's standing submit fact IS the delivery (S7 branch-is-change);
+ * the member the queue would compose from it is derived here so the `queue.run`
+ * dispatches below can name exactly one. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>>,
+  branch: string,
+): Promise<DerivedRunMember> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base: "main" })
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint: mintFor(app),
+    branch,
+  })
 }
 
 type Fact = Readonly<{ name: string; data?: unknown }>
@@ -103,33 +136,15 @@ async function withoutJobEvents(journal: Journal<unknown>): Promise<Journal<unkn
   return createMemoryJournal(kept)
 }
 
-/** Reproduce a `pr/pushed` fact as journals wrote it before revision identity
- * existed: no `submitter` and no `changeId`. Those are ONE era, not two — the
- * legacy replay schema is strict, so a fact carrying `changeId` but no
- * `submitter` matches no schema at all and is not a shape any journal holds. */
-async function withoutPushedIdentity(journal: Journal<unknown>): Promise<Journal<unknown>> {
-  const kept = (await frames(journal)).map((value) => {
-    const frame = value as Frame
-    if (frame.events === undefined) return value
-    return {
-      ...frame,
-      events: frame.events.map((event) => {
-        if (event.name !== "pr/pushed") return event
-        const { submitter: _submitter, changeId: _changeId, ...data } = event.data as Record<string, unknown>
-        return { ...event, data }
-      }),
-    }
-  })
-  return createMemoryJournal(kept)
-}
-
 /** A run started but never Job-backed: the record exists, its steps have no Job. */
 async function joblessRun(log?: ReturnType<typeof createLogger>) {
   const journal = createMemoryJournal()
   {
     await using seed = await createApp(journal)
-    const pr = await submitBranch(seed, "issue/orphaned-run")
-    await seed.dispatch(seed.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const member = await submitBranch(seed, "issue/orphaned-run")
+    // `prs: []` beside a non-empty `derived` selects exactly those derived
+    // members — the post-S7 spelling of naming one member explicitly.
+    await seed.dispatch(seed.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
     expect(seed.queue.get("R1")?.steps[0]?.job, "seed must start with a Job so the surgery is meaningful").toBeDefined()
   }
   return createApp(await withoutJobEvents(journal), ids(100), log)
@@ -205,8 +220,8 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
 
   it("refuses to settle a run that still has a job at its cursor", async () => {
     await using app = await createApp()
-    const pr = await submitBranch(app, "issue/live-run")
-    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const member = await submitBranch(app, "issue/live-run")
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
 
     await expect(
       app.dispatch(app.commands.queue.settleOrphanedRun, { run: "R1", reason: "not an orphan" }),
@@ -219,8 +234,8 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
     const journal = createMemoryJournal()
     {
       await using seed = await createApp(journal)
-      const pr = await submitBranch(seed, "issue/passes")
-      await seed.queue.run({ prs: [pr.id], steps: ["first"] }, { runner: "local", leaseMs: 60_000 })
+      const member = await submitBranch(seed, "issue/passes")
+      await seed.queue.run({ prs: [], derived: [member], steps: ["first"] }, { runner: "local", leaseMs: 60_000 })
       expect(seed.queue.get("R1")?.status, "the seed run must reach passed").toBe("completed")
     }
 
@@ -231,218 +246,6 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
     expect(run?.status, "a settled passed run must not resurrect as a phantom `running`").toBe("completed")
     expect(run?.finishedAt).toBeDefined()
     expect(pruned.queue.audit().findings.some((item) => item.code === "orphaned-run")).toBe(false)
-  })
-})
-
-/**
- * A pushed-but-never-submitted PR is invisible to the audit
- * (@i/10-merge-queue/drafts-strand-silently, #undead). The siblings above are
- * RUN-shaped gaps; this one never becomes a run at all: `pr/pushed` merges, no
- * `pr/submitted` follows, and the draft sits outside every projection the audit
- * walks — it ages nothing and pages nobody until outage forensics find it.
- * Live specimens 2026-08-13: PR846/849/856/886 stranded 9-22 HOURS, each
- * discovered by a pager CRITICAL rather than by the audit.
- */
-describe("draft stranded — a pushed PR that nobody submitted must age loudly, not silently", () => {
-  async function pushedDraft(options: Readonly<{ submitter?: string; journal?: Journal<unknown> }> = {}) {
-    const app = await createApp(options.journal ?? createMemoryJournal())
-    // bays.intake without `submit: true` records pr/pushed ONLY — no
-    // pr/submitted follows, so delivery stays "pushed". That IS the specimen
-    // shape. (submitBranch would be wrong here: its {branch} submit path
-    // emits pr/submitted immediately — this fixture's first draft proved it
-    // by flagging nothing.)
-    await app.bays.intake({
-      branch: "issue/stranded-draft",
-      headSha: "3".repeat(40),
-      base: "main",
-      baseSha: BASE,
-      ...(options.submitter === undefined ? {} : { submitter: options.submitter }),
-    })
-    const pr = Object.values(app.state().bays.prs).find((item) => item.branch === "issue/stranded-draft")
-    if (pr === undefined) throw new Error("intake did not record the change")
-    expect(app.state().bays.prs[pr.id]?.revs.at(-1)?.submittedAt, "the fixture must be a true draft").toBeUndefined()
-    return { app, pr }
-  }
-
-  function strandedFinding(app: Awaited<ReturnType<typeof createApp>>) {
-    return app.queue.audit({ now: STALE }).findings.find((item) => item.code === "draft-stranded")
-  }
-
-  it("flags a draft past the threshold with its age", async () => {
-    const { app, pr } = await pushedDraft()
-    try {
-      const finding = strandedFinding(app)
-      expect(finding, "a draft stranded for an hour must not read as a clean queue").toBeDefined()
-      expect(finding?.pr).toBe(pr.id)
-      expect(finding?.since).toBe(START)
-      expect(finding?.blockedMs, "the operator needs the age, not just the existence").toBe(
-        Date.parse(STALE) - Date.parse(START),
-      )
-    } finally {
-      await app[Symbol.asyncDispose]()
-    }
-  })
-
-  /**
-   * The age alone says a draft stranded; it never says WHO it stranded against
-   * or HOW FAR it got. Both live on the change already — the submitter recorded on
-   * the revision, and the review verdicts — so a consumer that has the finding
-   * must not have to re-open the change (or guess an owner from the branch name) to
-   * route it.
-   */
-  describe("routing facts — the finding carries who it stranded against and how far it got", () => {
-    it("names the submitter RECORDED on the revision", async () => {
-      const { app, pr } = await pushedDraft({ submitter: "@dev/11" })
-      try {
-        expect(
-          app.state().bays.prs[pr.id]?.revs.at(-1)?.submitter,
-          "the fixture must record the submitter the finding is expected to echo",
-        ).toBe("@dev/11")
-        expect(strandedFinding(app)?.submitter, "the finding must route to the recorded pusher").toBe("@dev/11")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-
-    it("carries both routing facts in the MESSAGE, the only field every surface prints", async () => {
-      // The structured fields above are the honest substrate, but nothing
-      // renders them: the CLI's formatActionableFailure prints code/cause/
-      // resolution only, and downstream JSON consumers rebuild findings field
-      // by field and drop keys they do not know. Carried in the message, both
-      // facts survive as the `cause` line — which is what actually reaches an
-      // operator. Assert the message, not just the fields, or this finding
-      // routes itself in a struct nobody reads.
-      const { app, pr } = await pushedDraft({ submitter: "@dev/11" })
-      try {
-        await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
-        const finding = strandedFinding(app)
-        expect(finding?.message).toContain("@dev/11")
-        expect(finding?.message).toContain("review: approved")
-        // The fields stay too — a consumer that DOES read them keeps its
-        // machine-readable route, and the two must agree.
-        expect(finding?.submitter).toBe("@dev/11")
-        expect(finding?.reviewCertification).toBe("approved")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-
-    it("keeps the message honest when the revision records no submitter", async () => {
-      // No recorded identity means no name in the message either — a stranded
-      // draft with an invented owner routes to the wrong person, which is worse
-      // than routing to nobody. The certification is always derivable, so it
-      // stays.
-      const seeded = createMemoryJournal()
-      {
-        const { app } = await pushedDraft({ journal: seeded })
-        await app[Symbol.asyncDispose]()
-      }
-      await using app = await createApp(await withoutPushedIdentity(seeded), ids(100))
-      const finding = strandedFinding(app)
-      expect(finding?.message).toContain("review: unreviewed")
-      expect(finding?.message, "no submitter means no ' by …' clause, never an empty one").not.toContain(" by ")
-    })
-
-    it("omits the submitter rather than inventing one when the revision records none", async () => {
-      // A journal written before submitter identity existed replays through
-      // LegacyPRPushedSchema, which has no `submitter` — the same surgery shape
-      // as `withoutJobEvents` above. There is no honest fallback here: the
-      // default submitter would name "operator" for a push nobody attributed.
-      const seeded = createMemoryJournal()
-      {
-        const { app } = await pushedDraft({ journal: seeded })
-        await app[Symbol.asyncDispose]()
-      }
-      await using app = await createApp(await withoutPushedIdentity(seeded), ids(100))
-      const revision = Object.values(app.state().bays.prs)[0]?.revs.at(-1)
-      expect(revision?.submitter, "the surgery must leave a genuinely unattributed revision").toBeUndefined()
-      const finding = strandedFinding(app)
-      expect(finding, "an unattributed draft still strands and must still flag").toBeDefined()
-      expect(finding?.submitter, "no recorded identity means no field, never a plausible-looking owner").toBeUndefined()
-    })
-
-    it("certifies a draft nobody has looked at as unreviewed", async () => {
-      const { app } = await pushedDraft()
-      try {
-        expect(strandedFinding(app)?.reviewCertification).toBe("unreviewed")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-
-    it("certifies a draft with reviewers requested and no verdict as review-requested", async () => {
-      const { app, pr } = await pushedDraft()
-      try {
-        await app.bays.requestReview({ pr: pr.id, reviewers: ["@cto"] })
-        expect(strandedFinding(app)?.reviewCertification).toBe("review-requested")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-
-    it("certifies a draft its reviewer rejected as changes-requested", async () => {
-      const { app, pr } = await pushedDraft()
-      try {
-        await app.bays.requestReview({ pr: pr.id, reviewers: ["@cto"] })
-        await app.bays.review({ pr: pr.id, by: "@cto", decision: "reject" })
-        // The verdict outranks the standing request: this draft waits on its
-        // author, and calling it review-requested would page the wrong person.
-        expect(strandedFinding(app)?.reviewCertification).toBe("changes-requested")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-
-    it("certifies an approved-but-unsubmitted draft as approved", async () => {
-      const { app, pr } = await pushedDraft()
-      try {
-        await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
-        // The worst specimen in the class: certified work, one command from the
-        // queue, aging where nothing looks.
-        expect(strandedFinding(app)?.reviewCertification).toBe("approved")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-
-    it("re-opens certification when a new revision leaves the verdict behind", async () => {
-      const { app, pr } = await pushedDraft()
-      try {
-        await app.bays.review({ pr: pr.id, by: "@cto", decision: "approve" })
-        expect(strandedFinding(app)?.reviewCertification).toBe("approved")
-        // A verdict is revision-bound. Pushing again strands NEW content, and a
-        // certification that carried the old approval forward would lie about
-        // what is uncertified.
-        await app.bays.intake({ branch: "issue/stranded-draft", headSha: "4".repeat(40), base: "main", baseSha: BASE })
-        expect(strandedFinding(app)?.reviewCertification).toBe("unreviewed")
-      } finally {
-        await app[Symbol.asyncDispose]()
-      }
-    })
-  })
-
-  it("stays silent inside the grace window", async () => {
-    const { app } = await pushedDraft()
-    try {
-      // FRESH is 60s after the push against a 15m grace — genuinely inside the
-      // window (checked below so this control cannot silently invert).
-      expect(Date.parse(FRESH) - Date.parse(START)).toBeLessThan(15 * 60 * 1000)
-      expect(app.queue.audit({ now: FRESH }).findings.some((item) => item.code === "draft-stranded")).toBe(false)
-    } finally {
-      await app[Symbol.asyncDispose]()
-    }
-  })
-
-  it("never flags a submitted PR, however old", async () => {
-    const { app, pr } = await pushedDraft()
-    try {
-      // Submit-by-id turns the pushed draft into a submitted revision — the
-      // queue's world owns it from here; only true drafts may flag.
-      await app.bays.submit({ pr: pr.id })
-      expect(app.queue.audit({ now: STALE }).findings.some((item) => item.code === "draft-stranded")).toBe(false)
-    } finally {
-      await app[Symbol.asyncDispose]()
-    }
   })
 })
 
@@ -459,8 +262,8 @@ describe("lapsed runner lease — a Job-backed run projects as running with noth
 
   async function leasedRun() {
     const app = await createApp()
-    const pr = await submitBranch(app, "issue/lease-lapsed")
-    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+    const member = await submitBranch(app, "issue/lease-lapsed")
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("the run must be Job-backed for a lease to exist at all")
     await app.dispatch(app.commands.job.transition, {

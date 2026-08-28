@@ -15,6 +15,7 @@ import {
   volatilePrNumberMint,
   type BayWorkspace,
   type Change,
+  type PrNumberMint,
 } from "@yrd/bay"
 import {
   Command,
@@ -35,6 +36,8 @@ import * as queueApi from "../src/index.ts"
 import {
   DEFAULT_QUEUE_BATCH_SIZE,
   candidateRefFor,
+  deriveRunMemberArgs,
+  materializeDerivedRunMembers,
   withQueue,
   projectQueueStarted,
   withMerge,
@@ -44,6 +47,8 @@ import {
   ChangeSnapshotSchema,
   ReplayQueueRecordSchema,
   type AddStepResult,
+  type DerivedRunMember,
+  type DerivedSubmitEnrichment,
   type IntegrationProof,
   type IntegratedShape,
   type Queue,
@@ -187,24 +192,58 @@ type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 type MergedShape = ReviewedShape & IntegratedShape
 type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 
-function changeFacts(pr: Change | undefined) {
-  if (pr === undefined) throw new Error("expected PR")
-  const revision = currentChangeRev(pr)
-  return {
-    ...pr,
-    delivery: changeDeliveryState(pr),
-    current: revision,
-    revision: revision.n,
-    headSha: revision.head,
-    baseSha: revision.baseSha,
-    props: revision.props,
-    composition: revision.composition,
-    recut: revision.recut,
-  }
+/**
+ * Post-S7 (branch-is-change, @i/10 22991) a change has no record and therefore
+ * no delivery projection to read. The two facts that replace it:
+ *
+ * - INTEGRATED is the settlement's own terminal, `pr/integrated`, emitted from
+ *   the run's `ChangeSnapshot` — {@link terminalFor}.
+ * - STILL OPEN is the branch's standing submit fact: the fact IS the delivery,
+ *   so a fact still at the member's sha, with no terminal for it, is exactly
+ *   what `delivery === "submitted"` used to project — {@link standingSubmit}.
+ */
+async function terminalFor(
+  app: QueueApp,
+  pr: string,
+): Promise<Readonly<Record<string, unknown>> | undefined> {
+  const events = await Array.fromAsync(app.events())
+  const terminal = events.find(
+    (event) => event.name === "pr/integrated" && (event.data as Readonly<{ pr?: unknown }>).pr === pr,
+  )
+  return terminal === undefined ? undefined : (terminal.data as Readonly<Record<string, unknown>>)
 }
 
-function deliveryOf(pr: Change | undefined): string | undefined {
-  return pr === undefined ? undefined : changeDeliveryState(pr)
+function standingSubmit(app: QueueApp, branch: string) {
+  return app.state().bays.submits[branch]
+}
+
+/**
+ * The admission verdict's two surviving homes. `recordRevisionAdmission` is a
+ * no-op post-S7 — nothing writes an `admission` onto a change again — so a
+ * PASSED verdict is read off the admission Jobs (see {@link
+ * revisionAdmissionJob}) and a REFUSED one off the queues-slice refusal streak.
+ */
+function refusedAdmission(app: QueueApp, pr: string) {
+  return app.state().queues.admissionRefusals[pr]
+}
+
+/** The `Change` the queue materializes for a derived member — the post-S7
+ * stand-in for `app.bays.pr(id)`. It is a DERIVATION over the live submit fact,
+ * never a record read, and it carries the synthetic standing check request the
+ * fact is (design §2: the fact is the authority, so `bays.requestChecks` is
+ * gone rather than replaced). */
+function changeOf(app: QueueApp, member: DerivedRunMember): Change {
+  const change = materializeDerivedRunMembers(app.state().bays, [member])[0]
+  if (change === undefined) throw new Error(`no derived change for '${member.id}'`)
+  return change
+}
+
+/** The member as the run journaled it — a derived member's only durable home
+ * (recipe §4). Answers the retained `ChangeSnapshot`, never a record. */
+function snapshotOf(app: QueueApp, pr: string) {
+  return Queues.values(app.state().queues)
+    .flatMap((run) => run.prs)
+    .findLast((member) => member.id === pr)
 }
 
 function ids(initial = 0): () => string {
@@ -613,6 +652,7 @@ function queuePlugin(
         >
     runner?: (jobs: Jobs) => Runner
   }> = {},
+  mint: PrNumberMint = volatilePrNumberMint(),
 ) {
   const check = withStep(
     "check",
@@ -664,7 +704,32 @@ function queuePlugin(
     resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
     ...(options.prepareCandidate === undefined ? {} : { prepareCandidate: options.prepareCandidate }),
     ...(options.runner === undefined ? {} : { runner: options.runner }),
+    prNumberMint: mint,
   })
+}
+
+/**
+ * S7 (branch-is-change, @i/10 22991): a derived member's number comes from ONE
+ * mint — the same store the queue plugin composes with — so a fixture-derived
+ * member and the compose's own derivation stay one monotone sequence instead of
+ * both starting at `PR1`.
+ *
+ * The mint is keyed by JOURNAL, not by app, because the durable high-water is
+ * now its sole authority: a replayed app rebuilt from the same journal must
+ * inherit the numbers the original issued, or reusing a retained snapshot's
+ * already-issued id refuses ("an id escaped without its commit"). Two apps on
+ * one journal are one crash-restart of one runtime, and they share a mint the
+ * way they share `pr-mint.json` in production.
+ */
+const journalMints = new WeakMap<object, PrNumberMint>()
+const appMints = new WeakMap<object, PrNumberMint>()
+
+function mintFor(journal: object): PrNumberMint {
+  const existing = journalMints.get(journal)
+  if (existing !== undefined) return existing
+  const minted = volatilePrNumberMint()
+  journalMints.set(journal, minted)
+  return minted
 }
 
 async function createQueueApp(
@@ -674,25 +739,49 @@ async function createQueueApp(
   id: () => string = ids(),
   log?: ConditionalLogger,
 ) {
+  const mint = mintFor(journal)
   const bayJobs = createBayJobDefs(workspace())
-  const queue = queuePlugin(options)
+  const queue = queuePlugin(options, mint)
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   const definition = queue(base)
-  return createYrd(definition, {
+  const app = await createYrd(definition, {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
+  })
+  appMints.set(app, mint)
+  return app
+}
+
+type QueueApp = Awaited<ReturnType<typeof createQueueApp>>
+
+/** Derive the admissible member of an already-submitted branch, minting off
+ * the app's own mint (see {@link appMints}). */
+function memberOf(app: QueueApp, branch: string, enrichment?: DerivedSubmitEnrichment) {
+  const mint = appMints.get(app)
+  if (mint === undefined) throw new Error("app was not created by createQueueApp — no mint registered")
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint,
+    branch,
+    ...(enrichment === undefined ? {} : { enrichment }),
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, branch: string, base = "main") {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base, baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return changeFacts(pr)
+/**
+ * The submit fixture: write the branch's standing submit fact and hand back
+ * the member the queue derives from it. Post-S7 the fact IS the delivery —
+ * there is no record to mint — so callers select with
+ * `{ prs: [], derived: [member] }` (explicit) or `{ derived: [member] }`
+ * (implicit queue, pre-derived so the compose does not mint a second number).
+ */
+async function submitBranch(app: QueueApp, branch: string, base = "main") {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base })
+  return memberOf(app, branch)
 }
 
 async function replaySameHeadCandidateRemerge() {
@@ -709,28 +798,20 @@ async function replaySameHeadCandidateRemerge() {
       mergeability: "mergeable",
     }
   }
+  const branch = "topic/same-head-candidate-recut"
   const original = await createQueueApp({ prepareCandidate }, journal, undefined, id)
-  const pr = await submitBranch(original, "topic/same-head-candidate-recut")
-  await original.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
-  await original.bays.recut({
-    pr: pr.id,
-    fromRevision: pr.revision,
-    headSha: pr.headSha,
-    baseSha: BASE,
-    treeSha: "c".repeat(40),
-    patchId: "d".repeat(40),
-    reviewCarried: false,
-  })
-  await original.bays.ready({ pr: pr.id })
-  expect(changeFacts(original.state().bays.prs[pr.id])).toMatchObject({
-    revision: 2,
-    headSha: pr.headSha,
-    delivery: "submitted",
-  })
+  const pr = await submitBranch(original, branch)
+  await original.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
+  // Post-S7 the same-head revision bump is the derived lane's own: re-deriving
+  // the branch reuses the retained snapshot's identity and continues its
+  // revision count, with the submit fact (and so the head sha) unmoved. That is
+  // exactly what `bays.recut` + `bays.ready` used to mint onto the record.
+  const recut = memberOf(original, branch)
+  expect(recut).toMatchObject({ id: pr.id, revision: 2, headSha: pr.headSha })
   await original.close()
 
   const app = await createQueueApp({ prepareCandidate }, journal, undefined, id)
-  return { app, pr, prepared }
+  return { app, pr: recut, prepared }
 }
 
 describe("Queue", () => {
@@ -750,7 +831,7 @@ describe("Queue", () => {
     })
     const pr = await submitBranch(app, "topic/materialized-candidate")
 
-    const [run] = await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const [run] = await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
 
     expect(prepared).toEqual(["C1"])
     expect(app.state().queues.candidates[run!.candidateId]).toMatchObject({
@@ -763,26 +844,11 @@ describe("Queue", () => {
     expect(run?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
-  it("audits a content-equivalent Candidate whose result names the prior PR revision", async () => {
-    const fixture = await replaySameHeadCandidateRemerge()
-    await using app = fixture.app
-
-    const finding = app.queue.audit().findings.find(({ code }) => code === "candidate-revision-mismatch")
-    expect(finding).toMatchObject({
-      code: "candidate-revision-mismatch",
-      run: "R1",
-      pr: fixture.pr.id,
-    })
-    expect(finding?.message).toContain("Candidate 'C1'")
-    expect(finding?.message).toContain(`revision 1@${fixture.pr.headSha}`)
-    expect(finding?.message).toContain(`revision 2@${fixture.pr.headSha}`)
-  })
-
   it("mints a fresh Candidate after a same-head PR recut survives a runtime restart", async () => {
     const fixture = await replaySameHeadCandidateRemerge()
     await using app = fixture.app
 
-    await expect(app.queue.run({ prs: [fixture.pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ prs: [], derived: [fixture.pr], steps: ["check"] }, runtime)).resolves.toMatchObject([
       {
         candidateId: "C2",
         prs: [{ id: fixture.pr.id, revision: 2, headSha: fixture.pr.headSha }],
@@ -791,7 +857,11 @@ describe("Queue", () => {
       },
     ])
     expect(fixture.prepared).toEqual(["C1", "C2"])
-    expect(app.queue.audit().findings.filter(({ code }) => code === "candidate-revision-mismatch")).toEqual([])
+    // The `candidate-revision-mismatch` finding this used to also assert-absent
+    // is RETIRED (queue.ts): it compared a run's pinned member against the
+    // change's CURRENT record revision, and there is no second term since S7 —
+    // a member's snapshot IS its revision. The live equivalent, the fact moving
+    // off the pinned sha, is `stale-pr` from `pinnedChangeError`.
   })
 
   // 22332, the C2465 shape: two composes that produce DIFFERENT trees are
@@ -815,9 +885,9 @@ describe("Queue", () => {
     })
 
     const first = await submitBranch(app, "topic/self-collision-a")
-    const [firstRun] = await app.queue.run({ prs: [first.id], steps: ["check"] }, runtime)
+    const [firstRun] = await app.queue.run({ prs: [], derived: [first], steps: ["check"] }, runtime)
     const second = await submitBranch(app, "topic/self-collision-b")
-    const [secondRun] = await app.queue.run({ prs: [second.id], steps: ["check"] }, runtime)
+    const [secondRun] = await app.queue.run({ prs: [], derived: [second], steps: ["check"] }, runtime)
 
     // Neither run was refused, and both steps actually ran.
     expect(firstRun?.steps[0]?.job).toMatchObject({ status: "completed", conclusion: "success" })
@@ -852,7 +922,7 @@ describe("Queue", () => {
     })
     const pr = await submitBranch(app, "topic/legacy-ref-shape")
 
-    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
       /must publish refs\/yrd\/candidates\//u,
     )
   })
@@ -881,7 +951,7 @@ describe("Queue", () => {
     )
     const pr = await submitBranch(app, "topic/conflicting-candidate")
 
-    const [run] = await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const [run] = await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
 
     expect(checkCalls).toBe(0)
     expect(run).toMatchObject({
@@ -901,7 +971,7 @@ describe("Queue", () => {
       runnable: false,
       reason: { code: "candidate-conflicting", message: "change 'PR1' revision 1 conflicts in Candidate 'C1'" },
     })
-    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
       "conflicts in Candidate 'C1'",
     )
     const runFailures = events.filter(
@@ -945,7 +1015,7 @@ describe("Queue", () => {
     const first = await submitBranch(app, "topic/conflicting-child")
     const second = await submitBranch(app, "topic/passing-child")
 
-    const runs = await app.queue.run({ prs: [first.id, second.id], steps: ["check"] }, runtime)
+    const runs = await app.queue.run({ prs: [], derived: [first, second], steps: ["check"] }, runtime)
 
     expect(runs).toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure" },
@@ -994,7 +1064,7 @@ describe("Queue", () => {
     })
     const pr = await submitBranch(app, "topic/runner-candidate-context")
 
-    const [run] = await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const [run] = await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
 
     expect(submissions).toEqual([
       {
@@ -1039,8 +1109,8 @@ describe("Queue", () => {
     const releaseBranch = await submitBranch(app, "topic/release-check", "release")
 
     const running = Promise.all([
-      app.queue.run({ prs: [main.id], steps: ["check"] }, runtime),
-      app.queue.run({ prs: [releaseBranch.id], steps: ["check"] }, runtime),
+      app.queue.run({ prs: [], derived: [main], steps: ["check"] }, runtime),
+      app.queue.run({ prs: [], derived: [releaseBranch], steps: ["check"] }, runtime),
     ])
     await bothEntered.promise
     expect([...entered].toSorted()).toEqual(["main", "release"])
@@ -1066,7 +1136,7 @@ describe("Queue", () => {
     const first = await submitBranch(app, "topic/first-merge")
     const second = await submitBranch(app, "topic/second-merge")
 
-    const runs = await app.queue.run({ prs: [first.id, second.id] }, runtime)
+    const runs = await app.queue.run({ prs: [], derived: [first, second] }, runtime)
 
     expect(runs).toHaveLength(2)
     expect(runs.every((run) => run.status === "completed" && run.conclusion === "success")).toBe(true)
@@ -1545,7 +1615,7 @@ describe("Queue", () => {
   it("resolves a canonical Queue run without enumerating history while preserving selector fallback", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/bounded-run-resolution")
-    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
     const target = Queues.get(app.state().queues, "R1")
     if (target === undefined) throw new Error("expected canonical R1")
 
@@ -1584,7 +1654,7 @@ describe("Queue", () => {
     })
     const pr = await submitBranch(app, "issue/settled-failure")
 
-    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).resolves.toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure" },
     ])
     expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
@@ -1592,14 +1662,14 @@ describe("Queue", () => {
 
   it("drains the next submitted PR after releasing a passed check-only root", async () => {
     await using app = await createQueueApp({ defaultSteps: ["check"] })
-    await submitBranch(app, "issue/habitant-first")
+    const habitantFirst = await submitBranch(app, "issue/habitant-first")
 
-    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ derived: [habitantFirst] }, runtime)).resolves.toMatchObject([
       { id: "R1", status: "completed", conclusion: "success" },
     ])
-    await submitBranch(app, "issue/habitant-second")
+    const habitantSecond = await submitBranch(app, "issue/habitant-second")
 
-    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ derived: [habitantSecond] }, runtime)).resolves.toMatchObject([
       { id: "R2", status: "completed", conclusion: "success" },
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
@@ -1624,7 +1694,7 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp({}, journal, undefined, id)
       const pr = await submitBranch(app, "issue/settled-crash-gap")
-      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow("settled append refused")
+      await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow("settled append refused")
       expect(app.queue.get("R1")).toMatchObject({
         status: "completed",
         conclusion: "success",
@@ -1671,7 +1741,7 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp({}, journal, undefined, id)
       const pr = await submitBranch(app, "issue/legacy-terminal-root")
-      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+      await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
         "legacy fixture boundary",
       )
     }
@@ -1720,7 +1790,7 @@ describe("Queue", () => {
   async function seedLegacyStuckRoot(journal: ReturnType<typeof legacyStuckJournal>, id: () => string, branch: string) {
     await using app = await createQueueApp({}, journal, undefined, id)
     const pr = await submitBranch(app, branch)
-    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, leasedRuntime)).rejects.toThrow("job finish refused")
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, leasedRuntime)).rejects.toThrow("job finish refused")
   }
 
   it("auto-quiesces an unleased pre-settlement legacy root and results it", async () => {
@@ -1811,7 +1881,7 @@ describe("Queue", () => {
     async (historicalRuns) => {
       await using app = await createQueueApp()
       const pr = await submitBranch(app, "issue/bounded-advance")
-      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
       const records = app.state().queues.records
       const target = Queues.get(app.state().queues, "R1")
       if (target === undefined) throw new Error("expected canonical R1")
@@ -1841,7 +1911,7 @@ describe("Queue", () => {
   it("matches the former replay-order scans for every Queue projection index lookup", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/index-contract")
-    await app.queue.run({ prs: [pr.id], steps: ["check", "review"] }, runtime)
+    await app.queue.run({ prs: [], derived: [pr], steps: ["check", "review"] }, runtime)
     const seed = Queues.get(app.state().queues, "R1")
     if (seed?.prs[0] === undefined) throw new Error("expected R1 projection fixture")
     const later: QueueRecord = { ...seed, id: "R10" }
@@ -1948,7 +2018,7 @@ describe("Queue", () => {
     async (size) => {
       await using app = await createQueueApp()
       const pr = await submitBranch(app, "issue/bounded-index-write")
-      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
       const record = Queues.get(app.state().queues, "R1")
       const snapshot = record?.prs[0]
       if (record === undefined || snapshot === undefined) throw new Error("expected bounded index-write fixture")
@@ -1979,7 +2049,7 @@ describe("Queue", () => {
     async (size) => {
       await using app = await createQueueApp()
       const pr = await submitBranch(app, "issue/bounded-start-projection")
-      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
       const seed = Queues.get(app.state().queues, "R1")
       const seedAuthority = Queues.authorityRun(app.state().queues.authority, "R1")
       if (seed === undefined || seedAuthority === undefined) throw new Error("expected Queue projection seed")
@@ -2020,7 +2090,7 @@ describe("Queue", () => {
   it("derives the no-token authority kind from the submit fact, never a stored status copy (22991 phase 2)", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/authority-kind-derivation")
-    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
     const seed = Queues.get(app.state().queues, "R1")
     const snapshot = seed?.prs[0]
     if (seed === undefined || snapshot === undefined) throw new Error("expected authority-kind fixture")
@@ -2070,7 +2140,7 @@ describe("Queue", () => {
   it("rejects a Queue start whose execution result diverges from its Candidate", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/candidate-run-result")
-    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
     const seed = Queues.get(app.state().queues, "R1")
     const snapshot = seed?.prs[0]
     if (seed === undefined || snapshot === undefined) throw new Error("expected Candidate result fixture")
@@ -2093,7 +2163,7 @@ describe("Queue", () => {
     async (size) => {
       await using app = await createQueueApp()
       const pr = await submitBranch(app, "issue/all-bounded-lookups")
-      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
       const record = Queues.get(app.state().queues, "R1")
       if (record?.prs[0] === undefined) throw new Error("expected bounded lookup fixture")
       const key = queueLookupKey(record.prs[0], record.steps)
@@ -2146,17 +2216,12 @@ describe("Queue", () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createQueueApp({}, undefined, undefined, undefined, log)
-    await app.bays.submit({
-      branch: "issue/observable",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-      props: { review: "21125" },
-    })
+    await app.bays.recordBranchSubmit({ branch: "issue/observable", sha: HEAD, base: "main" })
+    const observable = memberOf(app, "issue/observable", { props: { review: "21125" } })
 
-    await expect(app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime)).resolves.toMatchObject([
-      { id: "R1", status: "completed", conclusion: "success" },
-    ])
+    await expect(
+      app.queue.run({ prs: [], derived: [observable], steps: ["check", "review", "merge"] }, runtime),
+    ).resolves.toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
 
     expect(events).toContainEqual(
       expect.objectContaining({
@@ -2371,8 +2436,7 @@ describe("Queue", () => {
       undefined,
       log,
     )
-    await submitBranch(app, "issue/batch-a")
-    await submitBranch(app, "issue/batch-b")
+    const batch = [await submitBranch(app, "issue/batch-a"), await submitBranch(app, "issue/batch-b")]
 
     const runStartedForR1 = () =>
       events.filter(
@@ -2383,7 +2447,7 @@ describe("Queue", () => {
           event.props?.outcome === "started",
       ).length
 
-    await app.queue.run({ prs: [] }, runtime)
+    await app.queue.run({ derived: batch }, runtime)
     expect(app.queue.get("R1")?.status).toBe("completed")
     expect(runStartedForR1()).toBe(1)
 
@@ -2392,7 +2456,7 @@ describe("Queue", () => {
     await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z" })).resolves.toEqual([])
 
     // A second drain cycle re-encounters the still-unsettled bisection tree.
-    await app.queue.run({ prs: [] }, runtime)
+    await app.queue.run({ derived: batch }, runtime)
     // The terminal batch parent R1 did NOT re-emit its run lifecycle.
     expect(runStartedForR1()).toBe(1)
     log.end()
@@ -2463,15 +2527,9 @@ describe("Queue", () => {
     const props = { request: "21091-terminal-join" }
 
     await using integratedApp = await createQueueApp()
-    await integratedApp.bays.submit({
-      branch: "topic/partial-2106-token",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-      issue: issueRef,
-      props,
-    })
-    await integratedApp.queue.run({ prs: ["PR1"] }, runtime)
+    await integratedApp.bays.recordBranchSubmit({ branch: "topic/partial-2106-token", sha: HEAD, base: "main" })
+    const integrating = memberOf(integratedApp, "topic/partial-2106-token", { issue: issueRef, props })
+    await integratedApp.queue.run({ prs: [], derived: [integrating] }, runtime)
 
     expect(await Array.fromAsync(integratedApp.events())).toContainEqual(
       expect.objectContaining({
@@ -2487,7 +2545,6 @@ describe("Queue", () => {
           baseSha: BASE,
           changeId: expect.stringMatching(/^I[0-9a-f]{40}$/u),
           props,
-          submitter: "operator",
         },
       }),
     )
@@ -2509,15 +2566,9 @@ describe("Queue", () => {
       ids(),
       createLogger("test", [{ level: "silent" }]),
     )
-    await rejectedApp.bays.submit({
-      branch: "topic/unrelated-20685-subject",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-      issue: issueRef,
-      props,
-    })
-    await rejectedApp.queue.run({ prs: ["PR1"] }, runtime)
+    await rejectedApp.bays.recordBranchSubmit({ branch: "topic/unrelated-20685-subject", sha: HEAD, base: "main" })
+    const rejecting = memberOf(rejectedApp, "topic/unrelated-20685-subject", { issue: issueRef, props })
+    await rejectedApp.queue.run({ prs: [], derived: [rejecting] }, runtime)
 
     const failedEvents = await Array.fromAsync(rejectedApp.events())
     expect(failedEvents.map(({ name }) => name)).not.toContain("pr/rejected")
@@ -2532,15 +2583,17 @@ describe("Queue", () => {
             evidence: { artifacts: [{ name: "stderr", path: "artifact://R1/check/stderr.log" }] },
           },
           job: { id: expect.any(String), attempt: 1 },
-          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD }],
         },
       }),
     )
-    expect(rejectedApp.state().bays.prs.PR1).toMatchObject({
-      state: "open",
-      merged: false,
-      issue: issueRef,
-      revs: [{ n: 1, head: HEAD, submitter: "operator", props }],
+    // "leaves the proposal open" post-S7: the branch's standing submit fact is
+    // untouched by the failure — the fact IS the delivery, so an unretired fact
+    // at the same sha is the open proposal the record's `state: "open"` used to
+    // project.
+    expect(rejectedApp.state().bays.submits["topic/unrelated-20685-subject"]).toMatchObject({
+      sha: HEAD,
+      base: "main",
     })
     const rejectedRun = rejectedApp.queue.get("R1")
     expect(rejectedRun).toMatchObject({
@@ -2562,55 +2615,17 @@ describe("Queue", () => {
     })
   })
 
-  it("binds an issue attached while checks wait to the eventual terminal fact", async () => {
-    await using app = await createQueueApp({
-      check: () => ({ status: "waiting", token: "remote-issue-attach" }),
-    })
-    const pr = await submitBranch(app, "issue/attach-while-waiting")
-    const waiting = (await app.queue.run({ prs: [pr.id] }, runtime))[0]
-    const job = waiting?.steps[0]?.job
-    if (job?.status !== "waiting") throw new Error("check did not wait")
-
-    const issueRef = "@km/all/21091-attached-while-waiting"
-    await app.bays.editPr({ pr: pr.id, issue: issueRef })
-    expect(
-      await app.queue.finish(
-        pr.id,
-        {
-          job: job.id,
-          step: "check",
-          attempt: job.attempt,
-          runner: job.runner,
-          token: job.token,
-          result: { status: "completed", conclusion: "success", output: { checked: true } },
-        },
-        runtime,
-      ),
-    ).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(await Array.fromAsync(app.events())).toContainEqual(
-      expect.objectContaining({
-        name: "pr/integrated",
-        data: expect.objectContaining({
-          pr: pr.id,
-          revision: 1,
-          headSha: HEAD,
-          issueRef,
-          run: "R1",
-          landingSha: MERGED,
-        }),
-      }),
-    )
-  })
-
   it("treats an explicit empty step selection as a true no-op", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/no-steps")
 
-    const result = await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: [] })
+    const result = await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: [], baseSha: BASE })
     expect(result.events).toEqual([])
-    await expect(app.queue.run({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: [] }, runtime)).resolves.toEqual([])
     expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    // A true no-op consumes nothing: the branch's standing submit fact — the
+    // whole of its delivery post-S7 — is exactly as it was before the run.
+    expect(app.state().bays.submits["issue/no-steps"]).toMatchObject({ sha: pr.headSha, base: "main" })
   })
 
   it("persists configured omissions without mislabeling unconfigured steps", async () => {
@@ -2628,7 +2643,7 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp({ defaultSteps: ["check", "merge", "deploy"] }, journal, undefined, id)
       const pr = await submitBranch(app, "issue/auditable-merge-only")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["merge"], baseSha: BASE })
       expect(JSON.parse(JSON.stringify(Queues.get(app.state().queues, "R1")?.stepSelection))).toMatchObject(
         expectedSelection,
       )
@@ -2655,14 +2670,17 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/requested-merge")
-    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["merge"], baseSha: BASE })
     const before = await Array.fromAsync(app.events())
 
     await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([])
 
     expect(await Array.fromAsync(app.events())).toEqual(before)
     expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
-    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    // Nothing integrated and the branch's submit fact still stands: post-S7
+    // those two together ARE `delivery === "submitted"`.
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
     expect(mergeCalls).toBe(0)
   })
 
@@ -2691,17 +2709,20 @@ describe("Queue", () => {
       {
         await using app = await createQueueApp(options, journal, undefined, id)
         const pr = await submitBranch(app, `issue/${crashPoint}-resume`)
-        await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+        await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
         const job = app.queue.get("R1")?.steps[0]?.job
         if (job === undefined) throw new Error(`expected ${crashPoint} crash-window Job`)
         if (crashPoint === "passed") await app.jobs.run(job.id, runtime)
       }
 
       await using replayed = await createQueueApp(options, journal, undefined, id)
-      await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
+      // The replayed root is resumed by the selectorless drain: an explicit
+      // `prs: ["PR1"]` selector needed a record to resolve, and a derived member
+      // is resumed from the run's own retained snapshot instead.
+      await expect(replayed.queue.run({ steps: ["check", "merge"] }, runtime)).resolves.toEqual([
         expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
       ])
-      expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("integrated")
+      expect(await terminalFor(replayed, "PR1")).toMatchObject({ run: "R1", commit: MERGED, landingSha: MERGED })
       expect(checkCalls).toBe(1)
       expect(mergeCalls).toBe(1)
     },
@@ -2730,12 +2751,13 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/mismatched-resume")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
       expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
-    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["merge"] }, runtime)).rejects.toThrow(
+    const mismatched = memberOf(replayed, "issue/mismatched-resume")
+    await expect(replayed.queue.run({ prs: [], derived: [mismatched], steps: ["merge"] }, runtime)).rejects.toThrow(
       "change 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
@@ -2774,16 +2796,19 @@ describe("Queue", () => {
       const first = await submitBranch(app, "issue/batch-one")
       const second = await submitBranch(app, "issue/batch-two")
       await app.dispatch(app.commands.queue.run, {
-        prs: [first.id, second.id],
+        prs: [],
+        derived: [first, second],
         steps: ["check", "merge"],
+        baseSha: BASE,
       })
       expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
-    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).rejects.toThrow(
-      "change 'PR1' is already in active queue run 'R1'",
-    )
+    const partial = memberOf(replayed, "issue/batch-one")
+    await expect(
+      replayed.queue.run({ prs: [], derived: [partial], steps: ["check", "merge"] }, runtime),
+    ).rejects.toThrow("change 'PR1' is already in active queue run 'R1'")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
@@ -2811,7 +2836,7 @@ describe("Queue", () => {
       const first = await submitBranch(app, "issue/batch-policy-one")
       await submitBranch(app, "issue/batch-policy-two")
       await submitBranch(app, "issue/batch-policy-three")
-      await app.dispatch(app.commands.queue.run, { prs: [first.id], steps: ["check", "merge"] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [first], steps: ["check", "merge"], baseSha: BASE })
 
       expect(app.state().queues.batchSize).toBe(1)
       expect(app.queue.get("R1")).toMatchObject({
@@ -2864,7 +2889,7 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/configured-authority")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], baseSha: BASE })
       expect(app.queue.get("R1")).toMatchObject({
         status: "queued",
         stepSelection: { authority: "configured", steps: ["check", "review", "merge", "deploy"] },
@@ -2872,8 +2897,9 @@ describe("Queue", () => {
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
+    const configured = memberOf(replayed, "issue/configured-authority")
     await expect(
-      replayed.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge", "deploy"] }, runtime),
+      replayed.queue.run({ prs: [], derived: [configured], steps: ["check", "review", "merge", "deploy"] }, runtime),
     ).rejects.toThrow("change 'PR1' is already in active queue run 'R1'")
     expect(checkCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
@@ -2898,7 +2924,7 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/configured-check-only")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], baseSha: BASE })
       expect(app.queue.get("R1")).toMatchObject({
         status: "queued",
         stepSelection: { authority: "configured", steps: ["check"] },
@@ -2906,7 +2932,8 @@ describe("Queue", () => {
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
-    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)).rejects.toThrow(
+    const checkOnly = memberOf(replayed, "issue/configured-check-only")
+    await expect(replayed.queue.run({ prs: [], derived: [checkOnly], steps: ["check"] }, runtime)).rejects.toThrow(
       "change 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
@@ -2922,18 +2949,20 @@ describe("Queue", () => {
       check: () => ({ status: "waiting", token: "shared-token" }),
     })
     const pr = await submitBranch(app, "issue/one-call-resubmit")
-    const first = (await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime))[0]
+    const first = (await app.queue.run({ prs: [], derived: [pr], steps: ["check", "merge"] }, runtime))[0]
     expect(first).toMatchObject({ id: "R1", status: "waiting" })
 
-    await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: "main" })
-    await app.bays.submit({ pr: pr.id })
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      revision: 2,
-      delivery: "submitted",
-      headSha: UPDATED,
-    })
+    // The resubmission post-S7 is a re-push: the submit fact moves to the new
+    // sha, and re-deriving the branch continues its revision count off the
+    // retained snapshot. That is what `bays.intake` + `bays.submit` minted onto
+    // the record.
+    await app.bays.recordBranchSubmit({ branch: pr.branch, sha: UPDATED, base: "main" })
+    const resubmitted = memberOf(app, pr.branch)
+    expect(resubmitted).toMatchObject({ id: pr.id, revision: 2, headSha: UPDATED })
 
-    await expect(app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
+    await expect(
+      app.queue.run({ prs: [], derived: [resubmitted], steps: ["check", "merge"] }, runtime),
+    ).resolves.toEqual([
       expect.objectContaining({
         id: "R1",
         status: "completed",
@@ -2943,11 +2972,9 @@ describe("Queue", () => {
       expect.objectContaining({ id: "R2", status: "waiting" }),
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      revision: 2,
-      delivery: "submitted",
-      headSha: UPDATED,
-    })
+    expect(snapshotOf(app, pr.id)).toMatchObject({ revision: 2, headSha: UPDATED })
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: UPDATED })
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
   })
 
   it.each(["merge-passed", "post-merge-requested"] as const)(
@@ -2976,8 +3003,10 @@ describe("Queue", () => {
         await using app = await createQueueApp(options, journal, undefined, id)
         const pr = await submitBranch(app, `issue/${crashPoint}`)
         await app.dispatch(app.commands.queue.run, {
-          prs: [pr.id],
+          prs: [],
+          derived: [pr],
           steps: crashPoint === "merge-passed" ? ["merge"] : ["merge", "deploy"],
+          baseSha: BASE,
         })
         const mergeJob = app.queue.get("R1")?.steps[0]?.job
         if (mergeJob === undefined) throw new Error("expected requested merge")
@@ -2985,9 +3014,9 @@ describe("Queue", () => {
         if (crashPoint === "post-merge-requested") {
           await app.dispatch(app.commands.queue.advance, { run: "R1" })
           // S7 settlement single-writer: the advance requests the next step but
-          // emits NO terminal — the member reads `submitted` until the run's
-          // settlement batch carries its `pr/integrated`.
-          expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+          // emits NO terminal — nothing has integrated the member until the
+          // run's settlement batch carries its `pr/integrated`.
+          expect(await terminalFor(app, pr.id)).toBeUndefined()
           expect(app.queue.get("R1")?.steps[1]?.job?.status).toBe("queued")
           await app.queue.pause({
             base: "main",
@@ -3004,7 +3033,7 @@ describe("Queue", () => {
       ])
       await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
       expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
-      expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("integrated")
+      expect(await terminalFor(replayed, "PR1")).toMatchObject({ run: "R1", commit: MERGED })
       expect(mergeCalls).toBe(1)
       expect(deployCalls).toBe(crashPoint === "post-merge-requested" ? 1 : 0)
     },
@@ -3024,17 +3053,17 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/deploy-only-resume")
-      await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).resolves.toMatchObject([
+      await expect(app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)).resolves.toMatchObject([
         { id: "R1", status: "completed", conclusion: "success" },
       ])
-      expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["deploy"] })
+      expect(await terminalFor(app, pr.id)).toMatchObject({ run: "R1", commit: MERGED })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["deploy"], baseSha: BASE })
       expect(app.queue.get("R2")).toMatchObject({ status: "queued", steps: [{ name: "deploy" }] })
       expect(activeQueueRootIds(app.state().queues.authority)).toEqual(["R2"])
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
-    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["deploy"] }, runtime)).resolves.toMatchObject([
+    await expect(replayed.queue.run({ steps: ["deploy"] }, runtime)).resolves.toMatchObject([
       { id: "R2", status: "waiting" },
     ])
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
@@ -3081,7 +3110,7 @@ describe("Queue", () => {
       await using app = await createQueueApp(options, journal, undefined, id)
       const active = await submitBranch(app, "issue/active")
       await submitBranch(app, "issue/queued")
-      await app.dispatch(app.commands.queue.run, { prs: [active.id], steps: ["check"] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [active], steps: ["check"], baseSha: BASE })
       const job = app.queue.get("R1")?.steps[0]?.job
       if (job === undefined) throw new Error("expected requested active Job")
       await app.dispatch(app.commands.job.transition, {
@@ -3098,7 +3127,10 @@ describe("Queue", () => {
       expect.objectContaining({ id: "R1", status: "in_progress" }),
     ])
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
-    expect(deliveryOf(replayed.state().bays.prs.PR2)).toBe("submitted")
+    // The same-base queued branch was not admitted: no run carries it, and its
+    // submit fact still stands unconsumed.
+    expect(snapshotOf(replayed, "PR2")).toBeUndefined()
+    expect(standingSubmit(replayed, "issue/queued")).toBeDefined()
     expect(checkCalls).toBe(0)
   })
 
@@ -3118,7 +3150,7 @@ describe("Queue", () => {
     })
     const first = await submitBranch(app, "issue/batch-one")
     const second = await submitBranch(app, "issue/batch-two")
-    await app.dispatch(app.commands.queue.run, { prs: [first.id, second.id], steps: ["check", "merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [first, second], steps: ["check", "merge"], baseSha: BASE })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("expected requested batch check")
     await app.dispatch(app.commands.job.transition, {
@@ -3143,8 +3175,12 @@ describe("Queue", () => {
       }),
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1"])
-    expect(deliveryOf(app.state().bays.prs[first.id])).toBe("submitted")
-    expect(deliveryOf(app.state().bays.prs[second.id])).toBe("submitted")
+    // Neither batch member integrated, and both keep their standing submit
+    // facts — the recovery consumed nothing.
+    expect(await terminalFor(app, first.id)).toBeUndefined()
+    expect(await terminalFor(app, second.id)).toBeUndefined()
+    expect(standingSubmit(app, first.branch)).toMatchObject({ sha: first.headSha })
+    expect(standingSubmit(app, second.branch)).toMatchObject({ sha: second.headSha })
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
 
@@ -3162,7 +3198,7 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/dead-habitant")
-    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("expected requested check")
     // A LIVE lease far in the future: only the named-runner reclaim releases it.
@@ -3209,7 +3245,7 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/killed-habitant-ghost")
-    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("expected requested check")
     // A habitant started this check, then was killed; its lease already lapsed.
@@ -3265,8 +3301,8 @@ describe("Queue", () => {
     })
     const onMain = await submitBranch(app, "issue/ghost-untargeted")
     const onRelease = await submitBranch(app, "issue/ghost-canceled", "release/2.0")
-    await app.dispatch(app.commands.queue.run, { prs: [onMain.id], steps: ["check", "merge"] })
-    await app.dispatch(app.commands.queue.run, { prs: [onRelease.id], steps: ["check", "merge"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [onMain], steps: ["check", "merge"], baseSha: BASE })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [onRelease], steps: ["check", "merge"], baseSha: BASE })
     const startGhost = async (run: string, runner: string) => {
       const job = app.queue.get(run)?.steps[0]?.job
       if (job === undefined) throw new Error(`expected requested check for ${run}`)
@@ -3326,7 +3362,7 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/crash-gap")
-      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
       const job = app.queue.get("R1")?.steps[0]?.job
       if (job === undefined) throw new Error("expected requested crash-gap check")
       await app.dispatch(app.commands.job.transition, {
@@ -3337,7 +3373,7 @@ describe("Queue", () => {
         leaseExpiresAt: "2026-01-01T00:00:01.000Z",
       })
       await expect(app.jobs.recover({ now: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([job.id])
-      expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+      expect(await terminalFor(app, pr.id)).toBeUndefined()
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
@@ -3345,7 +3381,7 @@ describe("Queue", () => {
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([
       expect.objectContaining({ id: "R1", status: "completed", conclusion: "failure" }),
     ])
-    expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("submitted")
+    expect(await terminalFor(replayed, "PR1")).toBeUndefined()
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
@@ -3355,7 +3391,7 @@ describe("Queue", () => {
         data: {
           run: "R1",
           error: { code: "job-lost" },
-          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, submitter: "operator" }],
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD }],
         },
       },
     ])
@@ -3369,22 +3405,28 @@ describe("Queue", () => {
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:03:00.000Z" })).resolves.toEqual([])
     expect(await Array.fromAsync(replayed.events())).toEqual(reconciled)
 
-    const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)
+    // The retry runs the SAME tree: the release returned the standing submit
+    // fact's authority, so the branch re-derives at an unmoved `headSha` (the
+    // derived lane's ordinal continues off the retained snapshot).
+    const retry = memberOf(replayed, "issue/crash-gap")
+    expect(retry).toMatchObject({ id: "PR1", headSha: HEAD })
+    const retried = await replayed.queue.run({ prs: [], derived: [retry], steps: ["check", "merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
     expect(retried).toMatchObject([
-      { id: "R2", status: "completed", conclusion: "success", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] },
+      {
+        id: "R2",
+        status: "completed",
+        conclusion: "success",
+        prs: [{ id: "PR1", revision: retry.revision, headSha: HEAD }],
+      },
     ])
-    expect(changeFacts(replayed.state().bays.prs.PR1)).toMatchObject({
-      delivery: "integrated",
-      revision: 1,
-      headSha: HEAD,
-    })
+    expect(await terminalFor(replayed, "PR1")).toMatchObject({ run: "R2", revision: retry.revision, headSha: HEAD })
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
     expect(checkCalls).toBe(1)
     expect(mergeCalls).toBe(1)
   })
 
-  it("cooperatively aborts a claimed Job when a closed change terminalizes its Queue Run", async () => {
+  it("cooperatively aborts a claimed Job when an unsubmitted change terminalizes its Queue Run", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()
     const log = createLogger("yrd", [{ level: "trace" }, { write: () => {} }])
@@ -3409,10 +3451,12 @@ describe("Queue", () => {
       log,
     )
     const pr = await submitBranch(app, "issue/claimed-cancel")
-    const running = app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const running = app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
     await started.promise
 
-    await app.bays.closePr({ pr: pr.id })
+    // Post-S7 a change is withdrawn by retiring its submit fact — there is no
+    // record to close, and the fact IS the delivery.
+    await app.bays.recordBranchUnsubmit({ branch: pr.branch, reason: "deleted" })
     await expect(app.queue.cancel({ prs: [pr.id], by: "@chief", reason: "PR withdrawn" })).resolves.toMatchObject([
       {
         status: "completed",
@@ -3430,17 +3474,9 @@ describe("Queue", () => {
     const journal = createMemoryJournal()
     const id = ids()
     await using app = await createQueueApp({}, journal, undefined, id)
-    await app.bays.submit({
-      branch: "issue/canceled",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-      props,
-    })
-    const pr = app.state().bays.prs.PR1
-    if (pr === undefined) throw new Error("correlated PR was not recorded")
-    const revision = currentChangeRev(pr)
-    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check"] })
+    await app.bays.recordBranchSubmit({ branch: "issue/canceled", sha: HEAD, base: "main" })
+    const pr = memberOf(app, "issue/canceled", { props })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check"], baseSha: BASE })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("Queue did not request a Job")
     await app.dispatch(app.commands.job.transition, {
@@ -3459,32 +3495,24 @@ describe("Queue", () => {
         name: "queue/run/canceled",
         data: {
           pr: pr.id,
-          revision: revision.n,
-          headSha: revision.head,
+          revision: pr.revision,
+          headSha: pr.headSha,
           run: "R1",
           by: "@chief",
           reason: "authorization revoked",
         },
       },
     ])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "submitted",
-      revision: revision.n,
-      headSha: revision.head,
-      props,
-      revs: [
-        {
-          n: revision.n,
-          head: revision.head,
-          terminal: undefined,
-        },
-      ],
-    })
+    // "Re-queues its correlated PR" post-S7: no terminal was written for the
+    // member, and its standing submit fact — the whole of its delivery — is
+    // untouched, so the next drain admits it again.
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha, base: "main" })
     expect(app.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "cancelled",
       error: { code: "run-canceled" },
-      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
+      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, props }],
       steps: [
         expect.objectContaining({
           job: expect.objectContaining({
@@ -3505,18 +3533,16 @@ describe("Queue", () => {
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "cancelled",
-      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
+      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, props }],
     })
-    expect(changeFacts(replayed.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "submitted",
-      revs: [{ terminal: undefined }],
-    })
-    await expect(replayed.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+    expect(await terminalFor(replayed, pr.id)).toBeUndefined()
+    expect(standingSubmit(replayed, pr.branch)).toMatchObject({ sha: pr.headSha })
+    await expect(replayed.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).resolves.toMatchObject([
       {
         id: "R2",
         status: "completed",
         conclusion: "success",
-        prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, props }],
+        prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, props }],
       },
     ])
   })
@@ -3525,7 +3551,7 @@ describe("Queue", () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/selected-suffix")
 
-    const run = (await app.queue.run({ prs: [pr.id], steps: ["merge", "deploy"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [], derived: [pr], steps: ["merge", "deploy"] }, runtime))[0]
 
     expect(run).toMatchObject({
       status: "completed",
@@ -3573,7 +3599,7 @@ describe("Queue", () => {
     const second = await submitBranch(app, "issue/two")
     const release = await submitBranch(app, "issue/release", "release/2.0")
 
-    const runs = await app.queue.run({ prs: [] }, runtime)
+    const runs = await app.queue.run({ derived: [first, second, release] }, runtime)
 
     expect(runs.map((run) => [run.base, run.prs.map((pr) => pr.id)])).toEqual([
       ["main", [first.id, second.id]],
@@ -3609,7 +3635,13 @@ describe("Queue", () => {
       expect(record).not.toHaveProperty("jobIds")
       expect(record).not.toHaveProperty("shape")
     }
-    expect(Object.values(app.state().bays.prs).map((pr) => pr.integration)).toEqual([
+    // The integration proof reaches each member through its terminal — the
+    // settlement's `pr/integrated`, which is where the record's `integration`
+    // projection used to be read from.
+    const proofs = (await Array.fromAsync(app.events()))
+      .filter(({ name }) => name === "pr/integrated")
+      .map(({ data }) => data)
+    expect(proofs).toEqual([
       expect.objectContaining({ commit: MERGED, baseSha: BASE }),
       expect.objectContaining({ commit: MERGED, baseSha: BASE }),
       expect.objectContaining({ commit: MERGED, baseSha: BASE }),
@@ -3618,68 +3650,9 @@ describe("Queue", () => {
     expect(app.queue.status("release/2.0").finished).toHaveLength(1)
   })
 
-  it("does not infer a merge for a pre-identity same-payload PR", async () => {
-    const journal = createMemoryJournal<unknown>()
-    await using app = await createQueueApp({}, journal)
-    const canonical = await submitBranch(app, "issue/one")
-    const run = (await app.queue.run({ prs: [canonical.id], steps: ["check", "review", "merge"] }, runtime))[0]
-    let cursor = 0
-    for await (const batch of journal.read()) cursor = batch.cursor
-    const command = { id: "00000000-0000-7000-8000-000000000101", op: "fixture.duplicate" }
-    expect(
-      await journal.append(
-        {
-          command,
-          cause: {
-            id: "00000000-0000-7000-8000-000000000102",
-            commandId: command.id,
-            op: command.op,
-            commandHash: Command.hash(command),
-          },
-          events: [
-            {
-              id: "00000000-0000-7000-8000-000000000103",
-              name: "pr/pushed",
-              ts: "2026-01-01T00:00:01.000Z",
-              data: {
-                pr: "PR2",
-                branch: "origin/issue/one",
-                base: "main",
-                headSha: canonical.headSha,
-                revision: 1,
-              },
-            },
-            {
-              id: "00000000-0000-7000-8000-000000000104",
-              name: "pr/submitted",
-              ts: "2026-01-01T00:00:01.001Z",
-              data: { pr: "PR2", revision: 1, headSha: canonical.headSha },
-            },
-          ],
-        },
-        cursor,
-      ),
-    ).toMatchObject({ appended: true })
-
-    const reconciled = await app.dispatch(app.commands.queue.advance, { run: run?.id ?? "missing" })
-
-    expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
-    expect(reconciled.events).toEqual([])
-    expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({
-      delivery: "integrated",
-      integration: run?.integration,
-    })
-    expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({
-      delivery: "submitted",
-      integration: undefined,
-    })
-  })
-
   it("refuses to reconcile a repository merge into the retired record index (S7: merged-truth is the authority)", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/result-index-gap")
-    const changeId = currentChangeRev(app.bays.pr(pr.id)!).changeId
-    if (changeId === undefined) throw new Error("expected current PR Change-Id")
     const fact = {
       pr: pr.id,
       revision: pr.revision,
@@ -3688,16 +3661,18 @@ describe("Queue", () => {
       commit: MERGED,
       landingSha: MERGED,
       baseSha: BASE,
-      changeId,
+      changeId: pr.changeId,
     }
 
     await expect(app.queue.reconcileMerge(fact)).rejects.toThrow(/retired/u)
 
-    expect(changeFacts(app.bays.pr(pr.id))).toMatchObject({ delivery: "submitted", integration: undefined })
+    // Nothing was reconciled anywhere: the branch's submit fact still stands
+    // exactly as pushed, and no terminal was written.
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha, base: "main" })
     expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/integrated")).toHaveLength(0)
   })
 
-  it("does not integrate canceled historical PRs that share the current payload", async () => {
+  it("replays historical pr/* frames for a same-payload change without materializing a second member", async () => {
     const journal = createMemoryJournal<unknown>()
     const original = await createQueueApp({}, journal)
     const current = await submitBranch(original, "issue/current-payload")
@@ -3756,14 +3731,19 @@ describe("Queue", () => {
 
     await using app = await createQueueApp({}, journal, undefined, ids(500))
     const before = (await Array.fromAsync(app.events())).length
-    await app.queue.run({ prs: [current.id], steps: ["check", "review", "merge"] }, runtime)
+    await app.queue.run({ prs: [], derived: [current], steps: ["check", "review", "merge"] }, runtime)
     const integrated = (await Array.fromAsync(app.events()))
       .slice(before)
       .filter((applied) => applied.name === "pr/integrated")
       .map((applied) => (applied.data as { pr: string }).pr)
 
+    // S7: the historical `pr/pushed`/`pr/submitted`/`pr/canceled` frames still
+    // PARSE on replay (the bay registries are the acceptance authority) but
+    // project NOTHING — so the payload-sharing `PR2` never becomes a member,
+    // and only the branch that actually has a submit fact integrates.
     expect(integrated).toEqual([current.id])
-    expect(changeFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "canceled", canceledBy: "@chief" })
+    expect(snapshotOf(app, "PR2")).toBeUndefined()
+    expect(Object.keys(app.state().bays.submits)).toEqual([current.branch])
   })
 
   it("integrates the implicit queue in PR revision submission order", async () => {
@@ -3771,98 +3751,18 @@ describe("Queue", () => {
     await using app = await createQueueApp({ batch: 1 }, createMemoryJournal(), () =>
       new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
     )
-    await app.bays.intake({ branch: "issue/created-first", headSha: HEAD, base: "main" })
-    await app.bays.intake({ branch: "issue/submitted-first", headSha: UPDATED, base: "main" })
-    await app.bays.submit({ pr: "PR2" })
-    await app.bays.submit({ pr: "PR1" })
+    // The submit CLOCK, not the identity order, decides the queue: the branch
+    // whose fact is older runs first even though its number was minted second.
+    await app.bays.recordBranchSubmit({ branch: "issue/submitted-first", sha: UPDATED, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "issue/created-first", sha: HEAD, base: "main" })
+    const createdFirst = memberOf(app, "issue/created-first")
+    const submittedFirst = memberOf(app, "issue/submitted-first")
+    expect([createdFirst.id, submittedFirst.id]).toEqual(["PR1", "PR2"])
 
     expect(app.queue.admissionOrder()).toEqual(["PR2", "PR1"])
-    const runs = await app.queue.run({}, runtime)
+    const runs = await app.queue.run({ derived: [createdFirst, submittedFirst] }, runtime)
 
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
-  })
-
-  it("uses one typed eligibility projection for draft, review, and revision freshness", async () => {
-    await using app = await createQueueApp({ requires: ["review"] })
-    await app.bays.submit({ branch: "issue/review-me", headSha: HEAD, base: "main", baseSha: BASE, draft: true })
-
-    expect(app.queue.eligibility("PR1")).toMatchObject({
-      pr: "PR1",
-      runnable: false,
-      reason: { code: "draft", message: "change 'PR1' is pushed, not ready" },
-      review: { required: true, approved: false },
-    })
-    await app.bays.ready({ pr: "PR1" })
-    await app.bays.comment({ pr: "PR1", by: "@cto", ref: "question-1", note: "Why this shape?" })
-    expect(app.queue.eligibility("PR1")).toMatchObject({
-      runnable: false,
-      reason: { code: "review-required", message: "change 'PR1' needs approval for revision 1" },
-      review: { required: true, approved: false },
-    })
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "reject", ref: "verdict-red" })
-    expect(app.queue.eligibility("PR1")).toMatchObject({
-      runnable: false,
-      reason: { code: "review-rejected", message: "change 'PR1' was rejected by @cto for revision 1" },
-      review: { required: true, approved: false, decision: "reject", by: "@cto", ref: "verdict-red" },
-    })
-    await app.bays.review({ pr: "PR1", by: "@cto", decision: "approve", ref: "verdict-1" })
-    expect(app.queue.eligibility("PR1")).toMatchObject({
-      runnable: true,
-      review: { required: true, approved: true, decision: "approve", by: "@cto", ref: "verdict-1" },
-    })
-
-    await app.bays.ready({ pr: "PR1" })
-    expect(app.queue.eligibility("PR1")).toMatchObject({ runnable: true })
-    expect(app.queue.eligibility("PR1").reason).toBeUndefined()
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).resolves.toHaveLength(1)
-
-    await app.bays.submit({
-      branch: "issue/review-stales",
-      headSha: UPDATED,
-      base: "main",
-      baseSha: BASE,
-      draft: true,
-    })
-    await app.bays.review({ pr: "PR2", by: "@cto", decision: "approve", ref: "verdict-2" })
-    await app.bays.ready({ pr: "PR2" })
-    await app.bays.intake({ branch: "issue/review-stales", headSha: "4".repeat(40), base: "main", baseSha: BASE })
-    await app.bays.ready({ pr: "PR2" })
-    expect(app.queue.eligibility("PR2")).toMatchObject({
-      runnable: false,
-      reason: { code: "review-required" },
-      review: { required: true, approved: false, stale: true },
-    })
-    await expect(app.queue.run({ prs: ["PR2"] }, runtime)).rejects.toThrow("change 'PR2' needs approval for revision 2")
-
-    await app.bays.submit({
-      branch: "issue/rejection-stales",
-      headSha: "5".repeat(40),
-      base: "main",
-      baseSha: BASE,
-      draft: true,
-    })
-    await app.bays.review({ pr: "PR3", by: "@cto", decision: "reject", ref: "verdict-3" })
-    await app.bays.ready({ pr: "PR3" })
-    expect(app.queue.eligibility("PR3")).toMatchObject({
-      runnable: false,
-      reason: { code: "review-rejected" },
-      review: { required: true, approved: false, decision: "reject", stale: false },
-    })
-    await app.bays.intake({
-      branch: "issue/rejection-stales",
-      headSha: "6".repeat(40),
-      base: "main",
-      baseSha: BASE,
-    })
-    await app.bays.ready({ pr: "PR3" })
-    expect(app.queue.eligibility("PR3")).toMatchObject({
-      runnable: false,
-      reason: { code: "review-required" },
-      review: { required: true, approved: false, stale: true },
-    })
-
-    expect(Queues.get(app.state().queues, "R1")).toBeDefined()
-    expect(Queues.ids(app.state().queues)).toHaveLength(1)
   })
 
   it("admits configured checks through Queue once and reuses their journaled result for integration", async () => {
@@ -3874,7 +3774,6 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/admitted")
-    await app.bays.requestChecks({ pr: pr.id })
 
     expect(app.queue.eligibility(pr.id)).toMatchObject({
       runnable: false,
@@ -3883,13 +3782,18 @@ describe("Queue", () => {
     })
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
     expect(checks).toBe(1)
-    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({
-      status: "passed",
-      baseSha: BASE,
-      steps: [
-        { name: "check", revision: "check-v1", status: "passed", output: { checked: true } },
-        { name: "review", revision: "review-v1", status: "passed", output: { approved: true } },
-      ],
+    // S7: `recordRevisionAdmission` writes nothing onto a change any more — the
+    // verdict's durable home is the admission JOBS, keyed by
+    // `admission:<pr>:<rev>:<baseSha>:<index>:<stepRevision>`.
+    expect(revisionAdmissionJob(app.jobs, pr, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { checked: true },
+    })
+    expect(revisionAdmissionJob(app.jobs, pr, BASE, 1, "review-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { approved: true },
     })
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(app.queue.eligibility(pr.id)).toMatchObject({
@@ -3897,7 +3801,7 @@ describe("Queue", () => {
       checks: { status: "passed" },
     })
 
-    const integrated = (await app.queue.run({ prs: [pr.id] }, runtime))[0]
+    const integrated = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(integrated).toMatchObject({
       id: "R1",
       status: "completed",
@@ -3914,11 +3818,13 @@ describe("Queue", () => {
   it("names the fully reused admission prefix when a change emits no run events", async () => {
     await using app = await createQueueApp({ defaultSteps: ["check"] })
     const pr = await submitBranch(app, "issue/covered-pr")
-    await app.bays.requestChecks({ pr: pr.id })
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
-    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(revisionAdmissionJob(app.jobs, pr, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
 
-    const result = await app.dispatch(app.commands.queue.run, { prs: [pr.id], baseSha: BASE })
+    const result = await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], baseSha: BASE })
 
     expect(result.events).toEqual([])
     expect(result.value).toEqual({
@@ -3941,11 +3847,10 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/queue-owned-drain")
-    await app.bays.requestChecks({ pr: pr.id })
     expect(await app.queue.admit({ prs: [pr.id] })).toHaveLength(1)
     expect(checks).toBe(0)
 
-    const integrated = await app.queue.run({ prs: [pr.id] }, runtime)
+    const integrated = await app.queue.run({ prs: [], derived: [pr] }, runtime)
 
     expect(integrated).toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
     expect(checks).toBe(1)
@@ -3963,16 +3868,15 @@ describe("Queue", () => {
     })
     const active = await submitBranch(app, "issue/unrelated-active-check")
     const selected = await submitBranch(app, "issue/explicitly-selected-check")
-    for (const pr of [active, selected]) await app.bays.requestChecks({ pr: pr.id })
 
     expect(await app.queue.admit({ prs: [active.id] })).toEqual([active.id])
     expect(revisionAdmissionJob(app.jobs, active)).toMatchObject({ status: "queued" })
 
-    await app.queue.run({ prs: [selected.id] }, runtime)
+    await app.queue.run({ prs: [], derived: [selected] }, runtime)
 
     expect(checkedPRs).toEqual([selected.id])
     expect(revisionAdmissionJob(app.jobs, active)).toMatchObject({ status: "queued" })
-    expect(deliveryOf(app.state().bays.prs[selected.id])).toBe("integrated")
+    expect(await terminalFor(app, selected.id)).toMatchObject({ run: "R1", commit: MERGED })
   })
 
   it("waits for every selected check before composing a mixed-ready explicit selection", async () => {
@@ -3980,29 +3884,26 @@ describe("Queue", () => {
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
     })
     const ready = await submitBranch(app, "issue/ready-selected-check")
-    await app.bays.requestChecks({ pr: ready.id })
     const readyAdmission = (await app.queue.admit({ prs: [ready.id] }, runtime))[0]
     if (readyAdmission === undefined) throw new Error("expected a settled selected admission")
     expect(app.queue.eligibility(ready.id)).toMatchObject({ runnable: true })
 
     const active = await submitBranch(app, "issue/unrelated-active-check")
-    await app.bays.requestChecks({ pr: active.id })
     const admission = (await app.queue.admit({ prs: [active.id] }))[0]
     if (admission === undefined) throw new Error("expected an unrelated active admission")
 
     const pending = await submitBranch(app, "issue/pending-selected-check")
-    await app.bays.requestChecks({ pr: pending.id })
 
     const runIdsBefore = Queues.ids(app.state().queues)
-    expect(await app.queue.run({ prs: [ready.id, pending.id] }, runtime)).toMatchObject([
+    expect(await app.queue.run({ prs: [], derived: [ready, pending] }, runtime)).toMatchObject([
       { id: "R1", status: "completed", conclusion: "success", prs: [{ id: ready.id }] },
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pending.id }] },
     ])
     expect(Queues.ids(app.state().queues)).toEqual([...runIdsBefore, "R1", "R2"])
     expect(admission).toBe(active.id)
     expect(revisionAdmissionJob(app.jobs, active)).toMatchObject({ status: "queued" })
-    expect(deliveryOf(app.state().bays.prs[ready.id])).toBe("integrated")
-    expect(deliveryOf(app.state().bays.prs[pending.id])).toBe("integrated")
+    expect(await terminalFor(app, ready.id)).toMatchObject({ run: "R1", commit: MERGED })
+    expect(await terminalFor(app, pending.id)).toMatchObject({ run: "R2", commit: MERGED })
   })
 
   it("limits an explicit admission drain to the selected PR instead of older queued checks", async () => {
@@ -4021,9 +3922,8 @@ describe("Queue", () => {
     )
     const queued = await submitBranch(app, "issue/unrelated-queued-check")
     const selected = await submitBranch(app, "issue/explicitly-selected-check")
-    for (const pr of [queued, selected]) await app.bays.requestChecks({ pr: pr.id })
 
-    await app.queue.run({ prs: [selected.id] }, runtime)
+    await app.queue.run({ prs: [], derived: [selected] }, runtime)
 
     expect(checkedPRs).toEqual([selected.id])
     expect(app.queue.eligibility(selected.id)).toMatchObject({ checks: { status: "passed" } })
@@ -4034,9 +3934,13 @@ describe("Queue", () => {
     })
     expect(Queues.values(app.state().queues).flatMap((run) => run.prs.map((pr) => pr.id))).not.toContain(queued.id)
 
-    const admittedChanges: string[] = []
+    // S7: `recordRevisionAdmission` no longer journals `pr/admission-recorded`
+    // — the verdict lives in the admission Jobs. "Only the selected change was
+    // admitted" is therefore read there: the selected member's check job ran to
+    // a verdict, the unrelated queued one is still sitting at `queued`.
+    const admissionEvents: string[] = []
     for await (const batch of journal.read()) {
-      admittedChanges.push(
+      admissionEvents.push(
         ...batch.values
           .map((value) => parseJournalFrame(value))
           .flatMap(({ events }) => events)
@@ -4044,7 +3948,9 @@ describe("Queue", () => {
           .map(({ data }) => (data as { pr: string }).pr),
       )
     }
-    expect(admittedChanges).toEqual([selected.id])
+    expect(admissionEvents).toEqual([])
+    expect(revisionAdmissionJob(app.jobs, selected)).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(revisionAdmissionJob(app.jobs, queued)).toMatchObject({ status: "queued" })
   })
 
   it("scopes an explicit Queue.admit drain after resolving a branch selector", async () => {
@@ -4059,7 +3965,6 @@ describe("Queue", () => {
     })
     const queued = await submitBranch(app, "issue/unrelated-queued-admit")
     const selected = await submitBranch(app, "issue/explicitly-selected-admit")
-    for (const pr of [queued, selected]) await app.bays.requestChecks({ pr: pr.id })
 
     await app.queue.admit({ prs: [selected.branch] }, runtime)
 
@@ -4071,257 +3976,19 @@ describe("Queue", () => {
     })
   })
 
-  it("keeps a passing admission when a no-delta recut mints a new revision", async () => {
-    // @i/10-merge-queue/admission-passes-nothing-merges. Admission records
-    // against revision N; a mechanical rebuild merges on byte-identical content
-    // and mints revision N+1; eligibility asks whether the CURRENT revision has
-    // a passing admission and the answer is never yes. Each admission triggers
-    // the next recut and each recut invalidates the admission before it, so the
-    // queue admits forever and merges nothing. PR560 reached revision 66.
-    //
-    // The recut here is the real specimen, not a self-reported no-op: SAME head,
-    // and `bays.recut` still mints revision 2. cli.test.ts's own fixture note
-    // says the pathological remerger reports `unchanged: false` precisely
-    // because it "ran and moved nothing", so the unchanged short-circuit in
-    // plugin.ts never fires for it.
-    await using app = await createQueueApp({
-      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
-    })
-    const pr = await submitBranch(app, "issue/no-delta-recut")
-    // Identity of a byte-identical rebuild: same head, same tree, same patch.
-    const rebuilt = { headSha: pr.headSha, baseSha: BASE, treeSha: "c".repeat(40), patchId: "d".repeat(40) }
-
-    // First mechanical rebuild. This one legitimately mints a revision — the change
-    // had no recut proof before it — and is only here so the SECOND rebuild is
-    // a true repeat rather than a first.
-    await app.bays.recut({ pr: pr.id, fromRevision: pr.revision, ...rebuilt, reviewCarried: false })
-    await app.bays.requestChecks({ pr: pr.id })
-    await app.queue.admit({ prs: [pr.branch] }, runtime)
-    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
-
-    // The specimen. Byte-identical to the rebuild that just passed, and it still
-    // mints revision 3: `unchanged` (plugin.ts) additionally requires the STORED
-    // recut's fromRevision to equal the incoming one, and the stored one lags by
-    // exactly one cycle, so the no-op short-circuit cannot fire in a loop.
-    await app.bays.recut({ pr: pr.id, fromRevision: 2, ...rebuilt, reviewCarried: false })
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({ revision: 3, headSha: pr.headSha })
-
-    // The claim: a rebuild that moved nothing did not stop the code from
-    // passing, so it must not discard the evidence that it passes. Admission is
-    // keyed to the revision ordinal (`admission:<pr>:<revision>:<baseSha>`,
-    // queue.ts admissionExecutionId), so revision 3 cannot see revision 2's
-    // passing job — and the recut drops the check request with it.
-    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
-  })
-
-  it("refreshes the check identity of a pushed carrier the drain will admit", async () => {
-    // @yrd/core/refresh-coverage-gap, from the live drain wedge (PR943). Every
-    // required check passed, the verdict was never written, and `yrd queue run
-    // code --once` died on a raw Zod dump every pass with the fleet's only
-    // merge path shut behind it.
-    //
-    // THE GAP. The drain admits against the CYCLE base — main as it is now.
-    // `refreshCheckIdentities` is what re-points a carrier's check request at
-    // that base, and it was handed only the submitted/ready selection plus the
-    // refused ones; `drainAdmissions` admits from `admissionQueue`, which also
-    // holds `pushed` carriers. A carrier in that gap was admitted against a
-    // base no request of its own named, so its authority count resolved against
-    // the wrong triple and the verdict decided on evidence nobody had refreshed
-    // for it. The two sets are now the same set.
-    const MOVED = "e".repeat(40)
-    await using app = await createQueueApp({
-      // Main advanced under the queue.
-      resolveBaseSha: () => MOVED,
-      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
-    })
-
-    // A submitted carrier, so the drain has something to walk. This one was
-    // always refreshed, and its verdict consumes the authority it was given.
-    const submitted = await submitBranch(app, "issue/refreshed-carrier")
-    await app.bays.requestChecks({ pr: submitted.id, baseSha: BASE })
-
-    // The carrier in the gap: a rebuild left it `pushed`, which keeps it in the
-    // admission queue and out of every list the refresh used to walk.
-    const stranded = await submitBranch(app, "issue/base-outran-request")
-    await app.bays.recut({
-      pr: stranded.id,
-      fromRevision: stranded.revision,
-      headSha: stranded.headSha,
-      baseSha: BASE,
-      treeSha: "c".repeat(40),
-      patchId: "d".repeat(40),
-      reviewCarried: false,
-    })
-    // Its live request matches this revision and this head exactly, so the base
-    // is the only thing that differs — PR943's shape precisely.
-    await app.bays.requestChecks({ pr: stranded.id, baseSha: BASE })
-    expect(changeFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
-
-    await app.queue.run({}, runtime)
-
-    // The claim: the carrier the drain admitted names the base it was admitted
-    // against. Not a count — a count of zero is a legal fact here and always
-    // was; what was wrong is that the identity behind it had never been
-    // re-pointed for this carrier at all.
-    expect(checkRequest(app.bays.pr(stranded.id)!)).toMatchObject({ baseSha: MOVED })
-    expect(checkRequest(app.bays.pr(submitted.id)!)).toMatchObject({ baseSha: MOVED })
-
-    expect(changeAdmission(app.bays.pr(submitted.id)!)).toMatchObject({
-      status: "passed",
-      baseSha: MOVED,
-      requestCount: 1,
-    })
-    expect(changeAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
-      status: "passed",
-      baseSha: MOVED,
-      requestCount: 1,
-    })
-  })
-
-  it("drains a cycle whose only work is a pushed carrier", async () => {
-    // @yrd/core/pushed-only-cycle-never-drains, the entry-side half of the gap
-    // `cbac01da` closed on the refresh side. WHICH carriers get refreshed and
-    // WHETHER the drain runs at all are different questions, and the second
-    // still keyed on `checked` — the submitted/ready selection. A cycle whose
-    // only work is `pushed` therefore had an empty entry set, `drainAdmissions`
-    // never entered its loop, and the cycle completed looking healthy having
-    // admitted nothing. The sibling tests above each had to add a submitted
-    // carrier "so the selectorless drain has a submitted PR to enter on"; this
-    // one is that companion removed.
-    const MOVED = "e".repeat(40)
-    await using app = await createQueueApp({
-      resolveBaseSha: () => MOVED,
-      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
-    })
-
-    // The only carrier in the cycle. A rebuild left it `pushed`, which keeps it
-    // in the admission queue and out of `requestedPRs` — so `checked` is empty
-    // while `admissionQueue` is not.
-    const stranded = await submitBranch(app, "issue/pushed-only-cycle")
-    await app.bays.recut({
-      pr: stranded.id,
-      fromRevision: stranded.revision,
-      headSha: stranded.headSha,
-      baseSha: BASE,
-      treeSha: "c".repeat(40),
-      patchId: "d".repeat(40),
-      reviewCarried: false,
-    })
-    await app.bays.requestChecks({ pr: stranded.id, baseSha: BASE })
-    expect(changeFacts(app.bays.pr(stranded.id))).toMatchObject({ revision: 2, delivery: "pushed" })
-
-    await app.queue.run({}, runtime)
-
-    // Reads in this order on purpose: the first assertion is what `cbac01da`
-    // already fixed and passes at the base pin, so a red here is provably the
-    // ENTRY reason and not a refresh one. The carrier's request names the cycle
-    // base — it was refreshed — and yet no verdict exists for it, because the
-    // loop that would write one never ran.
-    expect(checkRequest(app.bays.pr(stranded.id)!)).toMatchObject({ baseSha: MOVED })
-    expect(changeAdmission(app.bays.pr(stranded.id)!)).toMatchObject({
-      status: "passed",
-      baseSha: MOVED,
-      requestCount: 1,
-    })
-  })
-
-  it("mints no check request for a carrier that never asked for one", async () => {
-    // @yrd/core/refresh-coverage-gap, the exclusion the widened refresh keeps.
-    // `refreshCheckIdentities` re-points an identity; it never mints one. A
-    // carrier with no live check request has nothing to re-point, and granting
-    // it a request would push it into the admission queue on the strength of a
-    // housekeeping pass rather than anything its author asked for.
-    const MOVED = "e".repeat(40)
-    await using app = await createQueueApp({
-      resolveBaseSha: () => MOVED,
-      check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
-    })
-
-    const asked = await submitBranch(app, "issue/asked-for-checks")
-    await app.bays.requestChecks({ pr: asked.id, baseSha: BASE })
-    const silent = await submitBranch(app, "issue/never-asked-for-checks")
-
-    await app.queue.run({}, runtime)
-
-    expect(checkRequest(app.bays.pr(asked.id)!)).toMatchObject({ baseSha: MOVED })
-    expect(app.bays.pr(silent.id)!.checkRequests).toEqual([])
-    expect(changeAdmission(app.bays.pr(silent.id)!)).toBeUndefined()
-  })
-
-  it("counts the check requests a byte-identical rebuild carried into a new ordinal", async () => {
-    // @yrd/core/rebuilt-carrier-denied-retry. `303e7845` removed the revision
-    // ordinal from `checkRequest` because a request asks "check this tree" and
-    // the ordinal identifies nothing about the tree. The counter behind
-    // `hasFreshRevisionCheckAuthority` kept it, so the two disagreed about what
-    // a request IS: after a byte-identical rebuild minted a new ordinal, the
-    // counter saw only the request filed AFTER the rebuild and read one
-    // authority against the one the refusal had already spent. One is not more
-    // than one, so the carrier held no fresh authority and was refused a retry
-    // it had demonstrably earned — silently, and for as long as it kept
-    // rebuilding to the same tree.
-    let failing = true
-    let checks = 0
-    await using app = await createQueueApp({
-      resolveBaseSha: () => BASE,
-      check: () => {
-        checks += 1
-        return failing
-          ? { status: "completed", conclusion: "failure", error: { code: "check-failed", message: "tests failed" } }
-          : { status: "completed", conclusion: "success", output: { checked: true } }
-      },
-    })
-
-    const specimen = await submitBranch(app, "issue/rebuilt-at-a-new-ordinal")
-    await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
-    await app.queue.run({ prs: [specimen.id] }, runtime)
-    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({
-      status: "refused",
-      baseSha: BASE,
-      requestCount: 1,
-    })
-
-    // The specimen: a rebuild that moved neither the head nor the base, so the
-    // refused verdict carries onto revision 2 (plugin.ts, `carriedAdmission`)
-    // and the request filed at revision 1 still describes this exact tree.
-    await app.bays.recut({
-      pr: specimen.id,
-      fromRevision: specimen.revision,
-      headSha: specimen.headSha,
-      baseSha: BASE,
-      treeSha: "c".repeat(40),
-      patchId: "d".repeat(40),
-      reviewCarried: false,
-    })
-    await app.bays.requestChecks({ pr: specimen.id, baseSha: BASE })
-    expect(changeFacts(app.bays.pr(specimen.id))).toMatchObject({ revision: 2, delivery: "pushed" })
-
-    // A second carrier so the selectorless drain has a submitted PR to enter
-    // on; the specimen is reached from the admission queue, as in production.
-    failing = false
-    const peer = await submitBranch(app, "issue/keeps-the-drain-open")
-    await app.bays.requestChecks({ pr: peer.id, baseSha: BASE })
-
-    await app.queue.run({}, runtime)
-
-    // The claim, stated as the retry rather than as a tally: two requests name
-    // this tree against this base and only one authority has been spent, so the
-    // carrier is admitted again. Under the ordinal it read one against one and
-    // stayed refused for good.
-    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
-    expect(app.queue.eligibility(specimen.id)).toMatchObject({ checks: { status: "passed" } })
-    expect(changeAdmission(app.bays.pr(specimen.id)!)).toMatchObject({ requestCount: 2 })
-    expect(checks).toBe(3)
-  })
-
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
     })
     // PR A becomes merge-ready: checks requested, admitted, drained to passed.
     const ready = await submitBranch(app, "issue/merge-ready")
-    await app.bays.requestChecks({ pr: ready.id })
     await expect(app.queue.admit({ prs: [ready.id] }, runtime)).resolves.toEqual([ready.id])
-    expect(changeAdmission(app.bays.pr(ready.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    // The passed verdict's surviving home: the admission Job keyed to this
+    // member, revision, and base.
+    expect(revisionAdmissionJob(app.jobs, ready, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
     expect(app.queue.eligibility(ready.id)).toMatchObject({ runnable: true })
 
     // PR B's admission Job is claimed by a FOREIGN runner holding a live
@@ -4330,7 +3997,6 @@ describe("Queue", () => {
     // so an in-flight check must never gate the merge phase (2026-07-22
     // merge-starvation incidents: three independent reproductions).
     const inflight = await submitBranch(app, "issue/check-in-flight")
-    await app.bays.requestChecks({ pr: inflight.id })
     const admission = (await app.queue.admit({ prs: [inflight.id] }))[0]
     if (admission === undefined) throw new Error("expected admitted PR id for the in-flight PR")
     const job = revisionAdmissionJob(app.jobs, inflight)
@@ -4345,7 +4011,7 @@ describe("Queue", () => {
 
     // Habitant drain tick: the merge phase must run for the checks-passed PR
     // in this same tick, not wait for the foreign-held check to settle.
-    const runs = await app.queue.run({}, runtime)
+    const runs = await app.queue.run({ derived: [ready, inflight] }, runtime)
     expect(runs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -4381,10 +4047,9 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/bounded-admission-retry")
-      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
 
       let drainTurns = 0
-      const refused = await app.queue.run({ prs: [pr.id] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
+      const refused = await app.queue.run({ prs: [], derived: [pr] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
 
       expect(refused).toEqual([])
       expect(checks).toBe(1)
@@ -4393,11 +4058,10 @@ describe("Queue", () => {
         reason: { code: "required-check-failed" },
         checks: { status: "failed" },
       })
-      expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({
-        status: "refused",
+      expect(refusedAdmission(app, pr.id)).toMatchObject({
+        branch: pr.branch,
+        code: "queue-environment-refused",
         kind: "failure",
-        step: "check",
-        receipt: { code: "queue-environment-refused" },
       })
       expect(Queues.ids(app.state().queues)).toEqual([])
     }
@@ -4415,7 +4079,6 @@ describe("Queue", () => {
     expect(Queues.ids(replayed.state().queues)).toEqual([])
 
     refuseEnvironment = false
-    await replayed.bays.requestChecks({ pr: "PR1", baseSha: BASE })
     expect(await replayed.queue.run({ prs: ["PR1"] }, runtime)).toMatchObject([
       { id: "R1", status: "completed", conclusion: "success" },
     ])
@@ -4448,11 +4111,10 @@ describe("Queue", () => {
     } satisfies Parameters<typeof queuePlugin>[0]
     await using runner = await createQueueApp(options, journal, undefined, id)
     const pr = await submitBranch(runner, "issue/pause-admitted-retry")
-    await runner.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await using operator = await createQueueApp(options, journal, undefined, id)
 
     let drainTurns = 0
-    const draining = runner.queue.run({ prs: [pr.id] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
+    const draining = runner.queue.run({ prs: [], derived: [pr] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
     await checkStarted.promise
     await operator.queue.pause({
       base: "main",
@@ -4476,7 +4138,7 @@ describe("Queue", () => {
     await operator.queue.resume("main")
     await runner.refresh()
     expect(await runner.queue.admit({ prs: [pr.id] }, runtime)).toEqual([])
-    expect(changeAdmission(runner.bays.pr(pr.id)!)).toMatchObject({ status: "refused", kind: "failure", step: "check" })
+    expect(refusedAdmission(runner, pr.id)).toMatchObject({ branch: pr.branch, kind: "failure" })
     expect(checks).toBe(1)
   })
 
@@ -4489,13 +4151,14 @@ describe("Queue", () => {
     })
     const waiting = await submitBranch(app, "issue/waiting-check")
     const healthy = await submitBranch(app, "issue/healthy-check")
-    await app.bays.requestChecks({ pr: waiting.id })
-    await app.bays.requestChecks({ pr: healthy.id })
 
     expect(await app.queue.admit({ prs: [waiting.id] }, runtime)).toEqual([waiting.id])
     expect(app.queue.waitingAdmission(waiting.id)?.step.job).toMatchObject({ status: "waiting" })
     expect(await app.queue.admit({ prs: [healthy.id] }, runtime)).toEqual([healthy.id])
-    expect(changeAdmission(app.bays.pr(healthy.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(revisionAdmissionJob(app.jobs, healthy, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
     expect(app.queue.eligibility(waiting.id)).toMatchObject({ checks: { status: "checking" } })
     expect(app.queue.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
   })
@@ -4515,14 +4178,13 @@ describe("Queue", () => {
     })
     const first = await submitBranch(app, "issue/first-admission")
     const second = await submitBranch(app, "issue/second-merge")
-    await app.bays.requestChecks({ pr: first.id })
     expect(await app.queue.admit({ prs: [first.id] })).toEqual([first.id])
     expect(revisionAdmissionJob(app.jobs, first)).toMatchObject({ status: "queued" })
 
     // The check-only admission does not gate the integrating run (2026-07-22
     // merge-starvation fix) — but it must survive UNTOUCHED: proceeding must
     // never supersede or release another PR's admission.
-    await expect(app.queue.run({ prs: [second.id], steps: ["merge"] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ prs: [], derived: [second], steps: ["merge"] }, runtime)).resolves.toMatchObject([
       { status: "completed", conclusion: "success", prs: [{ id: second.id }] },
     ])
     expect(checkCalls).toBe(0)
@@ -4543,13 +4205,15 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/base-keyed-cache")
-    await app.bays.requestChecks({ pr: pr.id })
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
-    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(revisionAdmissionJob(app.jobs, pr, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
     expect(checks).toBe(1)
 
     baseSha = UPDATED
-    const integrated = await app.queue.run({ prs: [pr.id] }, runtime)
+    const integrated = await app.queue.run({ prs: [], derived: [pr] }, runtime)
 
     expect(integrated).toMatchObject([{ status: "completed", conclusion: "success" }])
     expect(checks).toBe(2)
@@ -4572,7 +4236,6 @@ describe("Queue", () => {
       await submitBranch(app, "issue/release-a", "release"),
       await submitBranch(app, "issue/release-b", "refs/heads/release"),
     ]
-    for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
 
     await app.queue.run({ prs: prs.map((pr) => pr.id) }, runtime)
 
@@ -4603,16 +4266,18 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/main-health-turns-red")
-    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
 
     expect(mainHealth).toBe("clear")
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toEqual([pr.id])
-    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    expect(revisionAdmissionJob(app.jobs, pr, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
     expect(mainHealth).toBe("green")
     expect(checks).toBe(1)
 
     mainHealth = "red"
-    const refused = await app.queue.run({ prs: [pr.id] }, runtime)
+    const refused = await app.queue.run({ prs: [], derived: [pr] }, runtime)
 
     expect(refused).toMatchObject([{ id: "R1", status: "completed", conclusion: "failure", prs: [{ baseSha: BASE }] }])
     expect(refused[0]?.steps[0]).toMatchObject({
@@ -4621,37 +4286,39 @@ describe("Queue", () => {
       job: { status: "completed", conclusion: "failure", error: { code: "base-red" } },
     })
     expect(refused[0]).not.toHaveProperty("reusedFrom")
-    expect(changeAdmission(app.bays.pr(pr.id)!)).toMatchObject({ status: "passed", baseSha: BASE })
+    // The member's own admission verdict is untouched by the base's red: its
+    // check Job still stands passed against this base.
+    expect(revisionAdmissionJob(app.jobs, pr, BASE, 0, "check-v1")).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
     expect(checks).toBe(2)
     expect(merges).toBe(0)
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "ready",
-      state: "open",
-      merged: false,
-    })
-    expect(app.state().bays.prs[pr.id]?.integration).toBeUndefined()
+    // Nothing integrated and the submission still stands — the base-classified
+    // red bills the base, never the author.
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
+    // `queue.checks` was deleted with the record lane; the run's own step Job,
+    // asserted above, is the surviving home of that verdict row.
     expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "failed", run: "R1" } })
-    expect(app.queue.checks([pr.id])).toMatchObject([
-      { pr: pr.id, revision: 1, run: "R1", step: "check", status: "failed", error: { code: "base-red" } },
-    ])
   })
 
-  it("recovery cancels an unstarted revision admission Job after its PR closes", async () => {
+  it("recovery cancels an unstarted revision admission Job after its submission is retired", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/stale-before-job")
-    await app.bays.requestChecks({ pr: pr.id })
     expect(await app.queue.admit({ prs: [pr.id] })).toHaveLength(1)
     const job = revisionAdmissionJob(app.jobs, pr)
     if (job === undefined) throw new Error("expected requested revision admission Job")
-    await app.bays.closePr({ pr: pr.id })
+    // Post-S7 a change goes away by retiring its submit fact — there is no
+    // record left to close.
+    await app.bays.recordBranchUnsubmit({ branch: pr.branch, reason: "deleted" })
 
     expect(app.jobs.get(job.id)).toMatchObject({ status: "queued" })
     expect(await app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).toEqual([])
     expect(app.jobs.get(job.id)).toMatchObject({ status: "completed", conclusion: "cancelled" })
-    expect(changeAdmission(app.bays.pr(pr.id)!)).toBeUndefined()
-    expect(app.queue.checks([pr.id])).toEqual(
-      expect.arrayContaining([expect.objectContaining({ pr: pr.id, revision: 1, step: "check", status: "failed" })]),
-    )
+    // `queue.checks` was deleted with the record lane; the cancelled admission
+    // Job asserted above is the surviving verdict row.
+    expect(refusedAdmission(app, pr.id)).toBeUndefined()
   })
 
   it("replays a legacy pinned-run failure before its requested Job starts", async () => {
@@ -4663,7 +4330,6 @@ describe("Queue", () => {
       await using app = await createQueueApp({ defaultSteps: ["check"] }, journal, undefined, id)
       const pr = await submitBranch(app, "issue/legacy-stale-before-job")
       prId = pr.id
-      await app.bays.requestChecks({ pr: pr.id })
     }
 
     let cursor = 0
@@ -4701,7 +4367,10 @@ describe("Queue", () => {
         prs: [{ id: prId }],
         stepSelection: { authority: "admission" },
       })
-      await app.bays.closePr({ pr: prId })
+      // Retiring the submit fact is what makes the pinned run stale post-S7:
+      // `pinnedChangeError` asks the live fact whether it still stands at the
+      // pinned sha, where it used to ask a record whether it was still open.
+      await app.bays.recordBranchUnsubmit({ branch: "issue/legacy-stale-before-job", reason: "deleted" })
       const admitted = await app.queue.admit({ prs: [prId] }, runtime)
       expect(app.queue.get("R1")).toMatchObject({
         id: "R1",
@@ -4718,9 +4387,11 @@ describe("Queue", () => {
     }
     const lifecycle = frames
       .flatMap((frame) => frame.events)
-      .filter(({ name }) => ["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"].includes(name))
+      .filter(({ name }) =>
+        ["queue/run/started", "job/requested", "branch/unsubmitted", "queue/run/failed"].includes(name),
+      )
       .map(({ name }) => name)
-    expect(lifecycle).toEqual(["queue/run/started", "job/requested", "pr/withdrawn", "queue/run/failed"])
+    expect(lifecycle).toEqual(["queue/run/started", "job/requested", "branch/unsubmitted", "queue/run/failed"])
 
     await using replayed = await createQueueApp({ defaultSteps: ["check"] }, indexedJournal(frames), undefined, id)
     expect(replayed.queue.get("R1")).toMatchObject({
@@ -4752,8 +4423,6 @@ describe("Queue", () => {
     )
     const first = await submitBranch(app, "issue/first-check")
     const second = await submitBranch(app, "issue/second-check")
-    await app.bays.requestChecks({ pr: first.id })
-    await app.bays.requestChecks({ pr: second.id })
 
     expect(app.queue.eligibility(second.id)).toMatchObject({ checks: { status: "queued", position: 2 } })
     expect(await app.queue.admit({ prs: [second.id] })).toEqual([])
@@ -4780,9 +4449,7 @@ describe("Queue", () => {
     now = "2026-01-01T00:01:00.000Z"
     const requestedFirst = await submitBranch(app, "issue/requested-first")
     now = "2026-01-01T00:02:00.000Z"
-    await app.bays.requestChecks({ pr: requestedFirst.id })
     now = "2026-01-01T00:03:00.000Z"
-    await app.bays.requestChecks({ pr: pushedFirst.id })
 
     expect(app.queue.eligibility(requestedFirst.id)).toMatchObject({
       checks: { status: "queued", position: 1, queuedAt: "2026-01-01T00:02:00.000Z" },
@@ -4798,7 +4465,6 @@ describe("Queue", () => {
     const journal = createMemoryJournal()
     const first = await createQueueApp({}, journal)
     const pr = await submitBranch(first, "issue/cache-identity")
-    await first.bays.requestChecks({ pr: pr.id })
     const admitted = (await first.queue.admit({ prs: [pr.id] }))[0]
     if (admitted === undefined) throw new Error("expected an admitted PR id")
     await first.queue.admit({ prs: [pr.id] }, runtime)
@@ -4826,7 +4492,7 @@ describe("Queue", () => {
     })
     await changed.queue.admit({ prs: [pr.id] }, runtime)
 
-    const integrated = (await changed.queue.run({ prs: [pr.id] }, runtime))[0]
+    const integrated = (await changed.queue.run({ prs: [], derived: [pr] }, runtime))[0]
     expect(integrated).toMatchObject({
       status: "completed",
       conclusion: "success",
@@ -4859,7 +4525,7 @@ describe("Queue", () => {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/environment-refused")
 
-      expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+      expect(await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)).toMatchObject([
         {
           id: "R1",
           status: "completed",
@@ -4868,11 +4534,11 @@ describe("Queue", () => {
           prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
         },
       ])
-      expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-        delivery: "submitted",
-        revision: pr.revision,
-        headSha: pr.headSha,
-      })
+      // Blameless refusal: nothing integrated, and the branch's submit fact —
+      // the whole of its delivery — still stands at the run's pinned sha, so
+      // the released authority returns to it.
+      expect(await terminalFor(app, pr.id)).toBeUndefined()
+      expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
 
       const events = await Array.fromAsync(app.events())
       const failed = events.find(
@@ -4896,21 +4562,19 @@ describe("Queue", () => {
       ref: replayedFailure.id,
     })
 
-    const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["merge"] }, runtime)
+    const retry = memberOf(replayed, "issue/environment-refused")
+    expect(retry).toMatchObject({ id: "PR1", headSha: HEAD })
+    const retried = await replayed.queue.run({ prs: [], derived: [retry], steps: ["merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
     expect(retried).toMatchObject([
       {
         id: "R2",
         status: "completed",
         conclusion: "success",
-        prs: [{ id: "PR1", revision: 1, headSha: HEAD }],
+        prs: [{ id: "PR1", revision: retry.revision, headSha: HEAD }],
       },
     ])
-    expect(changeFacts(replayed.state().bays.prs.PR1)).toMatchObject({
-      delivery: "integrated",
-      revision: 1,
-      headSha: HEAD,
-    })
+    expect(await terminalFor(replayed, "PR1")).toMatchObject({ run: "R2", headSha: HEAD, commit: MERGED })
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
     expect(mergeCalls).toBe(2)
   })
@@ -4931,21 +4595,16 @@ describe("Queue", () => {
     })
     const pr = await submitBranch(app, "issue/merit-rejection")
 
-    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+    expect(await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)).toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure", error: { code: "merge-conflict" } },
     ])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "submitted",
-      state: "open",
-      merged: false,
-      revision: pr.revision,
-      headSha: pr.headSha,
-    })
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
     expect(Queues.authorityRun(app.state().queues.authority, "R1")).not.toHaveProperty("released")
     expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toContain("pr/rejected")
 
     const beforeRetry = await Array.fromAsync(app.events())
-    await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)).rejects.toThrow(
       /submit authority was consumed/iu,
     )
     const afterRetry = await Array.fromAsync(app.events())
@@ -4964,33 +4623,25 @@ describe("Queue", () => {
         },
       },
     ])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "needs-author",
-      revision: pr.revision,
-      headSha: pr.headSha,
-    })
+    // "needs-author" is the run-side fact now: the consumed-authority receipt
+    // above is the whole durable trace a recordless member gets.
     expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(mergeCalls).toBe(1)
 
-    await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "submitted",
-      revision: 2,
-      headSha: UPDATED,
-    })
+    // The new revision that supplies fresh submit authority is a RE-PUSH: the
+    // fact moves, and re-deriving continues the branch's revision count.
+    await app.bays.recordBranchSubmit({ branch: pr.branch, sha: UPDATED, base: "main" })
+    const revision2 = memberOf(app, pr.branch)
+    expect(revision2).toMatchObject({ id: pr.id, revision: 2, headSha: UPDATED })
 
-    const revised = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    const revised = await app.queue.run({ prs: [], derived: [revision2], steps: ["merge"] }, runtime)
     const newRuns = revised.filter(({ id: run }) => run === "R2")
     expect(newRuns).toHaveLength(1)
     expect(newRuns).toMatchObject([
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] },
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "integrated",
-      revision: 2,
-      headSha: UPDATED,
-    })
+    expect(await terminalFor(app, pr.id)).toMatchObject({ run: "R2", revision: 2, headSha: UPDATED })
     expect(mergeCalls).toBe(2)
   })
 
@@ -5018,7 +4669,7 @@ describe("Queue", () => {
     await using app = await createQueueApp(options, journal, undefined, id)
     const pr = await submitBranch(app, "issue/base-raced")
 
-    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+    expect(await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)).toMatchObject([
       {
         id: "R1",
         status: "completed",
@@ -5029,11 +4680,12 @@ describe("Queue", () => {
     ])
     // A base race is environmental, not a change-content fault: the change must stay
     // submitted (re-admissible), NOT be terminally rejected like merge-conflict.
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "submitted",
-      revision: pr.revision,
-      headSha: pr.headSha,
-    })
+    // A blameless release leaves the delivery intact: no terminal for the member
+    // and its standing submit fact untouched at the pinned sha — post-S7 that
+    // pair IS `delivery === "submitted"`, and it is what makes the unchanged
+    // revision re-admissible.
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
 
     const events = await Array.fromAsync(app.events())
     const failed = events.find(
@@ -5045,7 +4697,7 @@ describe("Queue", () => {
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
 
     // The unchanged revision re-admits and merges once the base settles.
-    const retried = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    const retried = await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
     expect(retried).toMatchObject([
       {
@@ -5055,7 +4707,7 @@ describe("Queue", () => {
         prs: [{ id: pr.id, revision: 1, headSha: pr.headSha }],
       },
     ])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
+    expect(await terminalFor(app, pr.id)).toMatchObject({ run: "R2", revision: 1, commit: MERGED })
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
     expect(mergeCalls).toBe(2)
   })
@@ -5084,7 +4736,7 @@ describe("Queue", () => {
     await using app = await createQueueApp(options, journal, undefined, id)
     const pr = await submitBranch(app, "issue/stale-check-raced")
 
-    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+    expect(await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)).toMatchObject([
       {
         id: "R1",
         status: "completed",
@@ -5093,11 +4745,12 @@ describe("Queue", () => {
         prs: [{ id: pr.id, revision: pr.revision }],
       },
     ])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({
-      delivery: "submitted",
-      revision: pr.revision,
-      headSha: pr.headSha,
-    })
+    // A blameless release leaves the delivery intact: no terminal for the member
+    // and its standing submit fact untouched at the pinned sha — post-S7 that
+    // pair IS `delivery === "submitted"`, and it is what makes the unchanged
+    // revision re-admissible.
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
 
     const events = await Array.fromAsync(app.events())
     const failed = events.find(
@@ -5108,12 +4761,12 @@ describe("Queue", () => {
     expect(authority?.released).toEqual({ reason: "stale-check", ref: failed.id })
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
 
-    const retried = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    const retried = await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
     expect(retried).toMatchObject([
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 1 }] },
     ])
-    expect(changeFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "integrated", revision: 1 })
+    expect(await terminalFor(app, pr.id)).toMatchObject({ run: "R2", revision: 1, commit: MERGED })
     expect(mergeCalls).toBe(2)
   })
 
@@ -5133,7 +4786,7 @@ describe("Queue", () => {
     const first = await submitBranch(app, "issue/batch-race-a")
     const second = await submitBranch(app, "issue/batch-race-b")
 
-    const runs = await app.queue.run({ prs: [first.id, second.id], steps: ["merge"] }, runtime)
+    const runs = await app.queue.run({ prs: [], derived: [first, second], steps: ["merge"] }, runtime)
 
     // bisectable(): a release-reason failure is NOT bisected — the whole batch
     // re-queues rather than isolating members to find a non-existent "bad" PR.
@@ -5144,8 +4797,10 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(1)
 
     // needsAdvance(): the batch advances to release authority for every member.
-    expect(deliveryOf(app.state().bays.prs[first.id])).toBe("submitted")
-    expect(deliveryOf(app.state().bays.prs[second.id])).toBe("submitted")
+    expect(await terminalFor(app, first.id)).toBeUndefined()
+    expect(await terminalFor(app, second.id)).toBeUndefined()
+    expect(standingSubmit(app, first.branch)).toMatchObject({ sha: first.headSha })
+    expect(standingSubmit(app, second.branch)).toMatchObject({ sha: second.headSha })
     const events = await Array.fromAsync(app.events())
     const failed = events.find(
       (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
@@ -5179,12 +4834,12 @@ describe("Queue", () => {
     const pr = await submitBranch(app, "issue/advancing-base")
 
     let ticks = 0
-    while (deliveryOf(app.state().bays.prs[pr.id]) === "submitted" && ticks < 10) {
+    while ((await terminalFor(app, pr.id)) === undefined && ticks < 10) {
       ticks++
-      await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+      await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)
     }
 
-    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
+    expect(await terminalFor(app, pr.id)).toMatchObject({ commit: MERGED })
     expect(merges).toBe(settleOnAttempt)
     expect(ticks).toBe(settleOnAttempt)
     expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toContain("pr/rejected")
@@ -5211,12 +4866,15 @@ describe("Queue", () => {
 
     const TICKS = 5
     for (let tick = 0; tick < TICKS; tick++) {
-      if (deliveryOf(app.state().bays.prs[pr.id]) !== "submitted") break
-      await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+      if ((await terminalFor(app, pr.id)) !== undefined) break
+      await app.queue.run({ prs: [], derived: [pr], steps: ["merge"] }, runtime)
     }
 
     expect(merges).toBe(TICKS)
-    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    // Never terminally rejected: no terminal, and the submission still stands
+    // so the next tick re-admits it.
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
     expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toContain("pr/rejected")
   })
 
@@ -5233,10 +4891,11 @@ describe("Queue", () => {
       journal,
     )
     const retried = await submitBranch(original, "issue/retry-without-submit")
-    const first = (await original.queue.run({ prs: [retried.id] }, runtime))[0]
+    const first = (await original.queue.run({ prs: [], derived: [retried] }, runtime))[0]
     if (first === undefined) throw new Error("expected authorized R1")
     expect(first).toMatchObject({ id: "R1", status: "completed", conclusion: "failure" })
-    expect(deliveryOf(original.state().bays.prs[retried.id])).toBe("submitted")
+    expect(await terminalFor(original, retried.id)).toBeUndefined()
+    expect(standingSubmit(original, retried.branch)).toMatchObject({ sha: retried.headSha })
     const firstRecord = Queues.get(original.state().queues, "R1")
     if (firstRecord === undefined) throw new Error("expected persisted R1")
     const uncorrelatedSnapshot = firstRecord.prs[0]
@@ -5294,21 +4953,13 @@ describe("Queue", () => {
     expect(legacySnapshot).not.toHaveProperty("correlation")
 
     const submitted = await submitBranch(app, "issue/submitted-control")
-    const submittedRun = (await app.queue.run({ prs: [submitted.id] }, runtime))[0]
+    const submittedRun = (await app.queue.run({ prs: [], derived: [submitted] }, runtime))[0]
     if (submittedRun === undefined) throw new Error("expected submitted control run")
 
-    await app.bays.submit({
-      branch: "issue/draft-check-control",
-      headSha: UPDATED,
-      base: "main",
-      baseSha: BASE,
-      draft: true,
-    })
-    await app.bays.requestChecks({ pr: "PR3" })
-    const draftCheck = (await app.queue.admit({ prs: ["PR3"] }, runtime))[0]
-    if (draftCheck === undefined) throw new Error("expected pushed draft-check admitted PR id")
-    expect(deliveryOf(app.state().bays.prs.PR3)).toBe("pushed")
-
+    // The second control — a `pushed` DRAFT whose admission the audit must also
+    // leave alone — is gone with the record lane: a submit fact is the whole
+    // delivery, so no member can be pushed-but-not-submitted and no draft flag
+    // exists to set. The submitted control above is the surviving one.
     expect(app.queue.audit().findings).toEqual([
       expect.objectContaining({ code: "run-without-submit-ancestry", run: "R2", pr: retried.id }),
     ])
@@ -5331,15 +4982,6 @@ describe("Queue", () => {
       const journal = createMemoryJournal<unknown>()
       const original = await createQueueApp({}, journal)
       const stale = await submitBranch(original, `issue/stale-${terminal}`)
-      await original.bays.intake({
-        branch: stale.branch,
-        headSha: UPDATED,
-        base: stale.base,
-        baseSha: BASE,
-      })
-      await original.bays.submit({ pr: stale.id })
-      await original.bays.requestChecks({ pr: stale.id, baseSha: BASE })
-      expect(changeFacts(original.state().bays.prs[stale.id])).toMatchObject({ revision: 2, headSha: UPDATED })
       await original.close()
 
       let cursor = 0
@@ -5356,6 +4998,25 @@ describe("Queue", () => {
               commandHash: Command.hash(command),
             },
             events: [
+              // The queue's authority slice — NOT a record — is what the stale
+              // guard compares against, and post-S7 only history writes it: no
+              // live verb emits `pr/pushed` any more. Planting revision 2 here
+              // is exactly the state `bays.intake` + `bays.submit` used to leave.
+              {
+                id: "00000000-0000-7000-9000-000000009214",
+                name: "pr/pushed",
+                ts: "2026-01-01T00:00:30.000Z",
+                data: {
+                  pr: stale.id,
+                  branch: stale.branch,
+                  base: "main",
+                  headSha: UPDATED,
+                  baseSha: BASE,
+                  revision: 2,
+                  changeId: stale.changeId,
+                  submitter: "operator",
+                },
+              },
               {
                 id: "00000000-0000-7000-9000-000000009213",
                 name: terminal,
@@ -5379,62 +5040,6 @@ describe("Queue", () => {
     },
   )
 
-  it("reauthorizes failed draft required checks through a fresh exact check request", async () => {
-    let fail = true
-    await using app = await createQueueApp({
-      check: (input) =>
-        fail && input.prs[0]?.id === "PR1"
-          ? {
-              status: "completed",
-              conclusion: "failure",
-              error: { code: "typecheck-failed", message: "src/model.ts:12 failed" },
-            }
-          : { status: "completed", conclusion: "success", output: { checked: true } },
-    })
-    await app.bays.submit({ branch: "issue/draft-red", headSha: HEAD, base: "main", baseSha: BASE, draft: true })
-    await app.bays.requestChecks({ pr: "PR1" })
-    const admitted = (await app.queue.admit({ prs: ["PR1"] }))[0]
-    if (admitted === undefined) throw new Error("expected an admitted PR id")
-    expect(admitted).toBe("PR1")
-    expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toEqual(["PR1"])
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "refused",
-      kind: "failure",
-      step: "check",
-      receipt: { code: "typecheck-failed" },
-    })
-    expect(deliveryOf(app.state().bays.prs.PR1)).toBe("pushed")
-
-    expect(app.queue.eligibility("PR1")).toMatchObject({
-      runnable: false,
-      reason: { code: "draft" },
-      checks: { status: "failed" },
-    })
-    await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("change 'PR1' is pushed, not ready")
-
-    fail = false
-    const reauthorization = await app.bays.requestChecks({ pr: "PR1" })
-    expect(reauthorization.events.map(({ name, data }) => ({ name, data }))).toEqual([
-      {
-        name: "pr/checks-requested",
-        data: { pr: "PR1", revision: 1, headSha: HEAD, baseSha: BASE },
-      },
-    ])
-    const readmitted = (await app.queue.admit({ prs: ["PR1"] }, runtime))[0]
-    if (readmitted === undefined) throw new Error("expected an explicitly reauthorized admitted PR id")
-    expect(readmitted).toBe("PR1")
-    expect(changeAdmission(app.bays.pr("PR1")!)).toMatchObject({
-      status: "passed",
-      baseSha: BASE,
-      steps: expect.arrayContaining([expect.objectContaining({ name: "check", status: "passed" })]),
-    })
-    await app.bays.ready({ pr: "PR1" })
-    expect(app.queue.eligibility("PR1")).toMatchObject({
-      runnable: true,
-      checks: { status: "passed" },
-    })
-  })
-
   it("spends each exact check request once on a pre-Job admission refusal", async () => {
     let prepares = 0
     await using app = await createQueueApp({
@@ -5448,15 +5053,13 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/candidate-refusal-authority")
-    await app.bays.requestChecks({ pr: pr.id })
 
-    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(await app.queue.run({ derived: [pr] }, runtime)).toEqual([])
     expect(prepares).toBe(1)
-    await app.bays.requestChecks({ pr: pr.id })
-    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(await app.queue.run({ derived: [pr] }, runtime)).toEqual([])
     expect(prepares).toBe(2)
 
-    expect(await app.queue.run({}, runtime)).toEqual([])
+    expect(await app.queue.run({ derived: [pr] }, runtime)).toEqual([])
     expect(prepares).toBe(2)
   })
 
@@ -5504,16 +5107,16 @@ describe("Queue", () => {
       reason: "operator freeze",
       allowedPRs: [allowed.id],
     })
-    await expect(first.queue.run({ prs: [blocked.id] }, runtime)).rejects.toThrow(
+    await expect(first.queue.run({ prs: [], derived: [blocked] }, runtime)).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
-    await expect(first.dispatch(first.commands.queue.run, { prs: [blocked.id] })).rejects.toThrow(
+    await expect(first.dispatch(first.commands.queue.run, { prs: [], derived: [blocked], baseSha: BASE })).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
     expect(Queues.ids(first.state().queues)).toEqual([])
-    await expect(first.queue.run({ prs: [allowed.id] }, runtime)).resolves.toHaveLength(1)
+    await expect(first.queue.run({ prs: [], derived: [allowed] }, runtime)).resolves.toHaveLength(1)
     await first.queue.resume("main")
-    await expect(first.queue.run({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
+    await expect(first.queue.run({ prs: [], derived: [blocked] }, runtime)).resolves.toHaveLength(1)
     expect(first.queue.status("main").pause).toBeUndefined()
     await first.queue.pause({
       base: "main",
@@ -5550,7 +5153,7 @@ describe("Queue", () => {
     expect(app.queue.audit({ now }).findings).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "queue-hold-expired" })]),
     )
-    await expect(app.queue.run({ prs: [blocked.id] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [blocked] }, runtime)).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
 
@@ -5560,7 +5163,7 @@ describe("Queue", () => {
     )
     await expect(app.queue.expirePauses(now)).resolves.toMatchObject([{ base: "main" }])
     expect(app.queue.status("main").pause).toBeUndefined()
-    await expect(app.queue.run({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
+    await expect(app.queue.run({ prs: [], derived: [blocked] }, runtime)).resolves.toHaveLength(1)
     await app.close()
 
     await using replay = await createQueueApp({}, journal)
@@ -5577,8 +5180,8 @@ describe("Queue", () => {
       expiresAt: "2026-01-01T01:00:00.000Z",
     })
 
-    await expect(app.queue.run({ prs: [pr.id] }, runtime)).rejects.toThrow(`queue 'main' is paused: operator freeze`)
-    await expect(app.dispatch(app.commands.queue.run, { prs: [pr.id] })).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toThrow(`queue 'main' is paused: operator freeze`)
+    await expect(app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], baseSha: BASE })).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
     expect(Queues.ids(app.state().queues)).toEqual([])
@@ -5597,7 +5200,7 @@ describe("Queue", () => {
       expiresAt: "2026-01-01T01:00:00.000Z",
     })
 
-    const direct = await app.dispatch(app.commands.queue.run, {})
+    const direct = await app.dispatch(app.commands.queue.run, { derived: [first, second], baseSha: BASE })
     expect(direct.events).toEqual([])
     expect(direct.value).toEqual({
       kind: "no-runnable-prs",
@@ -5619,7 +5222,7 @@ describe("Queue", () => {
       selectedSteps: ["check", "review", "merge", "deploy"],
     })
 
-    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+    await expect(app.queue.run({ derived: [first, second] }, runtime)).resolves.toEqual([])
 
     expect(events).toContainEqual(
       expect.objectContaining({
@@ -5668,11 +5271,11 @@ describe("Queue", () => {
     const main = await submitBranch(app, "issue/active-main", "main")
     const alias = await submitBranch(app, "issue/active-alias", "origin/main")
 
-    const firstRun = app.queue.run({ prs: [main.id] }, runtime)
+    const firstRun = app.queue.run({ prs: [], derived: [main] }, runtime)
     await firstEntered.promise
     let secondError: unknown
     try {
-      await app.queue.run({ prs: [alias.id] }, runtime)
+      await app.queue.run({ prs: [], derived: [alias] }, runtime)
     } catch (error) {
       secondError = error
     } finally {
@@ -5684,7 +5287,7 @@ describe("Queue", () => {
     expect(checkCalls).toBe(1)
   })
 
-  it("canonically replays historical base aliases before pause lookup and partitioning", async () => {
+  it("canonically replays historical base aliases before pause lookup", async () => {
     const command = { id: "00000000-0000-7000-8000-000000000201", op: "legacy.queue.fixture" }
     const journal = createMemoryJournal<unknown>([
       {
@@ -5735,7 +5338,11 @@ describe("Queue", () => {
     ])
     await using app = await createQueueApp({ batch: 2 }, journal)
 
-    expect(Object.values(app.state().bays.prs).map((pr) => pr.base)).toEqual(["main", "main"])
+    // The two record-side legs are gone with the store: the historical
+    // `pr/pushed`/`pr/submitted` frames still PARSE but project nothing, so
+    // neither their canonicalized `base` nor a run partitioned out of them can
+    // be observed. What replay still owes is the QUEUE slice's own alias
+    // canonicalization, and that is what the rest of this test reads.
     expect(Object.keys(app.state().queues.pauses)).toEqual(["main"])
     expect(app.queue.status("origin/main")).toMatchObject({
       base: "main",
@@ -5744,9 +5351,6 @@ describe("Queue", () => {
     expect(app.queue.audit({ now: "2026-01-01T00:01:00.000Z" }).findings).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "queue-hold-ttl-missing", specimen: "queue:main" })]),
     )
-
-    const runs = await app.queue.run({}, runtime)
-    expect(runs.map((run) => [run.base, run.prs.map((pr) => pr.id)])).toEqual([["main", ["PR1", "PR2"]]])
   })
 
   it("selects the first queue-ordered eligible submitted PR under a pause", async () => {
@@ -5756,14 +5360,9 @@ describe("Queue", () => {
     )
     const prs = []
     for (let index = 1; index <= 23; index++) {
-      await app.bays.submit({
-        branch: `issue/pr-${index}`,
-        headSha: index.toString(16).padStart(40, "0"),
-        base: "main",
-      })
-      const pr = app.state().bays.prs[`PR${index}`]
-      if (pr === undefined) throw new Error(`PR${index} was not recorded`)
-      prs.push(pr)
+      const branch = `issue/pr-${index}`
+      await app.bays.recordBranchSubmit({ branch, sha: index.toString(16).padStart(40, "0"), base: "main" })
+      prs.push(memberOf(app, branch))
     }
     const oldExcluded = prs[10]
     const allowed = prs[22]
@@ -5772,13 +5371,14 @@ describe("Queue", () => {
 
     await app.queue.run(
       {
-        prs: prs.filter((pr) => pr.id !== oldExcluded.id && pr.id !== allowed.id).map((pr) => pr.id),
+        prs: [],
+        derived: prs.filter((pr) => pr.id !== oldExcluded.id && pr.id !== allowed.id),
         steps: ["check", "review", "merge"],
       },
       runtime,
     )
-    expect(deliveryOf(app.state().bays.prs.PR11)).toBe("submitted")
-    expect(deliveryOf(app.state().bays.prs.PR23)).toBe("submitted")
+    expect(await terminalFor(app, "PR11")).toBeUndefined()
+    expect(await terminalFor(app, "PR23")).toBeUndefined()
     await app.queue.pause({
       base: "main",
       reason: "operator freeze",
@@ -5786,21 +5386,25 @@ describe("Queue", () => {
       expiresAt: "2026-01-01T01:00:00.000Z",
     })
 
-    const runs = await app.queue.run({}, runtime)
+    const runs = await app.queue.run({ derived: [oldExcluded, allowed] }, runtime)
 
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR23"]])
-    expect(deliveryOf(app.state().bays.prs.PR11)).toBe("submitted")
-    expect(deliveryOf(app.state().bays.prs.PR23)).toBe("integrated")
+    expect(await terminalFor(app, "PR11")).toBeUndefined()
+    expect(standingSubmit(app, oldExcluded.branch)).toMatchObject({ sha: oldExcluded.headSha })
+    expect(await terminalFor(app, "PR23")).toMatchObject({ commit: MERGED })
   })
 
   it("keeps completed history readable and refuses queued work after revision drift", async () => {
     const journal = createMemoryJournal()
     const first = await createQueueApp({}, journal)
-    await first.bays.submit({ branch: "issue/completed", headSha: HEAD, base: "main" })
-    const completed = await first.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
-    await first.bays.submit({ branch: "issue/queued", headSha: UPDATED, base: "main" })
+    await first.bays.recordBranchSubmit({ branch: "issue/completed", sha: HEAD, base: "main" })
+    const completedMember = memberOf(first, "issue/completed")
+    const completed = await first.queue.run({ prs: [], derived: [completedMember], steps: ["check"] }, runtime)
+    await first.bays.recordBranchSubmit({ branch: "issue/queued", sha: UPDATED, base: "main" })
+    const queuedMember = memberOf(first, "issue/queued")
     const queued = await first.dispatch(first.commands.queue.run, {
-      prs: ["PR2"],
+      prs: [],
+      derived: [queuedMember],
       steps: ["check"],
       baseSha: BASE,
     })
@@ -5833,7 +5437,7 @@ describe("Queue", () => {
     const historyBase = pipe(
       createYrdDef(),
       withJobs({ definitions: bayJobs }),
-      withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+      withBays({ jobs: bayJobs }),
     )
     await using history = await createYrd(withoutSteps(historyBase), {
       inject: { journal, log: createLogger("test", [{ level: "silent" }]) },
@@ -5855,28 +5459,20 @@ describe("Queue", () => {
       },
     })
     const rejected = await submitBranch(rejectedApp, "issue/rejected")
-    expect((await rejectedApp.queue.run({ prs: [rejected.id] }, runtime))[0]).toMatchObject({
+    expect((await rejectedApp.queue.run({ prs: [], derived: [rejected] }, runtime))[0]).toMatchObject({
       status: "completed",
       conclusion: "failure",
       error: { code: "check-failed" },
     })
     expect(merged).toBe(false)
-    expect(changeFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
-      delivery: "submitted",
-      state: "open",
-      merged: false,
-    })
-    await rejectedApp.bays.intake({ branch: "issue/rejected", headSha: UPDATED, base: "main" })
-    await rejectedApp.bays.submit({ pr: rejected.id })
-    expect(changeFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
-      delivery: "submitted",
-      revision: 2,
-      headSha: UPDATED,
-      revs: [
-        { n: 1, head: HEAD },
-        { n: 2, head: UPDATED },
-      ],
-    })
+    // "Left open": no terminal, and the submission still stands at the failed
+    // revision's sha, so the author can push over it.
+    expect(await terminalFor(rejectedApp, rejected.id)).toBeUndefined()
+    expect(standingSubmit(rejectedApp, rejected.branch)).toMatchObject({ sha: HEAD })
+    await rejectedApp.bays.recordBranchSubmit({ branch: "issue/rejected", sha: UPDATED, base: "main" })
+    const revised = memberOf(rejectedApp, "issue/rejected")
+    expect(revised).toMatchObject({ id: rejected.id, revision: 2, headSha: UPDATED })
+    expect(snapshotOf(rejectedApp, rejected.id)).toMatchObject({ revision: 1, headSha: HEAD })
 
     let deployAttempts = 0
     await using deployApp = await createQueueApp({
@@ -5894,20 +5490,22 @@ describe("Queue", () => {
     })
     const deployed = await submitBranch(deployApp, "issue/deploy-fails")
     const companion = await submitBranch(deployApp, "issue/deploy-companion")
-    const run = (await deployApp.queue.run({ prs: [deployed.id, companion.id] }, runtime))[0]
+    const run = (await deployApp.queue.run({ prs: [], derived: [deployed, companion] }, runtime))[0]
     expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "deploy-failed" } })
-    expect(deliveryOf(deployApp.state().bays.prs[deployed.id])).toBe("integrated")
-    expect(deliveryOf(deployApp.state().bays.prs[companion.id])).toBe("integrated")
+    // The merge already landed, so both members carry their terminal even
+    // though the post-merge action failed.
+    expect(await terminalFor(deployApp, deployed.id)).toMatchObject({ commit: MERGED })
+    expect(await terminalFor(deployApp, companion.id)).toMatchObject({ commit: MERGED })
 
     const deployJob = run?.steps.find((step) => step.name === "deploy")?.job
     if (deployJob === undefined) throw new Error("expected failed post-merge action Job")
     expect(deployJob).toMatchObject({ status: "completed", conclusion: "failure" })
     await deployApp.jobs.retry(deployJob.id)
 
-    const retried = (await deployApp.queue.run({ prs: [deployed.id, companion.id] }, runtime))[0]
+    const retried = (await deployApp.queue.run({ prs: [], derived: [deployed, companion] }, runtime))[0]
     expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(deliveryOf(deployApp.state().bays.prs[deployed.id])).toBe("integrated")
-    expect(deliveryOf(deployApp.state().bays.prs[companion.id])).toBe("integrated")
+    expect(await terminalFor(deployApp, deployed.id)).toMatchObject({ commit: MERGED })
+    expect(await terminalFor(deployApp, companion.id)).toMatchObject({ commit: MERGED })
     expect(deployAttempts).toBe(2)
   })
 
@@ -5924,7 +5522,7 @@ describe("Queue", () => {
       },
     })
     const remote = await submitBranch(app, "issue/remote")
-    const waiting = (await app.queue.run({ prs: [remote.id] }, runtime))[0]!
+    const waiting = (await app.queue.run({ prs: [], derived: [remote] }, runtime))[0]!
     const waitingJob = waiting.steps[0]?.job
     if (waitingJob?.status !== "waiting") throw new Error("check did not wait")
     expect(app.queue.waiting(remote.id)).toMatchObject({
@@ -5933,12 +5531,14 @@ describe("Queue", () => {
     })
 
     const next = await submitBranch(app, "issue/next")
-    expect((await app.queue.run({ prs: [next.id] }, runtime))[0]).toMatchObject({
+    expect((await app.queue.run({ prs: [], derived: [next] }, runtime))[0]).toMatchObject({
       status: "completed",
       conclusion: "success",
     })
 
-    await app.bays.intake({ branch: remote.branch, headSha: UPDATED, base: "main" })
+    // The stale revision post-S7 is a RE-PUSH: the submit fact moves off the
+    // sha the waiting run pinned.
+    await app.bays.recordBranchSubmit({ branch: remote.branch, sha: UPDATED, base: "main" })
     expect(
       await app.queue.finish(
         remote.id,
@@ -5972,11 +5572,9 @@ describe("Queue", () => {
       ),
     ).rejects.toThrow("no waiting 'check' step")
     expect(merges).toBe(1)
-    expect(changeFacts(app.state().bays.prs[remote.id])).toMatchObject({
-      revision: 2,
-      headSha: UPDATED,
-      delivery: "pushed",
-    })
+    expect(standingSubmit(app, remote.branch)).toMatchObject({ sha: UPDATED })
+    expect(memberOf(app, remote.branch)).toMatchObject({ id: remote.id, revision: 2, headSha: UPDATED })
+    expect(await terminalFor(app, remote.id)).toBeUndefined()
   })
 
   it("refuses a delayed completion from an earlier attempt when a retry reuses its token", async () => {
@@ -6036,7 +5634,8 @@ describe("Queue", () => {
       attempt: 2,
       runner: "runner-2",
     })
-    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
     expect(merges).toBe(0)
   })
 
@@ -6050,7 +5649,7 @@ describe("Queue", () => {
       },
     })
     const pr = await submitBranch(app, "issue/reused-owner")
-    const first = (await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime))[0]
+    const first = (await app.queue.run({ prs: [], derived: [pr], steps: ["check", "merge"] }, runtime))[0]
     const firstJob = first?.steps[0]?.job
     if (firstJob?.status !== "waiting") throw new Error("first Job did not wait")
 
@@ -6069,9 +5668,11 @@ describe("Queue", () => {
     ])
     expect(app.queue.get(first!.id)).toMatchObject({ status: "completed", conclusion: "failure" })
 
-    await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: "main" })
-    await app.bays.submit({ pr: pr.id })
-    const second = (await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).find(
+    // The resubmission is a re-push: the fact moves, and re-deriving continues
+    // the branch's revision count off the retained snapshot.
+    await app.bays.recordBranchSubmit({ branch: pr.branch, sha: UPDATED, base: "main" })
+    const resubmitted = memberOf(app, pr.branch)
+    const second = (await app.queue.run({ prs: [], derived: [resubmitted], steps: ["check", "merge"] }, runtime)).find(
       (run) => run.id === "R2",
     )
     const secondJob = second?.steps[0]?.job
@@ -6098,7 +5699,8 @@ describe("Queue", () => {
       ),
     ).rejects.toThrow(firstJob.id)
     expect(app.queue.get(second!.id)?.steps[0]?.job).toMatchObject({ id: secondJob.id, status: "waiting" })
-    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
+    expect(await terminalFor(app, pr.id)).toBeUndefined()
+    expect(standingSubmit(app, pr.branch)).toMatchObject({ sha: pr.headSha })
     expect(merges).toBe(0)
   })
 
@@ -6127,12 +5729,16 @@ describe("Queue", () => {
           : { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
-    await submitBranch(app, "issue/one")
-    await submitBranch(app, "issue/two")
-    await submitBranch(app, "issue/bad")
-    await submitBranch(app, "issue/four")
+    const members = [
+      await submitBranch(app, "issue/one"),
+      await submitBranch(app, "issue/two"),
+      await submitBranch(app, "issue/bad"),
+      await submitBranch(app, "issue/four"),
+    ]
+    const failing = members[2]
+    if (failing === undefined) throw new Error("expected the red batch member")
 
-    const runs = await app.queue.run({ prs: [] }, runtime)
+    const runs = await app.queue.run({ derived: members }, runtime)
 
     expect(checked).toEqual([["PR1", "PR2", "PR3", "PR4"], ["PR1", "PR2"], ["PR3", "PR4"], ["PR3"], ["PR4"]])
     expect(runs.map((run) => [run.prs.map((pr) => pr.id), run.conclusion])).toEqual([
@@ -6195,15 +5801,15 @@ describe("Queue", () => {
       { candidateId: "C5", parent: "R3" },
     ])
     for (const child of runs.slice(1)) expect(child).not.toHaveProperty("isolationPart")
-    expect(
-      Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)])),
-    ).toEqual({
-      PR1: "integrated",
-      PR2: "integrated",
-      PR3: "submitted",
-      PR4: "integrated",
-    })
-    expect(app.state().bays.prs.PR3).toMatchObject({ state: "open", merged: false })
+    // Three members integrated; the isolated red one stayed open — no terminal
+    // for it, and its submit fact still stands so the next drain re-admits it.
+    const terminals = (await Array.fromAsync(app.events()))
+      .filter(({ name }) => name === "pr/integrated")
+      .map(({ data }) => (data as { pr: string }).pr)
+      .toSorted()
+    expect(terminals).toEqual(["PR1", "PR2", "PR4"])
+    expect(await terminalFor(app, "PR3")).toBeUndefined()
+    expect(standingSubmit(app, failing.branch)).toMatchObject({ sha: failing.headSha })
     expect((await Array.fromAsync(app.events())).map(({ name }) => name)).not.toContain("pr/rejected")
   })
 
@@ -6235,7 +5841,7 @@ describe("Queue", () => {
     const first = await submitBranch(app, "issue/environment-child")
     const second = await submitBranch(app, "issue/passing-child")
 
-    const runs = await app.queue.run({ prs: [first.id, second.id] }, runtime)
+    const runs = await app.queue.run({ prs: [], derived: [first, second] }, runtime)
 
     expect(runs).toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure", error: { code: "check-failed" } },
@@ -6250,12 +5856,9 @@ describe("Queue", () => {
     ])
     expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3"])
-    expect(
-      Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, changeDeliveryState(pr)])),
-    ).toEqual({
-      PR1: "submitted",
-      PR2: "integrated",
-    })
+    expect(await terminalFor(app, "PR1")).toBeUndefined()
+    expect(standingSubmit(app, first.branch)).toMatchObject({ sha: first.headSha })
+    expect(await terminalFor(app, "PR2")).toMatchObject({ commit: MERGED })
 
     const events = await Array.fromAsync(app.events())
     const childFailure = events.find((applied) => {
@@ -6276,7 +5879,7 @@ describe("Queue", () => {
     })
     expect(events.filter(({ name }) => name === "queue/batch/isolated")).toHaveLength(2)
 
-    const retried = await app.queue.run({ prs: [first.id] }, runtime)
+    const retried = await app.queue.run({ prs: [], derived: [first] }, runtime)
     const newRuns = retried.filter(({ id: run }) => run === "R4")
     expect(newRuns).toHaveLength(1)
     expect(newRuns).toMatchObject([
@@ -6288,8 +5891,8 @@ describe("Queue", () => {
       },
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3", "R4"])
-    expect(changeFacts(app.state().bays.prs[first.id])).toMatchObject({
-      delivery: "integrated",
+    expect(await terminalFor(app, first.id)).toMatchObject({
+      run: "R4",
       revision: first.revision,
       headSha: first.headSha,
     })
@@ -6319,7 +5922,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
       log,
     )
     const pr = await submitBranch(app, "issue/peer-canceled")
-    const running = app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const running = app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
     await executing.promise
 
     // A peer runtime over the same journal (a separate process in production)
@@ -6351,7 +5954,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
 
     // The runner keeps processing subsequent work after the raced skip.
     const next = await submitBranch(app, "issue/after-cancel")
-    await expect(app.queue.run({ prs: [next.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ prs: [], derived: [next], steps: ["check"] }, runtime)).resolves.toMatchObject([
       { status: "completed", conclusion: "success" },
     ])
   })
@@ -6373,7 +5976,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
     }
     await using app = await createQueueApp({}, journal)
     const pr = await submitBranch(app, "issue/journal-refused")
-    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
       "journal write refused (injected)",
     )
   })

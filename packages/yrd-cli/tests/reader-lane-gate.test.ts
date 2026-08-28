@@ -1,13 +1,16 @@
 /**
- * @failure A read view joins a run member against the retained record store and
- * throws on the first member the store does not hold, so ONE mixed-lane state —
- * record, derived, and intent members coexisting — crashes `yrd queue status`,
- * `yrd log`, and the timeline for the whole repository. This exact state is
- * live main post-S6 (2026-08-27: PR2131's derived member crashed three readers
- * serially, each discovered by a production incident, because no fixture held
- * the mix). This gate is the batch report: every reader entry point runs over
- * one composed mixed-lane state, so an S5 consumer regression fails HERE, once,
- * instead of live, serially.
+ * @failure A read view joins a run member against a record store and throws on
+ * the first member the store does not hold, so ONE mixed-lane state — record,
+ * derived, and intent members coexisting in run snapshots — crashes
+ * `yrd queue status`, `yrd log`, and the timeline for the whole repository.
+ * This exact state is live main post-S6 (2026-08-27: PR2131's derived member
+ * crashed three readers serially, each discovered by a production incident,
+ * because no fixture held the mix). S7 (branch-is-change, @i/10 22991) deleted
+ * the store outright, so EVERY historical record member a run snapshot carries
+ * is now a member no store holds — the exact input that crashed those readers,
+ * for the whole corpus. This gate is the batch report: every reader entry point
+ * runs over one composed mixed-lane state, so a consumer regression fails HERE,
+ * once, instead of live, serially.
  * @level l2
  * @consumer @yrd/cli every status/log/timeline operator; the 22991 S5 cutover
  */
@@ -177,7 +180,7 @@ const FACT_SHA = "c".repeat(40)
 const FACT_AT = "2026-07-13T10:00:00.000Z"
 
 function baysState(overrides: Partial<BaysState> = {}): BaysState {
-  return { byId: {}, prs: {}, receipts: {}, submits: {}, ...overrides }
+  return { byId: {}, submits: {}, ...overrides }
 }
 
 describe("reader lane gate — live submit facts render the pre-run pending band", () => {
@@ -228,24 +231,6 @@ describe("reader lane gate — live submit facts render the pre-run pending band
     expect(projection.rows.find((candidate) => candidate.factOnly === true)).toBeUndefined()
   })
 
-  it("a branch with a LIVE record renders NO fact row — the record lane owns the branch", () => {
-    const record = fixturePr("PR77", "submitted", FACT_AT)
-    const state = baysState({
-      prs: { [record.id]: record },
-      submits: { [record.branch]: { sha: FACT_SHA, base: "main", at: FACT_AT } },
-    })
-    const projection = queueTimelineProjection(results, {
-      now: NOW,
-      windowMs: 6 * 60 * 60_000,
-      statuses: ["pending", "running", "rejected", "integrated", "other"],
-      terms: [],
-      latest: false,
-      rowLimit: 500,
-      submissionTimes: queueTimelineAdmissionTimes(results),
-      state,
-    })
-    expect(projection.rows.find((candidate) => candidate.factOnly === true)).toBeUndefined()
-  })
 })
 
 describe("reader lane gate — human projection and active row survive recordless members", () => {

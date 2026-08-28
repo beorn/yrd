@@ -433,7 +433,7 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
 describe("pr withdraw", () => {
   it("withdraws a live change, records the reason, and terminalizes its Queue work", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/stale", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/stale", sha: HEAD_SHA, base: "main" })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
 
     const output = outputIO()
@@ -487,7 +487,7 @@ describe("pr withdraw", () => {
     expect((JSON.parse(log.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual(
       expect.arrayContaining([expect.objectContaining({ pr: "PR1", run: "R1", outcome: "stale" })]),
     )
-    await app.bays.submit({ branch: "topic/stale-norun", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/stale-norun", sha: HEAD2_SHA, base: "main" })
     expect(
       await runYrd(app, yrd("pr", "withdraw", "PR2", "--reason", "never queued", "--burn-payload"), outputIO().io),
     ).toBe(0)
@@ -500,8 +500,8 @@ describe("pr withdraw", () => {
 
   it("refuses unknown selectors and terminal PRs loud, without emitting", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "topic/two", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/two", sha: HEAD2_SHA, base: "main" })
 
     const unknown = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "nope"), unknown.io)).toBe(1)
@@ -526,7 +526,7 @@ describe("pr withdraw", () => {
 describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
   it("mr close does both records — withdrawn-with-reason first, then queue terminalization", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
 
     const output = outputIO()
@@ -552,7 +552,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 
   it("withdraw answers as a hidden alias with its stable envelope name", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const help = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("mr"), help.io), help.stderr()).toBe(0)
@@ -573,7 +573,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 
   it("root cancel stops the attempt and leaves the change open", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
     await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
 
     const output = outputIO()
@@ -589,7 +589,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 
   it("root cancel with no active attempt fails loud and teaches the branch-state verbs", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("cancel", "PR1"), output.io)).toBe(1)
@@ -610,7 +610,7 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
 describe("pre-spend disclosure on mr close", () => {
   it("refuses without --burn-payload, naming the revision and head it would spend", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("mr", "close", "PR1", "--reason", "looked stale"), output.io)).toBe(1)
@@ -627,7 +627,7 @@ describe("pre-spend disclosure on mr close", () => {
 
   it("--burn-payload discloses the spend, then withdraws", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const output = outputIO()
     expect(
@@ -644,8 +644,8 @@ describe("pre-spend disclosure on mr close", () => {
 
   it("names every revision in a batch and emits nothing when unacknowledged", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "topic/two", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
+    await app.bays.recordBranchSubmit({ branch: "topic/two", sha: HEAD2_SHA, base: "main" })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("mr", "close", "PR1", "PR2"), output.io)).toBe(1)
@@ -658,7 +658,7 @@ describe("pre-spend disclosure on mr close", () => {
 
   it("carries the spent revisions in the --json envelope", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("mr", "close", "PR1", "--burn-payload", "--json"), output.io), output.stderr()).toBe(0)
@@ -670,7 +670,7 @@ describe("pre-spend disclosure on mr close", () => {
 
   it("the hidden withdraw alias spends under the same acknowledgement", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const refused = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR1"), refused.io)).toBe(1)
@@ -689,7 +689,7 @@ describe("pre-spend disclosure on mr close", () => {
     // already carries. The verb stays registered, hidden, so an old runbook
     // gets this refusal — and emits nothing.
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch: "topic/one", sha: HEAD_SHA, base: "main" })
 
     const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })
     expect(await runYrd(app, yrd("admin", "pr", "prune"), output.io)).toBe(1)
@@ -710,8 +710,8 @@ describe("pr withdraw journal replay", () => {
     const dir = mkdtempSync(join(tmpdir(), "yrd-withdraw-replay-"))
     try {
       const first = await createCliApp({ journal: testJournal(dir) })
-      await first.bays.submit({ branch: "topic/reasoned", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-      await first.bays.submit({ branch: "topic/reasonless", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+      await first.bays.recordBranchSubmit({ branch: "topic/reasoned", sha: HEAD_SHA, base: "main" })
+      await first.bays.recordBranchSubmit({ branch: "topic/reasonless", sha: HEAD2_SHA, base: "main" })
       const withdraw = outputIO()
       expect(
         await runYrd(

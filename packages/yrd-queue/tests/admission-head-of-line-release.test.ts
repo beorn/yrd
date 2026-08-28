@@ -1,5 +1,5 @@
 /**
- * @failure A refused PR at the head of the admission queue ends the whole admission drain, so every ready PR behind it waits out the refusal loop instead of composing.
+ * @failure A refused member at the head of the admission queue ends the whole admission drain, so every ready member behind it waits out the refusal loop instead of composing.
  * @level l2
  * @consumer @yrd/queue admission drain
  */
@@ -9,7 +9,7 @@ import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } f
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { candidateRefFor, withMerge, withQueue, withStep, type CandidatePreparer } from "@yrd/queue"
+import { candidateRefFor, withMerge, withQueue, withStep, type CandidatePreparer, type Run } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -17,9 +17,10 @@ const MERGED = "b".repeat(40)
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
 /** The habitant runner always installs `continueAdmissions` (it is how a drain
- * signal interrupts the loop), and that is exactly the shape that admits ONE PR
- * per drain turn. A one-shot `queue run` leaves it undefined and dispatches the
- * whole queue in one turn, so only this shape can wedge head-of-line. */
+ * signal interrupts the loop), and that is exactly the shape that admits ONE
+ * member per drain turn. A one-shot `queue run` leaves it undefined and
+ * dispatches the whole queue in one turn, so only this shape can wedge
+ * head-of-line. */
 const HABITANT = { runner: "local", leaseMs: 60_000, continueAdmissions: () => true }
 
 function ids(initial = 0): () => string {
@@ -71,6 +72,11 @@ function checkMergePlugin(prepareCandidate: CandidatePreparer) {
     defaultSteps: ["check", "merge"],
     resolveBaseSha: () => BASE,
     prepareCandidate,
+    // S7: the selectorless compose derives every member from its standing
+    // submit fact, so the mint and the enrichment reader are what make a
+    // branch admissible at all — there is no record lane left to seed one.
+    prNumberMint: volatilePrNumberMint(),
+    readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
   })
 }
 
@@ -80,7 +86,7 @@ async function createApp(prepareCandidate: CandidatePreparer, log?: ReturnType<t
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -92,25 +98,24 @@ async function createApp(prepareCandidate: CandidatePreparer, log?: ReturnType<t
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  // `yrd pr submit` requests the checks; without them the change is never admission
-  // work and the drain this test exercises is skipped entirely.
-  await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
-  return pr
+/** The whole delivery, post-S7: a branch and its standing submit fact. Each
+ * branch gets its own head — an identical payload composes as a duplicate. */
+async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string): Promise<string> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base: "main" })
+  return branch
 }
 
-/** Refuse exactly the named PRs the way an authored-gitlink carrier is refused:
- * a per-PR refusal that prints its own deterministic remedy. */
+/** Refuse exactly the named branches the way an authored-gitlink carrier is
+ * refused: a per-member refusal that prints its own deterministic remedy.
+ * Keyed on the branch because that — not a store id — is what identifies a
+ * derived member before any run has retained a snapshot for it. */
 function refuseAuthoredGitlink(
   refused: ReadonlySet<string>,
   code: "authored-gitlink" | "recut-gitlink-conflict" = "authored-gitlink",
 ): CandidatePreparer {
   return (input) => {
-    const poisoned = input.prs.find((pr) => refused.has(pr.id))
+    const poisoned = input.prs.find((pr) => refused.has(pr.branch))
     if (poisoned !== undefined) {
       throw createFailure({
         kind: "refusal",
@@ -125,84 +130,85 @@ function refuseAuthoredGitlink(
   }
 }
 
-function skipsFor(events: readonly LogEvent[], pr: string): Extract<LogEvent, { kind: "log" }>[] {
+/** The preparation-path skip warn names the member by its minted id, so the
+ * branch has to be resolved through the ledger row that carries both. */
+function skipsForMember(events: readonly LogEvent[], pr: string): Extract<LogEvent, { kind: "log" }>[] {
   return events.filter(
     (event): event is Extract<LogEvent, { kind: "log" }> =>
       event.kind === "log" && event.props?.action === "compose-candidate-skip" && event.props?.pr === pr,
   )
 }
 
-describe("admission head-of-line release — a refused PR never blocks the ready PRs behind it", () => {
-  it("admits and integrates the trailing ready PRs in the SAME cycle that refuses the head", async () => {
+/** Which branches a drain actually integrated. The run's own snapshot is the
+ * post-S7 home of that fact: a derived member has no record to stamp. */
+function integratedBranches(runs: readonly Run[]): readonly string[] {
+  return runs
+    .filter((run) => run.integration !== undefined)
+    .flatMap((run) => run.prs.map((pr) => pr.branch))
+    .toSorted()
+}
+
+function refusalFor(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
+  return Object.values(app.state().queues.admissionRefusals).find((row) => row.branch === branch)
+}
+
+describe("admission head-of-line release — a refused member never blocks the ready members behind it", () => {
+  it("admits and integrates the trailing ready members in the SAME cycle that refuses the head", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const refused = new Set<string>()
+    const refused = new Set<string>(["issue/authored-gitlink-carrier"])
     await using app = await createApp(refuseAuthoredGitlink(refused, "recut-gitlink-conflict"), log)
     const head = await submitBranch(app, "issue/authored-gitlink-carrier")
-    refused.add(head.id)
     const trailing = [
       await submitBranch(app, "issue/ready-one"),
       await submitBranch(app, "issue/ready-two"),
       await submitBranch(app, "issue/ready-three"),
     ]
 
-    await app.queue.run({}, HABITANT)
+    const runs = await app.queue.run({}, HABITANT)
 
-    const state = app.state()
-    expect(state.bays.prs[head.id]?.integration).toBeUndefined()
-    expect(state.queues.admissionRefusals[head.id]).toMatchObject({ code: "recut-gitlink-conflict", count: 1 })
-    for (const pr of trailing) {
-      expect(
-        state.bays.prs[pr.id]?.integration,
-        `expected change '${pr.id}' to integrate behind the refused head`,
-      ).toEqual(expect.objectContaining({ commit: MERGED }))
-    }
-    expect(skipsFor(events, head.id).length).toBeGreaterThan(0)
+    // The head never integrated, and its refusal is on the durable ledger —
+    // the only trace a recordless head-of-line wedge has.
+    expect(integratedBranches(runs)).toEqual(trailing.toSorted())
+    const wedged = refusalFor(app, head)
+    expect(wedged).toMatchObject({ branch: head, code: "recut-gitlink-conflict", count: 1 })
+    expect(skipsForMember(events, wedged?.pr ?? "").length).toBeGreaterThan(0)
     log.end()
   })
 
-  it("ledgers the refused head exactly once per cycle while the trailing PRs drain", async () => {
-    const refused = new Set<string>()
+  it("ledgers the refused head exactly once per cycle while the trailing members drain", async () => {
+    const refused = new Set<string>(["issue/authored-gitlink-carrier"])
     await using app = await createApp(refuseAuthoredGitlink(refused))
     const head = await submitBranch(app, "issue/authored-gitlink-carrier")
-    refused.add(head.id)
     await submitBranch(app, "issue/ready-one")
 
     await app.queue.run({}, HABITANT)
 
     // One cycle, one streak increment — releasing the head must not turn a single
-    // refusal into a per-turn retry loop against the same PR.
-    expect(app.state().queues.admissionRefusals[head.id]).toMatchObject({
-      pr: head.id,
+    // refusal into a per-turn retry loop against the same member.
+    expect(refusalFor(app, head)).toMatchObject({
+      branch: head,
       code: "authored-gitlink",
       count: 1,
     })
   })
 
-  it("still drains every trailing PR when EVERY earlier PR in the queue is refused", async () => {
-    const refused = new Set<string>()
-    await using app = await createApp(refuseAuthoredGitlink(refused))
-    const poisoned = [
-      await submitBranch(app, "issue/poison-one"),
-      await submitBranch(app, "issue/poison-two"),
-      await submitBranch(app, "issue/poison-three"),
-    ]
-    for (const pr of poisoned) refused.add(pr.id)
+  it("still drains every trailing member when EVERY earlier member in the queue is refused", async () => {
+    const poisoned = ["issue/poison-one", "issue/poison-two", "issue/poison-three"]
+    await using app = await createApp(refuseAuthoredGitlink(new Set(poisoned)))
+    for (const branch of poisoned) await submitBranch(app, branch)
     const trailing = await submitBranch(app, "issue/ready-last")
 
-    await app.queue.run({}, HABITANT)
+    const runs = await app.queue.run({}, HABITANT)
 
-    const state = app.state()
-    for (const pr of poisoned) expect(state.bays.prs[pr.id]?.integration).toBeUndefined()
-    expect(state.bays.prs[trailing.id]?.integration).toEqual(expect.objectContaining({ commit: MERGED }))
+    expect(integratedBranches(runs)).toEqual([trailing])
+    for (const branch of poisoned) expect(refusalFor(app, branch)).toMatchObject({ code: "authored-gitlink" })
   })
 
-  it("keeps the drain terminating when EVERY queued PR is refused", async () => {
-    const refused = new Set<string>()
-    await using app = await createApp(refuseAuthoredGitlink(refused))
-    for (const branch of ["issue/poison-one", "issue/poison-two"]) {
-      refused.add((await submitBranch(app, branch)).id)
-    }
+  it("keeps the drain terminating when EVERY queued member is refused", async () => {
+    const poisoned = ["issue/poison-one", "issue/poison-two"]
+    await using app = await createApp(refuseAuthoredGitlink(new Set(poisoned)))
+    for (const branch of poisoned) await submitBranch(app, branch)
 
     await expect(app.queue.run({}, HABITANT)).resolves.toEqual([])
   })

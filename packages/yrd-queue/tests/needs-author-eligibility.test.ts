@@ -1,33 +1,49 @@
 /**
- * @failure A composition refusal that reaches the runner is misreported as a plain
- * `required-check-failed` (or as a submit-time door refusal), hiding that the author must
- * re-author the candidate; and a submitted PR with requested checks is not
- * discoverable by a later queue run when submit did not drain.
+ * @failure A composition refusal that reaches the runner is misreported as a
+ * plain `required-check-failed`, hiding that the author must re-author the
+ * candidate — or the reverse, an ordinary red check billing the author and
+ * consuming their submit authority. The distinction is the whole file: an
+ * author-owned refusal code bills the member `refusal` (needs-author) and
+ * emits the durable `pr/needs-author` fact; an ordinary check failure bills
+ * `failure` and emits none.
+ *
+ * S7 (branch-is-change, @i/10 22991): the change-record store is gone, so
+ * needs-author no longer lands as a stored delivery state on a Change. Its
+ * durable homes are the journaled `pr/needs-author` fact (re-sourced from the
+ * run's own snapshot) and the admission-refusal ledger row's `code` + `kind`.
+ * Those are what these tests read; the classification they fence is unchanged.
+ *
+ * THE ORDINARY-RED-CHECK TEST IS A CONTROL, not a third example. Billing every
+ * failure to the author would satisfy both author-owned assertions above it,
+ * leaving them decorative — only a code that must NOT bill the author proves
+ * the classification is a decision rather than a constant. Do not delete it as
+ * redundant.
+ *
+ * Identifying the member: `ChangeNeedsAuthorFactSchema` is `.strict()` and
+ * carries no `branch`, so the fact names its member only by a minted `PRId`
+ * that no store resolves. The branch is recovered through the fact's required
+ * `run` and that run's retained snapshot. Adding `branch` to the schema is the
+ * honest fix and is DEFERRED on purpose (@chief 2026-08-27): an event-schema
+ * change moves the projection checkpoint identity, which the store deletion is
+ * already moving once across a one-way migration edge, and the join works
+ * today. Recorded as a follow-up, not an oversight.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
-import {
-  createBayJobDefs,
-  currentChangeRev,
-  changeAdmission,
-  changeDeliveryState,
-  changeNeedsAuthor,
-  withBays,
-  volatilePrNumberMint,
-  type BayWorkspace,
-  type Change,
-} from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, parseJournalFrame, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
+  candidateRefFor,
   Queues,
   withMerge,
   withQueue,
   withStep,
   type AddStepResult,
+  type CandidatePreparer,
   type ChangeShape,
   type StepExecution,
   type StepRunner,
@@ -35,6 +51,7 @@ import {
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
+const MERGED = "b".repeat(40)
 const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 type CheckResult = z.infer<typeof CheckResultSchema>
@@ -42,26 +59,6 @@ type CheckResult = z.infer<typeof CheckResultSchema>
 function ids(): () => string {
   let value = 0
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
-}
-
-function changeFacts(pr: Change | undefined) {
-  if (pr === undefined) throw new Error("expected PR")
-  const revision = currentChangeRev(pr)
-  return {
-    ...pr,
-    status: changeDeliveryState(pr),
-    revision: revision.n,
-    headSha: revision.head,
-    base: revision.base,
-    baseSha: revision.baseSha,
-    props: revision.props,
-    composition: revision.composition,
-    revisions: pr.revs.map((item) => ({
-      ...item,
-      revision: item.n,
-      headSha: item.head,
-    })),
-  }
 }
 
 function workspace(): BayWorkspace {
@@ -86,23 +83,45 @@ function workspace(): BayWorkspace {
   }
 }
 
-async function createQueueApp(check?: StepRunner<ChangeShape, CheckResult>) {
+const mergeableCandidate: CandidatePreparer = (input) => {
+  const { prs: _prs, ...candidate } = input
+  return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
+}
+
+/** Derived-lane arming: the mint plus the enrichment reader are what make a
+ * standing submit fact admissible at all — there is no record lane to seed
+ * one. A fresh mint per app, so one test's high-water never leaks into another. */
+function derivedArming() {
+  return {
+    prNumberMint: volatilePrNumberMint(),
+    readSubmitEnrichment: ({ sha }: Readonly<{ branch: string; sha: string }>) => ({ changeId: `I${sha}` }),
+  }
+}
+
+async function createQueueApp(check?: StepRunner<ChangeShape, CheckResult>, journal = createMemoryJournal()) {
   const checkStep = withStep(
     "check",
     (input: StepExecution, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
       check?.(input, context) ?? { status: "completed", conclusion: "success", output: { checked: true } },
     { revision: "check-v1", output: CheckResultSchema },
   )
-  const queue = withQueue({ steps: [checkStep] as const, batch: false, defaultSteps: ["check"] })
+  const queue = withQueue({
+    steps: [checkStep] as const,
+    batch: false,
+    defaultSteps: ["check"],
+    resolveBaseSha: () => BASE,
+    prepareCandidate: mergeableCandidate,
+    ...derivedArming(),
+  })
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
-      journal: createMemoryJournal(),
+      journal,
       id: ids(),
       clock: () => "2026-01-01T00:00:00.000Z",
       log: createLogger("test", [{ level: "silent" }]),
@@ -117,6 +136,7 @@ type CheckedShape = AddStepResult<ChangeShape, "check", CheckResult>
  * present — the exact shape projectPRChecks filters out. */
 async function createIntegratingApp(
   merge: (input: StepExecution<CheckedShape>) => JobResult<{ commit: string; baseSha: string }>,
+  journal = createMemoryJournal(),
 ) {
   const checkStep = withStep(
     "check",
@@ -127,16 +147,23 @@ async function createIntegratingApp(
     },
   )
   const mergeStep = withMerge(merge, { revision: "merge-v1" })
-  const queue = withQueue({ steps: [checkStep, mergeStep] as const, batch: false, defaultSteps: ["check", "merge"] })
+  const queue = withQueue({
+    steps: [checkStep, mergeStep] as const,
+    batch: false,
+    defaultSteps: ["check", "merge"],
+    resolveBaseSha: () => BASE,
+    prepareCandidate: mergeableCandidate,
+    ...derivedArming(),
+  })
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
-      journal: createMemoryJournal(),
+      journal,
       id: ids(),
       clock: () => "2026-01-01T00:00:00.000Z",
       log: createLogger("test", [{ level: "silent" }]),
@@ -146,282 +173,155 @@ async function createIntegratingApp(
 
 type QueueApp = Awaited<ReturnType<typeof createQueueApp>>
 
-async function submitWithChecks(
-  app: Pick<QueueApp, "bays" | "state">,
-  branch: string,
-  headSha = HEAD,
-): Promise<string> {
-  await app.bays.submit({ branch, headSha, base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  await app.bays.requestChecks({ pr: pr.id })
-  return pr.id
+/** The whole delivery, post-S7: a branch and its standing submit fact. The
+ * fact IS the check request — there is no second `requestChecks` act. */
+async function submitBranch(app: Pick<QueueApp, "bays">, branch: string, sha = HEAD): Promise<string> {
+  await app.bays.recordBranchSubmit({ branch, sha, base: "main" })
+  return branch
+}
+
+async function journalEvents(
+  journal: ReturnType<typeof createMemoryJournal>,
+  name: string,
+): Promise<readonly Readonly<{ name: string; data: unknown }>[]> {
+  const out: Readonly<{ name: string; data: unknown }>[] = []
+  for await (const batch of journal.read(0)) {
+    for (const value of batch.values) {
+      const frame = parseJournalFrame(value)
+      for (const applied of frame.events) if (applied.name === name) out.push(applied)
+    }
+  }
+  return out
+}
+
+function refusalFor(app: { state: QueueApp["state"] }, branch: string) {
+  return Object.values(app.state().queues.admissionRefusals).find((row) => row.branch === branch)
 }
 
 describe("native needs-author lifecycle", () => {
-  it("projects a composition refusal that reached the runner as needs-author with its result", async () => {
-    await using app = await createQueueApp(() => ({
-      status: "completed",
-      conclusion: "failure",
-      error: {
-        code: "composition-retired",
-        message: "change 'PR1' declares a source composition; composed revisions are retired",
-      },
-    }))
-    const pr = await submitWithChecks(app, "topic/authored-root")
+  it("bills an author-owned composition refusal that reached the runner as needs-author, with its result", async () => {
+    const journal = createMemoryJournal()
+    await using app = await createQueueApp(
+      () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: {
+          code: "composition-retired",
+          message: "change 'PR1' declares a source composition; composed revisions are retired",
+        },
+      }),
+      journal,
+    )
+    const branch = await submitBranch(app, "topic/authored-root")
 
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
 
-    const current = app.bays.pr(pr)
-    if (current === undefined) throw new Error("expected refused PR")
-    const refused = changeAdmission(current)
-    expect(refused).toMatchObject({
-      status: "refused",
+    // The durable ledger bills the AUTHOR: kind 'refusal', not the generic
+    // 'failure' an ordinary red check earns.
+    expect(refusalFor(app, branch)).toMatchObject({
+      branch,
+      code: "composition-retired",
       kind: "refusal",
-      step: "check",
-      receipt: {
-        code: "composition-retired",
-        message: "change 'PR1' declares a source composition; composed revisions are retired",
-      },
-    })
-
-    expect(changeFacts(app.bays.pr(pr))).toMatchObject({
-      id: pr,
-      status: "needs-author",
-    })
-    expect(changeNeedsAuthor(current)).toMatchObject({
-      run: refused?.status === "refused" ? refused.steps[0]?.job : undefined,
-      step: "check",
-      receipt: {
-        code: "composition-retired",
-        message: "change 'PR1' declares a source composition; composed revisions are retired",
-      },
-    })
-    expect(changeFacts(app.bays.pr(pr)).revisions[0]).toMatchObject({ submittedAt: "2026-01-01T00:00:00.000Z" })
-    expect(changeFacts(app.bays.pr(pr)).revisions[0]?.terminal).toBeUndefined()
-    const events = await Array.fromAsync(app.events())
-    expect(events.map(({ name }) => name)).toContain("pr/admission-recorded")
-    expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
-    expect(app.state().queues.authority).toMatchObject({
-      submits: { PR1: { revision: 1, headSha: HEAD } },
-      checks: { PR1: { revision: 1, headSha: HEAD } },
-    })
-    // The stored delivery-status copy is deleted (22991 phase 2): the
-    // needs-author fact lives on the change record, never in queue authority.
-    expect(app.state().queues.authority).not.toHaveProperty("statuses")
-    const needsAuthorRecord = app.state().bays.prs[pr]
-    if (needsAuthorRecord === undefined) throw new Error(`expected change record '${pr}'`)
-    expect(changeDeliveryState(needsAuthorRecord)).toBe("needs-author")
-    expect(app.bays.prs().map(({ id }) => id)).toContain(pr)
-
-    const props = { request: "needs-author-repair" }
-    const submission = await app.bays.submitSelection(pr, {
-      props,
-      resolveRevision: async (selector) => (selector === "main" ? BASE : HEAD),
-      run: runtime,
-    })
-    if ("lane" in submission) throw new Error("expected a record-lane Change for a record id selector")
-    const correlated = submission
-    expect(changeFacts(correlated)).toMatchObject({
-      id: pr,
       revision: 1,
-      status: "needs-author",
-      props,
-      revisions: [{ revision: 1, props }],
+      headSha: HEAD,
     })
-    expect(correlated.revs).toHaveLength(1)
 
-    const eligibility = app.queue.eligibility(pr)
-    expect(eligibility.runnable).toBe(false)
-    expect(eligibility.reason?.code).toBe("admission-refused")
-    expect(eligibility.reason?.result).toBeUndefined()
-    expect(eligibility.reason?.message).toContain("composition-retired")
-    expect(eligibility.reason?.message).toContain("tracked changes re-merge implicitly")
+    // And the fact reaches settlement's hook, re-sourced from the run's own
+    // snapshot — the only home a recordless member's identity has. The fact
+    // schema is strict and carries no branch, so it is keyed on the minted id
+    // the ledger row records for this branch.
+    const needsAuthor = await journalEvents(journal, "pr/needs-author")
+    expect(needsAuthor).toHaveLength(1)
+    expect(needsAuthor[0]?.data).toMatchObject({
+      pr: refusalFor(app, branch)?.pr,
+      revision: 1,
+      headSha: HEAD,
+      step: "check",
+      receipt: {
+        code: "composition-retired",
+        message: "change 'PR1' declares a source composition; composed revisions are retired",
+      },
+    })
+    // A refused admission mints no run record.
     expect(Queues.ids(app.state().queues)).toEqual([])
-
-    // Receiver/refresh replay of the unchanged rejected head is idempotent:
-    // only new authored content may reopen and resume this change.
-    const beforeReplay = await Array.fromAsync(app.events())
-    const replay = await app.bays.intake({
-      branch: "topic/authored-root",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-    })
-    expect(replay.events).toEqual([])
-    expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
-    expect(await Array.fromAsync(app.events())).toEqual(beforeReplay)
-
-    const remergeReplay = await app.bays.recut({
-      pr,
-      fromRevision: 1,
-      headSha: HEAD,
-      baseSha: BASE,
-      treeSha: "3".repeat(40),
-      patchId: "4".repeat(40),
-      reviewCarried: false,
-    })
-    expect(remergeReplay.events).toEqual([])
-    expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 1, headSha: HEAD, status: "needs-author" })
-
-    // A fix push advances this already-submitted PR in place and re-requests
-    // checks. There is no withdraw/new-PR or submit-again ceremony.
-    const fixedHead = "2".repeat(40)
-    await app.bays.intake({ branch: "topic/authored-root", headSha: fixedHead, base: "main", baseSha: BASE })
-    expect(changeFacts(app.bays.pr(pr))).toMatchObject({ id: pr, revision: 2, headSha: fixedHead, status: "submitted" })
-    expect(app.bays.checksRequested(pr)).toBe(true)
-    expect(app.queue.eligibility(pr).checks.status).toBe("queued")
-    expect(app.bays.pr(pr)?.revs[0]?.admission).toMatchObject({
-      status: "refused",
-      receipt: { code: "composition-retired" },
-    })
-  })
-
-  it("does not reopen needs-author when same-head optional metadata, including a non-default base, is omitted", async () => {
-    await using app = await createQueueApp(() => ({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "composition-retired", message: "submitted composition cannot be built" },
-    }))
-    await app.bays.submit({
-      branch: "topic/same-head",
-      name: "original delivery",
-      headSha: HEAD,
-      base: "release/2.0",
-      baseSha: BASE,
-    })
-    await app.bays.requestChecks({ pr: "PR1" })
-    await app.queue.run({}, runtime)
-    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({ revision: 1, status: "needs-author" })
-
-    const before = await Array.fromAsync(app.events())
-    const omitted = await app.bays.intake({
-      branch: "topic/same-head",
-      headSha: HEAD,
-    })
-    const changedMetadata = await app.bays.intake({
-      branch: "topic/same-head",
-      name: "renamed delivery",
-      headSha: HEAD,
-    })
-
-    expect(omitted.events).toEqual([])
-    expect(changedMetadata.events).toEqual([])
-    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
-      revision: 1,
-      headSha: HEAD,
-      status: "needs-author",
-      base: "release/2.0",
-      name: "original delivery",
-      baseSha: BASE,
-    })
-    expect(await Array.fromAsync(app.events())).toEqual(before)
-
-    const authoredChange = await app.bays.intake({
-      branch: "topic/same-head",
-      headSha: HEAD,
-      base: "release/2.0",
-      baseSha: "d".repeat(40),
-    })
-    expect(authoredChange.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted", "pr/checks-requested"])
-    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
-      revision: 2,
-      headSha: HEAD,
-      status: "submitted",
-      baseSha: "d".repeat(40),
-    })
-  })
-
-  it("keeps a same-head ordinary check failure on its recorded non-default base", async () => {
-    await using app = await createQueueApp(() => ({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "check-failed", message: "opaque check failure" },
-    }))
-    await app.bays.submit({
-      branch: "topic/legacy-replay",
-      headSha: HEAD,
-      base: "release/2.0",
-      baseSha: BASE,
-    })
-    await app.bays.requestChecks({ pr: "PR1" })
-    await app.queue.run({}, runtime)
-    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
-      revision: 1,
-      status: "submitted",
-      base: "release/2.0",
-      baseSha: BASE,
-    })
-
-    const before = await Array.fromAsync(app.events())
-    const replay = await app.bays.intake({ branch: "topic/legacy-replay", headSha: HEAD })
-
-    expect(replay.events).toEqual([])
-    expect(changeFacts(app.bays.pr("PR1"))).toMatchObject({
-      revision: 1,
-      status: "submitted",
-      base: "release/2.0",
-      baseSha: BASE,
-    })
-    expect(await Array.fromAsync(app.events())).toEqual(before)
+    // The delivery-status copy is deleted (22991): nothing about needs-author
+    // lives in queue authority.
+    expect(app.state().queues.authority).not.toHaveProperty("statuses")
   })
 
   it("surfaces a refusal attached SOLELY to the integrating step (with a passed check present)", async () => {
     // The traced hole: projectPRChecks filters integrating steps and its
     // run.error fallback only fires with zero other records, so a composition
     // refusal on the merge step alongside a passed check record was invisible.
-    await using app = await createIntegratingApp(() => ({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "wrapper-mismatch", message: "change 'PR1' generated wrapper paths differ" },
-    }))
-    const pr = await submitWithChecks(app, "topic/merge-refusal")
+    const journal = createMemoryJournal()
+    await using app = await createIntegratingApp(
+      () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "wrapper-mismatch", message: "change 'PR1' generated wrapper paths differ" },
+      }),
+      journal,
+    )
+    const branch = await submitBranch(app, "topic/merge-refusal")
 
-    await app.queue.run({ prs: [pr] }, runtime)
+    await app.queue.run({}, runtime)
 
-    const eligibility = app.queue.eligibility(pr)
-    expect(eligibility.reason?.code).toBe("needs-author")
-    expect(eligibility.reason?.result).toMatchObject({ code: "wrapper-mismatch" })
+    // The refusal fired inside a started run, so the member's identity comes
+    // from that run's retained snapshot — the fact itself carries no branch.
+    const run = Queues.values(app.state().queues).find((record) => record.prs.some((pr) => pr.branch === branch))
+    expect(run, "the merge-step refusal must happen inside a started run").toBeDefined()
+    const needsAuthor = await journalEvents(journal, "pr/needs-author")
+    expect(needsAuthor, "a merge-step refusal beside a passed check must still reach a human").toHaveLength(1)
+    expect(needsAuthor[0]?.data).toMatchObject({
+      pr: run?.prs[0]?.id,
+      run: run?.id,
+      step: "merge",
+      receipt: { code: "wrapper-mismatch" },
+    })
   })
 
   it("keeps an ordinary check failure (tests/lint) off the needs-author path", async () => {
-    // An ordinary red check keeps the fresh PR open with a `required-check-failed`
-    // verdict, never `needs-author` — which is reserved for a composition the
-    // queue could not build.
-    await using app = await createQueueApp(() => ({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "check-failed", message: "unit tests failed" },
-    }))
-    const pr = await submitWithChecks(app, "topic/red-tests")
+    // An ordinary red check bills 'failure', never the author-owned 'refusal'
+    // — which is reserved for a composition the queue could not build. This is
+    // the control for the two tests above: without it, billing EVERYTHING to
+    // the author would pass them both.
+    const journal = createMemoryJournal()
+    await using app = await createQueueApp(
+      () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "check-failed", message: "unit tests failed" },
+      }),
+      journal,
+    )
+    const branch = await submitBranch(app, "topic/red-tests")
 
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
 
-    const eligibility = app.queue.eligibility(pr)
-    expect(eligibility.runnable).toBe(false)
-    expect(eligibility.reason?.code).toBe("required-check-failed")
-    expect(eligibility.reason?.result).toBeUndefined()
-    expect(eligibility.reason?.message).toContain("fix the branch and push")
-    expect(eligibility.reason?.message).not.toContain("submit it again")
+    expect(refusalFor(app, branch)).toMatchObject({ branch, code: "check-failed", kind: "failure" })
+    expect(await journalEvents(journal, "pr/needs-author")).toEqual([])
   })
 
-  it("lets a later queue run discover a submitted+requested PR that submit never drained", async () => {
-    // The decoupled submit only records `submitted` + requests checks; with no
-    // runner active it drains nothing. A subsequent queue run must still find
-    // and settle it from the admission queue.
+  it("lets a later queue run discover a standing submit fact that no run has drained", async () => {
+    // `recordBranchSubmit` projects the approval and dispatches nothing; with
+    // no runner active it drains nothing. A subsequent compose must still find
+    // it in the admission queue and settle it.
     await using app = await createQueueApp()
-    const pr = await submitWithChecks(app, "topic/late-drain")
+    const branch = await submitBranch(app, "topic/late-drain")
 
-    // No run has happened yet: the change is waiting in the admission queue.
-    const queued = app.queue.eligibility(pr)
-    expect(queued.checks.status).toBe("queued")
+    // Nothing has run yet: the approval is visible and explicitly not served.
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual([branch])
+    expect(Queues.ids(app.state().queues)).toEqual([])
 
     await app.queue.run({}, runtime)
-    // The later run found it in the admission queue and settled its checks.
-    expect(app.queue.eligibility(pr).checks.status).toBe("passed")
+
+    // The later run found it and settled its checks.
+    expect(app.queue.unrecordedSubmits()).toEqual([])
+    const served = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.branch === branch))
+    expect(served?.prs[0]).toMatchObject({ branch, headSha: HEAD, revision: 1 })
   })
 
-  it("keeps intake open while another candidate runs and while processing is paused", async () => {
+  it("keeps submission open while another candidate runs and while processing is paused", async () => {
     const started = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     await using app = await createQueueApp(async () => {
@@ -429,13 +329,15 @@ describe("native needs-author lifecycle", () => {
       await release.promise
       return { status: "completed", conclusion: "success", output: { checked: true } }
     })
-    const active = await submitWithChecks(app, "topic/active")
-    const running = app.queue.run({ prs: [active] }, runtime)
-    await started.promise
+    await submitBranch(app, "topic/active")
+    const running = app.queue.run({}, runtime)
+    // Raced against the run itself: if the compose rejects before the check
+    // step is reached, `started` never resolves and a bare await would hang
+    // until the suite timeout instead of reporting the real failure.
+    await Promise.race([started.promise, running])
 
-    const duringRun = await submitWithChecks(app, "topic/during-run", "2".repeat(40))
-    expect(changeFacts(app.bays.pr(duringRun))).toMatchObject({ status: "submitted", branch: "topic/during-run" })
-    expect(app.bays.checksRequested(duringRun)).toBe(true)
+    const duringRun = await submitBranch(app, "topic/during-run", "2".repeat(40))
+    expect(app.state().bays.submits[duringRun]).toMatchObject({ sha: "2".repeat(40), base: "main" })
 
     release.resolve()
     await running
@@ -446,11 +348,12 @@ describe("native needs-author lifecycle", () => {
       allowedPRs: [],
       expiresAt: "2026-01-01T01:00:00.000Z",
     })
-    const duringPause = await submitWithChecks(app, "topic/during-pause", "3".repeat(40))
-    expect(changeFacts(app.bays.pr(duringPause))).toMatchObject({ status: "submitted", branch: "topic/during-pause" })
-    expect(app.bays.checksRequested(duringPause)).toBe(true)
+    const duringPause = await submitBranch(app, "topic/during-pause", "3".repeat(40))
+    expect(app.state().bays.submits[duringPause]).toMatchObject({ sha: "3".repeat(40), base: "main" })
 
-    expect(app.queue.eligibility(duringRun).checks.status).toBe("queued")
-    expect(app.queue.eligibility(duringPause).checks.status).toBe("queued")
+    // Both are queued work the pause is holding, not lost submissions.
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch).toSorted()).toEqual(
+      [duringPause, duringRun].toSorted(),
+    )
   })
 })

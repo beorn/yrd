@@ -1,9 +1,10 @@
-// @failure The tracker bridges go blind on DERIVED deliveries: a branch the S6
-// door composes from its submit fact (recordless BY DESIGN — the terminal
-// reducers no-op for its id, "S6 relaxation") never reaches `bays.prs`, so a
-// bridge that projects only records shows the tent tracker bridge NOTHING for
-// any fleet delivery, pending or terminal, and every delivery cursor written
-// into coordination state goes dark post-purge.
+// @failure The tracker bridges go blind on DERIVED deliveries: a branch the
+// door composes from its submit fact is recordless BY DESIGN, so a bridge that
+// projects only change records shows the tent tracker bridge NOTHING for any
+// fleet delivery, pending or terminal, and every delivery cursor written into
+// coordination state goes dark post-purge. S7 (branch-is-change, @i/10 22991)
+// deleted the record store outright, so EVERY delivery is now derived and this
+// is the bridges' only remaining input.
 // @level l2
 // @consumer @yrd/cli
 
@@ -35,12 +36,10 @@ import {
   type StepExecution,
 } from "@yrd/queue"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
-import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
 const MERGED_SHA = "b".repeat(40)
-const RECORD_HEAD_SHA = "2".repeat(40)
 const CHANGE_ID = `I${"c".repeat(40)}`
 // The design-named fixture ref: enrichment is what carries `issue` onto a
 // derived member's snapshot (records no longer mint, so admission is where
@@ -119,11 +118,9 @@ function contestAdapters() {
 }
 
 /** The cli.test.ts composition pattern, pared to this suite's needs: the queue
- * owns the mint (S7 — derived-member identities mint at admission; records
- * never mint), injected journal/clock/ids, a passing check step, and
- * `readSubmitEnrichment` answering the submitted sha with the fixture issue.
- * Record-lane rows are seeded as journal events (`seedChanges`), with
- * `mintStart` lifting the queue mint above the seeded record numbers. */
+ * owns the mint (S7 — derived-member identities mint at admission), injected
+ * journal/clock/ids, a passing check step, and `readSubmitEnrichment`
+ * answering the submitted sha with the fixture issue. */
 async function createApp(
   options: {
     clock?: () => string
@@ -131,8 +128,6 @@ async function createApp(
     mergeCommits?: readonly string[]
     mergeAlreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
     mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
-    seedChanges?: readonly ChangeSeed[]
-    mintStart?: number
   } = {},
 ) {
   const contest = contestAdapters()
@@ -180,7 +175,7 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const prNumberMint = volatilePrNumberMint(options.mintStart ?? 0)
+  const prNumberMint = volatilePrNumberMint(0)
   const queue = withQueue({
     steps: [check, merge] as const,
     batch: false,
@@ -204,10 +199,7 @@ async function createApp(
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal:
-        options.seedChanges === undefined
-          ? createMemoryJournal()
-          : createMemoryJournal([seededChangesEntry(options.seedChanges)]),
+      journal: createMemoryJournal(),
       clock: options.clock ?? tickingClock(),
       id: ids(),
       log: createLogger("yrd", [{ level: "silent" }]),
@@ -271,7 +263,11 @@ describe("tracker bridges — DERIVED deliveries", () => {
     expect(await app.queue.run({}, RUNTIME)).toMatchObject([{ status: "completed", conclusion: "success" }])
     const run = app.queue.get("R1")
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(app.state().bays.prs).toEqual({})
+    // The delivery the bridge projects below is carried by the standing submit
+    // fact — the branch IS the change (S7). Asserting the fact still stands at
+    // the submitted sha is what makes the bridge row derived-lane by evidence
+    // rather than by naming.
+    expect(app.state().bays.submits["topic/derived-lands"]).toMatchObject({ sha: HEAD_SHA, base: "main" })
 
     const { v1, v2 } = await readBridges(app)
     const expected = {
@@ -399,47 +395,6 @@ describe("tracker bridges — DERIVED deliveries", () => {
     const { v1, v2 } = await readBridges(app)
     expect(v2.deliveries).toEqual([])
     expect(v1.deliveries).toEqual([])
-  })
-
-  it("projects a record-lane delivery beside a derived one — the lanes are disjoint by construction", async () => {
-    const recordIssue = "@yrd/core/record-beside-derived"
-    // Seeded record history (delivery state "pushed"): carries the record lane
-    // in the bridge without entering the selectorless drain below. The mint
-    // starts above the seeded number so the derived admission mints PR2.
-    await using app = await createApp({
-      seedChanges: [
-        {
-          pr: "PR1",
-          branch: "topic/record-lane",
-          issue: recordIssue,
-          revs: [{ headSha: RECORD_HEAD_SHA, baseSha: BASE_SHA, delivery: "pushed" }],
-        },
-      ],
-      mintStart: 1,
-    })
-    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-
-    await app.bays.recordBranchSubmit({ branch: "topic/derived-beside", sha: HEAD_SHA, base: "main" })
-    expect(await app.queue.run({}, RUNTIME)).toMatchObject([{ status: "completed", conclusion: "success" }])
-
-    const { v1, v2 } = await readBridges(app)
-    expect(v2.deliveries).toHaveLength(2)
-    // Record rows keep their lane (and their leading position); derived rows
-    // append. The id sets cannot collide: a record row projects from
-    // `bays.prs`, a derived row only from members with no record for their id.
-    expect(v2.deliveries).toMatchObject([
-      { issueRef: recordIssue, pr: "PR1", revision: 1, headSha: RECORD_HEAD_SHA, status: "pushed" },
-      {
-        issueRef: FIXTURE_ISSUE,
-        pr: "PR2",
-        revision: 1,
-        headSha: HEAD_SHA,
-        status: "integrated",
-        landingSha: MERGED_SHA,
-        runs: ["R1"],
-      },
-    ])
-    expect(v1.deliveries).toMatchObject([{ pr: "PR1", status: "pushed" }, { pr: "PR2", status: "integrated" }])
   })
 
   it("preserves already-landed equivalence evidence for a derived delivery in both bridge versions", async () => {

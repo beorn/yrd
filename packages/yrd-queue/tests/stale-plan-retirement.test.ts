@@ -112,7 +112,7 @@ async function seedStalePlanBatch(journal: Journal<unknown>, id: () => string, l
     const b = await submitBranch(app, "issue/batch-b", mint)
     // `prs: []` beside a non-empty `derived` selects exactly those derived
     // members — the post-S7 spelling of naming the batch explicitly.
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [a, b], steps: ["check"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [a, b], steps: ["check"], baseSha: BASE })
     const checkJob = app.queue.get("R1")?.steps[0]?.job
     if (checkJob === undefined) throw new Error("expected requested batch check")
     await app.jobs.run(checkJob.id, runtime)

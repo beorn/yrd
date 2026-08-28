@@ -1,18 +1,22 @@
 /**
- * @failure ONE submit fact is consumed by BOTH lanes. Measured live 2026-08-27
- * (hh main): branch task/materializer-root-fence carried a record-lane Change
- * AND a live refs/yrd/submit fact; the record lane merged revision 1, the fact
- * survived, and the next selectorless compose arbitrated the branch DERIVED
- * (terminal×different-sha) and merged an empty revision 2 whose second parent
- * was revision 1's own merge commit — a phantom revision and a second merge
- * commit for one approval. The invariant these tests fence: one lane consumes
- * one push, decided by LIVE ownership plus landed content — a live record's
- * branch never composes derived (the fact is that record's pending signal), a
- * fact pointing AT a terminal record's landing commit never composes (stale
- * landed content, the incident's exact signature), and the record lane's
- * merge retires the branch's fact in the same journal write as the terminal.
- * A terminal branch's genuinely NEW head DOES compose: post-purge the derived
- * lane is the only re-entry (Q1), and recordless branches are its population.
+ * @failure ONE submit fact is consumed TWICE, so one approval produces two
+ * merge commits. Measured live 2026-08-27 (hh main): branch
+ * task/materializer-root-fence carried a record-lane Change AND a live
+ * refs/yrd/submit fact; the record lane merged revision 1, the fact survived,
+ * and the next selectorless compose arbitrated the branch derived and merged
+ * an empty revision 2 whose second parent was revision 1's own merge commit —
+ * a phantom revision and a second merge commit for one approval.
+ *
+ * S7 (branch-is-change, @i/10 22991) deletes the record store, so the
+ * two-LANE half of the original incident is structurally impossible: there is
+ * one lane. What survives — and is the half that actually did the damage — is
+ * the CONSUMPTION rule: a standing submit fact is one push's consent, spent by
+ * exactly one run, and renewed only by the author pushing again. Without it a
+ * single approval re-composes every drain cycle forever, which is the same
+ * double-merge with one lane instead of two. These tests fence that rule on
+ * the production path (submit fact in, compose out), plus the incident's own
+ * signature — a fact standing at content the queue already landed never mints
+ * a second merge.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -24,9 +28,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
-  derivedLaneBranches,
   Queues,
-  alreadyLandedSubmits,
   withMerge,
   withQueue,
   withStep,
@@ -75,6 +77,15 @@ const mergeableCandidate: CandidatePreparer = (input) => {
   return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
 }
 
+/** The incident's own candidate answer: the approved tree is already contained
+ * in the base, so merging it adds nothing and the "candidate" IS the base
+ * commit. Post-S7 this — not a record's integration stamp — is how the queue
+ * recognises landed content. */
+const containedCandidate: CandidatePreparer = (input) => {
+  const { prs: _prs, ...candidate } = input
+  return { ...candidate, sha: input.baseSha, ref: candidateRefFor(input.baseSha), mergeability: "mergeable" }
+}
+
 /** submit-intake.test.ts's reference configuration: no review requirement, no
  * required checks, derived self-composition ARMED (mint + enrichment) — the
  * exact regime the incident's runner was in. */
@@ -84,6 +95,7 @@ async function createApp(
     id?: () => string
     log?: ReturnType<typeof createLogger>
     queueMint?: PrNumberMint
+    prepare?: CandidatePreparer
   }> = {},
 ) {
   const check = withStep(
@@ -108,7 +120,7 @@ async function createApp(
     batch: false,
     defaultSteps: ["check", "merge"],
     resolveBaseSha: () => BASE,
-    prepareCandidate: mergeableCandidate,
+    prepareCandidate: options.prepare ?? mergeableCandidate,
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
   })
@@ -116,7 +128,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -129,15 +141,6 @@ async function createApp(
 }
 
 type App = Awaited<ReturnType<typeof createApp>>
-
-/** An authored record via `bay.submit`; head is unique per record count. */
-async function submitBranch(app: App, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error(`PR for '${branch}' was not recorded`)
-  return pr
-}
 
 async function journalEvents(
   journal: ReturnType<typeof createMemoryJournal>,
@@ -159,141 +162,107 @@ function actionsLogged(events: readonly LogEvent[]): string[] {
   )
 }
 
-describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)", () => {
-  it("the incident: a branch whose record already MERGED is never composed by the derived lane, even while a submit fact stands at a new sha", async () => {
-    const events: LogEvent[] = []
-    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+/** Every run that carried a member on `branch` — the post-S7 home of "did this
+ * branch merge", since a derived member has no record to stamp. */
+function runsForBranch(app: App, branch: string) {
+  return Queues.values(app.state().queues).filter((run) => run.prs.some((member) => member.branch === branch))
+}
+
+describe("one submit fact is consumed by one run (PR2139 double-merge, 2026-08-27)", () => {
+  it("the incident: a standing fact spent by a merge never composes a second merge for the same push", async () => {
     const journal = createMemoryJournal()
-    await using app = await createApp({ journal, log })
+    await using app = await createApp({ journal })
+    await app.bays.recordBranchSubmit({ branch: "task/fence", sha: SHA, base: "main" })
 
-    // The two-lane state `yrd pr submit` + the refs/for dual-write produce: a
-    // record AND a live submit fact for the same branch at the record's head.
-    const pr = await submitBranch(app, "task/fence")
-    const head = pr.revs[0]?.head
-    if (head === undefined) throw new Error("record has no revision head")
-    await app.bays.recordBranchSubmit({ branch: "task/fence", sha: head, base: "main" })
-
-    // Revision 1 merges through the RECORD lane.
-    const first = await app.queue.run({ prs: [pr.id] }, runtime)
+    // The push merges once.
+    const first = await app.queue.run({}, runtime)
     expect(first).toMatchObject([{ status: "completed", conclusion: "success" }])
     expect(await journalEvents(journal, "pr/integrated")).toHaveLength(1)
 
-    // The measured post-landing state: a submit fact stands again for the
-    // branch at the revision-1 MERGE COMMIT itself (the ref survived and was
-    // re-projected after landing). Terminal record × different-sha — the cell
-    // the old universe ruled DERIVED.
-    await app.bays.recordBranchSubmit({ branch: "task/fence", sha: MERGED, base: "main" })
-    expect(derivedLaneBranches(app.state().bays)).toEqual([])
-    expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/fence"])
-
     // The next selectorless compose — where the empty revision 2 was minted
-    // and merged live — must compose NOTHING for this branch.
+    // and merged live — must compose NOTHING for this branch: the consent was
+    // spent, and nothing has renewed it.
     const again = await app.queue.run({}, runtime)
-    expect(again, "one submit fact must never be consumed by two lanes").toEqual([])
+    expect(again, "one submit fact must never be consumed twice").toEqual([])
     expect(await journalEvents(journal, "pr/integrated")).toHaveLength(1)
-    const doubled = Queues.values(app.state().queues).filter((run) =>
-      run.prs.some((member) => member.branch === "task/fence" && member.id !== pr.id),
-    )
-    expect(doubled, "no derived run may exist beside the record lane's merge").toEqual([])
-
-    // NO SILENT ERRORS: the exclusion says so, names the branch, and names the
-    // cure — the fact is stale landed content, retire it.
-    expect(actionsLogged(events)).toContain("compose-derived-fact-already-landed")
+    expect(runsForBranch(app, "task/fence")).toHaveLength(1)
   })
 
-  it("the record lane's merge retires the branch's submit fact in the same journal write (reason: superseded)", async () => {
-    const journal = createMemoryJournal()
-    const id = ids()
-    const queueMint = volatilePrNumberMint()
-    {
-      await using app = await createApp({ journal, id, queueMint })
-      const pr = await submitBranch(app, "task/retired")
-      const head = pr.revs[0]?.head
-      if (head === undefined) throw new Error("record has no revision head")
-      await app.bays.recordBranchSubmit({ branch: "task/retired", sha: head, base: "main" })
-      expect(app.state().bays.submits["task/retired"]).toMatchObject({ sha: head })
-
-      const runs = await app.queue.run({ prs: [pr.id] }, runtime)
-      expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-
-      // The consumption is recorded WITH the terminal: the fact is gone, and
-      // the journal says why — the merge superseded the standing approval.
-      expect(app.state().bays.submits["task/retired"]).toBeUndefined()
-      const retired = await journalEvents(journal, "branch/unsubmitted")
-      expect(retired.map((event) => event.data)).toEqual([{ branch: "task/retired", reason: "superseded" }])
-
-      // Nothing is left for the derived lane even BEFORE its own admission
-      // filter: the next compose has no fact to derive from.
-      expect(derivedLaneBranches(app.state().bays)).toEqual([])
-      await expect(app.queue.run({}, runtime)).resolves.toEqual([])
-    }
-
-    // The retirement replays: the event is registered and schema-valid, so a
-    // fresh projection over the same journal converges on the retired state.
-    await using replayed = await createApp({ journal, id, queueMint })
-    expect(replayed.state().bays.submits["task/retired"]).toBeUndefined()
-  })
-
-  it("a mid-run re-push survives the merge and COMPOSES as the branch's derived re-entry (Q1)", async () => {
+  it("the consumption is durable and named: the ledger says the authority was spent, not that the branch is unknown", async () => {
     await using app = await createApp({})
-    const pr = await submitBranch(app, "task/repushed")
-    // The author approved NEWER content than the revision the run pins.
+    await app.bays.recordBranchSubmit({ branch: "task/spent", sha: SHA, base: "main" })
+    await app.queue.run({}, runtime)
+
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+
+    // NO SILENT ERRORS: a branch that stops composing must say why, with the
+    // cure (re-push) implied by the code rather than vanishing from every
+    // surface.
+    const row = Object.values(app.state().queues.admissionRefusals).find((entry) => entry.branch === "task/spent")
+    expect(row).toMatchObject({ branch: "task/spent", code: "queue-submit-authority-consumed" })
+  })
+
+  it("a re-push renews the consent and composes the branch's derived re-entry as a NEW revision of the SAME identity", async () => {
+    await using app = await createApp({})
+    await app.bays.recordBranchSubmit({ branch: "task/repushed", sha: SHA, base: "main" })
+    const first = await app.queue.run({}, runtime)
+    expect(first).toMatchObject([{ status: "completed", conclusion: "success" }])
+    const firstMember = runsForBranch(app, "task/repushed")[0]?.prs[0]
+    expect(firstMember).toMatchObject({ headSha: SHA, revision: 1 })
+
+    // The author approves NEWER content: per-push consent, so the branch is
+    // runnable again — post-S7 the derived lane is the only re-entry there is.
     await app.bays.recordBranchSubmit({ branch: "task/repushed", sha: RESUBMIT_SHA, base: "main" })
-
-    const runs = await app.queue.run({ prs: [pr.id] }, runtime)
-    expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-
-    // The standing consent is for content the merge did NOT land — it stands,
-    // and post-purge the derived lane IS the terminal branch's re-entry: the
-    // record is history, the new head is new work (Q1). Excluding record
-    // history wholesale would strand every resubmit of a merged branch.
-    expect(app.state().bays.submits["task/repushed"]).toMatchObject({ sha: RESUBMIT_SHA })
-    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["task/repushed"])
     const again = await app.queue.run({}, runtime)
     expect(again).toMatchObject([{ status: "completed", conclusion: "success" }])
-    const reentry = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((member) => member.branch === "task/repushed" && member.headSha === RESUBMIT_SHA),
+
+    const reentry = runsForBranch(app, "task/repushed").find((run) =>
+      run.prs.some((member) => member.headSha === RESUBMIT_SHA),
     )
     expect(reentry, "the new head runs as a derived member").toBeDefined()
-    expect(reentry?.prs[0]?.id).not.toBe(pr.id)
+    // Branch continuity: the same change identity, the next revision — not a
+    // second change competing for the same branch.
+    expect(reentry?.prs[0]).toMatchObject({
+      id: firstMember?.id,
+      changeId: firstMember?.changeId,
+      revision: 2,
+      headSha: RESUBMIT_SHA,
+    })
   })
 
-  it("a genuinely recordless branch still composes, runs and merges as a derived member", async () => {
+  it("the incident's signature: a fact standing at content the base already holds is parked, never merged a second time", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const journal = createMemoryJournal()
+    await using app = await createApp({ journal, log, prepare: containedCandidate })
+    await app.bays.recordBranchSubmit({ branch: "task/landed", sha: MERGED, base: "main" })
+
+    await expect(app.queue.run({}, runtime)).resolves.toEqual([])
+    expect(await journalEvents(journal, "pr/integrated")).toEqual([])
+
+    // Named, durable, and pointed at the cure — the stale fact is retired, not
+    // resubmitted.
+    const row = Object.values(app.state().queues.admissionRefusals).find((entry) => entry.branch === "task/landed")
+    expect(row).toMatchObject({ branch: "task/landed", code: "candidate-already-landed" })
+    expect(row?.reason).toMatch(/refs\/yrd\/submit\/task\/landed/u)
+    expect(actionsLogged(events)).toContain("compose-candidate-skip")
+  })
+
+  it("a retired fact composes nothing, and an unrelated standing fact in the same drain still merges", async () => {
     await using app = await createApp({})
+    await app.bays.recordBranchSubmit({ branch: "task/withdrawn", sha: SHA, base: "main" })
     await app.bays.recordBranchSubmit({ branch: "issue/recordless", sha: RECORDLESS_SHA, base: "main" })
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless"])
-    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
+    // The author withdraws one approval before any compose sees it.
+    await app.bays.recordBranchUnsubmit({ branch: "task/withdrawn", reason: "deleted" })
+    expect(app.state().bays.submits["task/withdrawn"]).toBeUndefined()
 
     const runs = await app.queue.run({}, runtime)
+
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
-    expect(app.state().bays.prs).toEqual({})
-    const record = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((member) => member.branch === "issue/recordless"),
-    )
-    expect(record?.prs[0]).toMatchObject({ branch: "issue/recordless", headSha: RECORDLESS_SHA })
-  })
-
-  it("the derived universe: live ownership and landed content exclude; terminal history with a NEW head composes", async () => {
-    await using app = await createApp({})
-    // Open record + fact: record-lane pendency, excluded — the fact is the
-    // live record's own pending signal.
-    await submitBranch(app, "task/open")
-    await app.bays.recordBranchSubmit({ branch: "task/open", sha: SHA, base: "main" })
-    // Withdrawn record + NEW-head fact: the terminal branch's derived
-    // re-entry (Q1) — composes.
-    const withdrawn = await submitBranch(app, "task/withdrawn")
-    await app.bays.closePr({ pr: withdrawn.id, reason: "superseded" })
-    await app.bays.recordBranchSubmit({ branch: "task/withdrawn", sha: RESUBMIT_SHA, base: "main" })
-    // Merged record + fact AT the landing commit: the incident cell — stale
-    // landed content, excluded.
-    const merged = await submitBranch(app, "task/merged")
-    await app.queue.run({ prs: [merged.id] }, runtime)
-    await app.bays.recordBranchSubmit({ branch: "task/merged", sha: MERGED, base: "main" })
-    // Recordless: the derived lane's own population.
-    await app.bays.recordBranchSubmit({ branch: "issue/recordless", sha: RECORDLESS_SHA, base: "main" })
-
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless", "task/withdrawn"])
-    expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/merged"])
+    expect(runsForBranch(app, "task/withdrawn")).toEqual([])
+    expect(runsForBranch(app, "issue/recordless")[0]?.prs[0]).toMatchObject({
+      branch: "issue/recordless",
+      headSha: RECORDLESS_SHA,
+    })
   })
 })

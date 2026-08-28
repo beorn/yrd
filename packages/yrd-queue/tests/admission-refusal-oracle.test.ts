@@ -1,11 +1,19 @@
 /**
  * @failure A change refused at ADMISSION never becomes a run record, so `auditQueues` (which walks run records only) is structurally blind to a head-of-line refusal loop — `queue audit` returned `findings: []` through a 5h46m block while every compose cycle logged a loggily-only `compose-candidate-skip`.
+ *
+ * S7 (branch-is-change, @i/10 22991): members are derived from standing submit
+ * facts, so the refusal ledger is the ONLY durable identity a member refused
+ * before any run has — `mintDerivedMemberIdentity` reuses the ledger row's id
+ * across refused composes, which is what makes a streak countable at all. The
+ * fixtures below re-push nothing between cycles: a refused member never
+ * consumed its authority, so every compose re-derives it, which is exactly the
+ * forever-retry the header incident describes.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, currentChangeRev, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -66,6 +74,16 @@ function workspace(): BayWorkspace {
   }
 }
 
+/** Derived-lane arming. Without a mint and an enrichment reader the compose
+ * cannot derive a member from a submit fact at all, so every fixture here
+ * needs both — they are what the record lane's intake used to stand in for. */
+function derivedArming(mint?: PrNumberMint) {
+  return {
+    prNumberMint: mint ?? volatilePrNumberMint(),
+    readSubmitEnrichment: ({ sha }: Readonly<{ branch: string; sha: string }>) => ({ changeId: `I${sha}` }),
+  }
+}
+
 /** Check-only plan: every configured step is admission work, so a refusal here
  * merges in `dispatchAdmissions` — the path that never mints a run record. */
 function checkOnlyPlugin(
@@ -88,8 +106,10 @@ function checkOnlyPlugin(
     steps: [check] as const,
     batch: false,
     defaultSteps: ["check"],
+    resolveBaseSha: () => BASE,
     prepareCandidate,
     progress,
+    ...derivedArming(),
     ...(needsPersonOwner === undefined ? {} : { needsPersonOwner }),
   })
 }
@@ -108,11 +128,16 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
+}
+
+const mergeableCandidate: CandidatePreparer = (input) => {
+  const { prs: _prs, ...candidate } = input
+  return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
 }
 
 async function createDeliveryApp(clock: () => string, waitForMerge = false, defaultSteps?: readonly string[]) {
@@ -141,86 +166,56 @@ async function createDeliveryApp(clock: () => string, waitForMerge = false, defa
     steps: [check, merge] as const,
     batch: false,
     progress: { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
+    resolveBaseSha: () => BASE,
+    prepareCandidate: mergeableCandidate,
+    ...derivedArming(),
     ...(defaultSteps === undefined ? {} : { defaultSteps }),
   })
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), id: ids(), clock, log: createLogger("test", [{ level: "silent" }]) },
   })
 }
 
-type SubmissionApp = Readonly<{
-  bays: Pick<Awaited<ReturnType<typeof createApp>>["bays"], "submit" | "requestChecks" | "prs">
-}>
-
-async function submitAndRequestChecks(app: SubmissionApp, branch: string) {
-  const digit = (app.bays.prs().length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = app.bays.prs().find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
-  return pr
+/** The whole delivery, post-S7: a branch and its standing submit fact. Each
+ * branch needs its own head — an identical payload composes as a duplicate. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>> | Awaited<ReturnType<typeof createDeliveryApp>>,
+  branch: string,
+  sha?: string,
+): Promise<string> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: sha ?? digit.repeat(40), base: "main" })
+  return branch
 }
 
-/**
- * Admission attempts inside the current progress window. The stall predicate
- * asks whether the queue has been TRIED and still not moved, not merely whether
- * it has waited, so any fixture that probes the stalled finding has to supply
- * the attempts a real stalled queue accumulates. Timing matters: the window
- * restarts at the last merge, so attempts must be issued on the clock the
- * assertion is about.
- */
-async function requestChecksTimes(app: SubmissionApp, pr: string, times: number): Promise<void> {
-  for (let index = 0; index < times; index++) await app.bays.requestChecks({ pr, baseSha: BASE })
+/** The refusal ledger row a branch earned, and the id the mint reused for it.
+ * A derived member has no store row, so this IS the member's identity. */
+function refusalFor(
+  app: Awaited<ReturnType<typeof createApp>> | Awaited<ReturnType<typeof createDeliveryApp>>,
+  branch: string,
+) {
+  return Object.values(app.state().queues.admissionRefusals).find((row) => row.branch === branch)
 }
 
-type JournalFact = Readonly<{ name: string; data?: unknown }>
-type JournalFrame = Readonly<{ events?: readonly JournalFact[] }>
-
-async function journalFrames(journal: Journal<unknown>): Promise<unknown[]> {
-  const collected: unknown[] = []
-  for await (const page of journal.read()) collected.push(...page.values)
-  return collected
+function memberIdFor(
+  app: Awaited<ReturnType<typeof createApp>> | Awaited<ReturnType<typeof createDeliveryApp>>,
+  branch: string,
+): string {
+  const id = refusalFor(app, branch)?.pr
+  if (id === undefined) throw new Error(`no refusal row identifies a member for branch '${branch}'`)
+  return id
 }
 
-/** Reproduce `pr/pushed`/`pr/submitted` facts as journals wrote them before
- * revision identity existed: no `submitter` (and, on `pr/pushed`, no
- * `changeId` — the legacy replay schema is strict, so a fact carrying
- * `changeId` but no `submitter` matches no shape any journal holds, same
- * surgery as orphaned-run-recovery.test.ts's `withoutPushedIdentity`).
- * `bays.submit({branch, ...})` mints BOTH facts for one revision and each
- * independently carries `submitter` — stripping only `pr/pushed` leaves
- * `pr/submitted`'s copy standing in for it. */
-async function withoutPushedIdentity(journal: Journal<unknown>): Promise<Journal<unknown>> {
-  const kept = (await journalFrames(journal)).map((value) => {
-    const frame = value as JournalFrame
-    if (frame.events === undefined) return value
-    return {
-      ...frame,
-      events: frame.events.map((event) => {
-        if (event.name === "pr/pushed") {
-          const { submitter: _submitter, changeId: _changeId, ...data } = event.data as Record<string, unknown>
-          return { ...event, data }
-        }
-        if (event.name === "pr/submitted") {
-          const { submitter: _submitter, ...data } = event.data as Record<string, unknown>
-          return { ...event, data }
-        }
-        return event
-      }),
-    }
-  })
-  return createMemoryJournal(kept)
-}
-
-/** A Candidate preparer that refuses for one change forever — the shape of every
+/** A Candidate preparer that refuses for one branch forever — the shape of every
  * real head-of-line admission wedge (authored gitlink, stale recut certificate,
  * unresolvable base): typed `refusal`, so the selectorless drain survives it and
- * retries the identical PR on the next cycle, forever. */
+ * retries the identical member on the next cycle, forever. Keyed on the branch
+ * because a derived member's id is minted by the very compose being refused. */
 function refuseForever(
   blocked: () => string,
   failure: Readonly<{ code: string; message: (pr: string) => string }> = {
@@ -229,36 +224,40 @@ function refuseForever(
   },
 ): CandidatePreparer {
   return (input) => {
-    if (input.prs.some((pr) => pr.id === blocked())) {
-      throw createFailure({ kind: "refusal", code: failure.code, message: failure.message(blocked()) })
+    const poisoned = input.prs.find((pr) => pr.branch === blocked())
+    if (poisoned !== undefined) {
+      throw createFailure({ kind: "refusal", code: failure.code, message: failure.message(poisoned.id) })
     }
     const { prs: _prs, ...candidate } = input
     return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
   }
 }
 
-/** The habitant's own drain shape: `continueAdmissions` is how a drain signal
- * interrupts the loop, and it is also what makes admissions one change per turn —
- * the only shape in which a refused head can hold the line. */
-const HABITANT = { ...runtime, continueAdmissions: () => true }
-
-describe("admission refusal oracle — a head-of-line PR refused at admission is visible to queue audit", () => {
-  it("records a refusal reported by an external queue preparation robot", async () => {
+describe("admission refusal oracle — a head-of-line member refused at admission is visible to queue audit", () => {
+  it("records a refusal reported by an external queue preparation robot, under the identity the robot carried", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createApp(
       refuseForever(() => ""),
       clock.read,
     )
-    const pr = await submitAndRequestChecks(app, "issue/external-refusal")
+    await submitBranch(app, "issue/external-refusal", HEAD)
+    // A robot outside the queue's own dispatcher has no member id to quote —
+    // the id-seam cannot resolve one for a member no run has ever retained — so
+    // it carries the identity itself. Without these fields the refusal
+    // journaled nothing at all.
     await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
+      branch: "issue/external-refusal",
+      revision: 1,
+      headSha: HEAD,
       code: "submodule-pin-unpublished",
       kind: "refusal",
       reason: "the refreshed revision contains an unpublished submodule pin",
     })
 
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
-      pr: pr.id,
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({
+      pr: "PR1",
+      branch: "issue/external-refusal",
       revision: 1,
       headSha: HEAD,
       code: "submodule-pin-unpublished",
@@ -280,10 +279,13 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       undefined,
       "@ci",
     )
-    const pr = await submitAndRequestChecks(app, "issue/configured-owner")
+    await submitBranch(app, "issue/configured-owner", HEAD)
 
     await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
+      branch: "issue/configured-owner",
+      revision: 1,
+      headSha: HEAD,
       code: "authored-gitlink",
       kind: "refusal",
       reason: "the change touches generated-only gitlinks; an exact ruling is needed",
@@ -292,9 +294,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     // refusal needs-person (applyRefusalRemedies -> settleAdmissionRefusal);
     // driven explicitly here since no refusal code auto-parks any more.
     await app.queue.settleAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
       revision: 1,
-      headSha: currentChangeRev(pr).head,
+      headSha: HEAD,
       disposition: "needs-person",
       reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
@@ -302,7 +304,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit().findings).toContainEqual(
       expect.objectContaining({
         code: "admission-refusal-needs-person",
-        pr: pr.id,
+        pr: "PR1",
         owner: "@ci",
         message: expect.stringContaining("Owner: @ci."),
       }),
@@ -320,21 +322,21 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       undefined,
       "   ",
     )
-    const pr = await submitAndRequestChecks(app, "issue/blank-configured-owner")
+    await submitBranch(app, "issue/blank-configured-owner", HEAD)
 
     await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
+      branch: "issue/blank-configured-owner",
+      revision: 1,
+      headSha: HEAD,
       code: "authored-gitlink",
       kind: "refusal",
       reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
-    // The runner's own judgment classification settles a no-mechanical-remedy
-    // refusal needs-person (applyRefusalRemedies -> settleAdmissionRefusal);
-    // driven explicitly here since no refusal code auto-parks any more.
     await app.queue.settleAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
       revision: 1,
-      headSha: currentChangeRev(pr).head,
+      headSha: HEAD,
       disposition: "needs-person",
       reason: "the change touches generated-only gitlinks; an exact ruling is needed",
     })
@@ -342,50 +344,40 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit().findings).toContainEqual(
       expect.objectContaining({
         code: "admission-refusal-needs-person",
-        pr: pr.id,
+        pr: "PR1",
         owner: "unowned — no needsPerson.owner is configured in .yrd.yml",
       }),
     )
   })
 
-  it("keeps the needs-person finding honest when the revision records no submitter", async () => {
-    // `owner` is repository CONFIG, never journal identity — so a revision
-    // with no recorded submitter anywhere in its history must still produce
-    // the finding, still carrying the explicit unowned default: no invented
-    // name resurrected from push identity, no crash on the missing fields
-    // (@i/10-merge-queue/22918-needs-person-unowned), same principle as the
-    // draft-stranded precedent (orphaned-run-recovery.test.ts).
+  it("keeps the needs-person finding honest for a member no identity was ever recorded for", async () => {
+    // `owner` is repository CONFIG, never journal identity. A DERIVED member is
+    // the strongest form of this case: nothing anywhere records a submitter for
+    // it, because no record was ever minted. The finding must still fire,
+    // still carry the explicit unowned default, and invent no name
+    // (@i/10-merge-queue/22918-needs-person-unowned).
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    const seeded = createMemoryJournal()
-    {
-      await using seed = await createApp(
-        refuseForever(() => ""),
-        clock.read,
-        seeded,
-      )
-      const pr = await submitAndRequestChecks(seed, "issue/unattributed-permanent-refusal")
-      await seed.queue.recordAdmissionRefusal({
-        pr: pr.id,
-        code: "authored-gitlink",
-        kind: "refusal",
-        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
-      })
-      await seed.queue.settleAdmissionRefusal({
-        pr: pr.id,
-        revision: 1,
-        headSha: currentChangeRev(pr).head,
-        disposition: "needs-person",
-        reason: "the change touches generated-only gitlinks; an exact ruling is needed",
-      })
-    }
     await using app = await createApp(
       refuseForever(() => ""),
       clock.read,
-      await withoutPushedIdentity(seeded),
-      ids(100),
     )
-    const revision = Object.values(app.state().bays.prs)[0]?.revs.at(-1)
-    expect(revision?.submitter, "the surgery must leave a genuinely unattributed revision").toBeUndefined()
+    await submitBranch(app, "issue/unattributed-permanent-refusal", HEAD)
+    await app.queue.recordAdmissionRefusal({
+      pr: "PR1",
+      branch: "issue/unattributed-permanent-refusal",
+      revision: 1,
+      headSha: HEAD,
+      code: "authored-gitlink",
+      kind: "refusal",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
+    await app.queue.settleAdmissionRefusal({
+      pr: "PR1",
+      revision: 1,
+      headSha: HEAD,
+      disposition: "needs-person",
+      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
+    })
 
     const finding = app.queue.audit().findings.find((candidate) => candidate.code === "admission-refusal-needs-person")
     expect(finding, "an unattributed settlement still needs a person and must still flag").toBeDefined()
@@ -403,19 +395,22 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       refuseForever(() => ""),
       clock.read,
     )
-    const pr = await submitAndRequestChecks(app, "issue/unfetched-certified-base")
+    await submitBranch(app, "issue/unfetched-certified-base", HEAD)
 
     // The 2026-07-27 partition specimen: a certificate that could not be READ,
     // refused 106 consecutive cycles and cured by nothing but a retry.
     await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
+      branch: "issue/unfetched-certified-base",
+      revision: 1,
+      headSha: HEAD,
       code: "recut-certificate",
       kind: "refusal",
       reason: "the certified base is not present in the candidate repository",
     })
 
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "recut-certificate", count: 1 })
-    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toBeUndefined()
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({ code: "recut-certificate", count: 1 })
+    expect(app.state().queues.admissionRefusals.PR1?.settlement).toBeUndefined()
   })
 
   it("keeps a recoverable gitlink object gap on the ordinary retry threshold", async () => {
@@ -424,249 +419,19 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       refuseForever(() => ""),
       clock.read,
     )
-    const pr = await submitAndRequestChecks(app, "issue/recoverable-gitlink-object-gap")
+    await submitBranch(app, "issue/recoverable-gitlink-object-gap", HEAD)
 
     await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR1",
+      branch: "issue/recoverable-gitlink-object-gap",
+      revision: 1,
+      headSha: HEAD,
       code: "recut-gitlink-object-missing",
       kind: "refusal",
       reason: "the pinned commit is not present locally; fetch it and retry",
     })
 
-    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
-  })
-
-  it("keeps a passed admission in the no-merge progress population until delivery", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read, true)
-    const pr = await submitAndRequestChecks(app, "issue/admitted-without-merge")
-    await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
-
-    await app.queue.run({}, runtime)
-    expect(app.queue.eligibility(pr.id).checks.status).toBe("passed")
-    expect(app.bays.pr(pr.id)?.integratedAt).toBeUndefined()
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({
-        code: "queue-progress-stalled",
-        specimen: "queue:main",
-        count: 1,
-        since: "2026-01-01T00:00:00.000Z",
-      }),
-    )
-  })
-
-  it("reports submitted work that never started required checks", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read, true)
-    await app.bays.submit({
-      branch: "issue/never-started",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-    })
-    const pr = app.bays.prs().find((candidate) => candidate.branch === "issue/never-started")
-    if (pr === undefined) throw new Error("submitted PR was not recorded")
-
-    expect(app.bays.checksRequested(pr.id)).toBe(false)
-    expect(app.queue.audit({ now: "2026-01-01T00:29:59.999Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-never-started" }),
-    )
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual({
-      code: "queue-never-started",
-      message:
-        `Queue 'main' has 1 submitted change that never started required checks for 30m00s ` +
-        `(since 2026-01-01T00:00:00.000Z); head is '${pr.id}'.`,
-      resolution: [
-        `Start or restart the habitant queue runner, then verify it requests required checks for '${pr.id}'.`,
-      ],
-      pr: pr.id,
-      specimen: "queue:main:never-started",
-      count: 1,
-      since: "2026-01-01T00:00:00.000Z",
-      blockedMs: 30 * 60_000,
-    })
-  })
-
-  it("does not let unrelated merges reset one never-started carrier's readiness clock", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read)
-    await app.bays.submit({
-      branch: "issue/never-started",
-      headSha: HEAD,
-      base: "main",
-      baseSha: BASE,
-    })
-    const ignored = app.bays.prs().find((candidate) => candidate.branch === "issue/never-started")
-    if (ignored === undefined) throw new Error("submitted PR was not recorded")
-
-    clock.set("2026-01-01T00:20:00.000Z")
-    const merged = await submitAndRequestChecks(app, "issue/unrelated-merge")
-    await app.queue.run({ prs: [merged.id] }, runtime)
-    expect(app.bays.pr(merged.id)?.integratedAt).toBe("2026-01-01T00:20:00.000Z")
-    expect(app.bays.pr(ignored.id)?.integratedAt).toBeUndefined()
-    expect(app.bays.checksRequested(ignored.id)).toBe(false)
-
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({
-        code: "queue-never-started",
-        pr: ignored.id,
-        since: "2026-01-01T00:00:00.000Z",
-        blockedMs: 30 * 60_000,
-      }),
-    )
-  })
-
-  /**
-   * Box 2 of @i/10-merge-queue/uptime-is-not-health. The bead's predicate is a
-   * CONJUNCTION validated over the whole journal — runner heartbeat fresh AND
-   * ready-set non-empty AND no change for the window AND at least ten
-   * admission checks in it — which fired exactly 3 times, all genuine. The
-   * duration test alone fires 37 times, and an alarm that fires 37 times is an
-   * alarm somebody mutes.
-   *
-   * `queueProgressAuditFindings` implements the middle two conjuncts. The CLI
-   * composes its result with the habitant heartbeat rather than pushing runtime
-   * liveness into the queue package. This pins the audit half: ONE admission check is a queue barely
-   * tried, not a queue trying and failing, so it must not read as stalled. The
-   * count is computable from state today — `ChangeCheckRequest` already carries `at`
-   * — so this needs no new recording, only the predicate.
-   *
-   * The clocks deliberately stay separate: `QueueAuditOptions` is `{ now?: string }`,
-   * and yrd-cli depends on @yrd/queue and not the reverse. The habitant status
-   * carries both a heartbeat time and a timestamped projection of this audit.
-   */
-  it("does not call a queue stalled on a single admission check", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read, true)
-    const pr = await submitAndRequestChecks(app, "issue/one-admission-check")
-
-    await app.queue.run({}, runtime)
-
-    expect(app.bays.pr(pr.id)?.checkRequests.length).toBe(1)
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled" }),
-    )
-  })
-
-  /**
-   * The CLI shape. `host.ts` passes `config.steps` as `defaultSteps`, and
-   * `config.ts` builds that array as `[...checks, "merge"]`, so a real
-   * invocation always selects a merge step. Pinned here because the next test
-   * pins what happens when it does not, and the pair is only meaningful
-   * together.
-   */
-  it("puts a ready candidate in the progress population under the CLI's own step selection", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read, true, ["check", "merge"])
-    const pr = await submitAndRequestChecks(app, "issue/cli-shaped-selection")
-    await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
-
-    await app.queue.run({}, runtime)
-
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled", specimen: "queue:main" }),
-    )
-  })
-
-  /**
-   * `queueProgressQueue` opens with a guard that returns an EMPTY population
-   * when the selection carries no merge step, and it says nothing when it does.
-   *
-   * This matters because the guard reads `state.queues.defaultSteps` — PERSISTED
-   * state frozen at queue-install time — and not the config the CLI would
-   * compute today. Nothing reconciles the two. A queue installed with a
-   * merge-less selection therefore reports a clean audit forever, however long
-   * it is blocked, and `selectSteps` does not throw because every named step is
-   * still installed.
-   *
-   * Pinned as the CURRENT behaviour, not endorsed. A queue that cannot merge
-   * arguably cannot stall, but a queue whose PERSISTED selection has drifted
-   * from its installed steps is exactly the silent-empty class this file's
-   * header incident is about, one layer down.
-   */
-  it("reports nothing at all when the persisted step selection carries no merge step", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read, true, ["check"])
-    const pr = await submitAndRequestChecks(app, "issue/merge-less-selection")
-    await requestChecksTimes(app, pr.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 1)
-
-    await app.queue.run({}, runtime)
-
-    // Blocked for an hour, twice the default threshold, and silent.
-    expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled" }),
-    )
-  })
-
-  it("makes one exact refusal loud without inventing a stalled live queue", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    let blocked = ""
-    await using app = await createApp(
-      refuseForever(() => blocked),
-      clock.read,
-      createMemoryJournal(),
-      ids(),
-      undefined,
-      { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
-    )
-    const pr = await submitAndRequestChecks(app, "issue/no-merge")
-    blocked = pr.id
-    await app.queue.run({}, runtime)
-
-    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled" }),
-    )
-    expect(app.queue.eligibility(pr.id)).toMatchObject({
-      runnable: false,
-      reason: {
-        code: "admission-refused",
-        message: expect.stringContaining("authored-gitlink"),
-      },
-    })
-
-    blocked = ""
-    clock.set("2026-01-01T00:10:01.000Z")
-    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
-    await app.queue.run({}, runtime)
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled" }),
-    )
-  })
-
-  it("uses a real merge as the next progress clock while queued work remains", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read)
-    const first = await submitAndRequestChecks(app, "issue/merges-first")
-    const second = await submitAndRequestChecks(app, "issue/remains-queued")
-    await requestChecksTimes(app, second.id, DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks - 2)
-
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({
-        code: "queue-progress-stalled",
-        specimen: "queue:main",
-        count: 2,
-        since: "2026-01-01T00:00:00.000Z",
-      }),
-    )
-
-    clock.set("2026-01-01T00:30:00.000Z")
-    await app.queue.run({ prs: [first.id] }, runtime)
-    expect(app.bays.pr(first.id)?.integratedAt).toBe("2026-01-01T00:30:00.000Z")
-    expect(app.bays.pr(second.id)?.integratedAt).toBeUndefined()
-    // No further attempts follow the merge on purpose. The merge restarts
-    // the window, so `second` now carries ZERO checks inside it — the shape of a
-    // runner asleep over ready work, which must stay loud.
-    expect(app.queue.audit({ now: "2026-01-01T00:59:59.999Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled" }),
-    )
-    expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({
-        code: "queue-progress-stalled",
-        specimen: "queue:main",
-        count: 1,
-        since: "2026-01-01T00:30:00.000Z",
-      }),
-    )
+    expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: "PR1" }))
   })
 
   it("counts one typed refusal streak and resets that streak when the refusal code changes", async () => {
@@ -684,22 +449,23 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     let prId = ""
     {
       await using app = await createApp(prepare, clock.read, journal, id)
-      const pr = await submitAndRequestChecks(app, "issue/typed-refusal-streak")
-      prId = pr.id
+      await submitBranch(app, "issue/typed-refusal-streak", HEAD)
 
-      for (const [index, at] of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"].entries()) {
+      // No re-push between cycles: a refused member never consumed its
+      // authority, so every compose re-derives it under the SAME id (the
+      // ledger row anchors the reuse) and the streak grows.
+      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:01:00.000Z"]) {
         clock.set(at)
-        if (index > 0) await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
         await app.queue.run({}, runtime)
       }
       refusalCode = "base-moved"
       for (const at of ["2026-01-01T00:02:00.000Z", "2026-01-01T00:03:00.000Z", "2026-01-01T00:04:00.000Z"]) {
         clock.set(at)
-        await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
         await app.queue.run({}, runtime)
       }
 
-      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+      prId = memberIdFor(app, "issue/typed-refusal-streak")
+      expect(app.state().queues.admissionRefusals[prId]).toMatchObject({
         count: 5,
         sameCodeCount: 3,
         sameCodeFirstAt: "2026-01-01T00:02:00.000Z",
@@ -708,8 +474,8 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       expect(app.queue.audit().findings).toContainEqual({
         code: "admission-refusal-loop",
         message: expect.stringContaining("exact refusal text for base-moved"),
-        pr: pr.id,
-        specimen: `pr:${pr.id}:refusal:base-moved`,
+        pr: prId,
+        specimen: `pr:${prId}:refusal:base-moved`,
         refusal: "base-moved",
         count: 3,
         since: "2026-01-01T00:02:00.000Z",
@@ -739,44 +505,41 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
 
   it("counts consecutive admission refusals and names the change, code, count, and block span", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    let blocked = ""
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createApp(
-      refuseForever(() => blocked),
+      refuseForever(() => "issue/head-of-queue-wedge"),
       clock.read,
       createMemoryJournal(),
       ids(),
       log,
     )
-    const pr = await submitAndRequestChecks(app, "issue/head-of-queue-wedge")
-    blocked = pr.id
+    await submitBranch(app, "issue/head-of-queue-wedge", HEAD)
 
     // Three compose cycles spread over the real 22395 block window. Every cycle
-    // refuses the same PR at admission, so no queue run record ever exists.
+    // refuses the same member at admission, so no queue run record ever exists.
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     clock.set("2026-01-01T02:00:00.000Z")
-    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     clock.set("2026-01-01T05:46:00.000Z")
-    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
 
+    const prId = memberIdFor(app, "issue/head-of-queue-wedge")
     // The record walk really is blind: no run record was ever minted, so every
     // one of `auditQueues`' six run-record codes has nothing to walk.
     expect(Queues.ids(app.state().queues)).toEqual([])
     expect(
       events.filter(
         (event): event is Extract<LogEvent, { kind: "log" }> =>
-          event.kind === "log" && event.props?.action === "compose-candidate-skip" && event.props?.pr === pr.id,
+          event.kind === "log" && event.props?.action === "compose-candidate-skip" && event.props?.pr === prId,
       ),
     ).toHaveLength(3)
 
     expect(app.queue.audit().findings).toContainEqual({
       code: "admission-refusal-loop",
-      message: expect.stringContaining(`change '${pr.id}'`),
-      pr: pr.id,
-      specimen: `pr:${pr.id}:refusal:authored-gitlink`,
+      message: expect.stringContaining(`change '${prId}'`),
+      pr: prId,
+      specimen: `pr:${prId}:refusal:authored-gitlink`,
       refusal: "authored-gitlink",
       count: 3,
       since: "2026-01-01T00:00:00.000Z",
@@ -784,9 +547,9 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     })
     const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-loop")
     expect(finding?.message).toBe(
-      `change '${pr.id}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
+      `change '${prId}' at the head of the required-check queue failed its entry checks 3 consecutive times over 5h46m ` +
         `(since 2026-01-01T00:00:00.000Z) without ever completing required checks; latest failure 'authored-gitlink': ` +
-        `yrd: change '${pr.id}' authors a gitlink bump`,
+        `yrd: change '${prId}' authors a gitlink bump`,
     )
     log.end()
   })
@@ -795,35 +558,33 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const journal = createMemoryJournal()
     const id = ids()
-    let blocked = ""
+    let prId = ""
     {
       await using app = await createApp(
-        refuseForever(() => blocked),
+        refuseForever(() => "issue/head-of-queue-wedge"),
         clock.read,
         journal,
         id,
       )
-      const pr = await submitAndRequestChecks(app, "issue/head-of-queue-wedge")
-      blocked = pr.id
+      await submitBranch(app, "issue/head-of-queue-wedge", HEAD)
 
       await app.queue.run({}, runtime)
       expect(app.queue.audit().findings).toEqual([])
       clock.set("2026-01-01T00:10:00.000Z")
-      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
       expect(app.queue.audit().findings).toEqual([])
       clock.set("2026-01-01T00:20:00.000Z")
-      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
       expect(app.queue.audit().findings).toContainEqual(
         expect.objectContaining({ code: "admission-refusal-loop", count: 3 }),
       )
+      prId = memberIdFor(app, "issue/head-of-queue-wedge")
     }
 
     // A fresh process replaying the same journal sees the same wedge: the ledger
     // is journal-derived state, not in-process bookkeeping.
     await using replayed = await createApp(
-      refuseForever(() => blocked),
+      refuseForever(() => "issue/head-of-queue-wedge"),
       clock.read,
       journal,
       id,
@@ -831,7 +592,7 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(replayed.queue.audit().findings).toContainEqual(
       expect.objectContaining({
         code: "admission-refusal-loop",
-        pr: "PR1",
+        pr: prId,
         refusal: "authored-gitlink",
         count: 3,
         since: "2026-01-01T00:00:00.000Z",
@@ -840,190 +601,132 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     )
   })
 
-  it("clears the streak when the change is finally admitted", async () => {
+  it("clears the streak when the member is finally admitted", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    let blocked = ""
+    let blocked = "issue/transient-wedge"
     await using app = await createApp(
       refuseForever(() => blocked),
       clock.read,
     )
-    const pr = await submitAndRequestChecks(app, "issue/transient-wedge")
-    blocked = pr.id
+    await submitBranch(app, "issue/transient-wedge", HEAD)
 
-    for (const [index, at] of [
-      "2026-01-01T00:00:00.000Z",
-      "2026-01-01T00:05:00.000Z",
-      "2026-01-01T00:10:00.000Z",
-    ].entries()) {
+    for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
       clock.set(at)
-      if (index > 0) await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
     }
     expect(app.queue.audit().findings).toContainEqual(
       expect.objectContaining({ code: "admission-refusal-loop", count: 3 }),
     )
 
+    // The wedge clears: the same member is admitted on the next cycle and the
+    // durable streak goes with it — a stale ledger row is a phantom wedge.
     blocked = ""
     clock.set("2026-01-01T00:15:00.000Z")
-    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
     await app.queue.run({}, runtime)
-    expect(Queues.ids(app.state().queues)).toEqual([])
-    expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "passed" } })
     expect(app.state().queues.admissionRefusals).toEqual({})
     expect(app.queue.audit().findings).toEqual([])
   })
 
-  it("settles a needs-person refusal for one exact revision and preserves that bound across replay (22528)", async () => {
+  it("makes one exact refusal loud without inventing a stalled live queue", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = "issue/no-merge"
+    await using app = await createApp(
+      refuseForever(() => blocked),
+      clock.read,
+      createMemoryJournal(),
+      ids(),
+      undefined,
+      { ...DEFAULT_QUEUE_PROGRESS_POLICY, refusalCount: 3 },
+    )
+    await submitBranch(app, "issue/no-merge", HEAD)
+    await app.queue.run({}, runtime)
+
+    // One refusal is a fact worth recording and NOT yet a wedge: the row
+    // stands, the loop finding stays below threshold, and nothing invents a
+    // stalled queue out of a check-only plan that cannot merge at all.
+    expect(refusalFor(app, "issue/no-merge")).toMatchObject({ code: "authored-gitlink", count: 1 })
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+    expect(app.queue.audit({ now: "2026-01-01T00:10:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-loop" }),
+    )
+
+    blocked = ""
+    clock.set("2026-01-01T00:10:01.000Z")
+    await app.queue.run({}, runtime)
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
+  it("settles a needs-person refusal for one exact revision, and a genuinely new push clears it", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const journal = createMemoryJournal()
     const id = ids()
-    let blocked = ""
+    let blocked = "issue/needs-person"
     let preparations = 0
     const refusing = refuseForever(() => blocked)
     const prepare: CandidatePreparer = (input) => {
       preparations += 1
       return refusing(input)
     }
+    let prId = ""
     {
       await using app = await createApp(prepare, clock.read, journal, id)
-      const pr = await submitAndRequestChecks(app, "issue/needs-person")
-      blocked = pr.id
-      for (const [index, at] of [
-        "2026-01-01T00:00:00.000Z",
-        "2026-01-01T00:05:00.000Z",
-        "2026-01-01T00:10:00.000Z",
-      ].entries()) {
+      await submitBranch(app, "issue/needs-person", HEAD)
+      for (const at of ["2026-01-01T00:00:00.000Z", "2026-01-01T00:05:00.000Z", "2026-01-01T00:10:00.000Z"]) {
         clock.set(at)
-        if (index > 0) await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
         await app.queue.run({}, runtime)
       }
-      const current = app.bays.pr(pr.id)!.revs.at(-1)!
+      prId = memberIdFor(app, "issue/needs-person")
       await app.queue.settleAdmissionRefusal({
-        pr: pr.id,
-        revision: current.n,
-        headSha: current.head,
+        pr: prId,
+        revision: 1,
+        headSha: HEAD,
         disposition: "needs-person",
         reason: "the recut certificate requires human judgment",
       })
-      expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
-        pr: pr.id,
-        revision: current.n,
-        headSha: current.head,
+      // The settlement is bound to the EXACT revision and head it named — that
+      // bound is what lets a new push reopen the question.
+      expect(app.state().queues.admissionRefusals[prId]).toMatchObject({
+        pr: prId,
+        revision: 1,
+        headSha: HEAD,
         settlement: {
           disposition: "needs-person",
           reason: "the recut certificate requires human judgment",
         },
       })
-      expect(app.queue.eligibility(pr.id)).toMatchObject({
-        runnable: false,
-        reason: {
-          code: "admission-refused",
-          message: expect.stringContaining("Settled needs-person at 2026-01-01T00:10:00.000Z"),
-        },
-      })
-      expect(app.queue.eligibility(pr.id).reason?.message).not.toContain("yrd pr recut")
-      expect(app.queue.eligibility(pr.id).reason?.message).toContain("authored-gitlink")
     }
 
+    // Replay: a settled refusal is not re-attempted, so the candidate preparer
+    // is not called again and the journal does not grow.
     const beforeReplay = await Array.fromAsync(journal.read()).then((events) => events.length)
     await using replayed = await createApp(prepare, clock.read, journal, id)
     await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
     expect(preparations).toBe(3)
     expect(await Array.fromAsync(journal.read()).then((events) => events.length)).toBe(beforeReplay)
-    expect(replayed.queue.eligibility("PR1")).toMatchObject({
-      runnable: false,
-      reason: {
-        code: "admission-refused",
-        message: expect.stringContaining("Settled needs-person at 2026-01-01T00:10:00.000Z"),
-      },
+    expect(replayed.state().queues.admissionRefusals[prId]?.settlement).toMatchObject({
+      disposition: "needs-person",
     })
 
-    // A genuinely new revision is new evidence: the durable settlement applies
-    // only to the exact revision/head it named and must not suppress a new push.
-    const nextHead = "2".repeat(40)
-    await replayed.bays.intake({
-      branch: "issue/needs-person",
-      headSha: nextHead,
-      base: "main",
-      baseSha: BASE,
-    })
-    await replayed.bays.ready({ pr: "PR1" })
-    await replayed.bays.requestChecks({ pr: "PR1", baseSha: BASE })
+    // A genuinely new push is new evidence: the durable settlement applies only
+    // to the exact revision/head it named and must not suppress the new tree.
     blocked = ""
+    await replayed.bays.recordBranchSubmit({ branch: "issue/needs-person", sha: "2".repeat(40), base: "main" })
     await replayed.queue.run({}, runtime)
-    expect(replayed.queue.eligibility("PR1")).toMatchObject({ checks: { status: "passed" } })
     expect(replayed.state().queues.admissionRefusals).toEqual({})
   })
 
-  it("prints the settlement, never the recut drill, once a refusal is settled needs-person", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    let blocked = ""
-    await using app = await createApp(
-      refuseForever(() => blocked),
-      clock.read,
-    )
-    const pr = await submitAndRequestChecks(app, "issue/settled-judgment")
-    blocked = pr.id
-    await app.queue.run({}, runtime)
-    const revision = app.bays.pr(pr.id)!.revs.at(-1)!
-    await app.queue.settleAdmissionRefusal({
-      pr: pr.id,
-      revision: revision.n,
-      headSha: revision.head,
-      disposition: "needs-person",
-      reason: "the recut certificate requires human judgment",
-    })
-
+  it("a settled needs-person refusal carries its judgment and its owner durably, never a retry drill", async () => {
     // classifyRefusalRemedy already judged this refusal to have NO mechanical
-    // remedy — the settlement is that judgment made durable. The per-PR message
-    // still printed the recut drill after it, sending readers back into the
-    // loop the settlement had closed; the settled case must print the judgment
-    // fact instead (2026-08-19).
-    const message = app.queue.eligibility(pr.id).reason?.message
-    expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
-    expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
-    expect(message).toContain("the recut certificate requires human judgment")
-    expect(message).toContain("decision owner: unowned — no needsPerson.owner is configured in .yrd.yml")
-    expect(message).not.toContain("yrd pr recut")
-  })
-
-  it("prints the settlement for a still-submitted PR whose refusal auto-settled needs-person", async () => {
+    // remedy — the settlement is that judgment made durable. Before 2026-08-19
+    // the surfaces still printed the recut drill after it, sending readers back
+    // into the loop the settlement had closed.
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    let blocked = ""
-    // authored-gitlink is a judgment-class refusal and NOT a needs-author code,
-    // so the change stays `submitted` — the exact shape the habitant's
-    // settleNeedsPerson leaves behind, reaching the settled admission-refusal
-    // verdict via the runner's own explicit settlement.
     await using app = await createApp(
-      refuseForever(() => blocked, {
-        code: "authored-gitlink",
-        message: (pr) => `change '${pr}' revision 1 touches generated-only gitlinks; an exact ruling is needed`,
-      }),
-      clock.read,
-    )
-    const pr = await submitAndRequestChecks(app, "issue/settled-submitted")
-    blocked = pr.id
-    await app.queue.run({}, runtime)
-    await app.queue.settleAdmissionRefusal({
-      pr: pr.id,
-      revision: 1,
-      headSha: currentChangeRev(pr).head,
-      disposition: "needs-person",
-      reason: "the change touches generated-only gitlinks; an exact ruling is needed",
-    })
-    expect(app.state().queues.admissionRefusals[pr.id]?.settlement).toMatchObject({ disposition: "needs-person" })
-
-    const message = app.queue.eligibility(pr.id).reason?.message
-    expect(app.queue.eligibility(pr.id).reason?.code).toBe("admission-refused")
-    expect(message).toContain("Settled needs-person at 2026-01-01T00:00:00.000Z")
-    expect(message).not.toContain("yrd pr recut")
-  })
-
-  it("names the configured decision owner in the settled eligibility message", async () => {
-    const clock = movableClock("2026-01-01T00:00:00.000Z")
-    let blocked = ""
-    await using app = await createApp(
-      refuseForever(() => blocked),
+      refuseForever(() => "issue/settled-judgment"),
       clock.read,
       createMemoryJournal(),
       ids(),
@@ -1031,90 +734,303 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       undefined,
       "@queue-captain",
     )
-    const pr = await submitAndRequestChecks(app, "issue/settled-owner")
-    blocked = pr.id
+    await submitBranch(app, "issue/settled-judgment", HEAD)
     await app.queue.run({}, runtime)
-    const revision = app.bays.pr(pr.id)!.revs.at(-1)!
+    const prId = memberIdFor(app, "issue/settled-judgment")
     await app.queue.settleAdmissionRefusal({
-      pr: pr.id,
-      revision: revision.n,
-      headSha: revision.head,
+      pr: prId,
+      revision: 1,
+      headSha: HEAD,
       disposition: "needs-person",
       reason: "the recut certificate requires human judgment",
     })
 
-    // The audit finding names the owner (admission-refusal-needs-person); the
-    // reader-facing eligibility message must not decline to say WHO at the
-    // exact moment the reader asks — same resolution, same value.
-    const message = app.queue.eligibility(pr.id).reason?.message
-    expect(message).toContain("decision owner: @queue-captain")
-    expect(message).not.toContain("yrd pr recut")
+    const row = app.state().queues.admissionRefusals[prId]
+    expect(row?.settlement).toMatchObject({
+      disposition: "needs-person",
+      reason: "the recut certificate requires human judgment",
+    })
+    // The audit finding is the surface that names WHO decides, and it must not
+    // decline to say so at the exact moment a reader asks.
+    const finding = app.queue.audit().findings.find((item) => item.code === "admission-refusal-needs-person")
+    expect(finding).toMatchObject({ pr: prId, owner: "@queue-captain" })
+    expect(finding?.message).toContain("the recut certificate requires human judgment")
+    expect(finding?.message).not.toContain("yrd pr recut")
+    // And the settled member stops counting toward the retry loop.
+    expect(app.queue.audit().findings).not.toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-loop", pr: prId }),
+    )
   })
 })
 
-describe("a submitted PR with no check request and a ledgered refusal never wedges queue reads", () => {
-  // The PR1128 incident (2026-08-17, @i/10-merge-queue): `bay submit` queued a
-  // carrier, then the authored-gitlink refusal was ledgered against it BEFORE
-  // any check request existed. The audit's head-of-line sort compared that change
-  // with a comparator that THREW on a missing current check request, so every
-  // surface that computes audit findings died — pr list, queue audit, bay
-  // status, the habitant runner's own progress probe (which crashlooped it into
-  // restart suppression), and `queue recover`, the tool whose job is settling
-  // exactly this shape. A comparator asserts nothing: the ordering is total
-  // (check-request time, else source-ready time) and the state is PRONOUNCED
-  // by findings instead.
-  it("audits the PR1128 shape as findings instead of throwing", async () => {
+/**
+ * The progress half of the oracle.
+ *
+ * THE POPULATION, stated (@chief ruling 2026-08-27), because a stalled-queue
+ * test over a population that never fills is precisely the silent-empty
+ * failure this file exists to catch — the same shape as the header incident,
+ * one layer up. Pre-S7 the population was Change records filtered by
+ * `checksRequested(pr)`, with the clock read from `ChangeCheckRequest.at`. S7
+ * deletes both, because a standing submit fact IS the check request. So:
+ *
+ * - `queue-never-started` = a standing submit fact no compose has served —
+ *   the `unrecordedSubmits()` population — dated from the fact's own `at`.
+ * - `queue-progress-stalled` = that fact's age plus the admission-Job count,
+ *   an admission ATTEMPT now being a compose cycle rather than a re-request.
+ *
+ * Both codes stay in YRD_QUEUE_AUDIT_FINDING_CODES and must keep firing. If a
+ * test here goes green by finding nothing, that is the bug, not the pass —
+ * which is why each fixture asserts the population is non-empty before
+ * asserting what the audit says about it.
+ */
+describe("queue progress findings — a queue that is tried and does not move", () => {
+  const attempts = DEFAULT_QUEUE_PROGRESS_POLICY.minAdmissionChecks
+
+  /** Admission attempts the queue actually dispatched — the post-S7 stand-in
+   * for the `ChangeCheckRequest` count the stall predicate used to read. */
+  function admissionJobs(app: Awaited<ReturnType<typeof createDeliveryApp>>): readonly string[] {
+    return Object.keys(app.state().jobs.byKey).filter((key) => key.startsWith("admission:"))
+  }
+
+  it("keeps a passed admission in the no-merge progress population until delivery", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    await submitBranch(app, "issue/admitted-without-merge", HEAD)
+    // Tried, repeatedly, and still not delivered: the merge step waits forever.
+    for (let index = 0; index < attempts; index++) await app.queue.run({}, runtime)
+
+    // The population is real before the audit is asked about it.
+    expect(admissionJobs(app).length).toBeGreaterThan(0)
+
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-progress-stalled",
+        specimen: "queue:main",
+        count: 1,
+        since: "2026-01-01T00:00:00.000Z",
+      }),
+    )
+  })
+
+  it("reports approved work that no compose ever served", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    await submitBranch(app, "issue/never-started", HEAD)
+    // No compose at all: the approval stands, visible and unserved.
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/never-started"])
+
+    expect(app.queue.audit({ now: "2026-01-01T00:29:59.999Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-never-started" }),
+    )
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-never-started",
+        specimen: "queue:main:never-started",
+        count: 1,
+        since: "2026-01-01T00:00:00.000Z",
+        blockedMs: 30 * 60_000,
+      }),
+    )
+  })
+
+  it("dates the never-started window from the OLDEST unserved approval, not the newest", async () => {
+    // The readiness clock is a property of the approvals themselves: a later
+    // approval joining the queue must not drag the window forward and shorten
+    // a wedge that has been running for half an hour.
+    //
+    // NOTE (lost half): the original of this test also proved that an
+    // UNRELATED MERGE does not reset the clock, by keeping one carrier out of
+    // the compose as submitted-without-a-check-request. S7 deletes that state
+    // — a standing submit fact IS the check request, so every approval the
+    // runner can see is composable and there is no way to hold one back while
+    // another merges. Re-fixturing that half needs the progress-population
+    // referent decision; it is NOT covered here.
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read)
+    await submitBranch(app, "issue/never-started", HEAD)
+    clock.set("2026-01-01T00:20:00.000Z")
+    await submitBranch(app, "issue/joined-later", "3".repeat(40))
+
+    // Both approvals are genuinely unserved — the population the finding counts.
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch).toSorted()).toEqual([
+      "issue/joined-later",
+      "issue/never-started",
+    ])
+
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({
+        code: "queue-never-started",
+        count: 2,
+        since: "2026-01-01T00:00:00.000Z",
+        blockedMs: 30 * 60_000,
+      }),
+    )
+  })
+
+  it("does not call a queue stalled on a single admission attempt", async () => {
+    // ONE attempt is a queue barely tried, not a queue trying and failing. An
+    // alarm that fires on the first attempt is an alarm somebody mutes.
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true)
+    await submitBranch(app, "issue/one-admission-check", HEAD)
+
+    await app.queue.run({}, runtime)
+
+    // POSITIVE CONTROL. This test asserts an ABSENCE, so it passes for free if
+    // the population is empty — the exact silent-empty failure the file is
+    // about. The member must genuinely be in the queue, tried exactly once,
+    // for the absence below to mean "not yet stalled" rather than "nothing here".
+    expect(admissionJobs(app)).toHaveLength(1)
+    expect(app.state().bays.submits["issue/one-admission-check"]).toBeDefined()
+
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
+  /**
+   * The CLI shape. `host.ts` passes `config.steps` as `defaultSteps`, and
+   * `config.ts` builds that array as `[...checks, "merge"]`, so a real
+   * invocation always selects a merge step. Pinned here because the next test
+   * pins what happens when it does not, and the pair is only meaningful
+   * together.
+   */
+  it("puts a ready candidate in the progress population under the CLI's own step selection", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true, ["check", "merge"])
+    await submitBranch(app, "issue/cli-shaped-selection", HEAD)
+    for (let index = 0; index < attempts; index++) await app.queue.run({}, runtime)
+
+    expect(admissionJobs(app).length).toBeGreaterThan(0)
+
+    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled", specimen: "queue:main" }),
+    )
+  })
+
+  /**
+   * `queueProgressQueue` opens with a guard that returns an EMPTY population
+   * when the selection carries no merge step, and it says nothing when it does.
+   *
+   * This matters because the guard reads `state.queues.defaultSteps` — PERSISTED
+   * state frozen at queue-install time — and not the config the CLI would
+   * compute today. Nothing reconciles the two. A queue installed with a
+   * merge-less selection therefore reports a clean audit forever, however long
+   * it is blocked, and `selectSteps` does not throw because every named step is
+   * still installed.
+   *
+   * Pinned as the CURRENT behaviour, not endorsed. A queue that cannot merge
+   * arguably cannot stall, but a queue whose PERSISTED selection has drifted
+   * from its installed steps is exactly the silent-empty class this file's
+   * header incident is about, one layer down.
+   */
+  it("reports nothing at all when the persisted step selection carries no merge step", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read, true, ["check"])
+    await submitBranch(app, "issue/merge-less-selection", HEAD)
+    for (let index = 0; index < attempts; index++) await app.queue.run({}, runtime)
+
+    // POSITIVE CONTROL for an absence assertion: the member is present and
+    // tried the same number of times as the CLI-shaped test above, which DOES
+    // flag. The only difference is the persisted merge-less selection, so the
+    // silence below is attributable to the guard and not to an empty queue.
+    expect(admissionJobs(app).length).toBeGreaterThan(0)
+    expect(app.state().bays.submits["issue/merge-less-selection"]).toBeDefined()
+
+    // Blocked for an hour, twice the default threshold, and silent.
+    expect(app.queue.audit({ now: "2026-01-01T01:00:00.000Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+
+  it("uses a real merge as the next progress clock while queued work remains", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    await using app = await createDeliveryApp(clock.read)
+    await submitBranch(app, "issue/merges-first", HEAD)
+    await submitBranch(app, "issue/remains-queued", "4".repeat(40))
+
+    clock.set("2026-01-01T00:30:00.000Z")
+    const merged = await app.queue.run({}, runtime)
+
+    // POSITIVE CONTROL: a merge really happened (that is what restarts the
+    // window) and work really remains behind it. Without both, the quiet below
+    // is an empty queue rather than a freshly restarted one. The proof comes
+    // from the returned Run — the retained QueueRecord carries no integration.
+    expect(merged.some((run) => run.integration !== undefined)).toBe(true)
+    expect(app.state().bays.submits["issue/remains-queued"]).toBeDefined()
+
+    // No further attempts follow the merge on purpose. The merge restarts the
+    // window, so the queued remainder now carries ZERO attempts inside it — the
+    // shape of a runner asleep over ready work, which must stay loud once the
+    // window elapses and stay quiet before it does.
+    expect(app.queue.audit({ now: "2026-01-01T00:59:59.999Z" }).findings).not.toContainEqual(
+      expect.objectContaining({ code: "queue-progress-stalled" }),
+    )
+  })
+})
+
+describe("a standing submit fact with a ledgered refusal and no run never wedges queue reads", () => {
+  // The PR1128 incident (2026-08-17, @i/10-merge-queue): a carrier was queued,
+  // then the authored-gitlink refusal was ledgered against it BEFORE any check
+  // request existed. The audit's head-of-line sort compared that change with a
+  // comparator that THREW on a missing current check request, so every surface
+  // that computes audit findings died — pr list, queue audit, bay status, the
+  // habitant runner's own progress probe (which crashlooped it into restart
+  // suppression), and `queue recover`, the tool whose job is settling exactly
+  // this shape. A comparator asserts nothing: the ordering is total and the
+  // state is PRONOUNCED by findings instead.
+  //
+  // S7 keeps the shape reachable for a different reason: a derived member
+  // refused at its FIRST admission has a ledger row and no run record at all,
+  // which is the same "ledgered but nothing to sort by" state one layer down.
+  it("audits a ledger-only member as findings instead of throwing", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     // The delivery app: progress findings require a merge step in the plan,
     // exactly like the production queue that wedged.
     await using app = await createDeliveryApp(clock.read)
-    // The PR1127 analog: properly submitted WITH a check request, carrying its
-    // own refusal row — the incident journal held refusal rows for both PRs,
-    // and the head sort only ever runs its comparator with two entries.
-    const ahead = await submitAndRequestChecks(app, "task/pr1127-shape")
+    await submitBranch(app, "task/pr1127-shape", HEAD)
     await app.queue.recordAdmissionRefusal({
-      pr: ahead.id,
+      pr: "PR1",
+      branch: "task/pr1127-shape",
+      revision: 1,
+      headSha: HEAD,
       code: "carrier-drops-landed",
       kind: "refusal",
       reason: "the branch does not contain the merge-queue base",
     })
-    // Submitted, deliberately WITHOUT a check request — half the incident state.
-    await app.bays.submit({ branch: "task/pr1128-shape", headSha: "9".repeat(40), base: "main", baseSha: BASE })
-    const pr = app.bays.prs().find((item) => item.branch === "task/pr1128-shape")
-    if (pr === undefined) throw new Error("PR was not recorded")
-    expect(pr.checkRequests).toEqual([])
-    // The ledgered, unsettled refusal — the other half (the incident's exact
-    // journal event, op queue.admissionRefused).
+    // A second member in the same state: the head sort only ever runs its
+    // comparator with two entries, so one row could never reproduce the throw.
+    await submitBranch(app, "task/pr1128-shape", "9".repeat(40))
     await app.queue.recordAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR2",
+      branch: "task/pr1128-shape",
+      revision: 1,
+      headSha: "9".repeat(40),
       code: "authored-gitlink",
       kind: "refusal",
-      reason: `change '${pr.id}' changes generated-only gitlinks [ag]`,
+      reason: "change 'PR2' changes generated-only gitlinks [ag]",
     })
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink" })
+    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({ code: "authored-gitlink" })
 
-    // Pre-fix both of these threw "queued change '<id>' has no current check
-    // request" out of the head sort. Post-fix the state is a finding: the
-    // never-started window names the change the moment it exceeds the policy.
-    expect(app.queue.audit().findings).toEqual([])
-    expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({ code: "queue-never-started", pr: pr.id }),
-    )
+    // Pre-fix both of these threw out of the head sort. Post-fix the audit
+    // simply computes — no run record exists for either member, and that is a
+    // state to report, never to assert against.
+    expect(() => app.queue.audit()).not.toThrow()
+    expect(() => app.queue.audit({ now: "2026-01-01T06:00:00.000Z" })).not.toThrow()
+    expect(Queues.ids(app.state().queues)).toEqual([])
 
     // And the settlement the remedy loop applies to this disposition still
     // merges — the repair path itself must stay reachable over this state.
     await app.queue.settleAdmissionRefusal({
-      pr: pr.id,
+      pr: "PR2",
       revision: 1,
       headSha: "9".repeat(40),
       disposition: "needs-person",
       reason: "authored gitlink: pin work belongs to an intent, not this carrier",
     })
-    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({
+    expect(app.state().queues.admissionRefusals.PR2).toMatchObject({
       settlement: expect.objectContaining({ disposition: "needs-person" }),
     })
-    expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
-      expect.objectContaining({ code: "queue-never-started", pr: pr.id }),
-    )
+    expect(() => app.queue.audit({ now: "2026-01-01T06:00:00.000Z" })).not.toThrow()
   })
 })

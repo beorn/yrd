@@ -69,7 +69,12 @@ function twoStepPlugin(secondRevision: string) {
     }),
     { revision: secondRevision, output: SecondResultSchema },
   )
-  return withQueue({ steps: [first, second] as const, batch: false, defaultSteps: ["first", "second"] })
+  return withQueue({
+    steps: [first, second] as const,
+    batch: false,
+    defaultSteps: ["first", "second"],
+    resolveBaseSha: () => BASE,
+  })
 }
 
 async function createApp(secondRevision: string, journal = createMemoryJournal(), id: () => string = ids()) {
@@ -107,6 +112,20 @@ async function submitBranch(
   })
 }
 
+/** Re-derive an already-run branch's member so an explicit re-admission can
+ * name it. Post-S7 a bare `prs: ["PR1"]` no longer resolves: `explicitPRs`
+ * looks selectors up in the materialized derived batch, and only a
+ * SELECTORLESS compose derives on its own. The id is reused from the run
+ * snapshot, so the mint must already stand at that high-water. */
+function rederive(app: Awaited<ReturnType<typeof createApp>>, branch: string): DerivedRunMember {
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint: volatilePrNumberMint(1),
+    branch,
+  })
+}
+
 describe("stale-steps release — a drifted next step frees the run instead of killing compose", () => {
   it("releases a pending run whose not-yet-started next step revision drifted, keeping the change submitted", async () => {
     const journal = createMemoryJournal()
@@ -117,7 +136,12 @@ describe("stale-steps release — a drifted next step frees the run instead of k
       const member = await submitBranch(app, "issue/stale-next-step")
       // `prs: []` beside a non-empty `derived` selects exactly those derived
       // members — the post-S7 spelling of naming one member explicitly.
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [],
+        derived: [member],
+        steps: ["first", "second"],
+        baseSha: BASE,
+      })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -150,7 +174,12 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     {
       await using app = await createApp("second-v1", journal, id)
       const member = await submitBranch(app, "issue/stale-current-step")
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [],
+        derived: [member],
+        steps: ["first", "second"],
+        baseSha: BASE,
+      })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -164,7 +193,9 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     // Replay after the requested current Job's definition moved. The habitant
     // compose path must retire R1 before Jobs.run sees the stale revision.
     await using replayed = await createApp("second-v2", journal, id)
-    await expect(replayed.queue.run({ prs: ["PR1"] }, runtime)).resolves.toBeDefined()
+    await expect(
+      replayed.queue.run({ derived: [rederive(replayed, "issue/stale-current-step")] }, runtime),
+    ).resolves.toBeDefined()
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "completed",
       conclusion: "failure",
@@ -172,7 +203,10 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     })
     expect(replayed.state().bays.submits["issue/stale-current-step"]).toMatchObject({ sha: "1".repeat(40) })
 
-    const readmitted = await replayed.queue.run({ prs: ["PR1"] }, runtime)
+    const readmitted = await replayed.queue.run(
+      { derived: [rederive(replayed, "issue/stale-current-step")] },
+      runtime,
+    )
     expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
     expect(Queues.ids(replayed.state().queues)).toContain("R2")
   })
@@ -184,7 +218,12 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     {
       await using app = await createApp("second-v1", journal, id)
       const member = await submitBranch(app, "issue/recover-stale-current-step")
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [],
+        derived: [member],
+        steps: ["first", "second"],
+        baseSha: BASE,
+      })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -221,7 +260,12 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     {
       await using app = await createApp("second-v1", journal, id)
       const member = await submitBranch(app, "issue/stale-then-readmit")
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first", "second"] })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [],
+        derived: [member],
+        steps: ["first", "second"],
+        baseSha: BASE,
+      })
       const firstJob = app.queue.get("R1")?.steps[0]?.job
       if (firstJob === undefined) throw new Error("expected requested first step")
       await app.jobs.run(firstJob.id, runtime)
@@ -236,7 +280,10 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     })
 
     // A fresh explicit run composes a NEW run under the installed (v2) revision.
-    const readmitted = await replayed.queue.run({ prs: ["PR1"], steps: ["first", "second"] }, runtime)
+    const readmitted = await replayed.queue.run(
+      { derived: [rederive(replayed, "issue/stale-then-readmit")], steps: ["first", "second"] },
+      runtime,
+    )
     expect(readmitted.at(-1)).toMatchObject({ status: "completed", conclusion: "success" })
     expect(Queues.ids(replayed.state().queues)).toContain("R2")
   })

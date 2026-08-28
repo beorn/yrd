@@ -1,44 +1,44 @@
 /**
- * @failure The S6 door retires record creation, so a branch's answer must
- * arbitrate between the frozen/live record store and the live submit fact —
- * and the legacy "a record in ANY state wins" filter is wrong in exactly one
- * cell: a terminal record would permanently shadow a post-door re-submission
- * of its branch ("withdrawn, nothing to run" forever — the stranded-draft
- * class 22991 exists to kill, returning through the front door). This file is
- * A4 of the S6 door design (@i/10-merge-queue/s6-door-design §3 leg 3): the
- * full 9-cell record×submit matrix as a table test, the two decisive cells
- * asserted by name, and the id-seam (store-first by id, admission-time mint
- * with commit-before-escape) proven while only tests call it.
+ * @failure A derived member's identity is minted twice, recycled, or lost. A
+ * recordless member has no store row, so its id lives only in run history —
+ * and if the mint re-derives instead of reusing, every compose of the same
+ * branch burns a fresh number (and every refused compose burns one before any
+ * run exists to retain a snapshot). This file is the id-seam: which source
+ * answers for an id, which source supplies a re-pushed branch's identity, and
+ * the commit-before-escape contract that makes a crash skip a number rather
+ * than re-issue one.
+ *
+ * S7 (branch-is-change, @i/10 22991): the change-record store is gone, so the
+ * mint reads run history alone — the latest retained snapshot for the branch,
+ * then the refusal-ledger row, then a fresh number. The record x submit
+ * arbitration this file used to table-test collapses with it: with no store to
+ * fill, only the two `record: "none"` cells are constructible, and the "never
+ * both lanes" guarantee is structural rather than arbitrated.
  * @level l2
  * @consumer @yrd/queue
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import {
-  changeHead,
   createBayJobDefs,
   volatilePrNumberMint,
   withBays,
   type BaysState,
   type BayWorkspace,
-  type Change,
 } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
-  classifyDerivedChangeCell,
   latestChangeSnapshot,
   maxChangeSnapshotRevision,
   mintDerivedMemberIdentity,
-  newestTruthRecord,
   Queues,
   resolveMemberById,
   withQueue,
   withStep,
   type ChangeSnapshot,
-  type DerivedChangeCell,
-  type DerivedChangeLane,
+  type QueueAdmissionRefusal,
   type QueueRecord,
   type QueuesState,
   type StepExecution,
@@ -93,7 +93,7 @@ async function createQueueApp() {
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -105,179 +105,49 @@ async function createQueueApp() {
   })
 }
 
-type QueueApp = Awaited<ReturnType<typeof createQueueApp>>
-
-function nextHead(app: QueueApp): string {
-  // Each PR needs its own head: an identical payload is refused as a duplicate.
-  return (Object.keys(app.state().bays.prs).length + 1).toString(16).repeat(40)
-}
-
-function recorded(app: QueueApp, branch: string): Change {
-  const pr = Object.values(app.state().bays.prs).findLast((item) => item.branch === branch)
-  if (pr === undefined) throw new Error(`PR for '${branch}' was not recorded`)
-  return pr
-}
-
-async function submitRecord(app: QueueApp, branch: string): Promise<Change> {
-  await app.bays.submit({ branch, headSha: nextHead(app), base: "main", baseSha: BASE })
-  return recorded(app, branch)
-}
-
-/** Build one cell of the record×submit matrix for `branch` and return the
- * record head (when a record exists) so same-sha facts can name it. */
-async function buildCell(
-  app: QueueApp,
-  branch: string,
-  cell: Readonly<{ record: "none" | "live" | "terminal"; submit: "none" | "same-sha" | "different-sha" }>,
-): Promise<void> {
-  let head: string | undefined
-  if (cell.record !== "none") {
-    const pr = await submitRecord(app, branch)
-    head = changeHead(pr)
-    if (cell.record === "terminal") await app.bays.closePr({ pr: pr.id, reason: "superseded" })
-  }
-  if (cell.submit === "same-sha") {
-    if (head === undefined) throw new Error("same-sha needs a record head — the cell is zero by construction")
-    await app.bays.recordBranchSubmit({ branch, sha: head, base: "main" })
-  }
-  if (cell.submit === "different-sha") {
-    await app.bays.recordBranchSubmit({ branch, sha: OTHER_SHA, base: "main" })
-  }
-}
-
-describe("A4 — the 9-cell record×submit matrix, one lane per cell", () => {
-  // Every constructible cell with its ruled lane (s6-door-design §2/§3). The
-  // ninth cell — none×same-sha — is zero by construction (no record head to
-  // equal) and gets its own assertion below instead of a fixture.
-  const CELLS = [
-    { record: "none", submit: "none", lane: "none" },
-    { record: "none", submit: "different-sha", lane: "derived" },
-    { record: "live", submit: "none", lane: "record" },
-    { record: "live", submit: "same-sha", lane: "record" },
-    { record: "live", submit: "different-sha", lane: "record" },
-    { record: "terminal", submit: "none", lane: "record" },
-    { record: "terminal", submit: "same-sha", lane: "record" },
-    { record: "terminal", submit: "different-sha", lane: "derived" },
-  ] as const satisfies ReadonlyArray<DerivedChangeCell & { lane: DerivedChangeLane }>
-
-  it.each(CELLS.map((cell) => ({ ...cell, name: `${cell.record}×${cell.submit}` })))(
-    "$name ⇒ lane '$lane'",
-    async ({ record, submit, lane }) => {
-      await using app = await createQueueApp()
-      const branch = "issue/cell"
-      await buildCell(app, branch, { record, submit })
-      const derived = app.queue.deriveChange(branch)
-      expect(derived.authority.cell).toEqual({ record, submit })
-      expect(derived.authority.lane).toBe(lane)
-      // One lane per branch, never both: the verdict is a single enum, and a
-      // derived verdict always stands on a live submit fact.
-      if (derived.authority.lane === "derived") expect(derived.submit).toBeDefined()
-      if (record === "none") expect(derived.authority.record).toBeUndefined()
-      else expect(derived.authority.record?.branch).toBe(branch)
-    },
-  )
-
-  it("none×same-sha is zero by construction: a submit with no record classifies as different-sha", () => {
-    const cell = classifyDerivedChangeCell(undefined, { sha: OTHER_SHA, base: "main", at: AT })
-    expect(cell).toEqual({ record: "none", submit: "different-sha" })
-  })
-
-  it("DECISIVE terminal×different-sha: the derived member is the live truth and the branch is NOT shadowed", async () => {
+describe("one lane per branch — the submit fact is the whole question", () => {
+  it("a branch with a standing submit fact is derived; without one there is nothing to derive", async () => {
+    // What the 9-cell record x submit matrix collapsed to. Six of its eight
+    // constructible cells needed a Change record to build, and no writer can
+    // mint one any more, so the record axis is unreachable: `lane` is a
+    // function of the submit fact alone.
     await using app = await createQueueApp()
-    const branch = "issue/resubmitted"
-    await buildCell(app, branch, { record: "terminal", submit: "different-sha" })
-    const derived = app.queue.deriveChange(branch)
-    expect(derived.authority).toMatchObject({
-      lane: "derived",
-      cell: { record: "terminal", submit: "different-sha" },
+    expect(app.queue.deriveChange("issue/nothing")).toMatchObject({
+      branch: "issue/nothing",
+      authority: { lane: "none", cell: { record: "none", submit: "none" } },
     })
-    expect(derived.submit).toMatchObject({ sha: OTHER_SHA, base: "main" })
-    // Stage-2 boundary, stated: while record writes still flow the LEGACY
-    // fields keep their pre-S6 answers — the terminal record still answers
-    // `record`/`eligibility` and still hides the unrecorded row. Only the
-    // verdict flips; the door flips the consumers.
-    expect(derived.record).toBeDefined()
-    expect(derived.eligibility?.reason?.code).toBe("terminal")
-    expect(derived.unrecorded).toBeUndefined()
+
+    await app.bays.recordBranchSubmit({ branch: "issue/facted", sha: OTHER_SHA, base: "main" })
+    const derived = app.queue.deriveChange("issue/facted")
+    expect(derived).toMatchObject({
+      branch: "issue/facted",
+      submit: { sha: OTHER_SHA, base: "main", at: AT },
+      authority: { lane: "derived", cell: { record: "none", submit: "different-sha" } },
+    })
+    // A derived verdict always stands on a live submit fact, and no record
+    // answers for the branch because none can exist.
+    expect(derived.submit).toBeDefined()
+    expect(derived.record).toBeUndefined()
   })
 
-  it("DECISIVE live×different-sha: the record lane owns the push — never both lanes", async () => {
+  it("an unsubmit retires the branch from the derived lane in the same read", async () => {
     await using app = await createQueueApp()
-    const branch = "issue/pending-revision"
-    await buildCell(app, branch, { record: "live", submit: "different-sha" })
-    const derived = app.queue.deriveChange(branch)
-    expect(derived.authority.lane).toBe("record")
-    expect(derived.authority.cell).toEqual({ record: "live", submit: "different-sha" })
-    // The differing sha is the record's PENDING revision (the receiver's
-    // conditional dispatch intakes it at write time), not a second member.
-    expect(mintDerivedMemberIdentityRefusal(app, branch)).toMatch(/live change/)
-  })
+    await app.bays.recordBranchSubmit({ branch: "issue/gone", sha: OTHER_SHA, base: "main" })
+    await app.bays.recordBranchUnsubmit({ branch: "issue/gone", reason: "deleted" })
 
-  it("a multi-record branch arbitrates newest-truth while the legacy field keeps first-match", async () => {
-    await using app = await createQueueApp()
-    const branch = "issue/reborn"
-    const first = await submitRecord(app, branch)
-    await app.bays.closePr({ pr: first.id, reason: "superseded" })
-    // Intake mints a FRESH id for a terminal branch — the multi-record case.
-    await app.bays.intake({ branch, headSha: nextHead(app), base: "main", baseSha: BASE })
-    const second = recorded(app, branch)
-    expect(second.id).not.toBe(first.id)
-
-    const derived = app.queue.deriveChange(branch)
-    expect(derived.record?.id).toBe(first.id)
-    expect(derived.authority.record?.id).toBe(second.id)
-    expect(derived.authority.lane).toBe("record")
-    expect(newestTruthRecord(Object.values(app.state().bays.prs).filter((pr) => pr.branch === branch))?.id).toBe(
-      second.id,
-    )
+    expect(app.queue.deriveChange("issue/gone")).toMatchObject({
+      branch: "issue/gone",
+      authority: { lane: "none", cell: { record: "none", submit: "none" } },
+    })
+    expect(app.state().bays.submits["issue/gone"]).toBeUndefined()
   })
 })
 
-function mintDerivedMemberIdentityRefusal(app: QueueApp, branch: string): string {
-  try {
-    mintDerivedMemberIdentity({
-      mint: volatilePrNumberMint(100),
-      bays: app.state().bays,
-      queues: app.state().queues,
-      branch,
-    })
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
-  throw new Error("expected mintDerivedMemberIdentity to refuse a live-record branch")
-}
+// ————— id-seam: pure-state fixtures over run history, the only identity home
+// a recordless member has. —————
 
-// ————— id-seam: pure-state fixtures (no production path creates recordless
-// snapshots yet — the door does; until then ONLY these tests call the seam). —————
-
-function changeRecord(
-  overrides: Readonly<{ id: string; branch: string; state?: "open" | "closed"; merged?: boolean; revisions?: number }>,
-): Change {
-  const revisions = overrides.revisions ?? 1
-  return {
-    id: overrides.id,
-    name: `Change ${overrides.id}`,
-    branch: overrides.branch,
-    base: "main",
-    state: overrides.state ?? "open",
-    merged: overrides.merged ?? false,
-    revs: Array.from({ length: revisions }, (_ignored, index) => ({
-      n: index + 1,
-      head: (index + 2).toString(16).repeat(40),
-      base: "main",
-      baseSha: BASE,
-      pushedAt: AT,
-      submittedAt: AT,
-      submitter: "author@example.test",
-    })),
-    reviews: [],
-    comments: [],
-    checkRequests: [],
-  }
-}
-
-function baysWith(...prs: readonly Change[]): BaysState {
-  return { byId: {}, prs: Object.fromEntries(prs.map((pr) => [pr.id, pr])), receipts: {}, submits: {} }
+function baysWith(submits: Readonly<Record<string, Readonly<{ sha: string; base: string; at: string }>>> = {}): BaysState {
+  return { byId: {}, submits }
 }
 
 function snapshot(
@@ -302,23 +172,43 @@ function queuesWith(...records: readonly QueueRecord[]): QueuesState {
   return { ...empty, records: records.reduce((lookup, record) => Queues.set(lookup, record), empty.records) }
 }
 
-describe("id-seam — store-first by id", () => {
-  const terminal = changeRecord({ id: "PR7", branch: "issue/old", state: "closed", merged: true, revisions: 3 })
+function queuesWithRefusal(row: QueueAdmissionRefusal, ...records: readonly QueueRecord[]): QueuesState {
+  return { ...queuesWith(...records), admissionRefusals: { [row.pr]: row } }
+}
 
-  it("a record answers its id even when snapshots also name it; recordless ids answer from the newest snapshot", () => {
-    const bays = baysWith(terminal)
+function refusalRow(
+  overrides: Readonly<{ pr: string; branch: string; revision?: number; headSha?: string }>,
+): QueueAdmissionRefusal {
+  return {
+    pr: overrides.pr,
+    branch: overrides.branch,
+    ...(overrides.revision === undefined ? {} : { revision: overrides.revision }),
+    ...(overrides.headSha === undefined ? {} : { headSha: overrides.headSha }),
+    code: "authored-gitlink",
+    reason: "the branch authors a gitlink bump it may not carry",
+    count: 1,
+    sameCodeCount: 1,
+    firstAt: AT,
+    lastAt: AT,
+  } as QueueAdmissionRefusal
+}
+
+describe("id-seam — an id answers from the newest snapshot that names it", () => {
+  it("resolves a recordless id from run history, and reports an id nothing names as unknown", () => {
     const queues = queuesWith(
       runRecord("R2", [snapshot({ id: "PR7", branch: "issue/old", revision: 3 })]),
       runRecord("R10", [snapshot({ id: "PR9", branch: "issue/new", revision: 2, changeId: "I0123abcd" })]),
     )
-    expect(resolveMemberById(bays, queues, "PR7")).toMatchObject({ source: "record", id: "PR7" })
-    expect(resolveMemberById(bays, queues, "pr#9")).toMatchObject({
+    // Every id answers from a snapshot now — there is no store arm left to
+    // out-rank one, so `source` is the same for every resolvable member.
+    expect(resolveMemberById(queues, "PR7")).toMatchObject({ source: "snapshot", id: "PR7" })
+    expect(resolveMemberById(queues, "pr#9")).toMatchObject({
       source: "snapshot",
       id: "PR9",
       snapshot: { revision: 2, changeId: "I0123abcd" },
     })
-    expect(resolveMemberById(bays, queues, "9")).toMatchObject({ source: "snapshot", id: "PR9" })
-    expect(resolveMemberById(bays, queues, "PR8")).toBeUndefined()
+    expect(resolveMemberById(queues, "9")).toMatchObject({ source: "snapshot", id: "PR9" })
+    expect(resolveMemberById(queues, "PR8")).toBeUndefined()
   })
 
   it("the newest snapshot wins by natural run order (R10 after R2), and intent members never match", () => {
@@ -333,54 +223,88 @@ describe("id-seam — store-first by id", () => {
 })
 
 describe("id-seam — admission-time mint (commit-before-escape)", () => {
-  it("a fresh member mints strictly above BOTH the frozen store's max and the high-water, committing first", () => {
+  it("a fresh member mints strictly above the high-water at revision 1, committing first", () => {
     const mint = volatilePrNumberMint(3)
-    const bays = baysWith(changeRecord({ id: "PR7", branch: "issue/old", state: "closed", revisions: 3 }))
-    const identity = mintDerivedMemberIdentity({ mint, bays, queues: queuesWith(), branch: "issue/fresh" })
-    expect(identity).toEqual({ id: "PR8", revision: 1, minted: true })
-    // The high-water moved BEFORE the id escaped: A9's crash window skips a
+    const identity = mintDerivedMemberIdentity({
+      mint,
+      bays: baysWith(),
+      queues: queuesWith(),
+      branch: "issue/fresh",
+    })
+    expect(identity).toEqual({ id: "PR4", revision: 1, minted: true })
+    // The high-water moved BEFORE the id escaped: the crash window skips a
     // number, never re-issues one.
-    expect(mint.highWater()).toBe(8)
-  })
-
-  it("a post-door revision of a pre-door branch continues the record's revision count", () => {
-    const mint = volatilePrNumberMint(7)
-    const bays = baysWith(changeRecord({ id: "PR7", branch: "issue/old", state: "closed", revisions: 3 }))
-    const identity = mintDerivedMemberIdentity({ mint, bays, queues: queuesWith(), branch: "issue/old" })
-    expect(identity).toEqual({ id: "PR8", revision: 4, minted: true })
+    expect(mint.highWater()).toBe(4)
   })
 
   it("a re-pushed derived branch reuses its snapshot identity — id, changeId, next revision — without minting", () => {
     const mint = volatilePrNumberMint(9)
-    const bays = baysWith(changeRecord({ id: "PR7", branch: "issue/derived", state: "closed", revisions: 2 }))
     const queues = queuesWith(
       runRecord("R1", [snapshot({ id: "PR9", branch: "issue/derived", revision: 3, changeId: "I0123abcd" })]),
       runRecord("R2", [snapshot({ id: "PR9", branch: "issue/derived", revision: 4, changeId: "I0123abcd" })]),
     )
-    const identity = mintDerivedMemberIdentity({ mint, bays, queues, branch: "issue/derived" })
+    const identity = mintDerivedMemberIdentity({ mint, bays: baysWith(), queues, branch: "issue/derived" })
     expect(identity).toEqual({ id: "PR9", changeId: "I0123abcd", revision: 5, minted: false })
     expect(mint.highWater()).toBe(9)
   })
 
-  it("a snapshot whose id has a record is NOT reusable — it names the record era, and the mint skips past it", () => {
-    const mint = volatilePrNumberMint(7)
-    const record = changeRecord({ id: "PR7", branch: "issue/old", state: "closed", revisions: 3 })
-    const queues = queuesWith(runRecord("R1", [snapshot({ id: "PR7", branch: "issue/old", revision: 3 })]))
-    const identity = mintDerivedMemberIdentity({ mint, bays: baysWith(record), queues, branch: "issue/old" })
-    expect(identity).toEqual({ id: "PR8", revision: 4, minted: true })
+  it("a member refused before ANY run reuses its refusal-ledger id, keeping the refused revision while the tree is unchanged", () => {
+    // The only other durable identity home a derived member has: without this
+    // arm every refused compose burned a fresh number for the same branch,
+    // and the standing admission Jobs stopped keying.
+    const mint = volatilePrNumberMint(5)
+    const queues = queuesWithRefusal(
+      refusalRow({ pr: "PR5", branch: "issue/refused", revision: 2, headSha: HEAD }),
+    )
+    const identity = mintDerivedMemberIdentity({
+      mint,
+      bays: baysWith({ "issue/refused": { sha: HEAD, base: "main", at: AT } }),
+      queues,
+      branch: "issue/refused",
+    })
+    expect(identity).toEqual({ id: "PR5", revision: 2, minted: false })
+    expect(mint.highWater()).toBe(5)
   })
 
-  it("a live record refuses the derived lane loudly", () => {
-    const bays = baysWith(changeRecord({ id: "PR5", branch: "issue/live" }))
-    expect(() =>
-      mintDerivedMemberIdentity({ mint: volatilePrNumberMint(5), bays, queues: queuesWith(), branch: "issue/live" }),
-    ).toThrow(/live change 'PR5'/)
+  it("a re-push past a refused member continues the revision count above the refused one", () => {
+    const mint = volatilePrNumberMint(5)
+    const queues = queuesWithRefusal(
+      refusalRow({ pr: "PR5", branch: "issue/refused", revision: 2, headSha: HEAD }),
+    )
+    // The submit fact now stands at a DIFFERENT tree than the refusal recorded.
+    const identity = mintDerivedMemberIdentity({
+      mint,
+      bays: baysWith({ "issue/refused": { sha: OTHER_SHA, base: "main", at: AT } }),
+      queues,
+      branch: "issue/refused",
+    })
+    expect(identity).toEqual({ id: "PR5", revision: 3, minted: false })
+    expect(mint.highWater()).toBe(5)
+  })
+
+  it("a retained snapshot outranks the refusal ledger for the same branch", () => {
+    const mint = volatilePrNumberMint(9)
+    const queues = queuesWithRefusal(
+      refusalRow({ pr: "PR5", branch: "issue/both", revision: 2, headSha: HEAD }),
+      runRecord("R1", [snapshot({ id: "PR9", branch: "issue/both", revision: 4, changeId: "Iabcd0123" })]),
+    )
+    const identity = mintDerivedMemberIdentity({ mint, bays: baysWith(), queues, branch: "issue/both" })
+    expect(identity).toEqual({ id: "PR9", changeId: "Iabcd0123", revision: 5, minted: false })
   })
 
   it("a reused id above the high-water is an escaped id and refuses loudly", () => {
     const queues = queuesWith(runRecord("R1", [snapshot({ id: "PR9", branch: "issue/derived", revision: 1 })]))
     expect(() =>
       mintDerivedMemberIdentity({ mint: volatilePrNumberMint(3), bays: baysWith(), queues, branch: "issue/derived" }),
+    ).toThrow(/exceeds the mint high-water/)
+  })
+
+  it("an escaped id in the refusal ledger refuses just as loudly as one in a snapshot", () => {
+    // The ledger arm needs its own guard: it is reached only when no snapshot
+    // exists, so a snapshot-only test leaves it unfenced.
+    const queues = queuesWithRefusal(refusalRow({ pr: "PR9", branch: "issue/refused", revision: 1, headSha: HEAD }))
+    expect(() =>
+      mintDerivedMemberIdentity({ mint: volatilePrNumberMint(3), bays: baysWith(), queues, branch: "issue/refused" }),
     ).toThrow(/exceeds the mint high-water/)
   })
 })

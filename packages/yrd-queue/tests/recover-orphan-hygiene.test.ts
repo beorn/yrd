@@ -9,7 +9,7 @@ import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } f
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withStep, withQueue } from "@yrd/queue"
+import { deriveRunMemberArgs, withStep, withQueue, type DerivedRunMember } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -56,7 +56,7 @@ async function createApp(
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
+    withBays({ jobs: bayJobs }),
   )
   return createYrd(queue(base), {
     inject: {
@@ -68,12 +68,21 @@ async function createApp(
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: string) {
-  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base: "main", baseSha: BASE })
-  const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
-  if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+/** The branch's standing submit fact IS the delivery (S7 branch-is-change);
+ * the member the queue would compose from it is derived here so the low-level
+ * `queue.run` dispatch below can name exactly one. */
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createApp>>,
+  branch: string,
+): Promise<DerivedRunMember> {
+  const digit = (Object.keys(app.state().bays.submits).length + 1).toString(16)
+  await app.bays.recordBranchSubmit({ branch, sha: digit.repeat(40), base: "main" })
+  return deriveRunMemberArgs({
+    bays: app.state().bays,
+    queues: app.state().queues,
+    mint: volatilePrNumberMint(),
+    branch,
+  })
 }
 
 /** Seed R1 with a still-queued `first` Job, then cancel the RUN via the
@@ -81,8 +90,10 @@ async function submitBranch(app: Awaited<ReturnType<typeof createApp>>, branch: 
  * its pending Job. That leftover queued Job is the orphan a state upgrade
  * strands. */
 async function seedOrphan(app: Awaited<ReturnType<typeof createApp>>) {
-  const pr = await submitBranch(app, "issue/orphaned-requested")
-  await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["first"] })
+  const member = await submitBranch(app, "issue/orphaned-requested")
+  // `prs: []` beside a non-empty `derived` selects exactly those derived
+  // members — the post-S7 spelling of naming one member explicitly.
+  await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
   const job = app.queue.get("R1")?.steps[0]?.job
   if (job === undefined) throw new Error("expected requested first step")
   await app.dispatch(app.commands.queue.cancelRun, { run: "R1", by: "tester", reason: "seed orphan" })
