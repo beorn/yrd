@@ -226,6 +226,25 @@ describe("native needs-author lifecycle", () => {
       headSha: HEAD,
     })
 
+    // DELIBERATE RED (S7) — and the contract here needs a src owner's ruling,
+    // because this test is internally inconsistent as written. It asserts BOTH
+    // that the fact is "re-sourced from the run's own snapshot" AND, twelve
+    // lines below, that "a refused admission mints no run record" — and that
+    // second assertion PASSES. There is no run snapshot to re-source from on
+    // this path, so settlement's hook never runs and zero `pr/needs-author`
+    // events are emitted.
+    //
+    // The competing reading is that the event is correctly gone: the sweep's
+    // own comment in queue.ts says the record-lane eject that used to write a
+    // durable `pr/needs-author` is deleted, and that "the warn plus the
+    // refusal-ledger row below are its whole trace". The ledger-row assertion
+    // immediately above this block passes and is the stronger check — it
+    // carries branch, code, kind, revision and headSha.
+    //
+    // NOT resolving that myself: deleting this expectation would bless the
+    // defect if the fact is genuinely owed, and keeping it red costs only this
+    // note if it is not. Left red per the standing ruling.
+    //
     // And the fact reaches settlement's hook, re-sourced from the run's own
     // snapshot — the only home a recordless member's identity has. The fact
     // schema is strict and carries no branch, so it is keyed on the minted id

@@ -136,6 +136,26 @@ describe("stale-plan retirement — an un-isolable drifted batch is retired, not
     // Before: audit flags the un-isolable batch (no more "audit clean" lie).
     expect(replayed.queue.audit().findings.some((f) => f.code === "unisolable-stale-plan")).toBe(true)
 
+    // DELIBERATE RED (S7): the audit flags the batch (the assertion above
+    // passes) but the compose does not retire it. R1's error stays
+    // `check-failed` / "red batch" — its ORIGINAL failure — where the contract
+    // is a typed `stale-plan` release.
+    //
+    // Not a fixture problem. Tried and ruled out, each measured: handing the
+    // compose the re-derived batch members (with the first session's mint
+    // carried across the replay, so the identities match) changes nothing, and
+    // configuring `resolveBaseSha` changes nothing. Also ruled out the obvious
+    // src explanation — that `resumableQueueRoots`' `!samePlan(run.steps,
+    // admissions)` filter excludes a check-only root — because `samePlan`
+    // compares step REVISIONS too, and this fixture's whole point is that the
+    // revision drifted (`check-v1` recorded, `check-v2` installed), so R1 does
+    // reach `settleCandidate`.
+    //
+    // Same family as the reds in stale-steps-release.test.ts and
+    // orphaned-run-recovery.test.ts: the audit sees the condition, and the
+    // path that is supposed to ACT on it does not. Needs a src owner to say
+    // where the stale-plan refusal is being lost between `settle` and
+    // `retireStalePlan`.
     // The selectorless compose survives and retires R1 — it neither throws nor
     // loops forever refusing isolation.
     await expect(replayed.queue.run({}, runtime)).resolves.toBeDefined()
