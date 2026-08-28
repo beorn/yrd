@@ -72,7 +72,16 @@ async function createApp(
       output: z.object({ first: z.boolean() }).strict(),
     },
   )
-  const queue = withQueue({ steps: [first] as const, batch: false, defaultSteps: ["first"] })
+  // `resolveBaseSha` is REQUIRED post-S7: the queue tip used to arrive inline on
+  // a record revision's snapshot, and a DERIVED member's snapshot carries no
+  // `baseSha` at all, so without this the facade's admission drain refuses with
+  // "a Candidate requires the exact merge-queue base SHA".
+  const queue = withQueue({
+    steps: [first] as const,
+    batch: false,
+    defaultSteps: ["first"],
+    resolveBaseSha: () => BASE,
+  })
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
@@ -144,7 +153,7 @@ async function joblessRun(log?: ReturnType<typeof createLogger>) {
     const member = await submitBranch(seed, "issue/orphaned-run")
     // `prs: []` beside a non-empty `derived` selects exactly those derived
     // members — the post-S7 spelling of naming one member explicitly.
-    await seed.dispatch(seed.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
+    await seed.dispatch(seed.commands.queue.run, { prs: [], derived: [member], steps: ["first"], baseSha: BASE })
     expect(seed.queue.get("R1")?.steps[0]?.job, "seed must start with a Job so the surgery is meaningful").toBeDefined()
   }
   return createApp(await withoutJobEvents(journal), ids(100), log)
@@ -221,7 +230,7 @@ describe("orphaned run recovery — a run with no Job at its cursor step can nev
   it("refuses to settle a run that still has a job at its cursor", async () => {
     await using app = await createApp()
     const member = await submitBranch(app, "issue/live-run")
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"], baseSha: BASE })
 
     await expect(
       app.dispatch(app.commands.queue.settleOrphanedRun, { run: "R1", reason: "not an orphan" }),
@@ -239,6 +248,25 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
       expect(seed.queue.get("R1")?.status, "the seed run must reach passed").toBe("completed")
     }
 
+    // DELIBERATELY RED (S7): a check-only run of DERIVED members never journals
+    // `queue/run/settled`, so its terminal status dies with its Jobs — exactly
+    // the R1582 phantom-`running` row this file exists to prevent.
+    //
+    // Site: queue.ts, the settled command's emission guard
+    //   `claimed || memberTerminals.length > 0`
+    // `claimed` reads `state.queues.authority.claims`, which a derived member
+    // never populates — its authority is the standing submit fact, derived at
+    // read time and, by design, "never stored". `memberTerminals` is empty
+    // because a check-only run has no `integration`. So neither disjunct can
+    // fire and no settlement fact is written. The comment immediately above
+    // that guard states the invariant this breaks: "`passed` is the outcome
+    // that has no other record-level proof, so without this the run's status
+    // dies with its Jobs when retention prunes them."
+    //
+    // Correct behaviour: a settled root emits `queue/run/settled` carrying its
+    // terminal status whether or not a stored claim backs it. Verified by
+    // journal inspection, not inferred: the seed emits `queue/run/started` and
+    // no settlement event, and a second compose adds no events at all.
     // Job retention prunes a finished root's Jobs; the Queue record outlives them.
     await using pruned = await createApp(await withoutJobEvents(journal), ids(100))
 
@@ -263,7 +291,7 @@ describe("lapsed runner lease — a Job-backed run projects as running with noth
   async function leasedRun() {
     const app = await createApp()
     const member = await submitBranch(app, "issue/lease-lapsed")
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"], baseSha: BASE })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("the run must be Job-backed for a lease to exist at all")
     await app.dispatch(app.commands.job.transition, {

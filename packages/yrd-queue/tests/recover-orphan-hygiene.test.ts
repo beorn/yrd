@@ -93,7 +93,7 @@ async function seedOrphan(app: Awaited<ReturnType<typeof createApp>>) {
   const member = await submitBranch(app, "issue/orphaned-requested")
   // `prs: []` beside a non-empty `derived` selects exactly those derived
   // members — the post-S7 spelling of naming one member explicitly.
-  await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"] })
+  await app.dispatch(app.commands.queue.run, { prs: [], derived: [member], steps: ["first"], baseSha: BASE })
   const job = app.queue.get("R1")?.steps[0]?.job
   if (job === undefined) throw new Error("expected requested first step")
   await app.dispatch(app.commands.queue.cancelRun, { run: "R1", by: "tester", reason: "seed orphan" })

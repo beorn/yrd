@@ -147,8 +147,10 @@ async function createApp(
 }
 
 /** The branch's standing submit fact IS the delivery (S7 branch-is-change), and
- * the member the queue composes from it is derived here so each run below names
- * exactly one. `mint` is per-JOURNAL: identities are reused by branch and a
+ * the member the queue composes from it is derived here and HANDED to each run
+ * below, which is what makes the run name exactly one member: this file's queue
+ * plugin configures no `prNumberMint`, so a bare selectorless compose cannot
+ * self-derive a ref-only branch and would run nothing at all. `mint` is per-JOURNAL: identities are reused by branch and a
  * reused id above the mint's high-water refuses, so a replaying second session
  * must carry the first session's mint. */
 async function submit(
@@ -161,6 +163,37 @@ async function submit(
   return deriveRunMemberArgs({ bays: app.state().bays, queues: app.state().queues, mint, branch })
 }
 
+/**
+ * FOUR DELIBERATE REDS in this file (S7), all one src defect. The standalone
+ * ADMISSION drain executes its own steps under the process/declared plan,
+ * independently of the run's step authority, and the root run does not reuse
+ * that verdict when a declared plan is in play. Observed, not inferred:
+ *
+ *   - "keeps an explicit --steps selection authoritative": ran
+ *     ['check','review','check','merge'] for `steps: ["check","merge"]`. The
+ *     admission ran the DECLARED plan's `review` even though the caller's step
+ *     selection is supposed to be authoritative, then the root ran check+merge.
+ *   - "runs the plan the base ref's config declares": ran
+ *     ['check','check','review','merge'] — `check` executed twice, once as the
+ *     admission and once in the root run.
+ *   - "refuses a base ref that declares a step this process cannot execute":
+ *     ran ['check'] where nothing may execute. The admission ran a check
+ *     BEFORE the root run refused the unexecutable plan — the silent-partial
+ *     execution 23192 records.
+ *   - "executes a check the declared config added after the stored checkpoint":
+ *     ran ['merge'] — the newly declared checks did not execute at all.
+ *
+ * Mechanism for the sharpest of them: in the compose, `explicitStepAuthority`
+ * (`args.steps !== undefined`) empties `checked`, but `admissible` is gated on
+ * `selectorless` alone. A run passing `steps` with no `prs` selector is still
+ * selectorless, so `drainAdmissions` runs with `selection` undefined and never
+ * sees `args.steps`. `derived-admission-execution.test.ts` pins the intended
+ * contract for the matching-plan case: one admission, one invocation.
+ *
+ * Verified NOT a fixture artifact: threading a `prNumberMint` into the plugin
+ * and letting the compose SELF-DERIVE the branch (the production path, no
+ * caller-supplied `derived`) reproduces the double `check` identically.
+ */
 describe("declared step plan", () => {
   it("executes a check the declared config added after the stored checkpoint was written", async () => {
     const cache = checkpointJournal(createMemoryJournal())
@@ -170,8 +203,8 @@ describe("declared step plan", () => {
 
     {
       await using first = await createApp(["check", "merge"], cache.journal, id, ran)
-      await submit(first, "topic/one", "1", mint)
-      await first.queue.run({}, runtime)
+      const one = await submit(first, "topic/one", "1", mint)
+      await first.queue.run({ derived: [one] }, runtime)
       expect(ran).toEqual(["check", "merge"])
     }
     const storedIdentity = cache.stored()?.identity
@@ -184,8 +217,8 @@ describe("declared step plan", () => {
     // journal with an evicted prefix cannot serve.
     expect(cache.loads.at(-1), "a .yrd.yml checks edit must not move the projection identity").toBe(storedIdentity)
 
-    await submit(second, "topic/two", "2", mint)
-    await second.queue.run({}, runtime)
+    const two = await submit(second, "topic/two", "2", mint)
+    await second.queue.run({ derived: [two] }, runtime)
     expect(ran, "the newly declared check must run without a --steps flag").toEqual(["check", "review", "merge"])
     expect(second.queue.get("R2")?.steps.map((step) => step.name)).toEqual(["check", "review", "merge"])
   })
@@ -196,16 +229,16 @@ describe("declared step plan", () => {
     const mint = volatilePrNumberMint()
     await using app = await createApp(["check", "review", "merge"], createMemoryJournal(), id, ran)
 
-    await submit(app, "topic/configured", "1", mint)
-    await app.queue.run({}, runtime)
+    const configured = await submit(app, "topic/configured", "1", mint)
+    await app.queue.run({ derived: [configured] }, runtime)
     expect(app.state().queues.records.root?.entries?.[0]?.value?.stepSelection).toEqual({
       authority: "configured",
       source: "declared-at-base",
       steps: ["check", "review", "merge"],
     })
 
-    await submit(app, "topic/explicit", "2", mint)
-    await app.queue.run({ steps: ["check", "merge"] }, runtime)
+    const explicit = await submit(app, "topic/explicit", "2", mint)
+    await app.queue.run({ derived: [explicit], steps: ["check", "merge"] }, runtime)
     expect(app.queue.get("R2")?.stepSelection).toMatchObject({ authority: "explicit", source: "explicit" })
   })
 
@@ -217,8 +250,8 @@ describe("declared step plan", () => {
       steps: ["check", "review", "merge"],
     }))
 
-    await submit(app, "topic/declared", "1", volatilePrNumberMint())
-    await app.queue.run({}, runtime)
+    const declaredMember = await submit(app, "topic/declared", "1", volatilePrNumberMint())
+    await app.queue.run({ derived: [declaredMember] }, runtime)
 
     // The process was constructed declaring two steps; the base ref declares
     // three. Git is the authority, so three run.
@@ -242,8 +275,8 @@ describe("declared step plan", () => {
     // built. A step the base ref declares but this process never installed has
     // nothing to execute, and running the rest silently is exactly the defect
     // 23192 records — so the run refuses and names what is missing.
-    await submit(app, "topic/unknown", "1", volatilePrNumberMint())
-    await expect(app.queue.run({}, runtime)).rejects.toThrow(/publish/u)
+    const unknown = await submit(app, "topic/unknown", "1", volatilePrNumberMint())
+    await expect(app.queue.run({ derived: [unknown] }, runtime)).rejects.toThrow(/publish/u)
     expect(ran, "nothing may execute under a plan this process cannot honour").toEqual([])
   })
 
@@ -254,8 +287,8 @@ describe("declared step plan", () => {
       steps: ["check", "review", "merge"],
     }))
 
-    await submit(app, "topic/explicit", "1", volatilePrNumberMint())
-    await app.queue.run({ steps: ["check", "merge"] }, runtime)
+    const explicit = await submit(app, "topic/explicit", "1", volatilePrNumberMint())
+    await app.queue.run({ derived: [explicit], steps: ["check", "merge"] }, runtime)
 
     expect(ran).toEqual(["check", "merge"])
     expect(app.queue.get("R1")?.stepSelection).toMatchObject({ authority: "explicit", source: "explicit" })

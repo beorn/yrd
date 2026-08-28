@@ -126,6 +126,26 @@ function rederive(app: Awaited<ReturnType<typeof createApp>>, branch: string): D
   })
 }
 
+/**
+ * TWO DELIBERATE REDS in this file (S7), both the same shape: a QUEUED current
+ * step whose requested Job revision drifted is DETECTED but never RELEASED.
+ *
+ * Discriminator, and the reason this reads as src rather than fixture debt:
+ *   - the audit DOES see it — `replayed.queue.audit().findings` carries
+ *     `{ code: "step-revision-drift", run: "R1", step: "second" }`, and that
+ *     assertion passes;
+ *   - the raw `advance` reducer DOES release it — the sibling test above, for a
+ *     not-yet-started NEXT step, is green;
+ *   - but the compose path leaves R1 `in_progress`, and `queue.recover()`
+ *     returns `[]`.
+ * `recover()` takes no selector and walks the whole population, so nothing
+ * about the derived lane's selection should reach it; detection and release
+ * disagreeing across two independent release paths is the tell.
+ *
+ * Less certain about the compose half than the recover half — a src owner
+ * should confirm whether the compose is expected to retire a drifted root at
+ * all, or whether `recover` is the only intended release path here.
+ */
 describe("stale-steps release — a drifted next step frees the run instead of killing compose", () => {
   it("releases a pending run whose not-yet-started next step revision drifted, keeping the change submitted", async () => {
     const journal = createMemoryJournal()
@@ -193,8 +213,16 @@ describe("stale-steps release — a drifted next step frees the run instead of k
     // Replay after the requested current Job's definition moved. The habitant
     // compose path must retire R1 before Jobs.run sees the stale revision.
     await using replayed = await createApp("second-v2", journal, id)
+    // The SELECTOR is load-bearing here, not decoration: `resumableQueueRoots`
+    // indexes an existing root only through an EXPLICIT selection, so a bare
+    // `derived` batch never puts R1 in the resumable set and the compose has
+    // nothing to retire. `derived` supplies the batch the selector resolves
+    // within (post-S7 a selector resolves against the run's own batch).
     await expect(
-      replayed.queue.run({ derived: [rederive(replayed, "issue/stale-current-step")] }, runtime),
+      replayed.queue.run(
+        { prs: ["PR1"], derived: [rederive(replayed, "issue/stale-current-step")] },
+        runtime,
+      ),
     ).resolves.toBeDefined()
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "completed",

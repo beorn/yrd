@@ -1145,9 +1145,9 @@ describe("Queue", () => {
 
   it("projects immutable Candidates separately from GitHub-shaped Runs", async () => {
     await using app = await createQueueApp()
-    await submitBranch(app, "topic/target-model")
+    const pr = await submitBranch(app, "topic/target-model")
 
-    const [run] = await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+    const [run] = await app.queue.run({ derived: [pr], steps: ["check"] }, runtime)
 
     expect(app.state().queues.candidates).toMatchObject({
       C1: {
@@ -1587,21 +1587,35 @@ describe("Queue", () => {
 
   it("resolves PR, Run, and base selectors while preserving canonical records", async () => {
     await using app = await createQueueApp()
-    await submitBranch(app, "Topic/Selectors")
+    const pr = await submitBranch(app, "Topic/Selectors")
 
-    const runs = await app.queue.run({ prs: ["pr1"], steps: ["check"] }, runtime)
+    // The selector STAYS: this test's subject is that every selector surface
+    // resolves case-insensitively to one canonical record. `derived` supplies
+    // the batch the selector must resolve WITHIN (post-S7 a selector resolves
+    // against the run's own derived batch, never a store).
+    const runs = await app.queue.run({ prs: ["pr1"], derived: [pr], steps: ["check"] }, runtime)
     expect(runs).toMatchObject([{ id: "R1", prs: [{ id: "PR1", base: "main" }] }])
     expect(app.queue.get("r1")).toMatchObject({ id: "R1", prs: [{ id: "PR1" }] })
     expect(app.queue.status("MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
     expect(app.queue.status("ORIGIN/MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
+    // GRANDFATHER (S7) — do NOT read this passing `[]` as evidence the live
+    // authority projection works. `activeQueueRootIds` iterates
+    // `authority.claims` only, and post-S7 `claims` is never written at all:
+    // its writers are the `pr/submitted` / `pr/checks-requested` reducers,
+    // which are now bare `return state`. So this assertion holds for the wrong
+    // reason and would hold no matter what the queue did.
+    // Left standing on @chief's instruction rather than flipped: the sibling
+    // at "removes ordinary failed roots from the live authority projection
+    // after settlement" is the more dangerous one, because that test is fully
+    // GREEN. See its note for the measurement.
     expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
   })
 
   it("accepts the printed `<base>#<number>` run reference the timeline and queue views teach", async () => {
     await using app = await createQueueApp()
-    await submitBranch(app, "topic/printed-run-ref")
+    const pr = await submitBranch(app, "topic/printed-run-ref")
 
-    await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+    await app.queue.run({ derived: [pr], steps: ["check"] }, runtime)
     expect(app.queue.get("main#1")).toMatchObject({ id: "R1" })
     expect(app.queue.get("MAIN#1")).toMatchObject({ id: "R1" })
     expect(app.queue.get("other#1")).toBeUndefined()
@@ -1657,6 +1671,29 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).resolves.toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure" },
     ])
+    // GRANDFATHER (S7) — this test is GREEN and it is blessing a defect. The
+    // `[]` below is not "the root was removed after settlement"; the live
+    // authority projection is empty at ALL times post-S7, so this assertion
+    // cannot distinguish a correctly-retired root from one that was never
+    // recorded. Measured directly, on a root that is LIVE rather than settled
+    // — a check-only run parked `waiting` on an external token, exactly the
+    // shape `queue.recover` exists to reclaim:
+    //     runs        [["R1","waiting"]]
+    //     claims      {}
+    //     activeRoots []
+    //     recover()   []
+    // `authority.claims` is never written because its writers, the
+    // `pr/submitted` and `pr/checks-requested` reducers, are bare
+    // `return state` since S7. Every consumer keyed on it reads "nothing
+    // active": `activeQueueRootIds` (projection-index.ts), `queue.recover`'s
+    // ownership capture, and the settled command's `claimed` guard — which is
+    // why a settled run also journals no `queue/run/settled`.
+    //
+    // DO NOT flip this to a non-empty expectation to "fix" it. The two tests
+    // that DO expect non-empty here — "releases a replayed terminal root after
+    // a crash before its settled event" and "resumes one waiting deploy-only
+    // run for an already integrated change" — are the real acceptance, and
+    // both are red (each failing earlier, for its own reason).
     expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
   })
 
@@ -2351,8 +2388,8 @@ describe("Queue", () => {
       undefined,
       log,
     )
-    await submitBranch(app, "issue/one-error")
-    await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+    const pr = await submitBranch(app, "issue/one-error")
+    await app.queue.run({ derived: [pr], steps: ["check"] }, runtime)
 
     expect(
       events.find(
@@ -2393,9 +2430,9 @@ describe("Queue", () => {
       undefined,
       log,
     )
-    await submitBranch(app, "issue/pass-me")
-    await submitBranch(app, "issue/fail-me")
-    const runs = await app.queue.run({ prs: ["PR1", "PR2"], steps: ["check"] }, runtime)
+    const passing = await submitBranch(app, "issue/pass-me")
+    const failing = await submitBranch(app, "issue/fail-me")
+    const runs = await app.queue.run({ derived: [passing, failing], steps: ["check"] }, runtime)
     expect(
       runs.map((run) => run.conclusion).toSorted((left, right) => (left ?? "").localeCompare(right ?? "")),
     ).toEqual(["failure", "success"])
@@ -2472,9 +2509,9 @@ describe("Queue", () => {
       undefined,
       log,
     )
-    await submitBranch(app, "issue/waiting")
+    const pr = await submitBranch(app, "issue/waiting")
 
-    await expect(app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ derived: [pr], steps: ["check"] }, runtime)).resolves.toMatchObject([
       { id: "R1", status: "waiting" },
     ])
 
@@ -4079,9 +4116,12 @@ describe("Queue", () => {
     expect(Queues.ids(replayed.state().queues)).toEqual([])
 
     refuseEnvironment = false
-    expect(await replayed.queue.run({ prs: ["PR1"] }, runtime)).toMatchObject([
-      { id: "R1", status: "completed", conclusion: "success" },
-    ])
+    // Re-derived on the REPLAYED app, not selected by record id: the member is
+    // rebuilt from the surviving submit fact, and the journal-keyed mint hands
+    // back the same PR1 the original run issued.
+    expect(
+      await replayed.queue.run({ derived: [memberOf(replayed, "issue/bounded-admission-retry")] }, runtime),
+    ).toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
     expect(checks).toBe(2)
   })
 
@@ -4237,7 +4277,7 @@ describe("Queue", () => {
       await submitBranch(app, "issue/release-b", "refs/heads/release"),
     ]
 
-    await app.queue.run({ prs: prs.map((pr) => pr.id) }, runtime)
+    await app.queue.run({ derived: prs }, runtime)
 
     expect(resolvedBases).toEqual(["main", "release"])
   })
@@ -5089,6 +5129,32 @@ describe("Queue", () => {
     })
   })
 
+  /**
+   * QUEUE PAUSE — DELIBERATE REDS (S7). Two independent src changes, both
+   * observed, neither a fixture problem:
+   *
+   * 1. A pause allow-list can only name a member that has ALREADY run.
+   *    `queue.pause` resolves each `allowedPRs` selector through
+   *    `resolveMemberById(snapshot.queues, ...)`, which reads RETAINED RUN
+   *    SNAPSHOTS ("a pause allow-list member is named by its retained run
+   *    snapshot"). A branch that has never been composed resolves to nothing,
+   *    so `pause({ allowedPRs: [branch] })` refuses `pr-not-found` — and
+   *    pausing BEFORE anything has run is exactly when an operator freezes a
+   *    queue. Same seam as the known `pauseMemberStatus` defect.
+   *
+   * 2. A paused queue no longer REFUSES; it returns no runs. The pause is now
+   *    an eligibility verdict (`code: "queue-paused"`, message
+   *    "...; change 'PRn' is not in the allowed set") rather than a thrown
+   *    refusal, so `queue.run` resolves `[]` where these tests expect a
+   *    rejection. Checked that this is not the selectorless refusal-swallow:
+   *    naming the member explicitly (`prs: [id]` beside its `derived` entry,
+   *    the mode whose refusals DO propagate) still returns `[]`.
+   *
+   * Whether (2) is an intended contract change or a lost fail-loud guarantee
+   * needs a src owner's ruling — the operator-facing effect is that
+   * `yrd queue run` on a paused queue returns nothing instead of saying
+   * "paused", with the reason surviving only in the `no-runnable-prs` warn.
+   */
   it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
     const journal = createMemoryJournal()
     const first = await createQueueApp({}, journal)

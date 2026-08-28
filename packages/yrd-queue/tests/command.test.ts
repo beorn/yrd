@@ -143,6 +143,24 @@ async function terminalChangeFacts(
   return events.filter((event) => event.name === name).map(({ data }) => data)
 }
 
+/**
+ * The PERSISTED Job behind one of a run's steps, looked up in state by its id.
+ *
+ * Replaces `app.queue.checks([...])`, whose per-change check projection read
+ * the deleted record store and went with it; the operator-facing join now
+ * lives in yrd-cli (`derivedCheckRecords`, which reads exactly these Jobs).
+ * Asserting on state rather than on the returned `run.steps[n].job` is the
+ * half worth keeping: it proves the verdict was PERSISTED, not merely
+ * reported back by the call that produced it.
+ */
+function persistedStepJob(app: { state: () => { jobs: { byId: Record<string, unknown> } } }, job: unknown): unknown {
+  const id = (job as Readonly<{ id?: unknown }> | undefined)?.id
+  if (typeof id !== "string") throw new Error("run step carried no job to look up")
+  const stored = app.state().jobs.byId[id]
+  if (stored === undefined) throw new Error(`job '${id}' produced a verdict that never reached state`)
+  return stored
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
@@ -5257,14 +5275,12 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[0]?.job).not.toHaveProperty("output")
-    expect(app.queue.checks(["PR1"])).toMatchObject([
-      {
-        error: {
-          code: "queue-environment-refused",
-          evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
-        },
+    expect(persistedStepJob(app, run.steps[0]?.job)).toMatchObject({
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
       },
-    ])
+    })
     // Branch-is-change: the standing submit fact at the authored head IS "still
     // submitted, payload neither moved nor withdrawn"; the run's retained
     // snapshot is the revision's only durable home.
@@ -5334,17 +5350,16 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[1]?.job).not.toHaveProperty("output")
-    expect(app.queue.checks(["PR1"])).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          step: "merge",
-          error: expect.objectContaining({
-            code: "queue-environment-refused",
-            evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
-          }),
-        }),
-      ]),
-    )
+    // Keyed on the step NAME, as the deleted check projection was: the
+    // refusal must be the MERGE step's persisted verdict, not just some
+    // step's.
+    expect(run.steps[1]?.name).toBe("merge")
+    expect(persistedStepJob(app, run.steps[1]?.job)).toMatchObject({
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
+    })
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     // Branch-is-change: the standing submit fact at the authored head IS "still
     // submitted, payload neither moved nor withdrawn"; the run's retained
@@ -7952,17 +7967,16 @@ describe("Queue command adapters", () => {
       },
     })
     expect(run.steps[1]?.job).not.toHaveProperty("output")
-    expect(app.queue.checks(["PR1"])).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          step: "merge",
-          error: expect.objectContaining({
-            code: "queue-environment-refused",
-            evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
-          }),
-        }),
-      ]),
-    )
+    // Keyed on the step NAME, as the deleted check projection was: the
+    // refusal must be the MERGE step's persisted verdict, not just some
+    // step's.
+    expect(run.steps[1]?.name).toBe("merge")
+    expect(persistedStepJob(app, run.steps[1]?.job)).toMatchObject({
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
+    })
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     // Branch-is-change: the standing submit fact at the authored head IS "still
     // submitted, payload neither moved nor withdrawn"; the run's retained

@@ -87,7 +87,16 @@ async function createApp(
     (): JobResult<{ second: boolean }> => ({ status: "completed", conclusion: "success", output: { second: true } }),
     { revision: "second-v1", output: z.object({ second: z.boolean() }).strict() },
   )
-  const queue = withQueue({ steps: [first, second] as const, batch: false, defaultSteps: ["first", "second"] })
+  // `resolveBaseSha` is REQUIRED post-S7: the queue tip used to arrive inline on
+  // a record revision's snapshot, and a DERIVED member's snapshot carries no
+  // `baseSha` at all, so without this the admission drain refuses with "a
+  // Candidate requires the exact merge-queue base SHA".
+  const queue = withQueue({
+    steps: [first, second] as const,
+    batch: false,
+    defaultSteps: ["first", "second"],
+    resolveBaseSha: () => BASE,
+  })
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs] }),
@@ -202,7 +211,7 @@ async function seedMixedPopulation(
     expect(app.queue.get("R1")?.steps.map((step) => step.job !== undefined)).toEqual([true, true])
 
     const orphan = await submitBranch(app, "issue/jobless-orphan")
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [orphan], steps: ["first", "second"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [orphan], steps: ["first", "second"], baseSha: BASE })
     expect(app.queue.get("R2")?.steps[0]?.job, "the orphan seed must start with a Job").toBeDefined()
 
     await seed?.(app)
@@ -218,7 +227,7 @@ async function seedValidPopulation(): Promise<Journal<unknown>> {
     const passed = await submitBranch(app, "issue/unreadable-run")
     await app.queue.run({ prs: [], derived: [passed], steps: ["first", "second"] }, RUNTIME)
     const orphan = await submitBranch(app, "issue/jobless-orphan")
-    await app.dispatch(app.commands.queue.run, { prs: [], derived: [orphan], steps: ["first", "second"] })
+    await app.dispatch(app.commands.queue.run, { prs: [], derived: [orphan], steps: ["first", "second"], baseSha: BASE })
   }
   return await withoutJobForKey(journal, "queue:R2:0")
 }
@@ -368,8 +377,16 @@ describe("recover reaches the PR1128 shape with an unreadable record in the same
         Queues.values(app.state().queues).filter((run) => run.prs.some((pr) => pr.id === member.id)),
         "the incident's carrier never started required checks — no run carries it",
       ).toEqual([])
+      // The caller-carried identity is REQUIRED here, not decoration: this
+      // member was refused before any run retained a snapshot of it, so the
+      // id-seam has nothing to resolve `pr` against and the reducer refuses
+      // `pr-not-found` without it (queue.ts wave defect 1). A record used to
+      // stand in for exactly this.
       await app.queue.recordAdmissionRefusal({
         pr: member.id,
+        branch: member.branch,
+        revision: member.revision,
+        headSha: member.headSha,
         code: "authored-gitlink",
         kind: "refusal",
         reason: `change '${member.id}' changes generated-only gitlinks [ag]`,
