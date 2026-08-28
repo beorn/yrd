@@ -787,8 +787,12 @@ export type ChangeEligibility = Readonly<{
  * is runnable — the next compose derives its admission — so this row is a
  * not-yet-picked-up fact, not a refusal; it persists only while no runner
  * composes, derived admission is unwired, or the derivation refused, and it
- * must SAY so wherever a waiting author looks: status, watch, audit and the
- * considered rows of an empty run (@cto efd1fa9a, constraint 3). When a
+ * must SAY WHICH wherever a waiting author looks: status, watch, audit and the
+ * considered rows of an empty run (@cto efd1fa9a, constraint 3). `message` is
+ * built from the wiring the compose itself acts on, so the unwired case reads
+ * differently from a lane simply waiting on a compose — listing all three at
+ * once implied a distinction the row could not make
+ * (@i/10-yrd/23996-derived-empty-silent). When a
  * record exists for the same branch, the record wins and this row does not
  * appear; once a retained run snapshot names the branch at this exact sha,
  * the member's own rows take over and this one retires.
