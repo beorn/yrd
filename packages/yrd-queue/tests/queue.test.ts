@@ -3819,6 +3819,46 @@ describe("Queue", () => {
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
   })
 
+  it("refuses the retired admit verb by name instead of reporting the change missing", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/retired-admit")
+
+    // The defect this fences: `admit` selected from `admissionQueue`, whose
+    // population is ENTIRELY its `derived` argument, and `AdmitSelection` has no
+    // parameter that carries one. Every call site passed the empty default, so
+    // the verb could never admit anything — and it said so by raising
+    // `pr-not-found` for a LIVE submitted branch. That blamed the change for a
+    // fault in the verb, which is the failure mode that costs the most to chase.
+    expect(standingSubmit(app, "issue/retired-admit")).toBeDefined()
+    await expect(app.queue.admit({ prs: [pr.id] }, runtime)).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "retired-command" },
+    })
+    await expect(app.queue.admit({ prs: [pr.id] }, runtime)).rejects.toThrow(/queue run/u)
+    // Selectorless was the quieter half: it resolved [] and admitted nothing at all.
+    await expect(app.queue.admit({}, runtime)).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "retired-command" },
+    })
+  })
+
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — admits configured checks through Queue once and reuses their journaled result for integration — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("admits configured checks through Queue once and reuses their journaled result for integration", async () => {
     let checks = 0
     await using app = await createQueueApp({
@@ -3869,6 +3909,25 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — names the fully reused admission prefix when a change emits no run events — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("names the fully reused admission prefix when a change emits no run events", async () => {
     await using app = await createQueueApp({ defaultSteps: ["check"] })
     const pr = await submitBranch(app, "issue/covered-pr")
@@ -3892,6 +3951,25 @@ describe("Queue", () => {
     })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — owns the admission drain inside Queue before integrating the same cached proof — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("owns the admission drain inside Queue before integrating the same cached proof", async () => {
     let checks = 0
     await using app = await createQueueApp({
@@ -3910,6 +3988,25 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — does not drive an unrelated active admission for an explicit selection — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("does not drive an unrelated active admission for an explicit selection", async () => {
     const checkedPRs: string[] = []
     await using app = await createQueueApp({
@@ -3933,6 +4030,25 @@ describe("Queue", () => {
     expect(await terminalFor(app, selected.id)).toMatchObject({ run: "R1", commit: MERGED })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — waits for every selected check before composing a mixed-ready explicit selection — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("waits for every selected check before composing a mixed-ready explicit selection", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
@@ -4007,6 +4123,25 @@ describe("Queue", () => {
     expect(revisionAdmissionJob(app.jobs, queued)).toMatchObject({ status: "queued" })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — scopes an explicit Queue.admit drain after resolving a branch selector — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("scopes an explicit Queue.admit drain after resolving a branch selector", async () => {
     const checkedPRs: string[] = []
     await using app = await createQueueApp({
@@ -4030,6 +4165,25 @@ describe("Queue", () => {
     })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — integrates a checks-passed PR while another admission's check is still in flight — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("integrates a checks-passed PR while another admission's check is still in flight", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "completed", conclusion: "success", output: { checked: true } }),
@@ -4145,6 +4299,25 @@ describe("Queue", () => {
     expect(checks).toBe(2)
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — lets an admitted check settle but suppresses every retry once the queue is paused — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("lets an admitted check settle but suppresses every retry once the queue is paused", async () => {
     const journal = createMemoryJournal()
     const id = ids()
@@ -4205,6 +4378,25 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — does not let an unrelated waiting admission monopolize Queue capacity — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("does not let an unrelated waiting admission monopolize Queue capacity", async () => {
     await using app = await createQueueApp({
       check: (input) =>
@@ -4226,6 +4418,25 @@ describe("Queue", () => {
     expect(app.queue.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — does not supersede another PR's unstarted admission for an explicit merge — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("does not supersede another PR's unstarted admission for an explicit merge", async () => {
     let checkCalls = 0
     let mergeCalls = 0
@@ -4255,6 +4466,25 @@ describe("Queue", () => {
     expect(revisionAdmissionJob(app.jobs, first)).toMatchObject({ status: "queued" })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — keys admission reuse by the freshly resolved base SHA — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("keys admission reuse by the freshly resolved base SHA", async () => {
     let baseSha = BASE
     let checks = 0
@@ -4305,6 +4535,25 @@ describe("Queue", () => {
     expect(resolvedBases).toEqual(["main", "release"])
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — refuses integration when a clear main-health admission turns green then same-base red — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("refuses integration when a clear main-health admission turns green then same-base red", async () => {
     let mainHealth: "clear" | "green" | "red" = "clear"
     let checks = 0
@@ -4366,6 +4615,25 @@ describe("Queue", () => {
     expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "failed", run: "R1" } })
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — recovery cancels an unstarted revision admission Job after its submission is retired — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("recovery cancels an unstarted revision admission Job after its submission is retired", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/stale-before-job")
@@ -4384,6 +4652,25 @@ describe("Queue", () => {
     expect(refusedAdmission(app, pr.id)).toBeUndefined()
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — replays a legacy pinned-run failure before its requested Job starts — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("replays a legacy pinned-run failure before its requested Job starts", async () => {
     const journal = createMemoryJournal<unknown>()
     const id = ids()
@@ -4472,6 +4759,25 @@ describe("Queue", () => {
     expect(replayed.state().jobs.retention.queueTerminalOrder.R1).toBeDefined()
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — keeps admission globally FIFO even when a later PR is selected explicitly — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("keeps admission globally FIFO even when a later PR is selected explicitly", async () => {
     const checked: string[] = []
     const journal = createMemoryJournal()
@@ -4505,6 +4811,25 @@ describe("Queue", () => {
     expect(admittedChanges).toStrictEqual([first.id, second.id])
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — orders admission age and position from the check request fact, not the earlier push — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("orders admission age and position from the check request fact, not the earlier push", async () => {
     let now = "2026-01-01T00:00:00.000Z"
     await using app = await createQueueApp({}, createMemoryJournal(), () => now)
@@ -4524,6 +4849,25 @@ describe("Queue", () => {
     expect(admitted).toBe(requestedFirst.id)
   })
 
+  /**
+   * RED, and not convertible without changing its subject. This test drives
+   * admission through `queue.admit`, which is RETIRED (S7 branch-is-change) and
+   * now refuses `retired-command`. The contract and the reason the old
+   * behaviour was a LIE — `pr-not-found` for a live submitted branch, blaming
+   * the change for a fault in the verb — are fenced by "refuses the retired
+   * admit verb by name instead of reporting the change missing".
+   *
+   * Why it is not re-pointed at `run`: `admit` was the only PUBLIC
+   * admission-only trigger. `run` composes AND integrates, so this test's
+   * subject — naturally misses the journal cache when the installed-step identity changes — is no longer observable from outside the package. Several
+   * of these tests turn on asserting that admission happened while
+   * `Queues.ids(...)` is still empty, which a compose cannot show.
+   *
+   * Live path: `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass
+   * the derived batch `admissionQueue` needs. Restoring this coverage needs an
+   * admission-only surface, or a compose-level rewrite that asserts the
+   * admission Jobs without asserting the absence of a Run.
+   */
   it("naturally misses the journal cache when the installed-step identity changes", async () => {
     const journal = createMemoryJournal()
     const first = await createQueueApp({}, journal)
@@ -5219,6 +5563,34 @@ describe("Queue", () => {
    * `yrd queue run` on a paused queue returns nothing instead of saying
    * "paused", with the reason surviving only in the `no-runnable-prs` warn.
    */
+  /**
+   * RED, and it names a real operator-facing gap rather than stale idiom.
+   *
+   * SITE: `pause` maps its allow-list through `resolveMemberById`
+   * (queue.ts, `const allowedPRs = args.allowedPRs.map(...)`; the resolver is
+   * model.ts:945), which walks queue RUN records ONLY. A submitted member that
+   * has never run has no snapshot, so it cannot be named — and post-S7 EVERY
+   * member starts never-run.
+   *
+   * REACHABLE FROM THE CLI: `yrd queue pause --allow <id>` passes raw operator
+   * selectors straight through (run.ts:6513-6516, `allowedPRs: csv(options.allow)`),
+   * so freezing a queue and allowing one freshly-submitted branch answers
+   * `pr-not-found` for a live branch. That is the same lie-shape as the retired
+   * `admit` verb: it blames the change for a limit that belongs to the resolver.
+   * In a freeze, the members an operator most wants to allow are precisely the
+   * ones that have NOT run yet.
+   *
+   * WEIGH THIS BEFORE FIXING: the snapshot keying is deliberate and documented
+   * in place — "a pause allow-list member is named by its retained run snapshot
+   * — the same seam `pauseMemberStatus` reads it back through." So the read-back
+   * seam has to move with the write side.
+   *
+   * CORRECT: resolve the allow-list against the derived lane (the population
+   * `materializedDerived` / `admissionQueue` already use) and keep
+   * `pauseMemberStatus` reading through the same seam; or keep snapshot keying
+   * and make the refusal SAY the member must have run, instead of reporting it
+   * missing.
+   */
   it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
     const journal = createMemoryJournal()
     const first = await createQueueApp({}, journal)
@@ -5485,6 +5857,34 @@ describe("Queue", () => {
     )
   })
 
+  /**
+   * RED, and it names a real operator-facing gap rather than stale idiom.
+   *
+   * SITE: `pause` maps its allow-list through `resolveMemberById`
+   * (queue.ts, `const allowedPRs = args.allowedPRs.map(...)`; the resolver is
+   * model.ts:945), which walks queue RUN records ONLY. A submitted member that
+   * has never run has no snapshot, so it cannot be named — and post-S7 EVERY
+   * member starts never-run.
+   *
+   * REACHABLE FROM THE CLI: `yrd queue pause --allow <id>` passes raw operator
+   * selectors straight through (run.ts:6513-6516, `allowedPRs: csv(options.allow)`),
+   * so freezing a queue and allowing one freshly-submitted branch answers
+   * `pr-not-found` for a live branch. That is the same lie-shape as the retired
+   * `admit` verb: it blames the change for a limit that belongs to the resolver.
+   * In a freeze, the members an operator most wants to allow are precisely the
+   * ones that have NOT run yet.
+   *
+   * WEIGH THIS BEFORE FIXING: the snapshot keying is deliberate and documented
+   * in place — "a pause allow-list member is named by its retained run snapshot
+   * — the same seam `pauseMemberStatus` reads it back through." So the read-back
+   * seam has to move with the write side.
+   *
+   * CORRECT: resolve the allow-list against the derived lane (the population
+   * `materializedDerived` / `admissionQueue` already use) and keep
+   * `pauseMemberStatus` reading through the same seam; or keep snapshot keying
+   * and make the refusal SAY the member must have run, instead of reporting it
+   * missing.
+   */
   it("selects the first queue-ordered eligible submitted PR under a pause", async () => {
     let tick = 0
     await using app = await createQueueApp({ batch: 23 }, createMemoryJournal(), () =>

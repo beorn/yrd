@@ -938,6 +938,14 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
   /** Admit immutable PR revisions and return the admitted PR ids. */
+  /** RETIRED (S7 branch-is-change): always refuses `retired-command`. Admission
+   * work is selected from the compose's DERIVED batch, and this verb has no
+   * parameter that carries one — `AdmitSelection` is `{ prs?: string[] }`, so
+   * every `admissionQueue(...)` it could reach was handed the empty default and
+   * the population was unconditionally `[]`. The live path is a compose:
+   * `run` -> `drainAdmissions` -> `dispatchAdmissions`, which pass the derived
+   * batch. The surface survives one step so pre-S7 callers fail loud with the
+   * replacement named instead of not compiling. */
   admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly string[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
   /** Clear holds whose exact recorded deadline has passed. The deadline fence
@@ -2377,49 +2385,22 @@ function createQueue<Shape extends ChangeShape>(
           `settle through the queue's settled batch`,
       )
     },
-    async admit(args, runOptions) {
-      return observeYrdLifecycle(
-        log,
-        {
-          lifecycle: "admit",
-          attributes: { selectors: args.prs },
-          // The `progress` outcome asked whether an accepted change still
-          // carried no STORED admission verdict. Nothing has written one since
-          // `recordRevisionAdmission` became a no-op, and there is no record to
-          // read it off anyway, so the probe can only answer "succeeded" — say
-          // nothing rather than report a verdict that is no longer computed.
-          resultAttributes: (prs) => ({ prs }),
-        },
-        async () => {
-          const resolveCycleBase = createBaseResolutionCycle()
-          const requestedSelectors = args.prs?.length ? args.prs : undefined
-          const selection: "explicit" | undefined = requestedSelectors === undefined ? undefined : "explicit"
-          await actions.refresh()
-          await cleanupSettledRoots()
-          let snapshot = runtime()
-          const selected =
-            requestedSelectors === undefined
-              ? admissionQueue(snapshot, steps)
-              : // S7: the admission queue is the whole population a selector can
-                // name, so an explicit selection filters it rather than
-                // resolving each id against a store.
-                requestedSelectors.map((selector) => {
-                  const pr = admissionQueue(snapshot, steps).find((member) => member.id === selector)
-                  if (pr === undefined) {
-                    raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
-                  }
-                  return pr
-                })
-          await refreshCheckIdentities(selected, resolveCycleBase)
-          snapshot = runtime()
-          const selectors =
-            requestedSelectors === undefined
-              ? admissionQueue(snapshot, steps).map((pr) => pr.id)
-              : selected.map((pr) => pr.id)
-          return runOptions === undefined
-            ? (await dispatchAdmissions(selectors, resolveCycleBase)).admitted
-            : drainAdmissions(selectors, runOptions, resolveCycleBase, selection)
-        },
+    // eslint-disable-next-line @typescript-eslint/require-await -- the retired
+    // surface keeps its async signature so pre-S7 callers fail loud, not on a type.
+    async admit(args) {
+      // S7 branch-is-change: this verb selected from `admissionQueue`, whose
+      // population is ENTIRELY its `derived` argument — and `AdmitSelection`
+      // carries no derived batch, so every call site here passed the empty
+      // default. The result was a verb that could not admit anything while
+      // reporting `pr-not-found` for live submitted branches: a lie about the
+      // CHANGE when the truth was about the VERB. Refuse loudly instead.
+      raiseFailure(
+        "refusal",
+        "retired-command",
+        `yrd: 'admit' is retired${args.prs?.length ? ` for '${args.prs.join("', '")}'` : ""} — admission selects ` +
+          `from the compose's derived batch, which this verb has no parameter to carry, so it never had a ` +
+          `population to select from. Admit through a compose instead: 'queue run' (selectorless drains the ` +
+          `whole lane; 'queue run <selector>' narrows to what you name)`,
       )
     },
     async pause(args) {
