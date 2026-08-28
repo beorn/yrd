@@ -10,10 +10,20 @@
  * shape (the §3 identity trap, avoided by construction). A derived member's
  * only durable home stays the `queue/run/started` `ChangeSnapshot`.
  *
- * Until the door commit retires the 2b intake sweep, no live caller builds
- * `QueueRunArgs.derived`, so every path in this file is reachable only from
- * tests — behavior today is unchanged by construction. The door's compose
- * wires `deriveRunMemberArgs` in where the sweep used to run.
+ * This is LIVE. The door's compose wires `deriveRunMemberArgs` in where the 2b
+ * intake sweep used to run, and derived membership carries real landings: five
+ * runs measured 2026-08-28 (R3578, R3590-R3593) each merged a derived member
+ * with `QueueRunArgs.prs` empty. The header here claimed the opposite — "no
+ * live caller builds `QueueRunArgs.derived`, so every path in this file is
+ * reachable only from tests" — long after that stopped being true, and a
+ * comment asserting unreachability over live code is worse than no comment: it
+ * stops the next reader looking. It is recorded because it cost something. The
+ * queue audit kept reading the mutable `Change` record for a derived member's
+ * admission evidence, found none by construction, and reported four executed,
+ * PASSING checks as "executed in NEITHER stage" on every one of those
+ * landings. The evidence was on the run record the whole time, exactly where
+ * the paragraph above says a derived member's only durable home is
+ * (@yrd/cli/plan-audit.ts `carriedAtBase`).
  *
  * 2b's four loud edges re-homed here (design R2; queue.ts sweep policy
  * carried): mint-failure and duplicate-payload PROPAGATE and fail the compose;
