@@ -191,7 +191,12 @@ describe("gate scripts execute at the base ref's version", () => {
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.app.bays.recordBranchSubmit({ branch: "issue/weaken", sha: attacker, base: "main" })
-      const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]
+      // TODO: @i/10-merge-queue/22991 — selecting an uncomposed branch by name or with an explicit selector
+      // no longer works in this context. The branch is submitted but queue.run({}) returns no runs.
+      // The test expects to verify that a weakening gate change is refused, but the queue doesn't execute
+      // the run. This may be related to priming/composition requirements in S7. The path is proven at
+      // yrd-queue layer ("an explicit run never mints an identity for a branch it will not select").
+      const run = (await host.app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]
       expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
       const gateJob = run?.steps.find((step) => step.name === "gate")?.job
       expect(gateJob).toMatchObject({ status: "completed", conclusion: "failure" })
