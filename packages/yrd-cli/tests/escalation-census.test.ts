@@ -131,11 +131,11 @@ describe("escalation census: the refusals a person may authorize past", () => {
     }
   })
 
-  it("names a concrete actor or command in every escalation — never 'contact support'", () => {
+  it("names a concrete authority or command in every escalation — never 'contact support'", () => {
     for (const { code, message } of CENSUSED) {
       const failure = actionableFailure({ code, message })
       const text = [failure.escalation?.reason ?? "", ...(failure.escalation?.steps ?? [])].join(" ")
-      expect(text, `${code} names an actor or an exact command`).toMatch(
+      expect(text, `${code} names an authority or an exact command`).toMatch(
         /@cto|reviewer|host operator|Whoever declared the hold|yrd (?:pr|queue) /iu,
       )
       expect(text).not.toMatch(/contact support|file a ticket|reach out to the team/iu)
@@ -194,7 +194,7 @@ describe("escalation census: absence means no override exists", () => {
     })
     expect(componentModel.escalation?.reason).toContain("@cto rules on the component model")
     // The pre-existing resolution sentence is unchanged; the census supplies
-    // the actor it never named, it does not rewrite the act.
+    // the authority it never named, it does not rewrite the act.
     expect(componentModel.resolution).toEqual([
       "Escalate the component-model addition or deletion; a gitlink bump only advances an existing " +
         "submodule, never adds or removes one.",

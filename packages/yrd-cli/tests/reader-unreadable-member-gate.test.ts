@@ -2,12 +2,12 @@
  * @failure A read surface joins every run member against the retained change
  * record store and ABORTS the whole read on the first member the store cannot
  * answer for, so one journal write that never landed blinds `yrd log`, `yrd
- * queue status` and the timeline for every caller — including the caller who
+ * queue list` and the timeline for every caller — including the caller who
  * asked for five rows that did not include it (@i/10-yrd/23228, measured on
  * live main 2026-08-27: `R3578` referencing an unjournaled `PR2131`, exit 3
  * under every flag combination, with no scoping flag able to route around it).
  * @level l2
- * @consumer @yrd/cli every `log` / `queue status` / timeline operator
+ * @consumer @yrd/cli every `log` / `queue list` / timeline operator
  *
  * WHAT IS PINNED. A read answers a question about a POPULATION, so it renders
  * every member it can and REPORTS the ones it cannot — never an abort, and
@@ -170,7 +170,7 @@ describe("reader unreadable-member gate — one unresolvable member never blinds
     expect(rows.filter((row) => row.run !== "R9101")).toEqual(healthyRows)
   })
 
-  it("`yrd queue status` projects the row and reports the fault on the projection", () => {
+  it("`yrd queue list` projects the row and reports the fault on the projection", () => {
     const healthyProjection = project(healthy)
     const projection = project(faulted)
 

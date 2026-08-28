@@ -4,13 +4,13 @@
  * `refs/yrd/submit/<branch>` fact with no record, which post-S6 is the normal
  * shape of `git push bay HEAD:refs/for/main/<issue>` — contributes no row and
  * no count. Every rendered number is correct arithmetic over an empty set, so
- * `yrd queue status` prints `OPEN 0 ... No runnable or recent failed PRs.` and
+ * `yrd queue list` prints `OPEN 0 ... No runnable or recent failed PRs.` and
  * reads as a true idle queue while `yrd pr list` shows the work. Live specimen
  * 2026-08-28: cfb6e186 standing on both `refs/for/main/@i/2-agent-launch/
  * 23096-account-rotation-ignored-on-resume` and its submit ref, invisible on
  * the dashboard — the operator's next move is to push again.
  * @level l2
- * @consumer @yrd/cli every operator reading `yrd queue status`
+ * @consumer @yrd/cli every operator reading `yrd queue list`
  */
 import type { BaysState, Change, ProjectedBranchSubmit } from "@yrd/bay"
 import { createElement } from "react"

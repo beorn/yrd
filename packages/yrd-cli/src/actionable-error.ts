@@ -312,7 +312,7 @@ function escalatedFailure(failure: FailureLike, cause: string, entry: Escalation
 // The component-model branch is the ONE arm a person may authorize past, so it
 // alone carries an escalation, sourced from the census below rather than kept
 // as a second copy of the sentence. Its "Escalate the …" resolution named the
-// act but never the actor, which is the whole defect the census closes: the
+// act but never the authority, which is the whole defect the census closes: the
 // gate that got this right once did it as hardcoded prose in one message
 // (@i/10-yrd/escalation-channel-unused).
 function authoredGitlinkFailure(failure: FailureLike, cause: string): ActionableFailure {
