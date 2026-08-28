@@ -228,6 +228,15 @@ type RuntimeStep = StepDef<ChangeShape, ChangeShape>
 
 const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
 const RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
+/** The identity immediately BEFORE the change-record store left the state
+ * contract (22991 phase 2): `initialState` had already stopped seeding
+ * `queues.authority.statuses`, and `bays` still carried `prs` + `receipts`.
+ * THE LIVE /hh JOURNAL STORED THIS ONE — `journal_snapshot.checkpoint_identity`
+ * at cursor 97714, read-only copy taken 2026-08-27 21:51 PDT, with
+ * `history_evicted_through` = 27609 so rebuild from complete history is
+ * unavailable and the retained edge is the only thing carrying the deployment.
+ * Measured from the production journal itself, never a harness (PR1305/R2732). */
+const RETIRED_CHANGE_STORE_CHECKPOINT_IDENTITY = "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c"
 /** Durable production predecessors: the pre-restore two-check checkpoint, the
  * three-check checkpoint rewritten by the recovery before this protocol
  * shipped, the pre-quarantine intent contract (intents-v1, no `unreadable`
@@ -2106,24 +2115,27 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     })),
     {
       from: RETIRED_CHANGE_RECORD_CHECKPOINT_IDENTITY,
+      // Explicit successor: this edge produces the DELIVERY-STATE-COPY-FREE
+      // shape, which is its own shipped identity — the one the live journal
+      // stored until the store deletion below moved the target. Leaving `to`
+      // implicit would have silently re-pointed this edge at the post-deletion
+      // identity while its callback still carries `bays.prs`, handing a
+      // migrated checkpoint a field the contract no longer has.
+      to: RETIRED_CHANGE_STORE_CHECKPOINT_IDENTITY,
       migrate: (state) => {
-        // The live deployment already wrote a 36d85bbb checkpoint before
-        // this retired nested field was noticed. A real forward edge is the
-        // only opportunity to remove it from runtime and durable state.
-        const prsWithoutRegressions = Object.fromEntries(
-          Object.entries(state.bays.prs).map(([id, pr]) => {
-            const { regressions: _retiredRegressions, ...withoutRegressions } = pr as typeof pr &
-              Readonly<{ regressions?: unknown }>
-            return [id, withoutRegressions]
-          }),
-        )
+        // A checkpoint at this identity still carries `bays.prs` and
+        // `bays.receipts`; the current contract has neither, so read the
+        // record half through a widened view. The successor edge below deletes
+        // the whole container, which is also why the per-record `regressions`
+        // repair this edge used to perform is gone: it scrubbed a field inside
+        // an object that no longer survives the next hop.
         const { terminalAssociations: _retiredBackfill, ...queuesWithoutBackfill } =
           state.queues as typeof state.queues & Readonly<{ terminalAssociations?: unknown }>
         // 22991 phase 2, first store-deletion door: the queue's stored copy of
         // per-change delivery state (`authority.statuses`) is deleted from the
         // contract — ChangeDeliveryState is "derived, never stored" and the
         // copy was the drift surface. Every path into the current identity
-        // takes this edge last, so this single drop covers every retained
+        // takes this edge, so this single drop covers every retained
         // predecessor; parity was proven against the live checkpoint before
         // the cut (2084/2084 stored labels equal the record derivation).
         const { statuses: _retiredStatusCopy, ...authorityWithoutStatusCopy } =
@@ -2131,9 +2143,28 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         const { intents: _deadIntents, ...withoutDeadIntents } = state as typeof state & Readonly<{ intents?: unknown }>
         return {
           ...withoutDeadIntents,
-          bays: { ...withoutDeadIntents.bays, prs: prsWithoutRegressions },
           queues: { ...queuesWithoutBackfill, authority: authorityWithoutStatusCopy },
         }
+      },
+    },
+    {
+      from: RETIRED_CHANGE_STORE_CHECKPOINT_IDENTITY,
+      migrate: (state) => {
+        // 22991 phase 2, the store deletion itself: `bays.prs` (the change
+        // records) and `bays.receipts` (intake idempotence) leave the state
+        // contract. A branch and its standing submit fact are the delivery
+        // truth; history reads from run snapshots, the merge-record notes and
+        // main's ancestry. Every `pr/*` event still parses on replay and
+        // projects nothing, so a checkpoint taken here never regrows them.
+        //
+        // THE LIVE DEPLOYMENT SITS ON THIS EDGE'S PREDECESSOR (journal_snapshot
+        // .checkpoint_identity 381cdb9e at cursor 97714, read-only copy taken
+        // 2026-08-27 21:51 PDT). History is evicted through cursor 27609, so a
+        // rebuild from complete history is unavailable and this edge is the
+        // only thing that carries the fleet across the deletion.
+        const { prs: _retiredRecords, receipts: _retiredReceipts, ...baysWithoutRecordStore } = state.bays as
+          typeof state.bays & Readonly<{ prs?: unknown; receipts?: unknown }>
+        return { ...state, bays: baysWithoutRecordStore }
       },
     },
   ])
@@ -3290,47 +3321,35 @@ async function createYrdRuntimeHost(
           // re-derived from config, which is the other side of the comparison.
           installed: () => ({ batchSize: runtimeApp.queue.state().batchSize, steps: runtimeApp.queue.steps() }),
           records: () => Queues.values(runtimeApp.queue.state()),
-          // How legs a/b see the checks-before-queueing stage: the passed
-          // record for the member's EXACT revision at the Run's own base sha.
-          // A Run that reused this evidence executed only the remainder, and
-          // reading its executed steps alone as "what was checked" is the
-          // false "did not run" this closes (item 0).
+          // How legs a/b see the checks-before-queueing stage. Every member is
+          // recordless since S7, so the standalone admission Jobs are the ONLY
+          // home these verdicts have (`recordRevisionAdmission` never wrote for
+          // a recordless member, and the per-revision `admission` block it wrote
+          // for a record went with the store). Reading a Run's executed steps
+          // alone as "what was checked" is the false "did not run" this closes
+          // (item 0); returning `undefined` for a member that WAS checked is the
+          // same falsehood one level down (NSE-12). The key family is
+          // `admission:<id>:<revision>:<baseSha>:<index>[:stepRev]`, buildable
+          // from the member identity alone.
           admission: (member, baseSha) => {
             const snapshot = runtimeApp.state()
-            const pr = snapshot.bays.prs[member.id]
-            if (pr === undefined) {
-              // DERIVED member (recordless by design): its checks-before-
-              // queueing verdicts live ONLY in standalone admission Jobs
-              // (`recordRevisionAdmission` skips recordless members), so the
-              // record read below can never see them — and an `undefined`
-              // here reads as "nothing was checked" for every derived member
-              // (NSE-12). The key family is
-              // `admission:<id>:<revision>:<baseSha>:<index>[:stepRev]`,
-              // buildable from the member identity alone.
-              const prefix = `admission:${member.id}:${String(member.revision)}:${baseSha}:`
-              const passed = Object.entries(snapshot.jobs.byKey)
-                .filter(([key]) => key.startsWith(prefix))
-                .flatMap(([key, id]) => {
-                  const job = snapshot.jobs.byId[id]
-                  if (job?.status !== "completed" || job.conclusion !== "success") return []
-                  const input = job.input as Readonly<{ step?: unknown }> | undefined
-                  const name = typeof input?.step === "string" ? input.step : undefined
-                  if (name === undefined) return []
-                  // Key tail after the identity prefix: `<index>[:<stepRev>]`.
-                  // A legacy key without the step-revision segment still
-                  // proves the step ran; only the revision comparison is
-                  // forfeited (the audit tolerates an absent revision).
-                  const stepRevision = key.slice(prefix.length).split(":")[1]
-                  return [{ name, ...(stepRevision === undefined ? {} : { revision: stepRevision }) }]
-                })
-              return passed.length === 0 ? undefined : passed
-            }
-            const revision = pr.revs.find((rev) => rev.n === member.revision)
-            const admission = revision?.admission
-            if (admission?.status !== "passed" || admission.baseSha !== baseSha) return undefined
-            return admission.steps
-              .filter((step) => step.status === "passed")
-              .map((step) => ({ name: step.name, revision: step.revision }))
+            const prefix = `admission:${member.id}:${String(member.revision)}:${baseSha}:`
+            const passed = Object.entries(snapshot.jobs.byKey)
+              .filter(([key]) => key.startsWith(prefix))
+              .flatMap(([key, id]) => {
+                const job = snapshot.jobs.byId[id]
+                if (job?.status !== "completed" || job.conclusion !== "success") return []
+                const input = job.input as Readonly<{ step?: unknown }> | undefined
+                const name = typeof input?.step === "string" ? input.step : undefined
+                if (name === undefined) return []
+                // Key tail after the identity prefix: `<index>[:<stepRev>]`.
+                // A legacy key without the step-revision segment still
+                // proves the step ran; only the revision comparison is
+                // forfeited (the audit tolerates an absent revision).
+                const stepRevision = key.slice(prefix.length).split(":")[1]
+                return [{ name, ...(stepRevision === undefined ? {} : { revision: stepRevision }) }]
+              })
+            return passed.length === 0 ? undefined : passed
           },
         },
       }),

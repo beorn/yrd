@@ -1,4 +1,4 @@
-import { BayIdSchema, GitRefSchema, GitShaSchema, PRIdSchema, type Bay, type BaysState, type Change } from "@yrd/bay"
+import { BayIdSchema, GitRefSchema, GitShaSchema, PRIdSchema, type Bay, type BaysState } from "@yrd/bay"
 import { JsonSchema, type CommandHandler, type CommandResult, type DeepReadonly, type JsonValue } from "@yrd/core"
 import type { Job, JobContext, JobResult, JobsState, RunJobOptions } from "@yrd/job"
 import { IssueSchema } from "@yrd/issue"
@@ -238,12 +238,14 @@ export type ContestAttempt = ContestAttemptRecord &
     artifacts: readonly ContestArtifact[]
   }>
 
+/** S7 (branch-is-change, @i/10 22991): the projected `pr?: Change` is gone with
+ * the change-record store. A resolved promotion's identity stays on the stored
+ * `ContestPromotionRecord.result`; nothing ever read the record body here. */
 export type ContestPromotion = Readonly<{
   attempt: string
   commit: string
   ref: string
   job?: Job
-  pr?: Change
 }>
 
 export type ContestStatus = "running" | "ready" | "failed" | "selected" | "promoting" | "promoted" | "promotion-failed"

@@ -6,7 +6,10 @@ export function queueReadBases(state: YrdCliState, configuredBase: string): read
   return [
     ...new Set([
       configuredBase,
-      ...Object.values(state.bays.prs).map((pr) => pr.base),
+      // A standing submit fact carries the base its branch was approved
+      // against — since S7 that fact IS the delivery, so it is the same base
+      // the deleted change record used to contribute here.
+      ...Object.values(state.bays.submits).map((submit) => submit.base),
       ...Queues.values(state.queues).map((run) => run.base),
       ...Object.values(state.queues.pauses).map((pause) => pause.base),
     ]),

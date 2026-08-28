@@ -16,7 +16,6 @@ import {
   changeRevisionLineage,
   changeRevisionNumber,
   changeSourceReadyAt,
-  resolveChange,
   type BaysState,
   type ChangeProps,
   type Change,
@@ -4248,14 +4247,14 @@ function queueHeadBlockDetails(
   const finding = runner.queueProgress.findings.find((candidate) => {
     if (candidate.code !== "admission-refusal-loop" || candidate.pr === undefined) return false
     if (resultIds !== undefined) return resultIds.has(candidate.pr)
-    const blocked = state === undefined ? undefined : resolveChange(state, candidate.pr)
-    if (blocked !== undefined) return baseIdentity(blocked.base) === baseIdentity(projection.base)
+    // The change-record lookup that used to answer "which base is this
+    // refusal's delivery on" went with the store; the projection's own rows
+    // carry the same base for every member it knows.
     return projection.rows.some(
       (row) => row.pr === candidate.pr && baseIdentity(row.base) === baseIdentity(projection.base),
     )
   })
   if (finding?.pr === undefined) return undefined
-  const blocked = state === undefined ? undefined : resolveChange(state, finding.pr)
   const positions = new Map(
     (result?.eligibilities ?? []).flatMap((eligibility) =>
       eligibility.checks.position === undefined ? [] : [[eligibility.pr, eligibility.checks.position] as const],
@@ -4280,7 +4279,9 @@ function queueHeadBlockDetails(
           .find((candidate) => candidate.id === finding.pr || candidate.branch === finding.pr)
   return {
     pr: finding.pr,
-    subject: blocked?.title ?? blocked?.name ?? blocked?.branch ?? member?.name ?? member?.branch ?? row?.subject ?? finding.pr,
+    // The record's `title`/`name` led this chain; the run member's own name and
+    // branch are what remain, and they were already the recordless fallback.
+    subject: member?.name ?? member?.branch ?? row?.subject ?? finding.pr,
     ...(position === undefined ? {} : { position }),
     ...(queuedBehind === undefined ? {} : { queuedBehind }),
     blockedMs,

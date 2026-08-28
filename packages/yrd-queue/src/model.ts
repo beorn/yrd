@@ -20,7 +20,6 @@ import {
   changeRevisionNumber,
   isLiveChange,
   parseChangeSelector,
-  resolveChange,
   type BaysState,
   type Change,
   type PRId,
@@ -935,21 +934,15 @@ export function arbitrateDerivedChange(
 }
 
 /**
- * The store-first-by-id half of the S6 seam: `PRnnn` selectors answer from the
- * record store when a record exists (the frozen store is complete for its own
- * era), else from the newest retained `ChangeSnapshot` naming that id (the
- * only home a post-door derived member's identity has). The two sources cannot
- * disagree about one id: post-door ids are minted strictly above the frozen
- * store's max (mint monotonicity, pr-mint commit-before-escape), so an id has
- * a record or snapshots, never a record AND recordless snapshots.
+ * Resolve a `PRnnn` selector to the newest retained `ChangeSnapshot` naming it
+ * — since S7 the only home a member's identity has. The record-store arm this
+ * used to try first is gone with the store, so an id that no retained run
+ * carries resolves to nothing at all: retention, not the store, is what bounds
+ * how far back a selector reaches.
  */
-export type ResolvedMember =
-  | Readonly<{ source: "record"; id: PRId; record: Change }>
-  | Readonly<{ source: "snapshot"; id: string; snapshot: ChangeSnapshot }>
+export type ResolvedMember = Readonly<{ source: "snapshot"; id: string; snapshot: ChangeSnapshot }>
 
-export function resolveMemberById(bays: BaysState, queues: QueuesState, selector: string): ResolvedMember | undefined {
-  const record = resolveChange(bays, selector)
-  if (record !== undefined) return { source: "record", id: record.id, record }
+export function resolveMemberById(queues: QueuesState, selector: string): ResolvedMember | undefined {
   const id = parseChangeSelector(selector)?.pr ?? selector
   const snapshot = latestChangeSnapshot(queues, (candidate) => candidate.id === id)
   return snapshot === undefined ? undefined : { source: "snapshot", id: snapshot.id, snapshot }
@@ -1035,10 +1028,11 @@ export type QueueAuditFinding = Readonly<{
    * identity existed): a finding with no recorded identity says nothing rather
    * than naming a plausible owner. */
   submitter?: string
-  /** How far the carrier got through REVIEW before it stranded. Readers keep
-   * the open `string` for the same reason `code` stays open — a value parsed
-   * out of a foreign version's JSON must remain readable. Producers emit the
-   * closed {@link QueueAuditReviewCertification}. */
+  /** How far the carrier got through REVIEW before it stranded. NO producer
+   * emits this since S7 — it belonged to `draft-stranded`, which retired with
+   * the record store — but the field stays readable, for the same reason `code`
+   * stays open: a finding parsed out of a foreign version's JSON must remain
+   * readable. */
   reviewCertification?: string
   /**
    * Who a JUDGMENT disposition (a refusal with no mechanical remedy) routes
@@ -1055,48 +1049,6 @@ export type QueueAuditFinding = Readonly<{
   owner?: string
 }>
 
-/** How far a carrier got through review, derived ONLY from review facts the
- * PR already carries — a certification that can lie is worse than none.
- *
- * Named for REVIEW, not handoff: `BayHandoff` already certifies a workspace
- * head in this codebase, and one word carrying two certifications is the
- * ambiguity that costs a reader a wrong assumption. A bay's handoff readiness
- * (`bays.byId[pr.bay].handoff`) is reachable where this is derived and could
- * become a separate signal — it must never be folded into this one.
- *
- * Every member is decided by the SAME two inputs at the derivation point: the
- * verdict on the current revision (`reviewState(pr).current`) and the requested
- * reviewer set. Precedence runs left to right below: an explicit verdict on
- * this exact revision outranks an outstanding request, because the verdict is
- * about the content that actually stranded.
- *
- * Deliberately NOT members, because the discriminating data does not exist
- * where the finding is derived:
- * - `stale-base` would need the live base tip. The audit's state is
- *   `{ bays, jobs, intents, queues }`; no base branch head lives there, and the
- *   revision's own `baseSha` is only the base it was cut against. Deriving
- *   staleness would mean inventing a comparison.
- * - `unrecoverable` would need `rejectedAt` / `terminalRun`. Both are cleared
- *   by EVERY revision-appending reduction (`pr/pushed` and `pr/recut` both
- *   patch them to `undefined`), so a change in the `pushed` delivery state that
- *   this finding fires on can never carry either. The field would be a
- *   constant, not a discriminator. */
-export const YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS = [
-  /** A verdict of `approve` stands on this exact revision (including one a
-   * rebuild carried forward): the change is certified and only the submit is
-   * missing. */
-  "approved",
-  /** A verdict of `reject` stands on this exact revision: the draft is stranded
-   * waiting on its author, not on a reviewer. */
-  "changes-requested",
-  /** Reviewers are requested and none has ruled on this revision. */
-  "review-requested",
-  /** No verdict on this revision and no outstanding request — the carrier never
-   * entered review at all. */
-  "unreviewed",
-] as const
-
-export type QueueAuditReviewCertification = (typeof YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS)[number]
 
 /** Every finding code `yrd queue audit` can emit, in ONE authoritative place.
  * It is the union of BOTH producers whose findings that command concatenates:
@@ -1113,20 +1065,26 @@ export type QueueAuditReviewCertification = (typeof YRD_QUEUE_AUDIT_REVIEW_CERTI
  * from `runnerHealthError` in `@yrd/cli`), a different document than a
  * `QueueAuditFinding` — a consumer may join the two surfaces onto one page, but
  * the queue audit itself never emits them. */
+/* S7 (branch-is-change, @i/10 22991) retired five codes with the record store.
+ * Each named a disagreement between a run and a CHANGE RECORD, and none is a
+ * representable state once a member's run snapshot is its whole identity:
+ * `draft-stranded` (a change pushed but never submitted — a push with no submit
+ * ref is now invisible to the queue rather than stranded inside it),
+ * `missing-pr` (a member the store could not materialize),
+ * `run-without-submit-ancestry` / `run-without-check-ancestry` (a member holding
+ * no authority TOKEN — authority is the live submit fact now, never a token),
+ * and `candidate-revision-mismatch` (a run pinned to a revision the record has
+ * moved past). Their live successors are `unrecorded-submit`, the
+ * admission-refusal ledger codes, and `stale-pr` at dispatch. */
 export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-hold-ttl-missing",
   "queue-hold-expired",
-  "draft-stranded",
   "unrecorded-submit",
-  "missing-pr",
-  "run-without-submit-ancestry",
-  "run-without-check-ancestry",
   "invalid-run",
   "orphaned-run",
   "run-lease-expired",
   "step-unavailable",
   "step-revision-drift",
-  "candidate-revision-mismatch",
   "orphaned-requested-job",
   "unisolable-stale-plan",
   "admission-refusal-loop",
@@ -1169,10 +1127,11 @@ export const YRD_QUEUE_AUDIT_PAGE_FINDING_CODES = YRD_QUEUE_AUDIT_FINDING_CODES
 /** A finding AT ITS PRODUCER: a {@link QueueAuditFinding} whose code is closed
  * over {@link YRD_QUEUE_AUDIT_FINDING_CODES}. Readers keep the open
  * `code: string` — a finding parsed back out of another process's JSON status is
- * data from a foreign version, not an emission, and must stay readable. The
- * same split applies to `reviewCertification`. */
+ * data from a foreign version, not an emission, and must stay readable.
+ * `reviewCertification` is excluded outright: its only producer retired with the
+ * record store, so an emission carrying one would have no writer. */
 export type QueueAuditFindingEmission = Omit<QueueAuditFinding, "code" | "reviewCertification"> &
-  Readonly<{ code: QueueAuditFindingCode; reviewCertification?: QueueAuditReviewCertification }>
+  Readonly<{ code: QueueAuditFindingCode }>
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 

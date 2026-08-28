@@ -1,7 +1,6 @@
-import { currentChangeRev, changeDeliveryState, type Change, type ChangeDeliveryState } from "@yrd/bay"
 import { compareNatural } from "@yrd/core"
 import { ADMISSION_REFUSAL_LOOP_THRESHOLD, type QueueAdmissionRefusal } from "@yrd/queue"
-import { actionableFailure, redeliveryRefusedByDelivery, type FailureLike } from "./actionable-error.ts"
+import { actionableFailure, type FailureLike } from "./actionable-error.ts"
 
 /**
  * One mechanically executable step of a printed refusal remedy.
@@ -23,10 +22,13 @@ export type RefusalRemedy =
   | Readonly<{ kind: "judgment"; reason: string }>
 
 export type RefusalRemedyContext = Readonly<{
-  /** The change's branch, substituted for the `<branch>` placeholder the printed
-   * remedy carries — the one token a human had to fill in by hand. */
+  /** The delivery's branch, substituted for the `<branch>` placeholder the
+   * printed remedy carries — the one token a human had to fill in by hand. */
   branch: string
-  delivery?: ChangeDeliveryState
+  /** Whether a mechanical redelivery is still possible. Was a
+   * `ChangeDeliveryState` tested against the record's terminal states; since S7
+   * the caller derives it from the standing submit fact and the member's runs. */
+  redeliverable?: boolean
 }>
 
 /** The `<branch>` placeholder a printed remedy uses when it does not know (or
@@ -93,10 +95,10 @@ export function classifyRefusalRemedy(failure: FailureLike, context: RefusalReme
     }
     steps.push(step)
   }
-  if (steps.length > 0 && redeliveryRefusedByDelivery(context.delivery)) {
+  if (steps.length > 0 && context.redeliverable === false) {
     return Object.freeze({
       kind: "judgment",
-      reason: `a change in delivery state '${context.delivery ?? "unknown"}' cannot be redelivered mechanically`,
+      reason: "this delivery has ended — no submit fact stands for its branch, so it cannot be redelivered mechanically",
     })
   }
   if (!steps.some((step) => step.verb === "submit")) {
@@ -206,33 +208,48 @@ export function foldRefusalStall(
  * failed remedy degrades to the printed refusal instead of becoming its own
  * retry loop.
  */
+/** The identity a refusal streak names, and whether that delivery can still be
+ * redelivered mechanically. S7 moved this from the change record's own fields
+ * to the retained run member — the caller resolves it, so this function stays
+ * pure and the derived read lives with the state it reads. */
+export type RefusalRemedySubject = Readonly<{
+  id: string
+  branch: string
+  revision: number
+  headSha: string
+  /** False when the delivery has ended: nothing to redeliver, so the printed
+   * remedy escalates instead of running. Replaces the record's delivery-state
+   * test (`redeliveryRefusedByDelivery`). */
+  redeliverable: boolean
+}>
+
 export function planRefusalRemedies(
   refusals: Readonly<Record<string, QueueAdmissionRefusal>>,
-  prs: Readonly<Record<string, Change>>,
+  subjectOf: (id: string) => RefusalRemedySubject | undefined,
   attempted: ReadonlySet<string>,
 ): readonly RefusalRemedyPlan[] {
   const plans: RefusalRemedyPlan[] = []
   for (const refusal of Object.values(refusals).toSorted((left, right) => compareNatural(left.pr, right.pr))) {
     if (refusal.settlement !== undefined || refusal.count < ADMISSION_REFUSAL_LOOP_THRESHOLD) continue
-    const pr = prs[refusal.pr]
-    // The ledger is retained past its PR (compaction drops streaks for PRs the
-    // state no longer holds); a streak with no PR names nothing to remedy.
-    if (pr === undefined) continue
-    const revision = currentChangeRev(pr)
-    const key = refusalRemedyKey(pr.id, revision.n, revision.head)
+    const subject = subjectOf(refusal.pr)
+    // The ledger is retained past its delivery (compaction drops streaks for
+    // members the state no longer holds); a streak naming nothing that still
+    // exists has nothing to remedy.
+    if (subject === undefined) continue
+    const key = refusalRemedyKey(subject.id, subject.revision, subject.headSha)
     if (attempted.has(key)) continue
     plans.push(
       Object.freeze({
-        pr: pr.id,
-        branch: pr.branch,
-        revision: revision.n,
-        headSha: revision.head,
+        pr: subject.id,
+        branch: subject.branch,
+        revision: subject.revision,
+        headSha: subject.headSha,
         failure: Object.freeze({ code: refusal.code, message: refusal.reason }),
         count: refusal.count,
         key,
         remedy: classifyRefusalRemedy(
           { code: refusal.code, message: refusal.reason },
-          { branch: pr.branch, delivery: changeDeliveryState(pr) },
+          { branch: subject.branch, redeliverable: subject.redeliverable },
         ),
       }),
     )

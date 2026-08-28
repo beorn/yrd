@@ -2,33 +2,19 @@ import { adaptProcessGit, createProcess, type GitSyncReadCommand } from "@yrd/pr
 import type { GitProcessResult } from "git-super/process"
 import { createElement } from "react"
 import {
-  currentChangeRev,
-  isLiveChange,
-  changeDeliveryState,
-  changeNeedsAuthor,
-  changeNotFoundMessage,
-  type Change,
 } from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
 import { Queues, type Run } from "@yrd/queue"
-import { usage } from "./invocation.ts"
-import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
 import { projectChangeTaskStatus } from "./task-status.ts"
 import type { PruneGitFacts, YrdCliApp, YrdCliIO } from "./types.ts"
 
 type JsonOption = Readonly<{ json?: boolean }>
 
-const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
 const GIT_TIMEOUT_MS = 30_000
 /** Commits per `rev-list` invocation, so a listing with thousands of candidate
  * heads cannot overflow the argument vector. */
 const REV_LIST_BATCH = 400
-const CONSUMED_QUEUE_AUTHORITY_RESULTS = new Set(["queue-submit-authority-consumed", "queue-checks-authority-consumed"])
-
-function jsonEnabled(options: JsonOption): boolean {
-  return options.json === true
-}
 
 function short(sha: string): string {
   return sha.length > 12 ? sha.slice(0, 12) : sha
@@ -123,205 +109,51 @@ export type RemergePreflightOptions = JsonOption &
     expectedCurrent?: Readonly<{ revision: number; headSha: string; track?: boolean }>
   }>
 
-/** Classify one immutable PR revision against one resolved target without
- * creating refs, appending journal events, or calling the remerger. Exact
- * ancestry/tree equivalence authorizes withdrawal; patch-id is attribution
- * evidence only because stable patch IDs intentionally ignore whitespace. */
-/** Classify a change against its live base and print the verdict plus the ONE exact
- * command that follows from it. The result is returned as well as printed, so a
- * mechanical caller (the habitant's self-applied-remedy pass, 22474) runs the
- * same `next` a human would have read off the terminal — one decision function,
- * never a second copy of the verdict rules. */
-/** TRANSITION-ONLY resolver for the remedy preflight's record arm: a LIVE
- * record can exist only until the S7 cutover drain retires the last one — the
- * mint is gone, so the population can only shrink. Reads the frozen store
- * directly (the bay's resolution verbs deleted with the record surface) and
- * dies with the store field. Post-drain this raises pr-missing for every
- * selector, which is the honest answer: the fact-keyed remedy arm owns
- * everything that still moves. */
-function requiredLivePr(app: YrdCliApp, selector: string): Change {
-  const store = app.state().bays.prs
-  const exact =
-    store[selector] ??
-    Object.values(store).find((candidate) => candidate.branch === selector && isLiveChange(candidate as Change))
-  if (exact === undefined) {
-    raiseFailure("refusal", "pr-missing", changeNotFoundMessage(app.state().bays, selector))
-  }
-  const pr = exact as Change
-  if (!isLiveChange(pr)) {
-    raiseFailure(
-      "refusal",
-      "pr-terminal",
-      `yrd: change '${pr.id}' is ${changeDeliveryState(pr)}; a terminal change cannot re-merge`,
-    )
-  }
-  return pr
-}
-
-export async function preflightRemerge(
-  app: YrdCliApp,
-  selector: string,
-  options: RemergePreflightOptions,
+/**
+ * Is this head already contained in its target base — the SUBSUMED proof the
+ * re-merge preflight existed to compute?
+ *
+ * The preflight itself (`preflightRemerge`) and its record resolver
+ * (`requiredLivePr`) are gone with the change-record store: every other input
+ * it weighed — the revision list, the recut certification, `needsAuthor`, the
+ * passing-check force flag — was a field on the record, and the four verdicts
+ * they produced collapsed to two once the in-process applier had no record-side
+ * re-mint left to do. Only this question survives, and it never needed a record:
+ * it is pure git.
+ *
+ * `true` means the content is already on the base, so resubmitting it would
+ * merge the same payload twice — the outcome the ancestry model cannot clean up
+ * afterwards, and the reason the runner escalates instead of redelivering.
+ */
+export async function headSubsumedByBase(
+  headSha: string,
+  base: string,
   io: YrdCliIO,
-): Promise<RemergePreflightResult> {
-  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
-    usage("--revision must be a positive integer")
-  }
-  const pr = requiredLivePr(app, selector)
-  const revision = options.revision ?? currentChangeRev(pr).n
-  const source = pr.revs.find((candidate) => candidate.n === revision)
-  if (source === undefined) {
-    raiseFailure("refusal", "revision-missing", `yrd: change '${pr.id}' has no revision ${revision}`)
-  }
-  if (source.composition !== undefined) {
-    raiseFailure(
-      "refusal",
-      "recut-preflight-composition",
-      `yrd: change '${pr.id}' revision ${source.n} has composed source payloads; root-tree preflight cannot prove every source yet`,
-    )
-  }
-  if (source.baseSha === undefined) {
-    raiseFailure(
-      "configuration",
-      "recut-preflight-source-base-missing",
-      `yrd: change '${pr.id}' revision ${source.n} has no immutable source base; preflight cannot classify its pin distance`,
-    )
-  }
-
+): Promise<Readonly<{ subsumed: boolean; targetBaseSha: string; tree: PruneChecks["mergeTree"] }>> {
   const cwd = io.cwd ?? process.cwd()
   const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
-  const targetBaseSha = (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
+  const targetBaseSha = (await git.resolveCommit(`origin/${base}`)) ?? (await git.resolveCommit(base))
   if (targetBaseSha === undefined) {
     raiseFailure(
       "configuration",
       "recut-preflight-target-missing",
-      `yrd: change '${pr.id}' targets base '${pr.base}' but neither 'origin/${pr.base}' nor '${pr.base}' resolves to a commit here`,
+      `yrd: base '${base}' resolves to no commit here (neither 'origin/${base}' nor '${base}'), so whether ` +
+        `${headSha.slice(0, 12)} is already contained in it cannot be decided`,
     )
   }
-  const candidateHeadSha = options.proposedHeadSha ?? source.head
-  const checks = await contentChecks(candidateHeadSha, targetBaseSha, git)
-  if (!checks.headPresent) {
+  const checks = await contentChecks(headSha, targetBaseSha, git)
+  if (checks.headPresent !== true) {
     raiseFailure(
       "configuration",
       "recut-preflight-head-missing",
-      `yrd: change '${pr.id}' proposed head '${candidateHeadSha}' is not present in this repository`,
+      `yrd: head '${headSha}' is not present in this repository`,
     )
   }
-  if (checks.ancestorOfBase === undefined || checks.mergeTree === undefined) {
-    throw new Error(`yrd: preflight content proof for '${pr.id}' did not return complete evidence`)
-  }
-  const pinDistance =
-    git.pinDistance ??
-    raiseFailure(
-      "configuration",
-      "recut-preflight-git-facts",
-      "yrd: installed PR Git facts do not provide pin-distance evidence",
-    )
-  const patchMatch =
-    git.patchMatch ??
-    raiseFailure(
-      "configuration",
-      "recut-preflight-git-facts",
-      "yrd: installed PR Git facts do not provide patch-match evidence",
-    )
-  const distance = await pinDistance(source.baseSha, targetBaseSha)
-  if (distance.sourceOnly !== 0) {
-    raiseFailure(
-      "refusal",
-      "recut-preflight-base-diverged",
-      `yrd: change '${pr.id}' revision ${source.n} base ${short(source.baseSha)} diverged from target ${short(targetBaseSha)} ` +
-        `(source-only=${distance.sourceOnly}, target-only=${distance.targetOnly})`,
-    )
-  }
-  const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
-  const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
-  const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
-  const needsAuthor = changeNeedsAuthor(pr)
-  const reauthorizing =
-    needsAuthor !== undefined &&
-    CONSUMED_QUEUE_AUTHORITY_RESULTS.has(needsAuthor.receipt.code) &&
-    source.n === currentChangeRev(pr).n
-  if (
-    needsAuthor !== undefined &&
-    !reauthorizing &&
-    options.proposedHeadSha === undefined &&
-    source.n === currentChangeRev(pr).n
-  ) {
-    raiseFailure(
-      "refusal",
-      "recut-needs-authored-change",
-      `yrd: change '${pr.id}' needs author changes after '${needsAuthor.receipt.code}'; ` +
-        "an unchanged re-merge cannot resolve it — push new authored content, then retry the printed remedy",
-    )
-  }
-  const certifiedCurrentBase =
-    options.proposedHeadSha === undefined && distance.targetOnly === 0 && source.recut !== undefined
-  const verdict: RemergePreflightVerdict = subsumed
-    ? "SUBSUMED-WITHDRAW"
-    : reauthorizing
-      ? requiresForce
-        ? "RECUT-FORCE"
-        : "RECUT"
-      : certifiedCurrentBase
-        ? "FRESH-NOOP"
-        : requiresForce
-          ? "RECUT-FORCE"
-          : "RECUT"
-  // The hidden `yrd pr recut` verb is retired (the queue rebuilds by merge on
-  // its own): a human's RECUT spelling is resubmitting from the branch tip; the
-  // runner applies the same verdict in-process via `applyPreflightVerdict`.
-  const next =
-    verdict === "SUBSUMED-WITHDRAW"
-      ? // The subsumed proof (head reachable from the base, or merging it reproduces
-        // the base tree exactly) IS the payload-spend acknowledgement: content that
-        // already merged has nothing left to resubmit. Printed WITH the flag so the
-        // command runs as written rather than refusing whoever pastes it.
-        `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
-      : verdict === "RECUT-FORCE" || verdict === "RECUT"
-        ? `yrd pr submit ${pr.branch}`
-        : options.queue === true
-          ? // `yrd pr ready` retired with the record verbs: queueing a fresh tip is
-            // a resubmit — the standing fact renews and compose picks it up, which
-            // is also exactly what the in-process applier executes.
-            `yrd pr submit ${pr.branch}`
-          : `yrd pr view ${pr.id}`
-  const evidence: RemergePreflightResult["evidence"] = {
-    headSha: source.head,
-    ...(options.proposedHeadSha === undefined ? {} : { proposedHeadSha: options.proposedHeadSha }),
-    ...(options.expectedCurrent === undefined ? {} : { expectedCurrent: options.expectedCurrent }),
-    sourceBaseSha: source.baseSha,
-    targetBase: pr.base,
+  return {
+    subsumed: checks.ancestorOfBase === true || checks.mergeTree === "identical",
     targetBaseSha,
-    pinDistance: distance,
-    patchId: patch.patchId ?? null,
-    patchMatchTarget: patch.targetSha ?? null,
-    ancestorOfTarget: checks.ancestorOfBase === true,
     tree: checks.mergeTree,
-    certified: source.recut !== undefined,
-    passingCheck: requiresForce,
-    requestedQueue: options.queue === true,
   }
-  const result: RemergePreflightResult = {
-    command: "pr.recut.preflight",
-    pr: pr.id,
-    revision: source.n,
-    verdict,
-    evidence,
-    next,
-  }
-  await printResult(
-    io,
-    jsonEnabled(options),
-    result,
-    [
-      `${verdict} ${pr.id} r${source.n}`,
-      `pin-distance: source-only=${distance.sourceOnly}, target-only=${distance.targetOnly} (${short(source.baseSha)}..${short(targetBaseSha)})`,
-      `patch-id-match-target: ${patch.targetSha === undefined ? "none" : short(patch.targetSha)} (patch-id=${patch.patchId ?? "none"})`,
-      `tree-proof: ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${checks.mergeTree}`,
-      `next: ${next}`,
-    ].join("\n"),
-  )
-  return result
 }
 
 type GitCapture = Readonly<{ code: number; stdout: string }>

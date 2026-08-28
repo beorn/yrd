@@ -25,7 +25,6 @@ import {
   formatChangeRevisionSelector,
   isNonCheckableChangeState,
   parseChangeSelector,
-  resolveChange,
 } from "@yrd/bay"
 import { type Event, type JsonValue, stageAsync } from "@yrd/core"
 import { type Job, type JobError, JobRequestSchema, JobTransitionSchema } from "@yrd/job"
@@ -217,32 +216,27 @@ type QueuePauseHealth = Readonly<{
 }>
 
 /**
- * The delivery status of one pause allow-list member, derived-first: the id
- * resolves through {@link resolveMemberById} (a record while the store lasts,
- * else the newest retained run snapshot — the only identity home a derived
- * member has), and a snapshot-resolved member's status is the fact's:
+ * The delivery status of one pause allow-list member: the id resolves through
+ * {@link resolveMemberById} to the newest retained run snapshot — since S7 the
+ * only identity home a member has — and its status is the fact's.
  * {@link derivedAuthorityLookup} — the one authority derivation, never a
  * second one here — answers `submitted` for a standing, unconsumed submit
  * fact at the snapshot's sha. Everything else tolerates as `unknown`: no
- * `queues` handed in, an id neither source knows, a fact that vanished or
- * moved, or one a retained run already consumed — states where the honest
- * status word (integrated? rejected? re-running?) belongs to the run-outcome
- * projection, not to a partial re-derivation here. `unknown` keeps
- * `blocksAll` conservative: never a false pause-blocks-all warning, at worst
- * a missed one.
+ * `queues` handed in (nothing left to resolve against once the record arm is
+ * gone), an id no retained run knows, a fact that vanished or moved, or one a
+ * retained run already consumed — states where the honest status word
+ * (integrated? rejected? re-running?) belongs to the run-outcome projection,
+ * not to a partial re-derivation here. `unknown` keeps `blocksAll`
+ * conservative: never a false pause-blocks-all warning, at worst a missed one.
  */
 function pauseMemberStatus(
   state: BaysState,
   queues: QueuesState | undefined,
   id: string,
 ): ChangeDeliveryState | "unknown" {
-  if (queues === undefined) {
-    const record = resolveChange(state, id)
-    return record === undefined ? "unknown" : changeDeliveryState(record)
-  }
-  const resolved = resolveMemberById(state, queues, id)
+  if (queues === undefined) return "unknown"
+  const resolved = resolveMemberById(queues, id)
   if (resolved === undefined) return "unknown"
-  if (resolved.source === "record") return changeDeliveryState(resolved.record)
   const authority = derivedAuthorityLookup({ bays: state, queues })(resolved.snapshot)
   return authority?.standing === true ? "submitted" : "unknown"
 }

@@ -183,16 +183,25 @@ export function contestTaskStatusOf(contest: Pick<Contest, "status">): TaskStatu
   }
 }
 
+/** The task status of one retained run member, from the outcome of its latest
+ * run. This replaces `changeTaskStatusOf` for the issue lens: S7 deleted the
+ * change record the old mapping read, and a member's run outcome is the same
+ * question asked of the surviving evidence. A member with no finished run is
+ * work in progress, never `todo` — compose has already picked it up. */
+export function memberRunTaskStatusOf(outcome: string): TaskStatus {
+  if (outcome === "success") return "done"
+  if (outcome === "failure" || outcome === "cancelled" || outcome === "timed_out") return "blocked"
+  return "wip"
+}
+
 export function issueTaskStatusOf(
   issue: Readonly<{
-    prs: readonly Change[]
+    /** One entry per retained run member joined to the issue. */
+    deliveries: readonly TaskStatus[]
     contests: readonly Pick<Contest, "status">[]
   }>,
 ): TaskStatus {
-  const children = [
-    ...issue.prs.map((pr) => changeTaskStatusOf(pr)),
-    ...issue.contests.map((contest) => contestTaskStatusOf(contest)),
-  ]
+  const children = [...issue.deliveries, ...issue.contests.map((contest) => contestTaskStatusOf(contest))]
   if (children.length === 0) return "todo"
   if (children.includes("blocked")) return "blocked"
   if (children.includes("wip")) return "wip"

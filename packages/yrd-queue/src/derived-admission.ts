@@ -5,27 +5,20 @@
  * start a Queue run under an admission-time minted identity.
  *
  * Everything here is a PURE DERIVATION over surviving projections
- * (`bays.submits`, `bays.prs`, `QueuesState`) plus caller-supplied identity —
- * nothing persists, nothing journals a new event type, nothing adds state
- * shape (the §3 identity trap, avoided by construction). A derived member's
- * only durable home stays the `queue/run/started` `ChangeSnapshot`.
+ * (`bays.submits`, `QueuesState`) plus caller-supplied identity — nothing
+ * persists, nothing journals a new event type, nothing adds state shape (the
+ * §3 identity trap, avoided by construction). A derived member's only durable
+ * home stays the `queue/run/started` `ChangeSnapshot`.
  *
- * Until the door commit retires the 2b intake sweep, no live caller builds
- * `QueueRunArgs.derived`, so every path in this file is reachable only from
- * tests — behavior today is unchanged by construction. The door's compose
- * wires `deriveRunMemberArgs` in where the sweep used to run.
- *
- * 2b's four loud edges re-homed here (design R2; queue.ts sweep policy
- * carried): mint-failure and duplicate-payload PROPAGATE and fail the compose;
- * a vanished/moved submit fact and a live-record collision are typed refusals
- * the selectorless compose skips loudly (the row survives into audit).
+ * S7 (branch-is-change, @i/10 22991) removed the other lane this file used to
+ * arbitrate against: with no `Change` record materializable, every live submit
+ * fact is a derived member and "derived" stopped being a distinction. What
+ * remains of 2b's loud edges is mint-failure, which PROPAGATES and fails the
+ * compose, and the vanished/moved submit fact, a typed refusal the selectorless
+ * compose skips loudly (the row survives into audit).
  */
 import {
-  changeComposition,
-  changeHead,
   changeIdForDerivedSubmit,
-  baseIdentity,
-  isLiveChange,
   ChangeIdSchema,
   ChangePropsSchema,
   GitRefSchema,
@@ -41,7 +34,6 @@ import { raiseFailure, type DeepReadonly } from "@yrd/core"
 import * as z from "zod"
 import { mintDerivedMemberIdentity } from "./derived-member.ts"
 import {
-  arbitrateDerivedChange,
   latestChangeSnapshot,
   Queues,
   type ChangeSnapshot,
@@ -85,18 +77,19 @@ export type DerivedRunMember = Readonly<z.infer<typeof DerivedRunMemberSchema>>
  * derivation, not a record: it is never written to `bays.prs`, and
  * `Queues.snapshot` of it is exactly the `ChangeSnapshot` the run journals.
  *
- * Validation is the four loud edges (design R2), split by 2b's own policy:
+ * Validation is what survives S7 of the four loud edges (design R2) — both
+ * remaining edges are statements about the live submit fact, which is now the
+ * whole of a branch's delivery:
  *
  * - no live submit fact for the branch ⇒ refusal `derived-submit-vanished`
  * - live fact whose sha ≠ the member's ⇒ refusal `derived-submit-moved`
  *   (the git-CAS: a re-push supersedes the admission that was in flight)
- * - a LIVE record for the branch ⇒ refusal `derived-record-lane` (the record
- *   lane owns the branch; never both lanes for one push — A4)
- * - the member's id already names a record ⇒ Error (mint monotonicity broken
- *   — infrastructure, propagates)
- * - another open record already carries the exact payload ⇒ Error (the 2b
- *   duplicate-payload collision: one payload under two identities needs a
- *   human, propagates and fails the compose)
+ *
+ * The other two edges guarded against the record store and retired with it: a
+ * live record owning the branch, and a second record carrying the same payload
+ * under another identity, are both unrepresentable once no record exists. The
+ * within-batch duplicate guard in {@link materializeDerivedRunMembers} is what
+ * still catches one branch admitted twice in one compose.
  */
 export function materializeDerivedRunMembers(
   bays: DeepReadonly<BaysState>,
@@ -129,36 +122,6 @@ function materializeDerivedRunMember(bays: DeepReadonly<BaysState>, member: Deri
       "derived-submit-moved",
       `yrd: derived member '${member.id}' (${member.branch}) was derived at ${member.headSha} but the live ` +
         `submit fact now stands at ${submit.sha} — re-derive admission at the live sha`,
-    )
-  }
-  if (bays.prs[member.id] !== undefined) {
-    throw new Error(
-      `yrd: derived member id '${member.id}' already names a record — the mint is monotone above the ` +
-        `frozen store, so a colliding id means an identity escaped outside it; refusing to run`,
-    )
-  }
-  const records = Object.values(bays.prs).filter((pr) => pr.branch === member.branch)
-  const live = records.find(isLiveChange)
-  if (live !== undefined) {
-    raiseFailure(
-      "refusal",
-      "derived-record-lane",
-      `yrd: branch '${member.branch}' has live change '${live.id}' — the record lane owns it and a derived ` +
-        `member may not run beside it (never both lanes for one push)`,
-    )
-  }
-  const duplicate = Object.values(bays.prs).find(
-    (pr) =>
-      pr.branch !== member.branch &&
-      pr.state === "open" &&
-      changeHead(pr) === member.headSha &&
-      baseIdentity(pr.base) === baseIdentity(submit.base) &&
-      changeComposition(pr) === undefined,
-  )
-  if (duplicate !== undefined) {
-    throw new Error(
-      `yrd: derived member '${member.id}' (${member.branch}) payload already recorded as change ` +
-        `'${duplicate.id}' (${duplicate.branch}) — one payload under two identities needs a human`,
     )
   }
   return {
@@ -215,10 +178,9 @@ export type DerivedAuthorityLookup = (pr: ChangeSnapshot) => DerivedMemberAuthor
  * the fact. A re-push — same sha included — re-projects the fact with a newer
  * `at`, which is the per-push consent renewing the authority.
  *
- * Answers `undefined` for anything that is not a derived member (a record
- * exists for the id — token machinery owns it) or whose fact vanished/moved —
- * the caller's gap machinery then reports `missing` exactly as it would for a
- * record without its token.
+ * Answers `undefined` for an intent member (a pin-advance materialization, not
+ * a change) and for any member whose fact vanished or moved — the caller's gap
+ * machinery then reports `missing`.
  */
 export function derivedAuthorityLookup(
   state: Readonly<{ bays: DeepReadonly<BaysState>; queues: DeepReadonly<QueuesState> }>,
@@ -226,7 +188,6 @@ export function derivedAuthorityLookup(
 ): DerivedAuthorityLookup {
   return (pr) => {
     if (pr.intent !== undefined) return undefined
-    if (state.bays.prs[pr.id] !== undefined) return undefined
     const submit = state.bays.submits[pr.branch]
     if (submit === undefined || submit.sha !== pr.headSha) return undefined
     const consumer = consumingRun(state.queues, pr, submit, options.excludeRun)
@@ -259,102 +220,100 @@ function consumingRun(
 }
 
 /**
- * Is this retained run member a derived member — recordless BY DESIGN — rather
- * than something the reader should refuse to render?
+ * Every branch the DERIVED lane currently owns — which, since S7, is every
+ * branch carrying a live submit fact. This is the compose's selection
+ * universe.
  *
- * The original discriminator compared the member's number to the record
- * store's max ("derived ids mint strictly above the frozen store's max", A9).
- * That assumption is FALSE while A2's fact-keyed grandfather lives: a factless
- * `yrd pr submit` still mints a legacy RECORD, so both lanes mint post-door
- * and their numbers interleave. Measured 2026-08-27: record PR2135 minted
- * after derived members PR2131-2134, moving the "frontier" past them and
- * reclassifying every earlier derived member as corruption — which crashed
- * every status view the moment the fix that relied on the number test landed.
+ * The three exclusions this filter used to apply were all statements about the
+ * record store, and all became unrepresentable with it: no branch can have a
+ * LIVE record owning it, no fact can point at a RECORD's landing commit (the
+ * PR2139 double-merge cell), and `arbitrateDerivedChange` over an empty record
+ * set answers "derived" for every live fact. One submit fact now has exactly
+ * one possible consumer by construction rather than by filtering.
  *
- * The sound rule needs no numbers: post-S6 records are never DELETED (the
- * grandfathered drain freezes them terminal, it does not remove them), so a
- * record the store "lost" is not a representable state. A recordless,
- * non-intent member retained by a run IS a derived member — or a member whose
- * record predates the store's own S4-certified history, which reads the same
- * way. Corruption detection belongs to the journal's hash chain, not to a
- * number heuristic that legacy mints invalidate.
- */
-export function isDerivedRunMember(bays: DeepReadonly<Pick<BaysState, "prs">>, pr: ChangeSnapshot): boolean {
-  return pr.intent === undefined && bays.prs[pr.id] === undefined
-}
-
-/** A recordless, non-intent run member, for callers that hold a record id SET
- * rather than `BaysState` (status projections over result lists). Same rule as
- * `isDerivedRunMember`; see its doc for why there is deliberately no number
- * test here. */
-export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): boolean {
-  return !recordIds.has(id)
-}
-
-/**
- * Every branch the DERIVED lane currently owns: a live submit fact on a
- * branch with NO record — in any state. This is the door compose's selection
- * universe — the exact population the retired 2b sweep used to mint records
- * for.
- *
- * Recordless-ness is a hard criterion on top of the arbitration verdict, not
- * a restatement of it. The verdict's terminal×different-sha cell still reads
- * "derived" (it is a status statement: the standing fact is newer truth than
- * the terminal record), but ADMISSION requires more — one submit fact must be
- * consumed by exactly one lane, and a branch with record history already has
- * the record lane as its consumer. Measured 2026-08-27 (PR2139): the record
- * lane merged revision 1, the submit fact survived at the merge commit's sha,
- * the terminal×different-sha cell arbitrated "derived", and the next compose
- * minted and merged an empty revision 2 — one approval, two merges. The
- * incident's signature is landed CONTENT (the fact pointing at the landing
- * commit itself), excluded via {@link alreadyLandedSubmits}; a terminal
- * branch's genuinely NEW head composes here — post-purge the derived lane is
- * the only re-entry (Q1).
+ * The PR2139 hazard itself — a fact standing at content already merged, which
+ * would compose an empty revision — did NOT retire with the record store; it
+ * is caught downstream instead, and by a stronger rule. {@link
+ * derivedAuthorityLookup} marks a fact CONSUMED once a retained root run that
+ * planned a merge named the same branch+sha and was not released, so a merged
+ * branch's surviving fact has no standing authority and is ejected before it
+ * can run again. That test is keyed on run history rather than on a record's
+ * `integration.commit`, so it covers derived merges too — the case the old
+ * filter could not see. It holds for as long as the consuming run is retained.
  */
 export function derivedLaneBranches(bays: DeepReadonly<BaysState>): string[] {
-  return Object.keys(bays.submits)
-    .filter((branch) => {
-      const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
-      // One-lane-consumes, decided by LIVE ownership plus landed content:
-      // - a LIVE record owns its branch, so its standing fact is that
-      //   record's own pending signal, never a derived admission;
-      // - a fact pointing AT a terminal record's landing commit is the
-      //   PR2139 incident cell — content already on main, a stale
-      //   re-projection, not an approval of new work (the empty double-merge
-      //   minted exactly there);
-      // - any OTHER terminal-record branch composes: post-purge (the legacy
-      //   mint is retired) the derived lane IS the only re-entry for a merged
-      //   or withdrawn branch's next head (Q1), and excluding record history
-      //   wholesale would strand every resubmit.
-      if (records.some((pr) => isLiveChange(pr as Change))) return false
-      if (alreadyLandedSubmits(bays).some((row) => row.branch === branch)) return false
-      return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
-    })
-    .toSorted()
+  return Object.keys(bays.submits).toSorted()
 }
 
 /**
- * Standing facts whose sha IS a terminal record's landing commit for the same
- * branch: content the queue already merged, surviving as a re-projected ref —
- * the PR2139 double-merge's exact signature. These never compose; the compose
- * warns one row per branch (NO SILENT ERRORS) and the cure is retirement of
- * the stale fact, not a resubmit.
+ * Is this run member on the derived lane?
+ *
+ * S7 kept the name and dropped the argument. It used to need the bay state, to
+ * ask whether the member's id also named a stored record; with the store gone
+ * the only non-derived member left is an intent, so the question answers from
+ * the member itself. The concept still earns a name — "a run member on the
+ * derived lane" is how the queue talks about its own work — and inlining the
+ * field test at each call site would spend that vocabulary to save a function.
+ */
+export function isDerivedRunMember(member: DeepReadonly<ChangeSnapshot>): boolean {
+  return member.intent === undefined
+}
+
+/** Has this content already merged into the base? Supplied by the caller
+ * because this layer never reads git itself. */
+export type LandedContentOracle = (sha: string) => boolean
+
+/**
+ * Standing facts pointing at content the queue ALREADY MERGED — a submission
+ * surviving as a re-projected ref, which is the PR2139 double-merge's exact
+ * signature. These never compose; the compose warns one row per branch (NO
+ * SILENT ERRORS) and the cure is retiring the stale fact, never a resubmit.
+ *
+ * S7 re-sourced the question. It used to ask "is there a terminal RECORD for
+ * this branch whose integration commit equals the fact's sha" — a store lookup,
+ * so with the record store deleted it could never fire again, and deleting the
+ * guard with the store would have silently reopened the incident class. The
+ * question it was really asking is "has this content already merged", which git
+ * answers directly and for EVERY branch, including the ones that never had a
+ * record — which, post-S7, is all of them. So the guard covers strictly more
+ * than it did, and it takes its answer from the caller rather than reaching for
+ * git from a pure layer.
  */
 export function alreadyLandedSubmits(
   bays: DeepReadonly<BaysState>,
-): Readonly<{ branch: string; sha: string; record: string }>[] {
-  return Object.keys(bays.submits)
-    .flatMap((branch) => {
-      const submit = bays.submits[branch]
-      if (submit === undefined) return []
-      const landed = Object.values(bays.prs).find(
-        (pr) => pr.branch === branch && !isLiveChange(pr as Change) && pr.integration?.commit === submit.sha,
-      )
-      return landed === undefined ? [] : [{ branch, sha: submit.sha, record: landed.id }]
-    })
+  hasLanded: LandedContentOracle,
+): Readonly<{ branch: string; sha: string }>[] {
+  return Object.entries(bays.submits)
+    .flatMap(([branch, submit]) => (submit !== undefined && hasLanded(submit.sha) ? [{ branch, sha: submit.sha }] : []))
     .toSorted((left, right) => left.branch.localeCompare(right.branch))
 }
 
+/**
+ * Branches whose standing facts collide on one payload: two or more submit
+ * facts at the SAME sha. The record store used to catch this by looking the
+ * payload up among live records; with no store, nothing did, and the collision
+ * became invisible.
+ *
+ * Reported rather than refused, deliberately. Two branches at one sha is
+ * legitimate more often than not — a rename, or a re-push under a new name —
+ * and whichever merges second is caught by {@link alreadyLandedSubmits} on the
+ * next pass. What is NOT acceptable is saying nothing, so the compose warns
+ * with the branches named and lets the operator decide which one is the work.
+ */
+export function duplicatePayloadSubmits(
+  bays: DeepReadonly<BaysState>,
+): Readonly<{ sha: string; branches: readonly string[] }>[] {
+  const byPayload = new Map<string, string[]>()
+  for (const [branch, submit] of Object.entries(bays.submits)) {
+    if (submit === undefined) continue
+    const claimants = byPayload.get(submit.sha)
+    if (claimants === undefined) byPayload.set(submit.sha, [branch])
+    else claimants.push(branch)
+  }
+  return [...byPayload.entries()]
+    .flatMap(([sha, branches]) => (branches.length > 1 ? [{ sha, branches: branches.toSorted() }] : []))
+    .toSorted((left, right) => left.sha.localeCompare(right.sha))
+}
 
 /**
  * The door-side driver step, exported so tests (and, at the door, the compose)
@@ -387,22 +346,15 @@ export function deriveRunMemberArgs(
   const { mint, branch, enrichment } = options
   const bays = options.bays as BaysState
   const queues = options.queues as QueuesState
-  const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
   const submit = bays.submits[branch]
-  const verdict = arbitrateDerivedChange(records, submit)
-  if (verdict.lane !== "derived" || submit === undefined) {
-    if (submit === undefined) {
-      raiseFailure(
-        "refusal",
-        "derived-submit-vanished",
-        `yrd: branch '${branch}' has no live submit fact — nothing to derive an admission from`,
-      )
-    }
+  // The live fact is the whole arbitration since S7: with no records to lose
+  // to, a branch that has one admits and a branch that has none has nothing to
+  // derive from.
+  if (submit === undefined) {
     raiseFailure(
       "refusal",
-      "derived-record-lane",
-      `yrd: branch '${branch}' arbitrates to the ${verdict.lane} lane — only a derived-lane branch admits ` +
-        `a derived member (record '${verdict.record?.id ?? "?"}' answers for it)`,
+      "derived-submit-vanished",
+      `yrd: branch '${branch}' has no live submit fact — nothing to derive an admission from`,
     )
   }
   // Identity source order: a retained snapshot's change id (branch continuity
@@ -411,10 +363,7 @@ export function deriveRunMemberArgs(
   // settles BEFORE the number mint can commit: the one remaining refusal —
   // facts too non-canonical to mint a STABLE identity from — must not burn a
   // number per compose retry. The snapshot peek and both mint arms are pure.
-  const reusable = latestChangeSnapshot(
-    queues as QueuesState,
-    (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
-  )
+  const reusable = latestChangeSnapshot(queues as QueuesState, (snapshot) => snapshot.branch === branch)
   const settledChangeId = reusable?.changeId ?? enrichment?.changeId ?? mintSyntheticChangeId(branch, submit.sha)
   const identity = mintDerivedMemberIdentity({ mint, bays, queues, branch })
   const changeId = identity.changeId ?? settledChangeId

@@ -10,16 +10,9 @@
  * crash between commit and use skips a number but can never re-issue one. The
  * id first escapes into the `queue/run/started` snapshot.
  */
-import {
-  changeRevisionNumber,
-  isLiveChange,
-  mintChangeId,
-  type BaysState,
-  type Change,
-  type PrNumberMint,
-} from "@yrd/bay"
+import { mintChangeId, type BaysState, type PrNumberMint } from "@yrd/bay"
 import { compareNatural } from "@yrd/core"
-import { latestChangeSnapshot, maxChangeSnapshotRevision, newestTruthRecord, type QueuesState } from "./model.ts"
+import { latestChangeSnapshot, maxChangeSnapshotRevision, type QueuesState } from "./model.ts"
 
 export type DerivedMemberIdentity = Readonly<{
   id: string
@@ -38,25 +31,21 @@ export type DerivedMemberIdentity = Readonly<{
 /**
  * Mint — or reuse — the identity a derived member of `branch` runs under.
  *
- * - Reuse: the latest retained `ChangeSnapshot` for the branch whose id no
- *   record carries (a recordless id can only have been minted for a derived
- *   member) keeps its id and changeId across re-pushes; the revision continues
- *   as 1 + the highest revision any retained snapshot records for that id.
- *   With no snapshot retained, the branch's refusal-ledger row anchors the
- *   same reuse (a member refused at its FIRST admission has no snapshot —
- *   without the row every refused compose burned a fresh number).
- * - Fresh: `mintChangeId` commits max(high-water, frozen-store max) + 1 before
- *   the id escapes — a derived member's number is always strictly above both
- *   (A9). The revision seeds from the branch's newest terminal record when the
- *   branch had one, so a post-door revision of a pre-door branch continues its
- *   count instead of restarting at 1. When queue retention has pruned a
- *   long-idle branch's runs it re-mints — number skip, never recycle.
+ * - Reuse: the latest retained `ChangeSnapshot` for the branch keeps its id and
+ *   changeId across re-pushes; the revision continues as 1 + the highest
+ *   revision any retained snapshot records for that id. With no snapshot
+ *   retained, the branch's refusal-ledger row anchors the same reuse (a member
+ *   refused at its FIRST admission has no snapshot — without the row every
+ *   refused compose burned a fresh number).
+ * - Fresh: `mintChangeId` commits high-water + 1 before the id escapes, and the
+ *   revision starts at 1. When queue retention has pruned a long-idle branch's
+ *   runs it re-mints — number skip, never recycle.
  *
- * A LIVE record for the branch refuses loudly: that branch is the record
- * lane's (grandfathered intake), and admitting it as a derived member would be
- * the "both lanes for one push" A4 forbids. The door's receiver dispatch
- * decides the lane at write time; this guard keeps the invariant even for a
- * caller that skipped it.
+ * S7 (branch-is-change): there is no record store to consult, so every arm
+ * reads run history alone. The old live-record guard ("that branch is the
+ * record lane's") is gone with the lane it protected — one submit fact now has
+ * exactly one possible consumer, so the "both lanes for one push" collision A4
+ * forbade is not a representable state.
  */
 export function mintDerivedMemberIdentity(
   options: Readonly<{
@@ -67,18 +56,7 @@ export function mintDerivedMemberIdentity(
   }>,
 ): DerivedMemberIdentity {
   const { mint, bays, queues, branch } = options
-  const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
-  const live = records.find(isLiveChange)
-  if (live !== undefined) {
-    throw new Error(
-      `yrd: branch '${branch}' has live change '${live.id}' — the record lane owns it; ` +
-        `a derived member may only be admitted for a branch with no live record`,
-    )
-  }
-  const reusable = latestChangeSnapshot(
-    queues,
-    (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
-  )
+  const reusable = latestChangeSnapshot(queues, (snapshot) => snapshot.branch === branch)
   if (reusable !== undefined) {
     const number = changeIdNumber(reusable.id)
     if (number !== undefined && number > mint.highWater()) {
@@ -101,7 +79,7 @@ export function mintDerivedMemberIdentity(
   // the refused one keeps the refused revision, so the standing admission
   // Jobs still key; a re-push continues the count above everything retained.
   const refused = Object.values(queues.admissionRefusals)
-    .filter((row) => row.branch === branch && bays.prs[row.pr] === undefined)
+    .filter((row) => row.branch === branch)
     .toSorted((left, right) => compareNatural(left.pr, right.pr))
     .at(-1)
   if (refused !== undefined) {
@@ -119,9 +97,12 @@ export function mintDerivedMemberIdentity(
       minted: false,
     }
   }
-  const id = mintChangeId(mint, bays.prs)
-  const seed = newestTruthRecord(records)
-  return { id, revision: (seed === undefined ? 0 : changeRevisionNumber(seed)) + 1, minted: true }
+  // The durable high-water is now the mint's SOLE authority: its second
+  // argument existed to let a surviving record set out-vote a lost mint file,
+  // and there is no record set to out-vote with. `{}` is that absence stated,
+  // not a placeholder — @yrd/bay owns the parameter and should drop it.
+  const id = mintChangeId(mint, {})
+  return { id, revision: 1, minted: true }
 }
 
 function changeIdNumber(id: string): number | undefined {

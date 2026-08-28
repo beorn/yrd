@@ -16,7 +16,6 @@ import {
   changeBaseSha,
   changeAdmission,
   changeComposition,
-  changeProps,
   changeDeliveryState,
   changeHead,
   changeNeedsAuthor,
@@ -24,8 +23,8 @@ import {
   changeSourceReadyAt,
   resolveBase,
   changeNotFoundMessage,
-  resolveChange,
   reviewState,
+  type ChangeProps,
   type BaysState,
   type HasBays,
   type Change,
@@ -93,6 +92,7 @@ import {
   ChangeSnapshotSchema,
   arbitrateDerivedChange,
   latestChangeSnapshot,
+  maxChangeSnapshotRevision,
   resolveMemberById,
   type AddStepResult,
   type BatchConfig,
@@ -103,7 +103,6 @@ import {
   type QueueAuditEmission,
   type QueueAuditFinding,
   type QueueAuditFindingEmission,
-  type QueueAuditReviewCertification,
   type QueueAuthorityState,
   type QueueAuthorityToken,
   type QueueFailure,
@@ -135,9 +134,7 @@ import {
   deriveRunMemberArgs,
   derivedAuthorityLookup,
   derivedLaneBranches,
-  isDerivedRunMember,
   materializeDerivedRunMembers,
-  alreadyLandedSubmits,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
   type DerivedSubmitEnrichment,
@@ -360,17 +357,13 @@ function queueRunNoRunnablePRs(
 }
 
 /**
- * The approvals the queue can see but not run: every projected submit ref
- * whose branch has no PR record. A record for the branch — in ANY state —
- * wins, because the record is what candidates, runs and checks are keyed by,
- * and a withdrawn or integrated record already tells the reader more than the
- * bare ref can.
+ * The approvals the queue can see but not run: every projected submit ref no
+ * run has yet admitted. Since S7 there is no record lane to lose a branch to,
+ * so the only question left is whether the derived lane has picked it up.
  */
 function unrecordedSubmits(bays: DeepReadonly<BaysState>, queues: DeepReadonly<QueuesState>): UnrecordedSubmit[] {
-  const recorded = new Set(Object.values(bays.prs).map((pr) => pr.branch))
   return (
     Object.entries(bays.submits)
-      .filter(([branch]) => !recorded.has(branch))
       // S6 door: a branch the derived lane has ADMITTED at exactly this sha is a
       // MEMBER — its truth lives in run/status rows, not a refusal row. A
       // derived-lane branch nothing has admitted yet KEEPS the row: whether
@@ -382,13 +375,48 @@ function unrecordedSubmits(bays: DeepReadonly<BaysState>, queues: DeepReadonly<Q
         ([branch, submit]) =>
           latestChangeSnapshot(
             queues as QueuesState,
-            (snapshot) =>
-              snapshot.branch === branch && snapshot.headSha === submit.sha && bays.prs[snapshot.id] === undefined,
+            (snapshot) => snapshot.branch === branch && snapshot.headSha === submit.sha,
           ) === undefined,
       )
       .toSorted(([left], [right]) => left.localeCompare(right))
       .map(([branch, submit]) => unrecordedSubmit(branch, submit))
   )
+}
+
+/**
+ * Re-materialize a retained run member as the in-memory `Change` the admission
+ * and eligibility machinery consumes, against the LIVE submit fact.
+ *
+ * This is the S7 replacement for a record lookup by id: the snapshot supplies
+ * the identity a record used to hold, and the fact supplies the tree. It
+ * answers `undefined` exactly when the member no longer stands — the fact
+ * vanished, moved off the snapshot's sha, or the snapshot predates change-id
+ * capture — so callers keep the same "this member went stale under me" branch
+ * they had when a record could disappear.
+ */
+function materializeSnapshotMember(
+  bays: DeepReadonly<BaysState>,
+  member: DeepReadonly<ChangeSnapshot>,
+): Change | undefined {
+  if (member.intent !== undefined || member.changeId === undefined) return undefined
+  const derived: DerivedRunMember = {
+    branch: member.branch,
+    id: member.id,
+    changeId: member.changeId,
+    revision: member.revision,
+    headSha: member.headSha,
+    ...(member.props === undefined ? {} : { props: member.props as ChangeProps }),
+    ...(member.issue === undefined ? {} : { issue: member.issue }),
+    ...(member.name === undefined ? {} : { title: member.name }),
+  }
+  try {
+    return materializeDerivedRunMembers(bays, [derived])[0]
+  } catch (error) {
+    // A vanished or moved fact is the typed refusal this function reports as
+    // `undefined`; anything else is not a staleness answer and must propagate.
+    if (failureFact(error)?.kind === "refusal") return undefined
+    throw error
+  }
 }
 
 function unrecordedSubmit(branch: string, submit: DeepReadonly<BaysState["submits"][string]>): UnrecordedSubmit {
@@ -415,11 +443,15 @@ function queueRunNoSubmittedPRs(
   selected: readonly RuntimeStep[],
   excluded: ReadonlySet<string>,
 ): QueueRunNoSubmittedPRs {
+  // S7: the population the queue can see is the live submit facts, and a fact
+  // that stands IS a submission — the per-delivery-state breakdown this used to
+  // report was a property of records. Counting the facts keeps the refusal
+  // answering "how many approvals exist that still did not run", which is the
+  // question the field was added for; reporting `{}` would read as "nothing is
+  // waiting" when branches are in fact queued.
   const population: Record<string, number> = {}
-  for (const pr of Object.values(bays.prs)) {
-    const delivery = changeDeliveryState(pr)
-    population[delivery] = (population[delivery] ?? 0) + 1
-  }
+  const submitted = Object.keys(bays.submits).length
+  if (submitted > 0) population["submitted"] = submitted
   return QueueRunNoSubmittedPRsSchema.parse({
     kind: "no-submitted-prs",
     population,
@@ -871,7 +903,9 @@ function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string 
   const known = [
     "main",
     ...Object.values(state.bays.byId).map((bay) => bay.base),
-    ...Object.values(state.bays.prs).map((pr) => pr.base),
+    // The bases changes are targeting, read from the live submit facts since S7
+    // — the record bases this replaces named exactly the same thing.
+    ...Object.values(state.bays.submits).map((submit) => submit.base),
     ...Queues.values(state.queues).map((run) => run.base),
     ...Object.values(state.queues.pauses).map((pause) => pause.base),
   ]
@@ -920,12 +954,11 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   recover(options: RecoverQueueOptions): Promise<readonly Run[]>
   audit(options?: QueueAuditOptions): QueueAuditEmission
   eligibility(selector: string, snapshot?: DeepReadonly<QueueRuntimeState>): ChangeEligibility
-  eligibilities(snapshot?: DeepReadonly<QueueRuntimeState>): readonly ChangeEligibility[]
   /**
    * Branches approved in git (`refs/yrd/submit/*`, projected by the receiver)
    * that the DERIVED lane has not yet admitted at their current sha (S6) —
    * visible with the reason, retiring once a retained run snapshot serves the
-   * branch. The record wins when one exists for the branch.
+   * branch.
    */
   unrecordedSubmits(snapshot?: DeepReadonly<QueueRuntimeState>): readonly UnrecordedSubmit[]
   /** One branch, both sources (record + submit ref), one answer — including
@@ -948,7 +981,6 @@ export type Queue<Shape extends ChangeShape = ChangeShape> = Readonly<{
   reconcileMerge(args: z.infer<typeof ChangeIntegratedSchema>): Promise<void>
   /** Live PR ids in the exact admission order used by a selectorless drain. */
   admissionOrder(): readonly string[]
-  checks(selectors?: readonly string[]): readonly ChangeCheckRecord[]
   quiesceLegacyRoots(options: QuiesceLegacyRootsOptions): Promise<QuiesceLegacyRootsResult>
   /** Journal a preparation refusal that happened outside Queue's own admission
    * dispatcher, so the same durable wedge oracle sees every compose robot. */
@@ -1343,9 +1375,9 @@ function createQueue<Shape extends ChangeShape>(
    * host's configured reader, and the ChangeSnapshot the run journals is the
    * identity's only durable home. No record is minted, and the DERIVED lane
    * retires no submit fact: the fact IS the submission, and it stands until
-   * the receiver sweeps the ref (branch delete) or a re-push renews it. (The
-   * RECORD lane's merge does retire its own branch's fact —
-   * {@link submitFactRetirement}.)
+   * the receiver sweeps the ref (branch delete) or a re-push renews it. Since
+   * S7 nothing retires a fact on merge at all: the record lane's terminal was
+   * the only emitter of `branch/unsubmitted` reason "superseded".)
    *
    * Loud-edge policy, carried from the sweep it replaces: a typed refusal or
    * infrastructure fact attributable to ONE branch (vanished/moved fact,
@@ -1361,24 +1393,11 @@ function createQueue<Shape extends ChangeShape>(
    */
   const deriveRefOnlyMembers = async (skip: ReadonlySet<string>): Promise<DerivedRunMember[]> => {
     const snapshot = runtime()
-    // One lane consumes one push, decided by LIVE ownership plus landed
-    // content (see derivedLaneBranches). The PR2139 incident cell — a fact
-    // standing AT a terminal record's landing commit — is excluded there and
-    // must stay loud here: content already merged, the fact is a stale
-    // re-projection to retire, never new work.
-    for (const stale of alreadyLandedSubmits(snapshot.bays)) {
-      if (skip.has(stale.branch)) continue
-      log.warn?.(
-        "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
-          "the fact is stale — retire it (git push bay :refs/yrd/submit/" + stale.branch + ")",
-        {
-          action: "compose-derived-fact-already-landed",
-          branch: stale.branch,
-          sha: stale.sha,
-          record: stale.record,
-        },
-      )
-    }
+    // The already-landed warn that stood here read a fact's sha against a
+    // terminal RECORD's integration commit — the PR2139 incident cell — and can
+    // no longer be computed. The hazard it named is caught downstream by
+    // authority consumption instead (see `derivedLaneBranches`), which ejects a
+    // merged branch's surviving fact with a `compose-candidate-skip` warn.
     const branches = derivedLaneBranches(snapshot.bays).filter((branch) => !skip.has(branch))
     if (branches.length === 0) return []
     if (derivedMint === undefined) {
@@ -1438,43 +1457,16 @@ function createQueue<Shape extends ChangeShape>(
 
   const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
     const snapshot = runtime()
-    let record = Queues.resolve(snapshot.queues, selector)
-    let pr = resolveChange(snapshot.bays, selector)
-    if (record !== undefined && pr !== undefined) {
-      if (record.id === selector) pr = undefined
-      else if (pr.id === selector) record = undefined
-      else {
-        const candidates = [record.id, pr.id].toSorted((left, right) => left.localeCompare(right))
-        raiseFailure(
-          "refusal",
-          "selector-ambiguous",
-          `yrd: queue run or PR selector '${selector}' is ambiguous: ${candidates.join(", ")}`,
-        )
-      }
+    // S7: only a RUN selector reaches a waiting step. The change arm here
+    // resolved a selector against the record store and then searched the queue
+    // summary for a run holding that member; with no store there is nothing for
+    // a bare change selector to resolve to, and the ambiguity between a run id
+    // and a change id it used to arbitrate cannot arise.
+    const record = Queues.resolve(snapshot.queues, selector)
+    if (record === undefined) {
+      raiseFailure("refusal", "queue-selection-missing", `yrd: no queue run '${selector}'`)
     }
-    let selected = record === undefined ? undefined : materializeRun(record, snapshot.jobs)
-    if (selected === undefined) {
-      if (pr === undefined) {
-        raiseFailure("refusal", "queue-selection-missing", `yrd: no queue run or change '${selector}'`)
-      }
-      const summary = queueSummary(snapshot.queues, snapshot.jobs, pr.base)
-      selected = [...summary.waiting, ...summary.running]
-        .toReversed()
-        .find(
-          (candidate) =>
-            candidate.prs.some((member) => member.id === pr.id) &&
-            candidate.steps.some((step) =>
-              stepName === undefined ? step.job?.status === "waiting" : step.name === stepName,
-            ),
-        )
-      if (selected === undefined) {
-        raiseFailure(
-          "refusal",
-          "queue-step-not-waiting",
-          `yrd: change '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`,
-        )
-      }
-    }
+    const selected = materializeRun(record, snapshot.jobs)
 
     const pending = selected.steps.filter((step) => step.job?.status === "waiting")
     const step =
@@ -1775,35 +1767,17 @@ function createQueue<Shape extends ChangeShape>(
     return Promise.resolve(undefined)
   }
 
-  /** The authority count this verdict may record, announcing an unresolved one.
+  /** The authority count this verdict may record.
    *
-   * An unresolved tally is a durable data defect: some check request of this
-   * tree records no base and neither does the revision it names, so nothing can
-   * say whether it was granted against this verdict's base. That must not be
-   * quietly written as a number — a reader would spend it as "no authority was
-   * granted" and deny the carrier its next retry — so the fact is recorded
-   * verbatim AND said out loud here, which is the only place holding both the
-   * carrier and the logger (@yrd/core/rebuilt-carrier-denied-retry). */
+   * An unresolved tally used to be a durable data defect worth announcing: a
+   * RECORD's check request that named no base left nothing able to say whether
+   * it was granted against this verdict's base. Every member is derived since
+   * S7, and a derived member's synthetic request records no base BY DESIGN (its
+   * authority is the live submit fact, and no verdict is ever recorded for it),
+   * so "unresolved" is now the normal shape rather than a defect — the warn it
+   * used to raise would fire on every admission. */
   const verdictRequestCount = (pr: DeepReadonly<Change>, baseSha: string): number | "unresolved" => {
-    const tally = revisionCheckRequestTally(pr, baseSha)
-    // A derived member's synthetic request records no base BY DESIGN (its
-    // authority is the live submit fact) and no verdict is ever recorded for
-    // it, so an unresolved tally is not the durable data defect the record
-    // lane must announce.
-    if (tally.status === "unresolved" && runtime().bays.prs[pr.id] === undefined) {
-      return recordedRequestCount(tally)
-    }
-    if (tally.status === "unresolved") {
-      log.warn?.("queue checks before queueing could not resolve the base of every check request for this tree", {
-        action: "admission-request-count-unresolved",
-        pr: pr.id,
-        revision: changeRevisionNumber(pr),
-        headSha: changeHead(pr),
-        baseSha,
-        unreadableRequests: tally.unreadable,
-      })
-    }
-    return recordedRequestCount(tally)
+    return recordedRequestCount(revisionCheckRequestTally(pr, baseSha))
   }
 
   const refuseRevisionAdmission = async (
@@ -1975,16 +1949,13 @@ function createQueue<Shape extends ChangeShape>(
         // Machinery failure, not a check verdict: a lost/canceled Job (the
         // classes admissionFailureKind marks "infrastructure") or a THROWN
         // callback (the job layer's registered `runner-error`). The record lane
-        // absorbs these into a durable admission-refused record; a DERIVED
-        // member has no record to carry that verdict (recordRevisionAdmission
-        // deliberately skips it) and no run exists yet to attribute a ledger
-        // row to, so the same absorb would leave the failure recorded NOWHERE
-        // while the compose resolves clean. Propagate instead — the door's own
-        // policy for infrastructure: it needs a human, not a retry loop.
-        if (
-          runtime().bays.prs[pr.id] === undefined &&
-          (job.conclusion !== "failure" || result.code === "runner-error")
-        ) {
+        // used to absorb these into a durable admission-refused record; a
+        // derived member — which is every member since S7 — has none to carry
+        // the verdict, and no run exists yet to attribute a ledger row to, so
+        // the same absorb would leave the failure recorded NOWHERE while the
+        // compose resolves clean. Propagate instead — the door's own policy for
+        // infrastructure: it needs a human, not a retry loop.
+        if (job.conclusion !== "failure" || result.code === "runner-error") {
           raiseFailure(
             "infrastructure",
             result.code,
@@ -2032,12 +2003,13 @@ function createQueue<Shape extends ChangeShape>(
   }
 
   const waitingRevisionAdmission = (selector: string, requestedStep?: string): WaitingAdmissionStep | undefined => {
-    const pr = resolveChange(runtime().bays, selector)
-    if (pr === undefined) return undefined
-    const request = checkRequest(pr)
-    const baseSha = request?.baseSha ?? changeBaseSha(pr)
-    if (baseSha === undefined) return undefined
-    const snapshot = pinCandidateBaseSha([Queues.snapshot(pr)], baseSha)[0]
+    // S7: the member and its pinned base come from the retained run snapshot —
+    // the same values the record arm read off a `Change` and re-derived with
+    // `Queues.snapshot`, now read from the snapshot the run already journaled.
+    const member = resolveMemberById(runtime().queues, selector)?.snapshot
+    if (member?.baseSha === undefined) return undefined
+    const baseSha = member.baseSha
+    const snapshot = pinCandidateBaseSha([member], baseSha)[0]
     if (snapshot === undefined) return undefined
     for (const [index, step] of admissionSteps(steps).entries()) {
       if (requestedStep !== undefined && step.name !== requestedStep) continue
@@ -2045,18 +2017,20 @@ function createQueue<Shape extends ChangeShape>(
         jobs.getByKey(admissionJobKey(snapshot, baseSha, index, step.revision)) ??
         jobs.getByKey(admissionJobKey(snapshot, baseSha, index))
       if (job?.status !== "waiting") continue
-      return { pr: pr.id, revision: changeRevisionNumber(pr), step: { name: step.name, job } }
+      return { pr: member.id, revision: member.revision, step: { name: step.name, job } }
     }
     return undefined
   }
 
   const cancelAdmissionJobsForRevision = async (args: CancelAdmissionJobsArgs): Promise<readonly string[]> => {
-    const pr = resolveChange(runtime().bays, args.pr)
-    if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, args.pr))
-    if (!pr.revs.some((revision) => revision.n === args.revision)) {
-      raiseFailure("refusal", "pr-revision-not-found", `yrd: change '${pr.id}' has no revision ${args.revision}`)
+    // S7: the member and its revisions come from retained run snapshots. A
+    // selector no retained run names cannot have admission Jobs to cancel.
+    const member = resolveMemberById(runtime().queues, args.pr)?.snapshot
+    if (member === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, args.pr))
+    if (maxChangeSnapshotRevision(runtime().queues, member.id) < args.revision) {
+      raiseFailure("refusal", "pr-revision-not-found", `yrd: change '${member.id}' has no revision ${args.revision}`)
     }
-    const prefix = admissionRevisionKeyPrefix(pr.id, args.revision)
+    const prefix = admissionRevisionKeyPrefix(member.id, args.revision)
     const selected = Object.values(runtime().jobs.byId)
       .filter((job) => job.status !== "completed" && job.key?.startsWith(prefix) === true)
       .toSorted((left, right) => compareNatural(left.id, right.id))
@@ -2085,23 +2059,16 @@ function createQueue<Shape extends ChangeShape>(
       if (prId === undefined || revisionText === undefined) {
         throw new Error(`yrd: malformed revision admission Job key '${job.key}'`)
       }
-      const pr = snapshot.bays.prs[prId]
-      if (pr !== undefined) {
-        if (changeRevisionNumber(pr) !== Number(revisionText)) return true
-        const delivery = changeDeliveryState(pr)
-        return delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready"
-      }
-      // DERIVED (recordless) member — store membership is NOT a liveness
-      // signal: S7 empties the store, and keying "stale" on a `bays.prs` miss
-      // would cancel every live derived admission the moment it does. Judge by
-      // the derived referent instead: the Job's own input snapshot pinned the
-      // exact branch+sha this admission checks; a retained run snapshot or the
-      // durable refusal-ledger row stands in for legacy jobs whose input does
-      // not parse. Stale ⇔ the live submit fact is gone (the branch was
-      // unsubmitted) or it moved off the pinned sha (a re-push superseded this
-      // tree) — the fact-CAS analogue of the record arm's revision key match.
-      // An unresolvable identity is never stale: absence must not cancel work
-      // this sweep cannot judge.
+      // Judged by the DERIVED referent, the only one left: the Job's own input
+      // snapshot pinned the exact branch+sha this admission checks; a retained
+      // run snapshot or the durable refusal-ledger row stands in for legacy
+      // jobs whose input does not parse. Stale ⇔ the live submit fact is gone
+      // (the branch was unsubmitted) or it moved off the pinned sha (a re-push
+      // superseded this tree) — the fact-CAS analogue of the revision-key match
+      // the record arm used to make. An unresolvable identity is never stale:
+      // absence must not cancel work this sweep cannot judge. (The record arm
+      // is deleted with the store: keying "stale" on a `bays.prs` miss would
+      // have cancelled every live derived admission the moment it emptied.)
       const input = AdmissionJobIdentitySchema.safeParse(job.input)
       const pinned = input.success ? input.data.prs[0] : undefined
       const retained =
@@ -2167,7 +2134,7 @@ function createQueue<Shape extends ChangeShape>(
       // that resolves to nothing is dropped: that is the `pr-not-found`
       // refusal itself, already logged loud, and a streak against a phantom
       // id would be an invented wedge.
-      const pr = resolveMemberById(snapshot.bays, snapshot.queues, selector)
+      const pr = resolveMemberById(snapshot.queues, selector)
       if (pr === undefined && identity === undefined) continue
       try {
         await appendAdmissionRefusal({
@@ -2226,7 +2193,7 @@ function createQueue<Shape extends ChangeShape>(
     const selectorless = selection !== "explicit"
     for (const selector of selectors) {
       try {
-        const pr = resolveChange(runtime().bays, selector) ?? derived.find((member) => member.id === selector)
+        const pr = derived.find((member) => member.id === selector)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(runtime().bays, selector))
         const snapshot = runtime()
         const delivery = changeDeliveryState(pr)
@@ -2285,14 +2252,11 @@ function createQueue<Shape extends ChangeShape>(
   ): Promise<string[]> => {
     const targets = new Set(selectors)
     const admitted = new Set<string>()
-    for (const selector of targets) {
-      const pr = resolveChange(runtime().bays, selector)
-      if (pr === undefined) continue
-      const delivery = changeDeliveryState(pr)
-      if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-        await cancelRevisionAdmissionJobs(pr, `PR became ${delivery}`)
-      }
-    }
+    // The pre-drain sweep that cancelled admission Jobs for a selector whose
+    // RECORD had reached a terminal delivery state is deleted with the store: a
+    // member has no standing delivery state to have moved past. Its live
+    // equivalent is `staleRevisionAdmissionJobs`, which judges the same
+    // staleness by the submit fact (gone or moved off the pinned sha).
     // PRs this drain already refused. A habitant drain dispatches ONE queued PR
     // per turn (see below), so without this set a refused head is re-picked as
     // the head every turn and the drain ends having admitted nothing — the
@@ -2355,7 +2319,7 @@ function createQueue<Shape extends ChangeShape>(
       if (dispatched.admitted.length > 0 && dispatched.refused.length === 0) continue
 
       for (const selector of targets) {
-        const pr = resolveChange(snapshot.bays, selector) ?? derived.find((member) => member.id === selector)
+        const pr = derived.find((member) => member.id === selector)
         if (pr === undefined) continue
         const runId = checkEligibility(snapshot, pr, steps).run
         if (runId !== undefined) {
@@ -2371,7 +2335,7 @@ function createQueue<Shape extends ChangeShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
-    admissionOrder: () => admissionOrderChanges(runtime().bays).map((pr) => pr.id),
+    admissionOrder: () => admissionOrderChanges(runtime()).map((pr) => pr.id),
     async reconcileMerge(args) {
       // S7 branch-is-change (@i/10 22991): the record index this command
       // reconciled repository-proven merges INTO is being deleted. Repository
@@ -2392,16 +2356,11 @@ function createQueue<Shape extends ChangeShape>(
         {
           lifecycle: "admit",
           attributes: { selectors: args.prs },
-          outcome: (prs) =>
-            prs.some((selector) => {
-              const pr = resolveChange(runtime().bays, selector)
-              if (pr === undefined) {
-                throw new Error(`yrd: accepted change '${selector}' disappeared from bay state`)
-              }
-              return changeAdmission(pr) === undefined
-            })
-              ? "progress"
-              : "succeeded",
+          // The `progress` outcome asked whether an accepted change still
+          // carried no STORED admission verdict. Nothing has written one since
+          // `recordRevisionAdmission` became a no-op, and there is no record to
+          // read it off anyway, so the probe can only answer "succeeded" — say
+          // nothing rather than report a verdict that is no longer computed.
           resultAttributes: (prs) => ({ prs }),
         },
         async () => {
@@ -2414,8 +2373,11 @@ function createQueue<Shape extends ChangeShape>(
           const selected =
             requestedSelectors === undefined
               ? admissionQueue(snapshot, steps)
-              : requestedSelectors.map((selector) => {
-                  const pr = resolveChange(snapshot.bays, selector)
+              : // S7: the admission queue is the whole population a selector can
+                // name, so an explicit selection filters it rather than
+                // resolving each id against a store.
+                requestedSelectors.map((selector) => {
+                  const pr = admissionQueue(snapshot, steps).find((member) => member.id === selector)
                   if (pr === undefined) {
                     raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
                   }
@@ -2436,10 +2398,14 @@ function createQueue<Shape extends ChangeShape>(
     async pause(args) {
       const snapshot = runtime()
       const base = queueBase(snapshot, args.base)
+      // S7: a pause allow-list member is named by its retained run snapshot —
+      // the same seam `pauseMemberStatus` reads it back through.
       const allowedPRs = args.allowedPRs.map((selector) => {
-        const pr = resolveChange(snapshot.bays, selector)
-        if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
-        return pr.id
+        const member = resolveMemberById(snapshot.queues, selector)
+        if (member === undefined) {
+          raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
+        }
+        return member.id
       })
       await actions.pause({ ...args, base, allowedPRs })
       const pause = state().pauses[base]
@@ -2492,12 +2458,16 @@ function createQueue<Shape extends ChangeShape>(
         token: completion.token,
         result: completion.result,
       })
-      const pr = resolveChange(runtime().bays, waiting.pr)
-      if (pr === undefined || changeRevisionNumber(pr) !== waiting.revision) {
+      // S7: re-materialize the member from its retained snapshot against the
+      // LIVE submit fact. That re-materialization is the staleness check — it
+      // refuses when the fact vanished or moved off the snapshot's sha, which is
+      // what "changed while a required check was waiting" now means.
+      const member = resolveMemberById(runtime().queues, waiting.pr)?.snapshot
+      const pr = member === undefined ? undefined : materializeSnapshotMember(runtime().bays, member)
+      if (pr === undefined || member === undefined || member.revision !== waiting.revision) {
         raiseFailure("refusal", "stale-pr", `yrd: change '${waiting.pr}' changed while a required check was waiting`)
       }
-      const request = checkRequest(pr)
-      const baseSha = request?.baseSha ?? changeBaseSha(pr)
+      const baseSha = member.baseSha
       if (baseSha === undefined) {
         raiseFailure(
           "infrastructure",
@@ -2670,20 +2640,11 @@ function createQueue<Shape extends ChangeShape>(
             : []
           for (const gap of authorityGaps) {
             try {
-              if (gap.reason === "consumed" && snapshot.bays.prs[gap.pr] !== undefined) {
-                // Record lane only: the eject writes a durable pr/needs-author
-                // on the record. A derived member has no record to write it on
-                // (PURE-GIT ruling) — its consumed authority is already legible
-                // from run history, and the warn + refusal ledger below is its
-                // whole trace.
-                const ejected = await actions.run({
-                  prs: [gap.pr],
-                  ...(args.steps === undefined ? {} : { steps: args.steps }),
-                })
-                if (!ejected.events.some((applied) => applied.name === "pr/needs-author")) {
-                  throw new Error(`yrd: consumed authority for change '${gap.pr}' produced no needs-author result`)
-                }
-              }
+              // The record-lane eject that used to run here wrote a durable
+              // pr/needs-author onto the record. No member has one since S7 (the
+              // PURE-GIT ruling) — a consumed authority is already legible from
+              // run history, and the warn plus the refusal-ledger row below are
+              // its whole trace.
               const gapReason =
                 gap.reason === "consumed"
                   ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
@@ -2695,17 +2656,16 @@ function createQueue<Shape extends ChangeShape>(
                 reason: gapReason,
                 remedy: "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'",
               })
-              // A `consumed` gap ejects with a durable `pr/needs-author` result,
-              // so it leaves a trace and stops repeating. A `missing` gap leaves
-              // nothing and re-skips the same PR every cycle — ledger that one.
-              // A DERIVED consumed gap has no record for the eject to write on,
-              // so it takes the same ledger row (its cure is a re-push).
-              if (gap.reason === "missing" || snapshot.bays.prs[gap.pr] === undefined) {
-                await noteCandidateRefusal([derivedEntry(gap.pr) ?? gap.pr], {
-                  code: `queue-${gap.kind}-authority-${gap.reason}`,
-                  reason: gapReason,
-                })
-              }
+              // Every gap takes a ledger row since S7. A gap used to be able to
+              // leave its trace on a record instead — `consumed` ejected with a
+              // durable `pr/needs-author` — and only `missing` needed the
+              // ledger. With no record to write on, both would otherwise
+              // re-skip the same member every cycle leaving nothing behind; the
+              // cure for either is a re-push.
+              await noteCandidateRefusal([derivedEntry(gap.pr) ?? gap.pr], {
+                code: `queue-${gap.kind}-authority-${gap.reason}`,
+                reason: gapReason,
+              })
             } catch (error) {
               // 22306 class: a single PR's authority/eject refusal must not abort the
               // selectorless drain (same boundary as the per-candidate wrap below).
@@ -2779,8 +2739,7 @@ function createQueue<Shape extends ChangeShape>(
             // than dropping every pushed carrier the drain took.
             const enteringDerived = materializedDerived(runtime().bays)
             const entering = refreshable.flatMap((pr) => {
-              const current =
-                resolveChange(runtime().bays, pr.id) ?? enteringDerived.find((member) => member.id === pr.id)
+              const current = enteringDerived.find((member) => member.id === pr.id)
               return current === undefined ? [] : [current]
             })
             await drainAdmissions(
@@ -2813,7 +2772,7 @@ function createQueue<Shape extends ChangeShape>(
           snapshot = runtime()
           const settledDerived = materializedDerived(snapshot.bays)
           const currentChecked = checked.flatMap((pr) => {
-            const current = resolveChange(snapshot.bays, pr.id) ?? settledDerived.find((member) => member.id === pr.id)
+            const current = settledDerived.find((member) => member.id === pr.id)
             return current === undefined ? [] : [current]
           })
           const unsettled = currentChecked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
@@ -3327,14 +3286,14 @@ function createQueue<Shape extends ChangeShape>(
       // cold `queue ls` — resolveChange plus checkEligibility together dominate it.
       return stage("eligibility", () => {
         const snapshot = projected ?? runtime()
-        const pr = resolveChange(snapshot.bays, selector)
+        // The same identity the published order uses (see
+        // `standingLaneMembers`), so `checks.position` and `admissionOrder()`
+        // report one number rather than two.
+        const member = resolveMemberById(snapshot.queues, selector)?.snapshot
+        const pr = member === undefined ? undefined : materializeSnapshotMember(snapshot.bays, member)
         if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
         return ChangeEligibility(snapshot, pr, steps, needsPersonOwner)
       })
-    },
-    eligibilities(projected) {
-      const snapshot = projected ?? runtime()
-      return Object.values(snapshot.bays.prs).map((pr) => ChangeEligibility(snapshot, pr, steps, needsPersonOwner))
     },
     unrecordedSubmits(projected) {
       const snapshot = projected ?? runtime()
@@ -3342,25 +3301,16 @@ function createQueue<Shape extends ChangeShape>(
     },
     deriveChange(branch, projected) {
       const snapshot = projected ?? runtime()
-      const records = Object.values(snapshot.bays.prs).filter((pr) => pr.branch === branch)
-      // Legacy first-match, deliberately NOT the arbitration's newest-truth
-      // pick: every pre-S6 consumer keeps its exact answer while writes still
-      // flow. The door cuts consumers over to `authority`, not the reverse.
-      const record = records[0]
       const submit = snapshot.bays.submits[branch]
       return {
         branch,
-        ...(record === undefined
-          ? {}
-          : { record, eligibility: ChangeEligibility(snapshot, record, steps, needsPersonOwner) }),
-        ...(submit === undefined ? {} : { submit }),
-        ...(record !== undefined || submit === undefined ? {} : { unrecorded: unrecordedSubmit(branch, submit) }),
-        authority: arbitrateDerivedChange(records, submit),
+        ...(submit === undefined ? {} : { submit, unrecorded: unrecordedSubmit(branch, submit) }),
+        authority: arbitrateDerivedChange([], submit),
       }
     },
     resolveMember(selector, projected) {
       const snapshot = projected ?? runtime()
-      return resolveMemberById(snapshot.bays, snapshot.queues, selector)
+      return resolveMemberById(snapshot.queues, selector)
     },
     freshnessCandidateBatches() {
       const snapshot = runtime()
@@ -3368,20 +3318,6 @@ function createQueue<Shape extends ChangeShape>(
         explicitStepAuthority: true,
       }).filter((pr) => checksRequested(pr))
       return partitionCandidates(candidates, snapshot.queues.batchSize).map((candidate) => candidate.map((pr) => pr.id))
-    },
-    checks(selectors) {
-      const snapshot = runtime()
-      const prs =
-        selectors === undefined
-          ? Object.values(snapshot.bays.prs)
-          : selectors.map((selector) => {
-              const pr = resolveChange(snapshot.bays, selector)
-              if (pr === undefined) {
-                raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(snapshot.bays, selector))
-              }
-              return pr
-            })
-      return prs.flatMap((pr) => projectChangeChecks(snapshot, pr, steps))
     },
     async quiesceLegacyRoots(options) {
       await actions.refresh()
@@ -3608,18 +3544,9 @@ function queueFailedEvent(
     run: run.id,
     error,
     ...(job === undefined ? {} : { job: { id: job.id, attempt: job.attempt } }),
-    prs: run.prs.map((pr) => {
-      const current = state.bays.prs[pr.id]
-      const submitter = current?.revs.find(
-        (revision) => revision.n === pr.revision && revision.head === pr.headSha,
-      )?.submitter
-      return {
-        pr: pr.id,
-        revision: pr.revision,
-        headSha: pr.headSha,
-        ...(submitter === undefined ? {} : { submitter }),
-      }
-    }),
+    // The `submitter` a record revision carried is gone with the store; a run
+    // member records no author, so the field is simply absent since S7.
+    prs: run.prs.map((pr) => ({ pr: pr.id, revision: pr.revision, headSha: pr.headSha })),
   })
 }
 
@@ -3695,21 +3622,13 @@ function createQueueCommands(
     title: "Run one revision required check",
     params: AdmissionStepArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionStepArgs) {
-      const pr = state.bays.prs[args.pr.id]
-      // Freshness referent per lane (same rule as pinnedChangeError): a record
-      // member answers from its record; a DERIVED member (S6, recordless by
-      // design) answers from its live submit fact at exactly the pinned sha.
-      const derivedFresh =
-        pr === undefined &&
+      // Freshness referent (same rule as pinnedChangeError): the member answers
+      // from its live submit fact at exactly the pinned sha and base. The record
+      // arm this used to choose between is gone with the store.
+      const fresh =
         state.bays.submits[args.pr.branch]?.sha === args.pr.headSha &&
         baseIdentity(state.bays.submits[args.pr.branch]?.base ?? "") === baseIdentity(args.pr.base)
-      if (
-        !derivedFresh &&
-        (pr === undefined ||
-          changeRevisionNumber(pr) !== args.pr.revision ||
-          changeHead(pr) !== args.pr.headSha ||
-          baseIdentity(pr.base) !== baseIdentity(args.pr.base))
-      ) {
+      if (!fresh) {
         raiseFailure(
           "refusal",
           "stale-pr",
@@ -3903,8 +3822,10 @@ function createQueueCommands(
         derivedAuthority,
       )[0]
       if (authorityGap !== undefined) {
-        const needsAuthor = queueAuthorityNeedsAuthorEvent(state, authorityGap, remaining)
-        if (needsAuthor !== undefined) return { events: [needsAuthor] }
+        // The consumed-authority arm used to answer with a durable
+        // `pr/needs-author` written onto the gap's RECORD. With no record to
+        // carry it, every gap — consumed or missing — refuses here instead, and
+        // the compose's refusal ledger is what makes it durable.
         requireQueueAuthority(
           state.queues.authority,
           candidateSnapshots,
@@ -3990,7 +3911,7 @@ function createQueueCommands(
       // still exist — until the store-deletion step — their terminals emit
       // here byte-identically to that loop, same fields, same store dedupe,
       // same submit-fact retirement, so a run straddling the cutover cannot
-      // double-emit ({@link recordMemberTerminalEvents}). The whole settled
+      // double-emit. The whole settled
       // TREE emits here, per PASSED run: a bisected root fails while its
       // isolated children merge their halves, and those merges' terminals
       // used to ride the children's own advances — with the advance loop
@@ -4006,9 +3927,6 @@ function createQueueCommands(
         return settling.prs
           .filter((member) => member.intent === undefined)
           .flatMap((member): EventDraft[] => {
-            if (state.bays.prs[member.id] !== undefined) {
-              return recordMemberTerminalEvents(state.bays, member, integration, settling.id)
-            }
             const alreadyMerged = integration.alreadyLanded
             if (alreadyMerged !== undefined) {
               return [
@@ -4222,24 +4140,18 @@ function createQueueCommands(
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionRefusedArgs) {
       // Fail loud on an unattributable refusal: the ledger's whole job is to name
       // the wedged PR, so a phantom id must never become a phantom finding. A
-      // DERIVED member (S6) is attributable through the id-seam — its identity
-      // lives in retained run snapshots, never the record store — or, refused
-      // before ANY run retained a snapshot, through the caller-carried
-      // branch+tree identity (wave defect 1: without it the first-admission
-      // refusal journaled nothing and the ledger stayed empty).
-      const member = resolveMemberById(state.bays, state.queues, args.pr)
+      // A member is attributable through the id-seam — its identity lives in
+      // retained run snapshots — or, refused before ANY run retained a
+      // snapshot, through the caller-carried branch+tree identity (wave defect
+      // 1: without it the first-admission refusal journaled nothing and the
+      // ledger stayed empty).
+      const member = resolveMemberById(state.queues, args.pr)
       const identity =
         member === undefined
           ? args.branch !== undefined && args.revision !== undefined && args.headSha !== undefined
             ? { branch: args.branch, n: args.revision, head: args.headSha }
             : raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
-          : member.source === "record"
-            ? {
-                branch: member.record.branch,
-                n: currentChangeRev(member.record).n,
-                head: currentChangeRev(member.record).head,
-              }
-            : { branch: member.snapshot.branch, n: member.snapshot.revision, head: member.snapshot.headSha }
+          : { branch: member.snapshot.branch, n: member.snapshot.revision, head: member.snapshot.headSha }
       const refused = event("queue/admission/refused", {
         pr: args.pr,
         code: args.code,
@@ -4270,17 +4182,26 @@ function createQueueCommands(
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
     apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
-      const pr = state.bays.prs[args.pr]
-      if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
-      const current = currentChangeRev(pr)
-      if (current.n !== args.revision || current.head !== args.headSha) {
+      // S7 freshness: the ledger row names the branch, and the live submit fact
+      // is that branch's current tree — the fact-CAS analogue of the record
+      // revision match this replaces. A settlement aimed at a tree the fact has
+      // moved off is stale exactly as before; a row whose branch cannot be
+      // resolved at all cannot be CAS'd, and settling it blind would record a
+      // disposition against a tree nothing can name.
+      const row = state.queues.admissionRefusals[args.pr]
+      const branch =
+        row?.branch ?? latestChangeSnapshot(state.queues as QueuesState, (member) => member.id === args.pr)?.branch
+      if (branch === undefined) {
+        raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
+      }
+      if (state.bays.submits[branch]?.sha !== args.headSha) {
         raiseFailure(
           "refusal",
           "stale-pr",
           `yrd: this settlement targets stale revision ${args.revision} (${args.headSha}) of change '${args.pr}'`,
         )
       }
-      const refusal = state.queues.admissionRefusals[args.pr]
+      const refusal = row
       if (refusal === undefined) {
         raiseFailure(
           "refusal",
@@ -4337,41 +4258,6 @@ type QueueAuthorityGap = Readonly<{
   reason: "missing" | "consumed"
   consumedBy?: RunId
 }>
-
-function queueAuthorityNeedsAuthorEvent(
-  state: DeepReadonly<RuntimeState>,
-  gap: QueueAuthorityGap,
-  steps: readonly DeepReadonly<InstalledStep>[],
-): EventDraft | undefined {
-  if (gap.reason !== "consumed") return undefined
-  if (gap.consumedBy === undefined) {
-    throw new Error(`yrd: consumed ${gap.kind} authority for change '${gap.pr}' has no consuming queue run`)
-  }
-  const pr = state.bays.prs[gap.pr]
-  if (pr === undefined || (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready")) {
-    return undefined
-  }
-  const revision = pr.revs.find((candidate) => candidate.n === gap.revision && candidate.head === gap.headSha)
-  if (revision === undefined) return undefined
-  const code = `queue-${gap.kind}-authority-consumed`
-  const remedy = "tracked changes re-merge implicitly when the branch moves; fallback: 'yrd pr submit <branch>'"
-  const message =
-    `yrd: change '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ` +
-    `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'\nresolve: ${remedy}`
-  const step = steps.find((candidate) => candidate.kind === "merge")?.name ?? steps[0]?.name ?? "queue"
-  return event("pr/needs-author", {
-    pr: gap.pr,
-    revision: gap.revision,
-    headSha: gap.headSha,
-    run: gap.consumedBy,
-    ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-    ...(changeProps(pr) === undefined ? {} : { props: changeProps(pr) }),
-    ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
-    step,
-    detail: message,
-    receipt: { code, message },
-  })
-}
 
 function queueAuthorityReleaseReason(
   error: DeepReadonly<JobError> | undefined,
@@ -4733,18 +4619,13 @@ export function compactQueueProjection(
   // so the ledger cannot grow without bound (or outlive the wedge it names).
   const admissionRefusals = Object.fromEntries(
     Object.entries(queues.admissionRefusals).filter(([id, row]) => {
-      const pr = bays.prs[id]
-      if (pr !== undefined) {
-        const delivery = changeDeliveryState(pr)
-        return delivery === "pushed" || delivery === "submitted"
-      }
-      // DERIVED (recordless) member — a `bays.prs` miss is not evidence the
-      // wedge ended (S7 empties the store, and this keep-filter would then
-      // drop EVERY derived streak at its first compaction). Still trying to
-      // get in ⇔ a live submit fact stands for the member's branch, read from
-      // the row's own recorded branch or, for legacy rows, the member's
-      // retained run snapshot. A row neither can resolve names nothing a
-      // future cycle can wedge on again — drop it.
+      // Still trying to get in ⇔ a live submit fact stands for the member's
+      // branch, read from the row's own recorded branch or, for legacy rows,
+      // the member's retained run snapshot. A row neither can resolve names
+      // nothing a future cycle can wedge on again — drop it. (The record arm
+      // this replaces keyed the same question on delivery state; keeping it
+      // would have dropped EVERY streak at the first compaction after the
+      // store emptied.)
       const branch =
         row.branch ?? latestChangeSnapshot(queues as QueuesState, (candidate) => candidate.id === id)?.branch
       return branch !== undefined && bays.submits[branch] !== undefined
@@ -4766,24 +4647,14 @@ function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonl
     }
     const snapshot = record.prs[0]
     if (snapshot === undefined) continue
-    const pr = bays.prs[snapshot.id]
-    if (pr === undefined) {
-      // DERIVED (recordless) member — the failed-admission decision still
-      // governs admission while the live submit fact stands at EXACTLY the
-      // refused sha: the fact-CAS analogue of the record arm's lookup-key
-      // freshness match below. A moved or retired fact superseded the refused
-      // tree, and the root ages out like any other terminal (S7: keying this
-      // on store membership silently evicted every derived member's decision
-      // evidence while it was still wedged).
-      if (snapshot.intent !== undefined) continue
-      const submit = bays.submits[snapshot.branch]
-      if (submit === undefined || submit.sha !== snapshot.headSha) continue
-      roots.add(queueRetentionRoot(queues, record.id))
-      continue
-    }
-    const delivery = changeDeliveryState(pr)
-    if ((delivery !== "pushed" && delivery !== "submitted") || !checksRequested(pr)) continue
-    if (queueLookupKey(Queues.snapshot(pr), record.steps) !== queueLookupKey(snapshot, record.steps)) continue
+    // The failed-admission decision still governs admission while the live
+    // submit fact stands at EXACTLY the refused sha — the fact-CAS analogue of
+    // the record arm's lookup-key freshness match. A moved or retired fact
+    // superseded the refused tree, and the root ages out like any other
+    // terminal.
+    if (snapshot.intent !== undefined) continue
+    const submit = bays.submits[snapshot.branch]
+    if (submit === undefined || submit.sha !== snapshot.headSha) continue
     roots.add(queueRetentionRoot(queues, record.id))
   }
   return roots
@@ -5464,14 +5335,6 @@ function requiredCandidateBaseSha(prs: readonly DeepReadonly<ChangeSnapshot>[]):
   return baseSha
 }
 
-function candidateArtifactKey(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): string {
-  return JSON.stringify([
-    prs[0] === undefined ? "" : queueIdentity(prs[0]),
-    baseSha,
-    ...prs.map((pr) => [pr.headSha, pr.composition]),
-  ])
-}
-
 function candidateResultKey(prs: readonly DeepReadonly<ChangeSnapshot>[], baseSha: string): string {
   return JSON.stringify([
     prs[0] === undefined ? "" : queueIdentity(prs[0]),
@@ -5569,7 +5432,13 @@ function legacyRootTargetForRecord(
 ): LegacyRootTarget | undefined {
   if (record.parent !== undefined || record.settlement !== undefined) return undefined
   const run = materializeRun(record, state.jobs)
-  if (legacyRunHasTerminalRevisions(state, run) || !needsSettlement(state, run)) return undefined
+  // A v1 failed Run settled by writing PR revision TERMINALS used to be excluded
+  // here: those terminals were replay evidence that the old writer had already
+  // quiesced the root, and treating them as live would reclassify completed
+  // history. The evidence lived on record revisions and is unreadable since S7,
+  // so such a root now presents as needing settlement — quiescing it again is
+  // idempotent, where the old misclassification was not.
+  if (!needsSettlement(state, run)) return undefined
   const jobs = run.steps
     .map((step) => step.job)
     .filter((job): job is DeepReadonly<Job> => job !== undefined && !Job.terminal(job))
@@ -5578,22 +5447,6 @@ function legacyRootTargetForRecord(
     jobs,
     leased: (now) => jobs.some((job) => job.status === "in_progress" && Date.parse(job.leaseExpiresAt) > now),
   }
-}
-
-/** A v1 failed Run settled by writing PR revision terminals instead of the
- * v3 queue/run/failed + explicit-settlement facts. Those terminals are replay
- * evidence that the old writer quiesced the root; applying v3's fresh failure
- * advancement rule to it would falsely classify completed history as live. */
-function legacyRunHasTerminalRevisions(state: DeepReadonly<RuntimeState>, run: DeepReadonly<Run>): boolean {
-  return (
-    Queues.terminal(run) &&
-    run.prs.every((snapshot) =>
-      state.bays.prs[snapshot.id]?.revs.some(
-        (revision) =>
-          revision.n === snapshot.revision && revision.head === snapshot.headSha && revision.terminal !== undefined,
-      ),
-    )
-  )
 }
 
 function requestStep(
@@ -5680,11 +5533,6 @@ export function advanceQueue(
     }
     const failed = queueFailedEvent(state, record, failure, job)
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
-    const current = pr === undefined ? undefined : state.bays.prs[pr.id]
-    const revision =
-      pr === undefined
-        ? undefined
-        : current?.revs.find((candidate) => candidate.n === pr.revision && candidate.head === pr.headSha)
     const evidence =
       (job.conclusion === "failure" ? firstArtifact(job.error.evidence, "stderr") : undefined) ??
       firstArtifact(checkEvidence(job), "stderr") ??
@@ -5693,46 +5541,25 @@ export function advanceQueue(
     if (authorResult === undefined || isIntegrated(before) || pr === undefined) {
       return { events: [failed] }
     }
-    if (current === undefined) {
-      // RE-SOURCE (S6 census #13): a derived member has no record, so the
-      // author-facing refusal FACT emits from the run's own snapshot — going
-      // dark here would starve the audit/status surfaces and settlement of the
-      // needs-author trail post-door. The submitted/ready gate's pure-git
-      // analogue: the live submit fact still stands at exactly the pinned sha
-      // (a mid-run re-push or branch delete means the author already
-      // superseded this member, and nagging them about it would be noise).
-      if (state.bays.submits[pr.branch]?.sha !== pr.headSha) return { events: [failed] }
-      const refusal = {
-        pr: pr.id,
-        revision: pr.revision,
-        headSha: pr.headSha,
-        run: record.id,
-        ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
-        ...(pr.props === undefined ? {} : { props: pr.props }),
-        step: planned.name,
-        ...(evidence === undefined ? {} : { evidence }),
-        detail: failure.message,
-      }
-      return { events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })] }
-    }
-    if (changeDeliveryState(current) !== "submitted" && changeDeliveryState(current) !== "ready") {
-      return { events: [failed] }
-    }
+    // RE-SOURCE (S6 census #13): the author-facing refusal FACT emits from the
+    // run's own snapshot — going dark here would starve the audit/status
+    // surfaces and settlement of the needs-author trail. The submitted/ready
+    // gate's pure-git analogue: the live submit fact still stands at exactly the
+    // pinned sha (a mid-run re-push or branch delete means the author already
+    // superseded this member, and nagging them about it would be noise).
+    if (state.bays.submits[pr.branch]?.sha !== pr.headSha) return { events: [failed] }
     const refusal = {
       pr: pr.id,
       revision: pr.revision,
       headSha: pr.headSha,
       run: record.id,
-      ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-      ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
-      ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
+      ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+      ...(pr.props === undefined ? {} : { props: pr.props }),
       step: planned.name,
       ...(evidence === undefined ? {} : { evidence }),
       detail: failure.message,
     }
-    return {
-      events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })],
-    }
+    return { events: [failed, event("pr/needs-author", { ...refusal, receipt: authorResult })] }
   }
 
   const shape = shapeThrough(record, state.jobs, index + 1)
@@ -5740,13 +5567,12 @@ export function advanceQueue(
   if (planned.kind === "merge") {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
     // S7 settlement single-writer: NO terminal facts emit here. Every
-    // non-intent member's `pr/integrated`/`pr/already-landed` — record and
-    // derived alike — emits from the `settled` command's batch, sourced from
-    // the run's own snapshots and, while records still exist, deduped against
-    // surviving store state ({@link recordMemberTerminalEvents}); the settled
-    // event's application retiring the root is the state-visible once-marker.
-    // The advance-path record loop and its same-payload sweep over the store
-    // are deleted with the store era (@i/10 22991 inventory §a).
+    // non-intent member's `pr/integrated`/`pr/already-landed` emits from the
+    // `settled` command's batch, sourced from the run's own snapshots; the
+    // settled event's application retiring the root is the state-visible
+    // once-marker. The advance-path record loop, its same-payload sweep over
+    // the store, and the store dedupe are all deleted with the record era
+    // (@i/10 22991 inventory §a).
   }
 
   const next = record.steps[index + 1]
@@ -5764,120 +5590,6 @@ export function advanceQueue(
     events.push(requestStep(requirePlannedStep(steps, next), record, candidate, index + 1, shape))
   }
   return { events }
-}
-
-/** One member's payload content key: base + head + composition. Post-S7 its
- * only consumer is {@link recordMemberTerminalEvents}' transition-window guard
- * (is the store record still EXACTLY the tree this run merged); the
- * store-wide same-payload settlement sweep it used to drive is deleted with
- * the record era, and this deletes with the store. */
-function payloadIdentity(pr: DeepReadonly<Change> | DeepReadonly<ChangeSnapshot>): string {
-  if ("revs" in pr) {
-    return `${baseIdentity(pr.base)}\0${changeHead(pr)}\0${JSON.stringify(changeComposition(pr))}`
-  }
-  return `${baseIdentity(pr.base)}\0${pr.headSha}\0${JSON.stringify(pr.composition)}`
-}
-
-/** TRANSITION (S7 settlement single-writer): records still exist until the
- * store-deletion step, and a record member's terminal now emits from the
- * `settled` batch — byte-identical to the advance-path record loop this
- * replaced (@i/10 22991 inventory §a): the same event fields sourced from the
- * CURRENT record revision, the same store dedupe (a record whose terminal was
- * already absorbed re-emits nothing — the cutover window's double-emission
- * guard), the same payload guard (a record that moved past the run's snapshot
- * is never claimed merged), and the same submit-fact retirement riding the
- * batch. Deletes with `BaysState.prs`. */
-function recordMemberTerminalEvents(
-  bays: DeepReadonly<BaysState>,
-  member: DeepReadonly<ChangeSnapshot>,
-  integration: DeepReadonly<IntegrationProof>,
-  run: RunId,
-): EventDraft[] {
-  const current = bays.prs[member.id]
-  if (current === undefined || payloadIdentity(current) !== payloadIdentity(member)) return []
-  const alreadyMerged = integration.alreadyLanded
-  if (alreadyMerged !== undefined) {
-    const existingEvidence = current.alreadyLanded
-    if (
-      changeDeliveryState(current) === "already-landed" &&
-      current.integration?.commit === integration.commit &&
-      current.integration?.baseSha === integration.baseSha &&
-      existingEvidence?.candidateSha === alreadyMerged.candidateSha &&
-      existingEvidence.candidateTreeSha === alreadyMerged.candidateTreeSha &&
-      existingEvidence.baseTreeSha === alreadyMerged.baseTreeSha
-    ) {
-      return []
-    }
-    const revision = currentChangeRev(current)
-    return [
-      event("pr/already-landed", {
-        pr: current.id,
-        revision: revision.n,
-        headSha: revision.head,
-        run,
-        ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-        baseSha: integration.baseSha,
-        candidateSha: alreadyMerged.candidateSha,
-        candidateTreeSha: alreadyMerged.candidateTreeSha,
-        baseTreeSha: alreadyMerged.baseTreeSha,
-        ...(changeProps(current) === undefined ? {} : { props: changeProps(current) }),
-        ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
-      }),
-      ...submitFactRetirement(bays, current.branch, revision.head),
-    ]
-  }
-  if (
-    current.merged &&
-    current.integration?.commit === integration.commit &&
-    current.integration?.baseSha === integration.baseSha
-  ) {
-    return []
-  }
-  const revision = currentChangeRev(current)
-  if (revision.changeId === undefined) {
-    // A current merge record proves only the stable identity it names. Keep a
-    // pre-identity record readable, but never infer that it merged.
-    return []
-  }
-  return [
-    event("pr/integrated", {
-      pr: current.id,
-      revision: revision.n,
-      headSha: revision.head,
-      run,
-      ...(current.issue === undefined ? {} : { issueRef: current.issue }),
-      commit: integration.commit,
-      landingSha: integration.commit,
-      baseSha: integration.baseSha,
-      changeId: revision.changeId,
-      ...(revision.props === undefined ? {} : { props: revision.props }),
-      ...(revision?.submitter === undefined ? {} : { submitter: revision.submitter }),
-    }),
-    ...submitFactRetirement(bays, current.branch, revision.head),
-  ]
-}
-
-/**
- * The record lane's takeover of a branch approval, at the one moment it is
- * unambiguous: the merge that lands `mergedHead` consumes the standing submit
- * fact for exactly that sha, and the retirement rides the SAME journal batch
- * as the terminal it belongs to. `reason: "superseded"` is the enum member
- * reserved for precisely this act (@yrd/bay receiver contract: "an intaken
- * record takes over the approval; the receiver never emits it") — before this
- * emitter existed, nothing emitted it, the fact outlived the merge, and the
- * derived lane consumed it a second time (PR2139 double-merge, 2026-08-27).
- *
- * A fact at a DIFFERENT sha is a mid-run re-push — consent for content this
- * merge did not land — and stands untouched. Derived members retire nothing
- * here: their fact deliberately outlives the run (consumption is derived from
- * run history; a re-push renews authority), and this helper is only reachable
- * for RECORD terminals. The projection's application is idempotent (a missing
- * fact no-ops), so a replayed batch cannot double-retire.
- */
-function submitFactRetirement(bays: DeepReadonly<BaysState>, branch: string, mergedHead: string): EventDraft[] {
-  return bays.submits[branch]?.sha === mergedHead
-    ? [event("branch/unsubmitted", { branch, reason: "superseded" })]
-    : []
 }
 
 function queueLifecycleRun(applied: Event): RunId | undefined {
@@ -6450,92 +6162,6 @@ function unisolableStalePlanBatches(
   return batches
 }
 
-type CandidateRevisionMismatch = Readonly<{
-  candidate: string
-  run: RunId
-  pr: string
-  recordedRevision: number
-  recordedHead: string
-  currentRevision: number
-  currentHead: string
-}>
-
-/**
- * Content-equivalent historical Candidates are valid artifacts, but they are
- * not authority for a newer PR revision. Surface the exact state that used to
- * make {@link candidateFor} select the old Candidate and then make
- * {@link startRun} refuse its immutable result. Once an exact current result
- * exists, the old Candidate is ordinary history and the finding clears.
- */
-function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonly CandidateRevisionMismatch[] {
-  const mismatches: CandidateRevisionMismatch[] = []
-  const seen = new Set<string>()
-  for (const record of Queues.values(state.queues)) {
-    const candidate = state.queues.candidates[record.candidateId]
-    if (candidate === undefined || candidate.mergeability === "unknown") continue
-    const current: ChangeSnapshot[] = []
-    let live = true
-    for (const snapshot of record.prs) {
-      const pr = state.bays.prs[snapshot.id]
-      const delivery = pr === undefined ? undefined : changeDeliveryState(pr)
-      if (pr === undefined || (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready")) {
-        live = false
-        break
-      }
-      current.push(Queues.snapshot(pr))
-    }
-    if (!live) continue
-    const currentBaseSha = current[0]?.baseSha
-    if (currentBaseSha === undefined || current.some((snapshot) => snapshot.baseSha !== currentBaseSha)) continue
-    if (candidateArtifactKey(record.prs, candidate.baseSha) !== candidateArtifactKey(current, currentBaseSha)) continue
-    if (candidateResultKey(record.prs, candidate.baseSha) === candidateResultKey(current, currentBaseSha)) continue
-    if (candidateFor(state.queues, current, currentBaseSha) !== undefined) continue
-    const mismatchIndex = candidate.revs.findIndex((revision, index) => {
-      const snapshot = current[index]
-      return (
-        snapshot === undefined ||
-        revision.pr !== snapshot.id ||
-        revision.n !== snapshot.revision ||
-        revision.head !== snapshot.headSha
-      )
-    })
-    const recorded = candidate.revs[mismatchIndex]
-    const latest = current[mismatchIndex]
-    if (recorded === undefined || latest === undefined) continue
-    const key = candidateResultKey(current, currentBaseSha)
-    if (seen.has(key)) continue
-    seen.add(key)
-    mismatches.push({
-      candidate: candidate.id,
-      run: record.id,
-      pr: latest.id,
-      recordedRevision: recorded.n,
-      recordedHead: recorded.head,
-      currentRevision: latest.revision,
-      currentHead: latest.headSha,
-    })
-  }
-  return mismatches
-}
-
-/** How far a stranded draft got through review, from the change's own review facts.
- *
- * `reviewState` already decides which verdict is CURRENT (same revision, same
- * head) and carries a rebuild's approval forward, so this reads that projection
- * instead of re-deriving the join. A verdict on this exact revision outranks an
- * outstanding request: the verdict is about the content that stranded, while
- * the requested-reviewer set is revision-independent and survives every push.
- *
- * Every branch here is decided by data the audit holds. The two states with no
- * such data — a stale base and an unrecoverable draft — are absent by
- * construction, not by omission; {@link YRD_QUEUE_AUDIT_REVIEW_CERTIFICATIONS}
- * records why. */
-function draftReviewCertification(pr: DeepReadonly<Change>): QueueAuditReviewCertification {
-  const decision = reviewState(pr).current?.decision
-  if (decision === "approve") return "approved"
-  if (decision === "reject") return "changes-requested"
-  return (pr.requestedReviewers ?? []).length > 0 ? "review-requested" : "unreviewed"
-}
 
 function auditQueues(
   state: DeepReadonly<RuntimeState>,
@@ -6581,47 +6207,18 @@ function auditQueues(
       })
     }
   }
-  // A pushed-but-never-submitted PR is invisible to every projection this
-  // audit walks — it never becomes a run, so it ages nothing and pages nobody
-  // until outage forensics find it (@i/10-merge-queue/drafts-strand-silently,
-  // #undead; live specimens PR846/849/856/886 sat 9-22 HOURS). The watcher
-  // layer must CONSUME this finding, never re-derive draft state itself.
-  // Clock-gated like the hold checks above: with no `now`, age is unjudgeable.
+  // `draft-stranded` reported a change PUSHED but never submitted — a record
+  // state (@i/10-merge-queue/drafts-strand-silently, #undead; specimens
+  // PR846/849/856/886 sat 9-22 HOURS). Since S7 a push with no submit ref
+  // creates nothing the queue can see at all: there is no record to age, and the
+  // branch is invisible to this projection rather than stranded within it. What
+  // survives is the mirror finding below — an approval in git the lane has not
+  // served — which is the half a queue projection can still witness.
+  //
+  // NOT COVERED, and deliberately named here rather than left silent: a pushed
+  // branch nobody submitted now ages entirely outside yrd. Restoring that
+  // finding needs a git-side branch census this layer cannot make.
   if (auditNowMs !== undefined) {
-    for (const pr of Object.values(state.bays.prs)) {
-      if (changeDeliveryState(pr) !== "pushed") continue
-      // The SAME revision the certification is derived from: `reviewState` and
-      // `changeDeliveryState` both read `currentChangeRev`, so re-picking the tip by
-      // hand here is a second definition of "current" that can only ever drift.
-      const revision = currentChangeRev(pr)
-      const pushedAtMs = parseAuditTime(revision.pushedAt, "pr pushed clock")
-      if (auditNowMs - pushedAtMs <= DRAFT_STRANDED_GRACE_MS) continue
-      const certification = draftReviewCertification(pr)
-      findings.push({
-        code: "draft-stranded",
-        // Routing facts go in the MESSAGE as well as the fields below. The CLI's
-        // `formatActionableFailure` still prints code/cause/resolution only, so
-        // who owns this draft and how far it got through review must survive in
-        // the human cause line as well as the structured facts consumed by the
-        // coordination watcher.
-        message:
-          `change '${pr.id}' (${pr.branch}) was pushed at ${revision.pushedAt}` +
-          `${revision.submitter === undefined ? "" : ` by ${revision.submitter}`}, review: ${certification}, ` +
-          `and nothing has submitted it; it is invisible to the queue until someone does`,
-        pr: pr.id,
-        specimen: `pr:${pr.id}`,
-        since: revision.pushedAt,
-        blockedMs: Math.max(0, auditNowMs - pushedAtMs),
-        // Who and how-far, so the finding routes itself: a stranded draft ages
-        // against SOMEONE, and an approved draft is a different emergency from
-        // one nobody has looked at. Both come from facts already on the change — the
-        // recorded revision submitter and the review verdicts — never from a
-        // seat guess or a live git read the audit cannot make.
-        ...(revision.submitter === undefined ? {} : { submitter: revision.submitter }),
-        reviewCertification: certification,
-        resolution: [`yrd pr submit ${pr.branch} --issue <ref>`],
-      })
-    }
     // The mirror image of a stranded draft: a branch APPROVED in git
     // (refs/yrd/submit/<branch>, projected by the receiver) that no record
     // carries, so nothing can run it (branch-is-change 2a). Same grace as a
@@ -6644,49 +6241,17 @@ function auditQueues(
       })
     }
   }
+  // Three member-level findings are deleted with the record store, none of them
+  // reachable without it. `missing-pr` reported a run member the store could not
+  // materialize — store corruption — and there is no store left to disagree with
+  // a run: a member's snapshot IS its identity, and a damaged run is what the
+  // journal's hash chain detects. `run-without-submit-ancestry` and
+  // `run-without-check-ancestry` reported a member the queues-slice booked as
+  // holding no TOKEN; every member's authority is its live submit fact, verified
+  // at run start and never a token, so both could only fire on a record member.
+  // "Started without authority" is now the admission-refusal ledger's story,
+  // read at the end of this walk.
   for (const record of Queues.values(state.queues)) {
-    for (const pr of record.prs) {
-      if (pr.intent !== undefined || state.bays.prs[pr.id] !== undefined) continue
-      // A derived member (S6) is recordless BY DESIGN — its number sits above
-      // every record the frozen store holds (A9 mint monotonicity), which is
-      // what separates it from the store-corruption class this finding exists
-      // for. It counts in the audit population without a finding.
-      if (isDerivedRunMember(state.bays, pr)) continue
-      findings.push({
-        code: "missing-pr",
-        message: `queue run '${record.id}' references missing change '${pr.id}'`,
-        run: record.id,
-        pr: pr.id,
-      })
-    }
-    const authority = projectionLookupGet(state.queues.authority.runs, record.id)
-    if (record.parent === undefined && authority !== undefined) {
-      const intentMembers = new Set(record.prs.filter((pr) => pr.intent !== undefined).map((pr) => pr.id))
-      // A derived member (S6) holds no token, so the queues-slice projection
-      // books it as missing in TOKEN vocabulary; its real authority — the live
-      // submit fact — was verified at run start and is not an ancestry gap.
-      // This read side holds the whole runtime state, so the interpretation
-      // lives here, not in the slice-pure projection.
-      const derivedMembers = new Set(record.prs.filter((pr) => isDerivedRunMember(state.bays, pr)).map((pr) => pr.id))
-      for (const pr of authority.missingSubmits) {
-        if (intentMembers.has(pr) || derivedMembers.has(pr)) continue
-        findings.push({
-          code: "run-without-submit-ancestry",
-          message: `queue run '${record.id}' started change '${pr}' without an unconsumed matching submit fact`,
-          run: record.id,
-          pr,
-        })
-      }
-      for (const pr of authority.missingChecks) {
-        if (intentMembers.has(pr) || derivedMembers.has(pr)) continue
-        findings.push({
-          code: "run-without-check-ancestry",
-          message: `queue run '${record.id}' started pushed change '${pr}' without an unconsumed matching checks fact`,
-          run: record.id,
-          pr,
-        })
-      }
-    }
     // Quarantined rows become `invalid-run` findings once, after every walk has
     // had its say, so a record several walks meet is reported once.
     const run = reader.read(record, state.jobs)
@@ -6751,17 +6316,11 @@ function auditQueues(
       }
     }
   }
-  for (const mismatch of candidateRevisionMismatches(state)) {
-    findings.push({
-      code: "candidate-revision-mismatch",
-      message:
-        `Candidate '${mismatch.candidate}' from queue run '${mismatch.run}' records change '${mismatch.pr}' ` +
-        `revision ${mismatch.recordedRevision}@${mismatch.recordedHead}, but the content-equivalent current result is ` +
-        `revision ${mismatch.currentRevision}@${mismatch.currentHead}; no exact current-revision Candidate exists`,
-      run: mismatch.run,
-      pr: mismatch.pr,
-    })
-  }
+  // `candidate-revision-mismatch` compared a run's pinned member against the
+  // change's CURRENT record revision — a comparison with no second term since
+  // S7. A member's snapshot is its revision, so a run can no longer disagree
+  // with a newer one; the live equivalent (the fact moved off the pinned sha)
+  // is `stale-pr`, reported by `pinnedChangeError` at dispatch.
   // The record walk above `continue`s past terminal runs and never inspects Jobs
   // whose run record is gone — so a requested Job stranded under a terminal or
   // absent run was invisible ("queue audit clean" printed over it). Surface it.
@@ -6815,12 +6374,11 @@ function admissionRefusalAuditFindings(
   needsPersonOwner: string,
 ): QueueAuditFindingEmission[] {
   const findings: QueueAuditFindingEmission[] = []
-  const refused = Object.entries(state.queues.admissionRefusals).flatMap(([id, refusal]) => {
-    if (refusal.settlement !== undefined) return []
-    const pr = state.bays.prs[id]
-    return pr === undefined ? [] : [pr]
-  })
-  const head = [...new Map([...queued, ...refused].map((pr) => [pr.id, pr])).values()].toSorted(
+  // The refused rows used to be re-materialized from their records and folded
+  // into the head-of-line population. A ledger row names an id with no standing
+  // materialization since S7, so the head is the admission queue alone — which
+  // already contains every member a refusal can be blocking.
+  const head = [...new Map(queued.map((pr) => [pr.id, pr])).values()].toSorted(
     (left, right) =>
       queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
   )[0]
@@ -6956,10 +6514,16 @@ function queueProgressAuditFindings(
   return findings
 }
 
+/** When this base last merged, read from the RUNS that merged it. The record
+ * `integratedAt`/`alreadyLandedAt` stamps this replaces said the same thing one
+ * level down; a root run that reached `passed` on this base is the same event,
+ * and is what still exists since S7. Retention bounds it: with every run for a
+ * base pruned, the queue has no merge clock and the caller falls back to the
+ * queued-at clock exactly as it did for a base that never merged. */
 function latestQueueMergeMs(state: DeepReadonly<RuntimeState>, base: string): number | undefined {
-  return Object.values(state.bays.prs)
-    .filter((pr) => baseIdentity(pr.base) === base)
-    .flatMap((pr) => [pr.integratedAt, pr.alreadyLandedAt])
+  return Queues.values(state.queues)
+    .filter((record) => record.parent === undefined && baseIdentity(record.base) === base)
+    .map((record) => record.passedAt)
     .filter((at): at is string => at !== undefined)
     .map((at) => parseAuditTime(at, "merge time"))
     .reduce<number | undefined>((latest, at) => (latest === undefined ? at : Math.max(latest, at)), undefined)
@@ -7036,7 +6600,21 @@ function recordedPlanDrift(
   return undefined
 }
 
-function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change[] | undefined {
+/**
+ * The members an explicit `prs: [...]` selection names.
+ *
+ * S7: a selector resolves against the run's OWN derived batch, never a store.
+ * That is not a narrowing — `args.derived` is the whole population a compose
+ * can run, so a selector naming anything else names something the run could not
+ * have executed anyway, and refusing it here is the same `pr-not-found` the
+ * record lookup used to raise. `materialized` is the batch the caller already
+ * built, so selection and execution cannot disagree about what a member is.
+ */
+function explicitPRs(
+  state: DeepReadonly<BaysState>,
+  args: QueueRunArgs,
+  materialized: readonly Change[],
+): Change[] | undefined {
   // `prs: []` beside a non-empty `derived` is an EXPLICIT selection of exactly
   // those derived members (the compose's candidate dispatch for an all-derived
   // partition); a bare empty/absent `prs` stays the implicit queue.
@@ -7044,7 +6622,7 @@ function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {
-    const pr = resolveChange(state, selector)
+    const pr = materialized.find((member) => member.id === selector || member.branch === selector)
     if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
     return pr
   })
@@ -7079,11 +6657,12 @@ function requestedPRs(
   excluded: ReadonlySet<string> = new Set(),
   implicitBefore?: QueuePosition,
 ): Change[] {
-  const explicit = explicitPRs(state, args)
-  // Derived members (S6): materialized beside the records and ranked by the
-  // same submit clock. Explicit selections append them verbatim — the driver
-  // only passes what it selected — while the implicit queue interleaves them.
+  // Every member is derived since S7, so the batch IS the population: an
+  // explicit selection picks out of it, and the implicit queue takes all of it
+  // in submit-clock order. The record half that used to be unioned in here is
+  // gone, and with it the interleave the two lanes needed.
   const derived = materializeDerivedRunMembers(state, args.derived ?? [])
+  const explicit = explicitPRs(state, args, derived)
   const bySubmitClock = (left: Change, right: Change): number => {
     const leftSubmittedAt = currentChangeRev(left).submittedAt
     const rightSubmittedAt = currentChangeRev(right).submittedAt
@@ -7095,14 +6674,14 @@ function requestedPRs(
   }
   const prs = (
     explicit === undefined
-      ? [
-          ...Object.values(state.prs).filter((pr) => {
-            const delivery = changeDeliveryState(pr)
-            return delivery === "submitted" || delivery === "ready"
-          }),
-          ...derived,
-        ].toSorted(bySubmitClock)
-      : [...explicit, ...derived]
+      ? [...derived].toSorted(bySubmitClock)
+      : // An explicit selection carries the batch it was drawn from: the
+        // compose's own candidate dispatch passes `prs: []` beside the
+        // candidate's `derived` entries, which means "exactly these members".
+        // Dedupe because `explicitPRs` now resolves ITS selectors out of the
+        // same batch — the record half that used to make the two disjoint by
+        // construction is gone.
+        [...explicit, ...derived.filter((member) => !explicit.some((pr) => pr.id === member.id))]
   )
     .filter((pr) => !excluded.has(pr.id))
     .filter(
@@ -7131,7 +6710,7 @@ function resumableQueueRoots(
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
 ): Run[] {
-  const explicit = explicitPRs(state.bays, args)
+  const explicit = explicitPRs(state.bays, args, materializeDerivedRunMembers(state.bays, args.derived ?? []))
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(steps)
   const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
@@ -7294,37 +6873,30 @@ function admissionQueue(
 ): Change[] {
   const selected = admissionSteps(steps)
   if (selected.length === 0) return []
-  // Derived members (S6) ride the same filter chain as records: their
-  // materialized value answers `submitted` with a standing check request for
-  // exactly the submit sha, and their verdict evidence lives in the admission
-  // Jobs rather than a stored admission record.
-  return [...Object.values(state.bays.prs), ...derived]
+  // The population is the compose's derived batch: a member's materialized value
+  // answers `submitted` with a standing check request for exactly the submit
+  // sha, and its verdict evidence lives in the admission Jobs.
+  //
+  // Two record-lane filters are deleted here, and this is a BUG FIX, not just a
+  // simplification. Both asked whether a STORED admission verdict retired the
+  // member from this queue: one keyed the `needs-author` re-entry on
+  // `changeAdmission`, the other retired a passed/refused verdict outright.
+  // `recordRevisionAdmission` stopped writing that verdict, so neither could
+  // ever fire again — and they were the record lane's ONLY exits from
+  // `drainAdmissions`' `while (targets.size > 0)` loop. Measured before this
+  // change: a journal seeded with pr/pushed + pr/submitted + pr/checks-requested
+  // spun that loop 1389 times in 369ms with zero state delta, admitting the same
+  // member forever and never yielding to a timer. The eligibility exit below —
+  // the derived lane's, previously reachable only for recordless members — is
+  // now the single exit for every member, and it is the one that terminates.
+  return [...derived]
     .filter((pr) => targets === undefined || targets.has(pr.id))
     .filter((pr) => {
       const delivery = changeDeliveryState(pr)
-      if (delivery === "pushed" || delivery === "submitted" || delivery === "ready") return true
-      if (delivery !== "needs-author") return false
-      const admission = changeAdmission(pr)
-      return admission?.status === "refused" && hasFreshRevisionCheckAuthority(state, pr, steps)
+      return delivery === "pushed" || delivery === "submitted" || delivery === "ready"
     })
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
-    .filter((pr) => {
-      const admission = changeAdmission(pr)
-      if (admission === undefined) return true
-      const request = checkRequest(pr)
-      const requestedBase = request?.baseSha ?? changeBaseSha(pr)
-      const matches =
-        requestedBase !== undefined &&
-        admission.baseSha === requestedBase &&
-        admission.steps.every(
-          (evidence, index) =>
-            evidence.name === selected[index]?.name && evidence.revision === selected[index]?.revision,
-        )
-      if (!matches) return true
-      if (admission.status === "passed" && admission.steps.length === selected.length) return false
-      return admission.status !== "refused" || hasFreshRevisionCheckAuthority(state, pr, steps)
-    })
     .filter((pr) => {
       const refusal = state.queues.admissionRefusals[pr.id]
       if (refusal?.settlement === undefined) return true
@@ -7332,13 +6904,11 @@ function admissionQueue(
       return refusal.revision !== revision.n || refusal.headSha !== revision.head
     })
     .filter((pr) => {
-      // Derived member (S6): no stored admission verdict ever retires it from
-      // this queue — its verdict lives in the admission Jobs. Keep it only
-      // while its checks are unattempted: passed retires it, failed requires a
-      // re-push (the derived retry act — git CAS, per-push consent), checking
-      // is already dispatched. Without this exit the drain loop re-admits the
-      // same recordless member forever.
-      if (state.bays.prs[pr.id] !== undefined) return true
+      // No stored admission verdict ever retires a member from this queue — its
+      // verdict lives in the admission Jobs. Keep it only while its checks are
+      // unattempted: passed retires it, failed requires a re-push (the retry
+      // act — git CAS, per-push consent), checking is already dispatched.
+      // Without this exit the drain loop re-admits the same member forever.
       return checkEligibility(state, pr, steps).status === "queued"
     })
     .filter((pr) => {
@@ -7369,10 +6939,20 @@ function admissionQueue(
 function queueProgressQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): Change[] {
   const selected = declaredDefaultSteps(steps)
   if (!selected.some((step) => step.kind === "merge")) return []
-  return Object.values(state.bays.prs)
-    .filter((pr) => {
-      const delivery = changeDeliveryState(pr)
-      return delivery === "submitted" || delivery === "ready" || (delivery === "pushed" && checksRequested(pr))
+  // S7 population: every branch whose live submit fact still holds STANDING
+  // authority, materialized from its latest retained run snapshot. Standing is
+  // what "has not produced a delivery outcome" means once records are gone — a
+  // merged branch's surviving fact reads as consumed and drops out here, which
+  // is the same retirement the record lane got from its delivery state. A
+  // branch no run has ever admitted has no snapshot to materialize and is
+  // reported by `unrecorded-submit` instead, so it is not silently dropped.
+  const authority = derivedAuthorityLookup(state)
+  return Object.keys(state.bays.submits)
+    .flatMap((branch): Change[] => {
+      const snapshot = latestChangeSnapshot(state.queues as QueuesState, (member) => member.branch === branch)
+      if (snapshot === undefined || authority(snapshot)?.standing !== true) return []
+      const pr = materializeSnapshotMember(state.bays, snapshot)
+      return pr === undefined ? [] : [pr]
     })
     .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .toSorted(
@@ -7406,26 +6986,55 @@ function queueProgressTime(pr: DeepReadonly<Change>): string {
  * out of the next pass. A position is where you stand in the queue, not a claim
  * that the next pass will take you.
  */
-function admissionOrderChanges(bays: DeepReadonly<BaysState>): Change[] {
-  return requestedPRs(bays, {}).toSorted(
+/**
+ * The standing queue population, for the READ surfaces — the published
+ * admission order and the position `eligibility` reports.
+ *
+ * S7: a member is published under the id its retained run snapshot carries. The
+ * record population this replaces was ordered by the same clock, so the order
+ * is unchanged in meaning — the order the facts were approved in.
+ *
+ * GAP, stated rather than silently dropped: a branch whose fact stands but
+ * which NO compose has admitted yet holds no position here, because it has no
+ * id. Reading the queue must not commit the PR-number mint (commit-before-escape
+ * is a write, and a number burned on a status read would never appear in a run),
+ * and the branch cannot stand in as the id — `QueueMemberIdSchema` is a journal
+ * replay schema admitting only `PRnnn` and the historical intent forms. Such a
+ * branch is visible as an `unrecorded-submit` audit finding instead. Closing it
+ * needs a ruling on what identity an un-composed member publishes.
+ */
+function standingLaneMembers(state: DeepReadonly<RuntimeState>): Change[] {
+  return Object.keys(state.bays.submits).flatMap((branch): Change[] => {
+    const snapshot = latestChangeSnapshot(state.queues as QueuesState, (member) => member.branch === branch)
+    const composed = snapshot === undefined ? undefined : materializeSnapshotMember(state.bays, snapshot)
+    return composed === undefined ? [] : [composed]
+  })
+}
+
+function admissionOrderChanges(state: DeepReadonly<RuntimeState>): Change[] {
+  return standingLaneMembers(state).toSorted(
     (left, right) =>
       queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
   )
 }
 
 /** This PR's one-based place in the published queue order; absent when it holds none. */
-function admissionPosition(bays: DeepReadonly<BaysState>, pr: string): number | undefined {
-  const index = admissionOrderChanges(bays).findIndex((candidate) => candidate.id === pr)
+function admissionPosition(state: DeepReadonly<RuntimeState>, pr: string): number | undefined {
+  const index = admissionOrderChanges(state).findIndex((candidate) => candidate.id === pr)
   return index < 0 ? undefined : index + 1
 }
 
+/** Members refused at required checks and awaiting their author.
+ *
+ * Empty since S7, and structurally so: this read a RECORD's `needs-author`
+ * delivery plus its stored refusal verdict, and neither is written any more —
+ * `recordRevisionAdmission` is a no-op and there is no record to carry the
+ * delivery state. A refused member's durable trace is the admission-refusal
+ * ledger (`queues.admissionRefusals`), and its retry act is a re-push, so
+ * nothing re-enters the compose through this path. */
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] {
-  return Object.values(state.bays.prs)
-    .filter((pr) => changeDeliveryState(pr) === "needs-author" && changeAdmission(pr)?.status === "refused")
-    .toSorted(
-      (left, right) =>
-        queueProgressTime(left).localeCompare(queueProgressTime(right)) || compareNatural(left.id, right.id),
-    )
+  void state
+  return []
 }
 
 /**
@@ -7605,7 +7214,7 @@ function checkEligibility(
   // One derivation, shared with `admissionOrder()`. Ranking the admission queue
   // separately here is what let a single response report two positions for one
   // PR — the two lists neither hold the same members nor rank them the same way.
-  const position = admissionPosition(state.bays, pr.id)
+  const position = admissionPosition(state, pr.id)
   return { status: "queued", ...timing, ...(position === undefined ? {} : { position }) }
 }
 
@@ -7806,7 +7415,6 @@ function currentRevisionAdmissionJobs(
  * rule the record lane's `checkRequest` applies.
  */
 function derivedAdmissionBaseSha(state: DeepReadonly<RuntimeState>, pr: DeepReadonly<Change>): string | undefined {
-  if (state.bays.prs[pr.id] !== undefined) return undefined
   const prefix = admissionRevisionKeyPrefix(pr.id, changeRevisionNumber(pr))
   let newest: Readonly<{ baseSha: string; job: string }> | undefined
   for (const [key, job] of Object.entries(state.jobs.byKey)) {
@@ -7818,92 +7426,6 @@ function derivedAdmissionBaseSha(state: DeepReadonly<RuntimeState>, pr: DeepRead
   return newest?.baseSha
 }
 
-function projectChangeChecks(
-  state: DeepReadonly<RuntimeState>,
-  pr: DeepReadonly<Change>,
-  steps: readonly RuntimeStep[],
-): ChangeCheckRecord[] {
-  const checks = checkEligibility(state, pr, steps)
-  const admission = changeAdmission(pr)
-  if (admission !== undefined && checks.run === undefined) {
-    const records = admission.steps.map((evidence) => {
-      const step = steps.find((candidate) => candidate.name === evidence.name)
-      const output = evidence.output === undefined ? undefined : objectValue(evidence.output)
-      const diagnostics =
-        Array.isArray(output?.diagnostics) || typeof output?.detail === "string"
-          ? ((output?.diagnostics ?? output?.detail) as JsonValue)
-          : evidence.receipt?.message
-      const artifact = firstArtifact(evidence.output, evidence.receipt === undefined ? undefined : "stderr")
-      return {
-        pr: pr.id,
-        revision: changeRevisionNumber(pr),
-        job: evidence.job,
-        step: evidence.name,
-        status: evidence.status === "passed" ? ("passed" as const) : ("failed" as const),
-        classification: step?.classification ?? "carrier",
-        command: [`queue.step.${evidence.name}`],
-        ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
-        ...(diagnostics === undefined ? {} : { diagnostics }),
-        ...(artifact === undefined ? {} : { artifact }),
-        ...(evidence.receipt === undefined ? {} : { error: evidence.receipt }),
-      }
-    })
-    if (records.length > 0) return records
-    if (admission.status === "refused") {
-      return [
-        {
-          pr: pr.id,
-          revision: changeRevisionNumber(pr),
-          status: "failed",
-          ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
-          error: admission.receipt,
-        },
-      ]
-    }
-  }
-  const revisionJobs =
-    checks.run === undefined ? projectRevisionAdmissionJobs(state, pr, steps, checks.queuedAt) : undefined
-  if (revisionJobs !== undefined) return revisionJobs
-  const run = checks.run === undefined ? undefined : materializeRun(Queues.record(state.queues, checks.run), state.jobs)
-  if (run === undefined) {
-    return [
-      {
-        pr: pr.id,
-        revision: changeRevisionNumber(pr),
-        status: checks.status,
-        ...(checks.position === undefined ? {} : { position: checks.position }),
-        ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
-      },
-    ]
-  }
-  const hasStartedStep = run.steps.some((step) => step.job !== undefined)
-  const records = run.steps
-    .filter((step) => step.kind !== "merge")
-    .flatMap((step, index) => {
-      if (step.job === undefined && (hasStartedStep || index !== run.cursor)) return []
-      const record = projectCheckStep(pr, run, step, checks.queuedAt)
-      return record === undefined ? [] : [record]
-    })
-  const evidenceStep =
-    run.error?.evidence === undefined
-      ? undefined
-      : run.steps.find((step) => step.kind !== "check" && step.job !== undefined && jobFailed(step.job))
-  const evidenceRecord =
-    evidenceStep === undefined ? undefined : projectCheckStep(pr, run, evidenceStep, checks.queuedAt)
-  const projected = evidenceRecord === undefined ? records : [...records, evidenceRecord]
-  return projected.length === 0
-    ? [
-        {
-          pr: pr.id,
-          revision: changeRevisionNumber(pr),
-          run: run.id,
-          status: checks.status,
-          ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
-          ...(run.error === undefined ? {} : { error: run.error }),
-        },
-      ]
-    : projected
-}
 
 function reusableRevisionAdmission(
   state: DeepReadonly<RuntimeState>,
@@ -7915,41 +7437,17 @@ function reusableRevisionAdmission(
   const boundary = selected.findIndex((step) => step.kind === "merge")
   const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
   if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
-  const pr = state.bays.prs[snapshot.id]
-  if (pr === undefined) {
-    // DERIVED member (recordless): reuse only when a merge step REMAINS. A
-    // fully-covered plan would return the zero-event reuse-covered no-op, and
-    // a derived identity's only durable home is the run/started snapshot — the
-    // minted number would escape nowhere and burn, and the next compose would
-    // re-derive and mint again. A check-only derived plan therefore executes
-    // its steps inside the run it must start anyway.
-    if (boundary < 0) return undefined
-    return derivedRevisionAdmissionReuse(state, snapshot, snapshot.baseSha, prefix)
-  }
-  if (changeRevisionNumber(pr) !== snapshot.revision || changeHead(pr) !== snapshot.headSha) {
-    return undefined
-  }
-  const admission = changeAdmission(pr)
-  if (
-    admission?.status !== "passed" ||
-    admission.baseSha !== snapshot.baseSha ||
-    admission.steps.length !== prefix.length ||
-    admission.steps.some(
-      (evidence, index) =>
-        evidence.status !== "passed" ||
-        evidence.name !== prefix[index]?.name ||
-        evidence.revision !== prefix[index]?.revision ||
-        evidence.output === undefined,
-    )
-  ) {
-    return undefined
-  }
-  return {
-    count: prefix.length,
-    shape: {
-      results: Object.fromEntries(admission.steps.map((evidence) => [evidence.name, evidence.output as JsonValue])),
-    },
-  }
+  // Reuse only when a merge step REMAINS. A fully-covered plan would return the
+  // zero-event reuse-covered no-op, and a member's identity's only durable home
+  // is the run/started snapshot — the minted number would escape nowhere and
+  // burn, and the next compose would re-derive and mint again. A check-only plan
+  // therefore executes its steps inside the run it must start anyway.
+  //
+  // The record-backed arm this replaces read a STORED admission verdict off the
+  // change. Nothing writes one (`recordRevisionAdmission` is a no-op) and there
+  // is no record to read, so every reuse now comes from the admission Jobs.
+  if (boundary < 0) return undefined
+  return derivedRevisionAdmissionReuse(state, snapshot, snapshot.baseSha, prefix)
 }
 
 /**
@@ -8820,32 +8318,14 @@ function pinnedChangeError(
         message: `Intent '${intent.id}' can no longer be verified: the intent rail that tracked it is retired`,
       }
     }
-    const current = state.bays.prs[snapshot.id]
-    if (current === undefined) {
-      // Derived member (S6): recordless by design — the live submit fact is the
-      // pin's referent. Standing at exactly the pinned sha ⇒ fresh; moved or
-      // vanished ⇒ the author superseded the member mid-run (re-push or branch
-      // delete), which is the same stale-pr the record lane reports. A
-      // record-era member can never alias in here: post-S6 records are never
-      // deleted, so its id always resolves its record above — and the record
-      // lane's merge retires the branch's submit fact (`superseded`,
-      // submitFactRetirement) the moment it consumes the approval.
-      if (state.bays.submits[snapshot.branch]?.sha === snapshot.headSha) continue
-      return {
-        code: "stale-pr",
-        message: `change '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
-      }
-    }
-    if (
-      changeRevisionNumber(current) !== snapshot.revision ||
-      changeHead(current) !== snapshot.headSha ||
-      baseIdentity(current.base) !== baseIdentity(snapshot.base) ||
-      (current.state === "closed" && !current.merged)
-    ) {
-      return {
-        code: "stale-pr",
-        message: `change '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
-      }
+    // The live submit fact is the pin's referent. Standing at exactly the
+    // pinned sha ⇒ fresh; moved or vanished ⇒ the author superseded the member
+    // mid-run (re-push or branch delete). The record arm this replaces asked the
+    // same question of a record's current revision, base and closed state.
+    if (state.bays.submits[snapshot.branch]?.sha === snapshot.headSha) continue
+    return {
+      code: "stale-pr",
+      message: `change '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
     }
   }
   return undefined
@@ -8881,17 +8361,10 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
   if (!jobFailed(step.job)) return false
   if (queueAuthorityReleaseReason(jobFailure(step.job)) !== undefined) return true
   if (step.job.conclusion !== "cancelled") return true
-  return run.prs.some((member) => {
-    const current = state.bays.prs[member.id]
-    return (
-      current !== undefined &&
-      changeRevisionNumber(current) === member.revision &&
-      changeHead(current) === member.headSha &&
-      (changeDeliveryState(current) === "pushed" ||
-        changeDeliveryState(current) === "submitted" ||
-        changeDeliveryState(current) === "ready")
-    )
-  })
+  // A cancelled step re-advances only while a member is still live, which since
+  // S7 means its submit fact still stands at exactly the pinned sha. The record
+  // arm asked the same of a record's current revision and delivery state.
+  return run.prs.some((member) => state.bays.submits[member.branch]?.sha === member.headSha)
 }
 
 function isIntegrated(shape: ChangeShape): shape is IntegratedShape {

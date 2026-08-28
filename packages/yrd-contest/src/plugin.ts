@@ -1,14 +1,4 @@
-import {
-  defaultBayBranch,
-  changeDeliveryState,
-  changeForBay,
-  changeHead,
-  changeRevisionNumber,
-  resolveBay,
-  type Bay,
-  type HasBays,
-  type Change,
-} from "@yrd/bay"
+import { defaultBayBranch, resolveBay, type Bay, type HasBays } from "@yrd/bay"
 import {
   command,
   event,
@@ -370,24 +360,28 @@ function createContestCommands(
       if (verified.commit.toLowerCase() !== promotion.pin.commit.toLowerCase()) {
         throw new Error("yrd: contest promotion verified a different commit")
       }
-      const pr = state.bays.prs[args.pr]
-      if (pr === undefined || !exactPR(pr, promotion.pin, record.base)) {
-        throw new Error(`yrd: change '${args.pr}' does not contain the selected contest commit`)
-      }
-      const delivery = changeDeliveryState(pr)
-      if (delivery !== "submitted" && delivery !== "ready" && delivery !== "integrated") {
-        throw new Error(`yrd: change '${pr.id}' is ${delivery}, not submitted`)
-      }
-      return {
-        events: [
-          event("contest/promoted", {
-            contest: record.id,
-            pr: pr.id,
-            revision: changeRevisionNumber(pr),
-            commit: promotion.pin.commit,
-          }),
-        ],
-      }
+      // S7 (branch-is-change, @i/10 22991): `contest/promoted` records
+      // `{ pr, revision }` — a change-record identity — and the two proofs that
+      // made that identity trustworthy both read the deleted store: that the
+      // record for `args.pr` carried the pin's exact bay/branch/base/commit,
+      // and that it had actually been submitted. Neither has a derived-lane
+      // replacement HERE: a promoted branch has a standing submit fact, but its
+      // member id and revision are minted by compose, which has not run at this
+      // point, and this package holds no queue handle to ask.
+      //
+      // Emitting the event anyway would write an UNVERIFIED promotion result —
+      // fabricating the one fact the surface exists to certify — so the command
+      // refuses instead, and says exactly what a ruling has to settle.
+      raiseFailure(
+        "refusal",
+        "contest-promotion-record-retired",
+        `yrd: contest '${record.id}' cannot be finalized as change '${args.pr}': contest promotion still records a ` +
+          `change-record identity (pr + revision), and the change-record store is gone. The winning attempt is ` +
+          `verified at commit ${promotion.pin.commit} on bay '${promotion.pin.bay}' — deliver it by submitting that ` +
+          `bay's branch ('yrd pr submit ${promotion.pin.branch}'), which runs it as a derived member. Re-enabling ` +
+          `automatic finalization needs a ruling on what identity 'contest/promoted' records post-S7 ` +
+          `(branch + submit sha, or the composed member id).`,
+      )
     },
   })
 
@@ -606,41 +600,17 @@ async function finalizePromotion(contestId: string, options: Parameters<typeof c
   if (promotion === undefined || promotion.result !== undefined) return false
   const verification = jobByKey(state, promotionKey(contestId))
   if (verification?.status !== "completed" || verification.conclusion !== "success") return false
-  const pr = await ensureExactPR(record, promotion.pin, options)
-  const finalized = await options.actions.finalize(contestId, pr.id)
+  // S7: the drive loop used to mint/redrive a change record for the winning bay
+  // (`ensureExactPR`: intake → submit → prove the record carries the exact pin)
+  // and then finalize on its id. Every step of that is gone — `bays.intake` and
+  // `bays.submit` now refuse `record-mint-retired`, and no record exists to
+  // prove the pin against — so the loop can no longer produce the identity
+  // `contest/promoted` requires. `finalize` refuses with the full explanation
+  // and the manual cure; calling it here keeps that ONE voice rather than
+  // adding a second, and keeps the refusal loud instead of returning `false`,
+  // which the caller would read as "nothing to finalize yet" and spin on.
+  const finalized = await options.actions.finalize(contestId, promotion.pin.bay)
   return finalized.events.length > 0
-}
-
-async function ensureExactPR(
-  record: DeepReadonly<ContestRecord>,
-  pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>,
-  options: Parameters<typeof createContests>[0],
-): Promise<DeepReadonly<Change>> {
-  let pr = changeForBay(options.runtime().bays, pin.bay)
-  if (pr === undefined || !exactPR(pr, pin, record.base) || changeDeliveryState(pr) === "rejected") {
-    // Promotion intake trusts the verified write-once pin and intentionally re-drives a rejected winner.
-    await options.bays.intake({
-      bay: pin.bay,
-      headSha: pin.commit,
-      ...(pin.baseSha === undefined ? {} : { baseSha: pin.baseSha }),
-    })
-    pr = changeForBay(options.runtime().bays, pin.bay)
-  }
-  if (pr === undefined || !exactPR(pr, pin, record.base)) {
-    throw new Error(`yrd: selected Bay '${pin.bay}' did not produce the exact contest PR`)
-  }
-  if (changeDeliveryState(pr) === "pushed") {
-    await options.bays.submit({ pr: pr.id })
-    pr = changeForBay(options.runtime().bays, pin.bay)
-  }
-  if (
-    pr === undefined ||
-    !exactPR(pr, pin, record.base) ||
-    (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready" && changeDeliveryState(pr) !== "integrated")
-  ) {
-    throw new Error(`yrd: selected contest commit was not submitted`)
-  }
-  return pr
 }
 
 function projectContests(state: DeepReadonly<ContestState>, applied: Event): ContestState {
@@ -699,16 +669,16 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
   let promotion: ContestPromotion | undefined
   if (record.promotion !== undefined) {
     const job = jobByKey(state, promotionKey(record.id))
-    const pr =
-      record.promotion.result === undefined
-        ? changeForBay(state.bays, record.promotion.pin.bay)
-        : state.bays.prs[record.promotion.result.pr]
+    // S7: the projected `pr` was the whole change record for the promoted (or
+    // candidate) delivery, read from the deleted store. A promotion that
+    // already resolved still carries its identity on `record.promotion.result`,
+    // which this view does not hide; the record BODY has no replacement and no
+    // reader ever used one.
     promotion = {
       attempt: record.promotion.attempt,
       commit: record.promotion.pin.commit,
       ref: record.promotion.pin.ref,
       ...(job === undefined ? {} : { job }),
-      ...(pr === undefined ? {} : { pr }),
     }
   }
 
@@ -887,15 +857,6 @@ function passedRunnerOutput(job: DeepReadonly<Job> | undefined): AttemptRunOutpu
   return job?.status === "completed" && job.conclusion === "success"
     ? AttemptRunOutputSchema.parse(job.output)
     : undefined
-}
-
-function exactPR(pr: DeepReadonly<Change>, pin: DeepReadonly<z.infer<typeof GitRevisionPinSchema>>, base: string): boolean {
-  return (
-    pr.bay === pin.bay &&
-    pr.branch === pin.branch &&
-    pr.base === base &&
-    changeHead(pr).toLowerCase() === pin.commit.toLowerCase()
-  )
 }
 
 function competitorOf(definition: CompetitorDef): Competitor {
