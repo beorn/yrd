@@ -338,43 +338,65 @@ async function hookedSubmoduleRepository(options: {
 }
 
 /**
- * DELIBERATE REDS (S7) — every test built on this fixture, and the reason is
- * NOT the fixture. Read this before "fixing" it.
+ * DELIBERATE REDS (S7) — 10 of the tests on this fixture and its `hooked`
+ * sibling. An earlier version of this note said "every test built on this
+ * fixture" and called the capability retired. BOTH WERE WRONG, and the wrong
+ * version nearly got these deleted. Corrected here with what was measured.
  *
- * The fixture creates the submodule pin on `task/submodule` and pushes it
- * there, deliberately NOT to the submodule's own `main`. That is correct and
- * load-bearing: these tests are about the queue ADVANCING a submodule's main to
- * an authored pin, so a pin already on main would leave nothing to advance.
+ * 14 tests on these fixtures PASS and 10 fail. The fixture is not poisoned,
+ * and the discriminator is none of the obvious candidates — passing and
+ * failing tests share the fixture, its options, and the compose. What differs
+ * is one line: the passing ones PUBLISH THE PIN to the submodule's main
+ * before composing,
  *
- * The compose now refuses that candidate before any of it runs. Measured:
- *   action  compose-candidate-skip
- *   code    min-commit-unpublished
- *   reason  change 'PR1' cannot fill the shaset: 'dep' authored min commit
- *           '…' is not on submodule main '…'; the author's gitlink is a min
- *           commit, never a value — push it to the submodule's own main first,
- *           then resubmit
- * so no job is created at all (`state().jobs.byId` is empty) and `queue.run`
- * returns nothing — which surfaces as `expected undefined to match object
- * { status: "completed" }` at whichever assertion reads the run first.
+ *     git push origin <pinSha>:refs/heads/main
  *
- * THE MODEL CHANGED UNDER THESE TESTS. src/command.ts says it in as many
- * words at the refusal site — "submodule-main-first parks this before
- * queueing" — and the fill-in only ever moves a pin FORWARD to main
- * (`if (main.sha === authored) continue` … else `updates.push({ sha: main.sha })`).
- * The authored gitlink is a floor, never a value, and main is never
- * back-promoted to it. That also matches the documented operator workflow:
- * fast-forward the component's main first, THEN submit from the hh root.
+ * and the failing ones never do, so they trip `min-commit-unpublished` at
+ * candidate composition and never reach what they were written to test.
  *
- * So the capability these tests exercise appears to be RETIRED BY DESIGN, and
- * converting them is not a fixture edit — it is a decision about whether
- * submodule-main promotion still exists at all. Left red and reported rather
- * than converted or deleted: deleting them would erase the only description of
- * a capability nobody has explicitly ruled dead, and making them pass would
- * require publishing the pin first, which deletes their subject.
+ * THE PROMOTION CAPABILITY IS LIVE, not retired. `SubmoduleMainPromotion`,
+ * `submoduleMainRefusals`, the promotion and convergence loops — 63
+ * occurrences in src/command.ts — and `componentMains` is a live field on
+ * `IntegrationProofSchema`. src also carries a ruling PROTECTING it (22925
+ * family): a guard once "hijacked every clean, non-conflicting gitlink
+ * advance … the queue's OWN promotion machinery never got a chance to run,
+ * because this pre-branch intercepted before any merge was even attempted",
+ * and the suite named as having proved that is this one.
  *
- * Needs a ruling. If promotion is retired, these want deletion WITH a
- * lost-coverage note naming what they proved; if some promotion path survives
- * for a case this fixture does not build, they want re-pointing at it.
+ * AND THE TWO CONDITIONS ARE MUTUALLY EXCLUSIVE. Composition refuses when the
+ * authored pin is NOT an ancestor of submodule main (command.ts:4423):
+ *
+ *     if (main.sha !== authored && !(await isAncestor(git, submoduleRepo, authored, main.sha)))
+ *
+ * Merge-time promotion fast-forwards when main IS an ancestor of the pin
+ * (command.ts:4947):
+ *
+ *     const fastForward = await git.run(repository, ["merge-base", "--is-ancestor", targetSha, pin.sha], true)
+ *     if (fastForward.code === 0) { targetSha = pin.sha; … }
+ *
+ * For a pin strictly ahead of main both hold, so the refusal fires on exactly
+ * the population the fast-forward exists to serve. Publish first and promotion
+ * takes its OTHER branch — `action: "verified"`, `mainAfterSha` unchanged. So
+ * the fast-forward branch has no reachable entry, which is why every test of
+ * it is red and every test that publishes first is green: the green ones only
+ * ever exercise the no-op branch.
+ *
+ * SCOPE OF THAT CLAIM, stated because it is not universal: the fill-in reads
+ * AUTHORED gitlinks while promotion reads MERGED candidate pins. For the
+ * single-member, single-sided gitlink advance these fixtures build, src says
+ * those are the same commit ("a cleanly-merged single-sided gitlink advance
+ * already carries the authored value"). For a multi-member batch they could
+ * differ, and I did not measure that case.
+ *
+ * WHAT EACH RED NEEDS (per @chief's re-ruling):
+ *  - the REFUSAL tests ("refuses a non-ancestral submodule main …", "refuses
+ *    to advance a dirty checked-out main …") are fixture debt: publish the
+ *    pin, THEN build the divergent or dirty condition, so each reaches the
+ *    refusal it was written for.
+ *  - "fast-forwards a clean checked-out main …" is the discriminator, and on
+ *    the evidence above its subject is INTACT while its code path is
+ *    unreachable. That is a src defect of the 22925 shape, not a test to
+ *    delete.
  */
 async function submoduleMainMergeRepository(
   options: Readonly<{ pushSuccessor?: boolean; nonBareComponentOrigin?: boolean }> = {},
