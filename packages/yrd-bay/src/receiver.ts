@@ -358,7 +358,7 @@ export async function createGitPushReceiver(options: ReceiverOptions): Promise<G
     await writeHook(receiverPath, "pre-receive", hookEntry)
     await writeHook(receiverPath, "post-receive", hookEntry)
     return receiver
-  })
+  }, { holder: "receiver-init" })
 }
 
 export async function loadGitPushReceiver(path: string, process: Pick<Process, "run">): Promise<GitPushReceiver> {
@@ -595,7 +595,7 @@ async function drainReceiverInbox(
       }
     }
     return drain
-  })
+  }, { holder: "receiver-inbox-drain" })
 }
 
 export async function runReceiverHookFromEnvironment(

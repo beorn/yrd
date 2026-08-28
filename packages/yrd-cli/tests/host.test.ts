@@ -3358,19 +3358,25 @@ checks: [{check: {run: "true"}}]
     await exclusive.run(async () => {
       let failure: unknown
       try {
-        await exclusive.run(async () => undefined)
+        await exclusive.run(async () => undefined, { holder: "test-inner" })
       } catch (error) {
         failure = error
       }
       expect(failure).toBeInstanceOf(Error)
       expect((failure as Error).message).toContain(
-        `writer lock is busy (holder=unknown operation; owner=pid:${process.pid}; contender=pid:${process.pid}; ${join(root, "writer.lock")})`,
+        `writer lock is busy (holder=test-outer; owner=pid:${process.pid}; contender=pid:${process.pid} operation=test-inner; ${join(root, "writer.lock")})`,
       )
+      // 23228: the holder is a REQUIRED option, so this message can no longer
+      // read "unknown operation" — which is what all 3,312 starvation messages
+      // measured on one host on 2026-08-28 said, leaving a ninety-minute
+      // incident with nothing to name. This assertion previously PINNED that
+      // defect by expecting the unnamed form.
+      expect((failure as Error).message).not.toContain("unknown operation")
       expect(classifyFailure(failure)).toMatchObject({
         exitCode: 3,
         failure: { kind: "infrastructure", code: "exclusive-busy" },
       })
-    })
+    }, { holder: "test-outer" })
   })
 
   it("prints help outside Git without initializing a repository host", async () => {
