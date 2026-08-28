@@ -88,6 +88,8 @@ async function createApp(
     queueMint?: PrNumberMint
     /** Stands in for the host's git ancestry read; see `isSubmitSuperseded`. */
     superseded?: (sha: string) => boolean
+    /** Makes the oracle throw, to exercise the compose's degrade path. */
+    supersededThrows?: boolean
   }> = {},
 ) {
   const check = withStep(
@@ -115,9 +117,15 @@ async function createApp(
     prepareCandidate: mergeableCandidate,
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
-    ...(options.superseded === undefined
-      ? {}
-      : { isSubmitSuperseded: ({ sha }: Readonly<{ sha: string }>) => options.superseded?.(sha) === true }),
+    ...(options.supersededThrows === true
+      ? {
+          isSubmitSuperseded: () => {
+            throw new Error("git: bad object")
+          },
+        }
+      : options.superseded === undefined
+        ? {}
+        : { isSubmitSuperseded: ({ sha }: Readonly<{ sha: string }>) => options.superseded?.(sha) === true }),
   })
   const bayJobs = createBayJobDefs(workspace())
   const base = pipe(
@@ -336,6 +344,28 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     ).toBe(false)
     // NO SILENT ERRORS: the skip names the branch and its cure.
     expect(actionsLogged(events)).toContain("compose-derived-fact-superseded")
+    log.end()
+  })
+
+  it("composes the branch, loudly, when the landed-content oracle cannot answer", async () => {
+    // The failure DIRECTION is a decision, not a default. An unreadable oracle
+    // must not be read as "superseded": that would silently drop a live
+    // submission, which is the worst outcome available here and is invisible
+    // to its author. Degrading to "compose it" restores the pre-fix behaviour
+    // for this one branch, whose stale fact is then loud on every later pass.
+    // One branch's unreadable oracle also must not starve its siblings.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createApp({ log, supersededThrows: true })
+    await app.bays.recordBranchSubmit({ branch: "issue/unreadable", sha: RECORDLESS_SHA, base: "main" })
+
+    const runs = await app.queue.run({}, runtime)
+    expect(runs, "a branch whose oracle threw still composes").toMatchObject([
+      { status: "completed", conclusion: "success" },
+    ])
+    const logged = actionsLogged(events)
+    expect(logged, "the compose says it could not decide").toContain("compose-derived-superseded-unknown")
+    expect(logged, "and it did not claim the fact was stale").not.toContain("compose-derived-fact-superseded")
     log.end()
   })
 })
