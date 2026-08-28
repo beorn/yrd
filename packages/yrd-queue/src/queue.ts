@@ -516,7 +516,13 @@ export type SettleAdmissionRefusalArgs = Readonly<z.infer<typeof SettleAdmission
  *
  * Exported because the runner's self-applied-remedy pass (22474) acts on
  * exactly the PRs the queue itself calls wedged — one number, one home, so the
- * remedy can never fire earlier than the finding that justifies it. */
+ * remedy can never fire earlier than the finding that justifies it.
+ *
+ * This is the threshold for a refusal that can CLEAR ITSELF. A verdict on the
+ * content reports at once instead ({@link contentVerdictAdmissionRefusal},
+ * 23236), so finding and remedy no longer share one number: the remedy still
+ * waits out this streak. The property that matters is unchanged and now has
+ * slack — the remedy can still never fire earlier than the finding. */
 export const ADMISSION_REFUSAL_LOOP_THRESHOLD = 3
 /**
  * Refusals a retry cannot change, because the fact they report is fixed for the
@@ -561,6 +567,38 @@ function attributableMember(
 
 function structurallyPermanentAdmissionRefusal(code: string): boolean {
   return STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS.has(code)
+}
+
+/**
+ * Refusals `queue audit` must report on the FIRST cycle instead of waiting out
+ * {@link ADMISSION_REFUSAL_LOOP_THRESHOLD}: a verdict on the CONTENT, which no
+ * retry can change.
+ *
+ * A race and a verdict are not the same fact. The threshold exists so one
+ * losable race never pages a human, and for a refusal that can genuinely clear
+ * on the next cycle — an unreadable certificate, a gitlink object this clone
+ * has not fetched — that is right and deliberate. A verdict cannot clear
+ * without the author pushing something new, so the streak only measures how
+ * long we waited to say so, in the hours an operator spends running the one
+ * tool that is supposed to name the branch that is not draining
+ * (@i/10-yrd/23236).
+ *
+ * The set is the needs-author classification this file already keeps, not a
+ * second one: {@link COMPOSITION_FAILURE_BUCKETS}'s `needs-author` bucket
+ * already answers "only a new revision cures this", which is the same
+ * question. `check-failed` is added here and NOT to that bucket, because the
+ * bucket also drives `failureDisposition`'s display state, where the generic
+ * required-check failure deliberately takes the plain default; the dynamic
+ * `<step>-failed` family canonicalizes onto it and inherits this with it.
+ *
+ * Deliberately distinct from {@link structurallyPermanentAdmissionRefusal},
+ * which settles the change needs-person on its first refusal: that changes
+ * what the QUEUE does with a refusal, this changes only when the AUDIT speaks
+ * about one.
+ */
+function contentVerdictAdmissionRefusal(code: string): boolean {
+  const canonical = canonicalRefusalCode(code) ?? code
+  return canonical === "check-failed" || NEEDS_AUTHOR_CODES.has(canonical)
 }
 
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
@@ -6802,7 +6840,10 @@ function admissionRefusalAuditFindings(
     const sameCodeCount = refusal.sameCodeCount ?? refusal.count
     const sameCodeFirstAt = refusal.sameCodeFirstAt ?? refusal.firstAt
     if (head?.id !== refusal.pr) continue
-    const threshold = structurallyPermanentAdmissionRefusal(refusal.code) ? 1 : progress.refusalCount
+    const threshold =
+      structurallyPermanentAdmissionRefusal(refusal.code) || contentVerdictAdmissionRefusal(refusal.code)
+        ? 1
+        : progress.refusalCount
     if (sameCodeCount < threshold) continue
     const blockedMs = Math.max(0, Date.parse(refusal.lastAt) - Date.parse(sameCodeFirstAt))
     findings.push({

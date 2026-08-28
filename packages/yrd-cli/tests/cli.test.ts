@@ -5262,7 +5262,22 @@ describe("runYrd", () => {
       status: "refused",
       receipt: { code: "authored-gitlink" },
     })
-    expect(app.queue.audit().findings).toEqual([])
+    // The quarantine is intact and is what this test is about: three cycles
+    // produced ONE refusal observation, never three. What changed (23236) is
+    // that the audit now NAMES an unsettled verdict on the content from its
+    // first refusal instead of only at the third — so it no longer goes silent
+    // about the single change nobody can act on. This is the same conflation
+    // the settled-refusal branch of `admissionRefusalAuditFindings` already
+    // fixed once: "stop retrying" and "stop REPORTING" are different facts.
+    expect(app.state().queues.admissionRefusals.PR1).toMatchObject({ code: "authored-gitlink", count: 1 })
+    expect(app.queue.audit().findings).toEqual([
+      expect.objectContaining({
+        code: "admission-refusal-loop",
+        pr: "PR1",
+        refusal: "authored-gitlink",
+        count: 1,
+      }),
+    ])
   })
 
   it("makes a same-head base refresh with zero runs actionable instead of reporting queue idle", async () => {
@@ -5370,8 +5385,21 @@ describe("runYrd", () => {
     await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })
 
     const audit = outputIO({ now: () => Date.parse("2026-07-09T12:10:00.000Z") })
-    expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(0)
-    expect(JSON.parse(audit.stdout())).toMatchObject({ command: "queue.audit", findings: [] })
+    // Exit 1, not 0: `queue audit` exits non-zero whenever it has findings, and
+    // under 23236 a content verdict IS a finding on its first refusal. That is
+    // the whole operational point — the exit code is how a heartbeat learns
+    // about an immutable refusal, and it now learns one cycle in instead of
+    // three (or, in this shape, never, since the streak cannot advance).
+    expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io), audit.stderr()).toBe(1)
+    // The STALL finding is this test's subject: an immutable refusal that
+    // settled must never read as a stalled queue, and an exact code list keeps
+    // that assertion as strict as `findings: []` was.
+    const audited = JSON.parse(audit.stdout()) as Readonly<{
+      command: string
+      findings: readonly Readonly<{ code: string }>[]
+    }>
+    expect(audited.command).toBe("queue.audit")
+    expect(audited.findings.map((finding) => finding.code)).toEqual(["admission-refusal-loop"])
   })
 
   it("records an external failing verdict successfully while the queue run becomes failed", async () => {

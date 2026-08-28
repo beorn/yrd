@@ -205,6 +205,12 @@ export function foldRefusalStall(
  * remediated, and skips any PR whose revision has already been attempted, so a
  * failed remedy degrades to the printed refusal instead of becoming its own
  * retry loop.
+ *
+ * Deliberately still this threshold, not the audit's: since 23236 the audit
+ * reports a content verdict on its FIRST refusal, but REPORTING and ACTING are
+ * different acts, and applying a remedy to one observation is the losable-race
+ * mistake the streak exists to prevent. So this pass stays three cycles behind
+ * that finding on purpose.
  */
 export function planRefusalRemedies(
   refusals: Readonly<Record<string, QueueAdmissionRefusal>>,

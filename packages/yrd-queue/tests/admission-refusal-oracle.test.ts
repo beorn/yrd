@@ -436,6 +436,63 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     expect(app.queue.audit().findings).not.toContainEqual(expect.objectContaining({ pr: pr.id }))
   })
 
+  it("reports a content verdict on its FIRST refusal instead of waiting out the streak (23236)", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = ""
+    await using app = await createApp(
+      refuseForever(() => blocked),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/verdict-not-race")
+    blocked = pr.id
+    await app.queue.run({}, runtime)
+
+    // `authored-gitlink` is a needs-author verdict on the CONTENT: the same
+    // branch at the same head sha authors the same gitlink bump forever, so
+    // cycles two and three can only measure how long we waited to say so.
+    expect(app.state().queues.admissionRefusals[pr.id]).toMatchObject({ code: "authored-gitlink", count: 1 })
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({
+        code: "admission-refusal-loop",
+        pr: pr.id,
+        refusal: "authored-gitlink",
+        count: 1,
+        since: "2026-01-01T00:00:00.000Z",
+      }),
+    )
+  })
+
+  it("still spends the full three cycles on a refusal that can clear itself (23236)", async () => {
+    const clock = movableClock("2026-01-01T00:00:00.000Z")
+    let blocked = ""
+    await using app = await createApp(
+      refuseForever(() => blocked, {
+        code: "recut-certificate",
+        message: (pr) => `yrd: change '${pr}' has a certified base this repository cannot read`,
+      }),
+      clock.read,
+    )
+    const pr = await submitAndRequestChecks(app, "issue/losable-race")
+    blocked = pr.id
+
+    // The threshold exists so one losable race never pages a human, and a
+    // certificate that could not be READ is exactly that — the 2026-07-27
+    // specimen refused 106 cycles and was cured by nothing but a retry.
+    // Reporting verdicts sooner must not lower the bar here.
+    await app.queue.run({}, runtime)
+    expect(app.queue.audit().findings).toEqual([])
+    clock.set("2026-01-01T00:10:00.000Z")
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
+    await app.queue.run({}, runtime)
+    expect(app.queue.audit().findings).toEqual([])
+    clock.set("2026-01-01T00:20:00.000Z")
+    await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
+    await app.queue.run({}, runtime)
+    expect(app.queue.audit().findings).toContainEqual(
+      expect.objectContaining({ code: "admission-refusal-loop", refusal: "recut-certificate", count: 3 }),
+    )
+  })
+
   it("keeps a passed admission in the no-merge progress population until delivery", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     await using app = await createDeliveryApp(clock.read, true)
@@ -791,7 +848,16 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
     log.end()
   })
 
-  it("stays quiet below the loop threshold and survives replay from the journal", async () => {
+  // Changed deliberately, not edited into agreement (23236). This test used to
+  // read "stays quiet below the loop threshold and survives replay from the
+  // journal", and it was not wrong: it recorded the contract as it stood, that
+  // EVERY refusal waits out the streak. That contract is now split by code —
+  // `authored-gitlink` is a verdict on the content and speaks at once, while a
+  // refusal that can clear itself still spends all three cycles, which is what
+  // "still spends the full three cycles on a refusal that can clear itself"
+  // above now holds. The replay half of this test is untouched: the ledger is
+  // journal-derived state either way.
+  it("reports a content verdict from its first cycle and survives replay from the journal", async () => {
     const clock = movableClock("2026-01-01T00:00:00.000Z")
     const journal = createMemoryJournal()
     const id = ids()
@@ -807,11 +873,15 @@ describe("admission refusal oracle — a head-of-line PR refused at admission is
       blocked = pr.id
 
       await app.queue.run({}, runtime)
-      expect(app.queue.audit().findings).toEqual([])
+      expect(app.queue.audit().findings).toContainEqual(
+        expect.objectContaining({ code: "admission-refusal-loop", count: 1 }),
+      )
       clock.set("2026-01-01T00:10:00.000Z")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
-      expect(app.queue.audit().findings).toEqual([])
+      expect(app.queue.audit().findings).toContainEqual(
+        expect.objectContaining({ code: "admission-refusal-loop", count: 2 }),
+      )
       clock.set("2026-01-01T00:20:00.000Z")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
       await app.queue.run({}, runtime)
@@ -1095,8 +1165,16 @@ describe("a submitted PR with no check request and a ledgered refusal never wedg
 
     // Pre-fix both of these threw "queued change '<id>' has no current check
     // request" out of the head sort. Post-fix the state is a finding: the
+    // head's own content verdict lands on its first cycle (23236), and the
     // never-started window names the change the moment it exceeds the policy.
-    expect(app.queue.audit().findings).toEqual([])
+    expect(app.queue.audit().findings).toEqual([
+      expect.objectContaining({
+        code: "admission-refusal-loop",
+        pr: ahead.id,
+        refusal: "carrier-drops-landed",
+        count: 1,
+      }),
+    ])
     expect(app.queue.audit({ now: "2026-01-01T06:00:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({ code: "queue-never-started", pr: pr.id }),
     )
