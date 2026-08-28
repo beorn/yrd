@@ -768,19 +768,16 @@ export function isChangeRevisionSelector(pr: string): boolean {
  * about a corrupt journal, not an operator whose selector found nothing.
  */
 export function changeNotFoundMessage(state: BaysState, selector: string): string {
-  // S7: the denominator counts the SURVIVING population a selector can name —
-  // replayed record history plus live submit facts — so the falsifiable-empty
-  // contract outlives the record store (`searched 0` stays honest absence).
-  const searched = `searched ${Object.keys(state.prs).length + Object.keys(state.submits).length} change(s)`
-  if (parseChangeSelector(selector) !== undefined || !/^(?:pr#?|\d+\.)/iu.test(selector.trim())) {
-    return `yrd: no change '${selector}' — ${searched}`
-  }
-  const copiedId = /^(?:pr#?)?([a-z0-9_-]+)/iu.exec(selector.trim())?.[1]
-  const copiedPr = copiedId === undefined ? undefined : state.prs[`PR${copiedId}`]
-  const examplePr = copiedPr ?? Object.values(state.prs).toSorted((left, right) => compareNatural(left.id, right.id))[0]
-  const example =
-    examplePr === undefined ? "pr#1.1" : formatChangeRevisionSelector(examplePr.id, currentChangeRev(examplePr))
-  return `yrd: no change '${selector}'; accepted form: ${example} — ${searched}`
+  // S7: the denominator counts the population a selector can still name — the
+  // live submit facts — so the falsifiable-empty contract outlives the record
+  // store (`searched 0` stays honest absence rather than silent absence).
+  //
+  // The `pr#N.R` half of this message is gone with the records it described.
+  // A selector that looks like a record id now gets the same "no change" line
+  // as any other miss, because there is no population left to draw an example
+  // from: suggesting a form nothing can satisfy would be worse than saying
+  // nothing. Branch names are the selectors that resolve.
+  return `yrd: no change '${selector}' — searched ${Object.keys(state.submits).length} submitted branch(es)`
 }
 
 export function currentChangeRev(pr: Pick<Change, "id" | "revs">): ChangeRev {
@@ -968,22 +965,14 @@ export type ProjectedBranchSubmit = Readonly<{
   at: string
 }>
 
+/** S7 (branch-is-change, @i/10 22991): `prs` and `receipts` are GONE. The change
+ * record was the queue's stored copy of what a branch had submitted; the branch
+ * and its standing submit fact are now that truth, so the store held only
+ * history — and history reads from run snapshots, the merge-record notes, and
+ * main's own ancestry instead. Every `pr/*` event still parses on replay and
+ * projects nothing. */
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
-  prs: Readonly<Record<PRId, Change>>
-  receipts: Readonly<
-    Record<
-      string,
-      Readonly<{
-        pr: PRId
-        branch: string
-        headSha: string
-        base: string
-        baseSha?: string
-        composition?: CompositionV1
-      }>
-    >
-  >
   /** Live `refs/yrd/submit/<branch>` facts by branch — see {@link BranchSubmitSchema}. */
   submits: Readonly<Record<string, ProjectedBranchSubmit>>
 }>
@@ -1089,7 +1078,7 @@ export function defaultBayBranch(name: string): string {
 }
 
 export function emptyBaysState(): BaysState {
-  return { byId: {}, prs: {}, receipts: {}, submits: {} }
+  return { byId: {}, submits: {} }
 }
 
 /** Projects the current lifecycle of every Bay-registered work branch from the
@@ -1170,14 +1159,6 @@ export function isTracked(pr: Change): boolean {
   return pr.track ?? true
 }
 
-/** @deprecated S7 read-survivor: joins a bay to its REPLAYED record history
- * (`state.prs`), which no live command grows any more. Kept only for
- * cross-package readers (@yrd/contest promotion pins); deletes with the store
- * once those rewire onto run snapshots / merged-truth. */
-export function changeForBay(state: BaysState, bay: BayId): Change | undefined {
-  return Object.values(state.prs).find((pr) => pr.bay === bay)
-}
-
 export function resolveBay(state: BaysState, selector: string): Bay | undefined {
   return resolveSelector(
     selector,
@@ -1192,100 +1173,9 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
   )
 }
 
-/** Resolve a change selector, reporting whether the operator named the change's
- * canonical id or reached it through an alias (branch/name/bay). A branch
- * selector means "the live delivery of this branch": when a branch has both a
- * terminal change and a live one, the live change wins. Candidates are ordered
- * most-recent-first (highest id) so the read-biased fallback resolves the most
- * recent terminal when a branch has ONLY terminal PRs. An exact canonical id
- * always addresses that specific PR, terminal or not, ahead of this preference.
- * This primitive stays verb-agnostic and read-biased; {@link requireLiveChange}
- * layers the live requirement on top. */
-export type ChangeSelectorMatch = SelectorMatch<Change> & Readonly<{ revision?: ChangeRev }>
-
-/** @deprecated S7 read-survivor (with {@link resolveChange},
- * {@link requireLiveChange}, {@link changeNotFoundMessage}): resolves over the
- * REPLAYED record store, which no live command grows any more. Kept because
- * @yrd/queue and @yrd/cli still import these for reads; each deletes with the
- * store once its owner rewires onto the queue's snapshot resolver
- * (`resolveMemberById`) + live submit facts. The selector GRAMMAR
- * ({@link parseChangeSelector}) is permanent and stays. */
-export function resolveChangeMatch(state: BaysState, selector: string): ChangeSelectorMatch | undefined {
-  const parsed = parseChangeSelector(selector)
-  const candidates = Object.values(state.prs)
-    .toSorted((left, right) => compareNatural(right.id, left.id))
-    .map((pr) => {
-      const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
-      return {
-        canonical: pr.id,
-        aliases: [
-          pr.branch,
-          ...(pr.name === undefined ? [] : [pr.name]),
-          ...(bay === undefined ? [] : [bay.id, bay.name, bay.branch]),
-        ],
-        value: pr,
-      }
-    })
-  const resolve = (input: string) => resolveSelectorMatch(input, candidates, { kind: "change", prefer: isLiveChange })
-  const matched = parsed === undefined ? resolve(selector) : (resolve(parsed.pr) ?? resolve(selector))
-  if (matched === undefined) return undefined
-  if (parsed?.revision === undefined) return matched
-  const revision = matched.value.revs.find((candidate) => candidate.n === parsed.revision)
-  return revision === undefined ? undefined : { ...matched, revision }
-}
-
-function projectChangeRevision(pr: Change, revision: ChangeRev): Change {
-  if (revision === currentChangeRev(pr)) return pr
-  const index = pr.revs.indexOf(revision)
-  if (index < 0) return pr
-  return {
-    ...pr,
-    revs: pr.revs.slice(0, index + 1),
-    reviews: pr.reviews.filter((review) => review.revision <= revision.n),
-    comments: pr.comments.filter((comment) => comment.revision <= revision.n),
-    checkRequests: pr.checkRequests.filter((request) => request.revision <= revision.n),
-  }
-}
-
-export function resolveChange(state: BaysState, selector: string): Change | undefined {
-  const matched = resolveChangeMatch(state, selector)
-  if (matched === undefined) return undefined
-  return matched.revision === undefined ? matched.value : projectChangeRevision(matched.value, matched.revision)
-}
-
-declare const liveBrand: unique symbol
-
-/** A change that has passed through {@link requireLiveChange}. The brand was
- * the shared mutation-boundary guard while record verbs existed; S7 deleted
- * every mutating verb, so it survives only as the return shape of the
- * deprecated read-survivor below. */
-export type LiveChange = Change & { readonly [liveBrand]: true }
-
-/** @deprecated S7 read-survivor (see {@link resolveChangeMatch}): the
- * live-preference resolution — a branch/name selector must name the live
- * delivery of that branch; a terminal change resolves only by its exact
- * canonical id. No mutating verb remains behind it; kept because @yrd/cli
- * still imports it, and it deletes with the store once that caller rewires
- * onto the queue's snapshot resolver + live submit facts. */
-export function requireLiveChange(state: BaysState, selector: string): LiveChange {
-  const resolution = resolveChangeMatch(state, selector)
-  if (resolution === undefined) {
-    raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state, selector))
-  }
-  const pr = resolution.value
-  if (resolution.revision !== undefined) {
-    const current = currentChangeRev(pr)
-    if (resolution.revision.n !== current.n) {
-      raiseFailure(
-        "refusal",
-        "historical-pr-revision",
-        `yrd: change '${pr.id}' selector targets historical revision ${resolution.revision.n}; current revision is ${current.n}`,
-      )
-    }
-  }
-  // A canonical-id match ('pr1' folds to PR1) passes a terminal change through to
-  // the verb's own state guard; an alias (branch/name) match must name a live
-  // delivery. The fold that decides this lives in resolveSelectorMatch, not here.
-  if (isLiveChange(pr) || resolution.matchedBy === "canonical") return pr as LiveChange
-  raiseFailure("refusal", "no-live-pr", `yrd: no live change for branch '${selector}'; use PR id`)
-}
+/** The `pr#N.R` selector grammar is permanent (see {@link parseChangeSelector}),
+ * but the RESOLVERS that turned one into a stored record are gone with the
+ * store: `resolveChangeMatch`, `resolveChange`, `requireLiveChange` and
+ * `changeForBay` all read `bays.prs`. A selector now resolves against the live
+ * submit facts and the queue's own member snapshots — @yrd/queue's
+ * `resolveMemberById` is the read that replaced them. */

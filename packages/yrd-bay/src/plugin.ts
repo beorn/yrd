@@ -634,17 +634,24 @@ export type BayBaseTarget = Readonly<{
 export type ResolveBayBaseContext = Readonly<{ branch?: string }>
 export type ResolveBayBase = (base: string, context?: ResolveBayBaseContext) => BayBaseTarget | Promise<BayBaseTarget>
 
+/** Whether this exact branch name was already earned by this same identity, so
+ * reopening onto it is a resumption rather than a collision.
+ *
+ * S7: the record half of this question is gone with the store — a live change
+ * record for the branch and issue used to count as provenance. A closed Bay
+ * carrying the same name and issue is now the whole answer, which is the
+ * durable half: it is Bay state, not delivery state, and reopening a Bay is a
+ * Bay question. A branch whose only provenance was a live record would have
+ * had a standing submit fact too, and the caller checks branch ownership
+ * separately. */
 function hasBranchReuseProvenance(
   state: DeepReadonly<BaysState>,
   identity: Pick<OpenBayArgs, "name" | "issue">,
   branch: string,
 ): boolean {
-  return (
-    Object.values(state.prs).some((pr) => pr.branch === branch && pr.issue === identity.issue && isLiveChange(pr)) ||
-    Object.values(state.byId).some(
-      (bay) =>
-        bay.status === "closed" && bay.branch === branch && bay.name === identity.name && bay.issue === identity.issue,
-    )
+  return Object.values(state.byId).some(
+    (bay) =>
+      bay.status === "closed" && bay.branch === branch && bay.name === identity.name && bay.issue === identity.issue,
   )
 }
 
@@ -967,7 +974,7 @@ export function withBays(options: WithBaysOptions) {
         ),
         "pr/admission-recorded": ChangeAdmissionRecordedFactSchema,
       },
-      projectionVersion: "bays-v15-retired-regressions",
+      projectionVersion: "bays-v16-retired-record-store",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1379,23 +1386,6 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   const current = state.bays
   const saveBay = (bay: Bay): BayState => bayState({ ...current, byId: { ...current.byId, [bay.id]: bay } })
   const patchBay = (bay: Bay, patch: Partial<Bay>): BayState => saveBay({ ...bay, ...patch })
-  const patchPR = (pr: Change, patch: Partial<Change>): BayState =>
-    bayState({ ...current, prs: { ...current.prs, [pr.id]: { ...pr, ...patch } } })
-  const patchRevisionClock = (pr: Change, patch: Partial<ChangeRevClock>): readonly ChangeRev[] => {
-    const currentRevision = currentChangeRev(pr)
-    let found = false
-    const revisions = pr.revs.map((revision) => {
-      if (revision.n !== currentRevision.n || revision.head !== currentRevision.head) return revision
-      found = true
-      return { ...revision, ...patch }
-    })
-    if (!found) {
-      throw new Error(
-        `yrd: change '${pr.id}' has no clock for current revision ${currentRevision.n}@${currentRevision.head}`,
-      )
-    }
-    return revisions
-  }
   const data = applied.data as Record<string, unknown>
 
   switch (applied.name) {
@@ -1460,477 +1450,34 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         },
       })
     }
-    case "pr/pushed": {
-      const parsed = ChangePushedSchema.safeParse(data)
-      const previous = ChangePushedV1Schema.safeParse(data)
-      const pushed = parsed.success
-        ? parsed.data
-        : previous.success
-          ? previous.data
-          : LegacyChangePushedSchema.parse(normalizeV1CorrelationToProps(data))
-      const base = baseIdentity(pushed.base)
-      const existing = current.prs[pushed.pr]
-      const record: ChangeRev = {
-        n: pushed.revision,
-        ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
-        head: pushed.headSha,
-        base,
-        ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
-        ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
-        ...(parsed.success
-          ? { submitter: parsed.data.submitter }
-          : previous.success
-            ? { submitter: previous.data.submitter }
-            : {}),
-        pushedAt: applied.ts,
-        ...(pushed.props === undefined ? {} : { props: pushed.props }),
-      }
-      const pr: Change =
-        existing === undefined
-          ? {
-              id: pushed.pr,
-              ...(pushed.bay === undefined ? {} : { bay: pushed.bay }),
-              ...(pushed.name === undefined ? {} : { name: pushed.name }),
-              ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
-              branch: pushed.branch,
-              base,
-              state: "open",
-              merged: false,
-              revs: [record],
-              reviews: [],
-              comments: [],
-              checkRequests: [],
-              requestedReviewers: [],
-            }
-          : {
-              ...existing,
-              ...(pushed.bay === undefined ? {} : { bay: pushed.bay }),
-              ...(pushed.name === undefined ? {} : { name: pushed.name }),
-              ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
-              base,
-              state: "open",
-              merged: false,
-              revs: [...existing.revs, record],
-              terminalRun: undefined,
-              submittedAt: undefined,
-              rejectedAt: undefined,
-              integratedAt: undefined,
-              integration: undefined,
-              alreadyLandedAt: undefined,
-              alreadyLanded: undefined,
-              withdrawnAt: undefined,
-              withdrawReason: undefined,
-              canceledAt: undefined,
-              canceledBy: undefined,
-              cancelReason: undefined,
-              detail: undefined,
-            }
-      // S7: the receipts satellite is write-dead — intake idempotence, its
-      // only reader, retired with intakePR. The `receipt` field still parses
-      // (journal contract); it just projects nothing.
-      return bayState({ ...current, prs: { ...current.prs, [pr.id]: pr } })
-    }
-    case "pr/recut": {
-      const parsed = ChangeRemergeFactSchema.safeParse(data)
-      const remerge = parsed.success ? parsed.data : ChangeRemergeReplaySchema.parse(data)
-      const pr = current.prs[remerge.pr]
-      // S7 relaxation: with no live mint a recut can name a record this state
-      // never materialized; the parse above is the contract, the store write
-      // is best-effort history.
-      if (pr === undefined) return state
-      const predecessor = pr.revs.find(
-        (revision) => revision.n === remerge.predecessor.revision && revision.head === remerge.predecessor.headSha,
-      )
-      if (
-        predecessor === undefined ||
-        remerge.fromRevision !== remerge.predecessor.revision ||
-        predecessor.baseSha !== remerge.predecessor.baseSha ||
-        remerge.successor.revision !== changeRevisionNumber(pr) + 1
-      ) {
-        throw new Error(`yrd: rebuild history does not match change '${pr.id}'`)
-      }
-      const proof: ChangeRemergeProof = {
-        fromRevision: remerge.fromRevision,
-        patchId: remerge.patchId,
-        treeSha: remerge.treeSha,
-        reviewCarried: remerge.reviewCarried,
-        ...(remerge.certificate === undefined ? {} : { certificate: remerge.certificate }),
-        ...(remerge.sources === undefined ? {} : { sources: remerge.sources }),
-        ...(remerge.transition === undefined ? {} : { transition: remerge.transition }),
-      }
-      const props = predecessor.props
-      const submitter = remerge.submitter ?? predecessor.submitter
-      // An admission is a verdict about a tree merged into a base. A rebuild
-      // that merges on the identical head AND the identical certified base has
-      // not changed either, so the verdict is still about this revision's
-      // content and carries — exactly as an approved review does below.
-      //
-      // Without this a byte-identical rebuild discards its own green: the
-      // carrier drops out of the queue, the runner re-requests, admission
-      // passes, the next rebuild discards it again, and nothing merges while
-      // every instrument reads healthy
-      // (@i/10-merge-queue/admission-passes-nothing-merges; one carrier reached
-      // revision 66). Any real change moves the head or the base and correctly
-      // leaves the new revision unadmitted.
-      const carriedAdmission =
-        remerge.successor.headSha === predecessor.head && remerge.successor.baseSha === predecessor.baseSha
-          ? predecessor.admission
-          : undefined
-      const revision: ChangeRev = {
-        n: remerge.successor.revision,
-        ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
-        head: remerge.successor.headSha,
-        base: pr.base,
-        baseSha: remerge.successor.baseSha,
-        ...(submitter === undefined ? {} : { submitter }),
-        ...(props === undefined ? {} : { props: { ...props } }),
-        ...(remerge.composition === undefined ? {} : { composition: remerge.composition }),
-        ...(carriedAdmission === undefined ? {} : { admission: carriedAdmission }),
-        recut: proof,
-        pushedAt: applied.ts,
-      }
-      const effectiveReview = pr.reviews.findLast(
-        (review) => review.revision === predecessor.n && review.headSha === predecessor.head,
-      )
-      const approval = effectiveReview?.decision === "approve" ? effectiveReview : undefined
-      if (remerge.reviewCarried && approval === undefined) {
-        throw new Error(`yrd: change '${pr.id}' rebuild carries a missing approval`)
-      }
-      const carriedReview: ChangeReview | undefined =
-        remerge.reviewCarried && approval !== undefined
-          ? {
-              revision: revision.n,
-              headSha: revision.head,
-              by: approval.by,
-              decision: "approve",
-              at: applied.ts,
-              ...(approval.note === undefined ? {} : { note: approval.note }),
-              carriedFrom: { revision: predecessor.n, headSha: predecessor.head },
-            }
-          : undefined
-      return patchPR(pr, {
-        state: "open",
-        merged: false,
-        revs: [...pr.revs, revision],
-        reviews: carriedReview === undefined ? pr.reviews : [...pr.reviews, carriedReview],
-        needsAuthor: undefined,
-        terminalRun: undefined,
-        submittedAt: undefined,
-        rejectedAt: undefined,
-        integratedAt: undefined,
-        integration: undefined,
-        alreadyLandedAt: undefined,
-        alreadyLanded: undefined,
-        withdrawnAt: undefined,
-        withdrawReason: undefined,
-        canceledAt: undefined,
-        canceledBy: undefined,
-        cancelReason: undefined,
-        detail: undefined,
-      })
-    }
-    case "pr/submitted": {
-      const parsed = ChangeRevisionSchema.safeParse(data)
-      const changed = parsed.success
-        ? parsed.data
-        : LegacyChangeRevisionSchema.parse(normalizeV1CorrelationToProps(data))
-      const changedFlow = parsed.success ? parsed.data.flow : undefined
-      const pr = current.prs[changed.pr]
-      if (pr === undefined) return state
-      if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
-        throw new Error(`yrd: stale change event for '${pr.id}'`)
-      }
-      const currentProps = changeProps(pr)
-      const submittedConflict = changed.props === undefined ? undefined : propsConflictKey(currentProps, changed.props)
-      if (submittedConflict !== undefined) {
-        throw new Error(`yrd: submitted prop '${submittedConflict}' does not match change '${pr.id}'`)
-      }
-      const props = changed.props === undefined ? currentProps : { ...currentProps, ...changed.props }
-      if (
-        pr.flow !== undefined &&
-        changedFlow !== undefined &&
-        (pr.flow.name !== changedFlow.name ||
-          pr.flow.rev !== changedFlow.rev ||
-          pr.flow.fingerprint !== changedFlow.fingerprint)
-      ) {
-        throw new Error(`yrd: submitted flow does not match change '${pr.id}'`)
-      }
-      const revisions = patchRevisionClock(pr, { submittedAt: applied.ts, terminal: undefined }).map((revision) => {
-        if (revision.n !== changeRevisionNumber(pr) || revision.head !== changeHead(pr)) return revision
-        return {
-          ...revision,
-          ...(parsed.success ? { submitter: parsed.data.submitter } : {}),
-          ...(props === undefined ? {} : { props: { ...props } }),
-        }
-      })
-      return patchPR(pr, {
-        state: "open",
-        merged: false,
-        submittedAt: applied.ts,
-        needsAuthor: undefined,
-        rejectedAt: undefined,
-        integratedAt: undefined,
-        integration: undefined,
-        alreadyLandedAt: undefined,
-        alreadyLanded: undefined,
-        withdrawnAt: undefined,
-        withdrawReason: undefined,
-        canceledAt: undefined,
-        canceledBy: undefined,
-        cancelReason: undefined,
-        revs: revisions,
-        flow: pr.flow ?? changedFlow,
-      })
-    }
+    // S7 (branch-is-change, @i/10 22991): the change-record store is deleted, so
+    // no `pr/*` frame projects state any more. They must still be ACCEPTED —
+    // an old journal has to stay readable — and a malformed one must still fail
+    // loud, but neither obligation belongs here: the `events` and `replayEvents`
+    // registries above are this plugin's acceptance authority, and they refuse a
+    // corrupt frame before replay ever reaches a reducer (proven per family, one
+    // deliberately malformed frame each, with this switch stubbed out). A second
+    // parse here would restate a rule it cannot enforce.
+    case "pr/pushed":
+    case "pr/recut":
+    case "pr/submitted":
     case "pr/props-set":
-    case "pr/correlation-bound": {
-      const changed = ChangePropsBoundSchema.parse(data)
-      const pr = current.prs[changed.pr]
-      if (pr === undefined) return state
-      if (changeRevisionNumber(pr) !== changed.revision || changeHead(pr) !== changed.headSha) {
-        throw new Error(`yrd: stale props for change '${pr.id}'`)
-      }
-      const delivery = changeDeliveryState(pr)
-      if (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready" && delivery !== "needs-author") {
-        throw new Error(`yrd: change '${pr.id}' is ${delivery}; props cannot be set`)
-      }
-      const currentProps = changeProps(pr)
-      const conflict = propsConflictKey(currentProps, changed.props)
-      if (conflict !== undefined) {
-        throw new Error(`yrd: prop '${conflict}' conflicts with change '${pr.id}'`)
-      }
-      return patchPR(pr, propsPatch(pr, { ...currentProps, ...changed.props }))
-    }
-    case "pr/withdrawn": {
-      const parsed = ChangeWithdrawnSchema.safeParse(data)
-      const changed = parsed.success
-        ? parsed.data
-        : LegacyChangeWithdrawnSchema.parse(normalizeV1CorrelationToProps(data))
-      const pr = current.prs[changed.pr]
-      // S7 relaxation: a terminal fact for a DERIVED member names no record.
-      if (pr === undefined) return state
-      assertTerminalApplies(pr, changed, applied.name)
-      return patchPR(pr, {
-        state: "closed",
-        merged: false,
-        withdrawnAt: applied.ts,
-        ...(parsed.success && parsed.data.reason !== undefined ? { withdrawReason: parsed.data.reason } : {}),
-        revs: patchRevisionClock(pr, { terminal: { kind: "withdrawn", at: applied.ts } }),
-      })
-    }
-    case "pr/needs-author": {
-      const changed = ChangeNeedsAuthorFactSchema.parse(data)
-      const pr = current.prs[changed.pr]
-      // S6 relaxation: a DERIVED member's author-facing refusal FACT names no
-      // record — the journal fact is the product and the store write is a
-      // no-op. Unreachable while replaying any pre-door journal: a historical
-      // needs-author is always preceded in retained history by its record's
-      // pr/pushed (or the record rides the checkpoint across eviction), so
-      // this branch fires only for post-door emissions (A5 proves it).
-      if (pr === undefined) return state
-      assertTerminalApplies(pr, changed, applied.name)
-      const delivery = changeDeliveryState(pr)
-      if (delivery !== "submitted" && delivery !== "ready") {
-        throw new Error(`yrd: change '${pr.id}' is ${delivery}; '${applied.name}' requires a submitted revision`)
-      }
-      return patchPR(pr, {
-        needsAuthor: {
-          at: applied.ts,
-          run: changed.run,
-          step: changed.step,
-          receipt: changed.receipt,
-          ...(changed.evidence === undefined ? {} : { evidence: changed.evidence }),
-          ...(changed.detail === undefined ? {} : { detail: changed.detail }),
-        },
-        terminalRun: undefined,
-        rejectedAt: undefined,
-        detail: changed.detail,
-      })
-    }
-    case "pr/rejected": {
-      const changed = ChangeReplayRejectedSchema.parse(data)
-      const pr = current.prs[changed.pr]
-      // S7 relaxation: a terminal fact for a DERIVED member names no record.
-      if (pr === undefined) return state
-      assertTerminalApplies(pr, changed, applied.name)
-      const rejected: Change = {
-        ...pr,
-        state: "open",
-        merged: false,
-        rejectedAt: applied.ts,
-        terminalRun: undefined,
-        revs: patchRevisionClock(pr, {
-          terminal: { kind: "rejected", at: applied.ts },
-        }),
-        ...(changed.detail === undefined ? {} : { detail: changed.detail }),
-      }
-      return patchPR(pr, "run" in changed ? associateRejectedTerminalRun(rejected, changed, changed.run) : rejected)
-    }
-    case "pr/integrated": {
-      const parsed = ChangeIntegratedSchema.safeParse(data)
-      const v1 = parsed.success ? undefined : ChangeIntegratedV1Schema.safeParse(data)
-      const changed = parsed.success
-        ? parsed.data
-        : v1?.success === true
-          ? v1.data
-          : LegacyChangeIntegratedSchema.parse(normalizeV1CorrelationToProps(data))
-      const pr = current.prs[changed.pr]
-      // S6 relaxation: a DERIVED member's terminal fact names no record; the
-      // journal fact is what settlement and status consume, and the store
-      // write is a no-op. Unreachable for pre-door journals (see the
-      // pr/needs-author case note); fires only for post-door emissions.
-      if (pr === undefined) return state
-      assertTerminalApplies(pr, changed, applied.name)
-      const run = parsed.success ? parsed.data.run : v1?.success === true ? v1.data.run : undefined
-      return patchPR(pr, {
-        state: "closed",
-        merged: true,
-        integratedAt: applied.ts,
-        alreadyLandedAt: undefined,
-        alreadyLanded: undefined,
-        terminalRun: run,
-        integration: {
-          commit: changed.commit,
-          baseSha: changed.baseSha,
-          ...(parsed.success ? { changeId: parsed.data.changeId } : {}),
-        },
-        revs: patchRevisionClock(pr, {
-          terminal: { kind: "integrated", at: applied.ts, ...(run === undefined ? {} : { run }) },
-        }),
-      })
-    }
-    case "pr/already-landed": {
-      const changed = ChangeAlreadyMergedSchema.parse(data)
-      const pr = current.prs[changed.pr]
-      // S6 relaxation — same rule and same replay argument as pr/integrated.
-      if (pr === undefined) return state
-      assertTerminalApplies(pr, changed, applied.name)
-      return patchPR(pr, {
-        state: "closed",
-        merged: true,
-        needsAuthor: undefined,
-        integratedAt: undefined,
-        alreadyLandedAt: applied.ts,
-        terminalRun: changed.run,
-        integration: { commit: changed.baseSha, baseSha: changed.baseSha },
-        alreadyLanded: {
-          baseSha: changed.baseSha,
-          candidateSha: changed.candidateSha,
-          candidateTreeSha: changed.candidateTreeSha,
-          baseTreeSha: changed.baseTreeSha,
-          ...(changed.settlement === undefined ? {} : { settlement: changed.settlement }),
-        },
-        revs: patchRevisionClock(pr, {
-          terminal: {
-            kind: "already-landed",
-            at: applied.ts,
-            ...(changed.run === undefined ? {} : { run: changed.run }),
-          },
-        }),
-      })
-    }
-    case "pr/canceled": {
-      const parsed = ChangeCanceledSchema.safeParse(data)
-      const changed = parsed.success
-        ? parsed.data
-        : LegacyChangeCanceledSchema.parse(normalizeV1CorrelationToProps(data))
-      const pr = current.prs[changed.pr]
-      const run = parsed.success ? parsed.data.run : undefined
-      // S7 relaxation: a terminal fact for a DERIVED member names no record.
-      if (pr === undefined) return state
-      assertTerminalApplies(pr, changed, applied.name)
-      return patchPR(pr, {
-        state: "closed",
-        merged: false,
-        canceledAt: applied.ts,
-        canceledBy: changed.by,
-        cancelReason: changed.reason,
-        terminalRun: run,
-        revs: patchRevisionClock(pr, {
-          terminal: { kind: "canceled", at: applied.ts, ...(run === undefined ? {} : { run }) },
-        }),
-      })
-    }
-    case "pr/edited": {
-      const changed = ChangeEditArgsSchema.parse(data)
-      const pr = current.prs[changed.pr]
-      const attachIssue =
-        changed.issue !== undefined &&
-        pr !== undefined &&
-        pr.issue === undefined &&
-        (changeDeliveryState(pr) === "pushed" ||
-          changeDeliveryState(pr) === "submitted" ||
-          changeDeliveryState(pr) === "ready")
-      return pr === undefined
-        ? state
-        : patchPR(pr, {
-            ...(attachIssue ? { issue: changed.issue } : {}),
-            ...(changed.note === undefined ? {} : { note: changed.note }),
-            ...(changed.title === undefined ? {} : { title: changed.title }),
-            ...(changed.description === undefined ? {} : { description: changed.description }),
-            ...(changed.track === undefined ? {} : { track: changed.track }),
-          })
-    }
-    case "pr/reviewed": {
-      const reviewed = ChangeReviewFactSchema.parse(data)
-      const { pr: prId, ...fact } = reviewed
-      const pr = current.prs[prId]
-      if (pr === undefined) return state
-      const review: ChangeReview = { ...fact, at: applied.ts }
-      return patchPR(pr, { reviews: [...pr.reviews, review] })
-    }
-    case "pr/commented": {
-      const commented = ChangeCommentFactSchema.parse(data)
-      const pr = current.prs[commented.pr]
-      if (pr === undefined) return state
-      const comment: ChangeComment = { ...commented, at: applied.ts }
-      return patchPR(pr, { comments: [...pr.comments, comment] })
-    }
-    case "pr/session-started": {
-      RetiredChangeSessionStartedFactSchema.parse(data)
-      return state
-    }
-    case "pr/session-ended": {
-      RetiredChangeSessionEndedFactSchema.parse(data)
-      return state
-    }
-    case "pr/review-requested": {
-      const requested = ChangeReviewRequestFactSchema.parse(data)
-      const pr = current.prs[requested.pr]
-      if (pr === undefined) return state
-      return patchPR(pr, { requestedReviewers: requested.reviewers })
-    }
-    case "pr/checks-requested": {
-      const requested = ChangeCheckRequestFactSchema.parse(data)
-      const pr = current.prs[requested.pr]
-      if (pr === undefined) return state
-      if (changeRevisionNumber(pr) !== requested.revision || changeHead(pr) !== requested.headSha) return state
-      return patchPR(pr, {
-        checkRequests: [
-          ...pr.checkRequests,
-          {
-            revision: requested.revision,
-            headSha: requested.headSha,
-            ...(requested.baseSha === undefined ? {} : { baseSha: requested.baseSha }),
-            at: applied.ts,
-          },
-        ],
-      })
-    }
-    case "pr/admission-recorded": {
-      const recorded = ChangeAdmissionRecordedFactSchema.parse(data)
-      const pr = current.prs[recorded.pr]
-      if (pr === undefined) return state
-      if (changeRevisionNumber(pr) !== recorded.revision || changeHead(pr) !== recorded.headSha) return state
-      return patchPR(pr, {
-        needsAuthor: undefined,
-        revs: pr.revs.map((revision) =>
-          revision.n === recorded.revision && revision.head === recorded.headSha
-            ? { ...revision, admission: { ...recorded.admission, at: applied.ts } }
-            : revision,
-        ),
-      })
-    }
+    case "pr/correlation-bound":
+    case "pr/withdrawn":
+    case "pr/needs-author":
+    case "pr/rejected":
+    case "pr/integrated":
+    case "pr/already-landed":
+    case "pr/canceled":
+    case "pr/edited":
+    case "pr/reviewed":
+    case "pr/commented":
+    case "pr/session-started":
+    case "pr/session-ended":
+    case "pr/review-requested":
+    case "pr/checks-requested":
+    case "pr/admission-recorded":
+      return state as BayState
     case "job/requested": {
       if (typeof data.definition !== "string" || !isBayJob(data.definition)) return state
       const input = data.input as { bay?: unknown }

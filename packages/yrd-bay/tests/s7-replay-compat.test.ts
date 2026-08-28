@@ -1,26 +1,24 @@
 /**
- * @failure An old journal's pr/* history stops parsing or stops materializing
- * its records (history loss), a terminal fact for a recordless derived member
- * wedges replay, or a live command grows back the ability to emit a NEW pr/*
- * record event.
+ * @failure An old journal's pr/* history stops PARSING (history becomes
+ * unreadable), a malformed frame starts passing silently, or a live command
+ * grows back the ability to emit a new pr/* record event.
  * @level l2
  * @consumer @yrd/bay S7 replay contract (branch-is-change, @i/10 22991)
  *
- * The S7 distinction under test, stated once: reducers stay LIVE — an old
- * journal replays with its records intact (the store field deletes only at
- * the integration step's checkpoint migration) — while every COMMAND that
- * could emit a new pr/* record event is gone. Two projection deltas ride the
- * boundary: the receipts satellite is write-dead, and the four terminal
- * reducers that threw on a missing record (withdrawn/rejected/canceled/recut)
- * are no-ops there, because queue-side terminals for derived members name no
- * record by design.
+ * The S7 contract, stated once: the change-record STORE is deleted, so no
+ * pr/* frame projects state any more — but a journal's PARSE contract is
+ * permanent. Every frame a shipped journal can carry must still be accepted,
+ * with the same schemas and the same legacy normalization it always had, and a
+ * malformed one must still fail loud. Acceptance without projection is the
+ * whole shape, and the second test below is the one that catches a reducer
+ * "converted" by simply returning state: that version accepts corruption too.
  */
 import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
-import { changeDeliveryState, resolveChange, type BaysState } from "../src/model.ts"
+import { type BaysState } from "../src/model.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -210,6 +208,30 @@ const FULL_FAMILY_EVENTS: ReadonlyArray<{ name: string; data: Record<string, unk
   },
 ]
 
+/** Boot an app over an arbitrary set of frames — the acceptance probe. Replay
+ * failures surface as a rejected boot, which is exactly the loud failure the
+ * parse contract owes a corrupt journal. */
+async function appWithFrames(frames: ReadonlyArray<{ name: string; data: Record<string, unknown> }>) {
+  const nextId = ids()
+  const at = "2026-01-01T00:00:00.000Z"
+  const seededCommand = { id: nextId(), op: "fixture.s7-replay-frames" }
+  const journal = createMemoryJournal([
+    {
+      command: seededCommand,
+      cause: {
+        id: nextId(),
+        commandId: seededCommand.id,
+        op: seededCommand.op,
+        commandHash: Command.hash(seededCommand),
+      },
+      events: frames.map(({ name, data }) => ({ id: nextId(), name, ts: at, data })),
+    },
+  ])
+  const jobs = createBayJobDefs(workspaceAdapter())
+  const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+  return createYrd(definition, { inject: { journal, clock: () => at, id: nextId, log: silentLog } })
+}
+
 async function replayedApp() {
   const nextId = ids()
   const at = "2026-01-01T00:00:00.000Z"
@@ -232,48 +254,55 @@ async function replayedApp() {
 }
 
 describe("S7 replay compatibility", () => {
-  it("replays every pr/* family with records intact, recordless terminals as no-ops, and receipts write-dead", async () => {
+  it("accepts every pr/* family on replay and materializes no record state", async () => {
     await using app = await replayedApp()
     const state = app.bays.state() as BaysState
 
-    // History intact: the store still materializes on replay.
-    expect(Object.keys(state.prs).toSorted()).toEqual(
-      ["PR1", "PR2", "PR3", "PR4", "PR5", "PR6", "PR7", "PR8", "PR9"].toSorted(),
-    )
-    const delivery = (id: string) => changeDeliveryState(state.prs[id]!)
-    expect(delivery("PR1")).toBe("needs-author")
-    expect(delivery("PR2")).toBe("integrated")
-    expect(delivery("PR3")).toBe("withdrawn")
-    expect(delivery("PR4")).toBe("rejected")
-    expect(delivery("PR5")).toBe("canceled")
-    expect(delivery("PR6")).toBe("already-landed")
-    expect(delivery("PR7")).toBe("pushed")
-    expect(state.prs.PR7?.revs).toHaveLength(2)
-    expect(state.prs.PR8?.title).toBe("feat: edited title")
-    // The retired correlation pair folds into props at the read boundary.
-    expect(state.prs.PR9?.revs[0]?.props).toEqual({ request: "review-9" })
-    // Full decoration materialized (the reducers are live, not parse-and-discard).
-    expect(state.prs.PR1).toMatchObject({
-      reviews: [expect.objectContaining({ by: "@dev/2", decision: "approve" })],
-      comments: [expect.objectContaining({ note: "looks right" })],
-      requestedReviewers: ["@dev/2"],
-      checkRequests: [expect.objectContaining({ headSha: HEAD_1 })],
-    })
-    expect(state.prs.PR1?.revs[0]?.admission).toMatchObject({ status: "passed", baseSha: BASE })
+    // The whole point: the journal above holds nine changes' worth of fully
+    // decorated history — pushes, reviews, comments, check requests, admission
+    // records, recuts and every terminal — and NONE of it projects. The store
+    // that used to hold them is not empty, it is gone from the contract.
+    expect(Object.keys(state).toSorted()).toEqual(["byId", "submits"])
+    expect(state).not.toHaveProperty("prs")
+    expect(state).not.toHaveProperty("receipts")
 
-    // The recordless terminals no-op'd instead of throwing (the app booted at
-    // all — this line names the four relaxed reducers plus the S6-relaxed
-    // three, none of which may materialize anything).
-    for (const absent of ["PR90", "PR91", "PR92", "PR93", "PR94", "PR95", "PR96"]) {
-      expect(state.prs[absent]).toBeUndefined()
-    }
+    // Booting at all is the parse proof: every frame above — including the
+    // recordless terminals that once threw on a missing record, and the retired
+    // correlation vocabulary — was accepted rather than quarantined.
+    expect(app.bays.list()).toEqual([])
 
-    // The receipts satellite is write-dead: the pr/pushed receipt PARSED
-    // (PR1 exists) and projected nothing.
-    expect(state.receipts).toEqual({})
-
-    // The derived lane's facts replay beside the records.
+    // The derived lane's own facts still replay, beside the discarded history.
     expect(state.submits["task/replayed-fact"]).toMatchObject({ sha: HEAD_2, base: "main" })
+  })
+
+  it("still refuses a malformed pr/* frame instead of discarding it silently", async () => {
+    // Where acceptance actually lives, and why this test exists. The reducers
+    // are now bare `return state`, so the ONLY thing standing between a corrupt
+    // journal and silence is the `events`/`replayEvents` registry. Deleting an
+    // entry there would look harmless — every test that seeds well-formed
+    // history keeps passing — and would quietly turn corruption into a clean
+    // boot. These frames were refused before S7 and must stay refused.
+    await expect(
+      appWithFrames([{ name: "pr/pushed", data: { pr: "PR1", branch: "topic/bad", base: "main", headSha: "nope" } }]),
+    ).rejects.toThrow()
+    await expect(
+      appWithFrames([{ name: "pr/integrated", data: { pr: "PR2", revision: 1, headSha: HEAD_1 } }]),
+    ).rejects.toThrow()
+    await expect(appWithFrames([{ name: "pr/reviewed", data: { pr: "PR3", decision: "maybe" } }])).rejects.toThrow()
+    await expect(
+      appWithFrames([{ name: "pr/checks-requested", data: { pr: "PR4", revision: "one" } }]),
+    ).rejects.toThrow()
+
+    // And the legacy shapes a shipped journal really holds still parse: the v1
+    // correlation pair and a pushed frame with neither changeId nor submitter.
+    await using legacy = await appWithFrames([
+      { name: "pr/pushed", data: { pr: "PR9", branch: "topic/v1", base: "main", headSha: HEAD_1, revision: 1 } },
+      {
+        name: "pr/correlation-bound",
+        data: { pr: "PR9", revision: 1, headSha: HEAD_1, correlation: { namespace: "request", id: "review-9" } },
+      },
+    ])
+    expect(Object.keys(legacy.bays.state() as BaysState).toSorted()).toEqual(["byId", "submits"])
   })
 
   it("no live command can produce a new pr/* record event", async () => {
@@ -300,26 +329,17 @@ describe("S7 replay compatibility", () => {
     const after = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(after.slice(0, before.length)).toEqual(before)
     expect(after.slice(before.length)).toEqual(["branch/submitted"])
-    // A resubmit of a branch whose REPLAYED record is live routes derived too:
-    // the record store gains nothing from any live path.
+
+    // A branch whose REPLAYED history was a live record routes derived too —
+    // no live path can grow the record vocabulary back.
     const resubmit = await app.bays.submitSelection("topic/decorated", {
       base: "main",
       resolveRevision: async () => HEAD_2,
       run: runtime,
     })
     expect(resubmit).toMatchObject({ lane: "derived", branch: "topic/decorated" })
-    const state = app.bays.state() as BaysState
-    expect(Object.keys(state.prs)).toHaveLength(9)
     expect((await Array.fromAsync(app.events())).filter(({ name }) => name.startsWith("pr/"))).toHaveLength(
       FULL_FAMILY_EVENTS.filter(({ name }) => name.startsWith("pr/")).length,
     )
-  })
-
-  it("resolution still reads the replayed records (the deprecated read-survivors serve history)", async () => {
-    await using app = await replayedApp()
-    const state = app.bays.state() as BaysState
-    expect(resolveChange(state, "topic/landed")).toMatchObject({ id: "PR2" })
-    expect(resolveChange(state, "pr#7.2")?.revs).toHaveLength(2)
-    expect(resolveChange(state, "PR1")).toMatchObject({ branch: "topic/decorated" })
   })
 })
