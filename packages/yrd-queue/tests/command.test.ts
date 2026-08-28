@@ -109,6 +109,21 @@ async function git(repo: string, args: string[]): Promise<string> {
   return stdout.trim()
 }
 
+/** The git verb of a spawned `git -C <repo> …` argv, skipping interleaved
+ * `-c <key>=<value>` pairs — the queue's trusted landing pushes carry a
+ * `core.hooksPath` quarantine there, so a positional `argv[3]` read misses
+ * them and silently blinds any interceptor keyed on it. */
+function gitVerb(argv: readonly string[]): string | undefined {
+  for (let at = 3; at < argv.length; at += 1) {
+    if (argv[at] === "-c") {
+      at += 1
+      continue
+    }
+    return argv[at]
+  }
+  return undefined
+}
+
 async function stablePatchId(
   repo: string,
   from: string,
@@ -6516,7 +6531,7 @@ describe("Queue command adapters", () => {
     expect(changeFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
-  it("runs remote push hooks without inheriting recursive submodule pushes", async () => {
+  it("pushes the landing refspec quarantined and without inheriting recursive submodule pushes", async () => {
     const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -6528,7 +6543,7 @@ describe("Queue command adapters", () => {
     const pushes: (readonly string[])[] = []
     const recordingProcess: Pick<Process, "run"> = {
       async run(request) {
-        if (request.argv[0] === "git" && request.argv[3] === "push") pushes.push(request.argv)
+        if (request.argv[0] === "git" && gitVerb(request.argv) === "push") pushes.push(request.argv)
         return process.run(request)
       },
     }
@@ -6553,6 +6568,10 @@ describe("Queue command adapters", () => {
     const proof = IntegrationProofSchema.parse(run.integration)
     const rootPush = pushes.find((argv) => argv.includes(`${proof.commit}:refs/heads/main`))
     expect(rootPush).toContain("--recurse-submodules=no")
+    // The landing push is trusted queue plumbing: source hooks are quarantined
+    // per invocation (landing-push-hook-isolation.test.ts holds the behavioral
+    // proof; this pins the mechanism on the actual spawned argv).
+    expect(rootPush).toContain("core.hooksPath=/dev/null")
     const recordPush = pushes.find((argv) =>
       argv.some((argument) => argument.endsWith(":refs/notes/yrd/merge-records")),
     )
@@ -7296,7 +7315,20 @@ describe("Queue command adapters", () => {
     expect(submodulePushes.filter((argv) => argv.includes(secondSubmodule.remote))).toHaveLength(2)
   }, 40_000)
 
-  it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
+  it("lands a checked candidate with source hooks quarantined even when they would refuse it", async () => {
+    // Until 2026-08-27 this test pinned the OPPOSITE ("rejects a checked
+    // candidate that fails a hook even when the operator tree passes it",
+    // 3f209c8e): the source repository's pre-push hook gated the landing
+    // push, evaluated from the candidate tree. The retired record-publication
+    // path superseded that contract — trusted queue pushes run with source
+    // hooks isolated (612198a0 "publishes from trusted staging without
+    // running source push hooks"), because author hook code must neither
+    // execute with the queue's authority nor fail the integration
+    // (merge-push-failed / native-root-push-failure). This fixture's hook
+    // REFUSES the candidate ("invalid" ≠ "accepted"), and the landing must
+    // succeed anyway. The author-facing fence — the same repository's own
+    // pushes still run its hooks — lives in
+    // landing-push-hook-isolation.test.ts.
     const { repo, remote, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "accepted",
       candidateVersion: "invalid",
@@ -7304,7 +7336,7 @@ describe("Queue command adapters", () => {
     })
     await using process = createProcess()
     // Local paths exist only in this synthetic fixture; allow them explicitly
-    // so the candidate reaches the hook failure this test specifies.
+    // so the candidate reaches the landing push this test specifies.
     await using app = await checkedQueue(
       process,
       repo,
@@ -7314,12 +7346,11 @@ describe("Queue command adapters", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run, JSON.stringify(run, null, 2)).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: { code: "merge-push-failed" },
-    })
-    expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
+    expect(run, JSON.stringify(run, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
+    const landed = await git(remote, ["rev-parse", "main"])
+    expect(landed).not.toBe(baseSha)
+    expect(landed).toBe(run.integration?.commit)
+    expect(await git(remote, ["ls-tree", "-r", "--name-only", "main"])).toContain("feature.txt")
   })
 
   it("keeps one same-base run active before the remote compare-and-push", async () => {
@@ -7524,7 +7555,7 @@ describe("Queue command adapters", () => {
               (mergeMode === "native-ref" &&
                 request.argv[3] === "update-ref" &&
                 request.argv[4] === "refs/heads/main") ||
-              (mergeMode === "native-remote" && request.argv[3] === "push"))
+              (mergeMode === "native-remote" && gitVerb(request.argv) === "push"))
           ) {
             mergeRuns += 1
           }
@@ -7624,7 +7655,7 @@ describe("Queue command adapters", () => {
       async run(request) {
         const result = await process.run(request)
         const refspec = request.argv.find((argument) => argument.endsWith(":refs/heads/main"))
-        if (request.argv[0] !== "git" || request.argv[3] !== "push" || refspec === undefined) return result
+        if (request.argv[0] !== "git" || gitVerb(request.argv) !== "push" || refspec === undefined) return result
         mergedSha = refspec.slice(0, refspec.indexOf(":"))
         return { ...result, exitCode: 19, stderr: "transport lost the success acknowledgement" }
       },
