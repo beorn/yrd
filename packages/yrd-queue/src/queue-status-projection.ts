@@ -1,6 +1,6 @@
 /**
  * The queue's DISPLAY-STATE projection: what every status surface needs to
- * know about one record, derived once from `changeDeliveryState` (the
+ * know about one change, derived once from `changeDeliveryState` (the
  * model-side primitive) plus run/eligibility context. Moved here from
  * `@yrd/cli`'s queue-status-view so the projection has one home a non-view
  * consumer can import without reaching into a view file (5a: one derivation
@@ -30,7 +30,7 @@ import {
 import { type Event, type JsonValue, stageAsync } from "@yrd/core"
 import { type Job, type JobError, JobRequestSchema, JobTransitionSchema } from "@yrd/job"
 import { GateCertificateSchema } from "./command.ts"
-import { isDerivedMemberId } from "./derived-admission.ts"
+import { derivedAuthorityLookup } from "./derived-admission.ts"
 import {
   type Candidate,
   type ChangeCheckRecord,
@@ -42,6 +42,8 @@ import {
   type QueueMemberKind,
   type QueueStep,
   type QueueSummary,
+  type QueuesState,
+  resolveMemberById,
   type Run,
 } from "./model.ts"
 
@@ -192,6 +194,12 @@ export function runIdValue(run: string): string {
 export type QueueStatusResult = QueueSummary &
   Readonly<{
     headSha?: string
+    /** The display change list. The host feeds record-store values while the
+     * store lasts; post-purge it feeds materialized derived members plus
+     * retained-member projections for history rows. The projections below
+     * therefore never treat this list as a complete store: a run member
+     * missing from it, or a member whose listed value no longer retains the
+     * run's pinned revision, is a defined no-clock state, never corruption. */
     prs: Change[]
     admissionOrder: readonly string[]
     candidates?: readonly Candidate[]
@@ -208,11 +216,43 @@ type QueuePauseHealth = Readonly<{
   blocksAll: boolean
 }>
 
-export function queuePauseHealth(state: BaysState, pause: NonNullable<QueueSummary["pause"]>): QueuePauseHealth {
-  const members = pause.allowedPRs.map((id) => {
-    const pr = resolveChange(state, id)
-    return { id, status: pr === undefined ? ("unknown" as const) : changeDeliveryState(pr) }
-  })
+/**
+ * The delivery status of one pause allow-list member, derived-first: the id
+ * resolves through {@link resolveMemberById} (a record while the store lasts,
+ * else the newest retained run snapshot — the only identity home a derived
+ * member has), and a snapshot-resolved member's status is the fact's:
+ * {@link derivedAuthorityLookup} — the one authority derivation, never a
+ * second one here — answers `submitted` for a standing, unconsumed submit
+ * fact at the snapshot's sha. Everything else tolerates as `unknown`: no
+ * `queues` handed in, an id neither source knows, a fact that vanished or
+ * moved, or one a retained run already consumed — states where the honest
+ * status word (integrated? rejected? re-running?) belongs to the run-outcome
+ * projection, not to a partial re-derivation here. `unknown` keeps
+ * `blocksAll` conservative: never a false pause-blocks-all warning, at worst
+ * a missed one.
+ */
+function pauseMemberStatus(
+  state: BaysState,
+  queues: QueuesState | undefined,
+  id: string,
+): ChangeDeliveryState | "unknown" {
+  if (queues === undefined) {
+    const record = resolveChange(state, id)
+    return record === undefined ? "unknown" : changeDeliveryState(record)
+  }
+  const resolved = resolveMemberById(state, queues, id)
+  if (resolved === undefined) return "unknown"
+  if (resolved.source === "record") return changeDeliveryState(resolved.record)
+  const authority = derivedAuthorityLookup({ bays: state, queues })(resolved.snapshot)
+  return authority?.standing === true ? "submitted" : "unknown"
+}
+
+export function queuePauseHealth(
+  state: BaysState,
+  pause: NonNullable<QueueSummary["pause"]>,
+  queues?: QueuesState,
+): QueuePauseHealth {
+  const members = pause.allowedPRs.map((id) => ({ id, status: pauseMemberStatus(state, queues, id) }))
   return {
     members,
     blocksAll:
@@ -228,10 +268,14 @@ export function queuePauseAllowedText(
   return health?.members.map(({ id, status }) => `${id} ${status}`).join(", ") ?? pause.allowedPRs.join(", ")
 }
 
-export function queuePauseWarnings(state: BaysState, results: readonly QueueStatusResult[]): string[] {
+export function queuePauseWarnings(
+  state: BaysState,
+  results: readonly QueueStatusResult[],
+  queues?: QueuesState,
+): string[] {
   return results.flatMap((result) => {
     if (result.pause === undefined) return []
-    const health = queuePauseHealth(state, result.pause)
+    const health = queuePauseHealth(state, result.pause, queues)
     if (!health.blocksAll) return []
     return [
       `[pause-blocks-all] queue '${result.base}' pause blocks every change: all allowed PRs are terminal (${queuePauseAllowedText(result.pause, health)})`,
@@ -463,21 +507,19 @@ export function queueRunRevisionClocks(
   runs: Iterable<Run>,
 ): Map<string, ChangeRunRevisionClock> {
   const byId = new Map([...prs].map((pr) => [pr.id, pr]))
-  const recordIds = new Set(byId.keys())
   const clocks = new Map<string, ChangeRunRevisionClock>()
   for (const run of runs) {
     for (const revision of run.prs) {
       const pr = byId.get(revision.id)
-      if (pr === undefined) {
-        // A carrier-free pin intent's member id is an intent id: the snapshot
-        // is the whole record and no revision clock exists. A derived member
-        // (S6: minted above the frozen store's frontier) is recordless BY
-        // DESIGN and has no record clock either. A recordless member at or
-        // below the frontier is journal corruption and stays loud.
-        if (revision.intent !== undefined) continue
-        if (isDerivedMemberId(revision.id, recordIds)) continue
-        throw new Error(`yrd: run '${run.id}' has no retained change '${revision.id}'`)
-      }
+      // No clock is a defined state, never corruption: an intent member's run
+      // is its own admission; a derived member (recordless BY DESIGN) dates
+      // its admission from the run-journaled submit fact; and post-purge the
+      // fed change list is materialized members plus history projections —
+      // retaining only their current revision — not a complete store, so a
+      // member the list misses, or a listed member that no longer retains the
+      // run's exact pinned revision, simply mints no clock here.
+      if (pr === undefined) continue
+      if (!pr.revs.some((rev) => rev.n === revision.revision && rev.head === revision.headSha)) continue
       clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
     }
   }
@@ -1274,7 +1316,6 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
   const submissionTimes = new Map<string, string | null>()
   for (const result of results) {
     const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
-    const recordIds = new Set(byId.keys())
     for (const pr of result.prs) {
       for (const revision of pr.revs) {
         if (revision.submittedAt !== undefined) {
@@ -1293,22 +1334,26 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
     for (const run of [...result.running, ...result.waiting, ...result.finished]) {
       for (const member of run.prs) {
         const pr = byId.get(member.id)
+        const runKey = queueRunRevisionKey(run, member)
         if (pr === undefined) {
           // Intent members have no submission: the run itself is the admission.
-          // A derived member (S6) has no record to date a submission from either;
-          // its admission clock is the run's, exactly like an intent's.
-          if (member.intent !== undefined || isDerivedMemberId(member.id, recordIds)) {
-            submissionTimes.set(queueRunRevisionKey(run, member), null)
-            continue
-          }
-          throw new Error(`yrd: run '${run.id}' has no retained change '${member.id}'`)
+          // A derived member (recordless BY DESIGN) dates its admission from
+          // the run-journaled submit fact, exactly like an intent — and
+          // post-purge the fed change list is materialized members plus
+          // history projections, never a complete store, so any member it
+          // misses reads the same way. Never a throw: a missing entry here is
+          // a defined admission-is-the-run state, not corruption.
+          submissionTimes.set(runKey, null)
+          continue
         }
-        const runKey = queueRunRevisionKey(run, member)
-        if (pr.revs.length > 0) {
+        if (pr.revs.some((rev) => rev.n === member.revision && rev.head === member.headSha)) {
           const clock = runRevisionClock(pr, run)
           submissionTimes.set(runKey, clock.admittedBy === "submission" ? clock.submittedAt : null)
           continue
         }
+        // The listed change no longer retains the run's exact pinned revision
+        // (a materialized member carries only its current one): fall back to
+        // the change-level submit time when it causally precedes the run.
         const submittedAt = pr.submittedAt
         submissionTimes.set(
           runKey,
@@ -1513,25 +1558,19 @@ export function queueLogSubmissionTime(
   revisionClocks: ReadonlyMap<string, ChangeRunRevisionClock> | undefined,
   run: Run,
   pr: PinnedChangeRevision,
-  recordIds: ReadonlySet<string>,
+  _recordIds?: ReadonlySet<string>,
 ): string | undefined {
   if (revisionClocks === undefined) return undefined
   const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
-  if (clock === undefined) {
-    // Intent members never mint a revision clock (no submission precedes the
-    // run). Derived members (recordless post-S6) never mint one either: their
-    // admission is the run-journaled git submit fact, not a record-lane
-    // submission event, so queueRunRevisionClocks deliberately skips them and
-    // this lookup misses. Records are never deleted post-S6, so a recordless
-    // member IS derived — the same membership rule as isDerivedMemberId, never
-    // a number frontier (PR2135 vs PR2131, 2026-08-27). Every RECORD change
-    // member must still have a clock; that absence stays a loud failure.
-    if (pr.intent !== undefined) return undefined
-    if (isDerivedMemberId(pr.id, recordIds)) return undefined
-    throw new Error(
-      `yrd: run '${run.id}' has no causal submit/check-request clock for change '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
-    )
-  }
+  // A missing clock is a defined state, never corruption: intent members'
+  // and derived members' admission is the run itself (no record-lane
+  // submission event precedes it), and post-purge the clock source is the
+  // fed change list — materialized members retaining only their current
+  // revision — not a complete store, so history rows legitimately miss. The
+  // record-membership tolerance rule this once keyed on `_recordIds` retired
+  // with the store; the set is accepted only so existing callers keep
+  // compiling until their own S7 sweep drops it.
+  if (clock === undefined) return undefined
   return clock.admittedBy === "submission" ? clock.submittedAt : undefined
 }
 

@@ -2912,7 +2912,10 @@ describe("Queue command adapters", () => {
         run: "R-hook",
         step: "check",
         index: 0,
-        prs: [{ id: "PR-hook", branch: "issue/hooked", base: "main", revision: 1, headSha: featureSha }],
+        // A schema-valid member id: non-intent snapshots are PRnnn by schema,
+        // and the candidate now records a note row for every non-intent
+        // member (synthetic identity included), parsing the id it carries.
+        prs: [{ id: "PR90", branch: "issue/hooked", base: "main", revision: 1, headSha: featureSha }],
         shape: { results: {} },
       },
       { id: "J-hook", attempt: 1, runner: "test", signal: new AbortController().signal },
