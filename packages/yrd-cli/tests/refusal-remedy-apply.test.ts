@@ -139,7 +139,11 @@ function harness(
       resolveCommit: async (ref: string) => (ref === "origin/main" || ref === "main" ? TARGET : ref),
       isAncestor: async () => verdict === "SUBSUMED-WITHDRAW",
       mergeTree: async () => "tree-merged",
-      treeOf: async () => (verdict === "SUBSUMED-WITHDRAW" ? "tree-merged" : "tree-base"),
+      // The carrier authored content of its own — its head tree differs from
+      // its recorded base's — so a subsumed verdict is about a real payload,
+      // not about a carrier that never had one.
+      treeOf: async (sha: string) =>
+        sha === BASE ? "tree-source-base" : verdict === "SUBSUMED-WITHDRAW" ? "tree-merged" : "tree-base",
       // Linear by default: the preflight linear-root gate counts parents.
       parents: async () => [TARGET],
       pinDistance: async () => ({ sourceOnly: 0, targetOnly: verdict === "FRESH-NOOP" ? 0 : 3 }),

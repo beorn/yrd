@@ -195,6 +195,10 @@ type PruneRow = Readonly<{
 
 export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
 
+/** One executed comparison, named the way the operator reading the verdict
+ * needs it: which plumbing ran, and what it concluded over which range. */
+export type SubsumptionProof = Readonly<{ check: string; detail: string }>
+
 export type RemergePreflightResult = Readonly<{
   command: "pr.recut.preflight"
   pr: string
@@ -212,6 +216,12 @@ export type RemergePreflightResult = Readonly<{
     patchMatchTarget: string | null
     ancestorOfTarget: boolean
     tree: "identical" | "divergent" | "conflicts" | "skipped"
+    /** The comparison that actually EXECUTED and concluded subsumption, absent
+     * when none did. `tree: "skipped"` and `patchId: null` are non-measurements
+     * sharing their fields with measurements, so this is the only field that
+     * says a comparison happened — and a payload burn may be ordered on nothing
+     * else (@i/10-yrd/subsumed-verdict-is-vacuous). */
+    subsumedBy?: SubsumptionProof
     certified: boolean
     passingCheck: boolean
     requestedQueue: boolean
@@ -310,6 +320,30 @@ async function contentChecks(headSha: string, baseSha: string, git: PruneGitFact
   return { headPresent: true, ancestorOfBase: ancestor, mergeTree }
 }
 
+/** Did this revision author content of its own?
+ *
+ * Subsumption evidence — head reachable from the base, or a merge that
+ * reproduces the base tree — is "this changes nothing relative to the base",
+ * and that is equally true of a payload that ALREADY LANDED and of a carrier
+ * that never authored one. The two states are opposite and the evidence is
+ * identical, so neither check can be read as "already merged" on its own
+ * (@i/10-yrd/23184).
+ *
+ * The tree tuple separates them: a head whose tree equals its OWN recorded
+ * base's tree changed nothing, so nothing about it can have landed. Only trees
+ * decide — commit and patch counts call a revert-then-restore history "unique
+ * work" while the trees are identical (`@yrd/queue` content-identity.ts, the
+ * 23167 specimen), and stable patch IDs are attribution evidence only. */
+async function authoredContent(
+  headSha: string,
+  sourceBaseSha: string,
+  git: PruneGitFacts,
+): Promise<Readonly<{ headTree: string; sourceBaseTree: string; empty: boolean }>> {
+  const headTree = await git.treeOf(headSha)
+  const sourceBaseTree = await git.treeOf(sourceBaseSha)
+  return { headTree, sourceBaseTree, empty: headTree === sourceBaseTree }
+}
+
 /** Prove one change's superseded verdict against its resolved base tip. Every
  * check that ran (and every check that was skipped, with why) is named in the
  * returned row so the operator sees exactly what was verified. */
@@ -338,6 +372,21 @@ async function pruneVerdict(pr: Change, baseSha: string, git: PruneGitFacts, dry
   const checked = `ancestor-of-base=${ancestor ? "yes" : "no"}, merge-tree=${mergeTree === "skipped" ? "skipped (head already reachable)" : mergeTree}`
   if (!superseded) {
     return { ...identity, checks, verdict: "keep", detail: `${checked} — live content not on base — kept` }
+  }
+  // Withdrawal SPENDS the payload and records that its content already merged.
+  // Prove there was a payload before spending one: see {@link authoredContent}.
+  if (revision.baseSha === undefined) {
+    const unproven =
+      `revision records no base commit, so its authored payload cannot be proven — ` +
+      `superseded and never-authored are indistinguishable here`
+    return { ...identity, checks, verdict: "keep", reason: unproven, detail: `${checked} — ${unproven} — kept` }
+  }
+  const authored = await authoredContent(revision.head, revision.baseSha, git)
+  if (authored.empty) {
+    const nothing =
+      `authored no content: head ${short(revision.head)} and its own base ${short(revision.baseSha)} ` +
+      `share tree ${short(authored.headTree)}, so nothing about it landed`
+    return { ...identity, checks, verdict: "keep", reason: nothing, detail: `${checked} — ${nothing} — kept` }
   }
   const reason = `superseded: content already in ${baseSha}`
   return {
@@ -418,6 +467,25 @@ export async function preflightRemerge(
   if (checks.ancestorOfBase === undefined || checks.mergeTree === undefined) {
     throw new Error(`yrd: preflight content proof for '${pr.id}' did not return complete evidence`)
   }
+  // `undefined` is not the only shape a non-measurement takes, and the guard
+  // above catches only that one. A range whose candidate IS the target base
+  // compares a commit against itself: `merge-base --is-ancestor` answers yes for
+  // free, `merge-tree` is then skipped on the strength of that free yes, and the
+  // verdict reads as three passing proofs over a range where NOTHING was
+  // compared. Three real submissions were ordered destroyed on exactly this
+  // evidence in one day (PR2191, PR2226, PR2245 —
+  // @i/10-yrd/subsumed-verdict-is-vacuous), so the degenerate range is refused
+  // before any verdict, not weighed against the checks it makes vacuous.
+  if (candidateHeadSha === targetBaseSha) {
+    raiseFailure(
+      "refusal",
+      "recut-preflight-degenerate-range",
+      `yrd: change '${pr.id}' revision ${source.n} resolved its candidate head to the target base itself ` +
+        `(${short(candidateHeadSha)} == ${short(targetBaseSha)}), so no comparison ran: ancestor=yes is a commit ` +
+        `matching itself and merge-tree was skipped on the strength of it. Recorded head is ${short(source.head)}; ` +
+        `re-resolve this revision's head before any verdict, and spend no payload on this reading`,
+    )
+  }
   const pinDistance =
     git.pinDistance ??
     raiseFailure(
@@ -442,7 +510,25 @@ export async function preflightRemerge(
     )
   }
   const patch = await patchMatch(source.baseSha, candidateHeadSha, targetBaseSha)
-  const subsumed = checks.ancestorOfBase === true || checks.mergeTree === "identical"
+  // Which comparison EXECUTED and concluded subsumption — not merely which
+  // field is non-`undefined`. `"skipped"` shares a union with three real
+  // measurements and `patch-id: none` shares a field with a real patch id, so
+  // both are matched by name here and neither can arrive as evidence by
+  // default. The range is already proven non-degenerate above, which is what
+  // makes the reachability answer below a measurement rather than a tautology.
+  const subsumedBy: SubsumptionProof | undefined =
+    checks.ancestorOfBase === true
+      ? {
+          check: "git merge-base --is-ancestor",
+          detail: `${short(candidateHeadSha)} is reachable from ${short(targetBaseSha)}`,
+        }
+      : checks.mergeTree === "identical"
+        ? {
+            check: "git merge-tree",
+            detail: `merging ${short(candidateHeadSha)} into ${short(targetBaseSha)} reproduces its tree exactly`,
+          }
+        : undefined
+  const subsumed = subsumedBy !== undefined
   const requiresForce = app.queue.eligibility(pr.id).checks.status === "passed"
   const needsAuthor = changeNeedsAuthor(pr)
   const reauthorizing =
@@ -462,6 +548,23 @@ export async function preflightRemerge(
         "an unchanged re-merge cannot resolve it — push new authored content, then retry the printed remedy",
     )
   }
+  if (subsumed) {
+    // A SUBSUMED-WITHDRAW verdict prints the payload-spend acknowledgement with
+    // it, so it must never be reached on evidence a no-op carrier also produces:
+    // see {@link authoredContent}.
+    const authored = await authoredContent(candidateHeadSha, source.baseSha, git)
+    if (authored.empty) {
+      raiseFailure(
+        "refusal",
+        "recut-preflight-empty-payload",
+        `yrd: change '${pr.id}' revision ${source.n} authored no content — head ${short(candidateHeadSha)} and its own ` +
+          `base ${short(source.baseSha)} share tree ${short(authored.headTree)}, so 'already in ${short(targetBaseSha)}' ` +
+          `is unprovable: a payload that never existed and one that landed leave the same evidence here ` +
+          `(ancestor-of-base=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${checks.mergeTree}). ` +
+          `Push the payload, or withdraw it with a reason that says nothing shipped`,
+      )
+    }
+  }
   const certifiedCurrentBase =
     options.proposedHeadSha === undefined && distance.targetOnly === 0 && source.recut !== undefined
   const verdict: RemergePreflightVerdict = subsumed
@@ -479,12 +582,15 @@ export async function preflightRemerge(
   // its own): a human's RECUT spelling is resubmitting from the branch tip; the
   // runner applies the same verdict in-process via `applyPreflightVerdict`.
   const next =
-    verdict === "SUBSUMED-WITHDRAW"
-      ? // The subsumed proof (head reachable from the base, or merging it reproduces
-        // the base tree exactly) IS the payload-spend acknowledgement: content that
+    subsumedBy !== undefined
+      ? // The subsumed proof IS the payload-spend acknowledgement: content that
         // already merged has nothing left to resubmit. Printed WITH the flag so the
-        // command runs as written rather than refusing whoever pastes it.
-        `yrd pr withdraw ${pr.id} --burn-payload --reason "superseded: content already in ${targetBaseSha}"`
+        // command runs as written rather than refusing whoever pastes it — which is
+        // exactly why it is keyed on the executed comparison and carries that
+        // comparison's name in the reason it records. A burn ordered with no named
+        // proof travels onward as a human-relayed instruction that nobody can audit.
+        `yrd pr withdraw ${pr.id} --burn-payload ` +
+        `--reason "superseded: ${subsumedBy.detail} (proved by ${subsumedBy.check})"`
       : verdict === "RECUT-FORCE" || verdict === "RECUT"
         ? `yrd pr submit ${pr.branch}`
         : options.queue === true
@@ -502,6 +608,7 @@ export async function preflightRemerge(
     patchMatchTarget: patch.targetSha ?? null,
     ancestorOfTarget: checks.ancestorOfBase === true,
     tree: checks.mergeTree,
+    ...(subsumedBy === undefined ? {} : { subsumedBy }),
     certified: source.recut !== undefined,
     passingCheck: requiresForce,
     requestedQueue: options.queue === true,
@@ -521,8 +628,18 @@ export async function preflightRemerge(
     [
       `${verdict} ${pr.id} r${source.n}`,
       `pin-distance: source-only=${distance.sourceOnly}, target-only=${distance.targetOnly} (${short(source.baseSha)}..${short(targetBaseSha)})`,
-      `patch-id-match-target: ${patch.targetSha === undefined ? "none" : short(patch.targetSha)} (patch-id=${patch.patchId ?? "none"})`,
-      `tree-proof: ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${checks.mergeTree}`,
+      // Not-measured never renders as not-different. `patch-id=none` means the
+      // patch was never produced and `merge-tree=skipped` means the merge never
+      // ran; printed as bare "none" and "skipped" beside real results, both read
+      // as findings, and an operator relayed one onward as an instruction to burn
+      // a working payload (@i/10-yrd/subsumed-verdict-is-vacuous).
+      patch.patchId === undefined
+        ? "patch-id-match-target: NOT MEASURED (no patch-id: the authored diff against the source base is empty)"
+        : `patch-id-match-target: ${patch.targetSha === undefined ? "no match" : short(patch.targetSha)} (patch-id=${short(patch.patchId)})`,
+      `tree-proof: ancestor=${checks.ancestorOfBase === true ? "yes" : "no"}, merge-tree=${
+        checks.mergeTree === "skipped" ? "NOT MEASURED (skipped: head already reachable)" : checks.mergeTree
+      }`,
+      `subsumed-by: ${subsumedBy === undefined ? "nothing — no comparison concluded subsumption" : `${subsumedBy.check} — ${subsumedBy.detail}`}`,
       `next: ${next}`,
     ].join("\n"),
   )

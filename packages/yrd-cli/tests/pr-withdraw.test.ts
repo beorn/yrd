@@ -21,6 +21,7 @@ import {
   createMemoryJournal,
   createYrd,
   createYrdDef,
+  failureFact,
   JsonSchema,
   pipe,
   type Journal,
@@ -49,7 +50,8 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createPruneGitFacts } from "../src/pr-withdraw.ts"
+import { actionableFailure, formatHumanFailure } from "../src/actionable-error.ts"
+import { createPruneGitFacts, preflightRemerge } from "../src/pr-withdraw.ts"
 import * as runInternals from "../src/run.ts"
 
 function runYrd(
@@ -385,8 +387,11 @@ function pruneGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
       throw new Error("mergeTree must not run in this scenario")
     },
     treeOf: (sha) => {
-      if (sha !== BASE_SHA) throw new Error(`treeOf must only inspect the base tip, got ${sha}`)
-      return BASE_TREE
+      if (sha === BASE_SHA) return BASE_TREE
+      // Every scenario head here carries content of its own, so its tree differs
+      // from its base's; a no-op carrier is a REAL repository (noopCarrierRepository).
+      if (sha === HEAD_SHA || sha === HEAD2_SHA || sha === HEAD3_SHA) return OTHER_TREE
+      throw new Error(`treeOf must only inspect the base tip or a submitted head, got ${sha}`)
     },
     ...overrides,
   }
@@ -1176,5 +1181,362 @@ describe("pr prune", () => {
     })
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect((await Array.fromAsync(app.events())).length).toBe(before)
+  })
+})
+
+/**
+ * One real repository holding the three carriers that ancestry and merge-tree
+ * evidence cannot tell apart, all cut from the SAME base:
+ *
+ *  - `landedHead` — its payload really merged, so it is an ancestor of the tip.
+ *  - `twinHead` — the identical payload authored separately, so merging it
+ *    reproduces the tip's tree exactly.
+ *  - `noopHead` — a carrier that authored nothing at all, which ALSO merges to
+ *    the tip's tree exactly, for the opposite reason.
+ *
+ * All three answer "identical to the base"; only the tree tuple separates the
+ * two landings from the no-op (@i/10-yrd/23184).
+ */
+function noopCarrierRepository(): Readonly<{
+  dir: string
+  sourceBaseSha: string
+  targetBaseSha: string
+  landedHead: string
+  twinHead: string
+  noopHead: string
+  divergentHead: string
+}> {
+  const dir = mkdtempSync(join(tmpdir(), "yrd-noop-carrier-"))
+  git(dir, "init", "-q", "-b", "main")
+  git(dir, "config", "user.name", "Yrd Test")
+  git(dir, "config", "user.email", "yrd@example.invalid")
+  writeFileSync(join(dir, "base.txt"), "base\n")
+  git(dir, "add", ".")
+  git(dir, "commit", "-qm", "base")
+  const sourceBaseSha = git(dir, "rev-parse", "HEAD")
+
+  git(dir, "switch", "-qc", "topic/landed")
+  writeFileSync(join(dir, "payload.txt"), "payload\n")
+  git(dir, "add", ".")
+  git(dir, "commit", "-qm", "payload")
+  const landedHead = git(dir, "rev-parse", "HEAD")
+
+  git(dir, "switch", "-qc", "topic/twin", sourceBaseSha)
+  writeFileSync(join(dir, "payload.txt"), "payload\n")
+  git(dir, "add", ".")
+  git(dir, "commit", "-qm", "the same payload, authored separately")
+  const twinHead = git(dir, "rev-parse", "HEAD")
+
+  git(dir, "switch", "-qc", "topic/noop", sourceBaseSha)
+  git(dir, "commit", "-q", "--allow-empty", "-m", "carrier with nothing in it")
+  const noopHead = git(dir, "rev-parse", "HEAD")
+
+  // Live content that is on no other branch: the one carrier no subsumption
+  // comparison can conclude anything about.
+  git(dir, "switch", "-qc", "topic/divergent", sourceBaseSha)
+  writeFileSync(join(dir, "unshipped.txt"), "unshipped\n")
+  git(dir, "add", ".")
+  git(dir, "commit", "-qm", "work that has not landed anywhere")
+  const divergentHead = git(dir, "rev-parse", "HEAD")
+
+  git(dir, "switch", "-q", "main")
+  git(dir, "merge", "-q", "--no-ff", "-m", "merge topic/landed", "topic/landed")
+  const targetBaseSha = git(dir, "rev-parse", "HEAD")
+  git(dir, "update-ref", "refs/remotes/origin/main", targetBaseSha)
+  return { dir, sourceBaseSha, targetBaseSha, landedHead, twinHead, noopHead, divergentHead }
+}
+
+describe("subsumption never reads a no-op carrier as a landing", () => {
+  it("refuses the re-merge preflight for a carrier that authored nothing", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/noop",
+        headSha: repo.noopHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir })
+      const failure = await preflightRemerge(app, "PR1", { json: true }, output.io).then(
+        (result) => result,
+        (error: unknown) => failureFact(error),
+      )
+      expect(failure).toMatchObject({ kind: "refusal", code: "recut-preflight-empty-payload" })
+      // The refusal names BOTH sides: what the carrier authored (nothing, proven
+      // by the shared tree) and the evidence a subsumed verdict would have run on.
+      const message = (failure as { message?: string }).message ?? ""
+      expect(message).toContain("authored no content")
+      expect(message).toContain(repo.noopHead.slice(0, 12))
+      expect(message).toContain(repo.sourceBaseSha.slice(0, 12))
+      expect(message).toContain("merge-tree=identical")
+      // Nothing was printed as a verdict and nothing was spent.
+      expect(output.stdout()).toBe("")
+      expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("still subsumes the preflight when the payload really is an ancestor of the base tip", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/landed",
+        headSha: repo.landedHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir })
+      const result = await preflightRemerge(app, "PR1", { json: true }, output.io)
+      expect(result).toMatchObject({
+        pr: "PR1",
+        verdict: "SUBSUMED-WITHDRAW",
+        evidence: { ancestorOfTarget: true, tree: "skipped" },
+      })
+      expect(result.next).toBe(
+        `yrd pr withdraw PR1 --burn-payload --reason "superseded: ${repo.landedHead.slice(0, 12)} is reachable ` +
+          `from ${repo.targetBaseSha.slice(0, 12)} (proved by git merge-base --is-ancestor)"`,
+      )
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("still subsumes the preflight when the identical payload landed by another route", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/twin",
+        headSha: repo.twinHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir })
+      const result = await preflightRemerge(app, "PR1", { json: true }, output.io)
+      expect(result).toMatchObject({
+        pr: "PR1",
+        verdict: "SUBSUMED-WITHDRAW",
+        evidence: { ancestorOfTarget: false, tree: "identical" },
+      })
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("prune keeps a carrier that authored nothing, and says why", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/noop",
+        headSha: repo.noopHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+      const before = (await Array.fromAsync(app.events())).length
+
+      const output = outputIO({ cwd: repo.dir })
+      expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        checked: [
+          {
+            pr: "PR1",
+            checks: { headPresent: true, ancestorOfBase: false, mergeTree: "identical" },
+            verdict: "keep",
+            reason: expect.stringContaining("authored no content") as unknown as string,
+          },
+        ],
+        summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
+        withdrawn: [],
+      })
+      expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+      expect((await Array.fromAsync(app.events())).length).toBe(before)
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("prune still withdraws both carriers whose payload really is on the base tip", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/landed",
+        headSha: repo.landedHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+      await app.bays.submit({
+        branch: "topic/twin",
+        headSha: repo.twinHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir })
+      expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        checked: [
+          {
+            pr: "PR1",
+            checks: { headPresent: true, ancestorOfBase: true, mergeTree: "skipped" },
+            verdict: "withdraw",
+            reason: `superseded: content already in ${repo.targetBaseSha}`,
+          },
+          {
+            pr: "PR2",
+            checks: { headPresent: true, ancestorOfBase: false, mergeTree: "identical" },
+            verdict: "withdraw",
+            reason: `superseded: content already in ${repo.targetBaseSha}`,
+          },
+        ],
+        summary: { checked: 2, withdrawn: 2, kept: 0, errors: 0 },
+      })
+      expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+      expect(changeDeliveryState(app.state().bays.prs.PR2!)).toBe("withdrawn")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("a payload burn is never ordered on a comparison that did not run", () => {
+  /** The measured specimen: a bay cut from the current tip, whose candidate head
+   * resolves to that tip. `merge-base --is-ancestor` answers yes because a commit
+   * matches itself, `merge-tree` is then skipped on the strength of that free yes,
+   * and `patch-id` is never produced — three evidence lines, no comparison. Three
+   * live submissions were ordered destroyed on this reading in one day
+   * (PR2191 / PR2226 / PR2245, @i/10-yrd/subsumed-verdict-is-vacuous). */
+  async function degenerate(repo: ReturnType<typeof noopCarrierRepository>) {
+    const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.targetBaseSha }) })
+    await app.bays.submit({
+      branch: "topic/cut-from-tip",
+      headSha: repo.targetBaseSha,
+      base: "main",
+      baseSha: repo.targetBaseSha,
+    })
+    return app
+  }
+
+  it("refuses when the candidate head IS the target base, and renders no burn instruction", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await degenerate(repo)
+      const output = outputIO({ cwd: repo.dir, columns: 400 })
+      const failure = await preflightRemerge(app, "PR1", {}, output.io).then(
+        (result) => result,
+        (error: unknown) => failureFact(error),
+      )
+      expect(failure).toMatchObject({ kind: "refusal", code: "recut-preflight-degenerate-range" })
+
+      // The RENDERED bytes, not the raw message: `actionableFailure` rewrites a
+      // failure into cause + resolution, promoting any quoted `yrd …` command in
+      // the message to an executable `resolve:` line. That rewrite is how a
+      // verdict becomes an instruction, so the refusal is asserted through it.
+      const rendered = formatHumanFailure(actionableFailure(failure as { code: string; message: string }))
+      expect(rendered).toBe(
+        `error: change 'PR1' revision 1 resolved its candidate head to the target base itself ` +
+          `(${repo.targetBaseSha.slice(0, 12)} == ${repo.targetBaseSha.slice(0, 12)}), so no comparison ran: ` +
+          `ancestor=yes is a commit matching itself and merge-tree was skipped on the strength of it. ` +
+          `Recorded head is ${repo.targetBaseSha.slice(0, 12)}; re-resolve this revision's head before any ` +
+          `verdict, and spend no payload on this reading`,
+      )
+      expect(rendered).not.toContain("--burn-payload")
+      expect(rendered).not.toContain("resolve:")
+      // No verdict was printed at all, so nothing can be relayed onward.
+      expect(output.stdout()).toBe("")
+      expect(output.stdout()).not.toContain("SUBSUMED-WITHDRAW")
+      expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("names the executed comparison in the remedy it prints, and in the evidence", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/twin",
+        headSha: repo.twinHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir })
+      const result = await preflightRemerge(app, "PR1", { json: true }, output.io)
+      expect(result.verdict).toBe("SUBSUMED-WITHDRAW")
+      expect(result.evidence.subsumedBy).toEqual({
+        check: "git merge-tree",
+        detail:
+          `merging ${repo.twinHead.slice(0, 12)} into ${repo.targetBaseSha.slice(0, 12)} ` +
+          "reproduces its tree exactly",
+      })
+      expect(result.next).toBe(
+        `yrd pr withdraw PR1 --burn-payload --reason "superseded: merging ${repo.twinHead.slice(0, 12)} into ` +
+          `${repo.targetBaseSha.slice(0, 12)} reproduces its tree exactly (proved by git merge-tree)"`,
+      )
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("renders a skipped merge-tree and a missing patch-id as NOT MEASURED, never as a finding", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/landed",
+        headSha: repo.landedHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir, columns: 400 })
+      await preflightRemerge(app, "PR1", {}, output.io)
+      const printed = output.stdout()
+      expect(printed).toContain("SUBSUMED-WITHDRAW PR1 r1")
+      // The payload's patch-id IS produced here (the carrier authored content),
+      // so only the skipped merge-tree is a non-measurement — and it says so.
+      expect(printed).toContain("merge-tree=NOT MEASURED (skipped: head already reachable)")
+      expect(printed).not.toContain("merge-tree=skipped")
+      // And the line that says which comparison actually concluded it.
+      expect(printed).toContain(
+        `subsumed-by: git merge-base --is-ancestor — ${repo.landedHead.slice(0, 12)} is reachable ` +
+          `from ${repo.targetBaseSha.slice(0, 12)}`,
+      )
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
+  })
+
+  it("orders no burn and names no proof when no comparison concluded subsumption", async () => {
+    const repo = noopCarrierRepository()
+    try {
+      const app = await createCliApp({ resolveBase: (ref) => ({ base: ref, baseSha: repo.sourceBaseSha }) })
+      await app.bays.submit({
+        branch: "topic/divergent",
+        headSha: repo.divergentHead,
+        base: "main",
+        baseSha: repo.sourceBaseSha,
+      })
+
+      const output = outputIO({ cwd: repo.dir, columns: 400 })
+      const result = await preflightRemerge(app, "PR1", {}, output.io)
+      expect(result.verdict).toBe("RECUT")
+      expect(result.evidence.subsumedBy).toBeUndefined()
+      expect(result.evidence.tree).toBe("divergent")
+      expect(result.next).toBe("yrd pr submit topic/divergent")
+      expect(output.stdout()).toContain("subsumed-by: nothing — no comparison concluded subsumption")
+      expect(output.stdout()).not.toContain("--burn-payload")
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true })
+    }
   })
 })
