@@ -944,7 +944,7 @@ describe("Queue", () => {
     )
     const pr = await submitBranch(app, "topic/conflicting-candidate")
 
-    const [run] = await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
+    const [run] = await app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check"] }, runtime)
 
     expect(checkCalls).toBe(0)
     expect(run).toMatchObject({
@@ -964,7 +964,7 @@ describe("Queue", () => {
       runnable: false,
       reason: { code: "candidate-conflicting", message: "change 'PR1' revision 1 conflicts in Candidate 'C1'" },
     })
-    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check"] }, runtime)).rejects.toThrow(
       "conflicts in Candidate 'C1'",
     )
     const runFailures = events.filter(
@@ -1008,7 +1008,10 @@ describe("Queue", () => {
     const first = await submitBranch(app, "topic/conflicting-child")
     const second = await submitBranch(app, "topic/passing-child")
 
-    const runs = await app.queue.run({ prs: [], derived: [first, second], steps: ["check"] }, runtime)
+    const runs = await app.queue.run(
+      { prs: [first.id, second.id], derived: [first, second], steps: ["check"] },
+      runtime,
+    )
 
     expect(runs).toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure" },
@@ -1057,7 +1060,7 @@ describe("Queue", () => {
     })
     const pr = await submitBranch(app, "topic/runner-candidate-context")
 
-    const [run] = await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
+    const [run] = await app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check"] }, runtime)
 
     expect(submissions).toEqual([
       {
@@ -1102,8 +1105,8 @@ describe("Queue", () => {
     const releaseBranch = await submitBranch(app, "topic/release-check", "release")
 
     const running = Promise.all([
-      app.queue.run({ prs: [], derived: [main], steps: ["check"] }, runtime),
-      app.queue.run({ prs: [], derived: [releaseBranch], steps: ["check"] }, runtime),
+      app.queue.run({ prs: [main.id], derived: [main], steps: ["check"] }, runtime),
+      app.queue.run({ prs: [releaseBranch.id], derived: [releaseBranch], steps: ["check"] }, runtime),
     ])
     await bothEntered.promise
     expect([...entered].toSorted()).toEqual(["main", "release"])
@@ -1699,12 +1702,14 @@ describe("Queue", () => {
     await using app = await createQueueApp({ defaultSteps: ["check"] })
     const habitantFirst = await submitBranch(app, "issue/habitant-first")
 
-    await expect(app.queue.run({ derived: [habitantFirst] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ prs: [habitantFirst.id], derived: [habitantFirst] }, runtime)).resolves.toMatchObject([
       { id: "R1", status: "completed", conclusion: "success" },
     ])
     const habitantSecond = await submitBranch(app, "issue/habitant-second")
 
-    await expect(app.queue.run({ derived: [habitantSecond] }, runtime)).resolves.toMatchObject([
+    await expect(
+      app.queue.run({ prs: [habitantSecond.id], derived: [habitantSecond] }, runtime),
+    ).resolves.toMatchObject([
       { id: "R2", status: "completed", conclusion: "success" },
     ])
     expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
@@ -1827,7 +1832,7 @@ describe("Queue", () => {
   async function seedLegacyStuckRoot(journal: ReturnType<typeof legacyStuckJournal>, id: () => string, branch: string) {
     await using app = await createQueueApp({}, journal, undefined, id)
     const pr = await submitBranch(app, branch)
-    await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, leasedRuntime)).rejects.toThrow(
+    await expect(app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check"] }, leasedRuntime)).rejects.toThrow(
       "job finish refused",
     )
   }
@@ -2179,7 +2184,7 @@ describe("Queue", () => {
   it("rejects a Queue start whose execution result diverges from its Candidate", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/candidate-run-result")
-    await app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
+    await app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check"] }, runtime)
     const seed = Queues.get(app.state().queues, "R1")
     const snapshot = seed?.prs[0]
     if (seed === undefined || snapshot === undefined) throw new Error("expected Candidate result fixture")
@@ -2758,7 +2763,7 @@ describe("Queue", () => {
       // The replayed root is resumed by the selectorless drain: an explicit
       // `prs: ["PR1"]` selector needed a record to resolve, and a derived member
       // is resumed from the run's own retained snapshot instead.
-      await expect(replayed.queue.run({ steps: ["check", "merge"] }, runtime)).resolves.toEqual([
+      await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
         expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
       ])
       expect(await terminalFor(replayed, "PR1")).toMatchObject({ run: "R1", commit: MERGED, landingSha: MERGED })
@@ -2790,13 +2795,20 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/mismatched-resume")
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [pr.id],
+        derived: [pr],
+        steps: ["check", "merge"],
+        baseSha: BASE,
+      })
       expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
     const mismatched = memberOf(replayed, "issue/mismatched-resume")
-    await expect(replayed.queue.run({ prs: [], derived: [mismatched], steps: ["merge"] }, runtime)).rejects.toThrow(
+    await expect(
+      replayed.queue.run({ prs: [mismatched.id], derived: [mismatched], steps: ["merge"] }, runtime),
+    ).rejects.toThrow(
       "change 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
@@ -2846,7 +2858,7 @@ describe("Queue", () => {
     await using replayed = await createQueueApp(options, journal, undefined, id)
     const partial = memberOf(replayed, "issue/batch-one")
     await expect(
-      replayed.queue.run({ prs: [], derived: [partial], steps: ["check", "merge"] }, runtime),
+      replayed.queue.run({ prs: [partial.id], derived: [partial], steps: ["check", "merge"] }, runtime),
     ).rejects.toThrow("change 'PR1' is already in active queue run 'R1'")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
@@ -2993,7 +3005,7 @@ describe("Queue", () => {
       check: () => ({ status: "waiting", token: "shared-token" }),
     })
     const pr = await submitBranch(app, "issue/one-call-resubmit")
-    const first = (await app.queue.run({ prs: [], derived: [pr], steps: ["check", "merge"] }, runtime))[0]
+    const first = (await app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check", "merge"] }, runtime))[0]
     expect(first).toMatchObject({ id: "R1", status: "waiting" })
 
     // The resubmission post-S7 is a re-push: the submit fact moves to the new
@@ -3005,7 +3017,7 @@ describe("Queue", () => {
     expect(resubmitted).toMatchObject({ id: pr.id, revision: 2, headSha: UPDATED })
 
     await expect(
-      app.queue.run({ prs: [], derived: [resubmitted], steps: ["check", "merge"] }, runtime),
+      app.queue.run({ prs: [resubmitted.id], derived: [resubmitted], steps: ["check", "merge"] }, runtime),
     ).resolves.toEqual([
       expect.objectContaining({
         id: "R1",
@@ -3416,7 +3428,12 @@ describe("Queue", () => {
     {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/crash-gap")
-      await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["check", "merge"], baseSha: BASE })
+      await app.dispatch(app.commands.queue.run, {
+        prs: [pr.id],
+        derived: [pr],
+        steps: ["check", "merge"],
+        baseSha: BASE,
+      })
       const job = app.queue.get("R1")?.steps[0]?.job
       if (job === undefined) throw new Error("expected requested crash-gap check")
       await app.dispatch(app.commands.job.transition, {
@@ -3464,7 +3481,7 @@ describe("Queue", () => {
     // derived lane's ordinal continues off the retained snapshot).
     const retry = memberOf(replayed, "issue/crash-gap")
     expect(retry).toMatchObject({ id: "PR1", headSha: HEAD })
-    const retried = await replayed.queue.run({ prs: [], derived: [retry], steps: ["check", "merge"] }, runtime)
+    const retried = await replayed.queue.run({ prs: [retry.id], derived: [retry], steps: ["check", "merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
     expect(retried).toMatchObject([
       {
@@ -6450,7 +6467,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
       log,
     )
     const pr = await submitBranch(app, "issue/peer-canceled")
-    const running = app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)
+    const running = app.queue.run({ prs: [pr.id], derived: [pr], steps: ["check"] }, runtime)
     await executing.promise
 
     // A peer runtime over the same journal (a separate process in production)
@@ -6482,7 +6499,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
 
     // The runner keeps processing subsequent work after the raced skip.
     const next = await submitBranch(app, "issue/after-cancel")
-    await expect(app.queue.run({ prs: [], derived: [next], steps: ["check"] }, runtime)).resolves.toMatchObject([
+    await expect(app.queue.run({ prs: [next.id], derived: [next], steps: ["check"] }, runtime)).resolves.toMatchObject([
       { status: "completed", conclusion: "success" },
     ])
   })
