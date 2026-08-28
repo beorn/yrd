@@ -82,12 +82,22 @@ export type PathReapResult = Readonly<{
   signalFailures: readonly string[]
 }>
 
-export async function reapOwnedPath(path: string, gracefulMs: number, killMs: number): Promise<PathReapResult> {
+export async function reapOwnedPath(
+  path: string,
+  gracefulMs: number,
+  killMs: number,
+  /** Injected proc tree, for tests that must not depend on the machine's own
+   * process table. Production never passes one: the census then reads the real
+   * `/proc`, exactly as before. Same trust model as the git-facts injection the
+   * CLI already uses for containment questions — reachable only from inside the
+   * process, never from the environment. */
+  options: Readonly<{ procRoot?: string }> = {},
+): Promise<PathReapResult> {
   const root = await canonicalPath(path)
   const protectedPids = await currentProcessAncestry()
   const signalFailures: string[] = []
   const targeted = new Set<number>()
-  const census = async () => pathProcessHolderCensus(root)
+  const census = async () => pathProcessHolderCensus(root, options)
   const killable = async (): Promise<number[]> =>
     uniquePids((await census()).holders.map(({ pid }) => pid)).filter((pid) => pid > 1 && !protectedPids.has(pid))
   const signal = (pids: readonly number[], value: "SIGTERM" | "SIGKILL"): void => {

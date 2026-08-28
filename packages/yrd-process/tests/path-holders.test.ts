@@ -8,6 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  createProcess,
   inspectPathHolderCensus,
   inspectPathHolders,
   pathHolderRefusal,
@@ -411,5 +412,50 @@ describe("a permanent gap is named and can be accepted; a clearable one cannot",
     expect(pathReapDeletionFailure(reap, { acceptUninspectablePids: [2217355] })).toMatch(
       /census incomplete.*deletion cannot be certified/u,
     )
+  })
+})
+
+describe("the proc tree the reaper censuses is injectable", () => {
+  /** A synthetic tree holding one ordinary process that owns nothing under the
+   * path. Nothing is ever signalled from it — the census finds no holder, so
+   * the reaper has no pid to kill and a fake pid can never collide with a real
+   * one on the machine. */
+  function syntheticProc(): { ownedPath: string; procRoot: string } {
+    const fixture = mkdtempSync(join(tmpdir(), "yrd-path-reap-seam-"))
+    scratch.push(fixture)
+    const ownedPath = join(fixture, "owned")
+    const procRoot = join(fixture, "proc")
+    const processRoot = join(procRoot, "4242")
+    mkdirSync(ownedPath)
+    mkdirSync(join(processRoot, "fd"), { recursive: true })
+    symlinkSync("/", join(processRoot, "cwd"))
+    symlinkSync("/bin/sh", join(processRoot, "exe"))
+    symlinkSync("/", join(processRoot, "root"))
+    writeFileSync(join(processRoot, "maps"), "")
+    return { ownedPath, procRoot }
+  }
+
+  test.runIf(process.platform === "linux")("an injected tree certifies a teardown on its own evidence", async () => {
+    const { ownedPath, procRoot } = syntheticProc()
+
+    await using injected = createProcess({ inject: { procRoot } })
+    const reaped = await injected.reapPath(ownedPath)
+
+    expect(reaped.survivorHolders).toEqual([])
+    expect(reaped.survivorCoverage).toMatchObject({ procRoot, complete: true, uninspectable: [] })
+    expect(pathReapDeletionFailure(reaped)).toBeUndefined()
+  })
+
+  test.runIf(process.platform === "linux")("control: without the injection it reads the real proc tree", async () => {
+    // The point of the pair. This one asserts only WHICH tree was read, never
+    // that the machine is clean — a box with a non-dumpable process (any box
+    // with an ssh login) legitimately refuses here, and that refusal is the
+    // defect the injection exists to keep out of unrelated tests.
+    const { ownedPath } = syntheticProc()
+
+    await using real = createProcess({})
+    const reaped = await real.reapPath(ownedPath)
+
+    expect(reaped.survivorCoverage).toMatchObject({ procRoot: "/proc" })
   })
 })

@@ -3170,6 +3170,9 @@ export type YrdHostOptions = Readonly<{
   /** Opaque logical submitter supplied by an embedding host; standalone Yrd defaults to operator. */
   defaultSubmitter?: string
   authorizeSubmoduleModelChange?: SubmoduleModelChangeAuthorizer
+  /** Proc tree the bay path-holder census reads; defaults to the real `/proc`.
+   * Only tests set it — see `YrdCliIO.procRoot`. */
+  procRoot?: string
   /**
    * Runs once after the host is fully closed and before the executable
    * boundary terminates. Detached background work belongs here rather than
@@ -3331,7 +3334,13 @@ async function createYrdRuntimeHost(
     )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
   const process = withGitTimeoutRetry(
-    withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } })),
+    withGitIndexLockRetry(
+      createProcess({
+        cwd: options.cwd,
+        env,
+        inject: { scope, log, ...(options.procRoot === undefined ? {} : { procRoot: options.procRoot }) },
+      }),
+    ),
   )
   let app: YrdCliApp | undefined
   let habitantLease: HabitantRunnerLease | undefined
@@ -3888,6 +3897,7 @@ async function runYrdProcessHost(
               ? {}
               : { implementationSource: selectedImplementationSource }),
             ...(posture === "journal-view-repair" ? { repairViewsBeforeReplay: true } : {}),
+            ...(io.procRoot === undefined ? {} : { procRoot: io.procRoot }),
             ...(options.workspaceLifecycle === undefined ? {} : { workspaceLifecycle: options.workspaceLifecycle }),
             ...(options.defaultSubmitter === undefined ? {} : { defaultSubmitter: options.defaultSubmitter }),
             ...(options.authorizeSubmoduleModelChange === undefined

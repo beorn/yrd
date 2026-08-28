@@ -208,6 +208,10 @@ export function createProcess(
       log?: ConditionalLogger
       now?: () => number
       spawn?: Spawn
+      /** Proc tree the path-holder census reads. Absent in production, where it
+       * reads the real `/proc`; a test supplies a synthetic tree so a bay
+       * teardown does not depend on what else is running on the machine. */
+      procRoot?: string
     }>
   }> = {},
 ): Process {
@@ -243,7 +247,9 @@ export function createProcess(
     closing = true
     return (closePromise ??= scope[Symbol.asyncDispose]())
   }
-  const reapPath = (path: string) => reapOwnedPath(path, killGraceMs, postKillReapGraceMs)
+  const procRoot = options.inject?.procRoot
+  const reapPath = (path: string) =>
+    reapOwnedPath(path, killGraceMs, postKillReapGraceMs, procRoot === undefined ? {} : { procRoot })
   return {
     async run(request) {
       if (closing || scope.disposed) throw new Error("yrd: Process is closed")

@@ -331,6 +331,12 @@ export type YrdCliIO = {
   /** Git facts for `pr prune` and the re-merge preflight; defaults to real Git
    * plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
+  /** Proc tree the bay path-holder census reads when certifying a teardown;
+   * defaults to the real `/proc`. Injected the same way and for the same reason
+   * as `pruneGit` above: the census is a safety question whose answer depends on
+   * the machine, so a test needs to supply the machine. Production never sets
+   * it, and nothing outside the process can. */
+  procRoot?: string
   /** Git facts for the branch-state verbs; defaults to real Git plumbing in `cwd`. */
   changeStateGit?(cwd: string): ChangeStateGitFacts
   /** Resolve a submodule's upstream default branch for `yrd admin submodule
