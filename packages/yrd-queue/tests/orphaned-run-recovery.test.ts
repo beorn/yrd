@@ -248,25 +248,21 @@ describe("a finished run stays terminal after its Jobs are pruned", () => {
       expect(seed.queue.get("R1")?.status, "the seed run must reach passed").toBe("completed")
     }
 
-    // DELIBERATELY RED (S7): a check-only run of DERIVED members never journals
-    // `queue/run/settled`, so its terminal status dies with its Jobs — exactly
-    // the R1582 phantom-`running` row this file exists to prevent.
+    // WAS deliberately red (S7), now GREEN — a fence, not a warning.
     //
-    // Site: queue.ts, the settled command's emission guard
-    //   `claimed || memberTerminals.length > 0`
-    // `claimed` reads `state.queues.authority.claims`, which a derived member
-    // never populates — its authority is the standing submit fact, derived at
-    // read time and, by design, "never stored". `memberTerminals` is empty
-    // because a check-only run has no `integration`. So neither disjunct can
-    // fire and no settlement fact is written. The comment immediately above
-    // that guard states the invariant this breaks: "`passed` is the outcome
-    // that has no other record-level proof, so without this the run's status
-    // dies with its Jobs when retention prunes them."
+    // It named a real src defect: a check-only run of DERIVED members never
+    // journalled `queue/run/settled`, so its terminal status died with its Jobs
+    // — exactly the R1582 phantom-`running` row this file exists to prevent.
+    // The emission guard `claimed || memberTerminals.length > 0` could not fire
+    // for a derived member, because `claimed` reads stored claims a derived
+    // member never populates (its authority is the standing submit fact,
+    // derived at read time and by design never stored) while `memberTerminals`
+    // is empty for a check-only run.
     //
-    // Correct behaviour: a settled root emits `queue/run/settled` carrying its
-    // terminal status whether or not a stored claim backs it. Verified by
-    // journal inspection, not inferred: the seed emits `queue/run/started` and
-    // no settlement event, and a second compose adds no events at all.
+    // Later S7 src work fixed it. This test is unchanged since the note was
+    // written, so it went green because the code did. The assertions below are
+    // what hold that: a settled root must emit its terminal status whether or
+    // not a stored claim backs it.
     // Job retention prunes a finished root's Jobs; the Queue record outlives them.
     await using pruned = await createApp(await withoutJobEvents(journal), ids(100))
 

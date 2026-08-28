@@ -127,24 +127,19 @@ function rederive(app: Awaited<ReturnType<typeof createApp>>, branch: string): D
 }
 
 /**
- * TWO DELIBERATE REDS in this file (S7), both the same shape: a QUEUED current
- * step whose requested Job revision drifted is DETECTED but never RELEASED.
+ * WERE two deliberate reds (S7), now GREEN — this is a fence, not a warning.
  *
- * Discriminator, and the reason this reads as src rather than fixture debt:
- *   - the audit DOES see it — `replayed.queue.audit().findings` carries
- *     `{ code: "step-revision-drift", run: "R1", step: "second" }`, and that
- *     assertion passes;
- *   - the raw `advance` reducer DOES release it — the sibling test above, for a
- *     not-yet-started NEXT step, is green;
- *   - but the compose path leaves R1 `in_progress`, and `queue.recover()`
- *     returns `[]`.
- * `recover()` takes no selector and walks the whole population, so nothing
- * about the derived lane's selection should reach it; detection and release
- * disagreeing across two independent release paths is the tell.
+ * They named a real src defect: a QUEUED current step whose requested Job
+ * revision drifted was DETECTED but never RELEASED — the audit carried
+ * `{ code: "step-revision-drift", run: "R1", step: "second" }` while the
+ * compose left R1 `in_progress` and `queue.recover()` returned `[]`. Detection
+ * and release disagreeing across two independent release paths was the tell.
  *
- * Less certain about the compose half than the recover half — a src owner
- * should confirm whether the compose is expected to retire a drifted root at
- * all, or whether `recover` is the only intended release path here.
+ * Later S7 src work fixed it; these tests are unchanged since the note was
+ * written, so they went green because the code did, not because the assertions
+ * moved. Kept in past tense deliberately: a "DELIBERATE RED" banner on a
+ * passing test teaches the next reader that green is unexpected here, which is
+ * how a real regression gets waved through.
  */
 describe("stale-steps release — a drifted next step frees the run instead of killing compose", () => {
   it("releases a pending run whose not-yet-started next step revision drifted, keeping the change submitted", async () => {
