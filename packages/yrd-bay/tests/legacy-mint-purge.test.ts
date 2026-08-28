@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "../src/plugin.ts"
+import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -51,11 +51,7 @@ function workspaceAdapter(): BayWorkspace {
 async function emptyApp() {
   const nextId = ids()
   const jobs = createBayJobDefs(workspaceAdapter())
-  const definition = pipe(
-    createYrdDef(),
-    withJobs({ definitions: jobs }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs, defaultBase: "main" }),
-  )
+  const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
   return createYrd(definition, {
     inject: {
       journal: createMemoryJournal([]),

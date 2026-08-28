@@ -201,13 +201,6 @@ async function installHookHost(
   // untracked, regardless of `autoConfig` — proving the receiver passes
   // absence through rather than treating "no file" as "match everything".
   autoConfig?: AutoConfig,
-  // Carrier branches a LIVE record supposedly owns, standing in for the
-  // production `recordLaneOwnsBranch` predicate over the bays state (@yrd/cli
-  // wires the real one; @yrd/bay cannot read record state itself — same
-  // no-cycle reasoning as the two fakes above). Proves the RECEIVER'S
-  // plumbing: a record-owned carrier is exempt from the push-time Change-Id
-  // gate, and everything else is not.
-  recordBranches?: string[],
 ): Promise<Env> {
   const bin = join(root, "bin")
   const targetFile = join(root, "targets.json")
@@ -254,9 +247,7 @@ async function installHookHost(
       'import { appendFile } from "node:fs/promises"',
       "const factsFile = process.env.YRD_TEST_BRANCH_FACTS",
       "const record = (kind) => factsFile === undefined ? undefined : async (fact) => { await appendFile(factsFile, `${JSON.stringify({ kind, ...fact })}\\n`) }",
-      "const recordBranchesRaw = process.env.YRD_TEST_RECORD_BRANCHES",
-      "const recordOwnsBranch = recordBranchesRaw === undefined ? undefined : (branch) => JSON.parse(recordBranchesRaw).includes(branch)",
-      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch, recordOwnsBranch, branchSubmitted: record('submitted'), branchUnsubmitted: record('unsubmitted') })",
+      "await runReceiverHookFromEnvironment(mode, { process: runner, resolveTarget, intakePolicy: process.env.YRD_TEST_INTAKE_POLICY, validateConfig, classifyBranch, branchSubmitted: record('submitted'), branchUnsubmitted: record('unsubmitted') })",
       "",
     ].join("\n"),
   )
@@ -269,7 +260,6 @@ async function installHookHost(
     ...(intakePolicy === undefined ? {} : { YRD_TEST_INTAKE_POLICY: intakePolicy }),
     ...(rejectConfigContaining === undefined ? {} : { YRD_TEST_REJECT_CONFIG_CONTAINING: rejectConfigContaining }),
     ...(autoConfig === undefined ? {} : { YRD_TEST_AUTO_CONFIG: JSON.stringify(autoConfig) }),
-    ...(recordBranches === undefined ? {} : { YRD_TEST_RECORD_BRANCHES: JSON.stringify(recordBranches) }),
   }
 }
 
@@ -485,7 +475,10 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     }
   })
 
-  it("accepts an authorized pinned push and leaves a pending result for Bay intake", async () => {
+  it("accepts an authorized pinned push and consumes its validated result at post-receive", async () => {
+    // S7: the record-intake handoff is retired — finalize drains
+    // unconditionally, so the result is re-validated and consumed inside the
+    // push itself, and the ref is the receipt.
     const f = await fixture("push")
     await git(f.mainRepo, "switch", "-qc", "issue/good")
     const headSha = await commit(f.mainRepo, "good.txt")
@@ -496,24 +489,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     )
     expect(result.code, result.stderr).toBe(0)
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/good")).toBe(headSha)
-    expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
-
-    const delivered: ReceiverResult[] = []
-    const drained = await f.receiver.drain({
-      resolveTarget: async () => target(f.baseSha),
-      intake: async (result) => void delivered.push(result),
-    })
-    expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
-    expect(delivered).toEqual([
-      expect.objectContaining({
-        branch: "issue/good",
-        ref: "refs/heads/issue/good",
-        oldSha: zero,
-        headSha,
-        intake: { bay: "B1", name: "receiver-test", branch: "issue/good", base: "main", baseSha: f.baseSha, headSha },
-      }),
-    ])
     expect(await inboxFiles(f.receiver)).toEqual([])
+
+    // A later drain over the consumed inbox is an idempotent no-op.
+    const drained = await f.receiver.drain({ resolveTarget: async () => target(f.baseSha) })
+    expect(drained).toEqual({ delivered: [], failed: [], ambiguous: [] })
   })
 
   it("re-invokes the worktree-anchored yrd and ignores an ambient PATH yrd (hermetic cold replay)", async () => {
@@ -542,7 +522,9 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.code, result.stderr).toBe(0)
     expect(existsSync(marker)).toBe(false)
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/hermetic")).toBe(headSha)
-    expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
+    // S7: finalize drains unconditionally, so the result is validated and
+    // consumed at post-receive — an empty inbox is the healthy end state.
+    expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
   it("rejects unknown branches and commits outside the pinned base", async () => {
@@ -665,7 +647,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(without.stderr).not.toContain("open one with")
   })
 
-  it("recovers prepared results by ref and retries the same result id after ambiguous intake", async () => {
+  it("recovers prepared results by ref and retries the same result id after a failed processing pass", async () => {
     const f = await fixture("recover")
     await git(f.mainRepo, "switch", "-qc", "issue/recover")
     const headSha = await commit(f.mainRepo, "recover.txt")
@@ -673,38 +655,31 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const update = `${zero} ${headSha} refs/heads/issue/recover\n`
     const [result] = await f.receiver.prepare(update, { resolveTarget: async () => target(f.baseSha) })
     expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
-    expect(
-      await f.receiver.drain({
-        resolveTarget: async () => target(f.baseSha),
-        intake: async () => {
-          throw new Error("must not run before ref acceptance")
-        },
-      }),
-    ).toEqual({ delivered: [], failed: [], ambiguous: [result!.id] })
+    expect(await f.receiver.drain({ resolveTarget: async () => target(f.baseSha) })).toEqual({
+      delivered: [],
+      failed: [],
+      ambiguous: [result!.id],
+    })
     expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.prepared.json`])
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/recover", headSha, zero)
 
-    const applied = new Set<string>()
-    const failed = await f.receiver.drain({
-      resolveTarget: async () => target(f.baseSha),
-      intake: async (current) => {
-        applied.add(current.id)
-        throw new Error("crash after durable intake")
+    // S7: the fallible step in processing is the re-authorization
+    // (validateStored → resolveTarget). Recovery validates once to move the
+    // result prepared→pending; the SECOND validation is the processing pass —
+    // fail exactly that one, so the result lands pending and retries.
+    let resolutions = 0
+    const failing = await f.receiver.drain({
+      resolveTarget: async () => {
+        resolutions += 1
+        if (resolutions === 2) throw new Error("the real cause")
+        return target(f.baseSha)
       },
     })
-    expect(failed.failed).toEqual([{ id: result!.id, error: "crash after durable intake" }])
+    expect(failing.failed).toEqual([{ id: result!.id, error: "the real cause" }])
     expect(await inboxFiles(f.receiver)).toEqual([`${result!.id}.pending.json`])
 
-    const retried: string[] = []
-    const recovered = await f.receiver.drain({
-      resolveTarget: async () => target(f.baseSha),
-      intake: async (current) => {
-        expect(applied.has(current.id)).toBe(true)
-        retried.push(current.id)
-      },
-    })
+    const recovered = await f.receiver.drain({ resolveTarget: async () => target(f.baseSha) })
     expect(recovered).toEqual({ delivered: [result!.id], failed: [], ambiguous: [] })
-    expect(retried).toEqual([result!.id])
     expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
@@ -721,22 +696,22 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const ref = `refs/heads/${branch}`
     const resolveTarget = async () => target(f.baseSha)
 
+    // S7: finalize drains in the same act, one result at a time — so seed BOTH
+    // results as prepared and let a single drain recover and process them
+    // together. The delivered ids are the processing order the retired intake
+    // callback used to witness; the branch chosen above makes result-name
+    // order the WRONG order.
     for (const [oldSha, headSha] of [
       [zero, first],
       [first, second],
     ] as const) {
-      const update = `${oldSha} ${headSha} ${ref}\n`
-      await f.receiver.prepare(update, { resolveTarget })
+      await f.receiver.prepare(`${oldSha} ${headSha} ${ref}\n`, { resolveTarget })
       await git(f.receiver.receiverPath, "update-ref", ref, headSha, oldSha)
-      await f.receiver.finalize(update, { resolveTarget })
     }
-    const heads: string[] = []
-    const result = await f.receiver.drain({
-      resolveTarget,
-      intake: async (result) => void heads.push(result.headSha),
-    })
+    const result = await f.receiver.drain({ resolveTarget })
     expect(result.failed).toEqual([])
-    expect(heads).toEqual([first, second])
+    expect(result.ambiguous).toEqual([])
+    expect(result.delivered).toEqual([receiverId(ref, zero, first), receiverId(ref, first, second)])
   })
 
   it("tells the second result for a branch where its blocking failure is", async () => {
@@ -758,19 +733,25 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       [zero, first],
       [first, second],
     ] as const) {
-      const update = `${oldSha} ${headSha} ${ref}\n`
-      await f.receiver.prepare(update, { resolveTarget })
+      await f.receiver.prepare(`${oldSha} ${headSha} ${ref}\n`, { resolveTarget })
       await git(f.receiver.receiverPath, "update-ref", ref, headSha, oldSha)
-      await f.receiver.finalize(update, { resolveTarget })
     }
 
+    // Both results enter this drain prepared. Recovery re-validates each once
+    // (two resolutions) and the THIRD resolution is the processing pass of
+    // the branch's first result — fail exactly that one, the same counting
+    // seam the recovery test above pins. The second result must then be
+    // blocked WITHOUT a resolution of its own.
+    let resolutions = 0
     const result = await f.receiver.drain({
-      resolveTarget,
-      intake: async () => {
-        throw new Error("the real cause")
+      resolveTarget: async () => {
+        resolutions += 1
+        if (resolutions === 3) throw new Error("the real cause")
+        return target(f.baseSha)
       },
     })
 
+    expect(resolutions).toBe(3)
     expect(result.failed).toHaveLength(2)
     // The first carries the real error; the second must point AT it.
     expect(result.failed[0]?.error).toBe("the real cause")
@@ -786,9 +767,6 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await writeFile(corrupt, "{not-json\n")
     const result = await f.receiver.drain({
       resolveTarget: async () => null,
-      intake: async () => {
-        throw new Error("must not run")
-      },
     })
     expect(result.failed).toEqual([{ id, error: expect.stringContaining("invalid JSON") }])
     expect(await readFile(corrupt, "utf8")).toBe("{not-json\n")
@@ -822,37 +800,18 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.stderr).not.toContain("only branch refs")
     expect(result.code).toBe(0)
 
-    // Read the result by DRAINING rather than by parsing the inbox file: drain
-    // re-validates it, so this also proves the stored result passes its own
-    // identity check. A submit result used to fail that check outright, since
-    // the invariant hardcoded refs/heads/<branch>.
-    const delivered: ReceiverResult[] = []
-    const drained = await f.receiver.drain({
-      resolveTarget: async (_branch, _update, intent) =>
-        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
-      intake: async (result) => void delivered.push(result),
-    })
-    expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
-    expect(delivered).toEqual([
-      expect.objectContaining({
-        ref: "refs/for/main/my-change",
-        // The carrier branch comes from the resolver; the ref names the CHANGE.
-        branch: "issue/my-change",
-        change: "my-change",
-        oldSha: zero,
-        headSha,
-        // The issue rides through to intake. A push that carries an issue
-        // reference and merges a change with no issue has forgotten the only thing
-        // the ref said beyond its commits.
-        intake: expect.objectContaining({
-          base: "main",
-          branch: "issue/my-change",
-          issue: "my-change",
-          headSha,
-          submit: true,
-        }),
-      }),
-    ])
+    // S7: the accepted push IS the intake — post-receive drains the result in
+    // the same act, re-validating the stored result on the way (a submit
+    // result used to fail its own identity check outright, since the
+    // invariant hardcoded refs/heads/<branch>). What the retired intake
+    // payload used to carry is asserted on the world instead: the refs/for
+    // ref holds the tip, the dual-write derived the CARRIER branch from the
+    // resolver (the ref names the CHANGE, not the branch) and pointed its
+    // submit ref, and the projected fact carries the resolved base. An empty
+    // inbox beside the standing submit ref is that whole path having run.
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/my-change")).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/my-change")).toBe(headSha)
+    expect(await branchFacts(f)).toEqual([{ kind: "submitted", branch: "issue/my-change", sha: headSha, base: "main" }])
     expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
@@ -864,13 +823,8 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       "for:main/my-change": target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
     })
     expect((await push(f, "work:refs/for/main/my-change", env)).code).toBe(0)
-
-    const firstDrain = await f.receiver.drain({
-      resolveTarget: async (_branch, _update, intent) =>
-        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change", issue: "my-change" }),
-      intake: async () => {},
-    })
-    expect(firstDrain.failed).toEqual([])
+    // S7: post-receive drained the first result in the same act.
+    expect(await inboxFiles(f.receiver)).toEqual([])
 
     // Model the successful first result's carrier materialization. A later
     // patchset must contain this carrier; otherwise accepting the Git ref and
@@ -909,26 +863,34 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
   it("refuses at drain when the carrier branch moved since the push", async () => {
     const f = await fixture("submit-drift")
     await git(f.mainRepo, "switch", "-qc", "work")
-    await submitCommit(f.mainRepo, "drift.txt")
-    const env = await installHookHost(f.root, {
-      "for:main/my-change": target(f.baseSha, { branch: "issue/my-change" }),
+    const headSha = await submitCommit(f.mainRepo, "drift.txt")
+    // In-process, because the drift must land BETWEEN the push and the drain:
+    // since S7 post-receive drains in the same act, so a completed push can no
+    // longer be caught in between — but a post-receive that died before its
+    // drain can, and drain recovery re-runs exactly this validation. Prepare
+    // stores the result pre-receive authorization produces; the ref lands the
+    // way git would land it.
+    await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${headSha}:refs/yrd/test/drift`)
+    const ref = "refs/for/main/my-change"
+    await f.receiver.prepare(`${zero} ${headSha} ${ref}\n`, {
+      resolveTarget: async (_branch, _update, intent) =>
+        intent === undefined ? null : target(f.baseSha, { branch: "issue/my-change" }),
     })
-    expect((await push(f, "work:refs/for/main/my-change", env)).code).toBe(0)
+    await git(f.receiver.receiverPath, "update-ref", ref, headSha)
 
     // A submit resolver DERIVES the carrier rather than reading it off the ref,
     // so the carrier is exactly the field that can move between the push and the
-    // drain — and it was the one field the drift check never compared. Intake
-    // would then have run against a branch nobody re-authorized. Everything else
-    // here is deliberately identical, so only the branch can fail this.
+    // drain — and it was the one field the drift check never compared. The
+    // submission would then stand for a branch nobody re-authorized. Everything
+    // else here is deliberately identical, so only the branch can fail this.
     const result = await f.receiver.drain({
       resolveTarget: async (_branch, _update, intent) =>
         intent === undefined ? null : target(f.baseSha, { branch: "issue/somewhere-else" }),
-      intake: async () => {
-        throw new Error("must not run")
-      },
     })
     expect(result.delivered).toEqual([])
     expect(result.failed).toEqual([{ id: expect.any(String), error: expect.stringContaining("authorization changed") }])
+    // The refused submission wrote nothing: no submit ref for either branch.
+    expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/submit/")).toBe("")
   })
 
   it("resolves the base by longest existing branch, so a slashed change name is not read as a base", async () => {
@@ -1076,24 +1038,36 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/identified")).toBe(headSha)
   })
 
-  it("exempts a carrier a live record already owns: a grandfathered re-push needs no trailer", async () => {
-    const f = await fixture("submit-grandfathered")
+  it("stays strict for a carrier that already submitted: the record-ownership exemption is retired", async () => {
+    // Pre-S7 a carrier a live record owned was exempt from the tip-trailer
+    // requirement (`recordOwnsBranch` — grandfathered re-pushes carried none
+    // of the derived lane's obligations). S7 retired the record store, so no
+    // record ever owns a branch again and the gate is strict EVERYWHERE. This
+    // is the fence against the exemption growing back keyed on "this carrier
+    // already submitted once".
+    const f = await fixture("submit-strict")
     await git(f.mainRepo, "switch", "-qc", "work")
-    const headSha = await commit(f.mainRepo, "grandfathered.txt")
-    const targets = {
-      "for:main/grandfathered": target(f.baseSha, { branch: "issue/grandfathered", issue: "grandfathered" }),
-    }
-    // Positive control: with NO record owning the carrier the same push
-    // refuses on the missing trailer — proving the exemption below is what
-    // admits it, not a gate that never ran.
-    const strict = await push(f, "work:refs/for/main/grandfathered", await installHookHost(f.root, targets))
-    expect(strict.code).not.toBe(0)
-    expect(strict.stderr).toContain("no 'Change-Id' trailer")
+    const env = await installHookHost(f.root, {
+      "for:main/strict": target(f.baseSha, { branch: "issue/strict", issue: "strict" }),
+    })
+    // Establish the carrier with a properly-identified submission first — the
+    // control proving the refusal below is about the TIP, never the branch.
+    const firstHead = await submitCommit(f.mainRepo, "identified.txt")
+    const first = await push(f, "work:refs/for/main/strict", env)
+    expect(first.code, first.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/strict")).toBe(firstHead)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/strict")).toBe(firstHead)
 
-    const env = await installHookHost(f.root, targets, undefined, undefined, undefined, ["issue/grandfathered"])
-    const result = await push(f, "work:refs/for/main/grandfathered", env)
-    expect(result.code, result.stderr).toBe(0)
-    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/grandfathered")).toBe(headSha)
+    // The re-push of the SAME carrier with a trailerless tip — exactly the
+    // shape the exemption used to admit — refuses with the amend cure, and
+    // moves nothing: neither the refs/for ref nor the standing submission.
+    const secondHead = await commit(f.mainRepo, "grandfathered.txt")
+    const second = await push(f, "work:refs/for/main/strict", env)
+    expect(second.code).not.toBe(0)
+    expect(second.stderr).toContain(`tip commit ${secondHead.slice(0, 12)}`)
+    expect(second.stderr).toContain("no 'Change-Id' trailer")
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/strict")).toBe(firstHead)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/strict")).toBe(firstHead)
   })
 
   // ── branch-is-change: refs/yrd/submit/* and refs/yrd/archive/* ─────────────
@@ -1350,20 +1324,13 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       "for:main/dual-write": target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
     })
     expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
-    // The drain-time dual-write projects the same fact a direct submit does —
-    // one projection for both spellings of "submitted".
-    const projected: unknown[] = []
-    const drainOptions = {
-      resolveTarget: async (_branch: string, _update: unknown, intent: { base: string; name: string } | undefined) =>
-        intent === undefined ? null : target(f.baseSha, { branch: "issue/dual-write", issue: "dual-write" }),
-      intake: async () => {},
-      branchSubmitted: async (fact: unknown) => {
-        projected.push(fact)
-      },
-    }
-    expect((await f.receiver.drain(drainOptions)).failed).toEqual([])
+    // The drain-time dual-write — run by post-receive itself since S7 —
+    // projects the same fact a direct submit does: one projection for both
+    // spellings of "submitted".
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(firstHead)
-    expect(projected).toEqual([{ branch: "issue/dual-write", sha: firstHead, base: "main" }])
+    expect(await branchFacts(f)).toEqual([
+      { kind: "submitted", branch: "issue/dual-write", sha: firstHead, base: "main" },
+    ])
 
     // Model the first result's carrier materialization (see "refuses a
     // rewritten submit patchset" above for why a SECOND refs/for push needs
@@ -1372,12 +1339,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await git(f.mainRepo, "update-ref", "refs/heads/issue/dual-write", firstHead)
     const secondHead = await submitCommit(f.mainRepo, "second.txt")
     expect((await push(f, "work:refs/for/main/dual-write", env)).code).toBe(0)
-    expect((await f.receiver.drain(drainOptions)).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/issue/dual-write")).toBe(secondHead)
     // Newest wins in the projection exactly as in the ref: a second submitted fact, no unsubmit between.
-    expect(projected).toEqual([
-      { branch: "issue/dual-write", sha: firstHead, base: "main" },
-      { branch: "issue/dual-write", sha: secondHead, base: "main" },
+    expect(await branchFacts(f)).toEqual([
+      { kind: "submitted", branch: "issue/dual-write", sha: firstHead, base: "main" },
+      { kind: "submitted", branch: "issue/dual-write", sha: secondHead, base: "main" },
     ])
   })
 
@@ -1469,7 +1435,6 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       (
         await f.receiver.drain({
           resolveTarget: async () => target(f.baseSha),
-          intake: async () => {},
           classifyBranch: fakeClassifier(autoConfig),
         })
       ).failed,
@@ -1515,7 +1480,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const canaryHead = await commit(f.mainRepo, "wip.txt")
     expect((await push(f, "task/wip-1:refs/heads/task/wip-1", env)).code).toBe(0)
 
-    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect((await f.receiver.drain({ resolveTarget, classifyBranch })).failed).toEqual([])
     for (const branch of ["task/plain", "issue/unmatched"]) {
       expect(await git(f.receiver.receiverPath, "for-each-ref", `refs/yrd/draft/${branch}`)).toBe("")
       expect(await git(f.receiver.receiverPath, "for-each-ref", `refs/yrd/ignore/${branch}`)).toBe("")
@@ -1543,7 +1508,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await git(f.mainRepo, "switch", "-qc", "task/would-match")
     await commit(f.mainRepo, "would-match.txt")
     expect((await push(f, "task/would-match:refs/heads/task/would-match", env)).code).toBe(0)
-    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect((await f.receiver.drain({ resolveTarget, classifyBranch })).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/yrd/ignore/task/would-match")).toBe("")
 
     // The discriminating half: give main a config NOW, and create a SECOND
@@ -1556,7 +1521,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await git(f.mainRepo, "switch", "-qc", "task/would-match-2")
     const secondHeadSha = await commit(f.mainRepo, "would-match-2.txt")
     expect((await push(f, "task/would-match-2:refs/heads/task/would-match-2", env)).code).toBe(0)
-    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect((await f.receiver.drain({ resolveTarget, classifyBranch })).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/ignore/task/would-match-2")).toBe(secondHeadSha)
   })
 
@@ -1576,7 +1541,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     await git(f.mainRepo, "switch", "-qc", "task/straight-2")
     const firstHead = await commit(f.mainRepo, "one.txt")
     expect((await push(f, "task/straight-2:refs/heads/task/straight-2", env)).code).toBe(0)
-    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect((await f.receiver.drain({ resolveTarget, classifyBranch })).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-2")).toBe(firstHead)
 
     // A second, ORDINARY plain push (not refs/for) to the SAME branch — the
@@ -1584,7 +1549,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     // submit ref happens to already exist.
     const secondHead = await commit(f.mainRepo, "two.txt")
     expect((await push(f, "task/straight-2:refs/heads/task/straight-2", env)).code).toBe(0)
-    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect((await f.receiver.drain({ resolveTarget, classifyBranch })).failed).toEqual([])
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-2")).toBe(secondHead)
   })
 
@@ -1625,7 +1590,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     const canarySecondHead = await commit(f.mainRepo, "canary-two.txt")
     expect((await push(f, "task/straight-canary:refs/heads/task/straight-canary", env)).code).toBe(0)
 
-    expect((await f.receiver.drain({ resolveTarget, intake: async () => {}, classifyBranch })).failed).toEqual([])
+    expect((await f.receiver.drain({ resolveTarget, classifyBranch })).failed).toEqual([])
     // The canary DID get re-submitted — the lane mechanism is live.
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/submit/task/straight-canary")).toBe(
       canarySecondHead,

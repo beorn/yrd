@@ -119,9 +119,7 @@ export type GitPushReceiver = Readonly<{
   process: Pick<Process, "run">
   prepare(input: string | readonly ReceiverRefUpdate[], options: ReceiverHookOptions): Promise<ReceiverResult[]>
   finalize(input: string | readonly ReceiverRefUpdate[], options: ReceiverHookOptions): Promise<ReceiverResult[]>
-  drain(
-    options: ReceiverHookOptions & { intake: DurableReceiverIntake; lockTimeoutMs?: number },
-  ): Promise<ReceiverDrainResult>
+  drain(options: ReceiverHookOptions & { lockTimeoutMs?: number }): Promise<ReceiverDrainResult>
 }>
 /**
  * What a `refs/for/<base>/<change>` push asks for, parsed out of the ref.
@@ -180,11 +178,8 @@ export type ReceiverAutoClassifier = (
   branch: string,
 ) => ReceiverAutoClassification | undefined | Promise<ReceiverAutoClassification | undefined>
 
-/** Intake must atomically deduplicate result.id with its own durable event. */
-export type DurableReceiverIntake = (result: Readonly<ReceiverResult>) => void | Promise<void>
 export type ReceiverHookOptions = {
   resolveTarget: ResolveReceiverTarget
-  intake?: DurableReceiverIntake
   clock?: () => string
   env?: Environment
   /**
@@ -209,18 +204,6 @@ export type ReceiverHookOptions = {
    */
   classifyBranch?: ReceiverAutoClassifier
   /**
-   * Whether a LIVE change record already owns this carrier branch — the S6
-   * record lane (the production predicate is `recordLaneOwnsBranch` over the
-   * bays state, which this receiver cannot read itself). Consulted only by
-   * the push-time Change-Id gate on a `refs/for/` push: a record-owned
-   * branch derives its identity from the record internally, so its
-   * grandfathered re-pushes stay exempt from the tip-trailer requirement.
-   * Omit and NO branch is exempt — post-S6 a recordless refs/for push IS the
-   * whole submission, so strict is the only safe default for a caller that
-   * wired no record state in.
-   */
-  recordOwnsBranch?: (branch: string) => boolean | Promise<boolean>
-  /**
    * Project an ACCEPTED `refs/yrd/submit/<branch>` write as a journal fact
    * (branch-is-change phase 2a; @cto efd1fa9a). Called only after git has
    * applied the ref — at post-receive for a direct push, after the drain-time
@@ -231,10 +214,10 @@ export type ReceiverHookOptions = {
   branchSubmitted?: (fact: Readonly<{ branch: string; sha: string; base: string }>) => Promise<void>
   /**
    * The inverse fact: a submit ref was deleted by its author (`deleted`) or
-   * swept by archival (`archived`). `superseded` is the record lane's takeover
-   * of the approval — emitted by the queue's merge bookkeeping
-   * (@yrd/queue submitFactRetirement) when a record-lane merge consumes the
-   * standing fact; the receiver never emits it.
+   * swept by archival (`archived`). These two are the only live reasons; the
+   * journal's third reason, `superseded`, was the record lane's approval
+   * takeover and retired with the record store (S7) — it survives in the
+   * projection schema strictly for replay.
    */
   branchUnsubmitted?: (fact: Readonly<{ branch: string; reason: "deleted" | "archived" }>) => Promise<void>
 }
@@ -526,13 +509,23 @@ async function finalizeReceiverUpdates(
       results.push(result)
     }
   }
-  if (options.intake) await receiver.drain({ ...options, intake: options.intake })
+  // S7: the drain is part of finalize's contract, unconditionally — the
+  // record-intake callback that used to gate it is retired, and the drain's
+  // surviving duties (the refs/for submit-ref dual-write and the ongoing
+  // auto-submit lane check) ARE the submission path now. A failed result
+  // stays pending and retries on the next drain, but post-receive cannot
+  // refuse a ref git already applied — so say it on stderr, which reaches
+  // the pusher, instead of returning it into a void.
+  const drained = await receiver.drain(options)
+  for (const failure of drained.failed) {
+    console.error(`yrd: receiver: drain result '${failure.id}' failed: ${failure.error}`)
+  }
   return results
 }
 
 async function drainReceiverInbox(
   receiver: GitPushReceiver,
-  options: ReceiverHookOptions & { intake: DurableReceiverIntake; lockTimeoutMs?: number },
+  options: ReceiverHookOptions & { lockTimeoutMs?: number },
 ): Promise<ReceiverDrainResult> {
   await mkdir(receiver.inboxDir, { recursive: true, mode: 0o700 })
   const drain: ReceiverDrainResult = { delivered: [], failed: [], ambiguous: [] }
@@ -562,13 +555,10 @@ async function drainReceiverInbox(
       }
       try {
         await validateStored(receiver, result, options)
-        await options.intake(result)
         // A `refs/for/` result IS a submission — re-point the submit ref at
-        // this tip (dual-write, phase 1: `result.intake.submit` above already
-        // carries the fact for the caller's own bay/journal; phase 2 re-points
-        // readers here instead). After intake, not before: a failed intake
-        // retries the whole result on the next drain, and this write should
-        // not have happened for a result nothing downstream has accepted yet.
+        // this tip. S7: the ref plus the `branchSubmitted` fact are the ONLY
+        // write (the record-intake dual-write retired with the store); a
+        // failed validation keeps the result pending and retries next drain.
         if (result.change !== undefined) {
           await writeSubmitRefForCarrier(receiver, result.branch, result.headSha, result.intake.base, options)
         } else if (!ZERO_SHA.test(result.oldSha)) {
@@ -1073,13 +1063,15 @@ async function validateSubmitCarrier(
  * the tip commit's `Change-Id` trailer — so a tip without a valid trailer
  * refuses HERE, where every other refs/for refusal fires, never at admission
  * after the pusher has already seen success (the receiver doc's standing
- * promise). A carrier a live record owns is exempt: the record lane derives
- * identity internally, and a grandfathered re-push carries none of the
- * derived lane's obligations. Trailer shape and parsing are shared with the
- * enrichment reader via `change-identity.ts` — one source of truth, so the
- * gate can never accept a trailer admission would then fail to read.
- * `includeMainObjects` for the same reason as the ancestry checks above: at
- * pre-receive the pushed commit lives only in the receiver's quarantine.
+ * promise). Strict EVERYWHERE since S7: the record-ownership exemption
+ * (`recordOwnsBranch`) retired with the record store — no record ever owns a
+ * branch again. (Admission's synthetic Change-Id mint remains the queue-side
+ * fallback for trailerless HISTORY, never for a new push.) Trailer shape and
+ * parsing are shared with the enrichment reader via `change-identity.ts` —
+ * one source of truth, so the gate can never accept a trailer admission
+ * would then fail to read. `includeMainObjects` for the same reason as the
+ * ancestry checks above: at pre-receive the pushed commit lives only in the
+ * receiver's quarantine.
  */
 async function validateChangeIdTrailer(
   receiver: GitPushReceiver,
@@ -1087,7 +1079,6 @@ async function validateChangeIdTrailer(
   branch: string,
   options: ReceiverHookOptions,
 ): Promise<void> {
-  if ((await options.recordOwnsBranch?.(branch)) === true) return
   const raw = (
     await receiverGit(
       receiver,
