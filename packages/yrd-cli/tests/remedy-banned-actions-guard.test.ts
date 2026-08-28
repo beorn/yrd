@@ -22,10 +22,15 @@
  * `packages/` -> repo root) to find `packages/<pkg>/src`, so it is location-sensitive to
  * exactly that depth.
  *
- * EXPECTED RED at HEAD as of 2026-08-13, by design (reproduce-first): the 5
- * confirmed offenders below are still live. Merge the guard together with (or
- * immediately before) their fix — see the sweep's `patch-plan.md` — so this
- * test is the regression fence, not a report.
+ * WAS expected-red when written; GREEN since the commit that added it. The 5
+ * offenders were fixed by 9a81d557, the same commit that introduced this
+ * guard — so its own instruction to "merge the guard together with their fix"
+ * was followed immediately and the warning was stale the moment it landed.
+ * Verified 2026-08-28 rather than inferred from the green: a fresh scan of 132
+ * files across 10 packages finds 0 non-allowlisted offenders, with a positive
+ * control (6 raw hits, all inside allowlisted files) proving the patterns still
+ * match real text. 4 of the 5 original sites no longer exist at all —
+ * `intent-admission.ts` was deleted by the intent-rail retirement.
  *
  * ALLOWLIST covers the pipeline's own internal git actuation (never printed
  * to a human as advice) — see each entry's `reason`. Do not add a new
@@ -135,9 +140,21 @@ describe("yrd tool surface: no remedy prescribes a banned git action", () => {
   it("scans every package's src/, not a hand-picked subset", () => {
     const files = surfaceFiles()
     const packagesTouched = new Set(files.map((f) => relativeToPackages(f).split("/")[0]))
-    // 2026-08-13 sweep denominator: 11 packages carry a src/ dir. A drop
-    // below this without a deliberate edit here means the walk broke, not
-    // that packages disappeared.
+    // Sweep denominator: 10 packages carry a src/ dir (measured 2026-08-28).
+    // It was 11 when this was written; `yrd-intent` was retired with the intent
+    // rail, so a package really did disappear.
+    //
+    // This floor is a deliberate tripwire and is meant to sit AT the true
+    // count: a drop means either the walk broke or a package was retired, and
+    // you must find out which before editing this number. Do not lower it to
+    // buy slack — that is the same as deleting it, just slower.
+    //
+    // If it fires: list `packages/*/src` and compare against 10. Fewer real
+    // packages means a legitimate retirement, so update this number and say
+    // which package went. Same count with a smaller walk means the walk broke,
+    // which is what this exists to catch. The previous comment named only the
+    // second cause, and a package HAD in fact disappeared — so it would have
+    // sent the next reader hunting a bug that was not there.
     expect(packagesTouched.size).toBeGreaterThanOrEqual(10)
   })
 
