@@ -147,7 +147,11 @@ export type QueueWatchSnapshot = Readonly<{
   /** Absolute repository authority whose Journal this snapshot projects. */
   repositoryRoot?: string
   results: readonly QueueStatusResult[]
-  state?: BaysState
+  /** Required: the queue projections span both admission lanes, and the
+   * DERIVED one — live submit facts with no record — is reachable only here.
+   * An optional state cannot be told from an empty derived lane, which is how
+   * a live queue rendered as idle (23235). */
+  state: BaysState
   now: number
   projection?: QueueTimelineProjection
   runnerRefusal?: QueueRunnerRefusal

@@ -17,16 +17,18 @@ import {
   changeRevisionNumber,
   changeSourceReadyAt,
   resolveChange,
+  type Bay,
   type BaysState,
   type ChangeProps,
   type Change,
   type ChangeDeliveryState,
   type ChangeRevClock,
   type ChangeRevTerminal,
+  type ProjectedBranchSubmit,
 } from "@yrd/bay"
 import { compareNatural, stageAsync, type Event, type JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import { isDerivedMemberId } from "@yrd/queue"
+import { derivedLaneBranches, isDerivedMemberId } from "@yrd/queue"
 import type {
   Candidate,
   InstalledStep,
@@ -263,6 +265,7 @@ import { failureSlug } from "./failure-slug.ts"
 import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
+  changeDeliveryTaskStatusOf,
   changeTaskStatusOf,
   runTaskStatusOf,
   stepTaskStatusOf,
@@ -764,6 +767,11 @@ export type HumanChangeProjection = Row &
     revisionLineage: readonly number[]
     touchedAt?: string
     failure?: HumanFailureProjection
+    /** A DERIVED-lane row projected from a standing submit fact alone: nothing
+     * is minted before admission, so it makes no change-id claim (`pr` carries
+     * the branch, `revision` the impossible 0) and holds no published queue
+     * position. See {@link pendingSubmitFacts}. */
+    factOnly?: true
   }>
 
 export type HumanQueueProjection = Readonly<{
@@ -777,7 +785,11 @@ export type HumanQueueProjection = Readonly<{
   pause?: QueueSummary["pause"]
   active?: WatchActiveRow
   oldestOpen: string
-  queue: readonly (HumanChangeProjection & Readonly<{ position: number }>)[]
+  /** `position` is the change's place in the queue's published admission
+   * order, and only the RECORD lane has one — a derived-lane row is a standing
+   * fact no compose has admitted yet, so it is rendered without a number
+   * rather than given an invented one. */
+  queue: readonly (HumanChangeProjection & Readonly<{ position?: number }>)[]
   queueOverflow: number
   recent: readonly HumanChangeProjection[]
 }>
@@ -2116,22 +2128,124 @@ function projectPR(
   }
 }
 
-function projectedChangeRows(
-  state: BaysState | undefined,
+/**
+ * Every live submit fact this queue's base holds that no retained run has
+ * admitted at its exact sha: the DERIVED lane's pre-run population, and the
+ * ONE derivation of it any reader may use.
+ *
+ * Post-S6 a `refs/for/<base>/<issue>` push mints NO record — the standing
+ * `refs/yrd/submit/<branch>` fact IS the submission, until a compose admits it
+ * as a run member. A reader whose whole population is the record store
+ * (`result.prs`) therefore renders a live queue as empty, with every counter
+ * correct arithmetic over an empty set and nothing to warn about (23235; live
+ * specimen 2026-08-28). Absence read as a fact about the world when it is only
+ * a fact about the population queried.
+ *
+ * The population rule is core's, reused rather than re-derived:
+ * {@link derivedLaneBranches} (a live fact, no live record, arbitration says
+ * derived, the PR2139 already-landed cell excluded) minus branches a retained
+ * run already carries at the fact's exact sha — a branch the derived lane has
+ * ADMITTED is a MEMBER, and its truth lives in the run/status rows. Callers
+ * wanting rows call {@link submitFactChangeRows}; the timeline's own pre-run
+ * band belongs here too rather than in a second walk of `state.submits`.
+ */
+export function pendingSubmitFacts(
+  state: BaysState,
   result: QueueStatusResult,
-  now: number,
-): HumanChangeProjection[] {
-  return result.prs.map((pr) =>
-    projectPR(
-      state,
-      result,
-      pr,
-      now,
-      undefined,
-      latestCandidateForCurrentRevision(result, pr),
-      eligibilityForCurrentRevision(result, pr),
+): readonly Readonly<{ branch: string; fact: ProjectedBranchSubmit; bay?: Bay }>[] {
+  const members = [...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs)
+  return derivedLaneBranches(state).flatMap((branch) => {
+    const fact = state.submits[branch]
+    if (fact === undefined) return []
+    if (baseIdentity(fact.base) !== baseIdentity(result.base)) return []
+    if (members.some((member) => member.branch === branch && member.headSha === fact.sha)) return []
+    const bay = Object.values(state.byId).find((candidate) => candidate.branch === branch)
+    return [{ branch, fact, ...(bay === undefined ? {} : { bay }) }]
+  })
+}
+
+/**
+ * {@link pendingSubmitFacts} as human change rows, so the dashboard's queue,
+ * its OPEN count and its DRAIN gauge span both admission lanes.
+ *
+ * Nothing is minted before admission, so the row claims no change id: `pr`
+ * carries the branch, `revision` the impossible 0, and `factOnly` marks it for
+ * the position rule. The fact's own projection time is the whole clock — it is
+ * the submission — and the subject joins through the owning BAY when one
+ * tracks the branch, bays and composed runs being the only subject sources the
+ * derived world has. Unresolved beats omitted here: an omitted row is
+ * indistinguishable from no work, which is the defect.
+ */
+function submitFactChangeRows(state: BaysState, result: QueueStatusResult, now: number): HumanChangeProjection[] {
+  return pendingSubmitFacts(state, result).map(({ branch, fact, bay }) => {
+    const path = bay?.path
+    const clock = age(fact.at, now, `branch '${branch}' submit fact age`)
+    return {
+      pr: branch,
+      revision: 0,
+      ...(path === undefined ? {} : { changeHref: pathToFileURL(path).href, path }),
+      branch,
+      subject: boundedQueue(bay?.name ?? path ?? `${fact.sha.slice(0, 12)} → ${fact.base}`, 80),
+      nativeStatus: "submitted" as const,
+      state: "submitted",
+      ...taskStatusFields(changeDeliveryTaskStatusOf("submitted")),
+      factOnly: true as const,
+      submittedAt: fact.at,
+      sourceReadyAt: fact.at,
+      touchedAt: fact.at,
+      revisionLineage: [],
+      target: fact.base,
+      age: clock,
+      touched: clock,
+      run: "-",
+      step: "-",
+      result: "awaiting compose",
+      artifactCount: 0,
+    }
+  })
+}
+
+/**
+ * Both admission lanes, in one population: the record store's changes plus the
+ * derived lane's standing submit facts ({@link submitFactChangeRows}).
+ *
+ * `state` is REQUIRED, and deliberately so — the derived lane is only visible
+ * through it, and behind an optional parameter its absence would silently
+ * return a short population rather than an error, which is the very failure
+ * 23235 records. A caller that cannot see the bays state cannot honestly
+ * report what the queue holds.
+ */
+function projectedChangeRows(state: BaysState, result: QueueStatusResult, now: number): HumanChangeProjection[] {
+  return [
+    ...result.prs.map((pr) =>
+      projectPR(
+        state,
+        result,
+        pr,
+        now,
+        undefined,
+        latestCandidateForCurrentRevision(result, pr),
+        eligibilityForCurrentRevision(result, pr),
+      ),
     ),
-  )
+    ...submitFactChangeRows(state, result, now),
+  ]
+}
+
+/**
+ * Published admission order first, then the derived lane by its own submission
+ * clock. Only the record lane holds a position (`admissionOrder` ranks records
+ * by check-request time), so the two groups cannot be interleaved by number
+ * without inventing one for a change the queue has not admitted.
+ */
+function byQueueOrder(
+  left: HumanChangeProjection & Readonly<{ position?: number }>,
+  right: HumanChangeProjection & Readonly<{ position?: number }>,
+): number {
+  if (left.position !== undefined && right.position !== undefined) return left.position - right.position
+  if (left.position !== undefined) return -1
+  if (right.position !== undefined) return 1
+  return (left.submittedAt ?? "").localeCompare(right.submittedAt ?? "") || compareNatural(left.pr, right.pr)
 }
 
 function byTouchedNewest(left: HumanChangeProjection, right: HumanChangeProjection): number {
@@ -2139,21 +2253,31 @@ function byTouchedNewest(left: HumanChangeProjection, right: HumanChangeProjecti
   return order === 0 ? compareNatural(left.pr, right.pr) : order
 }
 
+/**
+ * `state` is REQUIRED: the derived lane lives only there, and an optional one
+ * would hand a forgetful caller a silently short queue instead of an error
+ * (23235). Every reader of this projection can supply it.
+ */
 export function humanQueueProjection(
   result: QueueStatusResult,
   now: number,
   options: Readonly<{
     selected?: ReadonlySet<string>
-    state?: BaysState
-  }> = {},
+    state: BaysState
+  }>,
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const rows = projectedChangeRows(options.state, result, now)
   const positions = queueAdmissionPositions(result.admissionOrder)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted" || row.nativeStatus === "ready")
-    .map((row) => ({ ...row, position: requiredQueuePosition(positions, row.pr) }))
-    .toSorted((left, right) => left.position - right.position)
+    .map((row) =>
+      // A derived-lane row is not in `admissionOrder` and never will be until a
+      // compose admits it, so it takes no position rather than tripping the
+      // record lane's loud missing-position contract.
+      row.factOnly === true ? { ...row } : { ...row, position: requiredQueuePosition(positions, row.pr) },
+    )
+    .toSorted(byQueueOrder)
   const historical = result.finished.flatMap((run) =>
     run.prs.flatMap((member) => {
       const pr = result.prs.find((candidate) => candidate.id === member.id)
@@ -2739,11 +2863,19 @@ function SummaryQueue({ projection, repositoryRoot }: { projection: HumanQueuePr
   )
 }
 
-export function QueueListView({ results, now }: { results: readonly QueueStatusResult[]; now: number }) {
+export function QueueListView({
+  state,
+  results,
+  now,
+}: {
+  state: BaysState
+  results: readonly QueueStatusResult[]
+  now: number
+}) {
   return (
     <Box flexDirection="column">
       {results.map((result) => (
-        <SummaryQueue key={result.base} projection={humanQueueProjection(result, now)} />
+        <SummaryQueue key={result.base} projection={humanQueueProjection(result, now, { state })} />
       ))}
     </Box>
   )
@@ -2933,7 +3065,8 @@ export function QueueStatusView({
 }
 
 export type WatchQueueRow = Readonly<{
-  pos: number
+  /** Absent for a derived-lane row: it holds no published admission position. */
+  pos?: number
   pr: string
   subject: string
   taskStatus: TaskStatus
@@ -2945,9 +3078,9 @@ export type WatchQueueRow = Readonly<{
   result: string
 }>
 
-export function watchQueueRows(result: QueueStatusResult, now: number): WatchQueueRow[] {
-  return humanQueueProjection(result, now).queue.map((row) => ({
-    pos: row.position,
+export function watchQueueRows(state: BaysState, result: QueueStatusResult, now: number): WatchQueueRow[] {
+  return humanQueueProjection(result, now, { state }).queue.map((row) => ({
+    ...(row.position === undefined ? {} : { pos: row.position }),
     pr: row.pr,
     subject: row.subject,
     taskStatus: row.taskStatus,
@@ -3003,10 +3136,12 @@ export function activeWatchRow(
 }
 
 export function QueueWatchView({
+  state,
   results,
   now,
   pr,
 }: {
+  state: BaysState
   results: readonly QueueStatusResult[]
   now: number
   pr?: string
@@ -3034,7 +3169,7 @@ export function QueueWatchView({
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const projection = humanQueueProjection(result, now)
+        const projection = humanQueueProjection(result, now, { state })
         const pauseState = projection.pause === undefined ? "active" : `paused: ${projection.pause.reason}`
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
@@ -5079,16 +5214,27 @@ export function QueueTimelineView({
   if (results === undefined || now === undefined) {
     throw new Error("yrd: queue timeline requires results and snapshot time")
   }
+  // The summary spans both admission lanes, and the derived one is reachable
+  // only through the bays state: projecting a queue without it would report a
+  // record-only OPEN as if it were the whole queue (23235). A pre-load frame
+  // carrying no results has nothing to summarize and is left alone; a frame
+  // that HAS results and no state cannot be rendered honestly.
+  const bays = state
+  if (bays === undefined && results.length > 0) {
+    throw new Error("yrd: queue timeline requires bays state to project the derived lane's submissions")
+  }
   const rows = queueTimelineRows(results, now, latest, state)
   return (
     <Box flexDirection="column">
-      {results.map((result) => (
-        <SummaryQueue
-          key={result.base}
-          projection={humanQueueProjection(result, now)}
-          repositoryRoot={repositoryRoot}
-        />
-      ))}
+      {bays === undefined
+        ? null
+        : results.map((result) => (
+            <SummaryQueue
+              key={result.base}
+              projection={humanQueueProjection(result, now, { state: bays })}
+              repositoryRoot={repositoryRoot}
+            />
+          ))}
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (

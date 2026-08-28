@@ -1,4 +1,4 @@
-import { currentChangeRev, changeDeliveryState, type Change } from "@yrd/bay"
+import { currentChangeRev, changeDeliveryState, type BaysState, type Change } from "@yrd/bay"
 import type { JsonValue } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { Run } from "@yrd/queue"
@@ -441,6 +441,22 @@ function fixtureProjection(
   })
 }
 
+/**
+ * The bays state a fixture's own records imply: the record lane exactly as the
+ * result carries it, and an EMPTY derived lane — no bays, no standing submit
+ * facts. Every snapshot carries one, because the queue projections span both
+ * admission lanes and an absent state cannot be told from an empty derived
+ * lane (23235).
+ */
+function fixtureBays(results: readonly QueueStatusResult[]): BaysState {
+  return {
+    byId: {},
+    prs: Object.fromEntries(results.flatMap((result) => result.prs).map((pr) => [pr.id, pr])),
+    receipts: {},
+    submits: {},
+  }
+}
+
 export function fixtureSnapshot(
   result: QueueStatusResult,
   options: ProjectionOptions = {},
@@ -448,6 +464,7 @@ export function fixtureSnapshot(
 ): QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> {
   return {
     results: [result],
+    state: fixtureBays([result]),
     now: NOW,
     projection: fixtureProjection(result, options),
     ...(outputs === undefined ? {} : { outputs }),
@@ -463,7 +480,12 @@ export function fixtureMultiQueueSnapshot(
   results: readonly QueueStatusResult[],
   options: ProjectionOptions = {},
 ): QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> {
-  return { results: [...results], now: NOW, projection: fixtureProjection(results, options) }
+  return {
+    results: [...results],
+    state: fixtureBays(results),
+    now: NOW,
+    projection: fixtureProjection(results, options),
+  }
 }
 
 /**

@@ -13,6 +13,7 @@
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
+import type { BaysState } from "@yrd/bay"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
 import { QueueTopLine } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -87,7 +88,14 @@ describe("watch pane top line (@yrd/cli/queue-watch-top-line)", () => {
     // early return in QueueWatchFrame — the top line must not depend on it.
     const app = createRenderer({ cols: 140, rows: 40 })(
       createElement(QueueWatchFrame, {
-        snapshot: { results: [], now: Date.parse("2026-07-13T11:10:00.000Z"), repositoryRoot: "/hh" },
+        snapshot: {
+          results: [],
+          // A pre-load frame: nothing read yet, so the record lane is empty
+          // and so is the derived one. The state is stated, never omitted.
+          state: { byId: {}, prs: {}, receipts: {}, submits: {} } satisfies BaysState,
+          now: Date.parse("2026-07-13T11:10:00.000Z"),
+          repositoryRoot: "/hh",
+        },
       }),
     )
     try {

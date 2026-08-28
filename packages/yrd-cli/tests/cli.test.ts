@@ -32,6 +32,7 @@ import {
   withBays,
   volatilePrNumberMint,
   withDeployments,
+  type BaysState,
   type BayWorkspace,
   type Change,
   type ChangeDeliveryState,
@@ -135,6 +136,20 @@ import {
   taskStatusGlyph,
 } from "../src/task-status.ts"
 import { QueueWatchFrame, QueueWatchPane, queueDetailTier, type QueueWatchPaneProps } from "../src/watch-pane.tsx"
+
+/** An explicit EMPTY bays state: no bays, no records, and — the point — no
+ * standing submit facts, so these record-lane fixtures assert the record lane
+ * alone. The projections require it rather than accepting `undefined`, because
+ * an absent state cannot be told from an empty derived lane (23235). */
+const NO_BAYS: BaysState = { byId: {}, prs: {}, receipts: {}, submits: {} }
+
+/** A watch snapshot always carries the bays state the projections need
+ * (`run.ts` sets it from `state.bays`); saying so loudly beats a fallback that
+ * would quietly project the record lane alone. */
+function requiredWatchBays(snapshot: Readonly<{ state?: BaysState }>): BaysState {
+  if (snapshot.state === undefined) throw new Error("watch snapshot is missing its bays state")
+  return snapshot.state
+}
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -4898,9 +4913,7 @@ describe("runYrd", () => {
     expect(await app.queue.run({}, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
       { status: "completed", conclusion: "success" },
     ])
-    const retried = Queues.values(app.state().queues).find((run) =>
-      run.prs.some((pr) => pr.branch === "topic/retry"),
-    )
+    const retried = Queues.values(app.state().queues).find((run) => run.prs.some((pr) => pr.branch === "topic/retry"))
     expect(retried?.prs).toMatchObject([{ branch: "topic/retry", revision: 1, headSha: MERGED_SHA }])
     expect(app.state().bays.prs).toEqual({})
   })
@@ -8292,11 +8305,10 @@ describe("runYrd", () => {
       rowLimit: 20,
       submissionTimes: queueTimelineAdmissionTimes([result]),
     })
-    const handle = await run(createElement(QueueWatchFrame, { snapshot: { results: [result], now, projection } }), {
-      writable: { write: () => {} },
-      cols: 200,
-      rows: 50,
-    })
+    const handle = await run(
+      createElement(QueueWatchFrame, { snapshot: { results: [result], state: NO_BAYS, now, projection } }),
+      { writable: { write: () => {} }, cols: 200, rows: 50 },
+    )
 
     try {
       // Default cursor is the first row (PR1); the detail follows it with no
@@ -8360,7 +8372,7 @@ describe("runYrd", () => {
       waiting: [],
       finished: [],
     } satisfies QueueStatusResult
-    const initial = { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") }
+    const initial = { results: [result], state: NO_BAYS, now: Date.parse("2026-07-09T12:02:00.000Z") }
     const requested: Array<{ pr: string; revision: number; run?: string } | undefined> = []
     let activeLoads = 0
     let maxActiveLoads = 0
@@ -8906,7 +8918,9 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("watch"), io)).toBe(0)
     const props = mounted?.props as QueueWatchPaneProps
-    const frame = stripOsc8Targets(await renderString(createElement(QueueWatchView, props.initial)))
+    const frame = stripOsc8Targets(
+      await renderString(createElement(QueueWatchView, { ...props.initial, state: requiredWatchBays(props.initial) })),
+    )
     expect(frame).toContain("PAUSE")
     expect(frame).toContain("operator freeze")
     expect(frame).toContain("DRAIN")
@@ -8936,7 +8950,7 @@ describe("runYrd", () => {
     } as unknown as QueueStatusResult
     const now = Date.parse("2026-07-09T12:10:00.000Z")
 
-    expect(watchQueueRows(result, now)[0]).toMatchObject({ age: "10m", touched: "1m" })
+    expect(watchQueueRows(NO_BAYS, result, now)[0]).toMatchObject({ age: "10m", touched: "1m" })
     expect(activeWatchRow(result, now)).toMatchObject({
       run: "R1",
       pr: "PR1",
@@ -8988,7 +9002,7 @@ describe("runYrd", () => {
       plain: true,
     })
     const watchFrame = await renderString(
-      createElement(QueueWatchView, { results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+      createElement(QueueWatchView, { state: NO_BAYS, results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
       { width: 120, plain: true },
     )
 
@@ -9124,7 +9138,7 @@ describe("runYrd", () => {
       finished: [],
     } as unknown as QueueStatusResult
 
-    expect(watchQueueRows(result, Date.parse("2026-07-09T12:10:00.000Z"))[0]).toMatchObject({
+    expect(watchQueueRows(NO_BAYS, result, Date.parse("2026-07-09T12:10:00.000Z"))[0]).toMatchObject({
       step: "check",
       result: "waiting",
     })
@@ -9176,7 +9190,11 @@ describe("runYrd", () => {
 
     const frame = stripOsc8Targets(
       await renderString(
-        createElement(QueueWatchView, { results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+        createElement(QueueWatchView, {
+          state: NO_BAYS,
+          results: [result],
+          now: Date.parse("2026-07-09T12:10:00.000Z"),
+        }),
         { width: 120 },
       ),
     )
@@ -9198,6 +9216,7 @@ describe("runYrd", () => {
           finished: [],
         } as unknown as QueueStatusResult,
       ],
+      state: NO_BAYS,
       now: 0,
     }
     const handle = await run(
@@ -9348,9 +9367,14 @@ describe("runYrd", () => {
     if (mounted === undefined) throw new Error("expected watch pane to mount")
     const snapshot = (mounted.props as QueueWatchPaneProps).initial
     expect.soft(snapshot.results[0]?.pause).toBeUndefined()
-    expect.soft(watchQueueRows(snapshot.results[0]!, now()).map((row) => row.pr)).toEqual(["PR1", "PR2"])
+    expect
+      .soft(watchQueueRows(requiredWatchBays(snapshot), snapshot.results[0]!, now()).map((row) => row.pr))
+      .toEqual(["PR1", "PR2"])
     for (const width of [80, 120]) {
-      const frame = await renderString(createElement(QueueWatchView, snapshot), { width, height: 24, plain: true })
+      const frame = await renderString(
+        createElement(QueueWatchView, { ...snapshot, state: requiredWatchBays(snapshot) }),
+        { width, height: 24, plain: true },
+      )
       const rows = frame.trimEnd().split("\n")
       expect.soft(rows.length).toBeLessThanOrEqual(16)
       expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
@@ -9470,7 +9494,7 @@ describe("runYrd", () => {
           finished: item.runs,
         },
         Date.parse("2026-07-09T12:10:00.000Z"),
-        { selected },
+        { selected, state: NO_BAYS },
       )
       expect(projection.recent, item.name).not.toHaveLength(0)
       for (const row of projection.recent) {
@@ -9526,7 +9550,7 @@ describe("runYrd", () => {
       finished: [prior, current],
     } as QueueStatusResult
 
-    const projection = humanQueueProjection(result, Date.parse("2026-07-09T12:13:00.000Z"))
+    const projection = humanQueueProjection(result, Date.parse("2026-07-09T12:13:00.000Z"), { state: NO_BAYS })
     expect(projection.recent.map(({ runId, submittedAt, age }) => ({ runId, submittedAt, age }))).toEqual([
       { runId: "R2", submittedAt: "2026-07-09T12:10:01.000Z", age: "1m" },
       { runId: "R1", submittedAt: "2026-07-09T12:00:30.000Z", age: "4m" },
@@ -9540,6 +9564,7 @@ describe("runYrd", () => {
     const pending = humanQueueProjection(
       { ...result, prs: [awaitingCurrentRun], admissionOrder: ["PR1"], finished: [prior] },
       Date.parse("2026-07-09T12:13:00.000Z"),
+      { state: NO_BAYS },
     )
     expect(pending.queue).toHaveLength(1)
     expect(pending.queue[0]).toMatchObject({
@@ -9650,8 +9675,8 @@ describe("runYrd", () => {
       finished: [run],
     } as QueueStatusResult
 
-    const first = humanQueueProjection(result, Date.parse("2026-07-09T13:00:00.000Z")).recent[0]
-    const later = humanQueueProjection(result, Date.parse("2026-07-10T13:00:00.000Z")).recent[0]
+    const first = humanQueueProjection(result, Date.parse("2026-07-09T13:00:00.000Z"), { state: NO_BAYS }).recent[0]
+    const later = humanQueueProjection(result, Date.parse("2026-07-10T13:00:00.000Z"), { state: NO_BAYS }).recent[0]
     expect(first?.age).toBe("6m")
     expect(later?.age).toBe(first?.age)
   })
@@ -9707,6 +9732,7 @@ describe("runYrd", () => {
         finished: [run],
       },
       Date.parse("2026-07-09T12:02:00.000Z"),
+      { state: NO_BAYS },
     ).recent[0]?.failure
     expect(failure?.evidence).toEqual({ text: causal, href: pathToFileURL(causal).href })
     safeRemoveSync(temp, { within: tmpdir(), allowMissing: true })
@@ -9778,6 +9804,7 @@ describe("runYrd", () => {
     expect(
       humanQueueProjection(result, Date.parse("2026-07-09T12:04:00.000Z"), {
         selected: new Set(["PR2"]),
+        state: NO_BAYS,
       }).active,
     ).toMatchObject({ run: "R2", pr: "PR2", subject: "selected active run" })
   })
@@ -9828,14 +9855,14 @@ describe("runYrd", () => {
       finished,
     } as unknown as QueueStatusResult
     const now = Date.parse("2026-07-09T13:00:00.000Z")
-    const projection = humanQueueProjection(result, now)
+    const projection = humanQueueProjection(result, now, { state: NO_BAYS })
     expect(projection).toMatchObject({ open: 7, rejected: 5, queueOverflow: 2 })
     expect(projection.queue).toHaveLength(5)
     expect(projection.recent).toHaveLength(3)
     expect(projection.recent.map((row) => row.runId)).toEqual(["R5", "R4", "R3"])
 
     for (const width of [80, 120]) {
-      const frame = await renderString(createElement(QueueWatchView, { results: [result], now }), {
+      const frame = await renderString(createElement(QueueWatchView, { state: NO_BAYS, results: [result], now }), {
         width,
         height: 30,
         plain: true,
@@ -11067,7 +11094,9 @@ describe("runYrd", () => {
       waiting: [],
       finished: [],
     } as QueueStatusResult
-    expect.soft(() => humanQueueProjection(futureResult, Date.parse("2026-07-12T12:00:00.000Z"))).toThrow(/precedes/u)
+    expect
+      .soft(() => humanQueueProjection(futureResult, Date.parse("2026-07-12T12:00:00.000Z"), { state: NO_BAYS }))
+      .toThrow(/precedes/u)
 
     const rejected = timelineFixturePr("PR95", "rejected", "2026-07-12T11:59:00.000Z", undefined, {
       headSha: HEAD_SHA,
@@ -11091,7 +11120,7 @@ describe("runYrd", () => {
       finished: [backwards],
     } as QueueStatusResult
     expect
-      .soft(() => humanQueueProjection(backwardsResult, Date.parse("2026-07-12T12:03:00.000Z")))
+      .soft(() => humanQueueProjection(backwardsResult, Date.parse("2026-07-12T12:03:00.000Z"), { state: NO_BAYS }))
       .toThrow(/precedes/u)
   })
 

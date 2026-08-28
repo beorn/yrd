@@ -16,8 +16,12 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixtureJob, fixturePr, fixtureResult, fixtureRun, fixtureStep } from "../dev/queue-timeline-fixtures.ts"
+import type { BaysState } from "@yrd/bay"
 import { QueueWatchView } from "../src/queue-status-view.tsx"
 
+/** No bays, no records, no standing submit facts: this fixture asserts the
+ * record lane alone, and says so rather than omitting the state. */
+const NO_BAYS: BaysState = { byId: {}, prs: {}, receipts: {}, submits: {} }
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
 const BASE_SHA = "a".repeat(40)
 const REV1_HEAD = "bc1ce38b0824".padEnd(40, "0")
@@ -76,7 +80,7 @@ describe("watch detail — pending row whose latest run ran a superseded revisio
     const pr = supersededPr()
     const result = fixtureResult([pr], [rejectedRev1Run(pr)])
     const app = createRenderer({ cols: 120, rows: 40 })(
-      createElement(QueueWatchView, { results: [result], now: NOW, pr: "PR380" }),
+      createElement(QueueWatchView, { state: NO_BAYS, results: [result], now: NOW, pr: "PR380" }),
     )
     try {
       // (a) The run block is labeled as history: the run header carries the
@@ -119,7 +123,7 @@ describe("watch detail — current-revision run keeps today's rendering", () => 
     })
     const result = fixtureResult([pr], [currentRun])
     const app = createRenderer({ cols: 120, rows: 40 })(
-      createElement(QueueWatchView, { results: [result], now: NOW, pr: "PR380" }),
+      createElement(QueueWatchView, { state: NO_BAYS, results: [result], now: NOW, pr: "PR380" }),
     )
     try {
       expect(app.text).toContain("main#521")
