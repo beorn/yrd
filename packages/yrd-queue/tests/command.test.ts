@@ -4090,6 +4090,58 @@ describe("Queue command adapters", () => {
     })
   })
 
+  // 2026-08-28: this identity pair is DELIBERATE and must not be "fixed".
+  //
+  // A separate defect makes a CANDIDATE leg receive base==candidate: when every
+  // member is already contained in the base, nothing merges and the candidate
+  // sha IS the base sha, so four gates ran over an empty range (PR2145, PR2462,
+  // PR2503, PR2504, one compose pass, all four handed fd5a0d02..fd5a0d02).
+  // Reading that as "X..X is always wrong" and adding a blanket refusal to the
+  // environment builder would take typecheck and affected-tests down for
+  // everyone, because the delta comparison's BASE leg passes candidate.baseSha
+  // as both variables ON PURPOSE — that leg measures the base TREE, and asks no
+  // question about a range. This test exists so that deletion cannot be quiet.
+  it("hands the delta comparison's base leg an identical pair on purpose, and the candidate leg a real one", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    // Outside both checkouts: the two legs run in different worktrees and each
+    // appends one row, so the ledger is the only place their pairs meet.
+    const ledger = join(repo, "..", "delta-leg-pairs.txt")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        `printf '%s %s\\n' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" >> ${ledger}; ` +
+          // Fails with comparable diagnostics, which is the only thing that
+          // makes the base leg run at all.
+          "printf '%s\\n' 'src/a.ts:1:1 - shared-a'; exit 17",
+      ),
+      { comparison: "diagnostics" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+
+    const rows = (await readFile(ledger, "utf8"))
+      .split("\n")
+      .filter((row) => row.trim() !== "")
+      .map((row) => row.split(" "))
+    expect(rows, "both legs must have run").toHaveLength(2)
+    const identical = rows.filter(([base, candidate]) => base === candidate)
+    const distinct = rows.filter(([base, candidate]) => base !== candidate)
+
+    // The base leg: one sha, in both variables, and it is the base.
+    expect(identical, "the base leg's identical pair is the exemption this test defends").toHaveLength(1)
+    expect(identical[0]?.[0]).toBe(baseSha)
+    expect(identical[0]?.[1]).toBe(baseSha)
+    // The candidate leg: a real range, so a guard that refuses base==candidate
+    // on the CANDIDATE leg alone stays possible without breaking delta mode.
+    expect(distinct, "the candidate leg must still receive a measurable range").toHaveLength(1)
+    expect(distinct[0]?.[0]).toBe(baseSha)
+  })
+
   // 2026-08-26: the delta comparison's parent leg ran in a bare scratch
   // worktree — no submodule materialization — while the candidate leg's pool
   // checkout and both merge paths materialize. In a repository whose workspace
