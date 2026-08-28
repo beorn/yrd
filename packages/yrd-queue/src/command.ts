@@ -6078,6 +6078,32 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<ChangeShape, 
   const withGatePinnedScripts =
     (body: (path: string, candidate: PinnedCandidate) => Promise<JobResult<GitCheckResultEvidence>>) =>
     async (path: string, candidate: PinnedCandidate): Promise<JobResult<GitCheckResultEvidence>> => {
+      // A content check compares a base against a candidate, so it means
+      // nothing when they are the same commit. That is not hypothetical: when
+      // every member of a candidate is already contained in the base,
+      // `prepareCandidateMembers` correctly declines to merge any of them
+      // (see its "nothing is left to merge" branch), the scratch worktree's
+      // HEAD never leaves the base, and the recorded candidateSha IS baseSha.
+      // Measured 2026-08-28: PR2145, PR2462, PR2503 and PR2504 were all handed
+      // `fd5a0d02..fd5a0d02` in one compose pass — four unrelated changes, one
+      // sha, main's own tip in both variables.
+      //
+      // Refused HERE rather than in `prepareCandidateMembers` on purpose. The
+      // empty candidate is legitimate for a post-merge actuator retry, which
+      // has nothing left to merge and needs no range; refusing where it is
+      // built would break that. This is the check step's own funnel, so the
+      // merge step (which reads no range) is untouched, and the delta base leg
+      // below never runs because the candidate leg refuses first.
+      if (candidate.candidateSha === candidate.baseSha) {
+        return failed(
+          "candidate-carries-nothing",
+          `yrd: candidate ${candidate.candidateSha} is its own base, so '${options.purpose ?? "check"}' would ` +
+            `compare ${candidate.baseSha} against itself and measure nothing. Every member of this candidate is ` +
+            `already contained in the base — the shape an already-landed change leaves behind once its branch has ` +
+            `been fast-forwarded onto the base. No verdict was computed; this candidate needs a real commit or ` +
+            `retirement, not another check run.`,
+        )
+      }
       const overlay =
         options.scripts === undefined || options.scripts.length === 0
           ? undefined
