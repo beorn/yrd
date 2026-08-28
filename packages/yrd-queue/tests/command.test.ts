@@ -337,6 +337,45 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
+/**
+ * DELIBERATE REDS (S7) — every test built on this fixture, and the reason is
+ * NOT the fixture. Read this before "fixing" it.
+ *
+ * The fixture creates the submodule pin on `task/submodule` and pushes it
+ * there, deliberately NOT to the submodule's own `main`. That is correct and
+ * load-bearing: these tests are about the queue ADVANCING a submodule's main to
+ * an authored pin, so a pin already on main would leave nothing to advance.
+ *
+ * The compose now refuses that candidate before any of it runs. Measured:
+ *   action  compose-candidate-skip
+ *   code    min-commit-unpublished
+ *   reason  change 'PR1' cannot fill the shaset: 'dep' authored min commit
+ *           '…' is not on submodule main '…'; the author's gitlink is a min
+ *           commit, never a value — push it to the submodule's own main first,
+ *           then resubmit
+ * so no job is created at all (`state().jobs.byId` is empty) and `queue.run`
+ * returns nothing — which surfaces as `expected undefined to match object
+ * { status: "completed" }` at whichever assertion reads the run first.
+ *
+ * THE MODEL CHANGED UNDER THESE TESTS. src/command.ts says it in as many
+ * words at the refusal site — "submodule-main-first parks this before
+ * queueing" — and the fill-in only ever moves a pin FORWARD to main
+ * (`if (main.sha === authored) continue` … else `updates.push({ sha: main.sha })`).
+ * The authored gitlink is a floor, never a value, and main is never
+ * back-promoted to it. That also matches the documented operator workflow:
+ * fast-forward the component's main first, THEN submit from the hh root.
+ *
+ * So the capability these tests exercise appears to be RETIRED BY DESIGN, and
+ * converting them is not a fixture edit — it is a decision about whether
+ * submodule-main promotion still exists at all. Left red and reported rather
+ * than converted or deleted: deleting them would erase the only description of
+ * a capability nobody has explicitly ruled dead, and making them pass would
+ * require publishing the pin first, which deletes their subject.
+ *
+ * Needs a ruling. If promotion is retired, these want deletion WITH a
+ * lost-coverage note naming what they proved; if some promotion path survives
+ * for a case this fixture does not build, they want re-pointing at it.
+ */
 async function submoduleMainMergeRepository(
   options: Readonly<{ pushSuccessor?: boolean; nonBareComponentOrigin?: boolean }> = {},
 ): Promise<{

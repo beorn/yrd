@@ -177,6 +177,24 @@ describe("eligibility congruence — one fixture, both surfaces", () => {
 
     await app.queue.run({}, runtime)
 
+    // DELIBERATE RED (S7): `issue/servable` RAN and the status surface still
+    // calls it pending. Observed: `ranFor(app, "issue/servable")` is true,
+    // `statusVerdict(...).pending` is true, and the verdict still carries
+    // `code: "unrecorded-submit"` — the same code it carried BEFORE the
+    // compose, above.
+    //
+    // That is the incongruence this file exists to catch, in the direction
+    // that misleads: a branch the queue has served reads as still waiting to
+    // be served. `unrecordedSubmits` documents itself as "retiring once a
+    // retained run snapshot serves the branch", so either the run retained no
+    // snapshot naming this branch at the fact's sha, or the retirement
+    // condition does not see the one it retained.
+    //
+    // NOT caused by tonight's landed fixes — this red predates them (it stood
+    // at the 195-red measurement, before explicit selection and the refused-
+    // branch visibility work). Reported rather than converted: the assertion
+    // is correct and the surfaces genuinely disagree.
+    //
     // 1. Content congruence, per branch: pending on the status surface iff the
     //    run path left it alone.
     for (const branch of ["issue/servable", "issue/vanished", "issue/never-approved"]) {

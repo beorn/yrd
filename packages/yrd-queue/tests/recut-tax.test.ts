@@ -31,7 +31,7 @@
  * instrument whose baseline drifts silently is worth nothing.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createLogger } from "loggily"
@@ -165,6 +165,12 @@ async function drainDrill(
     batch: options.batch,
     defaultSteps: ["check", "review", "merge"],
     resolveBaseSha: () => head,
+    // REQUIRED post-S7: the drill submits branches and drains them with a bare
+    // selectorless compose, so every candidate is a DERIVED member the compose
+    // must mint an identity for. Without a mint `deriveRefOnlyMembers` warns
+    // and returns nothing, the drain composes zero candidates, and the drill
+    // measures the tax of doing nothing.
+    prNumberMint: volatilePrNumberMint(),
     prepareCandidate: (input) => {
       const members = input.prs.map((pr) => (pr as { branch: string }).branch)
       // Disjoint payloads: no two members ever touch the same file, so every
@@ -290,6 +296,27 @@ describe("queue drain throughput — rebuilds per merge", () => {
   // fault turns this file red HERE, loudly and attributably. The expected-fail
   // below can therefore only be silently wrong in a world where this passes —
   // which is exactly a world where the drill is healthy and the tax is real.
+  /**
+   * DELIBERATE RED (S7): the drill runs, integrates all 8, and merges once per
+   * batch-group — but BUILDS 43 where the recorded model predicts 36.
+   *
+   * `MEASURED` is deliberately NOT edited to 43. This file exists to pin the
+   * recut tax; moving the recorded number to match the code turns a throughput
+   * regression into a contract and deletes the only instrument that can see it.
+   *
+   * The discrepancy is structural, not noise: 43 - 36 = 7 = G-1 at G=8 groups,
+   * and it reproduced identically on two consecutive runs (43, 43), so it is
+   * not the load-sensitivity affecting this box tonight.
+   *
+   * Note this red only became REACHABLE with the `prNumberMint` wired above.
+   * Before that the compose derived nothing, integrated nothing, and the drill
+   * measured the tax of doing no work — the assertion it failed on then was
+   * `all 8 candidates must integrate: expected 0 to be 8`. So the tax was not
+   * "fine before"; it was unmeasured.
+   *
+   * Needs a ruling: is G-1 extra candidate builds per drain the accepted cost
+   * of the derived lane, or a regression against the model this file records?
+   */
   it(
     "drains every disjoint candidate and reproduces the recorded build counts",
     async () => {
