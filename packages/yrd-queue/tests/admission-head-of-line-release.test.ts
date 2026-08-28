@@ -83,11 +83,7 @@ function checkMergePlugin(prepareCandidate: CandidatePreparer) {
 async function createApp(prepareCandidate: CandidatePreparer, log?: ReturnType<typeof createLogger>) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = checkMergePlugin(prepareCandidate)
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ jobs: bayJobs }),
-  )
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: {
       journal: createMemoryJournal(),
@@ -174,6 +170,45 @@ describe("admission head-of-line release — a refused member never blocks the r
     expect(wedged).toMatchObject({ branch: head, code: "recut-gitlink-conflict", count: 1 })
     expect(skipsForMember(events, wedged?.pr ?? "").length).toBeGreaterThan(0)
     log.end()
+  })
+
+  it("admits one member per turn in GLOBAL order, holding a member on another base behind the head", async () => {
+    // Fences `drainAdmissions`' `queued.slice(0, 1)`, which is the only place
+    // global admission FIFO lives — and which nothing tested until now.
+    //
+    // TWO BASES, and that is the whole point of the fixture. The skip test's
+    // `runningQueue(..., pr.base)` disjunct already serializes members sharing a
+    // base, so a same-base version of this test passes whether ordering works or
+    // not. Only a cross-base pair can tell the two apart: `admissionQueue` is
+    // ordered and NOT base-filtered, so taking its head is what stops a
+    // release-base member riding along in the head's turn.
+    //
+    // WHY THIS TEST EXISTS. A fourth disjunct in that same skip test,
+    // `admissionLineHolder`, used to claim this job and had silently stopped
+    // being able to fire (@refname-reach, by construction — post-S7 it was
+    // called without the derived batch that IS `admissionQueue`'s population).
+    // The first version of this test was written to catch that, and passed
+    // identically against the broken code, because the property was never its to
+    // enforce. That guard is deleted; this asserts the mechanism that really
+    // carries the behaviour, at the site that carries it.
+    const turns: string[][] = [[]]
+    const prepare: CandidatePreparer = (input) => {
+      for (const pr of input.prs) turns.at(-1)?.push(pr.branch)
+      const { prs: _prs, ...candidate } = input
+      return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
+    }
+    await using app = await createApp(prepare)
+    const first = "issue/line-main"
+    await app.bays.recordBranchSubmit({ branch: first, sha: "1".repeat(40), base: "main" })
+    const second = "issue/line-release"
+    await app.bays.recordBranchSubmit({ branch: second, sha: "2".repeat(40), base: "release/2.0" })
+
+    await app.queue.run({}, { ...HABITANT, continueAdmissions: () => (turns.push([]), true) })
+
+    // One member per turn, head first, across bases — and BOTH turns asserted,
+    // because "the head went first" alone would also hold if the second member
+    // never ran at all.
+    expect(turns.filter((turn) => turn.length > 0)).toEqual([[first], [second]])
   })
 
   it("ledgers the refused head exactly once per cycle while the trailing members drain", async () => {

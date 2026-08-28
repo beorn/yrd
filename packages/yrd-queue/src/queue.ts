@@ -2217,8 +2217,7 @@ function createQueue<Shape extends ChangeShape>(
         if (
           blockingQueuePause(snapshot, pr) !== undefined ||
           admissionSteps(steps).length === 0 ||
-          runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined ||
-          (selection !== "explicit" && admissionLineHolder(snapshot, steps, pr) !== undefined)
+          runningQueue(snapshot.queues, snapshot.jobs, pr.base) !== undefined
         ) {
           continue
         }
@@ -2310,6 +2309,25 @@ function createQueue<Shape extends ChangeShape>(
       // A habitant (`continueAdmissions` installed) admits one change per turn so a
       // drain signal can interrupt between admissions; a one-shot dispatches the
       // whole queue in a single turn and needs no release.
+      //
+      // THIS LINE IS WHERE GLOBAL ADMISSION FIFO LIVES, and it is now the only
+      // place. `admissionQueue` above is ordered and NOT base-filtered, so
+      // taking its head serializes admissions across every base — `runningQueue`
+      // in the skip test below covers only same-base overlap.
+      //
+      // A second guard used to claim this job: `admissionLineHolder`, a fourth
+      // disjunct in that skip test, asking whether an unrefused member sat ahead
+      // of this one. It was DELETED rather than repaired. Post-S7 it was called
+      // without the compose's derived batch while `admissionQueue` returns
+      // `[...derived]` filtered, so it answered `undefined` for every input and
+      // could not fire (@refname-reach found it by construction; no test failed,
+      // then or after a trial repair). Rearming it would have been worse than
+      // leaving it: on the habitant path it re-asks what this line has already
+      // answered — the member it is handed IS the head, so nothing is ever ahead
+      // — and on the one-shot path it would have skipped every member but the
+      // first, contradicting the whole-queue dispatch this same line grants on
+      // purpose. The head-of-line RELEASE it was written for survives in
+      // `released` above, which is the mechanism that actually carries it.
       const turn = options.continueAdmissions === undefined ? queued : queued.slice(0, 1)
       const dispatched = await dispatchAdmissions(
         turn.map((pr) => pr.id),
@@ -7406,34 +7424,6 @@ function admissionPosition(state: DeepReadonly<RuntimeState>, pr: string): numbe
 function refusedRevisionAdmissions(state: DeepReadonly<RuntimeState>): Change[] {
   void state
   return []
-}
-
-/**
- * The change ahead of `pr` that legitimately holds the admission line, or
- * `undefined` when nothing does and `pr` may be admitted now.
- *
- * Admission is FIFO, and it used to be strict: only `admissionQueue[0]` could
- * ever be admitted. That made ONE unadmittable carrier freeze the door for
- * every ready PR behind it, because a refused PR keeps its head position — the
- * 22474 wedge (PR1791 held the line through 44 consecutive refusal cycles,
- * PR1787 through 30, with seven ready PRs stacked behind them, each cleared by
- * hand). A change carrying a live admission-refusal streak has demonstrably NOT
- * gotten in, so it stops holding the line while keeping its queue position: it
- * is still retried on its own turn, and its streak clears the moment it is
- * admitted, pushed, or re-merge ({@link QueueAdmissionRefusal}).
- *
- * Only PRs strictly AHEAD of `pr` are considered, so a change with a stale streak
- * of its own is never blocked by the very PRs it outranks.
- */
-function admissionLineHolder(
-  state: DeepReadonly<RuntimeState>,
-  steps: readonly RuntimeStep[],
-  pr: DeepReadonly<Change>,
-): DeepReadonly<Change> | undefined {
-  const queued = admissionQueue(state, steps)
-  const position = queued.findIndex((candidate) => candidate.id === pr.id)
-  const ahead = position < 0 ? queued : queued.slice(0, position)
-  return ahead.find((candidate) => state.queues.admissionRefusals[candidate.id] === undefined)
 }
 
 function blockingQueuePause(
