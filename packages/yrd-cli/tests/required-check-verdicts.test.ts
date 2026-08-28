@@ -22,7 +22,8 @@
  *    anything but one agent's `/tmp` scratch file.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
+import { createBayJobDefs, resolveChange, withBays, type BaysState } from "@yrd/bay"
+import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
@@ -70,7 +71,7 @@ function workspace() {
   }
 }
 
-async function createCliApp(options: { idStart?: number } = {}) {
+async function createCliApp(options: { idStart?: number; seeds?: readonly ChangeSeed[] } = {}) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -93,7 +94,6 @@ async function createCliApp(options: { idStart?: number } = {}) {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -101,7 +101,8 @@ async function createCliApp(options: { idStart?: number } = {}) {
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: createMemoryJournal(),
+      journal:
+        options.seeds === undefined ? createMemoryJournal() : createMemoryJournal([seededChangesEntry(options.seeds)]),
       clock: () => "2026-08-25T12:00:00.000Z",
       id: ids(options.idStart ?? 0),
       log: createLogger("yrd", [{ level: "silent" }]),
@@ -170,7 +171,7 @@ function services(app: CliApp, options: { failing?: string; log?: CheckLog } = {
       run: async (request: ProcessRequest) => {
         const target = request.argv.find((arg) => arg.startsWith("refs/remotes/origin/") && arg.endsWith("^{commit}"))
         const branch = target?.slice("refs/remotes/origin/".length, -"^{commit}".length)
-        const observed = branch === undefined ? undefined : app.bays.pr(branch)
+        const observed = branch === undefined ? undefined : resolveChange(app.bays.state() as BaysState, branch)
         return {
           stdout: request.argv.includes("merge-base")
             ? `${"0".repeat(39)}1\n`
@@ -196,10 +197,12 @@ function services(app: CliApp, options: { failing?: string; log?: CheckLog } = {
   }
 }
 
-async function draftedApp(branch: string): Promise<CliApp> {
-  const app = await createCliApp()
-  await app.bays.submit({ branch, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-  return app
+/** A seeded submitted record on `branch` (S7: records no longer mint, so the
+ * record state the checks read is journal history). */
+async function draftedApp(branch: string, seed: Partial<ChangeSeed> = {}): Promise<CliApp> {
+  return createCliApp({
+    seeds: [{ pr: "PR1", branch, base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }], ...seed }],
+  })
 }
 
 describe("a required check that ran cannot be erased by the throw that ends the run", () => {
@@ -303,8 +306,11 @@ describe("pr checks exit 0 means a recorded pass, never merely the absence of a 
     // The positive control. Without it, the assertion above is satisfied by a
     // command that simply always fails now, which would be a worse instrument
     // than the one being replaced.
+    // S7: the check-request verb retired with the record store; the queue's
+    // own admission records the check request when the run composes the
+    // seeded record. (A PRE-seeded pr/checks-requested row wedges compose —
+    // measured 2026-08-27 — so the fixture seeds only the submitted state.)
     await using app = await draftedApp("topic/judged")
-    await app.bays.requestChecks({ pr: "PR1" })
     await app.queue.run({ prs: ["PR1"] }, { runner: "required-check-verdicts-test", leaseMs: 60_000 })
     const output = outputIO()
 

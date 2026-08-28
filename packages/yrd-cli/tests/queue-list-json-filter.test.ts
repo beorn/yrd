@@ -117,7 +117,15 @@ async function createCliApp() {
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // The queue owns the mint (S7): derived-member identities mint at
+  // admission; a derived member carries no baseSha of its own, so the
+  // fixture resolves it here.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -125,7 +133,6 @@ async function createCliApp() {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -189,9 +196,11 @@ async function list(app: Awaited<ReturnType<typeof createCliApp>>, ...args: stri
 describe("queue list --json answers the same question as the human renderer", () => {
   it("applies --status to the JSON payload, not only to the rendered rows", async () => {
     const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.queue.run({ prs: ["PR1"] }, { runner: "json-filter-test", leaseMs: 60_000 })
-    await app.bays.submit({ branch: "topic/pending", headSha: "2".repeat(40), base: "main", baseSha: BASE_SHA })
+    // Derived lane (S7): the branch/submitted fact is the submission; the
+    // selectorless compose admits it, minting PR1 at admission, and runs it.
+    await app.bays.recordBranchSubmit({ branch: "topic/merged", sha: HEAD_SHA, base: "main" })
+    await app.queue.run({}, { runner: "json-filter-test", leaseMs: 60_000 })
+    await app.bays.recordBranchSubmit({ branch: "topic/pending", sha: "2".repeat(40), base: "main" })
 
     const all = await list(app)
     expect(resultRunIds(all), "the unfiltered listing must still carry the finished run").toContain("R1")

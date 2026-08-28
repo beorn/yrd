@@ -16,8 +16,9 @@
  * the derived lane (exit 0, no reopen).
  */
 import { describe, expect, it } from "vitest"
-import { changeDeliveryState, createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
-import { Command, createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import { changeDeliveryState, createBayJobDefs, resolveChange, withBays, type BaysState } from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -63,7 +64,7 @@ function workspace() {
  * turns the failed run into a durable `pr/needs-author`. */
 async function createCliApp(
   options: {
-    journal?: ReturnType<typeof createMemoryJournal<unknown>>
+    seeds?: readonly ChangeSeed[]
     failingCheckCode?: string
     idStart?: number
   } = {},
@@ -97,7 +98,6 @@ async function createCliApp(
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -105,7 +105,8 @@ async function createCliApp(
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: options.journal ?? createMemoryJournal(),
+      journal:
+        options.seeds === undefined ? createMemoryJournal() : createMemoryJournal([seededChangesEntry(options.seeds)]),
       clock: () => "2026-08-25T12:00:00.000Z",
       id: ids(options.idStart ?? 0),
       log: createLogger("yrd", [{ level: "silent" }]),
@@ -155,7 +156,7 @@ function services(app: CliApp): YrdCliServices {
       run: async (request: ProcessRequest) => {
         const target = request.argv.find((arg) => arg.startsWith("refs/remotes/origin/") && arg.endsWith("^{commit}"))
         const branch = target?.slice("refs/remotes/origin/".length, -"^{commit}".length)
-        const observed = branch === undefined ? undefined : app.bays.pr(branch)
+        const observed = branch === undefined ? undefined : resolveChange(app.bays.state() as BaysState, branch)
         return {
           stdout: request.argv.includes("merge-base")
             ? `${"0".repeat(39)}1\n`
@@ -181,63 +182,58 @@ function services(app: CliApp): YrdCliServices {
   }
 }
 
-/** A change whose failed run attributed the failure to its author. */
+function recordOf(app: CliApp, selector: string) {
+  const pr = resolveChange(app.bays.state() as BaysState, selector)
+  if (pr === undefined) throw new Error(`no seeded change '${selector}'`)
+  return pr
+}
+
+/** A change whose failed run attributed the failure to its author. S7: the
+ * submitted record is seeded as journal history; the failing run then writes
+ * the durable pr/needs-author fact exactly as before. */
 async function needsAuthorApp(): Promise<CliApp> {
-  const app = await createCliApp({ failingCheckCode: "composition-retired" })
-  await app.bays.submit({ branch: "topic/needs-author", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+  const app = await createCliApp({
+    failingCheckCode: "composition-retired",
+    seeds: [
+      { pr: "PR1", branch: "topic/needs-author", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] },
+    ],
+  })
   await app.queue.run({ prs: ["PR1"] }, { runner: "submit-truthfulness-test", leaseMs: 60_000 })
-  expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("needs-author")
+  expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("needs-author")
   return app
 }
 
 /** A change in the legacy `rejected` delivery state. No live command emits
  * `pr/rejected` any more, so the fixture replays it the way such changes really
- * exist in the fleet: from the journal. The crafted frame reuses a real op with
- * a matching command hash so replay integrity checks stay honest. */
+ * exist in the fleet: from the journal (pr/pushed + pr/submitted + pr/rejected
+ * in one seeded frame). */
 async function rejectedApp(): Promise<CliApp> {
-  const journal = createMemoryJournal<unknown>()
-  const first = await createCliApp({ journal })
-  await first.bays.submit({ branch: "topic/rejected", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-  let entries: unknown[] = []
-  for await (const chunk of journal.read()) entries = [...entries, ...(chunk as { values: readonly unknown[] }).values]
-  const op = "queue.settled"
-  const args = { run: "R1" }
-  const rejectedFrame = {
-    cause: {
-      id: "00000000-0000-7000-8000-0000000000f1",
-      commandId: "00000000-0000-7000-8000-0000000000f0",
-      op,
-      commandHash: Command.hash({ op, args }),
-    },
-    command: { id: "00000000-0000-7000-8000-0000000000f0", op, args },
-    events: [
+  const app = await createCliApp({
+    idStart: 0x100,
+    seeds: [
       {
-        id: "00000000-0000-7000-8000-0000000000f2",
-        name: "pr/rejected",
-        ts: "2026-08-25T12:05:00.000Z",
-        data: {
-          pr: "PR1",
-          revision: 1,
-          headSha: HEAD_SHA,
-          run: "R1",
-          step: "check",
-          detail: "legacy rejection: payload does not typecheck",
-        },
+        pr: "PR1",
+        branch: "topic/rejected",
+        base: "main",
+        revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }],
+        terminal: { kind: "rejected", run: "R1", step: "check", detail: "legacy rejection: payload does not typecheck" },
       },
     ],
-  }
-  const app = await createCliApp({ journal: createMemoryJournal([...entries, rejectedFrame]), idStart: 0x100 })
-  expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("rejected")
+  })
+  expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("rejected")
   return app
 }
 
-/** A change integrated by a completed run — the Q1 frozen-identity fixture. */
+/** A change integrated by a completed run — the Q1 frozen-identity fixture.
+ * S7: the submitted record is seeded; the run itself records its own check
+ * request at admission (a PRE-seeded request row wedges compose — measured
+ * 2026-08-27). */
 async function integratedApp(): Promise<CliApp> {
-  const app = await createCliApp()
-  await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-  await app.bays.requestChecks({ pr: "PR1" })
+  const app = await createCliApp({
+    seeds: [{ pr: "PR1", branch: "topic/merged", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] }],
+  })
   await app.queue.run({ prs: ["PR1"] }, { runner: "submit-truthfulness-test", leaseMs: 60_000 })
-  expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("integrated")
+  expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("integrated")
   return app
 }
 
@@ -260,7 +256,7 @@ describe("pr submit exit truthfulness", () => {
     const exit = await runYrd(app, yrd("pr", "submit", "topic/rejected", "--json"), output.io, services(app))
     // The record is terminal and stays terminal: the resubmit must not reopen
     // it (the legacy record mint's reopen door is retired).
-    expect(changeDeliveryState(app.bays.pr("PR1")!)).toBe("rejected")
+    expect(changeDeliveryState(recordOf(app, "PR1"))).toBe("rejected")
     const envelope = JSON.parse(output.stdout()) as {
       prs: readonly { id: string; status: string }[]
       derived?: readonly { lane: string; branch: string; sha: string; base: string }[]

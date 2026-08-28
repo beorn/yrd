@@ -21,6 +21,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { describe, expect, it } from "vitest"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
+import { seededChangesEntry } from "./support/seeded-changes.ts"
 
 const HEAD_SHA = "1".repeat(40)
 const BASE_SHA = "a".repeat(40)
@@ -93,7 +94,15 @@ async function createCliApp() {
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // The queue owns the mint (S7): derived-member identities mint at
+  // admission; a derived member carries no baseSha of its own, so the
+  // fixture resolves it here.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -101,21 +110,29 @@ async function createCliApp() {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
     }),
   )
+  // S7: records no longer mint, so the two live submissions (one per base)
+  // are seeded as journal history the replay reducers still materialize.
   const app = await createYrd(contests(queue(base)), {
-    inject: { journal: createMemoryJournal(), clock: () => "2026-08-13T12:00:00.000Z", id: ids() },
-  })
-  await app.bays.submit({ branch: "topic/on-main", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-  await app.bays.submit({
-    branch: "topic/on-release",
-    headSha: "2".repeat(40),
-    base: "release/next",
-    baseSha: BASE_SHA,
+    inject: {
+      journal: createMemoryJournal([
+        seededChangesEntry([
+          { pr: "PR1", branch: "topic/on-main", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] },
+          {
+            pr: "PR2",
+            branch: "topic/on-release",
+            base: "release/next",
+            revs: [{ headSha: "2".repeat(40), baseSha: BASE_SHA }],
+          },
+        ]),
+      ]),
+      clock: () => "2026-08-13T12:00:00.000Z",
+      id: ids(),
+    },
   })
   return app
 }

@@ -123,7 +123,15 @@ async function createCliApp() {
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // The queue owns the mint (S7): derived-member identities mint at
+  // admission; a derived member carries no baseSha of its own, so the
+  // fixture resolves it here.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -131,7 +139,6 @@ async function createCliApp() {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -198,12 +205,15 @@ async function hostSpelling(
 
 async function fixture() {
   const app = await createCliApp()
-  // Distinct head SHAs: the bay refuses a duplicate payload, so three branches
-  // sharing one SHA would submit as one change and shrink the comparison set.
-  for (const [index, branch] of ["topic/one", "topic/two", "topic/three"].entries()) {
-    await app.bays.submit({ branch, headSha: `${index + 1}`.repeat(40), base: "main", baseSha: BASE_SHA })
-  }
-  await app.queue.run({ prs: ["PR1"] }, { runner: "named-subcommand-test", leaseMs: 60_000 })
+  // Derived lane (S7): the branch/submitted fact is the submission. Submit
+  // topic/one first and drain it with a selectorless compose (minting PR1 at
+  // admission); the other two branches stay standing facts, as the retired
+  // record fixture used to leave pending records. Distinct head SHAs: a
+  // duplicate payload would compose as one change and shrink the set.
+  await app.bays.recordBranchSubmit({ branch: "topic/one", sha: "1".repeat(40), base: "main" })
+  await app.queue.run({}, { runner: "named-subcommand-test", leaseMs: 60_000 })
+  await app.bays.recordBranchSubmit({ branch: "topic/two", sha: "2".repeat(40), base: "main" })
+  await app.bays.recordBranchSubmit({ branch: "topic/three", sha: "3".repeat(40), base: "main" })
   return app
 }
 

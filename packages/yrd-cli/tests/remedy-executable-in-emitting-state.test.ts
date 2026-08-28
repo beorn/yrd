@@ -8,12 +8,7 @@
  * @consumer @yrd/cli refusal remedies
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type ChangeDeliveryState } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
-import { withJobs, type JobResult } from "@yrd/job"
-import { withQueue, withStep, type StepExecution } from "@yrd/queue"
-import { createLogger } from "loggily"
-import * as z from "zod"
+import { type ChangeDeliveryState } from "@yrd/bay"
 import {
   remedyAdmissibleIn,
   unobservableBranchRemedy,
@@ -23,7 +18,6 @@ import {
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
-const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 
 /** Every delivery state, spelled out. A new state added to the union without a
  * row here fails `exhaustive` below rather than silently skipping the walk. */
@@ -38,60 +32,6 @@ const ALL_DELIVERY_STATES: readonly ChangeDeliveryState[] = [
   "withdrawn",
   "canceled",
 ]
-
-function ids(): () => string {
-  let value = 0
-  return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
-}
-
-function workspace(): BayWorkspace {
-  return {
-    revision: "test-workspace-v1",
-    provision: (input) => ({
-      status: "completed",
-      conclusion: "success",
-      output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
-    }),
-    refresh: (input) => ({
-      status: "completed",
-      conclusion: "success",
-      output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
-    }),
-    checkpoint: () => ({
-      status: "completed",
-      conclusion: "success",
-      output: { headSha: HEAD, pushed: true, wip: false },
-    }),
-    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
-  }
-}
-
-async function createApp() {
-  const checkStep = withStep(
-    "check",
-    (_input: StepExecution): JobResult<z.infer<typeof CheckResultSchema>> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { checked: true },
-    }),
-    { revision: "check-v1", output: CheckResultSchema },
-  )
-  const queue = withQueue({ steps: [checkStep] as const, batch: false, defaultSteps: ["check"] })
-  const bayJobs = createBayJobDefs(workspace())
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ prNumberMint: volatilePrNumberMint(), jobs: bayJobs }),
-  )
-  return createYrd(queue(base), {
-    inject: {
-      journal: createMemoryJournal(),
-      id: ids(),
-      clock: () => "2026-08-26T00:00:00.000Z",
-      log: createLogger("test", [{ level: "silent" }]),
-    },
-  })
-}
 
 const RECORDED = { base: "main", baseSha: BASE, head: HEAD, n: 1 }
 
@@ -135,44 +75,10 @@ describe("every printed remedy is executable in the state that emits it", () => 
     expect([...ALL_DELIVERY_STATES].toSorted()).toEqual(Object.keys(exhaustive).toSorted())
   })
 
-  it("the admissibility table matches what the real publish guard does", async () => {
-    // Not a restatement of the table: this drives the actual command and reads
-    // the actual refusal, so the table cannot drift away from the guard.
-    const app = await createApp()
-    await app.bays.submit({ branch: "land-row83", headSha: HEAD, base: "main", baseSha: BASE })
-    const pr = app.bays.pr("PR1")
-    if (pr === undefined) throw new Error("expected the submitted change")
-    const delivery = "submitted" as const
-
-    expect(remedyAdmissibleIn("publish", delivery)).toBe(false)
-    // The exact PR1189 refusal, from the live guard.
-    await expect(
-      app.bays.requestPublication({
-        pr: pr.id,
-        revision: 1,
-        headSha: HEAD,
-        baseSha: BASE,
-        branch: pr.branch,
-        sourceRoot: "/repo",
-        components: [],
-        continuation: "none",
-      }),
-    ).rejects.toThrow(/is submitted, not pushed/u)
-  })
-
-  it("the admissibility table matches what the real withdraw guard does", async () => {
-    const app = await createApp()
-    await app.bays.submit({ branch: "land-row83", headSha: HEAD, base: "main", baseSha: BASE })
-
-    // Admissible per the table, and the live guard agrees: the close succeeds.
-    expect(remedyAdmissibleIn("withdraw", "submitted")).toBe(true)
-    await app.bays.closePr({ pr: "PR1", reason: "source branch gone" })
-    expect(app.bays.pr("PR1")?.state).toBe("closed")
-
-    // Positive control: the terminal state the table refuses is refused live too.
-    expect(remedyAdmissibleIn("withdraw", "withdrawn")).toBe(false)
-    await expect(app.bays.closePr({ pr: "PR1", reason: "again" })).rejects.toThrow()
-  })
+  // The two live-guard cross-checks ("table matches the real publish guard" /
+  // "…the real withdraw guard") were deleted with the guards themselves (S7
+  // branch-is-change, @i/10 22991): bays.requestPublication and bays.closePr
+  // retired with the record store, so the table is the only surface left.
 
   it("the PR1189 shape: a ready change whose branch is gone is told to withdraw, never to publish", () => {
     const remedy = unobservableBranchRemedy(

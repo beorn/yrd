@@ -523,9 +523,8 @@ async function createApp(
     },
     { revision: options.mergeRevision ?? "merge-v1" },
   )
-  // ONE mint for both plugins, as production wires it (S6): bays numbers its
-  // records from it, and the queue mints derived-member identities from the
-  // same monotone sequence when a selectorless compose admits a submit fact.
+  // The queue owns the mint (S7): derived-member identities mint at admission
+  // when a selectorless compose admits a submit fact; no record ever mints.
   const prNumberMint = volatilePrNumberMint()
   const queue = withQueue({
     steps: [check, merge] as const,
@@ -546,7 +545,6 @@ async function createApp(
     withDeployments({ jobs: deploymentJobs }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint,
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (base) => ({ base, baseSha: BASE_SHA }),

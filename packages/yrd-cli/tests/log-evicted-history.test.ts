@@ -116,7 +116,7 @@ describe("yrd log against an evicted journal", () => {
     // Eviction drops only frames the checkpoint already folded in, so the state
     // an ordinary `log` prints must be untouched by it.
     await app.refresh()
-    expect(Object.keys(app.state().bays.prs)).toHaveLength(SUBMISSIONS)
+    expect(Object.keys(app.state().bays.submits)).toHaveLength(SUBMISSIONS)
   })
 
   it("replays the whole history for `--all` while the window has not yet bitten", async () => {

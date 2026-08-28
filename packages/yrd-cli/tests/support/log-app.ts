@@ -111,7 +111,15 @@ export async function createCliApp(journal: Journal<unknown>, id: () => string =
     }),
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: false })
+  // The queue owns the mint (S7): derived-member identities mint at
+  // admission; a derived member carries no baseSha of its own, so the
+  // fixture resolves it here.
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: false,
+    prNumberMint: volatilePrNumberMint(),
+    resolveBaseSha: () => BASE_SHA,
+  })
   const contest = contestAdapters()
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
@@ -119,7 +127,6 @@ export async function createCliApp(journal: Journal<unknown>, id: () => string =
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -159,14 +166,15 @@ export function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
 
-/** Append history the way the product does: submit PRs, so the journal grows
+/** Append history the way the product does: project branch submissions (the
+ * derived lane's submit fact IS the submission, S7), so the journal grows
  * through real commands rather than hand-written frames. */
 export async function appendHistory(app: CliApp, prefix: string, count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     const branch = `${prefix}/${String(index)}`
-    // A distinct head per change: identical payloads are refused as duplicates.
+    // A distinct head per branch, as distinct payloads would carry.
     const headSha = Bun.SHA1.hash(branch, "hex")
-    await app.bays.submit({ branch, headSha, base: "main", baseSha: BASE_SHA })
+    await app.bays.recordBranchSubmit({ branch, sha: headSha, base: "main" })
   }
 }
 

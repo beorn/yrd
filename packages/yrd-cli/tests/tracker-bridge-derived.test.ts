@@ -35,6 +35,7 @@ import {
   type StepExecution,
 } from "@yrd/queue"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
+import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -117,11 +118,12 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-/** The cli.test.ts composition pattern, pared to this suite's needs: ONE mint
- * shared between withBays and withQueue (production S6 wiring — the queue
- * mints derived-member identities from the same monotone sequence bays numbers
- * records from), injected journal/clock/ids, a passing check step, and
- * `readSubmitEnrichment` answering the submitted sha with the fixture issue. */
+/** The cli.test.ts composition pattern, pared to this suite's needs: the queue
+ * owns the mint (S7 — derived-member identities mint at admission; records
+ * never mint), injected journal/clock/ids, a passing check step, and
+ * `readSubmitEnrichment` answering the submitted sha with the fixture issue.
+ * Record-lane rows are seeded as journal events (`seedChanges`), with
+ * `mintStart` lifting the queue mint above the seeded record numbers. */
 async function createApp(
   options: {
     clock?: () => string
@@ -129,6 +131,8 @@ async function createApp(
     mergeCommits?: readonly string[]
     mergeAlreadyLanded?: Readonly<{ candidateSha: string; candidateTreeSha: string; baseTreeSha: string }>
     mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
+    seedChanges?: readonly ChangeSeed[]
+    mintStart?: number
   } = {},
 ) {
   const contest = contestAdapters()
@@ -176,7 +180,7 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const prNumberMint = volatilePrNumberMint()
+  const prNumberMint = volatilePrNumberMint(options.mintStart ?? 0)
   const queue = withQueue({
     steps: [check, merge] as const,
     batch: false,
@@ -193,7 +197,6 @@ async function createApp(
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint,
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (base) => ({ base, baseSha: BASE_SHA }),
@@ -201,7 +204,10 @@ async function createApp(
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: createMemoryJournal(),
+      journal:
+        options.seedChanges === undefined
+          ? createMemoryJournal()
+          : createMemoryJournal([seededChangesEntry(options.seedChanges)]),
       clock: options.clock ?? tickingClock(),
       id: ids(),
       log: createLogger("yrd", [{ level: "silent" }]),
@@ -396,16 +402,20 @@ describe("tracker bridges — DERIVED deliveries", () => {
   })
 
   it("projects a record-lane delivery beside a derived one — the lanes are disjoint by construction", async () => {
-    await using app = await createApp()
     const recordIssue = "@yrd/core/record-beside-derived"
-    // Draft record (delivery state "pushed"): carries the record lane in the
-    // bridge without entering the selectorless drain below.
-    await app.bays.submit({
-      branch: "topic/record-lane",
-      headSha: RECORD_HEAD_SHA,
-      base: "main",
-      issue: recordIssue,
-      draft: true,
+    // Seeded record history (delivery state "pushed"): carries the record lane
+    // in the bridge without entering the selectorless drain below. The mint
+    // starts above the seeded number so the derived admission mints PR2.
+    await using app = await createApp({
+      seedChanges: [
+        {
+          pr: "PR1",
+          branch: "topic/record-lane",
+          issue: recordIssue,
+          revs: [{ headSha: RECORD_HEAD_SHA, baseSha: BASE_SHA, delivery: "pushed" }],
+        },
+      ],
+      mintStart: 1,
     })
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
 

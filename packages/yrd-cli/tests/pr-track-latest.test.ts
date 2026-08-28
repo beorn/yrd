@@ -9,7 +9,7 @@
  * live branch head is injected through YrdCliIO.pruneGit + resolveRevision.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
+import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd, type PruneGitFacts, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -133,7 +133,6 @@ async function createCliApp() {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -243,7 +242,7 @@ describe("pr submit tracking default", () => {
     // never a record-only drop.
     expect(envelope.warnings).toEqual([DERIVED_ACCEPTANCE_LINE])
     // The fact is the submission — no change record mints.
-    expect(app.bays.prs()).toEqual([])
+    expect(Object.values(app.bays.state().prs)).toEqual([])
   })
 
   it.each(["--track", "--no-track"])("%s refuses as retired before touching any state", async (flag) => {
@@ -259,7 +258,7 @@ describe("pr submit tracking default", () => {
     expect(output.stdout()).toBe("")
     expect(output.stderr()).toContain("track-flags-retired")
     expect(output.stderr()).toContain("push again to refresh")
-    expect(app.bays.prs()).toEqual([])
+    expect(Object.values(app.bays.state().prs)).toEqual([])
     expect(app.bays.state().submits).toEqual({})
   })
 })

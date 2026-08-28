@@ -14,7 +14,7 @@ import { join } from "node:path"
 import { createElement } from "react"
 import { renderString } from "silvery"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type Change } from "@yrd/bay"
+import { createBayJobDefs, withBays, type Change } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
@@ -30,6 +30,7 @@ import {
 } from "@yrd/queue"
 import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { createLogger } from "loggily"
+import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { createPruneGitFacts } from "../src/pr-withdraw.ts"
 import { changeListRows, ChangeListView, type ChangeListRow } from "../src/queue-status-view.tsx"
 
@@ -143,7 +144,7 @@ function workspace() {
   }
 }
 
-async function createCliApp() {
+async function createCliApp(seeds?: readonly ChangeSeed[]) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -168,7 +169,6 @@ async function createCliApp() {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -176,7 +176,7 @@ async function createCliApp() {
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: createMemoryJournal(),
+      journal: seeds === undefined ? createMemoryJournal() : createMemoryJournal([seededChangesEntry(seeds)]),
       clock: () => "2026-07-15T12:00:00.000Z",
       id: ids(),
       log: createLogger("test", [{ level: "silent" }]),
@@ -230,20 +230,21 @@ function mergeGit(overrides: Partial<PruneGitFacts> = {}): PruneGitFacts {
 
 describe("pr list bounded-window disclosure (22376)", () => {
   it("names how many rows the default window withheld", async () => {
-    const app = await createCliApp()
-    for (const index of Array.from({ length: 26 }, (_, offset) => offset + 1)) {
-      await app.bays.submit({
-        branch: `topic/window-${index}`,
-        headSha: index.toString(16).padStart(40, "0"),
-        base: "main",
-        baseSha: BASE_SHA,
-      })
-    }
-    // The six oldest go terminal: open PRs are never windowed out (see
-    // live-work-visibility.test.ts), so only terminal rows exercise the cut.
-    for (const index of Array.from({ length: 6 }, (_, offset) => offset + 1)) {
-      await app.bays.closePr({ pr: `PR${index}`, reason: "window specimen" })
-    }
+    // S7: records no longer mint — the record window is seeded as journal
+    // history. The six oldest go terminal: open PRs are never windowed out
+    // (see live-work-visibility.test.ts), so only terminal rows exercise the
+    // cut.
+    const app = await createCliApp(
+      Array.from({ length: 26 }, (_, offset) => offset + 1).map(
+        (index): ChangeSeed => ({
+          pr: `PR${index}`,
+          branch: `topic/window-${index}`,
+          base: "main",
+          revs: [{ headSha: index.toString(16).padStart(40, "0"), baseSha: BASE_SHA }],
+          ...(index <= 6 ? { terminal: { kind: "withdrawn", reason: "window specimen" } } : {}),
+        }),
+      ),
+    )
 
     const human = outputIO()
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
@@ -257,8 +258,9 @@ describe("pr list bounded-window disclosure (22376)", () => {
   })
 
   it("says nothing about a window it did not apply", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
+    const app = await createCliApp([
+      { pr: "PR1", branch: "topic/one", base: "main", revs: [{ headSha: LIVE_HEAD, baseSha: BASE_SHA }] },
+    ])
     const human = outputIO()
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
     expect(human.stdout()).not.toMatch(/hidden/iu)
@@ -275,9 +277,15 @@ describe("pr list merge reconciliation (22376)", () => {
    * content are exactly what the ancestry model cannot clean up afterwards.
    */
   it("reports the merge when a withdrawal arrives on top of it", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/merged", headSha: MERGED_HEAD, base: "main", baseSha: BASE_SHA })
-    await app.bays.closePr({ pr: "PR1", reason: "author changed their mind" })
+    const app = await createCliApp([
+      {
+        pr: "PR1",
+        branch: "topic/merged",
+        base: "main",
+        revs: [{ headSha: MERGED_HEAD, baseSha: BASE_SHA }],
+        terminal: { kind: "withdrawn", reason: "author changed their mind" },
+      },
+    ])
 
     const json = outputIO({ pruneGit: () => mergeGit() })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
@@ -298,9 +306,15 @@ describe("pr list merge reconciliation (22376)", () => {
   })
 
   it("leaves a withdrawal whose content is not on the base alone", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/live", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
-    await app.bays.closePr({ pr: "PR1", reason: "superseded by a different design" })
+    const app = await createCliApp([
+      {
+        pr: "PR1",
+        branch: "topic/live",
+        base: "main",
+        revs: [{ headSha: LIVE_HEAD, baseSha: BASE_SHA }],
+        terminal: { kind: "withdrawn", reason: "superseded by a different design" },
+      },
+    ])
 
     const json = outputIO({ pruneGit: () => mergeGit() })
     expect(await runYrd(app as CliApp, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
@@ -352,8 +366,9 @@ describe("pr list merge reconciliation (22376)", () => {
   })
 
   it("never probes git for a change whose recorded state already claims a merge", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/live", headSha: LIVE_HEAD, base: "main", baseSha: BASE_SHA })
+    const app = await createCliApp([
+      { pr: "PR1", branch: "topic/live", base: "main", revs: [{ headSha: LIVE_HEAD, baseSha: BASE_SHA }] },
+    ])
 
     const json = outputIO({
       pruneGit: () => ({

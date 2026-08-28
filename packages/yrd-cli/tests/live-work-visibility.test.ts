@@ -11,13 +11,14 @@
  * @consumer @yrd/cli
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
+import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withContests, type ContestGit } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { runYrd, type YrdCliIO } from "@yrd/cli"
+import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { createLogger } from "loggily"
 import { timelineRetainedRows, type QueueTimelineDisplayRow } from "../src/queue-status-view.tsx"
 
@@ -52,7 +53,7 @@ function workspace() {
   }
 }
 
-async function createCliApp() {
+async function createCliApp(seeds?: readonly ChangeSeed[]) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -77,7 +78,6 @@ async function createCliApp() {
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -85,7 +85,7 @@ async function createCliApp() {
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: createMemoryJournal(),
+      journal: seeds === undefined ? createMemoryJournal() : createMemoryJournal([seededChangesEntry(seeds)]),
       clock: () => "2026-08-07T12:00:00.000Z",
       id: ids(),
       log: createLogger("test", [{ level: "silent" }]),
@@ -125,26 +125,27 @@ function yrd(...args: string[]): string[] {
 
 describe("pr list never hides live work behind the default window", () => {
   it("keeps an open draft visible when 20+ newer PRs are terminal", async () => {
-    const app = await createCliApp()
-    // PR1 — the live draft, oldest id, `pushed` and never submitted.
-    await app.bays.submit({
-      branch: "task/oldest-draft",
-      headSha: "1".repeat(40),
-      base: "main",
-      baseSha: BASE_SHA,
-      draft: true,
-    })
-    // 21 newer PRs, all driven terminal (withdrawn) so the window is full of
-    // terminal rows and PR1 sits strictly outside the newest-20 cut.
-    for (const index of Array.from({ length: 21 }, (_, offset) => offset + 2)) {
-      await app.bays.submit({
-        branch: `topic/newer-${index}`,
-        headSha: index.toString(16).padStart(40, "0"),
+    // S7: records no longer mint — the record window under test is seeded as
+    // journal history. PR1 is the live draft, oldest id, `pushed` and never
+    // submitted; 21 newer PRs are terminal (withdrawn) so the window is full
+    // of terminal rows and PR1 sits strictly outside the newest-20 cut.
+    const app = await createCliApp([
+      {
+        pr: "PR1",
+        branch: "task/oldest-draft",
         base: "main",
-        baseSha: BASE_SHA,
-      })
-      await app.bays.closePr({ pr: `PR${index}`, reason: "window filler" })
-    }
+        revs: [{ headSha: "1".repeat(40), baseSha: BASE_SHA, delivery: "pushed" }],
+      },
+      ...Array.from({ length: 21 }, (_, offset) => offset + 2).map(
+        (index): ChangeSeed => ({
+          pr: `PR${index}`,
+          branch: `topic/newer-${index}`,
+          base: "main",
+          revs: [{ headSha: index.toString(16).padStart(40, "0"), baseSha: BASE_SHA }],
+          terminal: { kind: "withdrawn", reason: "window filler" },
+        }),
+      ),
+    ])
 
     const human = outputIO()
     expect(await runYrd(app as CliApp, yrd("pr", "list"), human.io), human.stderr()).toBe(0)

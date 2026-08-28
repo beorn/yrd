@@ -13,11 +13,12 @@
  * runs in a bare standalone clone.
  */
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
+import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { runYrd as runYrdRaw, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { testQueueReadModel } from "./queue-read-model-test-helper.ts"
+import { seededChangesEntry, type ChangeSeed } from "./support/seeded-changes.ts"
 import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
@@ -107,7 +108,7 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = {}) {
+async function createCliApp(overrides: { check?: () => JobResult<JsonValue>; seeds?: readonly ChangeSeed[] } = {}) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
@@ -133,7 +134,6 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({
-      prNumberMint: volatilePrNumberMint(),
       jobs: bayJobs,
       defaultBase: "main",
       resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }),
@@ -141,7 +141,10 @@ async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = 
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: createMemoryJournal(),
+      journal:
+        overrides.seeds === undefined
+          ? createMemoryJournal()
+          : createMemoryJournal([seededChangesEntry(overrides.seeds)]),
       clock: () => "2026-07-09T12:00:00.000Z",
       id: ids(),
       log: createLogger("test", [{ level: "silent" }]),
@@ -185,11 +188,12 @@ function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
 
-/** Submit one change whose canonical identity (PR1 / main) never matches the
- * lowercase or uppercase selectors the operator will type. */
-async function submitOnePR(app: CliApp): Promise<void> {
-  await app.bays.submit({ branch: "Topic/One", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-}
+/** One seeded change whose canonical identity (PR1 / main) never matches the
+ * lowercase or uppercase selectors the operator will type. S7: records no
+ * longer mint, so the record state is seeded as journal history. */
+const ONE_PR_SEED: readonly ChangeSeed[] = [
+  { pr: "PR1", branch: "Topic/One", base: "main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] },
+]
 
 describe("case-insensitive CLI selector surfaces", () => {
   it.each([
@@ -208,11 +212,9 @@ describe("case-insensitive CLI selector surfaces", () => {
       args: ["pr", "runs", "topic/one", "--json"],
       expected: { command: "pr.runs", pr: { id: "PR1", branch: "Topic/One" } },
     },
-    {
-      surface: "pr close",
-      args: ["pr", "close", "pr1", "--burn-payload", "--json"],
-      expected: { command: "pr.close", prs: [{ id: "PR1" }] },
-    },
+    // "pr close" row deleted (S7 branch-is-change, @i/10 22991): `pr close`
+    // refuses close-retired before resolving any selector, so the fold is no
+    // longer observable on that surface.
     {
       surface: "queue run",
       args: ["queue", "run", "pr1", "--json"],
@@ -246,8 +248,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   ])(
     "$surface resolves the folded selector and preserves canonical output",
     async ({ args, expected, exit }: { args: readonly string[]; expected: object; exit?: number }) => {
-      const app = await createCliApp()
-      await submitOnePR(app)
+      const app = await createCliApp({ seeds: ONE_PR_SEED })
       const output = outputIO()
 
       expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(exit ?? 0)
@@ -256,8 +257,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   )
 
   it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
-    const app = await createCliApp()
-    await submitOnePR(app)
+    const app = await createCliApp({ seeds: ONE_PR_SEED })
     const output = outputIO()
 
     expect(await runYrd(app, yrd("pr", "merge", "pr1", "--json"), output.io)).toBe(1)
@@ -265,8 +265,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   })
 
   it("applies canonical PR and base scopes to bounded watch projections", async () => {
-    const app = await createCliApp()
-    await submitOnePR(app)
+    const app = await createCliApp({ seeds: ONE_PR_SEED })
 
     for (const scope of [
       ["--pr", "pr1"],
@@ -284,9 +283,12 @@ describe("case-insensitive CLI selector surfaces", () => {
   })
 
   it("reports folded base collisions instead of choosing the first base", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "Topic/Upper", headSha: HEAD_SHA, base: "Main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "Topic/Lower", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
+    const app = await createCliApp({
+      seeds: [
+        { pr: "PR1", branch: "Topic/Upper", base: "Main", revs: [{ headSha: HEAD_SHA, baseSha: BASE_SHA }] },
+        { pr: "PR2", branch: "Topic/Lower", base: "main", revs: [{ headSha: MERGED_SHA, baseSha: BASE_SHA }] },
+      ],
+    })
     const output = outputIO()
 
     expect(await runYrd(app, yrd("queue", "--base", "MAIN", "--json"), output.io)).toBe(1)
@@ -294,8 +296,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   })
 
   it("teaches an accepted form when a copied PR-shaped selector is malformed", async () => {
-    const app = await createCliApp()
-    await submitOnePR(app)
+    const app = await createCliApp({ seeds: ONE_PR_SEED })
     const output = outputIO()
 
     expect(await runYrd(app, yrd("pr", "runs", "pr#1.bad", "--json"), output.io)).toBe(1)
@@ -303,8 +304,7 @@ describe("case-insensitive CLI selector surfaces", () => {
   })
 
   it("applies canonical PR and base scopes to log projections", async () => {
-    const app = await createCliApp()
-    await submitOnePR(app)
+    const app = await createCliApp({ seeds: ONE_PR_SEED })
     const setup = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), setup.io), setup.stderr()).toBe(0)
 
@@ -339,14 +339,15 @@ describe("case-insensitive CLI selector surfaces", () => {
    * prefix, so the shared builder's `yrd: ` would double up, and that site
    * already names a remedy rather than leaving the operator to guess.
    */
+  // "pr withdraw" row deleted (S7 branch-is-change, @i/10 22991): withdraw
+  // refuses withdraw-retired before searching anything, so it no longer emits
+  // the searched-population sentence.
   it.each([
     { surface: "queue run", args: ["queue", "run", "nope", "--json"] },
-    { surface: "pr withdraw", args: ["pr", "withdraw", "nope", "--json"] },
     { surface: "log --pr", args: ["log", "--pr", "nope", "--json"] },
     { surface: "pr view", args: ["pr", "view", "nope", "--json"] },
   ])("$surface says what it searched when a selector finds nothing", async ({ args }) => {
-    const app = await createCliApp()
-    await submitOnePR(app)
+    const app = await createCliApp({ seeds: ONE_PR_SEED })
     const output = outputIO()
 
     expect(await runYrd(app, yrd(...args), output.io)).toBe(1)
@@ -380,8 +381,8 @@ describe("case-insensitive CLI selector surfaces", () => {
               error: { code: "check-failed", message: "first attempt fails" },
             }
           : { status: "completed", conclusion: "success", output: { checked: true } },
+      seeds: ONE_PR_SEED,
     })
-    await submitOnePR(app)
 
     const rejected = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), rejected.io)).toBe(1)
