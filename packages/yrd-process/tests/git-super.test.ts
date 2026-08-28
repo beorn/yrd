@@ -87,6 +87,31 @@ describe("adaptProcessGit", () => {
     expect(argv).toEqual([["git", "-C", "/repo", "for-each-ref", "--format=%(refname)"]])
   })
 
+  test("emits --blob, never --file, for a blob-scoped config-get-regexp read", () => {
+    // @i/10-merge-queue/23041-staleness-measures-the-observer: `--blob` was
+    // silently dropped end to end (yrd-cli's own arg parser looked only for
+    // `--file`, and this type had nowhere to carry a blob ref), so a call
+    // asking to read `.gitmodules` at a historical ref silently ran against
+    // the wrong scope instead of failing loud. This fences the emission side:
+    // a `blob` field must produce `--blob`, and must never also emit `--file`.
+    const argv: string[][] = []
+    const git = adaptProcessGit(undefined, undefined, {
+      executeSync(execution) {
+        argv.push([...execution.argv])
+        return { code: 0, stdout: "", stderr: "" }
+      },
+    })
+
+    git.readSync({
+      repo: "/repo",
+      command: { verb: "config-get-regexp", blob: "origin/main:.gitmodules", pattern: String.raw`^submodule\.` },
+    })
+
+    expect(argv).toEqual([
+      ["git", "-C", "/repo", "config", "--blob", "origin/main:.gitmodules", "--get-regexp", String.raw`^submodule\.`],
+    ])
+  })
+
   test("runs a real bounded sync read without inventing a timeout", () => {
     const root = resolve(import.meta.dirname, "../../..")
     const git = adaptProcessGit(

@@ -296,12 +296,15 @@ function localReadCommand(args: readonly string[]): GitSyncReadCommand {
     case "config": {
       const fileIndex = rest.indexOf("--file")
       const file = fileIndex < 0 ? undefined : rest[fileIndex + 1]
+      const blobIndex = rest.indexOf("--blob")
+      const blob = blobIndex < 0 ? undefined : rest[blobIndex + 1]
       const regexpIndex = rest.indexOf("--get-regexp")
       const pattern = regexpIndex < 0 ? undefined : rest[regexpIndex + 1]
       if (pattern !== undefined) {
         return {
           verb: "config-get-regexp",
           ...(file === undefined ? {} : { file }),
+          ...(blob === undefined ? {} : { blob }),
           pattern,
         }
       }
