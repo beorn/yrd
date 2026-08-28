@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { resolveRelativeSubmoduleOrigin } from "git-super/submodule-origin"
 import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
 import { createFailure, createMemoryJournal, createYrd, createYrdDef, failureFact, pipe } from "@yrd/core"
-import { withJobs } from "@yrd/job"
+import { localRunner, withJobs } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
@@ -43,6 +43,7 @@ import {
   withQueue,
   withMerge,
   withStep,
+  worktreeContexts,
   type AddStepResult,
   type DerivedRunMember,
   type GitCheckEvidence,
@@ -894,7 +895,6 @@ async function checkedQueue(
     environmentPassthrough?: readonly string[]
     refuse?: RefusePathsPolicy
     mergeCommand?: readonly string[]
-    prepareCandidate?: boolean
     checkpointIdentity?: string | (() => string)
     defaultSteps?: readonly ("check" | "merge")[]
     log?: ConditionalLogger
@@ -958,9 +958,29 @@ async function checkedQueue(
     defaultBase: "main",
     ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
     resolveBaseSha: (base) => queueBaseSha(repo, base),
-    ...(options.prepareCandidate === true
-      ? { prepareCandidate: gitCandidatePreparer({ inject: { process }, repo }) }
-      : {}),
+    // Mirrors the CLI host: a preparer so every Candidate carries a ref, and a
+    // Runner whose worktree Contexts materialize it. Without BOTH, admission
+    // dispatches `candidate: "none"` onto inline Contexts that supply no cwd
+    // and no candidateRef, and the check step falls into the candidate
+    // RECONSTRUCTION path that production never takes.
+    prepareCandidate: gitCandidatePreparer({ inject: { process }, repo }),
+    runner: (jobs) => {
+      const contexts = worktreeContexts({
+        repo,
+        parent: join(dirname(repo), "contexts"),
+        size: 2,
+        submodules: "isolated",
+        git: createCandidatePoolGit(process),
+      })
+      const runner = localRunner({
+        id: "yrd-test",
+        jobs,
+        leaseMs: 60_000,
+        maxInFlight: contexts.maxInFlight,
+        contexts,
+      })
+      return Object.freeze({ ...runner, [Symbol.asyncDispose]: () => contexts.close() })
+    },
     recordMerge: gitMergeRecorder({ inject: { process }, repo }),
     prNumberMint: mint,
     readSubmitEnrichment: testSubmitEnrichment,
@@ -2955,6 +2975,99 @@ describe("Queue command adapters", () => {
     expect(artifacts.every(({ path }) => existsSync(path))).toBe(true)
     const artifactContents = await Promise.all(artifacts.map(({ path }) => readFile(path, "utf8")))
     expect(artifactContents.some((contents) => contents.includes("CONFLICT"))).toBe(true)
+  })
+
+  /**
+   * The Candidate ref spells the run and step names into a git refname, and a
+   * run id is caller-controlled. Root runs are `R<n>` and step names are plain
+   * words, so their refs must not move. A derived member's admission id is
+   * `admission:<pr>:<rev>:<baseSha>` — colons, which git refuses outright.
+   */
+  it("spells a root run's Candidate ref from its run and step names unchanged", async () => {
+    const { repo, feature } = await repository("feature")
+    await using process = createProcess()
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: ["true"],
+      artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+    })(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: feature }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
+    expect((outcome as { output?: { candidateRef?: string } }).output?.candidateRef).toMatch(
+      /^refs\/yrd\/candidates\/R1\/check\/attempt-1-[0-9a-f]{64}$/u,
+    )
+  })
+
+  it("pins a derived member's admission Candidate instead of stalling on its colon-bearing run id", async () => {
+    const { repo, feature } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: ["true"],
+      artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+    })(
+      {
+        run: `admission:PR1:1:${baseSha}`,
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: feature }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "success" })
+    expect((outcome as { output?: { candidateRef?: string } }).output?.candidateRef).toMatch(
+      new RegExp(`^refs/yrd/candidates/admission-PR1-1-${baseSha}/check/attempt-1-[0-9a-f]{64}$`, "u"),
+    )
+  })
+
+  /**
+   * Sanitizing characters cannot make every id legal — `..` is legal per
+   * character and illegal as a sequence. That case must fail LOUDLY and
+   * terminally, not burn 33 update-refs and report collision exhaustion as a
+   * retryable `waiting`.
+   */
+  it("refuses a structurally illegal Candidate ref loudly instead of reporting collision exhaustion", async () => {
+    const { repo, feature } = await repository("feature")
+    await using process = createProcess()
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: ["true"],
+      artifactRoot: join(repo, ".git", "yrd", "artifacts"),
+    })(
+      {
+        run: "..",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: feature }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "candidate-ref-invalid" },
+    })
+    expect((outcome as { error?: { message?: string } }).error?.message).toContain(
+      "refs/yrd/candidates/../check/attempt-1-",
+    )
+    expect((outcome as { error?: { message?: string } }).error?.message).not.toContain("collision identities")
   })
 
   it("bypasses authored commit hooks only for queue-synthesized candidate commits", async () => {
@@ -5813,9 +5926,7 @@ describe("Queue command adapters", () => {
   it("checks and merges the exact Change-Id-stamped Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
-      prepareCandidate: true,
-    })
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {})
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
     const changeId = pr.changeId
 
@@ -5876,9 +5987,7 @@ describe("Queue command adapters", () => {
   it("marks the synthesized merge commit with a distinct Merge-Change-Id, never a second Change-Id", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {
-      prepareCandidate: true,
-    })
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"], {})
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
     const changeId = pr.changeId
 
@@ -5912,7 +6021,7 @@ describe("Queue command adapters", () => {
       process,
       repo,
       shellCommand("printf 'candidate contract failed\\n' >&2; exit 17"),
-      { prepareCandidate: true },
+      {},
     )
     const pr = await submitDerived(app, { branch: "issue/feature", headSha: featureSha })
 
@@ -6519,19 +6628,13 @@ describe("Queue command adapters", () => {
     await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
     const pr = await submitCertifiedCarrier(app, fixture.repo, { branch: "issue/feature", headSha: fixture.featureSha })
 
-    const run = (await app.queue.run({ prs: [], derived: [pr] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      error: {
-        code: "queue-environment-refused",
-        evidence: {
-          kind: "submodule-reachability-refusal",
-          operation: "read-superproject-origin",
-          exitCode: 1,
-          retryable: true,
-        },
+    await expect(app.queue.run({ prs: [], derived: [pr] }, runtime)).rejects.toMatchObject({
+      failure: { kind: "infrastructure", code: "queue-environment-refused" },
+      evidence: {
+        kind: "submodule-reachability-refusal",
+        operation: "read-superproject-origin",
+        exitCode: 1,
+        retryable: true,
       },
     })
     expect(configuredCheckRan).toBe(false)

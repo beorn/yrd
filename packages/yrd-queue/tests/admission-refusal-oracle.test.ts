@@ -149,15 +149,26 @@ const mergeableCandidate: CandidatePreparer = (input) => {
   return { ...candidate, sha: MERGED, ref: candidateRefFor(MERGED), mergeability: "mergeable" }
 }
 
-async function createDeliveryApp(clock: () => string, waitForMerge = false, defaultSteps?: readonly string[]) {
+async function createDeliveryApp(
+  clock: () => string,
+  waitForMerge = false,
+  defaultSteps?: readonly string[],
+  /** Hold the ADMISSION check in flight forever. The only way to build a member
+   * the runner has genuinely tried and not yet served: admission never
+   * completes, so no run starts and no snapshot is retained. */
+  waitForCheck = false,
+) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
-    (_input: StepExecution): JobResult<{ checked: boolean }> => ({
-      status: "completed",
-      conclusion: "success",
-      output: { checked: true },
-    }),
+    (_input: StepExecution): JobResult<{ checked: boolean }> =>
+      waitForCheck
+        ? { status: "waiting", token: "check-pending" }
+        : {
+            status: "completed",
+            conclusion: "success",
+            output: { checked: true },
+          },
     { revision: "check-v1", output: CheckResultSchema },
   )
   const merge = withMerge(
@@ -890,23 +901,43 @@ describe("queue progress findings — a queue that is tried and does not move", 
 
   it("does not call a queue stalled on a single admission attempt", async () => {
     // ONE attempt is a queue barely tried, not a queue trying and failing. An
-    // alarm that fires on the first attempt is an alarm somebody mutes.
+    // alarm that fires on the first attempt is an alarm somebody mutes — and
+    // `progress.minAdmissionChecks` is the knob that says so.
+    //
+    // RE-FIXTURED, and the reason belongs here because the original shape can
+    // no longer be built. It used to admit a member and let the merge hang,
+    // then rely on the number of compose cycles to separate "tried once" from
+    // "tried ten times". Since S7 that difference is not durably recorded:
+    // after ten cycles an admitted member's runs, authority and submit fact are
+    // byte-identical to after one, and the two proxies that briefly did
+    // separate them (the authority-consumed refusal streak, then the admission
+    // Job count) each changed shape within a single afternoon of unrelated
+    // compose work. So the SERVED arm no longer takes this gate at all — past
+    // the SLO with no merge is a stall whatever the cadence — and the gate
+    // lives where its quantity is a property of the POPULATION instead: an
+    // approval nothing has dispatched for yet.
     const clock = movableClock("2026-01-01T00:00:00.000Z")
-    await using app = await createDeliveryApp(clock.read, true)
+    await using app = await createDeliveryApp(clock.read, true, undefined, true)
     await submitBranch(app, "issue/one-admission-check", HEAD)
 
     await app.queue.run({}, runtime)
 
     // POSITIVE CONTROL. This test asserts an ABSENCE, so it passes for free if
     // the population is empty — the exact silent-empty failure the file is
-    // about. The member must genuinely be in the queue, tried exactly once,
-    // for the absence below to mean "not yet stalled" rather than "nothing here".
+    // about. The member must genuinely be in the queue and genuinely tried once
+    // for the silence below to mean "not yet stalled" rather than "nothing
+    // here": one admission Job really dispatched, the approval really standing,
+    // and the branch really in the population `queue-never-started` counts.
     expect(admissionJobs(app)).toHaveLength(1)
     expect(app.state().bays.submits["issue/one-admission-check"]).toBeDefined()
+    expect(app.queue.unrecordedSubmits().map((row) => row.branch)).toEqual(["issue/one-admission-check"])
 
-    expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).not.toContainEqual(
-      expect.objectContaining({ code: "queue-progress-stalled" }),
-    )
+    // Half an hour, twice over: neither arm may speak. Not stalled, because
+    // nothing has been admitted; not never-started, because the runner is
+    // demonstrably working on it and one attempt is inside the quiet band.
+    const findings = app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings
+    expect(findings).not.toContainEqual(expect.objectContaining({ code: "queue-progress-stalled" }))
+    expect(findings).not.toContainEqual(expect.objectContaining({ code: "queue-never-started" }))
   })
 
   /**

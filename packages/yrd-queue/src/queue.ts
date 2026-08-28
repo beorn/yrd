@@ -1346,7 +1346,7 @@ function createQueue<Shape extends ChangeShape>(
    * while recovery is the one caller whose whole job is meeting it broken. */
   const cleanupSettledRoots = async (reader?: TolerantQueueReader): Promise<readonly RunId[]> => {
     const cleaned: RunId[] = []
-    for (const id of activeQueueRootIds(runtime().queues.authority)) {
+    for (const id of activeQueueRootIds(runtime().queues)) {
       const snapshot = runtime()
       const record = Queues.record(snapshot.queues, id)
       const run = reader === undefined ? materializeRun(record, snapshot.jobs) : reader.read(record, snapshot.jobs)
@@ -3089,7 +3089,7 @@ function createQueue<Shape extends ChangeShape>(
       // Capture ownership at the synchronous API boundary. A habitant runner can
       // settle and release a lost root while recovery is entering its observed
       // async operation; that race must not erase the run from recovery evidence.
-      const rootsBeforeRecovery = activeQueueRootIds(runtime().queues.authority)
+      const rootsBeforeRecovery = activeQueueRootIds(runtime().queues)
       return observeYrdLifecycle(
         log,
         {
@@ -3138,7 +3138,7 @@ function createQueue<Shape extends ChangeShape>(
           // any other. {@link createTolerantQueueReader} carries the incident.
           const reader = createTolerantQueueReader()
           let snapshot = runtime()
-          const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
+          const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues)])
           const candidates = [...recoveryRoots].flatMap((root) => reader.tree(snapshot, root))
           const staleQueued: Array<{ run: RunId; step: StepName; drift: string }> = []
           for (const candidate of candidates) {
@@ -3887,7 +3887,6 @@ function createQueueCommands(
       const run = materializeRun(record, state.jobs)
       if (needsSettlement(state, run)) return { events: [] }
       const root = resolveQueueAuthorityRoot(state.queues.authority, run.id)
-      const claimed = Object.values(state.queues.authority.claims).some((token) => token.consumedBy === root)
       // Carry the run's terminal projection into the settlement fact. `passed`
       // is the outcome that has no other record-level proof, so without this the
       // run's status dies with its Jobs when retention prunes them. The fact
@@ -3967,14 +3966,35 @@ function createQueueCommands(
             ]
           })
       })
+      // UNCONDITIONAL, and the guard it replaces is why (S7, branch-is-change).
+      // This read `claimed || memberTerminals.length > 0`, where `claimed`
+      // asked whether `authority.claims` held a token consumed by this root.
+      // That store is written only by the `pr/submitted` and
+      // `pr/checks-requested` reducers, both bare `return state` since the
+      // change-record store was deleted, so `claimed` is now false for every
+      // run that has ever existed. For a DERIVED member neither disjunct can
+      // fire — no stored claim, and a check-only run has no integration to
+      // produce a member terminal — so a non-integrating root emitted NOTHING
+      // and journaled no `queue/run/settled` at all.
+      //
+      // That is the R1582 phantom-run class, and the invariant it breaks is
+      // stated four lines above: `passed` is the outcome with no other
+      // record-level proof, so the run's status died with its Jobs the moment
+      // retention pruned them, and the run resurrected as a `running` row over
+      // already-integrated work.
+      //
+      // Nothing here needed a claim to be correct. Every early return above has
+      // already established that this is a settled ROOT — `record.parent` is
+      // undefined and `needsSettlement` is false — which is the whole
+      // precondition for the fact. Re-emission is bounded by the same facts:
+      // `markQueueTerminalRoot` is idempotent, and a root it has marked leaves
+      // {@link activeQueueRootIds}, so `cleanupSettledRoots` cannot pick it up
+      // a second time.
       return {
-        events:
-          claimed || memberTerminals.length > 0
-            ? [
-                ...memberTerminals,
-                event("queue/run/settled", { run: root, ...(status === undefined ? {} : { status }) }),
-              ]
-            : [],
+        events: [
+          ...memberTerminals,
+          event("queue/run/settled", { run: root, ...(status === undefined ? {} : { status }) }),
+        ],
       }
     },
   })
@@ -6032,7 +6052,7 @@ function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsSta
 }
 
 function activeQueueRuns(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): Run[] {
-  return activeQueueRootIds(queues.authority).flatMap((root) => queueTree(queues, jobs, root))
+  return activeQueueRootIds(queues).flatMap((root) => queueTree(queues, jobs, root))
 }
 
 function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, base: string): QueueSummary {
@@ -6530,42 +6550,42 @@ function unservedMemberIdentity(state: DeepReadonly<RuntimeState>, branch: strin
 }
 
 /**
- * Admission attempts the queue actually DISPATCHED for these members — the
- * post-S7 quantity `progress.minAdmissionChecks` gates.
+ * Admission attempts the queue actually DISPATCHED for these approvals — the
+ * post-S7 quantity `progress.minAdmissionChecks` gates on the never-started arm.
  *
- * It used to count `ChangeCheckRequest` rows inside the no-merge window. A
- * standing submit fact IS the check request now, so every derived member
- * carries exactly one of those forever: counting them would have answered `1`
- * for every member in every state, which is inside the policy's quiet middle
- * band and would have silenced this walk just as thoroughly as the empty
- * population did. Two durable traces replace it, and BOTH are needed: an
- * admission Job, one per (member, revision, base, step), for the cycles that
- * got through the door, and the refusal ledger's streak for the cycles that did
- * not — see the comment on `refused` below for why the second half is what
- * makes a hung merge measurable at all.
+ * Keyed on the BRANCH and sha the Job pinned, never on the member's id, and
+ * that is what makes it work at all. A member whose admission is still in
+ * flight has no retained run snapshot and no refusal row, so it has no PR
+ * NUMBER anywhere durable — the mint runs inside the compose — and a key-prefix
+ * count (`admission:<id>:`) answers ZERO for exactly the member whose admission
+ * is running, which would page every in-flight approval as untouched. The Job's
+ * own input carries the branch+sha it pinned ({@link AdmissionJobIdentitySchema},
+ * the field the stale-admission sweep already reads), which is durable,
+ * mint-independent, and survives a compose refactor.
+ *
+ * KNOWN LIMIT, stated rather than left to be discovered: only the ZERO boundary
+ * is meaningfully countable. This yields about one per member per
+ * (revision, base), so a configured `minAdmissionChecks` above roughly 2
+ * behaves the same as 2. The retry CADENCE the knob was written for was a count
+ * of `ChangeCheckRequest` rows, and a standing submit fact is now that request —
+ * singular and permanent. Restoring the numeric band needs a durable per-member
+ * attempt counter nothing writes today. What survives, and is load-bearing, is
+ * the asymmetry the policy field itself argues for: zero dispatched attempts
+ * over ready work is a runner asleep, and must page.
  */
 function admissionAttempts(
   state: DeepReadonly<RuntimeState>,
-  members: readonly string[],
+  approvals: readonly Readonly<{ branch: string; sha: string }>[],
   sinceMs: number,
 ): number {
-  const prefixes = members.map((id) => admissionMemberKeyPrefix(id))
-  const dispatched = Object.entries(state.jobs.byKey)
-    .filter(([key]) => prefixes.some((prefix) => key.startsWith(prefix)))
-    .map(([, id]) => state.jobs.byId[id])
-    .filter((job) => job !== undefined && parseAuditTime(job.requestedAt, "admission job clock") >= sinceMs).length
-  // A compose that REFUSES a member dispatches no Job at all, so Jobs alone
-  // count only the cycles that got through the door. The ledger counts the
-  // rest, and this is the half that makes a hung merge measurable: every cycle
-  // after the admitting one re-derives the member, finds its authority spent
-  // and appends to the streak. A streak whose last refusal predates the window
-  // is history — the window restarted on a merge — and contributes nothing.
-  const refused = members.reduce((total, id) => {
-    const row = state.queues.admissionRefusals[id]
-    if (row === undefined) return total
-    return parseAuditTime(row.lastAt, "admission refusal clock") >= sinceMs ? total + row.count : total
-  }, 0)
-  return dispatched + refused
+  const wanted = new Set(approvals.map((approval) => `${approval.branch}@${approval.sha}`))
+  return Object.values(state.jobs.byId).filter((job) => {
+    if (job.key?.startsWith("admission:") !== true) return false
+    if (parseAuditTime(job.requestedAt, "admission job clock") < sinceMs) return false
+    const identity = AdmissionJobIdentitySchema.safeParse(job.input)
+    if (!identity.success) return false
+    return identity.data.prs.some((member) => wanted.has(`${member.branch}@${member.headSha}`))
+  }).length
 }
 
 /**
@@ -6697,7 +6717,11 @@ function neverStartedFindings(
     // quantity ({@link admissionAttempts}): zero attempts is a runner asleep
     // over ready work and must page; a handful is ordinary retry cadence; many
     // is a queue trying and failing.
-    const attempts = admissionAttempts(state, ordered.map((submit) => submit.id), parseAuditTime(since, "branch submit clock"))
+    const attempts = admissionAttempts(
+      state,
+      ordered.map((submit) => ({ branch: submit.branch, sha: submit.sha })),
+      parseAuditTime(since, "branch submit clock"),
+    )
     if (attempts > 0 && attempts < progress.minAdmissionChecks) continue
     findings.push({
       code: "queue-never-started",
@@ -6723,15 +6747,26 @@ function neverStartedFindings(
  * inside the SLO. The window restarts on every real merge, so this measures the
  * gap since the queue last MOVED, not since the work arrived.
  *
- * `minAdmissionChecks` gates this arm exactly as it always did, and finding the
- * quantity it now counts took measuring rather than reading: after S7 an
- * admitted member's Jobs, runs, authority and submit fact are byte-identical
- * whether one compose cycle has passed or ten, which is why re-sourcing this
- * onto Jobs alone would have answered `1` forever and pinned every stalled
- * queue inside the quiet band. The refusal LEDGER is what still separates them
- * — each cycle after the admitting one re-derives the member and appends
- * `queue-submit-authority-consumed` to its streak — so a hung merge is
- * measurable, and a queue tried once is not yet accused of failing.
+ * `minAdmissionChecks` deliberately does NOT gate this arm, and that is a
+ * finding rather than an omission. The knob's original quantity — check
+ * REQUESTS inside the window — died with S7, because a standing submit fact IS
+ * the check request and every member carries exactly one forever. Two
+ * replacements were measured here and BOTH turned out to be artifacts of how
+ * the compose currently happens to behave rather than facts about the queue:
+ * the refusal ledger's `queue-submit-authority-consumed` streak (one row per
+ * post-admission cycle), and the admission-Job count. The first stopped being
+ * written and the second changed shape — 10 cycles went from 9 rows to 2 Jobs —
+ * inside a single afternoon of unrelated compose work, which is the whole
+ * argument: a stall alarm keyed on compose cadence goes quiet whenever the
+ * compose is refactored, and goes quiet SILENTLY, which is exactly the failure
+ * this walk was re-sourced to end.
+ *
+ * What is stable is the question itself. A member the queue ADMITTED, whose run
+ * has not merged, past the SLO, is stalled however many times anything has been
+ * tried — more attempts would not make it more stalled, and one attempt does
+ * not make it less so. `minAdmissionChecks` still gates the never-started arm,
+ * where attempts are a property of the population (nothing has been dispatched
+ * at all) rather than of the loop that dispatches them.
  */
 function progressStalledFindings(
   state: DeepReadonly<RuntimeState>,
@@ -6754,15 +6789,12 @@ function progressStalledFindings(
     const blockedMs = Math.max(0, nowMs - sinceMs)
     if (blockedMs < progress.noLandingMs) continue
     if (refusalFindings.some((finding) => finding.pr === first.id)) continue
-    const attempts = admissionAttempts(state, prs.map((pr) => pr.id), sinceMs)
-    if (attempts > 0 && attempts < progress.minAdmissionChecks) continue
     const since = new Date(sinceMs).toISOString()
     findings.push({
       code: "queue-progress-stalled",
       message:
         `Queue '${base}' has ${prs.length} admitted ${prs.length === 1 ? "change" : "changes"} and ` +
-        `no merge for ${formatRefusalSpan(blockedMs)} (since ${since}) across ${attempts} admission ` +
-        `${attempts === 1 ? "attempt" : "attempts"}; head is '${first.id}'.`,
+        `no merge for ${formatRefusalSpan(blockedMs)} (since ${since}); head is '${first.id}'.`,
       pr: first.id,
       specimen: `queue:${base}`,
       count: prs.length,
@@ -6993,7 +7025,7 @@ function resumableQueueRoots(
 }
 
 function pendingQueueRoots(state: DeepReadonly<RuntimeState>): Run[] {
-  return activeQueueRootIds(state.queues.authority)
+  return activeQueueRootIds(state.queues)
     .map((id) => Queues.get(state.queues, id))
     .filter((record): record is DeepReadonly<QueueRecord> => record !== undefined)
     .map((record) => materializeRun(record, state.jobs))
@@ -7923,6 +7955,11 @@ export const YRD_REFUSAL_CODES = [
   "candidate-already-landed",
   "candidate-conflict",
   "candidate-conflicting",
+  // `failed()`-only, like `stale-base` below: command.ts's pinCandidate returns
+  // this as a durable JobResult error when the candidate ref cannot be pinned.
+  // Its sibling `candidate-ref-refused` is the same family's WAITING branch and
+  // never a failure code — only this arm reaches a JobError.
+  "candidate-ref-invalid",
   "candidate-ref-refused",
   "candidate-submodules-failed",
   "carrier-drops-landed",
@@ -7955,11 +7992,15 @@ export const YRD_REFUSAL_CODES = [
   "definition-read-only",
   "deletion-inspection",
   // S6 derived-member admission (derived-admission.ts): the re-homed loud
-  // edges of the retired 2b sweep. All four are author-curable in the git
-  // regime — re-push the branch/submit ref, add the Change-Id trailer, or
-  // take the record lane. change-id-missing now fires only for submit facts
-  // too non-canonical to mint a synthetic identity from: a trailerless tip
-  // with canonical facts mints (changeIdForDerivedSubmit) instead of refusing.
+  // edges of the retired 2b sweep. THREE of the four below still have
+  // producers, and all three are author-curable in the git regime — re-push
+  // the branch/submit ref, or add the Change-Id trailer. The fourth,
+  // "derived-record-lane", is historical-only (see its own note). The cure
+  // this comment used to offer third — "or take the record lane" — is gone
+  // with the lane; derived-admission.ts says so at the one refusal that still
+  // mentions it. change-id-missing now fires only for submit facts too
+  // non-canonical to mint a synthetic identity from: a trailerless tip with
+  // canonical facts mints (changeIdForDerivedSubmit) instead of refusing.
   "derived-change-id-missing",
   // The host's enrichment reader raises this when the submitted commit is not
   // in the repository (R2's vanished-commit edge, attributable to one branch).
@@ -8062,7 +8103,7 @@ export const YRD_REFUSAL_CODES = [
   "recut-base-missing",
   // HISTORICAL-ONLY: a recut candidate refusal, retired with the rewrite
   // machinery and the recut verb (c146f903, e323f5be). It reached run failures,
-  // so recorded runs carry it.
+  // so recorded runs carry it — which is exactly why the entry STAYS.
   "recut-current-changed",
   "recut-publish",
   "refusal-remedy-needs-withdraw",

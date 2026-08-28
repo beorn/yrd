@@ -5678,8 +5678,26 @@ export type GitCheckOptions = ProcessDependency &
 type CandidatePin =
   | Readonly<{ status: "pinned"; ref: string }>
   | Readonly<{ status: "refused"; token: string; detail: string }>
+  /** Structurally unpinnable: the name itself is not a refname, so no retry
+   * and no collision identity can ever make it land. */
+  | Readonly<{ status: "invalid"; detail: string }>
 
 async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<CandidatePin> {
+  // A run id reaches this refname caller-controlled, and `candidateRef` can
+  // only sanitize CHARACTERS — `..`, a leading dot and a `.lock` suffix are
+  // each legal per character and illegal as a name. Ask git once, rather than
+  // discovering it 32 more times: every update-ref below would fail for this
+  // one structural reason and the loop would report it as collision
+  // exhaustion, dressing a permanent failure as a retryable `waiting`.
+  const named = await git.run(repo, ["check-ref-format", ref], true)
+  if (named.code !== 0) {
+    return {
+      status: "invalid",
+      detail:
+        `candidate ref '${ref}' is not a legal git refname, so no attempt can pin it: ` +
+        `the run or step name it spells has to change`,
+    }
+  }
   const collisionLimit = 32
   for (let collision = 0; collision <= collisionLimit; collision += 1) {
     const candidate = collision === 0 ? ref : `${ref}-collision-${collision}`
@@ -5696,6 +5714,19 @@ async function pinCandidate(git: Git, repo: string, ref: string, sha: string): P
   }
 }
 
+/**
+ * Git refnames admit a narrow alphabet and a run id is caller-controlled: a
+ * derived member's admission id spells `admission:<pr>:<rev>:<baseSha>`, whose
+ * colons git refuses outright. Map anything outside the refname-safe set to
+ * `-`. Root run ids (`R<n>`) and step names are already inside that set, so
+ * this is the IDENTITY on them and no existing ref name moves. `.` stays
+ * admissible so a dotted step name keeps its ref; the `..` that allows is
+ * caught loudly by {@link pinCandidate}'s check-ref-format probe.
+ */
+function refnameSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/gu, "-")
+}
+
 function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, attempt: number, sha: string): string {
   const identity = createHash("sha256")
     .update(job)
@@ -5704,7 +5735,7 @@ function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, a
     .update("\0")
     .update(sha)
     .digest("hex")
-  return `refs/yrd/candidates/${input.run}/${input.step}/attempt-${attempt}-${identity}`
+  return `refs/yrd/candidates/${refnameSegment(input.run)}/${refnameSegment(input.step)}/attempt-${attempt}-${identity}`
 }
 
 type PreparedCandidateFailure = Extract<Awaited<ReturnType<typeof prepareCandidate>>, { status: "failed" }>
@@ -5855,6 +5886,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
       candidateRef(input, context.id, context.attempt, candidate.output.sha),
       candidate.output.sha,
     )
+    if (pinned.status === "invalid") return failed("candidate-ref-invalid", pinned.detail)
     if (pinned.status === "refused") {
       return { status: "waiting", token: pinned.token, detail: pinned.detail }
     }

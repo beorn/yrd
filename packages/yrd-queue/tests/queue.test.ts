@@ -1598,17 +1598,24 @@ describe("Queue", () => {
     expect(app.queue.get("r1")).toMatchObject({ id: "R1", prs: [{ id: "PR1" }] })
     expect(app.queue.status("MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
     expect(app.queue.status("ORIGIN/MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
-    // GRANDFATHER (S7) — do NOT read this passing `[]` as evidence the live
-    // authority projection works. `activeQueueRootIds` iterates
-    // `authority.claims` only, and post-S7 `claims` is never written at all:
-    // its writers are the `pr/submitted` / `pr/checks-requested` reducers,
-    // which are now bare `return state`. So this assertion holds for the wrong
-    // reason and would hold no matter what the queue did.
-    // Left standing on @chief's instruction rather than flipped: the sibling
-    // at "removes ordinary failed roots from the live authority projection
-    // after settlement" is the more dangerous one, because that test is fully
-    // GREEN. See its note for the measurement.
-    expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
+    // WAS A GRANDFATHER (S7). The defect it blessed is fixed —
+    // `activeQueueRootIds` no longer walks the permanently-empty
+    // `authority.claims` — but this assertion is NOT yet re-derived, and must
+    // not be trusted as-is.
+    //
+    // It is currently UNREACHABLE: this test fails earlier, on an unrelated
+    // pre-existing defect (`explicitPRs` inside `resumableQueueRoots` raises
+    // "no change 'pr1' — searched 1 submitted branch"), so nothing here has
+    // ever been evaluated against the re-sourced walk.
+    //
+    // Do not assume `[]` when you fix that. Measured on the nearest comparable
+    // fixture — a passed check-only run, drained normally — the tree emits
+    // `queue/run/started` and nothing else, leaving `terminalOrder {}` and
+    // `activeRoots ["R1"]`. Whether that is the right answer or a symptom of
+    // settlement being broken for its own reasons is unresolved, which is
+    // exactly why this expectation needs re-deriving rather than editing to
+    // whatever makes it green.
+    expect(activeQueueRootIds(app.state().queues)).toEqual([])
   })
 
   it("accepts the printed `<base>#<number>` run reference the timeline and queue views teach", async () => {
@@ -1671,30 +1678,28 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [], derived: [pr], steps: ["check"] }, runtime)).resolves.toMatchObject([
       { id: "R1", status: "completed", conclusion: "failure" },
     ])
-    // GRANDFATHER (S7) — this test is GREEN and it is blessing a defect. The
-    // `[]` below is not "the root was removed after settlement"; the live
-    // authority projection is empty at ALL times post-S7, so this assertion
-    // cannot distinguish a correctly-retired root from one that was never
-    // recorded. Measured directly, on a root that is LIVE rather than settled
-    // — a check-only run parked `waiting` on an external token, exactly the
-    // shape `queue.recover` exists to reclaim:
-    //     runs        [["R1","waiting"]]
-    //     claims      {}
-    //     activeRoots []
-    //     recover()   []
-    // `authority.claims` is never written because its writers, the
-    // `pr/submitted` and `pr/checks-requested` reducers, are bare
-    // `return state` since S7. Every consumer keyed on it reads "nothing
-    // active": `activeQueueRootIds` (projection-index.ts), `queue.recover`'s
-    // ownership capture, and the settled command's `claimed` guard — which is
-    // why a settled run also journals no `queue/run/settled`.
+    // WAS A GRANDFATHER (S7). The `[]` is back, but it now means what the title
+    // always claimed, and the line above it is why.
     //
-    // DO NOT flip this to a non-empty expectation to "fix" it. The two tests
-    // that DO expect non-empty here — "releases a replayed terminal root after
-    // a crash before its settled event" and "resumes one waiting deploy-only
-    // run for an already integrated change" — are the real acceptance, and
-    // both are red (each failing earlier, for its own reason).
-    expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
+    // The original asserted `[]` alone and was GREEN while blessing two
+    // defects. `activeQueueRootIds` walked `authority.claims`, a store whose
+    // only writers — the `pr/submitted` and `pr/checks-requested` reducers —
+    // are bare `return state` post-S7, so it answered `[]` for every state and
+    // could not tell a correctly-retired root from one never recorded. And
+    // nothing SETTLED this root either: the settled command emitted its event
+    // only under `claimed || memberTerminals.length > 0`, and a failed
+    // check-only derived run satisfies neither, so the journal ended at
+    // `queue/run/failed` with `terminalOrder {}`. The assertion was the
+    // postcondition of an event that never fired.
+    //
+    // Both are fixed, so both halves are asserted here. `terminalOrder`
+    // carrying this root is the POSITIVE CONTROL the original lacked: it proves
+    // a `queue/run/settled` really was journaled, which is the only thing that
+    // makes the `[]` below evidence of retirement rather than of an empty
+    // projection. Assert them together or not at all — either one alone is
+    // exactly as uninformative as the version this replaces.
+    expect(app.state().queues.retention.terminalOrder).toEqual({ R1: 1 })
+    expect(activeQueueRootIds(app.state().queues)).toEqual([])
   })
 
   it("drains the next submitted PR after releasing a passed check-only root", async () => {
@@ -1737,16 +1742,16 @@ describe("Queue", () => {
         conclusion: "success",
         steps: [{ job: { status: "completed", conclusion: "success" } }],
       })
-      expect(activeQueueRootIds(app.state().queues.authority)).toEqual(["R1"])
+      expect(activeQueueRootIds(app.state().queues)).toEqual(["R1"])
     }
 
     await using replayed = await createQueueApp({}, journal, undefined, id)
-    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual(["R1"])
+    expect(activeQueueRootIds(replayed.state().queues)).toEqual(["R1"])
     const before = await Array.fromAsync(replayed.events())
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([
       expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
     ])
-    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual([])
+    expect(activeQueueRootIds(replayed.state().queues)).toEqual([])
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
     const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
     expect(appended.map(({ name }) => name)).toEqual(["queue/run/settled"])
@@ -1785,7 +1790,7 @@ describe("Queue", () => {
 
     await using replayed = await createQueueApp({}, journal, undefined, id)
     expect(replayed.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
-    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual([])
+    expect(activeQueueRootIds(replayed.state().queues)).toEqual([])
     const before = await Array.fromAsync(replayed.events())
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([])
     expect(await Array.fromAsync(replayed.events())).toEqual(before)
@@ -2244,7 +2249,7 @@ describe("Queue", () => {
           return Reflect.ownKeys(target)
         },
       })
-      activeQueueRootIds({ ...app.state().queues.authority, runs })
+      activeQueueRootIds({ ...app.state().queues, authority: { ...app.state().queues.authority, runs } })
       expect(historicalRunEnumerations).toBe(0)
     },
   )
@@ -3096,7 +3101,7 @@ describe("Queue", () => {
       expect(await terminalFor(app, pr.id)).toMatchObject({ run: "R1", commit: MERGED })
       await app.dispatch(app.commands.queue.run, { prs: [], derived: [pr], steps: ["deploy"], baseSha: BASE })
       expect(app.queue.get("R2")).toMatchObject({ status: "queued", steps: [{ name: "deploy" }] })
-      expect(activeQueueRootIds(app.state().queues.authority)).toEqual(["R2"])
+      expect(activeQueueRootIds(app.state().queues)).toEqual(["R2"])
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
@@ -3104,7 +3109,7 @@ describe("Queue", () => {
       { id: "R2", status: "waiting" },
     ])
     expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
-    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual(["R2"])
+    expect(activeQueueRootIds(replayed.state().queues)).toEqual(["R2"])
     expect(deployCalls).toBe(1)
   })
 

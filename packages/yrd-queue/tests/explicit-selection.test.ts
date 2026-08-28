@@ -287,25 +287,32 @@ describe("explicit selection — a miss must refuse, and the refusal must not ov
 
 describe("explicit selection — selector case folding", () => {
   /**
-   * @chief to rule on this pair when the fix is applied. I am pinning what I
-   * believe is right rather than guessing at consistency for its own sake, and
-   * the two halves deliberately disagree with each other.
+   * RULED (@chief): the two halves below deliberately disagree, and that is
+   * the decision, not an oversight.
    *
-   * The three selector surfaces currently disagree: `queue.get("r1")` and
-   * `queue.status("MAIN")` fold case, `explicitPRs` compares with `===`. Making
-   * all three fold is the obvious "consistency" fix and I think it is wrong,
-   * because the two kinds of selector are not the same kind of name.
+   * THE ASYMMETRY IS NOT AN INCONSISTENCY — IT IS A NAMESPACE-OWNERSHIP
+   * BOUNDARY. We fold what we mint, and we do not fold what git owns.
    *
-   * A minted id (`PR1`) is OURS. It has no meaning outside yrd, no collision
-   * risk from folding, and the surfaces an operator copies it off already fold
-   * — so folding here removes a real papercut and can break nothing.
+   * That sentence is here because the tempting fix is the wrong one and it
+   * argues well. The three selector surfaces do currently disagree —
+   * `queue.get("r1")` and `queue.status("MAIN")` fold case, `explicitPRs`
+   * compares with `===` — so "three surfaces should agree, make them all fold"
+   * sounds like tidying. It is not tidying. It re-introduces the hazard below,
+   * and it does so under a name that reads like an improvement in a diff.
    *
-   * A branch name is GIT'S. Refs are case-sensitive, and `Topic/Selectors` and
-   * `topic/selectors` can both exist at once. A folding branch selector would
-   * either resolve to a branch the operator did not name, or resolve
-   * ambiguously between two real branches — and it would do so at the exact
-   * moment they are asking us to merge something. Refusing and making them
-   * retype is the cheap outcome; merging the wrong branch is not.
+   * FOLD the minted id. `PR1` is OUR namespace: we mint every value in it, so
+   * there is no collision to fold two distinct things together, it has no
+   * meaning outside yrd, and the surfaces an operator copies it off already
+   * fold. Folding removes a real papercut and can break nothing.
+   *
+   * DO NOT FOLD the branch. A branch name is GIT'S namespace. Refs are
+   * case-sensitive, so `Topic/Selectors` and `topic/selectors` can both exist
+   * at once and mean different things. A folding branch selector would resolve
+   * either to a branch the operator did not name, or ambiguously between two
+   * real ones — at the exact moment they are asking us to merge. Making
+   * someone retype a branch is cheap. Merging the wrong branch is the same
+   * catastrophic outcome the narrowing guard at the top of this file exists to
+   * prevent, reached from a different direction.
    */
   it("folds case for the minted ID spelling, as every other selector surface does", async () => {
     await using app = await createApp()

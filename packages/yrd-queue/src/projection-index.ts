@@ -1,12 +1,13 @@
 import { compareNatural } from "@yrd/core"
+import { Queues } from "./model.ts"
 import type {
   InstalledStep,
   ChangeSnapshot,
-  QueueAuthorityState,
   QueueProjectionIndex,
   QueueProjectionLookup,
   QueueProjectionPlan,
   QueueRecord,
+  QueuesState,
   RunId,
 } from "./model.ts"
 import { projectionLookupGet, projectionLookupSet } from "./projection-lookup.ts"
@@ -153,10 +154,53 @@ export function releasedAdmissionFailures(
   return projectionLookupGet(index.plans, queueLookupKey(snapshot, steps))?.releasedAdmissionFailures ?? 0
 }
 
-export function activeQueueRootIds(authority: Readonly<QueueAuthorityState>): readonly RunId[] {
+/**
+ * The root runs the queue still OWNS — recovery's population, and every other
+ * caller's answer to "what is live right now".
+ *
+ * Re-sourced onto durable records (S7, branch-is-change @i/10 22991). This
+ * walked `authority.claims` and asked which runs a claim token named as its
+ * consumer. That store is seeded only by the `pr/submitted` and
+ * `pr/checks-requested` reducers, both of which have been bare `return state`
+ * since the change-record store was deleted, so `claims` is now permanently
+ * `{}` and this function returned `[]` for every state. `queue.recover` opens
+ * with it as its ownership capture, so the fleet's unwedge path reported
+ * success while reclaiming nothing — measured on a root parked `waiting`:
+ * `runs [["R1","waiting"]]`, `claims {}`, `activeRoots []`, `recover() []`.
+ *
+ * The three facts below all still have rows, and each carries one third of what
+ * a claim token used to say:
+ *
+ *   - a ROOT record (`parent === undefined`) — the run tree's own shape, which
+ *     never depended on a token;
+ *   - an EXPLICIT-settlement record — the new-run marker, absent only on
+ *     pre-settlement journals, which the claims walk excluded implicitly;
+ *   - not TERMINAL (`retention.terminalOrder`) — written by `queue/run/settled`
+ *     and by a canceled root, so a settled run retires here exactly when it
+ *     used to lose its claim;
+ *   - not RELEASED (`authority.runs[id].released`) — the one live member of the
+ *     authority family, written by `projectRunAuthority` at every run start and
+ *     stamped by `releaseRunAuthority`, and what retires a base-moved or
+ *     stale-plan failure that never reaches a terminal mark.
+ *
+ * Deliberately NOT sourced on the stored authority TOKENS. Every one of
+ * `authority.claims`, `.submits`, `.checks` and `.current` is written only by a
+ * dead `pr/*` reducer; a re-source onto any of them would be born dark in
+ * exactly the way this one was.
+ */
+export function activeQueueRootIds(queues: Readonly<QueuesState>): readonly RunId[] {
   const roots = new Set<RunId>()
-  for (const token of Object.values(authority.claims)) {
-    if (token.consumedBy !== undefined) roots.add(token.consumedBy)
+  for (const record of Queues.values(queues)) {
+    if (record.parent !== undefined) continue
+    // A record with no `settlement` marker predates the settlement protocol, so
+    // nothing will ever settle it and calling it active manufactures a root that
+    // recovery would chase forever. The claims walk excluded these implicitly —
+    // it only ever wrote a claim for an explicit-settlement run — and dropping
+    // that exclusion resurrects the legacy replay this guard is named for.
+    if (record.settlement !== "explicit") continue
+    if (queues.retention.terminalOrder[record.id] !== undefined) continue
+    if (projectionLookupGet(queues.authority.runs, record.id)?.released !== undefined) continue
+    roots.add(record.id)
   }
   return [...roots].toSorted(compareRunIds)
 }
