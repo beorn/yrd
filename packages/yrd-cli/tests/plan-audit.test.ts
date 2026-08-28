@@ -181,6 +181,51 @@ describe("leg a — a recorded Run against git at its own base sha", () => {
     expect(runPlanMismatch(MERGE_ONLY_RUN, { ...FOUR_CHECK_TIP, sha: SHA_B }, ADMISSION_AT_TIP_BASE)).toBeUndefined()
   })
 
+  const carriedRun = (overrides: Record<string, unknown> = {}): RecordedRunPlan => ({
+    ...MERGE_ONLY_RUN,
+    initialResults: Object.fromEntries(
+      ["typecheck", "manifest-co-change", "substrate-pair", "affected-tests"].map((name) => [
+        name,
+        { exitCode: 0, baseSha: SHA_B, ...overrides },
+      ]),
+    ),
+  })
+
+  it("counts a check the Run's OWN record carries at its base as executed — the derived member, which has no change record", () => {
+    // Derived admission persists nothing by design: "a derived member's only
+    // durable home stays the `queue/run/started` ChangeSnapshot". The
+    // AdmissionLookup is therefore structurally empty, and the run record is
+    // the only evidence there is. Reading the lookup alone reported four
+    // executed, PASSING checks as "executed in NEITHER stage" on every derived
+    // landing (R3578, R3590-R3593).
+    expect(runPlanMismatch(carriedRun(), { ...FOUR_CHECK_TIP, sha: SHA_B }, () => undefined)).toBeUndefined()
+  })
+
+  it("refuses carried evidence that names another base or did not pass", () => {
+    const tip = { ...FOUR_CHECK_TIP, sha: SHA_B }
+    // Positive control: the same shape, unmodified, IS credited.
+    expect(runPlanMismatch(carriedRun(), tip, () => undefined)).toBeUndefined()
+    expect(runPlanMismatch(carriedRun({ baseSha: SHA_A }), tip, () => undefined)?.message).toContain(
+      `step 'typecheck' is declared at that base and executed neither in the Run nor at admission for base ${SHA_B.slice(0, 8)}`,
+    )
+    expect(runPlanMismatch(carriedRun({ exitCode: 1 }), tip, () => undefined)?.code).toBe("run-plan-mismatch")
+    expect(runPlanMismatch(carriedRun({ baseSha: undefined }), tip, () => undefined)?.code).toBe("run-plan-mismatch")
+  })
+
+  it("prefers admission evidence over carried evidence when both exist", () => {
+    // Admission carries a step revision and is revision-checked against git;
+    // carried evidence is not. A stale admission revision must still be caught
+    // even though the run record also carries a passing result for that step.
+    const finding = runPlanMismatch(carriedRun(), { ...FOUR_CHECK_TIP, sha: SHA_B }, (member, baseSha) =>
+      ADMISSION_AT_TIP_BASE(member, baseSha)?.map((check) =>
+        check.name === "typecheck" ? { ...check, revision: "tc-v0" } : check,
+      ),
+    )
+    expect(finding?.message).toContain(
+      "step 'typecheck' executed at admission at revision 'tc-v0', but git at that base derives 'tc-v1'",
+    )
+  })
+
   it("finds a check that executed in neither stage, naming the base the admission was required at", () => {
     // The admission that exists was recorded at base X (SHA_B); the Run merged
     // onto base Y (SHA_A) — its members' checks were never proven against Y.

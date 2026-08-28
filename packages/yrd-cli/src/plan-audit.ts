@@ -1,3 +1,4 @@
+import type { JsonValue } from "@yrd/core"
 import type { InstalledStep, QueueAuditFindingEmission, QueueRecord, StepPlanSource, StepSelection } from "@yrd/queue"
 
 /** The derived queue-plan audit (23192, 23193).
@@ -40,6 +41,11 @@ export type RecordedRunPlan = Readonly<{
   steps: readonly InstalledStep[]
   plan?: readonly string[]
   members: readonly Readonly<{ id: string; revision: number }>[]
+  /** The results the Run COPIED onto its own record from the
+   * checks-before-queueing stage when it reused that evidence and executed
+   * only the remainder. Keyed by step name; immutable, written into the
+   * run-started event and never revised. */
+  initialResults?: Readonly<Record<string, JsonValue>>
   source?: StepPlanSource
   authority?: StepSelection["authority"]
   baseSha?: string
@@ -54,6 +60,7 @@ export function recordedRunPlan(record: QueueRecord): RecordedRunPlan {
     steps: record.steps,
     ...(selection?.steps === undefined ? {} : { plan: selection.steps }),
     members: record.prs.map((pr) => ({ id: pr.id, revision: pr.revision })),
+    ...(record.initialResults === undefined ? {} : { initialResults: record.initialResults }),
     ...(selection?.source === undefined ? {} : { source: selection.source }),
     ...(selection?.authority === undefined ? {} : { authority: selection.authority }),
     ...(selection?.baseSha === undefined ? {} : { baseSha: selection.baseSha }),
@@ -78,11 +85,15 @@ export type AdmissionLookup = (
  * - `run` — the Run executed it itself (`steps` carries its descriptor).
  * - `admission` — every member's checks-before-queueing record at the Run's
  *   own base sha carried it passed; the Run reused that evidence.
- * - `missing` — neither stage executed it. That is the real finding.
+ * - `carried` — the Run's OWN record carries a passed result for it at the
+ *   Run's own base sha. The same execution `admission` reports, read from the
+ *   immutable run record instead of the mutable change record — the only
+ *   durable home a DERIVED member has.
+ * - `missing` — no stage executed it. That is the real finding.
  */
 export type StepExecutionPlace = Readonly<{
   name: string
-  where: "run" | "admission" | "missing"
+  where: "run" | "admission" | "carried" | "missing"
   /** The executing side's recorded revision (`admission`: the first member's). */
   revision?: string
 }>
@@ -101,8 +112,45 @@ export function accountRunSteps(recorded: RecordedRunPlan, admissionFor?: Admiss
     if (evidence !== undefined && evidence.length > 0 && evidence.every((check) => check !== undefined)) {
       return { name, where: "admission", ...(evidence[0] === undefined ? {} : { revision: evidence[0].revision }) }
     }
+    if (carriedAtBase(recorded, name)) return { name, where: "carried" }
     return { name, where: "missing" }
   })
+}
+
+/** Did the Run's own record carry a passed result for this step at this Run's
+ * base sha?
+ *
+ * This is the evidence {@link AdmissionLookup} structurally cannot supply for
+ * a DERIVED member. Derived admission is a pure derivation that persists
+ * nothing by design — "a derived member's only durable home stays the
+ * `queue/run/started` ChangeSnapshot" (@yrd/queue/derived-admission.ts) — so
+ * there is no bay change record, `pr.recordAdmission` never runs, and the
+ * lookup returns undefined for evidence that plainly exists on the run record.
+ * Consulting only that mutable side table is how the audit reported four
+ * executed, PASSING checks as "executed in NEITHER stage" on every derived
+ * landing (R3578, R3590-R3593) while the run record itself held their exit
+ * codes, durations and artifact paths.
+ *
+ * Credit is deliberately narrow: the carried entry must name THIS Run's exact
+ * base sha and a zero exit. A result carried from another base proves nothing
+ * about this one, and an absent or malformed entry leaves the step missing, so
+ * the finding still fires. The carried entry records no step revision, so a
+ * step credited here is NOT revision-checked against git; `admission` is the
+ * stronger evidence and stays preferred wherever it exists. */
+function carriedAtBase(recorded: RecordedRunPlan, name: string): boolean {
+  if (recorded.baseSha === undefined) return false
+  const carried = recorded.initialResults?.[name]
+  if (carried === null || typeof carried !== "object" || Array.isArray(carried)) return false
+  const entry = carried as Readonly<Record<string, unknown>>
+  return entry.baseSha === recorded.baseSha && entry.exitCode === 0
+}
+
+/** The stage phrase each execution place reads as inside a finding. */
+const STAGE_PHRASE: Readonly<Record<StepExecutionPlace["where"], string>> = {
+  run: "in the Run",
+  admission: "at admission",
+  carried: "at admission, carried on the Run's record",
+  missing: "in no stage",
 }
 
 /** "merge ran in the Run; typecheck, affected-tests ran as checks before queueing for base
@@ -116,6 +164,10 @@ export function describeStepExecution(places: readonly StepExecutionPlace[], bas
   const admitted = at("admission")
   if (admitted.length > 0) {
     parts.push(`${admitted.join(", ")} ran as checks before queueing for base ${shortSha(baseSha)}, the Run's base`)
+  }
+  const carried = at("carried")
+  if (carried.length > 0) {
+    parts.push(`${carried.join(", ")} are carried on the Run's record as passed for base ${shortSha(baseSha)}`)
   }
   const missing = at("missing")
   if (missing.length > 0) parts.push(`${missing.join(", ")} executed in NEITHER stage`)
@@ -298,7 +350,7 @@ export function runPlanMismatch(
     }
     if (expected !== undefined && place.revision !== undefined && place.revision !== expected.revision) {
       problems.push(
-        `step '${place.name}' executed ${place.where === "run" ? "in the Run" : "at admission"} at revision ` +
+        `step '${place.name}' executed ${STAGE_PHRASE[place.where]} at revision ` +
           `'${shortRevision(place.revision)}', but git at that base derives '${shortRevision(expected.revision)}'`,
       )
     }
