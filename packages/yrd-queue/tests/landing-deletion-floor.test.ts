@@ -21,6 +21,11 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createProcess, type Process } from "@yrd/process"
 import { gitCheckStep, gitMergeStep, type ChangeShape, type StepExecution } from "@yrd/queue"
 
+/** A change fixture's stable identity. Production changes always carry one
+ * (`Queues.snapshot` reads it off the revision), and the queue refuses to
+ * write a candidate commit it cannot stamp with it. */
+const FIXTURE_CHANGE_ID = `I${"c0ffee12".repeat(5)}`
+
 const roots: string[] = []
 
 afterEach(async () => {
@@ -101,7 +106,16 @@ const checkInputFor = (featureSha: string) =>
     run: "R1",
     step: "check",
     index: 0,
-    prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+    prs: [
+      {
+        id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha: featureSha,
+      },
+    ],
     shape: { results: {} },
   }) satisfies StepExecution<ChangeShape>
 

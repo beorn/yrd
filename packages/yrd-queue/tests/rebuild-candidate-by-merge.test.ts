@@ -25,6 +25,9 @@ import { emptyCandidateFixture, fixtureRefGit, movedBaseFixture } from "./suppor
 const git = fixtureRefGit()
 const roots: string[] = []
 
+/** A well-formed change identity: `I` + 40 hex, the shape `ChangeIdSchema` takes. */
+const CHANGE_ID = `I${"a1b2c3d4".repeat(5)}`
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
@@ -43,6 +46,7 @@ describe("rebuildCandidateByMerge — moved base, direct revision", () => {
       { sha: fixture.baseTwo },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -62,6 +66,7 @@ describe("rebuildCandidateByMerge — moved base, direct revision", () => {
       { sha: fixture.baseTwo },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -81,6 +86,7 @@ describe("rebuildCandidateByMerge — moved base, direct revision", () => {
         { sha: fixture.baseTwo },
         {
           id: "PR1",
+          changeId: CHANGE_ID,
           branch: fixture.authorBranch,
           headSha: fixture.authorTip,
         },
@@ -97,6 +103,7 @@ describe("rebuildCandidateByMerge — moved base, direct revision", () => {
         { sha: fixture.baseTwo },
         {
           id: "PR1",
+          changeId: CHANGE_ID,
           branch: fixture.authorBranch,
           headSha: fixture.authorTip,
         },
@@ -220,6 +227,7 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
       { sha: fixture.targetSha },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -268,7 +276,7 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
     const result = await rebuildCandidateByMerge(
       options(fixture.superRepo),
       { sha: fixture.targetSha },
-      { id: "PR1", branch: fixture.authorBranch, headSha: fixture.authorTip },
+      { id: "PR1", changeId: CHANGE_ID, branch: fixture.authorBranch, headSha: fixture.authorTip },
     )
     expect(result.sha).toBeTruthy()
   })
@@ -283,6 +291,7 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
         { sha: fixture.targetSha },
         {
           id: "PR1",
+          changeId: CHANGE_ID,
           branch: fixture.authorBranch,
           headSha: fixture.authorTip,
         },
@@ -335,7 +344,7 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
     const result = await rebuildCandidateByMerge(
       options(fixture.superRepo),
       { sha: fixture.targetSha },
-      { id: "PR1", branch: fixture.authorBranch, headSha: fixture.authorTip },
+      { id: "PR1", changeId: CHANGE_ID, branch: fixture.authorBranch, headSha: fixture.authorTip },
     )
 
     // Filled from the submodule's current main (published, a descendant of
@@ -371,6 +380,7 @@ describe("rebuildCandidateByMerge — the 23167 specimen (empty candidate)", () 
       { sha: fixture.mainTip },
       {
         id: "PR2",
+        changeId: CHANGE_ID,
         branch: fixture.secondBranch,
         headSha: fixture.secondTip,
       },
@@ -392,6 +402,7 @@ describe("rebuildCandidateByMerge — the shaset fill-in", () => {
       { sha: fixture.targetSha },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -417,6 +428,7 @@ describe("rebuildCandidateByMerge — merge parents", () => {
       { sha: fixture.baseTwo },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -512,6 +524,7 @@ describe("rebuildCandidateByMerge — witnesses still run (proves the ONE code p
         { sha: fixture.queueBaseHead },
         {
           id: "PR1",
+          changeId: CHANGE_ID,
           branch: fixture.carrierBranch,
           headSha: fixture.carrierHead,
         },
@@ -535,6 +548,7 @@ describe("rebuildCandidateByMerge — idempotence (no revision is minted)", () =
       { sha: fixture.baseTwo },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -544,6 +558,7 @@ describe("rebuildCandidateByMerge — idempotence (no revision is minted)", () =
       { sha: fixture.baseTwo },
       {
         id: "PR1",
+        changeId: CHANGE_ID,
         branch: fixture.authorBranch,
         headSha: fixture.authorTip,
       },
@@ -583,6 +598,7 @@ describe("rebuildCandidateByMerge — content conflict beside a gitlink conflict
         { sha: mainTip },
         {
           id: "PR1",
+          changeId: CHANGE_ID,
           branch: fixture.authorBranch,
           headSha: authorTip,
         },
@@ -593,5 +609,97 @@ describe("rebuildCandidateByMerge — content conflict beside a gitlink conflict
         message: expect.stringContaining(contentPath),
       },
     })
+  })
+})
+
+/**
+ * The identity half. A rebuild writes queue-owned commits — the merge and, when
+ * a gitlink fills, the shaset wrapper on top of it — and every one of them must
+ * carry the change's `Change-Id`, because Change-Id ancestry IS how merged truth
+ * is derived (`merged-truth.ts`). Measured 2026-08-28 on the superproject: 61
+ * post-epoch `yrd: (compose|merge) … revision 1` commits carry no trailer at all
+ * and 27 of them are reachable from `origin/main` — every one written through
+ * THIS function, whose synthesized snapshot never had a `changeId` to stamp.
+ */
+describe("rebuildCandidateByMerge — the change's identity trailer", () => {
+  it("12. stamps the merge commit with exactly one Change-Id and one Merge-Change-Id", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "disjoint-paths" })
+    roots.push(fixture.root)
+
+    const result = await rebuildCandidateByMerge(
+      options(fixture.repo),
+      { sha: fixture.baseTwo },
+      {
+        id: "PR1",
+        changeId: CHANGE_ID,
+        branch: fixture.authorBranch,
+        headSha: fixture.authorTip,
+      },
+    )
+
+    // `%(trailers:key=…,valueonly)` emits ONE line per matching trailer, so a
+    // duplicate stamp shows up as a second line rather than a changed value.
+    expect(
+      await git.run(fixture.repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
+    ).toBe(CHANGE_ID)
+    expect(
+      await git.run(fixture.repo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", result.sha]),
+    ).toBe(`${CHANGE_ID}-merge`)
+  })
+
+  it("13. stamps the shaset wrapper it synthesizes on top of that merge, marked compose", async () => {
+    const fixture = await gitlinkConflictFixture({ authorPublishedToMain: true })
+    roots.push(fixture.root)
+
+    const result = await rebuildCandidateByMerge(
+      options(fixture.superRepo),
+      { sha: fixture.targetSha },
+      {
+        id: "PR1",
+        changeId: CHANGE_ID,
+        branch: fixture.authorBranch,
+        headSha: fixture.authorTip,
+      },
+    )
+
+    expect(
+      await git.run(fixture.superRepo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
+    ).toBe(CHANGE_ID)
+    expect(
+      await git.run(fixture.superRepo, [
+        "show",
+        "-s",
+        "--format=%(trailers:key=Merge-Change-Id,valueonly)",
+        result.sha,
+      ]),
+    ).toBe(`${CHANGE_ID}-compose`)
+    // The merge underneath it carries the same identity, marked as the merge.
+    const parent = await git.run(fixture.superRepo, ["rev-parse", `${result.sha}^`])
+    expect(
+      await git.run(fixture.superRepo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", parent]),
+    ).toBe(`${CHANGE_ID}-merge`)
+  })
+
+  it("14. a fast-forward rebuild returns the authored tip untouched — nothing to stamp", async () => {
+    const fixture = await movedBaseFixture({ mainMoves: "disjoint-paths" })
+    roots.push(fixture.root)
+
+    // Base already an ancestor of the authored tip: the pre-branch returns the
+    // author's own commit, which the queue never rewrites and must not stamp.
+    const result = await rebuildCandidateByMerge(
+      options(fixture.repo),
+      { sha: fixture.baseOne },
+      {
+        id: "PR1",
+        changeId: CHANGE_ID,
+        branch: fixture.authorBranch,
+        headSha: fixture.authorTip,
+      },
+    )
+
+    expect(result.sha).toBe(fixture.authorTip)
+    expect(
+      await git.run(fixture.repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
+    ).toBe("")
   })
 })

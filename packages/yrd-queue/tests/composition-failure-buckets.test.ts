@@ -55,7 +55,17 @@ describe("composition failure buckets — the partition is total and disjoint", 
     // promotion path (carrier-drops-landed) and the rebuild/record refusals
     // thrown via createFailure (payload-certificate) — still run/admission
     // error codes NEEDS_AUTHOR_CODES must classify.
-    const promotionPathCodes = new Set(["carrier-drops-landed", "payload-certificate", "scratch-cleanup-failed"])
+    const promotionPathCodes = new Set([
+      "carrier-drops-landed",
+      "payload-certificate",
+      "scratch-cleanup-failed",
+      // The two identity refusals: thrown via queueRefusal/createFailure from
+      // the candidate writer and the rebuild seam rather than returned as a
+      // candidateFailure, and still author-curable run errors the bucket must
+      // classify.
+      "candidate-change-id-missing",
+      "recut-change-id-missing",
+    ])
     for (const [name, set] of BUCKETS) {
       for (const code of set) {
         if (promotionPathCodes.has(code)) {

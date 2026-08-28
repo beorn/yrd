@@ -1029,12 +1029,41 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain(`tip commit ${headSha.slice(0, 12)}`)
     expect(result.stderr).toContain("no 'Change-Id' trailer")
-    // The cure shows the exact trailer line to add and names the amend.
-    expect(result.stderr).toContain("Change-Id: I<40 hex>")
-    expect(result.stderr).toContain("--amend")
+    // The cure names what GENERATES the trailer, not a bare amend: nothing in a
+    // plain checkout stamps one, so "amend and push again" on its own is a loop
+    // (@i/10-yrd/23139 — measured twice, both readers computed the hex by hand).
+    expect(result.stderr).toContain("commit-msg hook")
+    expect(result.stderr).toContain("git commit --amend --no-edit")
+    // …and a reader whose checkout is NOT running that hook is told how to tell,
+    // plus a command that writes the trailer without one.
+    expect(result.stderr).toContain("core.hooksPath")
+    expect(result.stderr).toContain('git commit --amend --trailer "Change-Id: ')
     // Push time means BEFORE the ref is accepted: nothing stored, nothing queued.
     expect(await git(f.receiver.receiverPath, "for-each-ref", "refs/for/")).toBe("")
     expect(await inboxFiles(f.receiver)).toEqual([])
+  })
+
+  it("names a cure a reader can run — never a bare amend, which adds no trailer", async () => {
+    const f = await fixture("submit-executable-cure")
+    await git(f.mainRepo, "switch", "-qc", "work")
+    await commit(f.mainRepo, "unexecutable.txt")
+    const env = await installHookHost(f.root, {
+      "for:main/unexecutable": target(f.baseSha, { branch: "issue/unexecutable", issue: "unexecutable" }),
+    })
+    const result = await push(f, "work:refs/for/main/unexecutable", env)
+    expect(result.code).not.toBe(0)
+
+    // The regression this pins: the refusal used to end at "amend the commit
+    // message to end with a trailer line 'Change-Id: I<40 hex>' (`git commit
+    // --amend`) and push again". Following that verbatim changes nothing —
+    // `git commit --amend` re-opens the same message. Every amend the cure
+    // names must therefore carry something that produces the value: the hook
+    // (--no-edit, which re-runs it) or an explicit --trailer.
+    const amends = result.stderr.match(/git commit --amend[^`"]*/gu) ?? []
+    expect(amends.length).toBeGreaterThan(0)
+    for (const amend of amends) {
+      expect(amend, `'${amend}' cannot produce a trailer on its own`).toMatch(/--no-edit|--trailer/u)
+    }
   })
 
   it("refuses a malformed Change-Id trailer — wrong length or prefix — naming what it found", async () => {
@@ -1048,7 +1077,9 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(short.code).not.toBe(0)
     expect(short.stderr).toContain("no valid 'Change-Id' trailer")
     expect(short.stderr).toContain("'Ideadbeef'")
-    expect(short.stderr).toContain("Change-Id: I<40 hex>")
+    // A malformed trailer's cure was always executable — the author already
+    // wrote the line, so correcting it is a real edit, not a no-op amend.
+    expect(short.stderr).toContain("correct the trailer line to 'Change-Id: I<40 hex>'")
     expect(short.stderr).toContain("--amend")
 
     // Only the TIP identifies the change: its malformed trailer refuses even

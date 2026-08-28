@@ -8053,6 +8053,12 @@ export const COMPOSITION_FAILURE_BUCKETS = {
     // must survive a refusal that is not the author's fault" violation this
     // phase's own bead names.
     "component-model-authorization-refused",
+    // Both identity refusals: a member with no Change-Id cannot have a
+    // candidate written for it, because merged-truth derivation reads that
+    // trailer's ancestry. The cure is the author's (migrate the pre-identity
+    // record), never a retry — nothing about the host changes the answer.
+    "candidate-change-id-missing",
+    "recut-change-id-missing",
     // A certificate-era composed revision reaching candidate construction:
     // the composed path is retired; the author resubmits the root change with
     // its gitlink bumps.
@@ -8162,6 +8168,10 @@ export const YRD_REFUSAL_CODES = [
   // CANCELED_FAILURE_CODES already accepted it (historical/external data);
   // "cancelled" registers as its alias below.
   "canceled",
+  // The queue's own candidate writer refusing to stamp a commit it cannot
+  // attribute: a member with no Change-Id would land invisible to
+  // merged-truth derivation (command.ts, candidateChangeCommitMessage).
+  "candidate-change-id-missing",
   "candidate-conflict",
   "candidate-conflicting",
   "candidate-ref-refused",
@@ -8292,6 +8302,10 @@ export const YRD_REFUSAL_CODES = [
   "record-mint-retired",
   "recut-base-missing",
   "recut-branch-absent",
+  // A pre-identity change reaching the rebuild seam: it cannot be rebuilt,
+  // because the candidate would carry no Change-Id (command.ts,
+  // remergeDirectChangeByMerge). Migration is the author-side cure.
+  "recut-change-id-missing",
   "recut-current-changed",
   "recut-publish",
   "refusal-remedy-needs-withdraw",

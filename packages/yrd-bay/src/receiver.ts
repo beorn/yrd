@@ -1101,10 +1101,28 @@ async function validateChangeIdTrailer(
     candidates.length === 0
       ? `has no '${CHANGE_ID_TRAILER_KEY}' trailer, which is the change's identity at admission`
       : `has no valid '${CHANGE_ID_TRAILER_KEY}' trailer — found '${candidates.join("', '")}', not 'I' followed by 40 hex digits`
+  // The cure has to be one the reader can actually run. The first cut said only
+  // "amend the commit message to end with a trailer line … (`git commit
+  // --amend`)" — and a bare amend does not ADD a trailer, because nothing in a
+  // plain checkout generates one. A reader following it literally amends,
+  // pushes, reads the same refusal, and amends again. Measured twice: @chief on
+  // task/check-reachability-fix (2026-08-27) and again on tip 0ef8319
+  // (2026-08-28), both of whom ended up computing the 40 hex digits by hand
+  // (@i/10-yrd/23139 — a remedy is only a remedy if its reader can execute it).
+  // So the missing case now names what GENERATES the value: the repository's
+  // commit-msg hook, how to tell whether your checkout runs it, and a one-liner
+  // that works without one. The malformed case keeps the plain correction,
+  // which was always executable — the author already wrote the line.
+  const cure =
+    candidates.length === 0
+      ? "the repository's commit-msg hook stamps this trailer, so `git commit --amend --no-edit` adds one; " +
+        "if the message comes back unchanged your checkout is not running that hook (check `git config " +
+        'core.hooksPath`), and `git commit --amend --trailer "Change-Id: ' +
+        'I$(git rev-parse HEAD | sha1sum | cut -c1-40)"` writes one without it'
+      : "correct the trailer line to 'Change-Id: I<40 hex>' (`git commit --amend`)"
   check(
     false,
-    `refs/for submit '${update.ref}': tip commit ${update.newSha.slice(0, 12)} ${found}; amend the commit ` +
-      `message to end with a trailer line 'Change-Id: I<40 hex>' (\`git commit --amend\`) and push again`,
+    `refs/for submit '${update.ref}': tip commit ${update.newSha.slice(0, 12)} ${found}; ${cure}, then push again`,
   )
 }
 

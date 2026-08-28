@@ -3186,6 +3186,18 @@ export type RebuildByMergeInput = Readonly<{
   /** The change id, used only for error attribution and the synthetic commit
    * message — never persisted, never a revision number. */
   id: string
+  /** The change's stable logical identity, stamped as the `Change-Id` trailer on
+   * every commit this rebuild writes. REQUIRED, and required at the type level
+   * on purpose: Change-Id ancestry is how merged truth is derived
+   * (`merged-truth.ts`), so a queue-written commit with no trailer is invisible
+   * to it. This field was absent until 2026-08-28 and the synthesized snapshot
+   * below had nothing to stamp — 61 post-epoch trailer-less
+   * `yrd: (compose|merge) … revision 1` commits on the superproject, 27 of them
+   * reachable from origin/main, every one written through here. A caller
+   * holding only an optional identity (`ChangeSnapshot.changeId`, absent for
+   * pre-identity journals) refuses at its own seam rather than passing
+   * undefined — see `remergeDirectChangeByMerge`. */
+  changeId: string
   /** The author's branch name, carried through for error messages only. */
   branch: string
   /** The unchanged authored tip. Never rewritten. */
@@ -3418,6 +3430,7 @@ export async function rebuildCandidateByMerge(
   }
   const pr = ChangeSnapshotSchema.parse({
     id: input.id,
+    changeId: input.changeId,
     branch: input.branch,
     base: input.branch,
     revision: 1,
@@ -3595,8 +3608,26 @@ async function remergeDirectChangeByMerge(
       message: `yrd: change '${input.id}' revision ${input.revision} has no immutable base SHA`,
     })
   }
+  // `ChangeRemergeInput` extends `ChangeSnapshot`, whose `changeId` is optional
+  // for one reason only: replaying a journal written before stable change
+  // identity. Such a change cannot be rebuilt — the candidate would carry no
+  // `Change-Id`, and merged truth is derived from that trailer's ancestry — so
+  // refuse here, naming the same remedy `plugin.ts` already names for a
+  // pre-identity record at its own rebuild seam. Identity is never invented:
+  // a minted-here id would be a fact nothing else agrees with.
+  if (input.changeId === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-change-id-missing",
+      message:
+        `yrd: change '${input.id}' revision ${String(input.revision)} predates stable Change-Id identity; ` +
+        `migrate it before rebuilding`,
+      pr: input.id,
+    })
+  }
   const built = await rebuildCandidateByMerge({ inject: { process: git.process }, repo, env: git.env }, target, {
     id: input.id,
+    changeId: input.changeId,
     branch: input.branch,
     headSha: input.headSha,
   })
@@ -4224,9 +4255,31 @@ function mergeChangeIdFor(operation: "compose" | "merge", changeId: string): str
   return `${changeId}-${operation}`
 }
 
+/**
+ * The ONE funnel every queue-written candidate commit message passes through,
+ * and therefore the one place the trailer can be guaranteed.
+ *
+ * It used to return a bare subject when the member carried no `changeId`. That
+ * silent branch is the trailer drop: the commit still lands, and merged-truth
+ * derivation — which reads `Change-Id` ancestry — cannot see the change at all,
+ * answering an unknown that looks exactly like not-merged. Refuse instead. A
+ * member reaching here without identity is a pre-identity journal replay, the
+ * only state `ChangeSnapshot.changeId`'s optionality exists for; `plugin.ts`
+ * already refuses that state at its own rebuild seams with the same remedy.
+ * Pin-intent members never reach here — `prepareCandidateMembers` routes them
+ * to `pinIntentCommitMessage` and `continue`s — so this covers only ordinary
+ * changes, every one of which has a minted identity.
+ */
 function candidateChangeCommitMessage(operation: "compose" | "merge", pr: StepExecution["prs"][number]): string {
   const subject = `yrd: ${operation} ${pr.id} revision ${String(pr.revision)}`
-  if (pr.changeId === undefined) return subject
+  if (pr.changeId === undefined) {
+    throw queueRefusal(
+      "candidate-change-id-missing",
+      `change '${pr.id}' revision ${String(pr.revision)} has no Change-Id, so the ${operation} commit ` +
+        `'${subject}' would land unattributable to merged-truth derivation; the change predates stable ` +
+        `Change-Id identity — migrate it before rebuilding`,
+    )
+  }
   return `${subject}\n\nChange-Id: ${pr.changeId}\nMerge-Change-Id: ${mergeChangeIdFor(operation, pr.changeId)}`
 }
 

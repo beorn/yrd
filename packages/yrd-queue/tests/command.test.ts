@@ -59,8 +59,16 @@ import {
   type StepExecution,
 } from "@yrd/queue"
 
+/** A change fixture's stable identity. Production changes always carry one
+ * (`Queues.snapshot` reads it off the revision), and the queue refuses to
+ * write a candidate commit it cannot stamp with it. */
+const FIXTURE_CHANGE_ID = `I${"c0ffee12".repeat(5)}`
+
 const roots: string[] = []
 const runtime = { runner: "local", leaseMs: 60_000 }
+/** A recut fixture's change identity: real changes always have one, and the
+ * candidate the rebuild writes carries it as its `Change-Id` trailer. */
+const RECUT_CHANGE_ID = `I${"beef1234".repeat(5)}`
 const gitFetchTimeout = {
   exitCode: 124,
   signal: "SIGTERM",
@@ -927,6 +935,7 @@ async function submitCertifiedCarrier(
   }
   const remerge = await createGitChangeRemerger({ inject: { process: noHooks }, repo }).recut({
     id: pr.id,
+    ...(revision.changeId === undefined ? {} : { changeId: revision.changeId }),
     branch: submission.branch,
     base,
     revision: revision.n,
@@ -1047,6 +1056,7 @@ describe("Queue command adapters", () => {
     const preparer = gitCandidatePreparer({ inject: { process: refusingProcess }, repo })
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/feature",
       base: "main",
       revision: 1,
@@ -1102,6 +1112,7 @@ describe("Queue command adapters", () => {
     const preparer = gitCandidatePreparer({ inject: { process: racingProcess }, repo })
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/feature",
       base: "main",
       revision: 1,
@@ -1140,7 +1151,15 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const preparer = gitCandidatePreparer({ inject: { process }, repo })
     const snapshot = (branch: string, headSha: string) =>
-      ChangeSnapshotSchema.parse({ id: "PR1", branch, base: "main", revision: 1, headSha, baseSha })
+      ChangeSnapshotSchema.parse({
+        id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
+        branch,
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha,
+      })
 
     // Both prepares are handed the SAME id — this is precisely the case the old
     // scheme could not survive.
@@ -1184,6 +1203,7 @@ describe("Queue command adapters", () => {
     const preparer = gitCandidatePreparer({ inject: { process }, repo })
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/alpha",
       base: "main",
       revision: 1,
@@ -1221,6 +1241,7 @@ describe("Queue command adapters", () => {
 
     const result = await remerger.recut({
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/candidate",
       base: "main",
       revision: 1,
@@ -1245,6 +1266,7 @@ describe("Queue command adapters", () => {
     await expect(
       remerger.recut({
         id: "PR2",
+        changeId: RECUT_CHANGE_ID,
         branch: "issue/candidate",
         base: "main",
         revision: 1,
@@ -1277,6 +1299,7 @@ describe("Queue command adapters", () => {
       createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
       {
         id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
         branch: "issue/approved",
         base: "main",
         revision: 1,
@@ -1312,6 +1335,7 @@ describe("Queue command adapters", () => {
       createGitChangeRemerger({ inject: { process: recordingProcess }, repo: fixture.repo }),
       {
         id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
         branch: "issue/approved",
         base: "main",
         revision: 1,
@@ -1341,6 +1365,7 @@ describe("Queue command adapters", () => {
         createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
         {
           id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
           branch: "issue/approved",
           base: "main",
           revision: 1,
@@ -1382,6 +1407,7 @@ describe("Queue command adapters", () => {
         createGitChangeRemerger({ inject: { process: observed.process }, repo: fixture.repo }),
         {
           id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
           branch: "issue/approved",
           base: "main",
           revision: 1,
@@ -1466,6 +1492,7 @@ describe("Queue command adapters", () => {
       createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
         branch: "issue/source",
         base: "main",
         revision: 1,
@@ -1510,6 +1537,7 @@ describe("Queue command adapters", () => {
       createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
         branch: "issue/source",
         base: "main",
         revision: 1,
@@ -1547,6 +1575,7 @@ describe("Queue command adapters", () => {
       createGitChangeRemerger({ inject: { process }, repo: fixture.repo }),
       {
         id: "PR1",
+        changeId: FIXTURE_CHANGE_ID,
         branch: "issue/source",
         base: "main",
         revision: 1,
@@ -1591,6 +1620,7 @@ describe("Queue command adapters", () => {
     await expect(
       createGitChangeRemerger({ inject: { process }, repo }).recut({
         id: "PR99",
+        changeId: RECUT_CHANGE_ID,
         branch: "issue/multi",
         base: "main",
         revision: 1,
@@ -1632,6 +1662,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/plain-identity",
       base: "main",
       revision: 1,
@@ -1649,6 +1680,80 @@ describe("Queue command adapters", () => {
     // rewritten (Q1) — it survives as the merge commit's own second parent.
     expect(result.headSha).not.toBe(featureSha)
     expect(await git(repo, ["rev-parse", `${result.headSha}^2`])).toBe(featureSha)
+  })
+
+  // The recut seam is where a change's identity reaches the queue's own commit
+  // writer. `ChangeRemergeInput` extends `ChangeSnapshot`, whose `changeId` is
+  // optional (pre-identity journals) — so the seam either carries the identity
+  // all the way to the merge message or refuses; what it must never do is write
+  // an identity-less candidate, which merged-truth derivation cannot see.
+  it("recut stamps the change's identity on the candidate it builds", async () => {
+    const changeId = `I${"0123abcd".repeat(5)}`
+    const { repo } = await repository()
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/identity-carried"])
+    await writeFile(join(repo, "feature.txt"), "feature\n")
+    await git(repo, ["add", "feature.txt"])
+    await git(repo, ["commit", "-qm", "feature"])
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "advance authority\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+
+    await using process = createProcess()
+    const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
+      id: "PR1",
+      changeId,
+      branch: "issue/identity-carried",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha: oldBaseSha,
+    })
+
+    // One line per matching trailer: a duplicate stamp would print two.
+    expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.headSha])).toBe(
+      changeId,
+    )
+    expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", result.headSha])).toBe(
+      `${changeId}-merge`,
+    )
+  })
+
+  it("recut refuses a change with no identity rather than writing an unattributable candidate", async () => {
+    const { repo } = await repository()
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/no-identity"])
+    await writeFile(join(repo, "feature.txt"), "feature\n")
+    await git(repo, ["add", "feature.txt"])
+    await git(repo, ["commit", "-qm", "feature"])
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "advance authority\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+
+    await using process = createProcess()
+    await expect(
+      createGitChangeRemerger({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/no-identity",
+        base: "main",
+        revision: 1,
+        headSha: featureSha,
+        baseSha: oldBaseSha,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        code: "recut-change-id-missing",
+        // The remedy has to be one the reader can perform, and it is the same
+        // one plugin.ts already names for a pre-identity record.
+        message: expect.stringContaining("migrate it before rebuilding"),
+      },
+    })
+    // Refusal means nothing was written: main is where the fixture left it.
+    expect(await git(repo, ["rev-parse", "main"])).not.toBe(oldBaseSha)
   })
 
   // A0 correction (2026-08-23): restored per direct instruction — this test
@@ -1680,6 +1785,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR9999",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/oversized",
       base: "main",
       revision: 1,
@@ -1734,6 +1840,7 @@ describe("Queue command adapters", () => {
     // is right — is the two assertions kept below.
     const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/payload",
       base: "main",
       revision: 1,
@@ -1766,6 +1873,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/raw",
       base: "main",
       revision: 1,
@@ -1797,6 +1905,7 @@ describe("Queue command adapters", () => {
 
     const result = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/candidate",
       base: "main",
       revision: 1,
@@ -1906,6 +2015,7 @@ describe("Queue command adapters", () => {
     const remerger = createGitChangeRemerger({ inject: { process }, repo })
     const input = {
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/root",
       base: "main",
       revision: 1,
@@ -1949,6 +2059,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const remerge = await createGitChangeRemerger({ inject: { process }, repo }).recut({
       id: "PR1",
+      changeId: RECUT_CHANGE_ID,
       branch: "issue/feature",
       base: "main",
       revision: 1,
@@ -2288,6 +2399,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/spent-carrier",
       base: "main",
       revision: 2,
@@ -2376,6 +2488,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/mint",
       base: "main",
       revision: 1,
@@ -2416,6 +2529,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/deleter",
       base: "main",
       revision: 1,
@@ -2513,6 +2627,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/beta",
       base: "main",
       revision: 1,
@@ -2582,6 +2697,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/beta",
       base: "main",
       revision: 1,
@@ -2628,6 +2744,7 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     const pr = ChangeSnapshotSchema.parse({
       id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
       branch: "issue/beta",
       base: "main",
       revision: 1,
@@ -2852,7 +2969,16 @@ describe("Queue command adapters", () => {
         run: "R1",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/conflict", base: "main", revision: 1, headSha: featureSha }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/conflict",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -2912,7 +3038,16 @@ describe("Queue command adapters", () => {
         run: "R-hook",
         step: "check",
         index: 0,
-        prs: [{ id: "PR-hook", branch: "issue/hooked", base: "main", revision: 1, headSha: featureSha }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/hooked",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J-hook", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -2953,7 +3088,16 @@ describe("Queue command adapters", () => {
         run: "R-refused",
         step: "typecheck",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -2996,7 +3140,16 @@ describe("Queue command adapters", () => {
         run: "R-red",
         step: "typecheck",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3055,6 +3208,7 @@ describe("Queue command adapters", () => {
         prs: [
           {
             id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
             branch: "issue/feature",
             base: "main",
             revision: 1,
@@ -3122,7 +3276,16 @@ describe("Queue command adapters", () => {
         run: "R-outside",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: "a".repeat(40),
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J-outside", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3148,7 +3311,16 @@ describe("Queue command adapters", () => {
         run: "R-live",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: "a".repeat(40),
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J-live", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3187,7 +3359,16 @@ describe("Queue command adapters", () => {
           run: "R1",
           step: "check",
           index: 0,
-          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          prs: [
+            {
+              id: "PR1",
+              changeId: FIXTURE_CHANGE_ID,
+              branch: "issue/feature",
+              base: "main",
+              revision: 1,
+              headSha: "a".repeat(40),
+            },
+          ],
           shape: { results: {} },
         },
         { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3216,7 +3397,16 @@ describe("Queue command adapters", () => {
       run: "R1",
       step: "check",
       index: 0,
-      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+      prs: [
+        {
+          id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
+          branch: "issue/feature",
+          base: "main",
+          revision: 1,
+          headSha: "a".repeat(40),
+        },
+      ],
       shape: { results: {} },
     } as StepExecution<ChangeShape>
     const context = { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal }
@@ -3278,7 +3468,16 @@ describe("Queue command adapters", () => {
       run: "R-stream",
       step: "check",
       index: 0,
-      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+      prs: [
+        {
+          id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
+          branch: "issue/feature",
+          base: "main",
+          revision: 1,
+          headSha: "a".repeat(40),
+        },
+      ],
       shape: { results: {} },
     } as StepExecution<ChangeShape>
     const context = { id: "J-stream", attempt: 2, runner: "test", signal: new AbortController().signal }
@@ -3412,7 +3611,16 @@ describe("Queue command adapters", () => {
           run: "R-slow",
           step: "check",
           index: 0,
-          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          prs: [
+            {
+              id: "PR1",
+              changeId: FIXTURE_CHANGE_ID,
+              branch: "issue/feature",
+              base: "main",
+              revision: 1,
+              headSha: "a".repeat(40),
+            },
+          ],
           shape: { results: {} },
         },
         { id: "J-slow", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3489,7 +3697,16 @@ describe("Queue command adapters", () => {
           run: "R1",
           step: "check",
           index: 0,
-          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          prs: [
+            {
+              id: "PR1",
+              changeId: FIXTURE_CHANGE_ID,
+              branch: "issue/feature",
+              base: "main",
+              revision: 1,
+              headSha: "a".repeat(40),
+            },
+          ],
           shape: { results: {} },
         },
         { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3558,7 +3775,16 @@ describe("Queue command adapters", () => {
         run: "R1",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: "a".repeat(40),
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3608,7 +3834,16 @@ describe("Queue command adapters", () => {
         run: "R1",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: "a".repeat(40),
+          },
+        ],
         shape: { results: {} },
       },
       { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3813,7 +4048,16 @@ describe("Queue command adapters", () => {
           run: "R-sub-parent",
           step: "check",
           index: 0,
-          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+          prs: [
+            {
+              id: "PR1",
+              changeId: FIXTURE_CHANGE_ID,
+              branch: "issue/feature",
+              base: "main",
+              revision: 1,
+              headSha: featureSha,
+            },
+          ],
           shape: { results: {} },
         },
         { id: "J-sub-parent", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -3889,7 +4133,16 @@ describe("Queue command adapters", () => {
           run: "R-sub-refused",
           step: "check",
           index: 0,
-          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+          prs: [
+            {
+              id: "PR1",
+              changeId: FIXTURE_CHANGE_ID,
+              branch: "issue/feature",
+              base: "main",
+              revision: 1,
+              headSha: featureSha,
+            },
+          ],
           shape: { results: {} },
         },
         { id: "J-sub-refused", attempt: 1, runner: "test", signal: new AbortController().signal },
@@ -4042,7 +4295,16 @@ describe("Queue command adapters", () => {
       run: "R1",
       step: "check",
       index: 0,
-      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+      prs: [
+        {
+          id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
+          branch: "issue/feature",
+          base: "main",
+          revision: 1,
+          headSha: featureSha,
+        },
+      ],
       shape: { results: {} },
     } satisfies StepExecution<ChangeShape>
     const checked = await gitCheckStep({
@@ -5327,7 +5589,15 @@ describe("Queue command adapters", () => {
     const { repo } = await repository()
     const headSha = "a".repeat(40)
     const baseSha = "b".repeat(40)
-    const pr = { id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha, baseSha }
+    const pr = {
+      id: "PR1",
+      changeId: FIXTURE_CHANGE_ID,
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha,
+    }
     const step = configuredCommandStep<ChangeShape>({
       inject: { process },
       command: shellCommand("env | grep -E '^(YRD_|GIT_)' | sort"),
@@ -5374,7 +5644,7 @@ describe("Queue command adapters", () => {
         run: "R1",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha }],
+        prs: [{ id: "PR1", changeId: FIXTURE_CHANGE_ID, branch: "issue/feature", base: "main", revision: 1, headSha }],
         shape: { results: {} },
       }) as StepExecution<ChangeShape>
     const jobContext = (overrides: Readonly<{ id?: string; attempt?: number; runner?: string }> = {}) => ({
@@ -7478,7 +7748,16 @@ describe("Queue command adapters", () => {
         run: "R1",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+        prs: [
+          {
+            id: "PR1",
+            changeId: FIXTURE_CHANGE_ID,
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+          },
+        ],
         shape: { results: {} },
       } satisfies StepExecution<ChangeShape>
       const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
@@ -7568,7 +7847,16 @@ describe("Queue command adapters", () => {
       run: "R1",
       step: "check",
       index: 0,
-      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+      prs: [
+        {
+          id: "PR1",
+          changeId: FIXTURE_CHANGE_ID,
+          branch: "issue/feature",
+          base: "main",
+          revision: 1,
+          headSha: featureSha,
+        },
+      ],
       shape: { results: {} },
     } satisfies StepExecution<ChangeShape>
     const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(

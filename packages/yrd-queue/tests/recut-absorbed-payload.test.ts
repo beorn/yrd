@@ -10,6 +10,11 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createGitChangeRemerger, type ChangeRemergeResult } from "@yrd/queue"
 
+/** A change fixture's stable identity. Production changes always carry one
+ * (`Queues.snapshot` reads it off the revision), and the queue refuses to
+ * write a candidate commit it cannot stamp with it. */
+const FIXTURE_CHANGE_ID = `I${"c0ffee12".repeat(5)}`
+
 const roots: string[] = []
 
 afterEach(async () => {
@@ -88,6 +93,7 @@ async function remerge(
   await using process = createProcess()
   return await createGitChangeRemerger({ inject: { process }, repo }).recut({
     id: "PR1",
+    changeId: FIXTURE_CHANGE_ID,
     branch: "issue/feature",
     base: "main",
     revision: 1,
