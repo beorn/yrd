@@ -2984,7 +2984,10 @@ describe("Queue", () => {
         await app.jobs.run(mergeJob.id, runtime)
         if (crashPoint === "post-merge-requested") {
           await app.dispatch(app.commands.queue.advance, { run: "R1" })
-          expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
+          // S7 settlement single-writer: the advance requests the next step but
+          // emits NO terminal — the member reads `submitted` until the run's
+          // settlement batch carries its `pr/integrated`.
+          expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
           expect(app.queue.get("R1")?.steps[1]?.job?.status).toBe("queued")
           await app.queue.pause({
             base: "main",
@@ -3672,7 +3675,7 @@ describe("Queue", () => {
     })
   })
 
-  it("repairs a repository merge record whose pr/integrated index row is missing exactly once", async () => {
+  it("refuses to reconcile a repository merge into the retired record index (S7: merged-truth is the authority)", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/result-index-gap")
     const changeId = currentChangeRev(app.bays.pr(pr.id)!).changeId
@@ -3688,14 +3691,10 @@ describe("Queue", () => {
       changeId,
     }
 
-    await app.queue.reconcileMerge(fact)
-    await app.queue.reconcileMerge(fact)
+    await expect(app.queue.reconcileMerge(fact)).rejects.toThrow(/retired/u)
 
-    expect(changeFacts(app.bays.pr(pr.id))).toMatchObject({
-      delivery: "integrated",
-      integration: { commit: MERGED, baseSha: BASE, changeId },
-    })
-    expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/integrated")).toHaveLength(1)
+    expect(changeFacts(app.bays.pr(pr.id))).toMatchObject({ delivery: "submitted", integration: undefined })
+    expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/integrated")).toHaveLength(0)
   })
 
   it("does not integrate canceled historical PRs that share the current payload", async () => {

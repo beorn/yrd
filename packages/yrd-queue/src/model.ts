@@ -696,6 +696,14 @@ export type QueueAdmissionRefusal = Readonly<{
   revision?: number
   /** Exact refused head. Missing only while replaying pre-22528 journals. */
   headSha?: string
+  /** The member's branch. A DERIVED (recordless) member refused before any run
+   * retained a snapshot has NO other durable identity home, so the row records
+   * it: compaction keys the streak's liveness on the branch's submit fact, and
+   * `mintDerivedMemberIdentity` reuses the row's id across refused composes
+   * instead of burning a fresh number per cycle. Missing on rows written
+   * before S7 (and on rows a record member earned, where the store still
+   * answers). */
+  branch?: string
   /** The refusal code of the most recent skip in this streak. */
   code: string
   /** The failure-fact kind of the most recent skip, when it carried one. */
