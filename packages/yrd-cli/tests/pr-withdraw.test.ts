@@ -49,8 +49,6 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createPruneGitFacts } from "../src/pr-withdraw.ts"
-import * as runInternals from "../src/run.ts"
 
 function runYrd(
   app: Parameters<typeof runYrdRaw>[0],
@@ -590,14 +588,18 @@ describe("I23 close merger + root cancel (chief ruling b9bf30f2)", () => {
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(0)
   })
 
-  it("root cancel with no active attempt fails loud and teaches close --reason", async () => {
+  it("root cancel with no active attempt fails loud and teaches the branch-state verbs", async () => {
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
 
     const output = outputIO()
     expect(await runYrd(app, yrd("cancel", "PR1"), output.io)).toBe(1)
     expect(output.stderr()).toContain("no running or waiting attempt")
-    expect(output.stderr()).toContain("mr close --reason")
+    // Cancel stops an attempt; stopping DELIVERY is the branch-state verbs'
+    // job, and the refusal teaches both spellings (S7: `mr close
+    // --burn-payload` died with payload identity).
+    expect(output.stderr()).toContain("yrd draft topic/one")
+    expect(output.stderr()).toContain("yrd archive topic/one")
   })
 })
 
@@ -681,15 +683,22 @@ describe("pre-spend disclosure on mr close", () => {
     expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 
-  it("admin pr prune keeps spending on its own content proof, with no acknowledgement", async () => {
-    // Prune proves the content already merged before it withdraws; that proof
-    // IS the acknowledgement, so the interactive gate must not block it.
+  it("admin pr prune refuses as retired, naming compose and the archive verb", async () => {
+    // The live-record scan the verb pruned is retired with the change-record
+    // store (branch-is-change, @i/10 22991): compose settles already-contained
+    // payloads itself, and `yrd archive <branch>` shelves a branch main
+    // already carries. The verb stays registered, hidden, so an old runbook
+    // gets this refusal — and emits nothing.
     const app = await createCliApp()
     await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
 
     const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })
-    expect(await runYrd(app, yrd("admin", "pr", "prune"), output.io), output.stderr()).toBe(0)
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(await runYrd(app, yrd("admin", "pr", "prune"), output.io)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toContain("admin pr prune is retired with the change-record store")
+    expect(output.stderr()).toContain("payload-already-contained")
+    expect(output.stderr()).toContain("resolve: yrd archive <branch>")
+    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
   })
 })
 
@@ -741,440 +750,5 @@ describe("pr withdraw journal replay", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
-})
-
-describe("pr prune", () => {
-  it("does not trust --quiet when a sibling directory entry masks a content conflict", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "yrd-prune-quiet-false-negative-"))
-    try {
-      git(dir, "init", "-q", "-b", "main")
-      git(dir, "config", "user.name", "Yrd Test")
-      git(dir, "config", "user.email", "yrd@example.invalid")
-      writeFileSync(join(dir, "control.md"), "one\nbase\nthree\n")
-      mkdirSync(join(dir, "control"))
-      writeFileSync(join(dir, "control", "existing.md"), "existing\n")
-      git(dir, "add", ".")
-      git(dir, "commit", "-qm", "base")
-
-      git(dir, "switch", "-q", "-c", "topic/quiet-false-negative")
-      writeFileSync(join(dir, "control.md"), "one\ntopic\nthree\n")
-      writeFileSync(join(dir, "control", "same.md"), "same on both sides\n")
-      git(dir, "add", ".")
-      git(dir, "commit", "-qm", "topic")
-      const headSha = git(dir, "rev-parse", "HEAD")
-
-      git(dir, "switch", "-q", "main")
-      writeFileSync(join(dir, "control.md"), "one\nmain\nthree\n")
-      writeFileSync(join(dir, "control", "same.md"), "same on both sides\n")
-      git(dir, "add", ".")
-      git(dir, "commit", "-qm", "main")
-      const baseSha = git(dir, "rev-parse", "HEAD")
-      git(dir, "update-ref", "refs/remotes/origin/main", baseSha)
-
-      const quiet = gitResult(dir, "merge-tree", "--write-tree", "--quiet", baseSha, headSha)
-      const normal = gitResult(dir, "merge-tree", "--write-tree", baseSha, headSha)
-      expect({ quiet: quiet.code, normal: normal.code }).toEqual({ quiet: 0, normal: 1 })
-
-      const app = await createCliApp()
-      await app.bays.submit({ branch: "topic/quiet-false-negative", headSha, base: "main", baseSha: BASE_SHA })
-      const output = outputIO({ cwd: dir })
-      expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
-      expect(JSON.parse(output.stdout())).toMatchObject({
-        checked: [
-          {
-            pr: "PR1",
-            checks: { headPresent: true, ancestorOfBase: false, mergeTree: "conflicts" },
-            verdict: "keep",
-          },
-        ],
-        summary: { checked: 1, withdrawn: 0, wouldWithdraw: 0, kept: 1, errors: 0 },
-      })
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it("completes when one real merge-tree conflict report exceeds one MiB", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "yrd-prune-large-merge-tree-"))
-    try {
-      git(dir, "init", "-q", "-b", "main")
-      git(dir, "config", "user.name", "Yrd Test")
-      git(dir, "config", "user.email", "yrd@example.invalid")
-      const paths = Array.from(
-        { length: 900 },
-        (_, index) => `conflict-${index.toString().padStart(4, "0")}-${"x".repeat(220)}.txt`,
-      )
-      for (const path of paths) writeFileSync(join(dir, path), "base\n")
-      git(dir, "add", ".")
-      git(dir, "commit", "-qm", "base")
-      git(dir, "switch", "-q", "-c", "topic/oversized")
-      for (const path of paths) writeFileSync(join(dir, path), "topic\n")
-      git(dir, "commit", "-qam", "topic")
-      const headSha = git(dir, "rev-parse", "HEAD")
-      git(dir, "switch", "-q", "main")
-      for (const path of paths) writeFileSync(join(dir, path), "main\n")
-      git(dir, "commit", "-qam", "main")
-      const baseSha = git(dir, "rev-parse", "HEAD")
-      git(dir, "update-ref", "refs/remotes/origin/main", baseSha)
-
-      let rawConflictBytes = 0
-      try {
-        git(dir, "merge-tree", "--write-tree", baseSha, headSha)
-        throw new Error("expected merge-tree to report conflicts")
-      } catch (error) {
-        const failed = error as Readonly<{ status?: unknown; stdout?: unknown }>
-        expect(failed.status).toBe(1)
-        const stdout =
-          typeof failed.stdout === "string"
-            ? failed.stdout
-            : failed.stdout instanceof Uint8Array
-              ? Buffer.from(failed.stdout).toString("utf8")
-              : ""
-        rawConflictBytes = Buffer.byteLength(stdout)
-      }
-      expect(rawConflictBytes).toBeGreaterThan(OVERSIZED_MERGE_TREE_BYTES)
-
-      const app = await createCliApp()
-      await app.bays.submit({ branch: "topic/oversized", headSha, base: "main", baseSha: BASE_SHA })
-      const output = outputIO({ cwd: dir })
-      expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
-      expect(JSON.parse(output.stdout())).toMatchObject({
-        command: "pr.prune",
-        checked: [
-          {
-            pr: "PR1",
-            checks: { headPresent: true, ancestorOfBase: false, mergeTree: "conflicts" },
-            verdict: "keep",
-          },
-        ],
-        summary: { checked: 1, withdrawn: 0, wouldWithdraw: 0, kept: 1, errors: 0 },
-        withdrawn: [],
-      })
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it("records one change error and continues judging every later PR", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "topic/broken", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "topic/three", headSha: HEAD3_SHA, base: "main", baseSha: BASE_SHA })
-
-    const judged: string[] = []
-    const facts = pruneGit({
-      resolveCommit: (ref) =>
-        ref === "origin/main" ? BASE_SHA : ref === HEAD_SHA || ref === HEAD2_SHA || ref === HEAD3_SHA ? ref : undefined,
-      isAncestor: (ancestor) => {
-        judged.push(ancestor)
-        if (ancestor === HEAD2_SHA) throw new Error("simulated merge-base transport failure")
-        return ancestor === HEAD3_SHA
-      },
-      mergeTree: (_baseSha, headSha) => {
-        if (headSha !== HEAD_SHA) throw new Error(`mergeTree must not inspect ${headSha}`)
-        return OTHER_TREE
-      },
-    })
-    const output = outputIO({ pruneGit: () => facts })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
-    expect(judged).toEqual([HEAD_SHA, HEAD2_SHA, HEAD3_SHA])
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      checked: [
-        { pr: "PR1", verdict: "keep" },
-        {
-          pr: "PR2",
-          verdict: "error",
-          error: "change 'PR2' could not be judged: simulated merge-base transport failure",
-        },
-        { pr: "PR3", verdict: "would-withdraw" },
-      ],
-      summary: { checked: 3, withdrawn: 0, wouldWithdraw: 1, kept: 1, errors: 1 },
-      withdrawn: [],
-    })
-
-    const human = outputIO({ pruneGit: () => facts, columns: 400 })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
-    const humanText = human.stdout().replace(/\s+/g, " ")
-    expect(humanText).toContain("[error] PR2 topic/broken r1")
-    expect(humanText).toContain("change 'PR2' could not be judged: simulated merge-base transport failure")
-    expect(humanText).toContain("checked 3 live changes — 1 would be withdrawn, 1 kept, 1 error")
-  })
-
-  it("keeps the exact revision owned by an active merge run", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/merge", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "queued",
-      steps: [{ kind: "merge", job: { status: "queued" } }],
-    })
-    const mergeJob = app.queue.get("R1")?.steps[0]?.job
-    if (mergeJob === undefined) throw new Error("expected queued merge Job")
-
-    const checkedAncestry: string[] = []
-    const output = outputIO({
-      pruneGit: () =>
-        pruneGit({
-          isAncestor: (ancestor, descendant) => {
-            checkedAncestry.push(`${ancestor}..${descendant}`)
-            return true
-          },
-        }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
-    expect(checkedAncestry).toEqual([])
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      checked: [
-        {
-          pr: "PR1",
-          checks: {},
-          verdict: "keep",
-          reason: "merge run 'R1' owns the in-flight merge for revision 1 (1111111111111111111111111111111111111111)",
-        },
-      ],
-      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
-      withdrawn: [],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(app.queue.get("R1")).toMatchObject({ status: "queued", steps: [{ job: { status: "queued" } }] })
-
-    await app.jobs.run(mergeJob.id, { runner: "cli-test", leaseMs: 60_000 })
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "completed",
-      conclusion: "success",
-      steps: [{ kind: "merge", job: { status: "completed", conclusion: "success" } }],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-
-    const completedOutput = outputIO({
-      pruneGit: () => pruneGit({ isAncestor: () => true }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), completedOutput.io), completedOutput.stderr()).toBe(
-      0,
-    )
-    expect(JSON.parse(completedOutput.stdout())).toMatchObject({
-      checked: [{ pr: "PR1", verdict: "keep" }],
-      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
-      withdrawn: [],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-
-    expect(
-      await app.queue.run({ prs: ["PR1"], steps: ["merge"] }, { runner: "cli-test", leaseMs: 60_000 }),
-    ).toMatchObject([{ id: "R1", status: "completed", conclusion: "success" }])
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
-  })
-
-  it("rechecks merge ownership after content proof before withdrawing", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/racing", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-
-    const output = outputIO({
-      pruneGit: () =>
-        pruneGit({
-          isAncestor: async () => {
-            await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
-            return true
-          },
-        }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      checked: [{ pr: "PR1", verdict: "keep" }],
-      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
-      withdrawn: [],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "queued",
-      steps: [{ kind: "merge", job: { status: "queued" } }],
-    })
-  })
-
-  it("keeps a newer revision that arrives after content proof", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/revised", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-
-    const output = outputIO({
-      pruneGit: () =>
-        pruneGit({
-          isAncestor: async () => {
-            await app.bays.intake({
-              branch: "topic/revised",
-              headSha: HEAD2_SHA,
-              base: "main",
-              baseSha: BASE_SHA,
-            })
-            return true
-          },
-        }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      checked: [
-        {
-          pr: "PR1",
-          verdict: "keep",
-          reason:
-            "PR changed during prune from revision 1 (1111111111111111111111111111111111111111) to revision 2 (2222222222222222222222222222222222222222)",
-        },
-      ],
-      summary: { checked: 1, withdrawn: 0, kept: 1, errors: 0 },
-      withdrawn: [],
-    })
-    expect(app.state().bays.prs.PR1).toMatchObject({
-      state: "open",
-      revs: [
-        { n: 1, head: HEAD_SHA },
-        { n: 2, head: HEAD2_SHA },
-      ],
-    })
-  })
-
-  it("does not let an active check-only run hide independently merged content", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/checked", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
-
-    const output = outputIO({
-      pruneGit: () => pruneGit({ isAncestor: () => true }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      checked: [{ pr: "PR1", verdict: "withdraw" }],
-      summary: { checked: 1, withdrawn: 1, kept: 0, errors: 0 },
-      withdrawn: [{ id: "PR1", taskStatus: "dropped" }],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "completed",
-      conclusion: "failure",
-      steps: [{ job: { status: "completed", conclusion: "cancelled" } }],
-    })
-  })
-
-  it("withdraws a change whose head is already an ancestor of the base tip", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-
-    const checkedAncestry: string[] = []
-    const output = outputIO({
-      pruneGit: () =>
-        pruneGit({
-          isAncestor: (ancestor, descendant) => {
-            checkedAncestry.push(`${ancestor}..${descendant}`)
-            return ancestor === HEAD_SHA && descendant === BASE_SHA
-          },
-        }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
-    expect(checkedAncestry).toEqual([`${HEAD_SHA}..${BASE_SHA}`])
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "pr.prune",
-      dryRun: false,
-      checked: [
-        {
-          pr: "PR1",
-          branch: "topic/merged",
-          headSha: HEAD_SHA,
-          base: "main",
-          baseSha: BASE_SHA,
-          checks: { headPresent: true, ancestorOfBase: true, mergeTree: "skipped" },
-          verdict: "withdraw",
-          reason: `superseded: content already in ${BASE_SHA}`,
-        },
-      ],
-      withdrawn: [{ id: "PR1", state: "closed", merged: false, taskStatus: "dropped" }],
-    })
-    expect(app.state().bays.prs.PR1).toMatchObject({
-      state: "closed",
-      merged: false,
-      revs: [{ terminal: { kind: "withdrawn" } }],
-      withdrawReason: `superseded: content already in ${BASE_SHA}`,
-    })
-    expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
-      expect.objectContaining({ pr: "PR1", reason: `superseded: content already in ${BASE_SHA}` }),
-    ])
-  })
-
-  it("withdraws a change whose merge with the base reproduces the base tree exactly", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/absorbed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-
-    const output = outputIO({
-      pruneGit: () =>
-        pruneGit({
-          mergeTree: (baseSha, headSha) => {
-            expect([baseSha, headSha]).toEqual([BASE_SHA, HEAD_SHA])
-            return BASE_TREE
-          },
-        }),
-    })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      checked: [
-        {
-          pr: "PR1",
-          checks: { headPresent: true, ancestorOfBase: false, mergeTree: "identical" },
-          verdict: "withdraw",
-          reason: `superseded: content already in ${BASE_SHA}`,
-        },
-      ],
-      withdrawn: [{ id: "PR1", state: "closed", merged: false, taskStatus: "dropped" }],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
-  })
-
-  it("keeps live PRs and prints the exact check behind every verdict", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/divergent", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "topic/conflicted", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
-    await app.bays.submit({ branch: "topic/unfetched", headSha: HEAD3_SHA, base: "main", baseSha: BASE_SHA })
-
-    const facts = pruneGit({
-      // Divergent content merges clean into a non-base tree; conflicted refuses to merge.
-      mergeTree: (_baseSha, headSha) => (headSha === HEAD_SHA ? OTHER_TREE : undefined),
-    })
-    const json = outputIO({ pruneGit: () => facts })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--json"), json.io), json.stderr()).toBe(0)
-    expect(JSON.parse(json.stdout())).toMatchObject({
-      checked: [
-        { pr: "PR1", checks: { headPresent: true, ancestorOfBase: false, mergeTree: "divergent" }, verdict: "keep" },
-        { pr: "PR2", checks: { headPresent: true, ancestorOfBase: false, mergeTree: "conflicts" }, verdict: "keep" },
-        { pr: "PR3", checks: { headPresent: false }, verdict: "keep" },
-      ],
-      withdrawn: [],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect(changeDeliveryState(app.state().bays.prs.PR2!)).toBe("submitted")
-    expect(changeDeliveryState(app.state().bays.prs.PR3!)).toBe("submitted")
-
-    const human = outputIO({ pruneGit: () => facts, columns: 400 })
-    expect(await runYrd(app, yrd("admin", "pr", "prune"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain("[keep] PR1 topic/divergent r1")
-    expect(human.stdout()).toContain("merge-tree=divergent")
-    expect(human.stdout()).toContain("[keep] PR2 topic/conflicted r1")
-    expect(human.stdout()).toContain("merge-tree=conflicts")
-    expect(human.stdout()).toContain("[keep] PR3 topic/unfetched r1")
-    expect(human.stdout()).toContain("head commit is not present in this repository")
-    expect(human.stdout()).toContain("checked 3 live changes — 0 withdrawn, 3 kept")
-  })
-
-  it("emits nothing under --dry-run while naming what it would withdraw", async () => {
-    const app = await createCliApp()
-    await app.bays.submit({ branch: "topic/merged", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
-    const before = (await Array.fromAsync(app.events())).length
-
-    const output = outputIO({ pruneGit: () => pruneGit({ isAncestor: () => true }) })
-    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
-    expect(JSON.parse(output.stdout())).toMatchObject({
-      command: "pr.prune",
-      dryRun: true,
-      checked: [{ pr: "PR1", verdict: "would-withdraw", reason: `superseded: content already in ${BASE_SHA}` }],
-      withdrawn: [],
-    })
-    expect(changeDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
-    expect((await Array.fromAsync(app.events())).length).toBe(before)
   })
 })

@@ -3358,8 +3358,36 @@ async function createYrdRuntimeHost(
           // reading its executed steps alone as "what was checked" is the
           // false "did not run" this closes (item 0).
           admission: (member, baseSha) => {
-            const pr = runtimeApp.state().bays.prs[member.id]
-            const revision = pr?.revs.find((rev) => rev.n === member.revision)
+            const snapshot = runtimeApp.state()
+            const pr = snapshot.bays.prs[member.id]
+            if (pr === undefined) {
+              // DERIVED member (recordless by design): its checks-before-
+              // queueing verdicts live ONLY in standalone admission Jobs
+              // (`recordRevisionAdmission` skips recordless members), so the
+              // record read below can never see them — and an `undefined`
+              // here reads as "nothing was checked" for every derived member
+              // (NSE-12). The key family is
+              // `admission:<id>:<revision>:<baseSha>:<index>[:stepRev]`,
+              // buildable from the member identity alone.
+              const prefix = `admission:${member.id}:${String(member.revision)}:${baseSha}:`
+              const passed = Object.entries(snapshot.jobs.byKey)
+                .filter(([key]) => key.startsWith(prefix))
+                .flatMap(([key, id]) => {
+                  const job = snapshot.jobs.byId[id]
+                  if (job?.status !== "completed" || job.conclusion !== "success") return []
+                  const input = job.input as Readonly<{ step?: unknown }> | undefined
+                  const name = typeof input?.step === "string" ? input.step : undefined
+                  if (name === undefined) return []
+                  // Key tail after the identity prefix: `<index>[:<stepRev>]`.
+                  // A legacy key without the step-revision segment still
+                  // proves the step ran; only the revision comparison is
+                  // forfeited (the audit tolerates an absent revision).
+                  const stepRevision = key.slice(prefix.length).split(":")[1]
+                  return [{ name, ...(stepRevision === undefined ? {} : { revision: stepRevision }) }]
+                })
+              return passed.length === 0 ? undefined : passed
+            }
+            const revision = pr.revs.find((rev) => rev.n === member.revision)
             const admission = revision?.admission
             if (admission?.status !== "passed" || admission.baseSha !== baseSha) return undefined
             return admission.steps

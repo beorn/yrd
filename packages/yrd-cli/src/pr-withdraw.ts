@@ -54,15 +54,9 @@ function requiredLivePr(app: YrdCliApp, selector: string): Change {
 }
 
 /** Withdraw the selected live change revision: emit pr/withdrawn with the recorded
- * reason and terminalize any Queue work still holding that authority.
- *
- * Exported because the habitant sweeps a change whose source branch is gone from
- * origin through this exact act (`run.ts`, @yrd/core/deleted-branch-head-wedges-queue)
- * — one withdrawal mechanism, not a second one that could terminalize differently.
- * The `--burn-payload` acknowledgement `withdrawPrs` demands is an OPERATOR gate on
- * spending a payload that still exists; a branch origin no longer advertises has no
- * payload left to spend, and the reason recorded here is the proof. */
-export async function withdrawOne(
+ * reason and terminalize any Queue work still holding that authority — the one
+ * withdrawal mechanism, so nothing can terminalize differently. */
+async function withdrawOne(
   app: YrdCliApp,
   id: string,
   reason: string | undefined,
@@ -169,28 +163,10 @@ export async function withdrawPrs(
   )
 }
 
-export type PrunePrsOptions = JsonOption & Readonly<{ dryRun?: boolean }>
-
 type PruneChecks = Readonly<{
   headPresent?: boolean
   ancestorOfBase?: boolean
   mergeTree?: "identical" | "divergent" | "conflicts" | "skipped"
-}>
-
-type PruneVerdict = "withdraw" | "would-withdraw" | "keep" | "error"
-
-type PruneRow = Readonly<{
-  pr: string
-  branch: string
-  revision: number
-  headSha: string
-  base: string
-  baseSha?: string
-  checks: PruneChecks
-  verdict: PruneVerdict
-  reason?: string
-  error?: string
-  detail: string
 }>
 
 export type RemergePreflightVerdict = "SUBSUMED-WITHDRAW" | "RECUT" | "RECUT-FORCE" | "FRESH-NOOP"
@@ -219,83 +195,6 @@ export type RemergePreflightResult = Readonly<{
   next: string
 }>
 
-function pruneLine(row: PruneRow): string {
-  const base = row.baseSha === undefined ? row.base : `${row.base}@${short(row.baseSha)}`
-  return `[${row.verdict}] ${row.pr} ${row.branch} r${row.revision}: head ${short(row.headSha)} vs ${base} — ${row.detail}`
-}
-
-function pruneFailureMessage(pr: string, action: "judged" | "withdrawn", error: unknown): string {
-  const cause = error instanceof Error && error.message.trim() !== "" ? error.message : String(error)
-  return `change '${pr}' could not be ${action}: ${cause}`
-}
-
-function pruneError(pr: Change, baseSha: string | undefined, error: unknown, checks: PruneChecks = {}): PruneRow {
-  const message = pruneFailureMessage(pr.id, "judged", error)
-  const revision = currentChangeRev(pr)
-  return {
-    pr: pr.id,
-    branch: pr.branch,
-    revision: revision.n,
-    headSha: revision.head,
-    base: pr.base,
-    ...(baseSha === undefined ? {} : { baseSha }),
-    checks,
-    verdict: "error",
-    error: message,
-    detail: message,
-  }
-}
-
-function replaceWithPruneError(row: PruneRow, error: unknown): PruneRow {
-  const { verdict: _verdict, reason: _reason, error: _error, detail: _detail, ...identity } = row
-  const message = pruneFailureMessage(row.pr, "withdrawn", error)
-  return { ...identity, verdict: "error", error: message, detail: message }
-}
-
-/** A merge moves the base before its Job can record `pr/integrated`. During
- * that side-effect boundary, pruning the exact revision would cancel its own
- * merge and replace the truthful integration with `pr/withdrawn` (22454). */
-function mergeRunOwningRevision(app: YrdCliApp, pr: Change): Run | undefined {
-  const revision = currentChangeRev(pr)
-  return Queues.ids(app.state().queues)
-    .map((id) => app.queue.get(id))
-    .filter((run): run is Run => run !== undefined)
-    .find((run) => {
-      const ownsRevision = run.prs.some(
-        (candidate) =>
-          candidate.id === pr.id && candidate.revision === revision.n && candidate.headSha === revision.head,
-      )
-      if (!ownsRevision) return false
-      const step = run.steps.findLast((candidate) => candidate.kind === "merge")
-      if (step?.kind !== "merge" || step.job === undefined) return false
-      return step.job.status !== "completed" || step.job.conclusion === "success"
-    })
-}
-
-function mergeOwnedPruneRow(pr: Change, run: Run): PruneRow {
-  const revision = currentChangeRev(pr)
-  const reason = `merge run '${run.id}' owns the in-flight merge for revision ${revision.n} (${revision.head})`
-  return {
-    pr: pr.id,
-    branch: pr.branch,
-    revision: revision.n,
-    headSha: revision.head,
-    base: pr.base,
-    checks: {},
-    verdict: "keep",
-    reason,
-    detail: `${reason} — kept`,
-  }
-}
-
-function changedPruneRow(row: PruneRow, pr: Change): PruneRow {
-  const revision = currentChangeRev(pr)
-  const reason =
-    `PR changed during prune from revision ${row.revision} (${row.headSha}) ` +
-    `to revision ${revision.n} (${revision.head})`
-  return { ...row, verdict: "keep", reason, detail: `${reason} — kept` }
-}
-
 async function contentChecks(headSha: string, baseSha: string, git: PruneGitFacts): Promise<PruneChecks> {
   const head = await git.resolveCommit(headSha)
   if (head === undefined) return { headPresent: false }
@@ -308,45 +207,6 @@ async function contentChecks(headSha: string, baseSha: string, git: PruneGitFact
         return merged === (await git.treeOf(baseSha)) ? ("identical" as const) : ("divergent" as const)
       })()
   return { headPresent: true, ancestorOfBase: ancestor, mergeTree }
-}
-
-/** Prove one change's superseded verdict against its resolved base tip. Every
- * check that ran (and every check that was skipped, with why) is named in the
- * returned row so the operator sees exactly what was verified. */
-async function pruneVerdict(pr: Change, baseSha: string, git: PruneGitFacts, dryRun: boolean): Promise<PruneRow> {
-  const revision = currentChangeRev(pr)
-  const identity = {
-    pr: pr.id,
-    branch: pr.branch,
-    revision: revision.n,
-    headSha: revision.head,
-    base: pr.base,
-    baseSha,
-  }
-  const checks = await contentChecks(revision.head, baseSha, git)
-  if (checks.headPresent !== true) {
-    return {
-      ...identity,
-      checks,
-      verdict: "keep",
-      detail: `head commit is not present in this repository; nothing could be verified — kept`,
-    }
-  }
-  const ancestor = checks.ancestorOfBase === true
-  const mergeTree = checks.mergeTree ?? "conflicts"
-  const superseded = ancestor || mergeTree === "identical"
-  const checked = `ancestor-of-base=${ancestor ? "yes" : "no"}, merge-tree=${mergeTree === "skipped" ? "skipped (head already reachable)" : mergeTree}`
-  if (!superseded) {
-    return { ...identity, checks, verdict: "keep", detail: `${checked} — live content not on base — kept` }
-  }
-  const reason = `superseded: content already in ${baseSha}`
-  return {
-    ...identity,
-    checks,
-    verdict: dryRun ? "would-withdraw" : "withdraw",
-    reason,
-    detail: `${checked} — ${reason}`,
-  }
 }
 
 export type RemergePreflightOptions = JsonOption &
@@ -529,100 +389,9 @@ export async function preflightRemerge(
   return result
 }
 
-/** `yrd admin pr prune [--dry-run]` — scan every live change against its base tip and
- * withdraw the ones whose content already merged (head is an ancestor of the
- * base, or merging head into the base reproduces the base tree exactly).
- * Prints one explicit verdict per change; --dry-run emits no events. */
-export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: YrdCliIO): Promise<void> {
-  const dryRun = options.dryRun === true
-  const cwd = io.cwd ?? process.cwd()
-  const git = io.pruneGit === undefined ? createPruneGitFacts(cwd) : io.pruneGit(cwd)
-  // This comparator deliberately pins the "en" locale so the printed prune verdict
-  // order is identical on every host — `compareNatural` (host default locale) would
-  // not guarantee that. Cold path: one sort of the live PRs per `yrd admin pr prune`, not
-  // the per-tick listing path the collator hoist targets.
-  const live = app.bays
-    .prs()
-    .filter((pr) => isLiveChange(pr))
-    .toSorted(
-      (left, right) => left.id.localeCompare(right.id, "en", { numeric: true }), // collator-hoist-allow: locale-pinned, cold path
-    ) as readonly Change[]
-
-  const rows: PruneRow[] = []
-  for (const pr of live) {
-    const mergeOwner = mergeRunOwningRevision(app, pr)
-    if (mergeOwner !== undefined) {
-      rows.push(mergeOwnedPruneRow(pr, mergeOwner))
-      continue
-    }
-    let baseSha: string | undefined
-    try {
-      baseSha = (await git.resolveCommit(`origin/${pr.base}`)) ?? (await git.resolveCommit(pr.base))
-      if (baseSha === undefined) {
-        throw new Error(
-          `target base '${pr.base}' did not resolve: neither 'origin/${pr.base}' nor '${pr.base}' is a commit here`,
-        )
-      }
-      rows.push(await pruneVerdict(pr, baseSha, git, dryRun))
-    } catch (error) {
-      rows.push(pruneError(pr, baseSha, error))
-    }
-  }
-
-  const withdrawn: Change[] = []
-  if (!dryRun) {
-    for (const [index, row] of rows.entries()) {
-      if (row.verdict !== "withdraw") continue
-      try {
-        await app.refresh()
-        const current = app.bays.pr(row.pr)
-        if (current !== undefined && isLiveChange(current)) {
-          const revision = currentChangeRev(current)
-          if (revision.n !== row.revision || revision.head !== row.headSha) {
-            rows[index] = changedPruneRow(row, current)
-            continue
-          }
-          const mergeOwner = mergeRunOwningRevision(app, current)
-          if (mergeOwner !== undefined) {
-            rows[index] = mergeOwnedPruneRow(current, mergeOwner)
-            continue
-          }
-        }
-        withdrawn.push(await withdrawOne(app, row.pr, row.reason, io))
-      } catch (error) {
-        rows[index] = replaceWithPruneError(row, error)
-      }
-    }
-  }
-
-  const kept = rows.filter((row) => row.verdict === "keep").length
-  const wouldWithdraw = rows.filter((row) => row.verdict === "would-withdraw").length
-  const errors = rows.filter((row) => row.verdict === "error").length
-  const summary =
-    rows.length === 0
-      ? "pr prune: no live PRs to check"
-      : `pr prune: checked ${rows.length} live change${rows.length === 1 ? "" : "s"} — ${
-          dryRun ? `${wouldWithdraw} would be withdrawn` : `${withdrawn.length} withdrawn`
-        }, ${kept} kept${errors === 0 ? "" : `, ${errors} error${errors === 1 ? "" : "s"}`}${
-          dryRun ? " (dry run: no events emitted)" : ""
-        }`
-  await printResult(
-    io,
-    jsonEnabled(options),
-    {
-      command: "pr.prune",
-      dryRun,
-      checked: rows.map(({ detail: _detail, ...row }) => row),
-      summary: { checked: rows.length, withdrawn: withdrawn.length, wouldWithdraw, kept, errors },
-      withdrawn: withdrawn.map(projectChangeTaskStatus),
-    },
-    [...rows.map(pruneLine), summary].join("\n"),
-  )
-}
-
 type GitCapture = Readonly<{ code: number; stdout: string }>
 
-/** Real Git plumbing shared by `pr prune` and the re-merge preflight:
+/** Real Git plumbing shared by the merge reconciler and the re-merge preflight:
  * reachability, exact merge-result tree identity, graph distance, and
  * attribution-only stable patch matching. Only documented exit codes are
  * tolerated; anything else fails loud. */

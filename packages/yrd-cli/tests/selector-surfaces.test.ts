@@ -209,11 +209,6 @@ describe("case-insensitive CLI selector surfaces", () => {
       expected: { command: "pr.runs", pr: { id: "PR1", branch: "Topic/One" } },
     },
     {
-      surface: "pr review",
-      args: ["pr", "review", "pr1", "--approve", "--by", "@cto", "--json"],
-      expected: { command: "pr.review", pr: { id: "PR1" } },
-    },
-    {
       surface: "pr close",
       args: ["pr", "close", "pr1", "--burn-payload", "--json"],
       expected: { command: "pr.close", prs: [{ id: "PR1" }] },

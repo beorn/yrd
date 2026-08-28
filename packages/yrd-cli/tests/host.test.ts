@@ -4082,7 +4082,7 @@ checks: [{check: {run: "true"}}]
     let stdout = ""
     let stderr = ""
     const exitCode = await runYrdProcess(
-      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--track", "--json"],
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"],
       {
         cwd: linked,
         stdout: (text) => {

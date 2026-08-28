@@ -3,9 +3,15 @@ import type { YrdCliApp, YrdCliIO } from "../../src/types.ts"
 export type HabitantWarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
 
 type HabitantState = Readonly<{
-  bays: Readonly<{ prs: Readonly<Record<string, unknown>> }>
+  bays: Readonly<{ prs: Readonly<Record<string, unknown>>; submits?: Readonly<Record<string, unknown>> }>
   jobs?: Readonly<{ byId: Readonly<Record<string, unknown>> }>
-  queues: Readonly<{ admissionRefusals: Readonly<Record<string, unknown>> }>
+  queues: Readonly<{
+    admissionRefusals: Readonly<Record<string, unknown>>
+    /** Retained-run projection lookup; `{}` models the empty radix. The S7
+     * habitant reads run history (driver last-merged, member snapshots), so a
+     * state without this container is not a state the real app can produce. */
+    records?: Readonly<Record<string, unknown>>
+  }>
 }>
 
 type HabitantRunContext = Readonly<{
@@ -20,13 +26,18 @@ type HabitantHarnessOptions = Readonly<{
 }>
 
 const emptyState = (): HabitantState => ({
-  bays: { prs: {} },
+  bays: { prs: {}, submits: {} },
   jobs: { byId: {} },
-  queues: { admissionRefusals: {} },
+  queues: { admissionRefusals: {}, records: {} },
 })
 
 function completeState(state: HabitantState) {
-  return { ...state, jobs: state.jobs ?? { byId: {} } }
+  return {
+    ...state,
+    jobs: state.jobs ?? { byId: {} },
+    bays: { submits: {}, ...state.bays },
+    queues: { records: {}, ...state.queues },
+  }
 }
 
 /**

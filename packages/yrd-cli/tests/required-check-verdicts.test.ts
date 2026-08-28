@@ -279,24 +279,6 @@ describe("a required check that ran cannot be erased by the throw that ends the 
     // ledger cannot live there.
     expect(output.stdout()).toBe("")
   })
-
-  it("`pr ready` runs the same gate and had the same erasure", async () => {
-    // Found by grepping the SYMBOL rather than reading the submit path alone:
-    // readyPr awaited runRequiredChecks and dropped the value identically, so
-    // a `pr ready` that ran four checks left no evidence any had.
-    await using app = await draftedApp("topic/ready")
-    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
-
-    await runYrd(app, yrd("pr", "ready", "PR1", "--json"), output.io, services(app))
-
-    expect(JSON.parse(output.stdout()) as Record<string, unknown>).toMatchObject({
-      command: "pr.ready",
-      requiredChecks: [
-        { name: CHEAP_CHECK, status: "passed" },
-        { name: EXPENSIVE_CHECK, status: "passed" },
-      ],
-    })
-  })
 })
 
 describe("pr checks exit 0 means a recorded pass, never merely the absence of a failure", () => {
