@@ -8,6 +8,36 @@
  * fixtures below re-push nothing between cycles: a refused member never
  * consumed its authority, so every compose re-derives it, which is exactly the
  * forever-retry the header incident describes.
+ *
+ * WHAT THAT COSTS, measured 2026-08-28, because "re-derives it" understates it:
+ * three drains over one conflicting branch produce THREE candidate
+ * compositions — one real git merge per cycle, unbounded, for as long as the
+ * branch stays conflicting. Pre-S7 a brake existed. `admitChangeRevision`'s
+ * `prior` is `changeAdmission(pr)`, which reads `currentChangeRev(pr).admission`
+ * — a RECORD field — and `recordRevisionAdmission` became a no-op when the
+ * store was deleted, so a derived member's revs carry no `admission` and
+ * `prior` is permanently `undefined`. Its `passed` reuse test and the
+ * `freshRetry` test beside it are BOTH structurally unable to fire. The cost is
+ * S7 fallout, not a standing cost of the design.
+ *
+ * DO NOT FIX IT BY KEYING ON (head, base). That is the obvious brake — reuse
+ * the ledgered refusal while both sides of the merge stand still — and it is
+ * wrong, measured: it breaks three tests in THIS file ("clears the streak when
+ * the member is finally admitted", "counts one typed refusal streak and resets
+ * that streak when the refusal code changes", "settles a needs-person refusal
+ * for one exact revision"), and every one of them is defending real behaviour.
+ * The assumption it rests on is false. Composition is NOT a pure function of
+ * the two shas: `min-commit-unpublished` refuses until someone pushes an
+ * authored pin to a submodule's own main, which moves NEITHER the member's head
+ * NOR the base, and a (head, base) brake strands that member forever. Trading a
+ * bounded cost for an unbounded wedge is a bad trade.
+ *
+ * A real brake therefore has to be CODE-SCOPED and conservative, in the manner
+ * of {@link STRUCTURALLY_PERMANENT_ADMISSION_REFUSALS} — which deliberately
+ * holds exactly one code, and that restraint is the point. A merge conflict
+ * between two fixed trees looks input-deterministic and is the obvious first
+ * candidate; deciding the rest needs someone who can say which refusals depend
+ * on repository state beyond the two shas.
  * @level l2
  * @consumer @yrd/queue
  */
@@ -134,11 +164,7 @@ async function createApp(
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = checkOnlyPlugin(prepareCandidate, progress, needsPersonOwner, mint)
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ jobs: bayJobs }),
-  )
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal, id, clock, log: log ?? createLogger("test", [{ level: "silent" }]) },
   })
@@ -191,11 +217,7 @@ async function createDeliveryApp(
     ...derivedArming(),
     ...(defaultSteps === undefined ? {} : { defaultSteps }),
   })
-  const base = pipe(
-    createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
-    withBays({ jobs: bayJobs }),
-  )
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), {
     inject: { journal: createMemoryJournal(), id: ids(), clock, log: createLogger("test", [{ level: "silent" }]) },
   })
@@ -884,10 +906,12 @@ describe("queue progress findings — a queue that is tried and does not move", 
     await submitBranch(app, "issue/joined-later", "3".repeat(40))
 
     // Both approvals are genuinely unserved — the population the finding counts.
-    expect(app.queue.unrecordedSubmits().map((row) => row.branch).toSorted()).toEqual([
-      "issue/joined-later",
-      "issue/never-started",
-    ])
+    expect(
+      app.queue
+        .unrecordedSubmits()
+        .map((row) => row.branch)
+        .toSorted(),
+    ).toEqual(["issue/joined-later", "issue/never-started"])
 
     expect(app.queue.audit({ now: "2026-01-01T00:30:00.000Z" }).findings).toContainEqual(
       expect.objectContaining({
