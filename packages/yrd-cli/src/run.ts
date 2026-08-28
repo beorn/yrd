@@ -3818,6 +3818,7 @@ async function certifyBayProcessesStopped(
   processService: Pick<Process, "reapPath"> | undefined,
   bay: Bay,
   path: string | undefined,
+  acceptUninspectablePids: readonly number[] = [],
 ): Promise<void> {
   // Provision can fail before a workspace exists. There is then no path-owned
   // process tree to reap; explicit force-close must still be able to drive the
@@ -3825,9 +3826,26 @@ async function certifyBayProcessesStopped(
   if (path === undefined) return
   if (processService === undefined) configuration("bay close requires the process-backed Yrd runtime")
   const reaped = await processService.reapPath(path)
-  const failure = pathReapDeletionFailure(reaped)
+  const failure = pathReapDeletionFailure(reaped, { acceptUninspectablePids })
   if (failure !== undefined) {
-    throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}`)
+    // @yrd/process states the CONDITION and deliberately names no command — it
+    // sits below the CLI and must not know one. This layer does, so the cure is
+    // completed here, with the pids already filled in: a refusal that says
+    // "accept those pids explicitly" and then leaves the operator to discover
+    // HOW is the half-written kind, and this is the last place that can finish
+    // it. Only the unaccepted pids are offered, so re-running the printed
+    // command is always the smallest sufficient acceptance.
+    const coverage = reaped.survivorCoverage
+    // Only the Linux census has the class at all: darwin's lsof mechanism
+    // reports `complete: true` and carries no uninspectable list, so there is
+    // nothing there to accept and nothing to print.
+    const uninspectable = coverage !== undefined && "uninspectable" in coverage ? coverage.uninspectable : []
+    const outstanding = uninspectable.filter((entry) => !acceptUninspectablePids.includes(entry.pid))
+    const cure =
+      outstanding.length === 0
+        ? ""
+        : `\n  yrd bay close ${bay.name} --accept-uninspectable ${outstanding.map((entry) => entry.pid).join(" ")}`
+    throw new Error(`yrd: Bay '${bay.name}' process-tree teardown failed: ${failure}${cure}`)
   }
 }
 
@@ -3835,7 +3853,7 @@ async function closeBayWithProcessReap(
   app: YrdCliApp,
   services: YrdCliServices,
   bay: Bay,
-  options: Readonly<{ withdraw?: boolean }>,
+  options: Readonly<{ withdraw?: boolean; acceptUninspectable?: readonly number[] }>,
   io: YrdCliIO,
   jobContext: string,
 ): Promise<Bay> {
@@ -3844,12 +3862,16 @@ async function closeBayWithProcessReap(
   // ownership root. This closes the attach-between-census-and-delete race.
   const path =
     services.resolveBayWorkspacePath === undefined ? bay.path : services.resolveBayWorkspacePath(bay.id, bay.path)
-  await certifyBayProcessesStopped(services.process, bay, path)
+  // Both censuses take the acceptance: the re-census after `close` runs against
+  // the same machine as the first, so a permanently-uninspectable process
+  // accepted before the atomic mark would otherwise refuse immediately after it.
+  const accepted = options.acceptUninspectable ?? []
+  await certifyBayProcessesStopped(services.process, bay, path, accepted)
   const closing = await app.bays.close({
     bay: bay.id,
     ...(options.withdraw === true ? { withdraw: true } : {}),
   })
-  await certifyBayProcessesStopped(services.process, bay, path)
+  await certifyBayProcessesStopped(services.process, bay, path, accepted)
   assertJobsPassed(await runJobs(app, app.jobs.requested(closing), io), jobContext)
   const closed = app.bays.get(bay.id)
   if (closed === undefined) throw new Error(`yrd: Bay '${bay.name}' disappeared while it was closing`)
@@ -3860,7 +3882,14 @@ async function closeBays(
   app: YrdCliApp,
   services: YrdCliServices,
   selectors: readonly string[],
-  options: { withdraw?: boolean; json?: boolean; force?: boolean; quiet?: boolean; requireAll?: boolean },
+  options: {
+    withdraw?: boolean
+    json?: boolean
+    force?: boolean
+    quiet?: boolean
+    requireAll?: boolean
+    acceptUninspectable?: readonly number[]
+  },
   io: YrdCliIO,
 ): Promise<readonly Bay[]> {
   const cwd = io.cwd ?? process.cwd()
@@ -3910,7 +3939,10 @@ async function closeBays(
         app,
         services,
         bay,
-        { withdraw: options.withdraw },
+        {
+          withdraw: options.withdraw,
+          ...(options.acceptUninspectable === undefined ? {} : { acceptUninspectable: options.acceptUninspectable }),
+        },
         io,
         `bay '${bay.id}' close`,
       )
@@ -11018,9 +11050,28 @@ function buildProgram(
       "close the workspace while the submission STANDS (nothing is withdrawn; the branch stays submitted)",
     )
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
+    // The escape from a census that can NEVER complete. A non-dumpable process
+    // (sshd-session is the everyday one) has its /proc entries re-owned by root,
+    // so no retry by any future run will read its open files — unlike an
+    // ordinary denial, which may clear. Without this flag the refusal names a
+    // pid and then offers the operator no way to act on it, and `bay close`
+    // is impossible on any machine somebody has ssh'd into. Acceptance is per
+    // pid and never implicit: an unnamed pid still refuses, and accepting one
+    // pid waives nothing about a clearable denial standing beside it.
+    .option(
+      "--accept-uninspectable <pid...>",
+      "accept named permanently-uninspectable pids (non-dumpable /proc) after confirming they hold nothing under the bay",
+    )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
-      await closeBays(installed(), installedServices(), selectors, options, io)
+      const acceptUninspectable = ((options.acceptUninspectable ?? []) as readonly string[]).map((raw) => {
+        const pid = Number(raw)
+        if (!Number.isSafeInteger(pid) || pid <= 0) {
+          usage(`bay close --accept-uninspectable expects process ids; '${raw}' is not one`)
+        }
+        return pid
+      })
+      await closeBays(installed(), installedServices(), selectors, { ...options, acceptUninspectable }, io)
     })
   bay
     .command("status [selector...]")
