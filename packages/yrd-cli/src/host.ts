@@ -2162,8 +2162,30 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
         // 2026-08-27 21:51 PDT). History is evicted through cursor 27609, so a
         // rebuild from complete history is unavailable and this edge is the
         // only thing that carries the fleet across the deletion.
-        const { prs: _retiredRecords, receipts: _retiredReceipts, ...baysWithoutRecordStore } = state.bays as
-          typeof state.bays & Readonly<{ prs?: unknown; receipts?: unknown }>
+        const { prs: retiredRecords, receipts: _retiredReceipts, ...baysWithoutRecordStore } = state.bays as
+          typeof state.bays & Readonly<{ prs?: Readonly<Record<string, unknown>>; receipts?: unknown }>
+        // LAST CHANCE TO READ THE RECORD SET, so spend it on the mint.
+        //
+        // `mintChangeId`'s second argument existed so a surviving record set
+        // could out-vote a lost `pr-mint.json`: the mint reads 0 on ENOENT, so
+        // losing that file while the journal survives — a re-clone, a wiped
+        // state dir, a backup older than the mint — would re-issue PR1 and walk
+        // back over ids the journal still remembers. That is 22986, the defect
+        // the durable mint was built for. Passing `{}` at the one live call
+        // site removed the backstop, and after this migration the record set is
+        // gone for good, so the vote can never be recast.
+        //
+        // Folding the max into the mint HERE makes the deletion self-healing:
+        // the file ends up at least as high as the records it is replacing, and
+        // every future id is above every id history holds. Writing a file from
+        // a migrate callback is deliberate impurity — the alternative is a
+        // silent id collision weeks later with no way left to detect it.
+        for (const id of Object.keys(retiredRecords ?? {})) {
+          const number = /^PR(\d+)$/u.exec(id)?.[1]
+          if (number === undefined) continue
+          const value = Number(number)
+          if (Number.isSafeInteger(value) && value > prNumberMint.highWater()) prNumberMint.commit(value)
+        }
         return { ...state, bays: baysWithoutRecordStore }
       },
     },

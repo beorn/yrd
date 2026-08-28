@@ -10,7 +10,6 @@ import { Fragment, createElement } from "react"
 import { Text } from "silvery"
 import * as z from "zod"
 import {
-  CompositionV1Schema,
   ChangePropsSchema,
   DeploymentInputSchema,
   DeploymentSourceResultSchema,
@@ -29,7 +28,6 @@ import {
   resolveBase,
   type Bay,
   type BaysState,
-  type CompositionV1,
   type ChangeProps,
   type Change,
   type ChangeDeliveryState,
@@ -163,7 +161,7 @@ import {
   type QueueTimelineRunner,
 } from "./queue-status-view.tsx"
 import type { QueueReadModel } from "./queue-read-model.ts"
-import { headSubsumedByBase, withdrawPrs } from "./pr-withdraw.ts"
+import { headSubsumedByBase } from "./pr-withdraw.ts"
 import {
   foldRefusalStall,
   formatRemedyCommand,
@@ -177,7 +175,6 @@ import {
   type HabitantRefusalStall,
 } from "./refusal-remedy.ts"
 import { reconcileDeliveryMerges, type ChangeMerge } from "./pr-merged.ts"
-import { requireImplicitRemergeBranchFreshness, type RemergeBranchFreshness } from "./recut-branch-freshness.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { applyChangeState, changeStateDeps, type ChangeState } from "./change-state.ts"
 import { lifecycleStatus } from "./status-presentation.ts"
@@ -3127,8 +3124,8 @@ async function resolveBayOpen(
       "refusal",
       "bay-open-pr-retired",
       `yrd: bay open --pr is retired with the change-record store (branch-is-change, @i/10 22991): there is no ` +
-        `record to bind '${options.pr}' to. Open the bay on the work branch instead — 'yrd bay open --bay <name>' ` +
-        `and check out the branch in it, or reopen the issue's bay with 'yrd bay open <issue>'.`,
+        `record to bind '${options.pr}' to. Open the bay on the work branch instead:\n` +
+        bayOnBranchCure(options.pr),
     )
   }
   const generated = generatedBayName()
@@ -3663,19 +3660,44 @@ async function refreshBay(app: YrdCliApp, bay: Bay, io: YrdCliIO): Promise<Bay> 
   return refreshed
 }
 
-// Exported so the remedy's prescribed flags can be tested against the LIVE
-// `bay open --help` — a printed remedy naming a flag the command lacks is a
-// refusal with extra steps (@i/16-work/23055-handoff-lies flavour 2: this
-// message shipped `--branch`, which `bay open` never had; the supported form
-// operators found by hand was `--pr`).
+/**
+ * The one cure for "you hold a branch and need a Bay materialized on it" —
+ * single-sourced, because this exact prescription has now been wrong TWICE in
+ * the same refusal (@i/16-work/23055-handoff-lies flavour 2). First it named
+ * `bay open --branch`, a flag `bay open` never had; the fix substituted
+ * `--pr`, which S7 then retired — so the second version was already false when
+ * it shipped, and the second step it chained (`yrd pr create`) had been retired
+ * too. Both times the cure was a literal in one file while the command it named
+ * changed in another.
+ *
+ * There is no live registry to read from here: the remedy is built inside a
+ * command's action, and the Commander program that knows which verbs and flags
+ * exist is assembled by `runYrd` a level above with no handle threaded down.
+ * So the ratchet is the other half — one definition every printing site shares,
+ * and two tests that read the LIVE surface: `handoff-remedy-flags.test.ts`
+ * validates the flags it names against real `bay open --help`, and
+ * `remedy-executable-in-emitting-state.test.ts` validates the VERBS it names
+ * against the real command tree, so a retired verb in a cure fails a test
+ * instead of an operator.
+ */
+function bayOnBranchCure(branch: string): string {
+  return (
+    `  yrd bay open --bay <name>\n` +
+    `  yrd in <name> -- git switch ${branch}\n` +
+    `or reopen the issue's own bay with 'yrd bay open <issue>'.`
+  )
+}
+
+// Exported so the remedy's prescribed flags and verbs can be tested against the
+// LIVE command surface — a printed remedy naming a flag the command lacks, or a
+// verb that refuses, is a refusal with extra steps.
 export function handoffBayMissingRemedy(selector: string, branch: string): string {
   return (
     `yrd: no active bay tracks '${selector}', and 'bay handoff' certifies a bay's materialized workspace — ` +
     `its live branch and head are the evidence, which is why this command cannot open one for you. ` +
-    `Open one from the packet's PR first:\n` +
-    `  yrd bay open --pr ${branch}\n` +
-    `then re-run this command. --pr takes the change selector or its branch name; if no PR exists for ` +
-    `'${branch}' yet, run 'yrd pr create' from the pushed branch, then 'bay open --pr'.`
+    `Open one on '${branch}' first:\n` +
+    `${bayOnBranchCure(branch)}\n` +
+    `Then re-run this command.`
   )
 }
 
@@ -3684,7 +3706,7 @@ async function certifyBayHandoff(
   selector: string,
   options: Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
   io: YrdCliIO,
-): Promise<void> {
+): Promise<YrdCliExitCode> {
   let bay = app.bays.get(selector)
   // Name the missing STEP, not the failed lookup. `no bay 'X'` is true and
   // useless: it reads as a broken tool to an author who has a branch, a head
@@ -3711,7 +3733,32 @@ async function certifyBayHandoff(
   // packet can refuse BEFORE writing instead of write-then-unwind, and so a
   // dry run can predict this refusal instead of reporting ready over it
   // (@i/16-work/23055-handoff-lies flavours 1 and 4).
+  //
+  // Certification has FOUR preconditions, and this preflight used to answer
+  // only the first. It computed `branchMatches`, printed it, and returned —
+  // never comparing `options.head` at all, and never setting an exit code, so
+  // `--check` exited 0 while predicting a refusal. A dry run that says "ready"
+  // in the voice of a zero exit, over a run that will refuse, is the exact
+  // defect it was built to prevent. Every precondition the reducer enforces
+  // (`certifyBayHandoff` in @yrd/bay: active, branch, head) is answered here,
+  // and any NO exits 1.
   if (options.check === true) {
+    const active = bay.status === "active"
+    const branchMatches = bay.branch === options.branch
+    // The projection holds the LAST OBSERVED workspace head, and the real run
+    // refreshes before certifying — so a mismatch here is "not proven ready",
+    // not "certain to fail". `--check` is read-only by contract and must not
+    // run that refresh, so it reports the honest answer and names the one
+    // command that settles it.
+    const headMatches = bay.headSha === options.head
+    const blockers = [
+      active ? undefined : `bay '${bay.id}' is ${bay.status}, not active`,
+      branchMatches ? undefined : `bay '${bay.id}' sits on '${bay.branch}', not the packet's '${options.branch}'`,
+      headMatches
+        ? undefined
+        : `bay '${bay.id}' last observed head '${bay.headSha ?? "unknown"}', not the packet's '${options.head}' — ` +
+          `run 'yrd bay refresh ${bay.id}' and re-check`,
+    ].filter((blocker): blocker is string => blocker !== undefined)
     await printResult(
       io,
       jsonEnabled(options),
@@ -3721,12 +3768,17 @@ async function certifyBayHandoff(
           bay: bay.id,
           branch: bay.branch,
           headSha: bay.headSha,
-          branchMatches: bay.branch === options.branch,
+          active,
+          branchMatches,
+          headMatches,
+          ready: blockers.length === 0,
+          blockers,
         },
       },
       createElement(BayStatusView, { bays: [bay] }),
     )
-    return
+    if (blockers.length > 0) await printHuman(io, blockers.map((blocker) => `yrd: ${blocker}`).join("\n"))
+    return blockers.length === 0 ? 0 : 1
   }
   // The Bay projection records the last observed workspace head, while the
   // packet is cut after the agent's final commit. Refresh only when needed so
@@ -3754,6 +3806,7 @@ async function certifyBayHandoff(
     { command: "bay.handoff", certification, lifecycle },
     createElement(BayStatusView, { bays: [certified] }),
   )
+  return 0
 }
 
 async function certifyBayProcessesStopped(
@@ -4868,7 +4921,7 @@ type ChangeSelectionOptions = {
   json?: boolean
 }
 
-type ChangeSelectionCommand = "bay.submit" | "pr.create" | "pr.submit"
+type ChangeSelectionCommand = "bay.submit" | "pr.submit"
 type ChangeSelectionResult = Readonly<{
   prs: readonly Change[]
   derived: readonly DerivedSubmission[]
@@ -4881,9 +4934,11 @@ async function applyChangeSelection(
   options: ChangeSelectionOptions,
   io: YrdCliIO,
   command: ChangeSelectionCommand,
-  stageAsDraft = command === "pr.create",
+  /** Pre-submit staging pass: preview the submission without writing the fact.
+   * `pr create` was the only caller that ever staged a real DRAFT, and it is
+   * retired, so staging has exactly one meaning left. */
+  stageAsDraft = false,
 ): Promise<ChangeSelectionResult> {
-  const createOnly = command === "pr.create"
   const props = parseProps(options.prop)
   const state = stateOf(app)
   const cwd = io.cwd ?? process.cwd()
@@ -4899,10 +4954,15 @@ async function applyChangeSelection(
   // envelope, matching the queue list/status `warnings` shape.
   const warnings: string[] = []
   const base = oneBaseOfAliases(state, options.base, options.queue, "base", "queue")
-  const composition = await readComposition(options.composition, io)
-  if (composition !== undefined && inferred.length !== 1) {
-    usage("--composition requires exactly one bay or branch selector")
-  }
+  // `--composition` was read, JSON-parsed, zod-validated, arity-checked — and
+  // then SILENTLY DISCARDED: `SubmitSelectionOptions` never declared the field,
+  // and spreading into an object literal defeats excess-property checking, so
+  // it compiled and the operator got a success with the composition gone. It
+  // cannot be plumbed back either: composed revisions are retired queue-side
+  // (a member declaring one refuses `composition-retired` at candidate
+  // preparation), so a flag that names a retired mechanism refuses here, next
+  // to the retired-reviewer refusal, before any selector submits.
+  if (options.composition !== undefined) refuseRetiredComposition()
   // Requested-reviewer records died with the change-record store; like the
   // retired track flags, a flag that binds to nothing refuses instead of
   // silently accepting (fail fast, before any selector submits).
@@ -4911,24 +4971,19 @@ async function applyChangeSelection(
     // The create-only guard refused when a record already existed for this
     // branch in a state past `pushed`. It read the deleted store, and its
     // subject cannot be reconstructed: the guard's whole point was that a
-    // SECOND record must not be minted, and nothing mints records now — the
-    // draft path `pr create` takes refuses `record-mint-retired` at the bay
-    // plugin before reaching a second guard.
+    // SECOND record must not be minted, and nothing mints records now.
     const metadata = resolveSubmitMetadata(options)
-    // Internal compatibility seam: `draft` means emit `pr/pushed` without
-    // `pr/submitted`; it is deliberately not part of either submit CLI.
     const submission = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(metadata.title === undefined ? {} : { title: metadata.title }),
       ...(metadata.description === undefined ? {} : { description: metadata.description }),
       ...(options.track === false ? { track: false } : {}),
-      // pr.create stages a real draft record; the pre-submit staging pass of
-      // pr.submit/bay.submit previews without writing (a recordless branch
-      // returns the derived preview instead of refusing or minting).
-      ...(stageAsDraft ? (createOnly ? { draft: true } : { stage: true }) : {}),
+      // The pre-submit staging pass of pr.submit/bay.submit previews without
+      // writing (a recordless branch returns the derived preview instead of
+      // refusing or minting).
+      ...(stageAsDraft ? { stage: true } : {}),
       ...(props === undefined ? {} : { props }),
-      ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       resolveParents: (sha) => requiredParents(sha, io),
       run: runtimeOptions(io),
@@ -5160,17 +5215,20 @@ async function applyChangeSelectionVerb(
   return 0
 }
 
-async function readComposition(path: string | undefined, io: YrdCliIO): Promise<CompositionV1 | undefined> {
-  if (path === undefined) return undefined
-  const absolute = resolve(io.cwd ?? process.cwd(), path)
-  try {
-    return CompositionV1Schema.parse(JSON.parse(await readFile(absolute, "utf8")))
-  } catch (cause) {
-    usage(
-      `invalid composition manifest '${path}': ${cause instanceof Error ? cause.message : String(cause)}; ` +
-        "provide version 1 with normalized repo-relative payload paths",
-    )
-  }
+/** `--composition` names a mechanism the queue itself retired: a member
+ * snapshot still declaring a source composition refuses `composition-retired`
+ * at candidate preparation (`@yrd/queue` command.ts), because a composed
+ * revision's head deliberately sits at the base and merging it would silently
+ * drop its submodule payload. The CLI reuses that exact code so one fact has
+ * one name on both sides of the boundary. */
+function refuseRetiredComposition(): never {
+  raiseFailure(
+    "refusal",
+    "composition-retired",
+    "yrd: --composition is retired: composed revisions are retired queue-side, and the derived lane has no " +
+      "revision record to bind a composition to. Submit the root branch with its authored gitlink bumps instead " +
+      "('yrd pr submit <branch>') — the queue fills the shaset from each submodule's main.",
+  )
 }
 
 /**
@@ -8919,6 +8977,21 @@ async function bumpJournal(
  * must never recommend is itself. Registered hidden so an old runbook gets
  * this typed refusal, never an unknown-command error. */
 const RETIRED_CHANGE_RECORD_VERBS = {
+  "pr create":
+    "yrd: pr create is retired with the change-record store; there is no draft record left to mint, and the " +
+    "draft path refused at the bay plugin (record-mint-retired) for every argument it ever accepted. Push the " +
+    "branch and submit it plainly ('yrd pr submit <branch>'); the submit fact queues it and the queue composes " +
+    "the branch as a derived member.",
+  "pr close":
+    "yrd: pr close is retired with the change-record store. A branch IS the change, so ending its delivery is " +
+    "two acts you already own: stop the current attempt ('yrd cancel <selector>'), then retire the standing " +
+    "submission by moving the branch back to draft ('yrd draft <branch>') or shelving it entirely " +
+    "('yrd archive <branch>'). Nothing is spent and nothing needs burning: payload identity died with the " +
+    "record store, and the same content re-enters through the derived lane on any branch.",
+  "pr withdraw":
+    "yrd: pr withdraw is retired with the change-record store — it was one act with two spellings, and close " +
+    "went with it. Stop the current attempt ('yrd cancel <selector>'), then move the branch back to draft " +
+    "('yrd draft <branch>') or shelve it ('yrd archive <branch>').",
   "pr edit":
     "yrd: pr edit is retired with the change-record store. A branch IS the change: its metadata lives on the " +
     "head commit — amend the subject, body, and trailers (Change-Id, Bead) and push; the derived lane reads " +
@@ -10545,7 +10618,7 @@ function addExamples(program: CliCommand, name: string): void {
   examples.push(
     [`$ ${name} pr list`, "inspect active PRs"],
     [`$ ${name} submit`, "submit the current branch as a change"],
-    [`$ ${name} pr create topic/fix`, "create a draft before you submit"],
+    [`$ ${name} draft topic/fix`, "keep a pushed branch out of the queue until it is ready"],
     [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
     [`$ ${name} contest open km:T1 --competitors '<json>'`, "compare implementations"],
   )
@@ -10570,11 +10643,8 @@ function addAuthoredCarrierWorkflow<
   ArgumentRecord extends Record<string, unknown>,
 >(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
   command.addHelpSection("Authored root branch:", [
-    [`$ ${name} pr create <branch>`, "record the authored root branch as a draft change"],
-    [
-      `$ ${name} pr submit <branch>`,
-      "tracked changes re-merge implicitly when the branch moves; this is the explicit fallback spelling",
-    ],
+    [`$ ${name} pr submit <branch>`, "push the authored root branch, then submit it — the fact IS the change"],
+    [`$ ${name} draft <branch>`, "unsubmit it again; the branch stays, the standing consent does not"],
   ])
 }
 
@@ -10596,7 +10666,7 @@ function addRootBayCommands(
     .command("sh [config]")
     .description("run $SHELL in a scoped Bay")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
+    .option("--pr <selector>", "retired: refuses and names why")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .option("--keep", "leave a successful run open")
     .action(async (config, options) =>
@@ -10762,7 +10832,7 @@ function buildProgram(
     .argument("[config]", "issue to link; omit for an anonymous Bay")
     .description("open and keep a Bay")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
+    .option("--pr <selector>", "retired: refuses and names why")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .action(async (config, options) => {
       if ((io as RuntimeInvocationIO)[RuntimeChildArgv] !== undefined) {
@@ -10774,7 +10844,7 @@ function buildProgram(
     .command("run [config] [command...]")
     .description("run one scoped command (defaults to $SHELL)")
     .option("--issue <ref>", "link an issue without a positional")
-    .option("--pr <selector>", "continue an existing PR without creating or submitting a revision")
+    .option("--pr <selector>", "retired: refuses and names why")
     .option("--bay <name>", "choose an issue-less or issue-linked Bay identity")
     .option("--keep", "leave a successful run open")
     .action(async (config, command, options) => {
@@ -10811,11 +10881,13 @@ function buildProgram(
     .option("--check", "resolve and validate the bay without certifying (read-only preflight)")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
-      certifyBayHandoff(
-        installed(),
-        selector,
-        options as Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
-        io,
+      setExit(
+        await certifyBayHandoff(
+          installed(),
+          selector,
+          options as Readonly<{ branch: string; head: string; evidence: string; check?: boolean; json?: boolean }>,
+          io,
+        ),
       ),
     )
   bay
@@ -10832,7 +10904,7 @@ function buildProgram(
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
-    .option("--composition <path>", "immutable version-1 source composition JSON")
+    .option("--composition <path>", "retired: refuses and names why")
     .option("--track", TRACK_OPTION_DESCRIPTION)
     .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
     .option("--json", "emit stable JSON")
@@ -10842,7 +10914,11 @@ function buildProgram(
   bay
     .command("close [selector...]")
     .description("close work bays (checks bay status first; needs --force to override)")
-    .option("--withdraw", "withdraw a live change before closing")
+    // The name is inherited; the MEANING inverted with the record store. It
+    // now overrides @yrd/bay's live-submission close guard, and the submission
+    // it once retracted is exactly what it leaves standing — so the help says
+    // that outright rather than repeating the old promise.
+    .option("--withdraw", "close the workspace while the submission STANDS (nothing is withdrawn; the branch stays submitted)")
     .option("--force", "bypass bay status (requires explicit bay name; prints what is destroyed)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
@@ -10881,7 +10957,7 @@ function buildProgram(
   program
     .command("cancel <selector>")
     .description(
-      "stop the current attempt for a change or run — members re-queue and the change stays open; to stop delivering it, use `yrd mr close --reason <text> --burn-payload` (run both for both effects)",
+      "stop the current attempt for a change or run — members re-queue and the branch stays submitted; to stop delivering it, move the branch back to draft (`yrd draft <branch>`) or shelve it (`yrd archive <branch>`)",
     )
     .option("--reason <text>", "human-readable cancellation reason")
     .option("--json", "emit stable JSON")
@@ -11199,44 +11275,37 @@ function buildProgram(
       "--state needs-author — answers: does this change currently need author action? tense: current",
     ].join("\n"),
   )
-  const create = pr
-    .command("create [selector]")
-    .description("create a draft change without requesting required checks")
-    .option("--base <branch>", "base branch for a direct branch create")
-    .option("--queue <branch>", "alias for --base")
-    .option("--issue <ref>", "link a tracker-neutral issue reference")
-    .option("--title <text>", "PR subject (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
-    .option("--description <text>", "PR description body (the derived lane reads the head commit itself; an explicit value warns as a record-only bind)")
+  // `create` only ever staged a DRAFT record, and the bay plugin refuses every
+  // draft with `record-mint-retired`, so the verb could not succeed for any
+  // argument — while three refusal texts and two help examples still sent
+  // operators to it. Retired like its siblings; the cures now name
+  // `yrd pr submit`, which runs.
+  pr.command("create [selector]", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--base <branch>", "ignored; the verb is retired")
+    .option("--queue <branch>", "ignored; the verb is retired")
+    .option("--issue <ref>", "ignored; the verb is retired")
+    .option("--title <text>", "ignored; the verb is retired")
+    .option("--description <text>", "ignored; the verb is retired")
     .option(
       "--prop <key>=<value>",
-      "set a prop on the draft revision — an opaque key=value label (repeatable)",
+      "ignored; the verb is retired",
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
+    .option("--composition <path>", "retired: refuses and names why")
     .option(
       "--reviewer <reviewer>",
       "retired: refuses and names why",
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
-    .option("--track", TRACK_OPTION_DESCRIPTION)
-    .option("--no-track", NO_TRACK_OPTION_DESCRIPTION)
+    .option("--track", "ignored; the verb is retired")
+    .option("--no-track", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) =>
-      setExit(
-        await applyChangeSelectionVerb(
-          installed(),
-          installedServices(),
-          selector === undefined ? [] : [selector],
-          options,
-          io,
-          "pr.create",
-        ),
-      ),
-    )
-  addAuthoredCarrierWorkflow(create, name)
-  pr.command("submit [selector...]")
+    .action(() => refuseRetiredChangeRecordVerb("pr create"))
+  const submit = pr.command("submit [selector...]")
+  submit
     .description("submit change revisions after the managed local required-check hook")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
@@ -11249,7 +11318,7 @@ function buildProgram(
       (value: string, previous: readonly string[]) => [...previous, value],
       [] as readonly string[],
     )
-    .option("--composition <path>", "queue-generated source composition JSON; not for authored root branches")
+    .option("--composition <path>", "retired: refuses and names why")
     .option(
       "--reviewer <reviewer>",
       "retired: refuses and names why",
@@ -11263,6 +11332,7 @@ function buildProgram(
     .action(async (selectors, options) =>
       setExit(await applyChangeSelectionVerb(installed(), installedServices(), selectors, options, io, "pr.submit")),
     )
+  addAuthoredCarrierWorkflow(submit, name)
   pr.command("view <selector>")
     .description("show a change and its runs")
     .option("--json", "emit stable JSON")
@@ -11335,20 +11405,24 @@ function buildProgram(
     .option("--follow", "follow active checks to a terminal result")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await changeChecks(installed(), selectors, options, io)))
-  pr.command("close [selector...]")
-    .description("close a live change without merging — records why, leaves the queue")
-    .option("--reason <text>", "close rationale recorded on each pr/withdrawn event")
-    .option("--burn-payload", "acknowledge that closing spends the payload identity permanently")
+  // `close` and its hidden alias `withdraw` were one act with two spellings
+  // (I23). Both are retired with the record store, and both are now registered
+  // HIDDEN like every other retired record verb: a visible verb that can only
+  // refuse is a promise the surface cannot keep, and this one was also named as
+  // the cure by `yrd cancel`'s own description — each command pointing at the
+  // other, neither able to run.
+  pr.command("close [selector...]", { hidden: true })
+    .description("retired: refuses and names why")
+    .option("--reason <text>", "ignored; the verb is retired")
+    .option("--burn-payload", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io, "pr.close"))
-  // Hidden ruled alias of `close` — one act, two spellings (I23); the envelope
-  // keeps its stable pr.withdraw name for journal consumers.
+    .action(() => refuseRetiredChangeRecordVerb("pr close"))
   pr.command("withdraw <selector...>", { hidden: true })
-    .description("withdraw live changes from delivery, recording the reason")
-    .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
-    .option("--burn-payload", "acknowledge that withdrawing spends the payload identity permanently")
+    .description("retired: refuses and names why")
+    .option("--reason <text>", "ignored; the verb is retired")
+    .option("--burn-payload", "ignored; the verb is retired")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io))
+    .action(() => refuseRetiredChangeRecordVerb("pr withdraw"))
   pr.command("merge <selector>")
     .description("teach that the queue is the only merger")
     .option("--json", "emit stable JSON")
@@ -11525,7 +11599,9 @@ function commanderErrorMessage(command: CliCommand | undefined, error: Commander
     command?.name() === "submit" &&
     error.code === "commander.unknownOption" &&
     error.message.includes("unknown option '--draft'")
-  return removedDraftSubmit ? `${error.message}; draft PRs are created with 'yrd pr create'` : error.message
+  return removedDraftSubmit
+    ? `${error.message}; a pushed branch is already a draft — submit it with 'yrd pr submit <branch>' when it is ready, and 'yrd draft <branch>' puts it back`
+    : error.message
 }
 
 function commandPath(command: CliCommand | undefined, fallback: string): string {
@@ -11602,6 +11678,56 @@ function jsonOutputRequested(program: CliCommand, args: readonly string[]): bool
     command = childCommand(command, token) ?? command
   }
   return false
+}
+
+/** The shape `yrdVisibleCommandPaths` needs from a Commander node. Structural
+ * rather than the concrete `CliCommand`, so the walk states exactly the three
+ * members it depends on. */
+type IntrospectableCommand = Readonly<{
+  name: () => string
+  aliases: () => readonly string[]
+  createHelp: () => Readonly<{ visibleCommands: (command: IntrospectableCommand) => readonly IntrospectableCommand[] }>
+}>
+
+/**
+ * Every command path this CLI actually offers an operator, read from the LIVE
+ * Commander tree.
+ *
+ * Never scraped from `--help` text: that output carries wrapped descriptions
+ * and a trailing prose section whose lines are indented exactly like command
+ * rows, so a text parser cannot tell a verb from a sentence.
+ *
+ * Hidden commands are excluded by construction, and hidden is precisely how a
+ * retired verb is registered here ("retired: refuses and names why"). So a path
+ * absent from this set is a path no refusal, remedy or help example may print —
+ * an operator cannot discover it, and running it only earns a second refusal.
+ * Aliases count as spellings, and the walk recurses under each, so `yrd pr
+ * submit` and `yrd change submit` both resolve.
+ *
+ * Exported for `remedy-executable-in-emitting-state.test.ts`, which walks every
+ * `yrd …` command the source prints and fails when one is missing here. That
+ * test is the only thing standing between a retirement and a cure that names
+ * the verb it just retired — a shape this repo has now shipped four times.
+ */
+export function yrdVisibleCommandPaths(): ReadonlySet<string> {
+  const invocation = normalizeYrdInvocation(["yrd"])
+  const io: YrdCliIO = { stdout() {}, stderr() {} }
+  const program = buildProgram(undefined, {}, invocation.name, io, () => undefined, {}, invocation)
+  const paths = new Set<string>()
+  const walk = (command: IntrospectableCommand, prefix: readonly string[]): void => {
+    for (const child of command.createHelp().visibleCommands(command)) {
+      // Commander's generated `help` verb is not part of the surface a cure
+      // would ever name, and it is synthesized per node.
+      if (child.name() === "help") continue
+      for (const spelling of [child.name(), ...child.aliases()]) {
+        const path = [...prefix, spelling]
+        paths.add(path.join(" "))
+        walk(child, path)
+      }
+    }
+  }
+  walk(program as unknown as IntrospectableCommand, [])
+  return paths
 }
 
 /** Cold-path fallback for host failures outside the normal command catcher.

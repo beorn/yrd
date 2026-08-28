@@ -18,9 +18,42 @@ const StepNameSchema = TextSchema.regex(/^[a-z][a-z0-9_-]*$/iu)
 const StepNamesSchema = z.array(StepNameSchema).superRefine((names, context) => {
   if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate steps" })
 })
+/**
+ * `requires:` is now an empty vocabulary, and saying so AT LOAD is the whole
+ * point.
+ *
+ * `review` was its only member, and it is unsatisfiable: the queue's gate still
+ * reads `state.queues.requires.includes("review")` and refuses
+ * `review-required`, but the approval it waits for can no longer be produced —
+ * `pr/reviewed` has a no-op reducer arm and zero emitters, `reviews:` survives
+ * as a type declaration over two empty literals, and `yrd pr review` is retired
+ * with the change-record store. So a repository that sets it wedges its own
+ * queue permanently: every change is refused "needs approval", the queue drains
+ * to zero, and the refusal reads exactly like ordinary review gating.
+ *
+ * The refusal belongs HERE and not at the gate. A config that cannot be
+ * satisfied must fail when it is SET — at `yrd` startup, and at the receiver,
+ * which validates a candidate's pushed `.yrd.yml` against this same schema
+ * before accepting the push — not silently later, once work has arrived and
+ * there is a wedge to diagnose.
+ */
+const RETIRED_REQUIREMENTS: Readonly<Record<string, string>> = {
+  review:
+    "names 'review', which is retired: revision-bound review records died with the change-record store " +
+    "(S7 branch-is-change), so no approval can ever be recorded and every change would be refused " +
+    "'review-required' until the queue drained to zero. Remove the key — the pushed submit ref is the " +
+    "recorded consent",
+}
+/** The member stays SPELLED in the enum on purpose: an operator who sets the
+ * one value this key ever took must read why it is gone, not a generic
+ * "invalid enum value" that reads like a typo. */
 const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements, context) => {
   if (new Set(requirements).size !== requirements.length) {
     context.addIssue({ code: "custom", message: "contains duplicate requirements" })
+  }
+  for (const requirement of requirements) {
+    const retired = RETIRED_REQUIREMENTS[requirement]
+    if (retired !== undefined) context.addIssue({ code: "custom", message: retired })
   }
 })
 const RunnerSchema = z.enum(["local", "waiting"])

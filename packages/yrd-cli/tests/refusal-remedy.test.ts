@@ -17,7 +17,7 @@ function authoredGitlink(pr = Change): { code: string; message: string } {
 
 describe("refusal remedy classification — self-applicable vs judgment-required", () => {
   it("leaves authored-gitlink pin work to the author instead of auto-redelivering", () => {
-    const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "submitted" })
+    const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", redeliverable: true })
 
     expect(remedy.kind).toBe("judgment")
     if (remedy.kind !== "judgment") return
@@ -27,16 +27,24 @@ describe("refusal remedy classification — self-applicable vs judgment-required
     expect(remedy.reason).toContain("not a mechanical Yrd redelivery command")
   })
 
-  it("does not resurrect the draft create path for a gitlink-bump remedy", () => {
-    const remedy = classifyRefusalRemedy(authoredGitlink(), { branch: "task/22474", delivery: "pushed" })
+  it("does not resurrect the draft create path — a create step never re-enters the queue", () => {
+    const remedy = classifyRefusalRemedy(
+      {
+        code: "composition-invalid",
+        message: `yrd: change '${Change}' needs a certified refresh; run 'yrd pr create <branch>'`,
+      },
+      { branch: "task/22474", redeliverable: true },
+    )
 
     expect(remedy.kind).toBe("judgment")
+    if (remedy.kind !== "judgment") return
+    expect(remedy.reason).toContain("never re-enters the change into the merge queue")
   })
 
   it("does not mechanise a composition-invalid carrier lacking a mechanical remedy", () => {
     const remedy = classifyRefusalRemedy(
       { code: "composition-invalid", message: `yrd: change '${Change}' composition manifest names no source` },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")
@@ -48,7 +56,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
         code: "recut-certificate",
         message: `yrd: change '${Change}' recut tree certificate does not match revision 3`,
       },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")
@@ -60,7 +68,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
         code: "payload-certificate",
         message: `yrd: change '${Change}' declared payload range-diff does not match the recorded source rewrite`,
       },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")
@@ -69,13 +77,15 @@ describe("refusal remedy classification — self-applicable vs judgment-required
   it("leaves an environment refusal to judgment — it names no PR-scoped command", () => {
     const remedy = classifyRefusalRemedy(
       { code: "queue-base-unresolved", message: "yrd: habitant auto-recut could not resolve queue base 'main'" },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")
   })
 
-  it("refuses to redeliver a terminal change mechanically", () => {
+  it("refuses to redeliver a branch with no standing submit fact", () => {
+    // S7: the delivery has ENDED when nothing stands for its branch any more —
+    // the terminal-state test the change record used to answer.
     const remedy = classifyRefusalRemedy(
       {
         code: "composition-invalid",
@@ -83,7 +93,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
           "yrd: change 'PR1791' needs a certified refresh; " +
           "tracked changes re-merge implicitly; fallback: 'yrd pr submit <branch>'",
       },
-      { branch: "task/22474", delivery: "integrated" },
+      { branch: "task/22474", redeliverable: false },
     )
 
     expect(remedy.kind).toBe("judgment")
@@ -99,7 +109,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
           "yrd: change 'PR1791' needs a certified refresh; " +
           "tracked changes re-merge implicitly; fallback: 'yrd pr submit <branch>'",
       },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy).toEqual({ kind: "self-applicable", steps: [{ verb: "submit", branch: "task/22474" }] })
@@ -111,7 +121,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
         code: "source-lineage",
         message: `yrd: change '${Change}' source lineage broke; run 'git -C km fetch --all --prune' then resubmit`,
       },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")
@@ -120,7 +130,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
   it("never mechanises a remedy that names an unknown yrd verb", () => {
     const remedy = classifyRefusalRemedy(
       { code: "queue-drift", message: `yrd: change '${Change}' is stale; run 'yrd queue deinit main' first` },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")
@@ -135,7 +145,7 @@ describe("refusal remedy classification — self-applicable vs judgment-required
         code: "composition-invalid",
         message: `yrd: change '${Change}' needs a certified refresh; run 'yrd pr recut ${Change} --preflight --queue --apply'`,
       },
-      { branch: "task/22474", delivery: "submitted" },
+      { branch: "task/22474", redeliverable: true },
     )
 
     expect(remedy.kind).toBe("judgment")

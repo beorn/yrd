@@ -1,13 +1,7 @@
 import { adaptProcessGit, createProcess, type GitSyncReadCommand } from "@yrd/process"
 import type { GitProcessResult } from "git-super/process"
-import { createElement } from "react"
-import {
-} from "@yrd/bay"
 import { raiseFailure } from "@yrd/core"
-import { Queues, type Run } from "@yrd/queue"
-import { ChangeResultView } from "./queue-status-view.tsx"
-import { projectChangeTaskStatus } from "./task-status.ts"
-import type { PruneGitFacts, YrdCliApp, YrdCliIO } from "./types.ts"
+import type { PruneGitFacts, YrdCliIO } from "./types.ts"
 
 type JsonOption = Readonly<{ json?: boolean }>
 
@@ -20,40 +14,14 @@ function short(sha: string): string {
   return sha.length > 12 ? sha.slice(0, 12) : sha
 }
 
-/** What closing this revision spends, in the operator's own terms: the exact
- * revision leaving delivery — so an operator acting on a STALE read sees the
- * mismatch here, before the spend, not after it (the PR78 specimen) — and the
- * one command that brings the payload back. */
-/** Closing an unmerged change is not housekeeping: it spends the
- * payload identity, and every other branch is barred from that commit
- * afterwards. The verb reads reversible, so the spend is stated and
- * acknowledged BEFORE the first event — never a silent success. The
- * acknowledgement is an explicit flag, not a prompt, so a non-TTY caller gets
- * the same typed refusal instead of hanging. */
-export type WithdrawPrsOptions = JsonOption & Readonly<{ reason?: string; burnPayload?: boolean }>
-
-/** S7: record withdrawal retired with the store — a branch IS the change and
- * its "withdrawal" is two acts the author already owns: cancel the queued
- * work, and retire the standing consent. The refusal teaches both. The
- * spent-payload disclosure died with payload identity itself: content
- * re-enters through the derived lane on any branch, so there is nothing to
- * burn and nothing to reopen. */
-export async function withdrawPrs(
-  _app: YrdCliApp,
-  _selectors: readonly string[],
-  _options: WithdrawPrsOptions,
-  _io: YrdCliIO,
-  command: "pr.close" | "pr.withdraw" = "pr.withdraw",
-): Promise<void> {
-  const verb = command === "pr.close" ? "close" : "withdraw"
-  raiseFailure(
-    "refusal",
-    `${verb}-retired`,
-    `yrd: change ${verb} retired with the record store — cancel queued work with 'yrd cancel <branch>', ` +
-      `and retire the standing submission by deleting its submit ref ` +
-      `(git push <receiver> :refs/yrd/submit/<branch>) or shelving the branch ('yrd archive <branch>')`,
-  )
-}
+/* S7: `withdrawPrs` deleted here, not moved. It ignored every parameter and
+ * raised `close-retired`/`withdraw-retired` unconditionally, so the whole
+ * function was a refusal wearing a command's shape — and its own refusal named
+ * `yrd cancel` as the cure while `yrd cancel`'s description named `mr close` as
+ * ITS cure, a two-command circle with no exit. The retirement now lives with
+ * every other retired record verb, in `RETIRED_CHANGE_RECORD_VERBS` (`run.ts`),
+ * where the verb is registered HIDDEN and the message names only branch-state
+ * verbs that really run. */
 
 type PruneChecks = Readonly<{
   headPresent?: boolean
