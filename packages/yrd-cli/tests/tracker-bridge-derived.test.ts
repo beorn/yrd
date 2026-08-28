@@ -27,6 +27,7 @@ import {
 } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import {
+  Queues,
   withMerge,
   withQueue,
   withStep,
@@ -322,31 +323,69 @@ describe("tracker bridges — DERIVED deliveries", () => {
     expect(settled.v2.deliveries).toMatchObject([{ pr: "PR1", status: "integrated", landingSha: MERGED_SHA }])
   })
 
-  it("keeps a failed derived run visible as submitted while its fact still stands", async () => {
+  it("reports a failed derived run as needs-author, carrying the run's own typed receipt", async () => {
     await using app = await createApp({ failingMerge: true })
     await app.bays.recordBranchSubmit({ branch: "topic/derived-fails", sha: HEAD_SHA, base: "main" })
     const factAt = app.bays.state().submits["topic/derived-fails"]?.at
 
     expect(await app.queue.run({}, RUNTIME)).toMatchObject([{ status: "completed", conclusion: "failure" }])
-    // The fact is standing consent: the queue re-serves it or the author
-    // re-pushes, so the delivery is not terminally resolved — "submitted" is
-    // true but imprecise until the durable refusal ledger (wave item) gives
-    // derived members needs-author precision.
+    // The fact is standing consent — the queue re-serves it or the author
+    // re-pushes — so the delivery is not TERMINALLY resolved, and this row
+    // used to say "submitted" for exactly that reason. True, and a blur: a
+    // consumer could not tell "waiting to run" from "ran and failed".
     expect(app.bays.state().submits["topic/derived-fails"]).toMatchObject({ sha: HEAD_SHA })
+    const failure = Queues.values(app.state().queues).find((record) => record.id === "R1")?.failure
+    expect(failure).toMatchObject({ error: { code: "merge-failed" } })
 
     const { v1, v2 } = await readBridges(app)
-    const expected = {
+    const identity = {
       issueRef: FIXTURE_ISSUE,
       pr: "PR1",
       revision: 1,
       headSha: HEAD_SHA,
-      status: "submitted",
-      at: factAt,
       runs: ["R1"],
     }
+    const bounce = { run: "R1", detail: "yrd: fixture merge refused the candidate" }
     expect(v2.deliveries).toHaveLength(1)
-    expect(v2.deliveries).toMatchObject([expected])
-    expect(v1.deliveries).toMatchObject([expected])
+    expect(v2.deliveries).toMatchObject([
+      {
+        ...identity,
+        status: "needs-author",
+        // The verdict's own clock, not the fact's: the fact stamps when the
+        // author consented, the failure stamps when the queue answered.
+        at: failure?.at,
+        bounce,
+        attributedResult: { code: "merge-failed", message: "yrd: fixture merge refused the candidate" },
+      },
+    ])
+    expect(v2.deliveries[0]?.at).not.toBe(factAt)
+    // v1 has no needs-author: it maps to `rejected` and keeps only `bounce`,
+    // which is why `detail` carries the message — the strict v1 consumer
+    // (the tent delivery projection) validates that a rejected row HAS a
+    // bounce, and a failed row with an empty diagnostic column is half an
+    // answer.
+    expect(v1.deliveries).toHaveLength(1)
+    expect(v1.deliveries).toMatchObject([{ ...identity, status: "rejected", at: failure?.at, bounce }])
+  })
+
+  it("keeps a SUPERSEDED failed derived run out of the bridges entirely", async () => {
+    // The narrowing above lives inside the fact-stands branch on purpose.
+    // A failed run whose fact has MOVED is superseded — the author already
+    // re-pushed — and must stay absent, or every historical failure would
+    // resurface as a live needs-author row the moment its successor ran.
+    await using app = await createApp({ failingMerge: true })
+    await app.bays.recordBranchSubmit({ branch: "topic/derived-superseded", sha: HEAD_SHA, base: "main" })
+    expect(await app.queue.run({}, RUNTIME)).toMatchObject([{ status: "completed", conclusion: "failure" }])
+    expect(Queues.values(app.state().queues).find((record) => record.id === "R1")?.failure).toBeDefined()
+
+    // The author re-pushes: the fact moves off the failed member's head.
+    const repushed = "3".repeat(40)
+    await app.bays.recordBranchSubmit({ branch: "topic/derived-superseded", sha: repushed, base: "main" })
+    expect(app.bays.state().submits["topic/derived-superseded"]).toMatchObject({ sha: repushed })
+
+    const { v1, v2 } = await readBridges(app)
+    expect(v2.deliveries).toEqual([])
+    expect(v1.deliveries).toEqual([])
   })
 
   it("keeps a passed check-only run — no integration proof — visible as submitted while its fact stands", async () => {
