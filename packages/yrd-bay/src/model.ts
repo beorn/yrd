@@ -1231,7 +1231,27 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
  * not pay for the stronger.
  */
 export function hasChangeRecord(bays: DeepReadonly<Pick<BaysState, "prs">>, id: string): boolean {
-  return bays.prs[id] !== undefined
+  return getChangeRecord(bays, id) !== undefined
+}
+
+/**
+ * The Change this id names, or undefined.
+ *
+ * The ONE expression in the codebase that indexes `BaysState.prs`, which is why
+ * `hasChangeRecord` is derived from it instead of repeating the index: "does it
+ * exist" and "give it to me" then cannot disagree about what counts as present,
+ * a disagreement that needs two indexes to be possible at all.
+ *
+ * Consumers outside yrd-bay ask through here. Inside yrd-bay, `projectBays` and
+ * its reducers index `current.prs` directly and correctly — the module that OWNS
+ * a shape may touch it, and routing a reducer through a reader would be ceremony
+ * rather than a boundary.
+ */
+export function getChangeRecord(
+  bays: DeepReadonly<Pick<BaysState, "prs">>,
+  id: string,
+): DeepReadonly<Change> | undefined {
+  return bays.prs[id]
 }
 
 export function isLiveChange(pr: Change): boolean {

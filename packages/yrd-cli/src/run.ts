@@ -33,6 +33,7 @@ import {
   resolveBase,
   resolveChange,
   requireLiveChange,
+  getChangeRecord,
   type Bay,
   type BaysState,
   type CompositionV1,
@@ -10995,7 +10996,7 @@ function observeHabitantRefusals(app: YrdCliApp, runs: number): HabitantRefusalO
     refusals: refusals.map(({ pr, code, count }) => ({ pr, code, count })),
     heads: Object.fromEntries(
       refusals.flatMap((refusal) => {
-        const pr = snapshot.bays.prs[refusal.pr]
+        const pr = getChangeRecord(snapshot.bays, refusal.pr)
         return pr === undefined ? [] : [[refusal.pr, currentChangeRev(pr).head] as const]
       }),
     ),

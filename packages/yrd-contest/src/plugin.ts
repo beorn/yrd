@@ -5,6 +5,7 @@ import {
   changeHead,
   changeRevisionNumber,
   resolveBay,
+  getChangeRecord,
   type Bay,
   type HasBays,
   type Change,
@@ -370,7 +371,7 @@ function createContestCommands(
       if (verified.commit.toLowerCase() !== promotion.pin.commit.toLowerCase()) {
         throw new Error("yrd: contest promotion verified a different commit")
       }
-      const pr = state.bays.prs[args.pr]
+      const pr = getChangeRecord(state.bays, args.pr)
       if (pr === undefined || !exactPR(pr, promotion.pin, record.base)) {
         throw new Error(`yrd: change '${args.pr}' does not contain the selected contest commit`)
       }
@@ -704,7 +705,7 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
     const pr =
       record.promotion.result === undefined
         ? changeForBay(state.bays, record.promotion.pin.bay)
-        : state.bays.prs[record.promotion.result.pr]
+        : getChangeRecord(state.bays, record.promotion.result.pr)
     promotion = {
       attempt: record.promotion.attempt,
       commit: record.promotion.pin.commit,

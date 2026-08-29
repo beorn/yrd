@@ -27,6 +27,7 @@ import {
   resolveChange,
   reviewState,
   hasChangeRecord,
+  getChangeRecord,
   type BaysState,
   type HasBays,
   type Change,
@@ -2685,7 +2686,7 @@ function createQueue<Shape extends ChangeShape>(
       if (prId === undefined || revisionText === undefined) {
         throw new Error(`yrd: malformed revision admission Job key '${job.key}'`)
       }
-      const pr = snapshot.bays.prs[prId]
+      const pr = getChangeRecord(snapshot.bays, prId)
       if (pr === undefined || changeRevisionNumber(pr) !== Number(revisionText)) return true
       const delivery = changeDeliveryState(pr)
       return delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready"
@@ -4175,7 +4176,7 @@ function queueFailedEvent(
     error,
     ...(job === undefined ? {} : { job: { id: job.id, attempt: job.attempt } }),
     prs: run.prs.map((pr) => {
-      const current = state.bays.prs[pr.id]
+      const current = getChangeRecord(state.bays, pr.id)
       const submitter = current?.revs.find(
         (revision) => revision.n === pr.revision && revision.head === pr.headSha,
       )?.submitter
@@ -4263,7 +4264,7 @@ function createQueueCommands(
     title: "Run one revision required check",
     params: AdmissionStepArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: AdmissionStepArgs) {
-      const pr = state.bays.prs[args.pr.id]
+      const pr = getChangeRecord(state.bays, args.pr.id)
       // Freshness referent per lane (same rule as pinnedChangeError): a record
       // member answers from its record; a DERIVED member (S6, recordless by
       // design) answers from its live submit fact at exactly the pinned sha.
@@ -4817,7 +4818,7 @@ function createQueueCommands(
     title: "Settle one exact required-check refusal as needing a person",
     params: SettleAdmissionRefusalSchema,
     apply(state: DeepReadonly<RuntimeState>, args: SettleAdmissionRefusalArgs) {
-      const pr = state.bays.prs[args.pr]
+      const pr = getChangeRecord(state.bays, args.pr)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
       const current = currentChangeRev(pr)
       if (current.n !== args.revision || current.head !== args.headSha) {
@@ -4858,7 +4859,7 @@ function createQueueCommands(
     title: "Reconcile one repository-proven merge into the journal index",
     params: ChangeIntegratedSchema,
     apply(state: DeepReadonly<RuntimeState>, args: z.infer<typeof ChangeIntegratedSchema>) {
-      const pr = state.bays.prs[args.pr]
+      const pr = getChangeRecord(state.bays, args.pr)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", changeNotFoundMessage(state.bays, args.pr))
       const revision = currentChangeRev(pr)
       const exact =
@@ -4950,7 +4951,7 @@ function queueAuthorityNeedsAuthorEvent(
   if (gap.consumedBy === undefined) {
     throw new Error(`yrd: consumed ${gap.kind} authority for change '${gap.pr}' has no consuming queue run`)
   }
-  const pr = state.bays.prs[gap.pr]
+  const pr = getChangeRecord(state.bays, gap.pr)
   if (pr === undefined || (changeDeliveryState(pr) !== "submitted" && changeDeliveryState(pr) !== "ready")) {
     return undefined
   }
@@ -5387,7 +5388,7 @@ function compactQueueProjection(
   // so the ledger cannot grow without bound (or outlive the wedge it names).
   const admissionRefusals = Object.fromEntries(
     Object.entries(queues.admissionRefusals).filter(([id]) => {
-      const pr = bays.prs[id]
+      const pr = getChangeRecord(bays, id)
       if (pr === undefined) return false
       const delivery = changeDeliveryState(pr)
       return delivery === "pushed" || delivery === "submitted"
@@ -5409,7 +5410,7 @@ function queueDecisionRoots(queues: DeepReadonly<QueuesState>, bays: DeepReadonl
     }
     const snapshot = record.prs[0]
     if (snapshot === undefined) continue
-    const pr = bays.prs[snapshot.id]
+    const pr = getChangeRecord(bays, snapshot.id)
     const delivery = pr === undefined ? undefined : changeDeliveryState(pr)
     if (pr === undefined || (delivery !== "pushed" && delivery !== "submitted") || !checksRequested(pr)) continue
     if (queueLookupKey(Queues.snapshot(pr), record.steps) !== queueLookupKey(snapshot, record.steps)) continue
@@ -6214,7 +6215,7 @@ function legacyRunHasTerminalRevisions(state: DeepReadonly<RuntimeState>, run: D
   return (
     Queues.terminal(run) &&
     run.prs.every((snapshot) =>
-      state.bays.prs[snapshot.id]?.revs.some(
+      getChangeRecord(state.bays, snapshot.id)?.revs.some(
         (revision) =>
           revision.n === snapshot.revision && revision.head === snapshot.headSha && revision.terminal !== undefined,
       ),
@@ -6306,7 +6307,7 @@ export function advanceQueue(
     }
     const failed = queueFailedEvent(state, record, failure, job)
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
-    const current = pr === undefined ? undefined : state.bays.prs[pr.id]
+    const current = pr === undefined ? undefined : getChangeRecord(state.bays, pr.id)
     const revision =
       pr === undefined
         ? undefined
@@ -7089,7 +7090,7 @@ function candidateRevisionMismatches(state: DeepReadonly<RuntimeState>): readonl
     const current: ChangeSnapshot[] = []
     let live = true
     for (const snapshot of record.prs) {
-      const pr = state.bays.prs[snapshot.id]
+      const pr = getChangeRecord(state.bays, snapshot.id)
       const delivery = pr === undefined ? undefined : changeDeliveryState(pr)
       if (pr === undefined || (delivery !== "pushed" && delivery !== "submitted" && delivery !== "ready")) {
         live = false
@@ -7262,7 +7263,7 @@ function auditQueues(
   for (const record of Queues.values(state.queues)) {
     // `missing-pr` USED TO BE EMITTED HERE and could not be, which is why it is
     // gone rather than repaired. The guard above it was
-    // `pr.intent !== undefined || bays.prs[pr.id] !== undefined` — the exact
+    // `pr.intent !== undefined || getChangeRecord(bays, pr.id) !== undefined` — the exact
     // negation of `isDerivedRunMember` — so every member that survived it
     // satisfied the very predicate the next line skipped on. The push was
     // unreachable, and `queue audit` reported zero `missing-pr` findings
@@ -7437,7 +7438,7 @@ function admissionRefusalAuditFindings(
   const findings: QueueAuditFindingEmission[] = []
   const refused = Object.entries(state.queues.admissionRefusals).flatMap(([id, refusal]) => {
     if (refusal.settlement !== undefined) return []
-    const pr = state.bays.prs[id]
+    const pr = getChangeRecord(state.bays, id)
     return pr === undefined ? [] : [pr]
   })
   const head = [...new Map([...queued, ...refused].map((pr) => [pr.id, pr])).values()].toSorted(
@@ -8523,7 +8524,7 @@ function reusableRevisionAdmission(
   const boundary = selected.findIndex((step) => step.kind === "merge")
   const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
   if (prefix.length === 0 || prefix.some((step) => step.classification === "base")) return undefined
-  const pr = state.bays.prs[snapshot.id]
+  const pr = getChangeRecord(state.bays, snapshot.id)
   if (pr === undefined) {
     // DERIVED member (recordless): reuse only when a merge step REMAINS. A
     // fully-covered plan would return the zero-event reuse-covered no-op, and
@@ -9437,7 +9438,7 @@ function pinnedChangeError(
         message: `Intent '${intent.id}' can no longer be verified: the intent rail that tracked it is retired`,
       }
     }
-    const current = state.bays.prs[snapshot.id]
+    const current = getChangeRecord(state.bays, snapshot.id)
     if (current === undefined) {
       // Derived member (S6): recordless by design — the live submit fact is the
       // pin's referent. Standing at exactly the pinned sha ⇒ fresh; moved or
@@ -9488,7 +9489,7 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
     if (run.steps[index + 1]?.job === undefined && index + 1 < run.steps.length) return true
     if (step.kind !== "merge" || run.integration === undefined) return false
     return run.prs.some((pr) => {
-      const current = state.bays.prs[pr.id]
+      const current = getChangeRecord(state.bays, pr.id)
       // A DERIVED member (S6) has no record to absorb the integration — its
       // terminal fact emits at settlement, not through an advance — so it can
       // never hold an advance open. Without this the settle loop re-advances
@@ -9514,7 +9515,7 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: Run): boolean {
   if (queueAuthorityReleaseReason(jobFailure(step.job)) !== undefined) return true
   if (step.job.conclusion !== "cancelled") return true
   return run.prs.some((member) => {
-    const current = state.bays.prs[member.id]
+    const current = getChangeRecord(state.bays, member.id)
     return (
       current !== undefined &&
       changeRevisionNumber(current) === member.revision &&
