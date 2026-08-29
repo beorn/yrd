@@ -31,6 +31,23 @@ export function createExclusive(
   const log = inject.log ?? createLogger("yrd", [{ level: "warn" }])
   return {
     async run(operation, runOptions) {
+      // The type says `holder` is required. That reaches every TypeScript
+      // caller and NO caller TypeScript cannot see — and one of those is how
+      // this stayed anonymous: `tools/yrd-runtime.mjs` in the superproject is
+      // a hand-written .mjs mirror of `drainSettlements`, it acquires this very
+      // lock, and it never got the argument the TS original was given. It read
+      // as "unknown operation" for as long as the field was optional, and as
+      // `undefined is not an object (evaluating 'runOptions.holder')` the
+      // moment it became required. Neither names what to do. So the check is
+      // here as well as in the type, because a requirement only the compiler
+      // enforces is not a requirement at the boundary a .mjs crosses.
+      if (runOptions === undefined || typeof runOptions.holder !== "string") {
+        throw new TypeError(
+          `yrd: exclusive run requires { holder } naming the operation taking ${join(dir, "writer.lock")}; ` +
+            "an unnamed holder renders as \"unknown operation\" in every starvation message, which is how a " +
+            "ninety-minute stall was observed with nothing to attribute it to",
+        )
+      }
       const holder = runOptions.holder.trim()
       if (holder === "" || /\r|\n/u.test(holder)) {
         throw new TypeError("yrd: exclusive holder must be a non-empty single line")
