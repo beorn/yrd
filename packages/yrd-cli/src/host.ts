@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { hostname } from "node:os"
-import { join, relative, resolve, sep } from "node:path"
+import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
 import { createGitWorktreeStore } from "git-super/worktree"
@@ -126,6 +126,9 @@ import {
   withGitTimeoutRetry,
   type Process,
   type ProcessResult,
+  type PathHolderCensus,
+  type PathHolderCensusReader,
+  type PathHolder,
 } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
@@ -3205,6 +3208,8 @@ export type YrdProcessHostOptions = Pick<
     /** Host-evaluated uncarried exemptions. Copied onto IO so both the
      * `queue uncarried` command and the habitant sweeper share one adapter. */
     uncarriedFilter?: YrdCliIO["filterUncarriedFindings"]
+    /** Test-only required census dependency for destructive Bay fixtures. */
+    testPathHolderCensus?: PathHolderCensusReader
   }>
 
 type YrdRuntimeHostOptions = YrdHostOptions &
@@ -3213,7 +3218,88 @@ type YrdRuntimeHostOptions = YrdHostOptions &
     implementationSource?: string
     /** Repair a stale view registry before the runtime replays Journal history. */
     repairViewsBeforeReplay?: boolean
+    testPathHolderCensus?: PathHolderCensusReader
   }>
+
+export const YRD_TEST_PATH_HOLDER_CENSUS_ENV = "YRD_TEST_PATH_HOLDER_CENSUS" as const
+
+function testPathHolderCoverage(complete: boolean): PathHolderCensus["coverage"] {
+  return globalThis.process.platform === "linux"
+    ? {
+            platform: "linux",
+            scope: "same-uid",
+            procRoot: "test-fixture",
+            complete,
+            processes: {
+              enumerated: complete ? 0 : 1,
+              sameUid: complete ? 0 : 1,
+              otherUid: 0,
+              unavailable: { exited: 0, denied: 0 },
+            },
+            sources: {
+              cwd: { readable: 0, unavailable: { exited: 0, denied: complete ? 0 : 1 } },
+              exe: { readable: 0, unavailable: { exited: 0, denied: complete ? 0 : 1 } },
+              root: { readable: 0, unavailable: { exited: 0, denied: complete ? 0 : 1 } },
+              maps: { readable: 0, unavailable: { exited: 0, denied: complete ? 0 : 1 } },
+              fd: { readable: 0, unavailable: { exited: 0, denied: complete ? 0 : 1 } },
+            },
+      }
+    : { platform: "darwin", mechanism: "lsof", complete: true }
+}
+
+function emptyTestPathHolderCensus(complete: boolean): PathHolderCensusReader {
+  return async (): Promise<PathHolderCensus> => ({ holders: [], coverage: testPathHolderCoverage(complete) })
+}
+
+function fileTestPathHolderCensus(path: string): PathHolderCensusReader {
+  if (!isAbsolute(path)) throw new Error(`yrd: test path-holder census file must be absolute, found '${path}'`)
+  return async (): Promise<PathHolderCensus> => {
+    const value = JSON.parse(readFileSync(path, "utf8")) as { complete?: unknown; holders?: unknown }
+    if (typeof value.complete !== "boolean" || !Array.isArray(value.holders)) {
+      throw new Error(`yrd: test path-holder census file '${path}' requires boolean complete and holders[]`)
+    }
+    const holders = value.holders.map((holder, index): PathHolder => {
+      if (
+        typeof holder !== "object" ||
+        holder === null ||
+        !Number.isSafeInteger((holder as { pid?: unknown }).pid) ||
+        typeof (holder as { source?: unknown }).source !== "string" ||
+        typeof (holder as { target?: unknown }).target !== "string"
+      ) {
+        throw new Error(`yrd: invalid test path-holder census row ${index} in '${path}'`)
+      }
+      return holder as PathHolder
+    })
+    return { holders: holders.filter(({ pid }) => processAlive(pid)), coverage: testPathHolderCoverage(value.complete) }
+  }
+}
+
+function resolveTestPathHolderCensus(
+  env: NodeJS.ProcessEnv,
+  injected: PathHolderCensusReader | undefined,
+): PathHolderCensusReader | undefined {
+  const fixture = env[YRD_TEST_PATH_HOLDER_CENSUS_ENV]
+  if (env.NODE_ENV !== "test") {
+    if (injected !== undefined || fixture !== undefined) {
+      throw new Error("yrd: test path-holder census wiring is available only under NODE_ENV=test")
+    }
+    return undefined
+  }
+  if (injected !== undefined) return injected
+  if (fixture === "complete-empty") return emptyTestPathHolderCensus(true)
+  if (fixture === "incomplete-denied") return emptyTestPathHolderCensus(false)
+  if (fixture?.startsWith("file:") === true) return fileTestPathHolderCensus(fixture.slice("file:".length))
+  if (fixture !== undefined) {
+    throw new Error(
+      `yrd: ${YRD_TEST_PATH_HOLDER_CENSUS_ENV} must be complete-empty, incomplete-denied, or file:<absolute-path>, found '${fixture}'`,
+    )
+  }
+  return async () => {
+    throw new Error(
+      `yrd: destructive test fixture must inject a path-holder census; set ${YRD_TEST_PATH_HOLDER_CENSUS_ENV} or pass testPathHolderCensus`,
+    )
+  }
+}
 
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   return createYrdRuntimeHost(options, undefined, "active")
@@ -3235,8 +3321,15 @@ async function runnerHealthProbeServices(options: YrdRuntimeHostOptions): Promis
       globalThis.process.stderr.write(text),
     )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+  const census = resolveTestPathHolderCensus(env, options.testPathHolderCensus)
   const process = withGitTimeoutRetry(
-    withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } })),
+    withGitIndexLockRetry(
+      createProcess({
+        cwd: options.cwd,
+        env,
+        inject: { scope, log, ...(census === undefined ? {} : { pathHolderCensus: census }) },
+      }),
+    ),
   )
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
@@ -3345,8 +3438,15 @@ async function createYrdRuntimeHost(
       globalThis.process.stderr.write(text),
     )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+  const census = resolveTestPathHolderCensus(env, options.testPathHolderCensus)
   const process = withGitTimeoutRetry(
-    withGitIndexLockRetry(createProcess({ cwd: options.cwd, env, inject: { scope, log } })),
+    withGitIndexLockRetry(
+      createProcess({
+        cwd: options.cwd,
+        env,
+        inject: { scope, log, ...(census === undefined ? {} : { pathHolderCensus: census }) },
+      }),
+    ),
   )
   let app: YrdCliApp | undefined
   let habitantLease: HabitantRunnerLease | undefined
@@ -3899,6 +3999,9 @@ async function runYrdProcessHost(
             ...(options.authorizeSubmoduleModelChange === undefined
               ? {}
               : { authorizeSubmoduleModelChange: options.authorizeSubmoduleModelChange }),
+            ...(options.testPathHolderCensus === undefined
+              ? {}
+              : { testPathHolderCensus: options.testPathHolderCensus }),
           },
           habitantSeed,
           posture === "viewer" ? "viewer" : "active",

@@ -8,6 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  createProcess,
   inspectPathHolderCensus,
   inspectPathHolders,
   pathHolderRefusal,
@@ -25,6 +26,49 @@ afterEach(() => {
 })
 
 describe("inspectPathHolders", () => {
+  test.runIf(process.platform === "linux")(
+    "an injected census preserves incomplete coverage as a deletion refusal",
+    async () => {
+      const fixture = mkdtempSync(join(tmpdir(), "yrd-path-injected-census-"))
+      scratch.push(fixture)
+      const ownedPath = join(fixture, "owned")
+      mkdirSync(ownedPath)
+      const service = createProcess({
+        inject: {
+          pathHolderCensus: async () => ({
+            holders: [],
+            coverage: {
+              platform: "linux",
+              scope: "same-uid",
+              procRoot: "injected-test-fixture",
+              complete: false,
+              processes: {
+                enumerated: 1,
+                sameUid: 1,
+                otherUid: 0,
+                unavailable: { exited: 0, denied: 0 },
+              },
+              sources: {
+                cwd: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+                exe: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+                root: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+                maps: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+                fd: { readable: 0, unavailable: { exited: 0, denied: 1 } },
+              },
+            },
+          }),
+        },
+      })
+      try {
+        const result = await service.reapPath(ownedPath)
+        expect(result.survivorCoverage?.complete).toBe(false)
+        expect(pathReapDeletionFailure(result)).toMatch(/census incomplete.*injected-test-fixture.*denied/isu)
+      } finally {
+        await service.close()
+      }
+    },
+  )
+
   test("the public refusal preserves the holder source and target", () => {
     expect(inspectPathHolderCensus).toBeTypeOf("function")
     expect(inspectPathHolders).toBeTypeOf("function")
