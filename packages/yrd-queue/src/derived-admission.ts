@@ -33,7 +33,7 @@
 import {
   changeComposition,
   changeHead,
-  changeIdForDerivedSubmit,
+  resolveChangeIdentity,
   baseIdentity,
   isLiveChange,
   ChangeIdSchema,
@@ -60,6 +60,7 @@ import {
   type QueuesState,
   type RunId,
 } from "./model.ts"
+import { mergedByAncestry, type MergedTruthGit, type MergedTruthIndex } from "./merged-truth.ts"
 import { projectionLookupGet } from "./projection-lookup.ts"
 
 /**
@@ -382,52 +383,264 @@ export function isDerivedMemberId(id: string, recordIds: ReadonlySet<string>): b
  * the terminal×different-sha cell arbitrated "derived", and the next compose
  * minted and merged an empty revision 2 — one approval, two merges. The
  * incident's signature is landed CONTENT (the fact pointing at the landing
- * commit itself), excluded via {@link alreadyLandedSubmits}; a terminal
+ * commit itself), excluded via the git-derived {@link landedSubmits}; a terminal
  * branch's genuinely NEW head composes here — post-purge the derived lane is
  * the only re-entry (Q1).
  */
-export function derivedLaneBranches(bays: DeepReadonly<BaysState>): string[] {
+export function derivedLaneBranches(bays: DeepReadonly<BaysState>, landedBranches: ReadonlySet<string>): string[] {
   return Object.keys(bays.submits)
     .filter((branch) => {
       const records = Object.values(bays.prs).filter((pr) => pr.branch === branch)
       // One-lane-consumes, decided by LIVE ownership plus landed content:
       // - a LIVE record owns its branch, so its standing fact is that
       //   record's own pending signal, never a derived admission;
-      // - a fact pointing AT a terminal record's landing commit is the
-      //   PR2139 incident cell — content already on main, a stale
-      //   re-projection, not an approval of new work (the empty double-merge
-      //   minted exactly there);
+      // - a fact whose content the repository ALREADY carries is the PR2139
+      //   incident cell — a stale re-projection, not an approval of new work
+      //   (the empty double-merge minted exactly there). That set is derived
+      //   from git by {@link landedSubmits} and passed in: this function is
+      //   pure over `BaysState`, and the question is not one `BaysState` can
+      //   answer (see that function's header for why the record store's
+      //   answer was wrong in both of the now-common cases);
       // - any OTHER terminal-record branch composes: post-purge (the legacy
       //   mint is retired) the derived lane IS the only re-entry for a merged
       //   or withdrawn branch's next head (Q1), and excluding record history
       //   wholesale would strand every resubmit.
       if (records.some((pr) => isLiveChange(pr as Change))) return false
-      if (alreadyLandedSubmits(bays).some((row) => row.branch === branch)) return false
+      if (landedBranches.has(branch)) return false
       return arbitrateDerivedChange(records as Change[], bays.submits[branch]).lane === "derived"
     })
     .toSorted()
 }
 
-/**
- * Standing facts whose sha IS a terminal record's landing commit for the same
- * branch: content the queue already merged, surviving as a re-projected ref —
- * the PR2139 double-merge's exact signature. These never compose; the compose
- * warns one row per branch (NO SILENT ERRORS) and the cure is retirement of
- * the stale fact, not a resubmit.
+/** One standing fact whose content the repository ALREADY carries: its sha is
+ * reachable from the merged-truth index's walked tip. */
+export type LandedSubmit = Readonly<{
+  branch: string
+  sha: string
+  /** The first-parent merge commit that carried the fact's sha, when the walked
+   * window names one. Absent for a fact merged outside the walk. */
+  mergeCommit?: string
+}>
+
+/** Why a standing fact's containment question has no answer.
+ *
+ * `degenerate` — the fact's sha IS the walked tip, so `is A contained in B`
+ * holds for free and proves nothing (merged-truth's self-comparison door-stop).
+ * The CONTENT is on the tip by construction, so this still bars admission.
+ *
+ * `unreadable` — git could not resolve the fact's sha here (pruned, never
+ * fetched, or a synthetic sha). Nothing is proven in EITHER direction, and the
+ * safe reading is the one the compose already applies to an unreadable oracle:
+ * leave the fact admissible so live work is never silently dropped, and be
+ * loud about it on every pass. */
+export type UnresolvedSubmitReason = "degenerate" | "unreadable"
+
+/** A standing fact git could not answer for. Never folded into landed or
+ * not-landed — an unanswerable window is not a verdict. */
+export type UnresolvedSubmit = Readonly<{
+  branch: string
+  sha: string
+  reason: UnresolvedSubmitReason
+  /** What was queried and what was missing, in the reader's own words. */
+  detail: string
+}>
+
+/** One standing fact where the retired record-store answer and the repository
+ * answer differ. Reported per fact, never counted: a disagreement names which
+ * side said what and which record produced the store's claim. */
+export type LandedSubmitDisagreement = Readonly<{
+  branch: string
+  sha: string
+  store: "landed" | "not-landed"
+  derived: "landed" | "not-landed" | UnresolvedSubmitReason
+  /** The terminal record whose integration commit the store matched. */
+  record?: string
+  detail: string
+}>
+
+export type LandedSubmitScan = Readonly<{
+  landed: readonly LandedSubmit[]
+  unresolved: readonly UnresolvedSubmit[]
+  disagreements: readonly LandedSubmitDisagreement[]
+  /** Denominator for every count above: how many standing facts were asked
+   * about. A zero landed over zero facts and a zero over forty are different
+   * findings, and no caller may print one as the other. */
+  facts: number
+}>
+
+/** Resolve the merged-truth index for ONE base branch. Supplied by the caller
+ * so index building — one first-parent walk per base — is cached, bounded (a
+ * production caller passes the trailer-stamping epoch as `stop`) and owned
+ * where the repository is, not re-derived per fact. */
+export type MergedTruthIndexFor = (base: string) => Promise<MergedTruthIndex>
+
+/** The empty scan, for a host that supplies no repository reader. It is NOT a
+ * default answer: {@link landedSubmits} is the only producer of a real one, and
+ * a caller handed this must say so where it says anything. */
+export const NO_LANDED_SUBMIT_SCAN: LandedSubmitScan = {
+  landed: [],
+  unresolved: [],
+  disagreements: [],
+  facts: 0,
+}
+
+/** What the RETIRED record-store reader would have claimed for one branch: a
+ * terminal record on that branch whose integration commit IS the fact's sha.
+ *
+ * Kept for exactly one purpose — naming the disagreement in
+ * {@link landedSubmits} — and never consulted for the verdict. Delete it with
+ * the record store; nothing else may call it.
  */
-export function alreadyLandedSubmits(
+function storeLandedClaim(bays: DeepReadonly<BaysState>, branch: string, sha: string): string | undefined {
+  return Object.values(bays.prs).find(
+    (pr) => pr.branch === branch && !isLiveChange(pr as Change) && pr.integration?.commit === sha,
+  )?.id
+}
+
+/**
+ * Standing submit facts whose content the repository ALREADY carries — derived
+ * from git, never from the change-record store.
+ *
+ * This is the read that replaced `alreadyLandedSubmits`, which answered the
+ * same question out of `bays.prs` and could not answer it in either of the two
+ * now-common cases. It needed a terminal RECORD for the branch — post-purge a
+ * merged branch usually has none — and it compared the fact's sha to that
+ * record's `integration.commit`, while the queue REBUILDS a candidate at merge
+ * under a new head, so the equality it tested does not survive a real merge.
+ * Both failures read as "not landed", which is the PR2139 double-merge's own
+ * signature: the compose derives an empty second revision for content already
+ * on main.
+ *
+ * `bays.submits` is still read, because that projection IS the standing-fact
+ * population — a git ref set, not a change record. `bays.prs` is read for ONE
+ * thing, the disagreement report, and never for the verdict.
+ *
+ * NO SILENT ERRORS, per fact: an unresolvable sha is attributable to one
+ * branch and is reported as {@link UnresolvedSubmit}, so one bad fact can
+ * never starve the scan of every healthy sibling — the same per-branch
+ * boundary the compose's derive loop keeps. A git failure is never an answer:
+ * `mergedByAncestry` resolves BOTH endpoints through `rev-parse --verify`
+ * before it asks containment, so only a resolved pair yields a not-landed.
+ */
+export async function landedSubmits(
+  git: MergedTruthGit,
+  indexFor: MergedTruthIndexFor,
   bays: DeepReadonly<BaysState>,
-): Readonly<{ branch: string; sha: string; record: string }>[] {
-  return Object.keys(bays.submits)
-    .flatMap((branch) => {
-      const submit = bays.submits[branch]
-      if (submit === undefined) return []
-      const landed = Object.values(bays.prs).find(
-        (pr) => pr.branch === branch && !isLiveChange(pr as Change) && pr.integration?.commit === submit.sha,
+): Promise<LandedSubmitScan> {
+  const branches = Object.keys(bays.submits).toSorted()
+  const landed: LandedSubmit[] = []
+  const unresolved: UnresolvedSubmit[] = []
+  const disagreements: LandedSubmitDisagreement[] = []
+  const indexes = new Map<string, MergedTruthIndex | Error>()
+  let facts = 0
+
+  for (const branch of branches) {
+    const submit = bays.submits[branch]
+    if (submit === undefined) continue
+    facts += 1
+    const record = storeLandedClaim(bays, branch, submit.sha)
+    const store = record === undefined ? "not-landed" : "landed"
+    const disagree = (derived: LandedSubmitDisagreement["derived"], detail: string): void => {
+      disagreements.push({
+        branch,
+        sha: submit.sha,
+        store,
+        derived,
+        ...(record === undefined ? {} : { record }),
+        detail,
+      })
+    }
+    const unreadable = (detail: string): void => {
+      unresolved.push({ branch, sha: submit.sha, reason: "unreadable", detail })
+      if (store === "landed") disagree("unreadable", detail)
+    }
+
+    // One index per DISTINCT base, built once and reused — a fact declares the
+    // base it targets, and an index is pinned to one walked tip, so asking a
+    // `main` index about a fact submitted to a release branch would answer the
+    // wrong question. A base whose index cannot be built fails its own facts
+    // and nobody else's; the error is cached so a broken base is not walked
+    // once per fact.
+    const base = baseIdentity(submit.base)
+    let index = indexes.get(base)
+    if (index === undefined) {
+      try {
+        index = await indexFor(base)
+      } catch (error) {
+        index = error instanceof Error ? error : new Error(String(error))
+      }
+      indexes.set(base, index)
+    }
+    if (index instanceof Error) {
+      unreadable(
+        `could not build the merged-truth index for base '${base}', so standing fact '${branch}' at ` +
+          `${submit.sha} could not be asked about: ${index.message}`,
       )
-      return landed === undefined ? [] : [{ branch, sha: submit.sha, record: landed.id }]
-    })
-    .toSorted((left, right) => left.branch.localeCompare(right.branch))
+      continue
+    }
+
+    let answer: Awaited<ReturnType<typeof mergedByAncestry>>
+    try {
+      answer = await mergedByAncestry(git, index, submit.sha)
+    } catch (error) {
+      unreadable(
+        `git could not resolve standing fact '${branch}' at ${submit.sha} against the walked tip ` +
+          `${index.tip} in ${index.repo}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      continue
+    }
+
+    if (answer.kind === "merged") {
+      landed.push({
+        branch,
+        sha: submit.sha,
+        ...(answer.mergeCommit === undefined ? {} : { mergeCommit: answer.mergeCommit }),
+      })
+      if (store === "not-landed") {
+        disagree(
+          "landed",
+          `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but the ` +
+            `repository carries that commit on ${index.tip}` +
+            (answer.mergeCommit === undefined ? "" : ` (merged by ${answer.mergeCommit})`),
+        )
+      }
+      continue
+    }
+
+    if (answer.kind === "unknown") {
+      unresolved.push({ branch, sha: submit.sha, reason: "degenerate", detail: answer.detail })
+      if (store === "landed") disagree("degenerate", answer.detail)
+      continue
+    }
+
+    if (store === "landed") {
+      disagree(
+        "not-landed",
+        `terminal record '${String(record)}' names ${submit.sha} as its integration commit, but that commit ` +
+          `is NOT contained in ${index.tip} in ${index.repo} — the record claims a landing the repository ` +
+          `does not carry`,
+      )
+    }
+  }
+
+  return { landed, unresolved, disagreements, facts }
+}
+
+/**
+ * The branches a derived admission must not be minted for, from a scan.
+ *
+ * Landed content, plus the DEGENERATE facts: a fact standing at the walked tip
+ * itself carries content the tip holds by construction, even though containment
+ * could not prove it. An UNREADABLE fact is deliberately absent — nothing was
+ * proven about it in either direction, and dropping a live submission on a
+ * failed read is the one outcome worse than composing a stale one (the compose
+ * applies the same asymmetry to its own unreadable oracle).
+ */
+export function landedSubmitBranches(scan: LandedSubmitScan): ReadonlySet<string> {
+  return new Set([
+    ...scan.landed.map((row) => row.branch),
+    ...scan.unresolved.filter((row) => row.reason === "degenerate").map((row) => row.branch),
+  ])
 }
 
 /**
@@ -489,9 +702,23 @@ export function deriveRunMemberArgs(
     queues as QueuesState,
     (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
   )
-  const settledChangeId = reusable?.changeId ?? enrichment?.changeId ?? mintSyntheticChangeId(branch, submit.sha)
+  const resolved = resolveChangeIdentity({
+    ...(reusable?.changeId === undefined ? {} : { snapshot: reusable.changeId }),
+    ...(enrichment?.changeId === undefined ? {} : { trailer: enrichment.changeId }),
+    branch,
+    sha: submit.sha,
+  })
+  if (!resolved.ok) {
+    raiseFailure(
+      "refusal",
+      "derived-change-id-missing",
+      `yrd: branch '${branch}' tip ${submit.sha} carries no Change-Id trailer, and its submit facts are not ` +
+        `canonical (a well-formed ref and a full hex sha) to mint a synthetic identity from — amend the tip ` +
+        `commit with a Change-Id trailer and re-push branch + submit ref`,
+    )
+  }
   const identity = mintDerivedMemberIdentity({ mint, bays, queues, branch })
-  const changeId = identity.changeId ?? settledChangeId
+  const changeId = identity.changeId ?? resolved.changeId
   return {
     branch,
     id: identity.id,
@@ -502,29 +729,4 @@ export function deriveRunMemberArgs(
     ...(enrichment?.issue === undefined ? {} : { issue: enrichment.issue }),
     ...(enrichment?.title === undefined ? {} : { title: enrichment.title }),
   }
-}
-
-/**
- * The synthetic arm of the identity ladder: mint a trailerless tip's change id
- * from the submission's stable facts via {@link changeIdForDerivedSubmit} —
- * deterministic, so a re-compose of the same push derives the same identity,
- * and the run's journaled `ChangeSnapshot` then anchors it for every later
- * revision of the branch. Refuses — commit-free, so the caller's number mint
- * never burns on a refused branch — only when the facts are not canonical (a
- * malformed ref or non-hex sha): an identity minted from a non-canonical fact
- * would not be stable across re-derivations, which is the mint's entire
- * contract. The cure is the trailer — amend the tip commit and re-push (the
- * record-lane out retired with the legacy mint).
- */
-function mintSyntheticChangeId(branch: string, sha: string): string {
-  if (!GitRefSchema.safeParse(branch).success || !GitShaSchema.safeParse(sha).success) {
-    raiseFailure(
-      "refusal",
-      "derived-change-id-missing",
-      `yrd: branch '${branch}' tip ${sha} carries no Change-Id trailer, and its submit facts are not ` +
-        `canonical (a well-formed ref and a full hex sha) to mint a synthetic identity from — amend the tip ` +
-        `commit with a Change-Id trailer and re-push branch + submit ref`,
-    )
-  }
-  return changeIdForDerivedSubmit({ branch, sha })
 }

@@ -98,7 +98,10 @@ import {
   type StepExecution,
   type StepRunner,
   Queues,
+  buildMergedTruthIndex,
+  landedSubmits,
   type DerivedSubmitEnrichment,
+  type MergedTruthGit,
 } from "@yrd/queue"
 import {
   installedPlanStale,
@@ -2053,6 +2056,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     requires: options.config.requires,
     prNumberMint,
     readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
+    scanLandedSubmits: landedSubmitScanner({ process: options.process, repo: options.repo }),
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
@@ -2560,6 +2564,75 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  * identity from the submission's stable facts (a retained snapshot's identity
  * or a present trailer wins over that mint).
  */
+/**
+ * The merged-truth reader's two git reads, over this host's process runner.
+ *
+ * `text` throws on ANY non-zero exit — an unreadable repository is a loud
+ * failure, never an empty index, and it is that throw which makes a negative
+ * containment answer trustworthy. `optionalText` maps a non-zero exit to
+ * undefined for the one question where that is a real answer (`merge-base
+ * --is-ancestor` exits 1 for "not contained"). A TIMEOUT stays fatal in both:
+ * git never finished asking, and reporting that as "not contained" would read
+ * a stalled repository as a clean not-merged.
+ */
+export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
+  const read = async (repo: string, args: readonly string[]): Promise<ProcessResult> => {
+    const result = await process.run({
+      argv: ["git", "-C", repo, ...args],
+      cwd: repo,
+      env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    assertGitDidNotTimeOut(result, args)
+    return result
+  }
+  return {
+    async text(repo, args) {
+      const result = await read(repo, args)
+      if (result.exitCode !== 0) {
+        throw new Error(`yrd: git ${args.join(" ")} exited ${String(result.exitCode)}: ${result.stderr.trim()}`)
+      }
+      return result.stdout.trim()
+    },
+    async optionalText(repo, args) {
+      const result = await read(repo, args)
+      return result.exitCode === 0 ? result.stdout.trim() : undefined
+    },
+  }
+}
+
+/**
+ * The queue's `scanLandedSubmits` capability: which standing submit facts does
+ * this repository already carry?
+ *
+ * One first-parent index per DISTINCT base, built on demand and cached inside
+ * one scan. The walk is UNBOUNDED on purpose: this consumer asks only
+ * `mergedByAncestry`, whose verdict is pure containment and never consults the
+ * Change-Id lineage index or its specimens, so the trailer-stamping epoch that
+ * a lineage consumer must pass as `stop` changes nothing here. The index's
+ * only contribution is naming the merge commit that carried a landed fact,
+ * which a bounded walk would silently drop — hence the full walk, and hence
+ * the cost: one `git log --first-parent` over the base per compose pass.
+ */
+function landedSubmitScanner(options: Readonly<{ process: Pick<Process, "run">; repo: string }>) {
+  const git = mergedTruthGit(options.process)
+  return async (input: Readonly<{ bays: Parameters<typeof landedSubmits>[2] }>) =>
+    landedSubmits(
+      git,
+      async (base) =>
+        buildMergedTruthIndex(git, options.repo, {
+          tip: (
+            await resolveGitQueueTarget({
+              inject: { process: options.process },
+              repo: options.repo,
+              branch: baseIdentity(base),
+            })
+          ).sha,
+        }),
+      input.bays,
+    )
+}
+
 /**
  * Does the base branch already contain this standing fact's content?
  *

@@ -2129,6 +2129,22 @@ function projectPR(
 }
 
 /**
+ * The landed-content answer this SURFACE does not have.
+ *
+ * "Has this standing fact's content already landed?" is a question about the
+ * repository, and `landedSubmits` is the only thing that answers it. This is a
+ * synchronous render projection: it holds `BaysState` and a status result, no
+ * process, no repository. So it excludes nothing on landed content and says so
+ * here rather than passing the record store's answer, which is the defect the
+ * cutover removed — a fact standing at merged content shows as pending until
+ * the compose or `yrd admin pr prune` retires it, and both of those DO ask git.
+ *
+ * The fix is to thread a scan down from the command entrance that already has
+ * the repository (see `prunePrs`), not to re-derive an answer here.
+ */
+const NO_REPOSITORY_LANDED_ANSWER: ReadonlySet<string> = new Set<string>()
+
+/**
  * Every live submit fact this queue's base holds that no retained run has
  * admitted at its exact sha: the DERIVED lane's pre-run population, and the
  * ONE derivation of it any reader may use.
@@ -2152,9 +2168,10 @@ function projectPR(
 export function pendingSubmitFacts(
   state: BaysState,
   result: QueueStatusResult,
+  landedBranches: ReadonlySet<string>,
 ): readonly Readonly<{ branch: string; fact: ProjectedBranchSubmit; bay?: Bay }>[] {
   const members = [...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs)
-  return derivedLaneBranches(state).flatMap((branch) => {
+  return derivedLaneBranches(state, landedBranches).flatMap((branch) => {
     const fact = state.submits[branch]
     if (fact === undefined) return []
     if (baseIdentity(fact.base) !== baseIdentity(result.base)) return []
@@ -2177,7 +2194,7 @@ export function pendingSubmitFacts(
  * indistinguishable from no work, which is the defect.
  */
 function submitFactChangeRows(state: BaysState, result: QueueStatusResult, now: number): HumanChangeProjection[] {
-  return pendingSubmitFacts(state, result).map(({ branch, fact, bay }) => {
+  return pendingSubmitFacts(state, result, NO_REPOSITORY_LANDED_ANSWER).map(({ branch, fact, bay }) => {
     const path = bay?.path
     const clock = age(fact.at, now, `branch '${branch}' submit fact age`)
     return {

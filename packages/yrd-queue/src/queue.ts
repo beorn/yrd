@@ -137,10 +137,12 @@ import {
   derivedLaneBranches,
   isDerivedRunMember,
   materializeDerivedRunMembers,
-  alreadyLandedSubmits,
+  landedSubmitBranches,
+  NO_LANDED_SUBMIT_SCAN,
   type DerivedAuthorityLookup,
   type DerivedRunMember,
   type DerivedSubmitEnrichment,
+  type LandedSubmitScan,
 } from "./derived-admission.ts"
 import {
   activeQueueRootIds,
@@ -858,24 +860,41 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
     input: Readonly<{ branch: string; sha: string }>,
   ): DerivedSubmitEnrichment | Promise<DerivedSubmitEnrichment>
   /**
+   * Which standing submit facts does the REPOSITORY already carry?
+   *
+   * The git-derived replacement for `alreadyLandedSubmits`, which answered the
+   * same question out of `bays.prs` and got it wrong in both of the now-common
+   * cases (see {@link landedSubmits}). This layer is pure over `BaysState` and
+   * never opens git itself, so the host supplies the scan — the same shape and
+   * reason as {@link QueueOptions.readSubmitEnrichment} above.
+   *
+   * Absent, the compose has NO answer to this question: it excludes nothing on
+   * landed content, says so once per pass, and leans on
+   * {@link QueueOptions.isSubmitSuperseded} downstream. It does NOT fall back
+   * to the record store — that store's answer is the defect this replaced, and
+   * a silent fallback to it would restore the PR2139 double-merge unannounced.
+   */
+  scanLandedSubmits?(input: Readonly<{ bays: DeepReadonly<BaysState> }>): Promise<LandedSubmitScan>
+
+  /**
    * Has the base branch ALREADY delivered this standing fact's content?
    *
-   * `alreadyLandedSubmits` asks the same question of the record store, and
-   * cannot answer it in two cases that are now the common ones. It needs a
-   * terminal RECORD for the branch — post-purge a merged branch usually has
-   * none — and it compares the fact's sha to that record's integration
-   * commit, while the queue REBUILDS a candidate at merge and mints a new
-   * head, so the equality it tests does not survive a real merge.
+   * The SECOND reader of the same question {@link QueueOptions.scanLandedSubmits}
+   * now answers, kept because it runs later in the pass, per branch, against
+   * the branch's own declared base rather than the scan's walked tip. Both are
+   * git-derived; the record-store answer they replaced (`alreadyLandedSubmits`)
+   * is deleted. Two live readers for one question is a consolidation debt, and
+   * it is named here rather than left for the next reader to discover.
    *
-   * Git answers it directly, for every branch, with or without a record. This
-   * layer is pure over `BaysState` and never reads git itself, so the host
+   * This layer is pure over `BaysState` and never reads git itself, so the host
    * supplies the answer — the same shape and reason as
    * {@link QueueOptions.readSubmitEnrichment} above.
    *
-   * Absent, the compose keeps its record-keyed exclusion alone, which is the
-   * pre-2026-08-28 behaviour: a merged branch whose fact was never retired
-   * composes again on every pass. Measured that day, four of them held the
-   * admission phase and the queue did not merge for 2h25m.
+   * Absent, the compose has only the scan's exclusion; absent BOTH, nothing
+   * excludes landed content, which is the pre-2026-08-28 behaviour: a merged
+   * branch whose fact was never retired composes again on every pass. Measured
+   * that day, four of them held the admission phase and the queue did not
+   * merge for 2h25m.
    */
   isSubmitSuperseded?(input: Readonly<{ branch: string; sha: string; base: string }>): boolean | Promise<boolean>
   /** Repository-truth sink for one immutable terminal merge record. */
@@ -1234,6 +1253,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             options.recordMerge,
             options.prNumberMint,
             options.readSubmitEnrichment,
+            options.scanLandedSubmits,
             options.isSubmitSuperseded,
             configuredRunner,
             progress,
@@ -1294,6 +1314,7 @@ function createQueue<Shape extends ChangeShape>(
   recordMerge: QueueOptions<readonly AnyStepDef[]>["recordMerge"],
   derivedMint: PrNumberMint | undefined,
   readSubmitEnrichment: QueueOptions<readonly AnyStepDef[]>["readSubmitEnrichment"],
+  scanLandedSubmits: QueueOptions<readonly AnyStepDef[]>["scanLandedSubmits"],
   isSubmitSuperseded: QueueOptions<readonly AnyStepDef[]>["isSubmitSuperseded"],
   configuredRunner: Runner | undefined,
   progress: QueueProgressPolicy,
@@ -1473,11 +1494,31 @@ function createQueue<Shape extends ChangeShape>(
     const snapshot = runtime()
     // One lane consumes one push, decided by LIVE ownership plus landed
     // content (see derivedLaneBranches). The PR2139 incident cell — a fact
-    // standing AT a terminal record's landing commit — is excluded there and
-    // must stay loud here: content already merged, the fact is a stale
+    // standing at content the repository already carries — is excluded there
+    // and must stay loud here: content already merged, the fact is a stale
     // re-projection to retire, never new work.
-    const landed = alreadyLandedSubmits(snapshot.bays)
-    for (const stale of landed) {
+    //
+    // The answer comes from GIT, through the host's scan. There is no fallback
+    // to the record store when the host wires none: that store answered this
+    // question wrongly for every recordless branch and for every merge-time
+    // rebuild, and a quiet fall-back to it is exactly how the double-merge
+    // came back unannounced. No scan means no exclusion and one loud line.
+    if (scanLandedSubmits === undefined) {
+      log.warn?.(
+        "queue compose cannot ask the repository which standing submit facts already landed: no " +
+          "scanLandedSubmits reader is configured for the queue plugin. Landed content excludes NOTHING on " +
+          "this pass — the record store is deliberately not consulted, because its answer was wrong for " +
+          "every recordless branch and every merge-time rebuild — so a stale fact can reach the derived " +
+          "lane and is caught, if at all, by the downstream superseded check",
+        {
+          action: "compose-derived-landed-scan-unconfigured",
+          submits: Object.keys(snapshot.bays.submits).length,
+        },
+      )
+    }
+    const landedScan =
+      scanLandedSubmits === undefined ? NO_LANDED_SUBMIT_SCAN : await scanLandedSubmits({ bays: snapshot.bays })
+    for (const stale of landedScan.landed) {
       if (skip.has(stale.branch)) continue
       log.warn?.(
         "queue compose will not derive an admission for a submit fact pointing at already-landed content; " +
@@ -1488,15 +1529,53 @@ function createQueue<Shape extends ChangeShape>(
           action: "compose-derived-fact-already-landed",
           branch: stale.branch,
           sha: stale.sha,
-          record: stale.record,
+          ...(stale.mergeCommit === undefined ? {} : { mergeCommit: stale.mergeCommit }),
         },
       )
     }
-    // The git-sourced half of the same question `alreadyLandedSubmits` asks of
-    // the record store. A fact whose content the base already holds is a stale
-    // re-projection, never new work — and unlike the record-keyed check this
-    // one answers for a recordless branch and survives a merge-time rebuild.
-    const lane = derivedLaneBranches(snapshot.bays)
+    // An unanswerable fact is neither landed nor live work, and it is never
+    // folded into either count: it gets its own line naming what git could not
+    // read. `landedSubmitBranches` decides which reasons bar admission.
+    for (const open of landedScan.unresolved) {
+      if (skip.has(open.branch)) continue
+      log.warn?.(
+        "queue compose could not determine from the repository whether a standing submit fact's content " +
+          "already landed; " +
+          (open.reason === "degenerate"
+            ? "the fact stands at the walked tip itself, so containment proves nothing and the branch is " +
+              "held back — retire the fact (git push bay :refs/yrd/submit/" +
+              open.branch +
+              ") if it is stale"
+            : "the fact's commit is unreadable here, so the branch stays admissible rather than dropping " +
+              "possibly-live work"),
+        {
+          action: "compose-derived-fact-landing-unresolved",
+          branch: open.branch,
+          sha: open.sha,
+          reason: open.reason,
+          detail: open.detail,
+        },
+      )
+    }
+    // The retired record store and the repository disagreeing about a landing
+    // is a FINDING, not noise to reconcile: one line per fact, naming which
+    // side said what. The repository's answer is the one that acts.
+    for (const conflict of landedScan.disagreements) {
+      log.warn?.(
+        "the change-record store and the repository disagree about whether a standing submit fact's " +
+          "content has landed; the repository decides and the record is being retired — record this",
+        {
+          action: "compose-derived-landing-disagreement",
+          branch: conflict.branch,
+          sha: conflict.sha,
+          store: conflict.store,
+          derived: conflict.derived,
+          ...(conflict.record === undefined ? {} : { record: conflict.record }),
+          detail: conflict.detail,
+        },
+      )
+    }
+    const lane = derivedLaneBranches(snapshot.bays, landedSubmitBranches(landedScan))
     const offered = lane.filter((branch) => !skip.has(branch))
     const branches: string[] = []
     let supersededCount = 0
@@ -1562,7 +1641,10 @@ function createQueue<Shape extends ChangeShape>(
         lane: lane.length,
         offered: offered.length,
         excludedAlreadyAdmitted: skip.size,
-        excludedAlreadyLanded: landed.length,
+        excludedAlreadyLanded: landedScan.landed.length,
+        landingUnresolved: landedScan.unresolved.length,
+        landingDisagreements: landedScan.disagreements.length,
+        landedScanFacts: landedScan.facts,
         excludedSuperseded: supersededCount,
         mint: derivedMint === undefined ? "unconfigured" : "configured",
         enrichmentReader: readSubmitEnrichment === undefined ? "unconfigured" : "configured",
@@ -7197,7 +7279,7 @@ function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): Change
   // `prs: []` beside a non-empty `derived` is an EXPLICIT selection of exactly
   // those derived members (the compose's candidate dispatch for an all-derived
   // partition); a bare empty/absent `prs` stays the implicit queue.
-  if (args.prs !== undefined && args.prs.length === 0 && (args.derived?.length ?? 0) > 0) return []
+  if (args.prs?.length === 0 && (args.derived?.length ?? 0) > 0) return []
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
   if (selectors === undefined) return undefined
   const prs = selectors.map((selector) => {

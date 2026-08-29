@@ -62,3 +62,92 @@ export function findChangeId(candidates: readonly string[]): ChangeId | undefine
   const found = candidates.find((value) => ChangeIdSchema.safeParse(value).success)
   return found === undefined ? undefined : ChangeIdSchema.parse(found)
 }
+
+/** Where a settled change identity actually came from. */
+export type ChangeIdProvenance = "record" | "snapshot" | "trailer" | "synthetic"
+
+/**
+ * A settled identity, or the one reason settling is impossible. Modelled as a
+ * discriminated result rather than a throw because the sole refusal is a TYPED
+ * queue refusal (`derived-change-id-missing`) whose failure vocabulary lives in
+ * `@yrd/core`, one layer above this module: the resolver decides, the caller
+ * raises. That split is what lets the receiver adopt this same ladder later
+ * without importing the queue's failure machinery.
+ */
+export type ResolvedChangeIdentity =
+  | Readonly<{
+      ok: true
+      changeId: ChangeId
+      provenance: ChangeIdProvenance
+      /**
+       * An AUTHORITATIVE trailer the tip carries that disagrees with the
+       * anchored identity that outranked it — the silent identity split.
+       *
+       * It is reachable by following the receiver's own printed cure. A
+       * trailerless branch admits under a synthetic id, that id anchors in the
+       * run's `ChangeSnapshot`, the author then runs the advertised `git commit
+       * --amend --no-edit` to stamp a real trailer and re-pushes — and the
+       * anchor still wins, correctly (an identity that changed mid-flight would
+       * orphan every fact already keyed on it). The commit and the queue now
+       * disagree about the change's identity, permanently, and today nothing
+       * says so. Surfacing it is not the cure; settling identity ONCE, at the
+       * submit fact, is. This field is what lets the divergence be counted
+       * before that lands, and asserted against after.
+       */
+      supersededTrailer?: ChangeId
+    }>
+  | Readonly<{ ok: false; reason: "non-canonical-submit-facts" }>
+
+/**
+ * Settle a derived submission's change identity from every piece of evidence
+ * that can carry one, in rank order:
+ *
+ * 1. `record` — a LIVE change record's own identity. The record lane answers
+ *    for the branch; nothing outranks it.
+ * 2. `snapshot` — a retained `ChangeSnapshot` for the branch. This is what
+ *    makes identity stable across a force-push and a rebase: after birth the
+ *    tip sha never re-enters the key, so a branch keeps one identity for its
+ *    whole life however its commits are rewritten.
+ * 3. `trailer` — the tip commit's `Change-Id`, the author's own declaration.
+ * 4. `synthetic` — a birth-time mint from (branch, tip sha). Ranked last and
+ *    reachable only at BIRTH, when no anchor exists yet.
+ *
+ * The sha appears in exactly one arm, and only for a branch nothing has
+ * recorded yet. Reading rank 4 as "identity is keyed on the tip sha" inverts
+ * the design: it is a seed consumed once, at birth, and anchored by the first
+ * journaled snapshot — ranks 1 and 2 are what every later derivation reads.
+ */
+export function resolveChangeIdentity(
+  evidence: Readonly<{
+    record?: string | undefined
+    snapshot?: string | undefined
+    trailer?: string | undefined
+    branch: string
+    sha: string
+  }>,
+): ResolvedChangeIdentity {
+  const trailer = evidence.trailer === undefined ? undefined : ChangeIdSchema.parse(evidence.trailer)
+  const anchored: readonly (readonly [ChangeIdProvenance, string | undefined])[] = [
+    ["record", evidence.record],
+    ["snapshot", evidence.snapshot],
+  ]
+  for (const [provenance, value] of anchored) {
+    if (value === undefined) continue
+    const changeId = ChangeIdSchema.parse(value)
+    return trailer !== undefined && trailer !== changeId
+      ? { ok: true, changeId, provenance, supersededTrailer: trailer }
+      : { ok: true, changeId, provenance }
+  }
+  if (trailer !== undefined) return { ok: true, changeId: trailer, provenance: "trailer" }
+  // Birth. A synthetic identity minted from a non-canonical fact would not be
+  // stable across re-derivation, which is the mint's entire contract — so the
+  // caller refuses instead of anchoring a drifting id.
+  if (!GitRefSchema.safeParse(evidence.branch).success || !GitShaSchema.safeParse(evidence.sha).success) {
+    return { ok: false, reason: "non-canonical-submit-facts" }
+  }
+  return {
+    ok: true,
+    changeId: changeIdForDerivedSubmit({ branch: evidence.branch, sha: evidence.sha }),
+    provenance: "synthetic",
+  }
+}

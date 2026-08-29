@@ -5,6 +5,7 @@ import type { HasJobs, HasRunner, JobCommands, JobsState } from "@yrd/job"
 import type {
   MergeRecordEstateRepair,
   GitChangeRemerger,
+  MergedTruthGit,
   HasQueue,
   QueueAuditEmission,
   QueueCommands,
@@ -340,6 +341,10 @@ export type YrdCliIO = {
   /** Git facts for `pr prune` and the re-merge preflight; defaults to real Git
    * plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
+  /** The merged-truth reader's two git reads, for the derived answer to "has
+   * this standing submit fact's content already landed?"; defaults to real Git
+   * plumbing in `cwd`. */
+  mergedTruthGit?(cwd: string): MergedTruthGit
   /** Git facts for the branch-state verbs; defaults to real Git plumbing in `cwd`. */
   changeStateGit?(cwd: string): ChangeStateGitFacts
   /** Resolve a submodule's upstream default branch for `yrd admin submodule
