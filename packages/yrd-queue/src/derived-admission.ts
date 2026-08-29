@@ -44,6 +44,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  hasChangeRecord,
   type BaysState,
   type Change,
   type ChangeProps,
@@ -192,7 +193,7 @@ function materializeDerivedRunMember(
         `submit fact now stands at ${submit.sha} — re-derive admission at the live sha`,
     )
   }
-  if (bays.prs[member.id] !== undefined) {
+  if (hasChangeRecord(bays, member.id)) {
     throw new Error(
       `yrd: derived member id '${member.id}' already names a record — the mint is monotone above the ` +
         `frozen store, so a colliding id means an identity escaped outside it; refusing to run`,
@@ -306,7 +307,7 @@ export function derivedAuthorityLookup(
 ): DerivedAuthorityLookup {
   return (pr) => {
     if (pr.intent !== undefined) return undefined
-    if (state.bays.prs[pr.id] !== undefined) return undefined
+    if (hasChangeRecord(state.bays, pr.id)) return undefined
     const submit = state.bays.submits[pr.branch]
     if (submit === undefined || submit.sha !== pr.headSha) return undefined
     const consumer = consumingRun(state.queues, pr, submit, options.excludeRun)
@@ -360,7 +361,7 @@ function consumingRun(
  * number heuristic that legacy mints invalidate.
  */
 export function isDerivedRunMember(bays: DeepReadonly<Pick<BaysState, "prs">>, pr: ChangeSnapshot): boolean {
-  return pr.intent === undefined && bays.prs[pr.id] === undefined
+  return pr.intent === undefined && !hasChangeRecord(bays, pr.id)
 }
 
 /** A recordless, non-intent run member, for callers that hold a record id SET
@@ -849,7 +850,7 @@ export function deriveRunMemberArgs(
   // number per compose retry. The snapshot peek and both mint arms are pure.
   const reusable = latestChangeSnapshot(
     queues as QueuesState,
-    (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
+    (snapshot) => snapshot.branch === branch && !hasChangeRecord(bays, snapshot.id),
   )
   const resolved = resolveChangeIdentity({
     ...(reusable?.changeId === undefined ? {} : { snapshot: reusable.changeId }),

@@ -26,6 +26,7 @@ import {
   changeNotFoundMessage,
   resolveChange,
   reviewState,
+  hasChangeRecord,
   type BaysState,
   type HasBays,
   type Change,
@@ -571,7 +572,7 @@ function unrecordedSubmits(
           latestChangeSnapshot(
             queues as QueuesState,
             (snapshot) =>
-              snapshot.branch === branch && snapshot.headSha === submit.sha && bays.prs[snapshot.id] === undefined,
+              snapshot.branch === branch && snapshot.headSha === submit.sha && !hasChangeRecord(bays, snapshot.id),
           ) === undefined,
       )
       .toSorted(([left], [right]) => left.localeCompare(right))
@@ -2274,7 +2275,7 @@ function createQueue<Shape extends ChangeShape>(
       // pinned to exactly the submit sha — no `pr/checks-requested` event
       // exists to re-point, and dispatching one would refuse pr-not-found.
       // Admission pins the cycle base per dispatch instead.
-      if (runtime().bays.prs[pr.id] === undefined) continue
+      if (!hasChangeRecord(runtime().bays, pr.id)) continue
       const base = baseIdentity(pr.base)
       const baseSha = await resolveCycleBase(base)
       if (checkRequest(pr)?.baseSha === baseSha) continue
@@ -2392,7 +2393,7 @@ function createQueue<Shape extends ChangeShape>(
     // duplicated authority this program deletes. The verdict already persists
     // in the admission Jobs and the queues-slice refusal streak; dispatching
     // `recordAdmission` for a recordless member would only refuse pr-not-found.
-    if (runtime().bays.prs[pr.id] === undefined) return Promise.resolve(undefined)
+    if (!hasChangeRecord(runtime().bays, pr.id)) return Promise.resolve(undefined)
     return actions.recordAdmission({
       pr: pr.id,
       revision: changeRevisionNumber(pr),
@@ -2416,7 +2417,7 @@ function createQueue<Shape extends ChangeShape>(
     // authority is the live submit fact) and no verdict is ever recorded for
     // it, so an unresolved tally is not the durable data defect the record
     // lane must announce.
-    if (tally.status === "unresolved" && runtime().bays.prs[pr.id] === undefined) {
+    if (tally.status === "unresolved" && !hasChangeRecord(runtime().bays, pr.id)) {
       return recordedRequestCount(tally)
     }
     if (tally.status === "unresolved") {
@@ -2586,7 +2587,7 @@ function createQueue<Shape extends ChangeShape>(
         // while the compose resolves clean. Propagate instead — the door's own
         // policy for infrastructure: it needs a human, not a retry loop.
         if (
-          runtime().bays.prs[pr.id] === undefined &&
+          !hasChangeRecord(runtime().bays, pr.id) &&
           (job.conclusion !== "failure" || result.code === "runner-error")
         ) {
           raiseFailure(
@@ -3194,7 +3195,7 @@ function createQueue<Shape extends ChangeShape>(
             : []
           for (const gap of authorityGaps) {
             try {
-              if (gap.reason === "consumed" && snapshot.bays.prs[gap.pr] !== undefined) {
+              if (gap.reason === "consumed" && hasChangeRecord(snapshot.bays, gap.pr)) {
                 // Record lane only: the eject writes a durable pr/needs-author
                 // on the record. A derived member has no record to write it on
                 // (PURE-GIT ruling) — its consumed authority is already legible
@@ -3224,7 +3225,7 @@ function createQueue<Shape extends ChangeShape>(
               // nothing and re-skips the same PR every cycle — ledger that one.
               // A DERIVED consumed gap has no record for the eject to write on,
               // so it takes the same ledger row (its cure is a re-push).
-              if (gap.reason === "missing" || snapshot.bays.prs[gap.pr] === undefined) {
+              if (gap.reason === "missing" || !hasChangeRecord(snapshot.bays, gap.pr)) {
                 await noteCandidateRefusal([gap.pr], {
                   code: `queue-${gap.kind}-authority-${gap.reason}`,
                   reason: gapReason,
@@ -4568,7 +4569,7 @@ function createQueueCommands(
         status !== "passed" || integration === undefined
           ? []
           : settledRun.prs
-              .filter((member) => member.intent === undefined && state.bays.prs[member.id] === undefined)
+              .filter((member) => isDerivedRunMember(state.bays, member))
               .flatMap((member): EventDraft[] => {
                 const alreadyMerged = integration.alreadyLanded
                 if (alreadyMerged !== undefined) {
@@ -7942,7 +7943,7 @@ function admissionQueue(
       // re-push (the derived retry act — git CAS, per-push consent), checking
       // is already dispatched. Without this exit the drain loop re-admits the
       // same recordless member forever.
-      if (state.bays.prs[pr.id] !== undefined) return true
+      if (hasChangeRecord(state.bays, pr.id)) return true
       return checkEligibility(state, pr, steps).status === "queued"
     })
     .filter((pr) => {
@@ -8413,7 +8414,7 @@ function currentRevisionAdmissionJobs(
  * rule the record lane's `checkRequest` applies.
  */
 function derivedAdmissionBaseSha(state: DeepReadonly<RuntimeState>, pr: DeepReadonly<Change>): string | undefined {
-  if (state.bays.prs[pr.id] !== undefined) return undefined
+  if (hasChangeRecord(state.bays, pr.id)) return undefined
   const prefix = admissionRevisionKeyPrefix(pr.id, changeRevisionNumber(pr))
   let newest: Readonly<{ baseSha: string; job: string }> | undefined
   for (const [key, job] of Object.entries(state.jobs.byKey)) {

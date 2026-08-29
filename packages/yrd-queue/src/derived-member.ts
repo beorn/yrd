@@ -14,6 +14,7 @@ import {
   changeRevisionNumber,
   isLiveChange,
   mintChangeId,
+  hasChangeRecord,
   type BaysState,
   type Change,
   type PrNumberMint,
@@ -73,7 +74,7 @@ export function mintDerivedMemberIdentity(
   }
   const reusable = latestChangeSnapshot(
     queues,
-    (snapshot) => snapshot.branch === branch && bays.prs[snapshot.id] === undefined,
+    (snapshot) => snapshot.branch === branch && !hasChangeRecord(bays, snapshot.id),
   )
   if (reusable !== undefined) {
     const number = changeIdNumber(reusable.id)

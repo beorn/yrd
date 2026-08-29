@@ -5,6 +5,7 @@ import {
   raiseFailure,
   resolveSelector,
   resolveSelectorMatch,
+  type DeepReadonly,
   type JsonValue,
   type SelectorMatch,
 } from "@yrd/core"
@@ -1206,6 +1207,31 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
       return { ...base, status: "open", ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }) }
     })
     .toSorted((left, right) => left.openedAt.localeCompare(right.openedAt) || left.bay.localeCompare(right.bay))
+}
+
+/**
+ * Does the record store hold a Change for this id?
+ *
+ * The one place that indexes `BaysState.prs`. It lives HERE, beside the state it
+ * reads, because the module that owns a shape owns the questions about it — and
+ * because the first attempt to home it in yrd-queue would have closed an import
+ * cycle (derived-admission already imports derived-member), which is the type
+ * system reporting the same fact.
+ *
+ * It exists because the index was open-coded at nineteen sites in three
+ * spellings — `bays.prs[x] === undefined`, `state.bays.prs[x] !== undefined`,
+ * `runtime().bays.prs[x] === undefined` — two of which had additionally
+ * re-derived `isDerivedRunMember` longhand, one of them 2,700 lines from a call
+ * to the real function in the SAME file. A question asked that many ways has no
+ * home.
+ *
+ * Deliberately NOT merged with `isDerivedRunMember`: that predicate additionally
+ * requires the member to be intentless. Callers needing the stronger question
+ * must not spell the weaker one and hope; callers needing the weaker one must
+ * not pay for the stronger.
+ */
+export function hasChangeRecord(bays: DeepReadonly<Pick<BaysState, "prs">>, id: string): boolean {
+  return bays.prs[id] !== undefined
 }
 
 export function isLiveChange(pr: Change): boolean {
