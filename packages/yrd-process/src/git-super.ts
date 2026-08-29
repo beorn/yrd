@@ -25,7 +25,7 @@ export type GitSyncReadCommand =
   | Readonly<{ verb: "stash-list" }>
   | Readonly<{ verb: "branch-show-current" }>
   | Readonly<{ verb: "worktree-list" }>
-  | Readonly<{ verb: "config-get-regexp"; file?: string; pattern: string; nul?: boolean }>
+  | Readonly<{ verb: "config-get-regexp"; file?: string; blob?: string; pattern: string; nul?: boolean }>
   | Readonly<{ verb: "remote-get-url"; remote: string }>
 
 export type GitSyncReadRequest = Readonly<{
@@ -115,6 +115,7 @@ function syncReadArgv(command: GitSyncReadCommand): readonly string[] {
         "config",
         ...(command.nul === true ? ["--null"] : []),
         ...(command.file === undefined ? [] : ["--file", command.file]),
+        ...(command.blob === undefined ? [] : ["--blob", command.blob]),
         "--get-regexp",
         command.pattern,
       ]
