@@ -7259,20 +7259,25 @@ function auditQueues(
     }
   }
   for (const record of Queues.values(state.queues)) {
-    for (const pr of record.prs) {
-      if (pr.intent !== undefined || state.bays.prs[pr.id] !== undefined) continue
-      // A derived member (S6) is recordless BY DESIGN — its number sits above
-      // every record the frozen store holds (A9 mint monotonicity), which is
-      // what separates it from the store-corruption class this finding exists
-      // for. It counts in the audit population without a finding.
-      if (isDerivedRunMember(state.bays, pr)) continue
-      findings.push({
-        code: "missing-pr",
-        message: `queue run '${record.id}' references missing change '${pr.id}'`,
-        run: record.id,
-        pr: pr.id,
-      })
-    }
+    // `missing-pr` USED TO BE EMITTED HERE and could not be, which is why it is
+    // gone rather than repaired. The guard above it was
+    // `pr.intent !== undefined || bays.prs[pr.id] !== undefined` — the exact
+    // negation of `isDerivedRunMember` — so every member that survived it
+    // satisfied the very predicate the next line skipped on. The push was
+    // unreachable, and `queue audit` reported zero `missing-pr` findings
+    // because it COULD not report one, not because none existed.
+    //
+    // Deleted rather than fixed, because the finding has no referent left.
+    // `isDerivedRunMember`'s own argument is that the state it looked for is
+    // not representable: post-S6 records are never deleted, so a record the
+    // store "lost" cannot happen. Retiring the record store finishes the job —
+    // once it holds nothing, every member is recordless and "the store does
+    // not have this change" stops being a defect at all.
+    //
+    // The code-coverage ratchet did not catch this. `audit-finding-codes.test.ts`
+    // scans producer source for `code: "…"` literals, so a literal inside dead
+    // code satisfies it exactly as a live one does — it proves the string is
+    // written, never that the finding can fire.
     const authority = projectionLookupGet(state.queues.authority.runs, record.id)
     if (record.parent === undefined && authority !== undefined) {
       const intentMembers = new Set(record.prs.filter((pr) => pr.intent !== undefined).map((pr) => pr.id))

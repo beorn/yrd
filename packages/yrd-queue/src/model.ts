@@ -1185,7 +1185,6 @@ export const YRD_QUEUE_AUDIT_FINDING_CODES = [
   "queue-hold-expired",
   "draft-stranded",
   "unrecorded-submit",
-  "missing-pr",
   "run-without-submit-ancestry",
   "run-without-check-ancestry",
   "invalid-run",

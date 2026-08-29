@@ -285,11 +285,14 @@ describe("S6 stage 3 — derived-member selection, admission, run", () => {
       // The id-seam answers the recordless id from the retained snapshot.
       expect(app.queue.resolveMember("PR2")).toMatchObject({ source: "snapshot", id: "PR2" })
 
-      // A10: the derived run is audit-clean — no missing-pr, no ancestry
-      // finding — because a recordless member above the frozen max is derived
-      // BY DESIGN, not store corruption.
+      // A10: the derived run is audit-clean — no ancestry finding — because a
+      // recordless member is derived BY DESIGN, not store corruption.
+      //
+      // The `missing-pr` assertion that used to lead this block is GONE, not
+      // relaxed. It filtered for a code whose producer was unreachable, so it
+      // held for every possible input and proved nothing about this fixture.
+      // A test that cannot fail is not evidence of the property it names.
       const audit = app.queue.audit()
-      expect(audit.findings.filter((finding) => finding.code === "missing-pr")).toEqual([])
       expect(audit.findings.filter((finding) => finding.code === "run-without-submit-ancestry")).toEqual([])
       expect(audit.findings.filter((finding) => finding.code === "run-without-check-ancestry")).toEqual([])
     }
