@@ -6906,19 +6906,26 @@ describe("runYrd", () => {
       findings: [neverStarted],
     })
 
+    // A REFUSING CHANGE IS NOT AN UNHEALTHY SERVICE. `admission-refusal-loop` is
+    // a fact about one change, and this projection gates `hab up`: admitting it
+    // made a bad change brick the runner, which is the only thing that could
+    // process that change's fix. Measured 2026-08-29 on PR2599 — it failed
+    // `manifest-co-change` correctly, and the service then refused to start with
+    // `resident-runner-no-progress` while its singleton lease stayed held.
+    // `queue audit` and the `mr list` WHY column still carry the finding.
     findings = [refusalLoop]
+    expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
+      state: "healthy",
+      observedAt: "2026-07-09T12:10:00.000Z",
+    })
+
+    // POSITIVE CONTROL: a genuine SERVICE finding alongside it still stalls, so
+    // the narrowing cannot have made this projection blind to everything.
+    findings = [refusalLoop, neverStarted]
     expect(project(progressApp, "2026-07-09T12:10:00.000Z")).toEqual({
       state: "stalled",
       observedAt: "2026-07-09T12:10:00.000Z",
-      findings: [
-        {
-          ...refusalLoop,
-          // The certificate-era recut-gitlink-conflict projector is deleted with
-          // the rewrite machinery; a historical refusal now projects the
-          // generic resolution.
-          resolution: ["Correct the cause above, then retry the same Yrd command."],
-        },
-      ],
+      findings: [neverStarted],
     })
 
     findings = [expiredHold]

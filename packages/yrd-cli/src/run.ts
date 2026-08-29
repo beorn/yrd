@@ -1382,25 +1382,36 @@ function runnerDriverHealthError(
  * status record. The supervisor can then prove outcome progress without
  * replaying Journal history in its health probe. */
 export function habitantQueueProgress(app: YrdCliApp, now: string): QueueRunnerProgress {
+  // SERVICE health, not QUEUE CONTENT. Every code admitted here makes the
+  // habitant service `unhealthy`, and `hab up` refuses to start an unhealthy
+  // service — so a finding in this list must be a property the SERVICE can act
+  // on by starting, restarting, or continuing to run.
+  //
+  // `admission-refusal-loop` is deliberately NOT in this list. It is a fact
+  // about ONE CHANGE — its admission keeps refusing — and admitting it here
+  // made a bad change brick the runner: measured 2026-08-29, PR2599 failed
+  // `manifest-co-change` (correctly: it was missing two inventory rows), the
+  // service went `unhealthy` with `resident-runner-no-progress`, and
+  // `hab up yrd-runner` then refused while the singleton lease stayed held by
+  // the dead process. **The service that is refused startup is the only thing
+  // that could ever process the fix for the change that refused it**, so the
+  // state is unrecoverable from inside. That is the same head-of-line shape as
+  // the per-PR refusal that cost the whole cycle that morning, one layer up and
+  // worse, because the cycle case at least kept the process alive.
+  //
+  // The finding is not lost: `queue audit` still reports it, `yrd mr list`
+  // carries it in the WHY column, and delivering it to its named owner is
+  // @i/10-yrd/needs-person-reaches-only-the-log. A refusing change needs an
+  // OWNER, not a dead runner.
   const findings = app.queue
     .audit({ now })
     .findings.filter(
       (finding) =>
         finding.code === "queue-progress-stalled" ||
         finding.code === "queue-never-started" ||
-        finding.code === "admission-refusal-loop" ||
         finding.code === "queue-hold-ttl-missing" ||
         finding.code === "queue-hold-expired",
     )
-    .map((finding) => {
-      if (finding.code !== "admission-refusal-loop") return finding
-      const failure = actionableFailure({
-        code: finding.refusal ?? finding.code,
-        message: finding.message,
-        ...(finding.resolution === undefined ? {} : { resolution: finding.resolution }),
-      })
-      return { ...finding, resolution: failure.resolution }
-    })
   return findings.length === 0 ? { state: "healthy", observedAt: now } : { state: "stalled", observedAt: now, findings }
 }
 
