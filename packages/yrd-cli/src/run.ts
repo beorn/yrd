@@ -1026,7 +1026,9 @@ async function habitantRunnerLeaseObservation(cwd: string): Promise<HabitantRunn
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
   }
   try {
-    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(() => Promise.resolve(), { holder: "resident-runner-probe" })
+    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(() => Promise.resolve(), {
+      holder: "resident-runner-probe",
+    })
     return { held: false }
   } catch (error) {
     const fact = failureFact(error)
@@ -10428,7 +10430,7 @@ export async function refreshTrackedQueueRevisions(
             settlementFailure.code === "comment-current-changed"
               ? "Skipped settling a tracked change preflight because the change changed."
               : "Skipped settling a tracked change preflight because its settlement ref already records a " +
-                "different fact; deferring this candidate so the cycle continues.",
+                  "different fact; deferring this candidate so the cycle continues.",
             {
               action: "queue-track-settlement-deferred",
               ...outcome,
@@ -11378,6 +11380,21 @@ export async function followQueueRuns(
         await gate()
       }
       if (!runRequired && !drainRequested()) {
+        // Box 1 of @yrd/core/stale-runner-never-recycles, the half that was
+        // missing: the source-staleness exit below sits AFTER this return, so a
+        // runner only ever reached it while it had work. A quiet queue never
+        // does — and a runner goes stale exactly when nothing is moving, so the
+        // process that most needed recycling was the one that could never get
+        // there. Measured 2026-08-29: 21 minutes armed and warning every 60s,
+        // three commits behind its own pin, with a submitted change waiting.
+        //
+        // Evaluated on THIS path or the post-run one, never both, so a cycle
+        // contributes exactly one observation to the confirmation window.
+        // Exiting is as clean here as it is there: no run is in flight, by
+        // construction of the branch we are on.
+        const idleSource = await habitantSourceHealth(app, io, sourceStall, habitant, sourceStaleThreshold)
+        sourceStall = idleSource.stall
+        if (idleSource.recycle) return HABITANT_SOURCE_STALE_EXIT
         if (scope.signal.aborted) return HABITANT_INTERRUPTED_EXIT
         await sleepUntilDrain(scope.sleep(interval), drainSignal)
         heartbeat?.check()

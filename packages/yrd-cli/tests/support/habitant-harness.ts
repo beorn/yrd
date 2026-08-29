@@ -44,7 +44,8 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
   const stderr: string[] = []
   const stdout: string[] = []
   const stateFactory = options.state ?? emptyState
-  let state = completeState(stateFactory())
+  let lastSnapshot = stateFactory()
+  let state = completeState(lastSnapshot)
   let refreshCalls = 0
   let runCalls = 0
   const app = {
@@ -52,7 +53,16 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     state: () => state,
     refresh: async () => {
       refreshCalls += 1
-      state = completeState(stateFactory())
+      const snapshot = stateFactory()
+      // A factory returning the SAME snapshot models a queue where nothing
+      // changed, and the loop reads that identity to decide a cycle is quiet.
+      // Minting a fresh object every refresh made every harness cycle look
+      // like a durable change, so no test could express a quiet queue — which
+      // is exactly the state in which the source-staleness exit was skipped.
+      if (snapshot !== lastSnapshot) {
+        lastSnapshot = snapshot
+        state = completeState(snapshot)
+      }
       return state
     },
     log: {
@@ -62,6 +72,9 @@ export function createHabitantHarness(options: HabitantHarnessOptions) {
     queue: {
       audit: () => ({ findings: [] }),
       expirePauses: async () => [],
+      // Every habitant cycle sweeps lapsed leases before deciding anything, so
+      // a harness without it cannot drive the loop as a habitant at all.
+      recover: async () => [],
       run: async () => {
         runCalls += 1
         return options.run({ signal, call: runCalls })

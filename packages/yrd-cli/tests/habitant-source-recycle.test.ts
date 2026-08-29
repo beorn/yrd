@@ -17,7 +17,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { habitantSourceHealth } from "../src/run.ts"
+import { followQueueRuns, habitantSourceHealth } from "../src/run.ts"
+import { createHabitantHarness } from "./support/habitant-harness.ts"
 import { HABITANT_SOURCE_STALE_OBSERVATIONS, type HabitantSourceStall } from "../src/source-staleness.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
@@ -259,5 +260,71 @@ describe("habitant source recycle — unmeasurable is never stale", () => {
     commit(source.root, "unrelated second")
 
     expect((await f.observe(10)).recycle).toBe(false)
+  })
+})
+
+describe("habitant source recycle — the quiet queue, where a runner actually goes stale", () => {
+  /**
+   * Every other test here drives cycles by calling `habitantSourceHealth` in a
+   * hand-rolled loop, so they prove the DECISION and not the wiring. The real
+   * loop reaches that call only after it has produced runs; a queue with
+   * nothing to do returns earlier. A runner falls behind its pin precisely
+   * while nothing is moving, so that is the one state where the exit has to
+   * work — and the one no test drove.
+   */
+  it("recycles from an idle cycle, without waiting for work it may never get", async () => {
+    const source = staleSource(5)
+    const queueRepo = initRepo("yrd-source-recycle-idle-queue-")
+    commit(queueRepo, "queue repository, unrelated history")
+    const stateDir = mkdtempSync(join(tmpdir(), "yrd-source-recycle-idle-state-"))
+    roots.push(stateDir)
+
+    // One snapshot, returned by identity every refresh: nothing is changing,
+    // so after the first cycle the loop has no reason to run the queue.
+    const quiet = { bays: { prs: {} }, queues: { admissionRefusals: {} } }
+    let cycles = 0
+    // Filled in after construction: the state factory runs once DURING it, so
+    // naming the harness directly would read it in the temporal dead zone.
+    const control: { bail?: () => void } = {}
+    const h = createHabitantHarness({
+      run: async () => [],
+      state: () => {
+        cycles += 1
+        // Bound the test: without the idle-path check this loop never exits,
+        // and a hang reads as a timeout rather than as the failure it is.
+        if (cycles > 8) control.bail?.()
+        return quiet
+      },
+    })
+    control.bail = () => {
+      h.drain()
+    }
+    const io = {
+      ...h.io,
+      // The source exit is an actuator, and only a supervised habitant may
+      // pull it — `habitant` is read off this identity.
+      runner: "yrd-cli:idle-recycle",
+      cwd: queueRepo,
+      stateDir,
+      sourceCheckout: source.root,
+      implementationSource: `git:${source.bootedSha}`,
+      // Real time, not a frozen clock: a quiet cycle only reaches the source
+      // check once maintenance falls due, so a fixed `now` parks the loop at an
+      // earlier return and proves nothing about the path under test.
+      now: () => Date.parse("2026-08-29T21:40:00.000Z") + cycles * 61_000,
+    } as unknown as YrdCliIO
+
+    // 3 = the unclean exit; hab's restart=on-failure re-execs onto the checkout.
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, io, h.gate)).resolves.toBe(3)
+
+    expect(h.warnings).toContainEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ action: "resident-source-stale-restart", headSha: source.headSha }),
+      }),
+    )
+    // The point of the test: it got there on IDLE cycles. Only the first
+    // cycle runs the queue, so anything beyond that is the quiet path doing it.
+    expect(h.runCalls()).toBe(1)
+    expect(cycles).toBeLessThanOrEqual(HABITANT_SOURCE_STALE_OBSERVATIONS + 3)
   })
 })
