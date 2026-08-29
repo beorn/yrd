@@ -345,6 +345,17 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // checkpoint equal changeDeliveryState of their change record exactly, so
   // the forward callback below can drop the key with zero information loss.
   "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
+  // The composition immediately before `CandidateChange.containedInBase`
+  // (bd1c0b88, 2026-08-28) moved the identity. Not a harness value (the
+  // PR1305 / R2732 lesson above): it is the ledger's own superseded last entry
+  // in `checkpoint-bump-gate.ts` — what this project has ASKED every
+  // deployment to store since 2026-08-26 — and it is what shared main's vendor
+  // pin 18d9b83dbb19, the composition the running yrd-runner loads, computes.
+  // The new field is optional on historical CandidateChanges, so this edge
+  // needs no transformation of its own: the shared callback below preserves
+  // every stored record verbatim and the forward callback's drops are all
+  // no-ops on a checkpoint this recent.
+  "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.

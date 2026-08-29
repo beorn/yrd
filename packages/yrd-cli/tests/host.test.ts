@@ -582,8 +582,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // and the production predecessor 701431d5 (measured from the live
     // journal's stored checkpoint_identity, cursor 92592, read-only
     // 2026-08-26) gains a retained edge below.
+    // Conscious update 2026-08-28 (bd1c0b88, `CandidateChange.containedInBase`):
+    // an OPTIONAL schema field still changes the accepted input shape the
+    // identity hashes, so the identity moves once even though no stored record
+    // needs rewriting. The predecessor 381cdb9e — what shared main's vendor pin
+    // 18d9b83dbb19 computes, and the ledger's own superseded last entry — gains
+    // a retained edge below.
     const previousTargetIdentity = "36d85bbb8b59e8a3c6c327b8f14f643816d951cd003904ac0acbe0bbca150691"
-    expect(first.manifest.targetIdentity).toBe("381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c")
+    expect(first.manifest.targetIdentity).toBe("74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1")
     expect(first.manifest.edges).toContainEqual({
       from: "fe5e818396dd2c5f9bab6191ab0dd882d9ee584046c618463b4583ff724effe8",
       to: previousTargetIdentity,
@@ -641,6 +647,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     // is what carries the deployment across that cut.
     expect(first.manifest.edges).toContainEqual({
       from: "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
+      to: previousTargetIdentity,
+    })
+    // The composition at shared main's vendor pin 18d9b83dbb19 — the identity
+    // the running yrd-runner is asked to store today. Its edge is what carries
+    // the live deployment across the containedInBase bump; without it a boot
+    // on this code refuses with checkpoint-migration-missing, and eviction
+    // (history_evicted_through 27609) makes that terminal.
+    expect(first.manifest.edges).toContainEqual({
+      from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
       to: previousTargetIdentity,
     })
     expect(first.manifest.edges).toContainEqual({
@@ -2005,7 +2020,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       )
       .get()
     if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
-    expect(rewritten.checkpoint_identity).toBe("381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c")
+    expect(rewritten.checkpoint_identity).toBe("74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1")
     const rewrittenValue = z
       .object({ value: z.object({ state: z.record(z.string(), z.unknown()) }).passthrough() })
       .passthrough()
@@ -2023,6 +2038,79 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
     expect(rebooted.state().queues.authority).not.toHaveProperty("statuses")
     expect(rebooted.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+  })
+
+  it("carries a 381cdb9e checkpoint — the pinned composition's — across the containedInBase bump", async () => {
+    // bd1c0b88 added an OPTIONAL `CandidateChange.containedInBase`, so no
+    // stored record needs rewriting and the migration callbacks have literally
+    // nothing to do on a checkpoint this recent. That is precisely the bump
+    // whose edge is easiest to omit — nothing fails while the migration is
+    // missing, because there is no migration work to fail. Only a deployment
+    // booting fails, days later, with checkpoint-migration-missing and no
+    // rebuild available (history_evicted_through 27609). This exercises the
+    // edge from the identity shared main's vendor pin 18d9b83dbb19 computes.
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    const predecessor = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    await predecessor.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await predecessor.close()
+
+    using database = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const checkpoint = database
+      .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton = 1")
+      .get()
+    if (checkpoint === null) throw new Error("expected predecessor projection checkpoint")
+    const retainedIdentity = "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c"
+    const retainedCheckpoint = JSON.stringify({
+      ...z.record(z.string(), z.unknown()).parse(JSON.parse(checkpoint.checkpoint_json)),
+      identity: retainedIdentity,
+    })
+    database
+      .query(
+        "UPDATE journal_snapshot SET checkpoint_identity = ?, checkpoint_json = ?, checkpoint_sha256 = ? WHERE singleton = 1",
+      )
+      .run(retainedIdentity, retainedCheckpoint, createHash("sha256").update(retainedCheckpoint).digest("hex"))
+    database.close()
+
+    await using restored = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: testJournal(stateDir),
+      process: runtimeProcess,
+      config,
+    })
+    // The stored projection crosses the bump intact — no field is invented for
+    // it, because the new one is optional and simply reads "not measured".
+    expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature" })
+    await restored.close()
+
+    using redatabase = new Database(join(stateDir, "journal.sqlite"), { strict: true })
+    const rewritten = redatabase
+      .query<{ checkpoint_identity: string }, []>(
+        "SELECT checkpoint_identity FROM journal_snapshot WHERE singleton = 1",
+      )
+      .get()
+    if (rewritten === null) throw new Error("expected a fresh projection checkpoint after restore")
+    expect(rewritten.checkpoint_identity).toBe("74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1")
+    redatabase.close()
   })
 
   it("folds a correlation-era checkpoint's revision labels into props while migrating a retained checkpoint", async () => {
@@ -3355,28 +3443,31 @@ checks: [{check: {run: "true"}}]
     roots.push(root)
     const exclusive = createExclusive(root, { timeoutMs: 0 })
 
-    await exclusive.run(async () => {
-      let failure: unknown
-      try {
-        await exclusive.run(async () => undefined, { holder: "test-inner" })
-      } catch (error) {
-        failure = error
-      }
-      expect(failure).toBeInstanceOf(Error)
-      expect((failure as Error).message).toContain(
-        `writer lock is busy (holder=test-outer; owner=pid:${process.pid}; contender=pid:${process.pid} operation=test-inner; ${join(root, "writer.lock")})`,
-      )
-      // 23228: the holder is a REQUIRED option, so this message can no longer
-      // read "unknown operation" — which is what all 3,312 starvation messages
-      // measured on one host on 2026-08-28 said, leaving a ninety-minute
-      // incident with nothing to name. This assertion previously PINNED that
-      // defect by expecting the unnamed form.
-      expect((failure as Error).message).not.toContain("unknown operation")
-      expect(classifyFailure(failure)).toMatchObject({
-        exitCode: 3,
-        failure: { kind: "infrastructure", code: "exclusive-busy" },
-      })
-    }, { holder: "test-outer" })
+    await exclusive.run(
+      async () => {
+        let failure: unknown
+        try {
+          await exclusive.run(async () => undefined, { holder: "test-inner" })
+        } catch (error) {
+          failure = error
+        }
+        expect(failure).toBeInstanceOf(Error)
+        expect((failure as Error).message).toContain(
+          `writer lock is busy (holder=test-outer; owner=pid:${process.pid}; contender=pid:${process.pid} operation=test-inner; ${join(root, "writer.lock")})`,
+        )
+        // 23228: the holder is a REQUIRED option, so this message can no longer
+        // read "unknown operation" — which is what all 3,312 starvation messages
+        // measured on one host on 2026-08-28 said, leaving a ninety-minute
+        // incident with nothing to name. This assertion previously PINNED that
+        // defect by expecting the unnamed form.
+        expect((failure as Error).message).not.toContain("unknown operation")
+        expect(classifyFailure(failure)).toMatchObject({
+          exitCode: 3,
+          failure: { kind: "infrastructure", code: "exclusive-busy" },
+        })
+      },
+      { holder: "test-outer" },
+    )
   })
 
   it("prints help outside Git without initializing a repository host", async () => {
@@ -3583,6 +3674,10 @@ checks: [{check: {run: "true"}}]
       { from: "348ade4e2dbe135e789387756816d753858f037668bb3a121cb2719802b3b598", to: releasedHop },
       // The one real forward edge: the released identity above to the target.
       { from: releasedHop, to: attestation.manifest.targetIdentity },
+      // The identity shared main's vendor pin 18d9b83dbb19 computes — what the
+      // running yrd-runner is asked to store — retained across the
+      // containedInBase bump (bd1c0b88, 2026-08-28).
+      { from: "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c", to: releasedHop },
       { from: "47f4ac247383142e258574ee2bdc635d51508a1f94621dc1a1482867d271bca7", to: releasedHop },
       // The production composition's identity before branch-is-change 2a.
       { from: "61773b43456a2943913a6514131c04502a9d26baadedfcf28e4c12bf6d746d37", to: releasedHop },
