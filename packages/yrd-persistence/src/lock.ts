@@ -4,10 +4,22 @@ import { createFailure, observeYrdLifecycle } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
 
 export type Exclusive = Readonly<{
-  run<Result>(operation: () => Promise<Result>, options?: ExclusiveRunOptions): Promise<Result>
+  run<Result>(operation: () => Promise<Result>, options: ExclusiveRunOptions): Promise<Result>
 }>
 
-export type ExclusiveRunOptions = Readonly<{ holder?: string }>
+/**
+ * `holder` is REQUIRED, and that is the point.
+ *
+ * git-super renders an unnamed holder as the literal "unknown operation", and
+ * every one of 3,312 starvation messages measured on one host on 2026-08-28
+ * said exactly that — so the lock could be observed to starve for ninety
+ * minutes with no way to name what held it. The bead that tracked the incident
+ * could not name the offender either. An optional field documented as
+ * "please set this" produced one caller that did out of ten; a required one
+ * cannot be omitted by a new call site, which is the only version of this rule
+ * that survives the next author.
+ */
+export type ExclusiveRunOptions = Readonly<{ holder: string }>
 export type ExclusiveOptions = GitExclusiveOptions
 
 /** Yrd observability/failure policy around git-super's one POSIX lock primitive. */
@@ -18,9 +30,9 @@ export function createExclusive(
 ): Exclusive {
   const log = inject.log ?? createLogger("yrd", [{ level: "warn" }])
   return {
-    async run(operation, runOptions = {}) {
-      const holder = runOptions.holder?.trim()
-      if (holder !== undefined && (holder === "" || /\r|\n/u.test(holder))) {
+    async run(operation, runOptions) {
+      const holder = runOptions.holder.trim()
+      if (holder === "" || /\r|\n/u.test(holder)) {
         throw new TypeError("yrd: exclusive holder must be a non-empty single line")
       }
       let lock: WriterLock
@@ -32,7 +44,7 @@ export function createExclusive(
             attributes: {
               path: join(dir, "writer.lock"),
               timeoutMs: options.timeoutMs ?? 30_000,
-              ...(holder === undefined ? {} : { holder }),
+              holder,
             },
             now: inject.now,
           },

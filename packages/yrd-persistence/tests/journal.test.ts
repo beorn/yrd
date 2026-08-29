@@ -1077,6 +1077,31 @@ describe("SQLite Journal", () => {
     expect(runs).toBe(2)
   })
 
+  it("names every writer that takes the lock, so a starved contender can identify it", async () => {
+    // 23228: the lock renders an unnamed holder as the literal "unknown
+    // operation". 3,312 starvation messages on one host on 2026-08-28 all said
+    // exactly that, so an incident that ran for ninety minutes could not name
+    // what held the lock. The holder is a REQUIRED option, which makes an
+    // unnamed call site a compile error; this asserts the names actually reach
+    // the lock rather than merely being accepted by the type.
+    const dir = await directory()
+    const holders: string[] = []
+    const exclusive: Exclusive = {
+      async run<Result>(operation: () => Promise<Result>, options: { readonly holder: string }): Promise<Result> {
+        holders.push(options.holder)
+        return operation()
+      },
+    }
+    const journal = testJournal(dir, { exclusive })
+    await accepted(journal, frame("named"), 0)
+    await Array.fromAsync(journal.read())
+
+    expect(holders.length).toBeGreaterThan(0)
+    expect(holders.every((holder) => holder.trim() !== "")).toBe(true)
+    expect(holders).toContain("journal-append")
+    expect(holders).toContain("journal-read")
+  })
+
   it("emits structured lock and append lifecycle evidence", async () => {
     const dir = await directory()
     const events: LogEvent[] = []

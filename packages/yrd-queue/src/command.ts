@@ -2775,7 +2775,7 @@ async function prepareCandidateMembers(
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   const componentModelChanges: SubmoduleModelChangeAuthorization[] = []
   const changes: CandidateChange[] = []
-  const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string): void => {
+  const recordChange = (pr: StepExecution["prs"][number], generatedCommit: string, containedInBase: boolean): void => {
     if (pr.intent !== undefined || pr.changeId === undefined) return
     changes.push(
       CandidateChangeSchema.parse({
@@ -2784,6 +2784,7 @@ async function prepareCandidateMembers(
         revision: pr.revision,
         submittedHead: pr.headSha,
         generatedCommit,
+        containedInBase,
       }),
     )
   }
@@ -2852,8 +2853,16 @@ async function prepareCandidateMembers(
     // against a base that already contains it. Nothing is left to merge, and
     // re-merging an already-contained head would only manufacture an empty
     // merge commit.
+    //
+    // This is the ONLY place the question "is this member already in the base?"
+    // is put to git as a check that can answer no. It used to be asked, acted
+    // on, and forgotten in the same breath — so every later consumer re-asked
+    // it of the collapsed candidate, where `is-ancestor X X`,
+    // `candidateSha === baseSha` and `tree(X) === tree(X)` all answer yes for
+    // free. Recording it is what makes those consumers able to read a
+    // measurement instead of a tautology.
     if (await isAncestor(git, path, pr.headSha, "HEAD")) {
-      recordChange(pr, pr.headSha)
+      recordChange(pr, pr.headSha, true)
       continue
     }
     if (refuse !== undefined && refuse.paths.length > 0) {
@@ -2912,7 +2921,7 @@ async function prepareCandidateMembers(
         submoduleResolutions.push(...resolved.output)
         const wrapper = await stabilizeGeneratedRootWrapper(git, path, before, message)
         if (wrapper !== undefined) return wrapper
-        recordChange(pr, await git.commit(path, "HEAD"))
+        recordChange(pr, await git.commit(path, "HEAD"), false)
         continue
       }
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
@@ -2970,7 +2979,7 @@ async function prepareCandidateMembers(
       generated = synthesized.output.commit
       submoduleResolutions.push(...authoredFill.filledPins)
     }
-    recordChange(pr, generated)
+    recordChange(pr, generated, false)
   }
   return {
     status: "passed",
@@ -7268,6 +7277,10 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
                   }),
                 )
               }
+              // The root is on the remote from here. Record that BEFORE the
+              // promotions below are attempted: a promotion failure must cost
+              // the convergence work, never the fact of the merge.
+              await recordRootMerged(git, repo, input, checked)
               // The changed-pin plan above preserves the pre-merge trust
               // boundary for new or changed submodule origins. Once root is
               // authoritative, audit every pin so this merge also converges
@@ -7412,6 +7425,10 @@ export function gitMergeStep<Shape extends ChangeShape>(options: GitMergeOptions
             return failed("stale-base", moved.stderr || "base branch moved")
           }
         }
+        // Both local paths converge here with the branch already moved — the
+        // checked-out `merge --ff-only` and the bare `update-ref` alike. Same
+        // rule as the remote path: the record goes in ahead of the promotions.
+        await recordRootMerged(git, repo, input, checked)
         return withSubmoduleMainPromotions(
           git,
           repo,
@@ -7590,6 +7607,93 @@ function repositoryResultFailure(
 }
 
 const MERGE_ATTEMPT_REF_ROOT = "refs/yrd/landing-attempts"
+
+/**
+ * Where "a run moved the base branch to this candidate" is kept. NOT a claim
+ * that the change is integrated.
+ *
+ * These were one field until now, and the conflation is why the fact was
+ * droppable: a merge that pushed the root and then failed submodule promotion
+ * returned `submoduleMainFailureResult` and produced no `IntegrationProof`, so
+ * the queue durably forgot a merge it had performed. Everything downstream then
+ * re-derived "is this already in" from the collapsed candidate, where
+ * `is-ancestor X X`, `candidateSha === baseSha` and `tree(X) === tree(X)` all
+ * answer yes for free.
+ *
+ * Kept deliberately non-interchangeable with an `IntegrationProof`, and here
+ * that is structural rather than nominal: this lives in its own ref namespace
+ * and stores exactly one sha under a change-and-run key, so there is no shared
+ * record for the two facts to collapse back into. Integrated-ness stays DERIVED
+ * from this plus a settled promotion; it is not stored, so there is no field to
+ * reach through.
+ *
+ * The ref name carries the change and the run; the ref value carries the
+ * candidate, which is the ONLY sha this fact holds. Inventing a `baseSha` by
+ * reading the candidate's first parent would be a fourth derived value dressed
+ * as a recorded one — a fast-forward's first parent is not the base it
+ * replaced. Whoever needs the prior base asks git, and gets an answer that can
+ * fail.
+ *
+ * Keyed by CHANGE, not by run, and that is the whole point. `mergeAttemptRefs`
+ * is keyed by `input.run`, so a retry — which is always a NEW run — can see
+ * nothing its predecessor wrote, and a merge that pushed the root and then
+ * failed promotion left no trace any later run could read. A change-keyed ref
+ * is legible to every subsequent run of the same change, which is what makes
+ * "did a previous run merge this?" answerable at all.
+ *
+ * Never cleared: a merge that happened stays happened. The attempt refs beside
+ * it are the retractable ones.
+ */
+const ROOT_MERGE_REF_ROOT = "refs/yrd/root-merged"
+
+function rootMergeRef(changeId: string, run: string): string {
+  const safeChange = changeId.replace(/[^a-zA-Z0-9._-]/gu, "-")
+  const safeRun = run.replace(/[^a-zA-Z0-9._-]/gu, "-")
+  return `${ROOT_MERGE_REF_ROOT}/${safeChange}/${safeRun}`
+}
+
+/**
+ * Record that the base branch now points at this candidate — called the instant
+ * the root lands and BEFORE promotion is attempted.
+ *
+ * The ordering is the fix, not a detail. Writing it after promotion is what
+ * made it droppable: the proof was produced on the success path only, so a
+ * promotion failure discarded a merge that had already happened. Written ahead
+ * of the attempt, "we merged the root and kept no record of it" stops being a
+ * reachable state instead of being a state we clean up after.
+ *
+ * Best-effort by construction: this must never turn a landed merge into a
+ * failed step, because the merge is already done by the time it runs and the
+ * step's verdict belongs to the merge, not to its bookkeeping. A ref that
+ * cannot be written is a lost record, and losing it leaves exactly the state
+ * that exists today.
+ */
+async function recordRootMerged(git: Git, repo: string, input: StepExecution, checked: PinnedCandidate): Promise<void> {
+  for (const change of checked.changes ?? []) {
+    const ref = rootMergeRef(change.changeId, input.run)
+    // The zero old-value asserts CREATION, matching every sibling update-ref in
+    // this file (:3106, :3667, :5728): a run merges a given change once, so a
+    // ref that already exists is a fact worth failing loudly on rather than
+    // overwriting. Writing without an expected old value is a blind clobber,
+    // and it is the convention the surrounding code already keeps.
+    const written = await git.run(
+      repo,
+      ["update-ref", "--create-reflog", ref, checked.candidateSha, "0".repeat(checked.candidateSha.length)],
+      true,
+    )
+    if (written.code === 0) continue
+    // Non-fatal, because the merge is already done and the step's verdict
+    // belongs to the merge rather than to its bookkeeping. Never SILENT,
+    // because a lost record is the exact state this fact exists to prevent —
+    // and a dropped write that says nothing is how the queue came to forget
+    // merges it had performed.
+    console.warn(
+      `yrd: root-merge fact NOT recorded for change ${change.changeId} at ${checked.candidateSha}: ` +
+        `git update-ref ${ref} exited ${String(written.code)}` +
+        `${written.stderr.trim() === "" ? "" : `: ${written.stderr.trim()}`}`,
+    )
+  }
+}
 
 function mergeAttemptRef(input: StepExecution, context: JobContext): string {
   const safeJob = context.id.replace(/[^a-zA-Z0-9._-]/gu, "-")

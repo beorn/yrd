@@ -468,7 +468,7 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
           ? await runtime.exclusive.run(async () => {
               await ensureDatabase(runtime)
               return readBatches(runtime, after, before)
-            })
+            }, { holder: "journal-read" })
           : await readBatches(runtime, after, before)
       for (const batch of batches) yield batch
     },
@@ -486,7 +486,7 @@ function createJournalWithMode(options: JournalOptions, mode: JournalMode): Jour
           resultAttributes: (result) => result,
         },
         () =>
-          withMutableDatabase(runtime, (database) => {
+          withMutableDatabase(runtime, "journal-append", (database) => {
             const required = journalFrameCompatibility(frame)
             const head = readHead(database)
             const floor = readJournalVersionFloor(database)
@@ -597,13 +597,13 @@ async function inspectCheckpoint(runtime: Context, mode: JournalMode): Promise<J
   return runtime.exclusive.run(async () => {
     await ensureDatabase(runtime)
     return load()
-  })
+  }, { holder: "checkpoint-load" })
 }
 
 async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Promise<boolean> {
   assertCursor(checkpoint.cursor)
   try {
-    await runtime.exclusive.run(async () => ensureDatabase(runtime))
+    await runtime.exclusive.run(async () => ensureDatabase(runtime), { holder: "checkpoint-save-ensure" })
     const prepared = prepareCheckpoint(runtime, checkpoint)
     if (prepared === null) return false
     await runtime.phase("checkpoint-prepared", {
@@ -611,7 +611,7 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
       snapshotCursor: prepared.snapshotCursor,
       compactedEvents: prepared.compactedEvents,
     })
-    return await withMutableDatabase(runtime, (database) => {
+    return await withMutableDatabase(runtime, "checkpoint-save", (database) => {
       let evicted: EvictionOutcome | undefined
       const current = readSnapshotHeader(database)
       const head = readHead(database)
@@ -853,6 +853,9 @@ function rethrowSqliteBusy(error: unknown): never {
 
 async function withMutableDatabase<Result>(
   runtime: Context,
+  /** Names this writer in the lock file, so a starved contender can say what
+   * held it instead of "unknown operation" (23228). */
+  holder: string,
   operation: (database: Database) => Result,
 ): Promise<Result> {
   assertMutablePlatform(runtime)
@@ -866,7 +869,7 @@ async function withMutableDatabase<Result>(
         checkpointWal(runtime, database)
         database.close()
       }
-    })
+    }, { holder })
   } catch (error) {
     rethrowSqliteBusy(error)
   }
@@ -1059,7 +1062,7 @@ async function rebuildJournalViews(runtime: Context): Promise<JournalViewRebuild
       checkpointWal(runtime, database)
       database.close()
     }
-  })
+  }, { holder: "journal-views-rebuild" })
 }
 
 async function finishSchemaMaintenance(runtime: Context): Promise<void> {
@@ -1320,7 +1323,7 @@ async function bumpJournalVersion(runtime: Context, target: number): Promise<Jou
     "journal-snapshots",
     `pre-bump-v${String(version)}-${new Date().toISOString().replaceAll(/[:.]/gu, "-")}.sqlite`,
   )
-  return withMutableDatabase(runtime, (database) => {
+  return withMutableDatabase(runtime, "journal-version-bump", (database) => {
     const from = readJournalVersionFloor(database)
     if (version < from) {
       raiseFailure(
@@ -2811,7 +2814,7 @@ export async function importOrphanJournal(
     },
   } as JournalOptions)
 
-  return withMutableDatabase(runtime, (database) => {
+  return withMutableDatabase(runtime, "import-orphan-journal", (database) => {
     const head = readHead(database)
     const live = allLiveFrames(database)
     const collisions = liveCollisions(live, records)

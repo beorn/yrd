@@ -1022,7 +1022,7 @@ async function habitantRunnerLeaseObservation(cwd: string): Promise<HabitantRunn
     raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
   }
   try {
-    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(() => Promise.resolve())
+    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(() => Promise.resolve(), { holder: "resident-runner-probe" })
     return { held: false }
   } catch (error) {
     const fact = failureFact(error)

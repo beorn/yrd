@@ -216,6 +216,23 @@ export const CandidateChangeSchema = z
     revision: z.number().int().positive(),
     submittedHead: GitShaSchema,
     generatedCommit: GitShaSchema,
+    /**
+     * Whether the base ALREADY contained this member's authored head when the
+     * candidate was built, so nothing was merged for it.
+     *
+     * A measurement, recorded where it is taken: `prepareCandidateMembers` runs
+     * `git merge-base --is-ancestor <submittedHead> HEAD` against the base
+     * checkout, a check that can genuinely answer no. Everything downstream
+     * used to re-derive the same question from the COLLAPSED candidate instead
+     * — `candidateSha === baseSha`, `is-ancestor X X`, `tree(X) === tree(X)` —
+     * and all three degenerate to yes for free, because a candidate that merged
+     * nothing IS its base. Three fake measurements stood in for one real one
+     * that was computed and thrown away.
+     *
+     * Absent on records written before this field existed; absence means "not
+     * measured", never "false".
+     */
+    containedInBase: z.boolean().optional(),
   })
   .strict()
 export type CandidateChange = Readonly<z.infer<typeof CandidateChangeSchema>>
