@@ -6473,6 +6473,9 @@ describe("Queue command adapters", () => {
   ] as const)(
     "keeps the candidate submitted after a cannot-probe $name",
     async (failure) => {
+      const stderrSpy = failure.timedOut
+        ? vi.spyOn(globalThis.process.stderr, "write").mockImplementation(() => true)
+        : undefined
       const fixture = await hookedSubmoduleRepository({
         baseVersion: "base",
         candidateVersion: "candidate",
@@ -6518,6 +6521,11 @@ describe("Queue command adapters", () => {
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
+      if (failure.timedOut) {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining("circuit breaker open after 3 consecutive timeouts"),
+        )
+      }
       expect(run).toMatchObject({
         status: "completed",
         conclusion: "failure",
@@ -6616,6 +6624,9 @@ describe("Queue command adapters", () => {
   ] as const)(
     "keeps the candidate submitted after a $name",
     async (failure) => {
+      const stderrSpy = failure.timedOut
+        ? vi.spyOn(globalThis.process.stderr, "write").mockImplementation(() => true)
+        : undefined
       const fixture = await hookedSubmoduleRepository({
         baseVersion: "base",
         candidateVersion: "candidate",
@@ -6651,6 +6662,11 @@ describe("Queue command adapters", () => {
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
+      if (failure.timedOut) {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining("circuit breaker open after 3 consecutive timeouts"),
+        )
+      }
       expect(run).toMatchObject({
         status: "completed",
         conclusion: "failure",
