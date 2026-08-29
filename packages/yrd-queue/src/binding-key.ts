@@ -54,8 +54,6 @@ import {
   type ExactDeltaObject,
 } from "./content-identity.ts"
 
-export type BindingKeyGit = ExactDeltaGit
-
 /** Ordered `-`/`+` line material of a text entry, markers stripped; the
  * `\ No newline at end of file` marker rides in-sequence on the side it
  * qualifies, so newline-at-eof facts key like any other content. */
@@ -161,7 +159,7 @@ function opaqueContent(entry: ExactDeltaEntry, form: "opaque" | "gitlink"): Bind
 }
 
 async function fileMaterial(
-  git: BindingKeyGit,
+  git: ExactDeltaGit,
   repo: string,
   delta: ExactDelta,
   entry: ExactDeltaEntry,
@@ -169,7 +167,7 @@ async function fileMaterial(
   const shared = { path: entry.path, kind: entry.kind, object: entry.object, modeDelta: exactDeltaModeDelta(entry) }
   if (entry.object === "gitlink") return { ...shared, content: opaqueContent(entry, "gitlink") }
   if (entry.kind === "typechange") return { ...shared, content: opaqueContent(entry, "opaque") }
-  const raw = await git.run(repo, [
+  const raw = await git.text(repo, [
     "diff",
     ...EXACT_DELTA_DIFF_OPTIONS,
     ...BINDING_KEY_DIFF_OPTIONS,
@@ -236,7 +234,7 @@ function digestOf(files: readonly BindingKeyFile[]): string {
  * Throws on an empty change: an empty content identity is an absence, never a
  * key — hashing it would mint one value every empty change shares.
  */
-export async function bindingKey(git: BindingKeyGit, repo: string, base: string, tip: string): Promise<BindingKey> {
+export async function bindingKey(git: ExactDeltaGit, repo: string, base: string, tip: string): Promise<BindingKey> {
   const delta = await exactDelta(git, repo, base, tip)
   if (delta.entries.length === 0) {
     throw new Error(

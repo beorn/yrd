@@ -40,8 +40,10 @@ async function git(repo: string, args: readonly string[]): Promise<string> {
   return stdout.trim()
 }
 
-/** The structural `git` the production helper takes: `run(repo, args) -> { stdout }`. */
-const runner = { run: async (repo: string, args: readonly string[]) => ({ stdout: await git(repo, args) }) }
+/** A `Pick<Git, "run">` over the real binary — the projection the production helper takes. */
+const runner = {
+  run: async (repo: string, args: readonly string[]) => ({ code: 0, stdout: await git(repo, args), stderr: "" }),
+}
 
 async function initRepo(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix))
@@ -107,7 +109,7 @@ describe("queueScratchParent — scratch follows the repository, not the temp di
   })
 
   it("raises loud rather than returning a relative path when git reports no common dir", async () => {
-    const empty = { run: async () => ({ stdout: "" }) }
+    const empty = { run: async () => ({ code: 0, stdout: "", stderr: "" }) }
 
     await expect(queueScratchParent(empty, "/nowhere")).rejects.toThrow(/empty common directory/u)
   })

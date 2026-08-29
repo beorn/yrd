@@ -144,8 +144,19 @@ describe("landing check — the alarm must ask whether the work landed", () => {
     const first = await commit(root, "shared.txt", "shared\n", "shared commit")
     const head = await commit(root, "unique.txt", "unique\n", "unique commit")
     await git(root, ["checkout", "-q", "main"])
+    // Main moves first, for the same reason the regenerated-carrier case above moves it:
+    // cherry-picking onto the UNMOVED tip reproduces `first` byte-for-byte whenever the
+    // replay lands in the same wall-clock second as the original, and then `shared commit`
+    // is on main by ANCESTRY. The count would still read 1, so nothing goes red — but
+    // `--cherry-pick` would have nothing to do, and this test's whole subject, that one of
+    // the two landed BY PATCH, would go unexercised in most runs.
+    await commit(root, "unrelated.txt", "main moved\n", "main advances")
     await git(root, ["cherry-pick", first])
     await git(root, ["push", "-q", "--no-recurse-submodules", "origin", "main"])
+    // Precondition, stated rather than assumed: what landed is a DIFFERENT sha carrying the
+    // same patch, so patch equivalence is the only thing that can see it.
+    expect(await git(root, ["rev-parse", "HEAD"])).not.toBe(first)
+    await expect(git(root, ["merge-base", "--is-ancestor", first, "main"])).rejects.toThrow()
 
     const landing = await classifyBranchLanding({
       process: await process_(),

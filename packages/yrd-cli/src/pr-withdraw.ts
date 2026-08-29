@@ -12,7 +12,16 @@ import {
   type ProjectedBranchSubmit,
 } from "@yrd/bay"
 import { raiseFailure, type DeepReadonly } from "@yrd/core"
-import { alreadyLandedSubmits, derivedLaneBranches, Queues, type Run } from "@yrd/queue"
+import {
+  buildMergedTruthIndex,
+  derivedLaneBranches,
+  landedSubmitBranches,
+  landedSubmits,
+  Queues,
+  type LandedSubmitScan,
+  type MergedTruthGit,
+  type Run,
+} from "@yrd/queue"
 import { usage } from "./invocation.ts"
 import { printResult } from "./output.tsx"
 import { ChangeResultView } from "./queue-status-view.tsx"
@@ -762,19 +771,40 @@ export type PruneExcludedSubmit = Readonly<{ branch: string; sha: string; reason
  * terminal record's same-sha fact — and both are stale refs whose cure is
  * retirement, not a run.
  */
-function unscannedSubmits(bays: DeepReadonly<BaysState>, scanned: ReadonlySet<string>): PruneExcludedSubmit[] {
-  const landed = new Map(alreadyLandedSubmits(bays).map((row) => [row.branch, row.record]))
+function unscannedSubmits(
+  bays: DeepReadonly<BaysState>,
+  scanned: ReadonlySet<string>,
+  scan: LandedSubmitScan,
+): PruneExcludedSubmit[] {
+  // Landed content is the REPOSITORY's answer, not the record store's: the
+  // store could only see a fact whose sha equalled some terminal record's
+  // integration commit, which misses every recordless branch and every
+  // merge-time rebuild.
+  const landed = new Map(scan.landed.map((row) => [row.branch, row.mergeCommit]))
+  const open = new Map(scan.unresolved.map((row) => [row.branch, row]))
   return Object.entries(bays.submits)
     .filter(([branch]) => !scanned.has(branch))
     .map(([branch, submit]) => {
-      const record = landed.get(branch)
       const terminal = Object.values(bays.prs).findLast((pr) => pr.branch === branch && !isLiveChange(pr as Change))
-      if (record !== undefined) {
+      if (landed.has(branch)) {
+        const mergeCommit = landed.get(branch)
         return {
           branch,
           sha: submit.sha,
-          reason: `fact stands at terminal change ${record}'s landing commit — content the record lane already merged`,
+          reason:
+            `content is already on '${submit.base}'` +
+            (mergeCommit === undefined ? "" : ` (merged by ${short(mergeCommit)})`) +
+            " — a stale re-projection of merged work",
           next: retireFactCommand(branch),
+        }
+      }
+      const unresolved = open.get(branch)
+      if (unresolved !== undefined) {
+        return {
+          branch,
+          sha: submit.sha,
+          reason: `the repository could not say whether this content landed (${unresolved.reason}): ${unresolved.detail}`,
+          ...(unresolved.reason === "degenerate" ? { next: retireFactCommand(branch) } : {}),
         }
       }
       if (terminal !== undefined) {
@@ -822,10 +852,30 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
     ) as readonly Change[]
 
   const bays = app.state().bays
+  // Which standing facts has the repository ALREADY delivered? Asked of git,
+  // through the same reader the compose's door uses, so prune and admission
+  // cannot disagree about landed content either.
+  const landedScan = await landedSubmits(
+    io.mergedTruthGit === undefined ? createMergedTruthGit(cwd) : io.mergedTruthGit(cwd),
+    async (base) => {
+      const tip = (await git.resolveCommit(`origin/${base}`)) ?? (await git.resolveCommit(base))
+      if (tip === undefined) {
+        throw new Error(
+          `target base '${base}' did not resolve: neither 'origin/${base}' nor '${base}' is a commit here`,
+        )
+      }
+      return buildMergedTruthIndex(
+        io.mergedTruthGit === undefined ? createMergedTruthGit(cwd) : io.mergedTruthGit(cwd),
+        cwd,
+        { tip },
+      )
+    },
+    bays,
+  )
   // The DERIVED population, enumerated by the same function the compose selects
   // from, so prune and admission never disagree about who is in the lane.
-  const derivedBranches = derivedLaneBranches(bays)
-  const excluded = unscannedSubmits(bays, new Set([...live.map((pr) => pr.branch), ...derivedBranches]))
+  const derivedBranches = derivedLaneBranches(bays, landedSubmitBranches(landedScan))
+  const excluded = unscannedSubmits(bays, new Set([...live.map((pr) => pr.branch), ...derivedBranches]), landedScan)
 
   const rows: RecordPruneRow[] = []
   for (const pr of live) {
@@ -915,6 +965,17 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
           dryRun ? " (dry run: no events emitted)" : ""
         }`
   const summary = [`pr prune: ${scanned} — ${disposition}`]
+  // A store-vs-repository disagreement is a FINDING of the store cutover, and
+  // it is printed per fact, never counted away. The repository's answer is the
+  // one prune acted on.
+  for (const conflict of landedScan.disagreements) {
+    summary.push(
+      `pr prune: RECORD/REPOSITORY DISAGREEMENT on ${conflict.branch} @ ${short(conflict.sha)} — ` +
+        `the change record says ${conflict.store}` +
+        (conflict.record === undefined ? "" : ` (via ${conflict.record})`) +
+        `, the repository says ${conflict.derived}: ${conflict.detail}`,
+    )
+  }
   if (excluded.length > 0) {
     summary.push(
       `pr prune: ${excluded.length} standing submit fact${excluded.length === 1 ? "" : "s"} neither lane scanned — ` +
@@ -929,7 +990,10 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
       dryRun,
       // The populations, in the machine-readable result too, so a mechanical
       // reader cannot mistake a clean count for a complete one either.
-      scanned: { record: rows.length, derived: derivedRows.length },
+      scanned: { record: rows.length, derived: derivedRows.length, standingFacts: landedScan.facts },
+      landed: landedScan.landed,
+      landingUnresolved: landedScan.unresolved,
+      landingDisagreements: landedScan.disagreements,
       excluded,
       checked: checked.map(({ detail: _detail, ...row }) => row),
       summary: {
@@ -942,11 +1006,64 @@ export async function prunePrs(app: YrdCliApp, options: PrunePrsOptions, io: Yrd
         staleFacts,
         errors,
         excluded: excluded.length,
+        landed: landedScan.landed.length,
+        landingUnresolved: landedScan.unresolved.length,
+        landingDisagreements: landedScan.disagreements.length,
       },
       withdrawn: withdrawn.map(projectChangeTaskStatus),
     },
     [...checked.map(pruneLine), ...summary].join("\n"),
   )
+}
+
+/**
+ * The merged-truth reader's two git reads, for `pr prune`'s cwd.
+ *
+ * `text` throws on any non-zero exit — an unreadable repository is a loud
+ * failure, never an empty index, and it is that throw which makes a NEGATIVE
+ * containment answer trustworthy. `optionalText` maps a non-zero exit to
+ * undefined for the one question where that is a real answer (`merge-base
+ * --is-ancestor` exits 1 for "not contained"). A timeout is fatal in both,
+ * inside `adaptProcessGit`: git never finished asking, and reporting that as
+ * "not contained" would read a stalled repository as a clean not-merged.
+ *
+ * `repo` is honoured rather than ignored: merged-truth passes it explicitly,
+ * and silently substituting the cwd would answer a different repository's
+ * question without saying so.
+ */
+export function createMergedTruthGit(cwd: string): MergedTruthGit {
+  const reader = adaptProcessGit(undefined, { timeoutMs: GIT_TIMEOUT_MS })
+  const localRead = (args: readonly string[]): GitSyncReadCommand => {
+    const [verb, ...rest] = args
+    switch (verb) {
+      case "rev-parse":
+      case "merge-base":
+      case "log":
+        return { verb, args: rest }
+    }
+    throw new Error(`yrd: merged-truth asked for a command that is not a typed local read: ${args.join(" ")}`)
+  }
+  const run = (repo: string, args: readonly string[]): GitProcessResult => {
+    const result = reader.readSync({ repo: repo === "" ? cwd : repo, command: localRead(args) })
+    if (result.timedOut === true) {
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${String(GIT_TIMEOUT_MS)}ms`)
+    }
+    return result
+  }
+  return {
+    text(repo, args) {
+      const result = run(repo, args)
+      if (result.code !== 0) {
+        const detail = result.stderr.trim() || result.failure?.trim() || ""
+        throw new Error(`yrd: git ${args.join(" ")} failed in '${repo}'${detail === "" ? "" : `: ${detail}`}`)
+      }
+      return Promise.resolve(result.stdout.trim())
+    },
+    optionalText(repo, args) {
+      const result = run(repo, args)
+      return Promise.resolve(result.code === 0 ? result.stdout.trim() : undefined)
+    },
+  }
 }
 
 type GitCapture = Readonly<{ code: number; stdout: string }>

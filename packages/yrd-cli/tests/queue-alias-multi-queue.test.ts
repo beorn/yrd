@@ -15,7 +15,7 @@
 import { withBays, volatilePrNumberMint, createBayJobDefs } from "@yrd/bay"
 import { normalizeYrdRepositoryAliasInvocation, runYrd as runYrdRaw, type YrdCliIO } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
-import { withContests, type ContestEvaluatorDef, type ContestGit, type ContestRunnerDef } from "@yrd/contest"
+import { withContests, type ContestEvaluatorDef, type CommitResolver, type ContestRunnerDef } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
@@ -72,7 +72,7 @@ function contestAdapters() {
       throw new Error("this fixture never evaluates a contest attempt")
     },
   }
-  const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   return { runner, evaluator, git }
 }
 

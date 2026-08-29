@@ -5,17 +5,20 @@
  * the split that makes the judgement testable without a repository. Everything
  * here is a deliberate answer to a way one of us got it wrong in one evening.
  */
-import type { PayloadKind, PinDirection, PushedRefFact } from "./uncarried.ts"
+import type { Git } from "git-super/worktree"
+import type { PayloadKind, PinDirection, PushedRefFact } from "./stranded.ts"
 
-/** The git reads this gatherer needs, injected so the caller owns process
- * spawning and tests need no repository. Each returns raw stdout. */
-export type RefGit = Readonly<{
-  /** `git -C <repo> <args...>`, trimmed stdout; throws on non-zero. */
-  run(repo: string, args: readonly string[]): Promise<string>
-  /** Same, but a non-zero exit yields undefined instead of throwing — for the
-   * questions where "cannot answer" is a real answer rather than a fault. */
-  optional(repo: string, args: readonly string[]): Promise<string | undefined>
-}>
+/**
+ * The two git reads this gatherer needs, PROJECTED from the one Git view
+ * rather than redeclared — a narrowing cannot drift from what it narrows,
+ * and six independently-declared git surfaces is how this codebase learned
+ * that lesson. Injected so the caller owns process spawning and tests need
+ * no repository.
+ *
+ * `text` is a trimmed value that throws; `optionalText` answers undefined for
+ * the questions where "cannot answer" is a real answer rather than a fault.
+ */
+export type RefGit = Pick<Git, "text" | "optionalText">
 
 export type GatherOptions = Readonly<{
   repo: string
@@ -48,7 +51,7 @@ async function pinDirection(
 ): Promise<PinDirection> {
   if (basePin === branchPin) return "aligned"
   const contains = async (ancestor: string, descendant: string): Promise<boolean | undefined> => {
-    const out = await git.optional(submoduleRepo, ["merge-base", "--is-ancestor", ancestor, descendant])
+    const out = await git.optionalText(submoduleRepo, ["merge-base", "--is-ancestor", ancestor, descendant])
     return out === undefined ? undefined : true
   }
   // A missing object is NOT a direction. If either side is unreadable here the
@@ -66,17 +69,17 @@ async function pinDirection(
  *
  * The ordering matters: cheap disqualifiers first, so a sweep over thousands of
  * refs does no submodule-repo work for the ones it will discard anyway. On this
- * fleet 1,502 of 1,546 uncarried refs are older than a week and die at the age
+ * fleet 1,502 of 1,546 stranded refs are older than a week and die at the age
  * bound before any git object is read.
  */
 export async function gatherPushedRefFact(git: RefGit, ref: string, options: GatherOptions): Promise<PushedRefFact> {
   const { repo, base, observedAtMs, carriedBranches, gitlinkPaths, absorbedRevisions } = options
-  const tipSha = await git.run(repo, ["rev-parse", `${ref}^{commit}`])
+  const tipSha = await git.text(repo, ["rev-parse", `${ref}^{commit}`])
 
   // Three-dot: what this ref CHANGED relative to the merge base. Two-dot would
   // include everything the base gained since, and would call a ref that touched
   // nothing a gitlink change.
-  const changed = (await git.run(repo, ["diff", "--name-only", `${base}...${ref}`]))
+  const changed = (await git.text(repo, ["diff", "--name-only", `${base}...${ref}`]))
     .split("\n")
     .filter((line) => line !== "")
   const changedGitlinks = changed.filter((path) => gitlinkPaths.has(path))
@@ -88,8 +91,8 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
   // recorded-but-untouched pin invents a revert that a real merge would not do.
   let direction: PinDirection = "none"
   for (const path of changedGitlinks) {
-    const basePin = await git.optional(repo, ["rev-parse", `${base}:${path}`])
-    const branchPin = await git.optional(repo, ["rev-parse", `${ref}:${path}`])
+    const basePin = await git.optionalText(repo, ["rev-parse", `${base}:${path}`])
+    const branchPin = await git.optionalText(repo, ["rev-parse", `${ref}:${path}`])
     if (basePin === undefined || branchPin === undefined) {
       direction = "diverged"
       break
@@ -109,7 +112,7 @@ export async function gatherPushedRefFact(git: RefGit, ref: string, options: Gat
   // bump is a unique patch by construction even when the content behind it
   // merged. The predicate ignores these for gitlink-only refs; they are gathered
   // anyway so a finding can report them without a second pass.
-  const cherry = (await git.optional(repo, ["cherry", base, ref])) ?? ""
+  const cherry = (await git.optionalText(repo, ["cherry", base, ref])) ?? ""
   const lines = cherry.split("\n").filter((line) => line !== "")
   return {
     ref,

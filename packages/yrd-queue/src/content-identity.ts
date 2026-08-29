@@ -30,12 +30,12 @@
  * reviews. The replacement is the normalized ±line digest in `binding-key.ts`.
  * This module never reads commit history at all — only trees.
  */
-import type { RefGit } from "./uncarried-facts.ts"
+import type { RefGit } from "./stranded-facts.ts"
 
 /** The one member `exactDelta` needs from the package's exported repository
  * handle. `run` throws on non-zero exit, which is the error contract here too:
  * an unreadable identity is a loud failure, never an empty delta. */
-export type ExactDeltaGit = Pick<RefGit, "run">
+export type ExactDeltaGit = Pick<RefGit, "text">
 
 /**
  * How a path changed between the two trees, straight from git's raw status
@@ -197,9 +197,9 @@ function parseRawDiff(raw: string): readonly ExactDeltaEntry[] {
  * never a fallback: every failure to resolve, run, or parse throws.
  */
 export async function exactDelta(git: ExactDeltaGit, repo: string, base: string, tree: string): Promise<ExactDelta> {
-  const baseTree = await git.run(repo, ["rev-parse", "--verify", `${base}^{tree}`])
-  const candidateTree = await git.run(repo, ["rev-parse", "--verify", `${tree}^{tree}`])
-  const raw = await git.run(repo, [
+  const baseTree = await git.text(repo, ["rev-parse", "--verify", `${base}^{tree}`])
+  const candidateTree = await git.text(repo, ["rev-parse", "--verify", `${tree}^{tree}`])
+  const raw = await git.text(repo, [
     "diff",
     ...EXACT_DELTA_DIFF_OPTIONS,
     "--raw",
@@ -389,11 +389,21 @@ export async function resolveAbsorbedPaths(
  * are that shape). The merged tree is honest at such a path exactly when it
  * agrees with the candidate there, so each remaining missing path is settled
  * by comparing the landed delta's own result tree against `candidateTree` at
- * that path: equal (or both absent) resolves, disagreement stays refused.
+ * that path: equal resolves, disagreement stays refused.
+ *
+ * ABSENT ON BOTH SIDES IS NOT AGREEMENT, except for an authored deletion where
+ * absence IS the change's own result. For an addition or an edit neither tree
+ * carries the work, so `undefined === undefined` would admit precisely what
+ * this settlement exists to refuse — a merge that dropped the path, waved
+ * through by a candidate that never carried it either (a wrong or empty tree,
+ * or the merged tree passed as its own witness). The agreement has to be
+ * positive: the candidate must hold the path for holding it to mean anything.
  *
  * The candidate must be an artifact built independently of the merged result
- * (the queue's tested candidate); passing the merged tree itself as
- * `candidateTree` answers vacuously.
+ * (the queue's tested candidate). Tree IDENTITY between the two is not the
+ * tell — git's merge is deterministic, so a faithful merge of the tested
+ * candidate legitimately yields that very tree — which is why what settles a
+ * path here is the per-path comparison above, never an equality of tree shas.
  */
 export async function resolveMissingAgainstCandidate(
   git: ExactDeltaGit,
@@ -410,6 +420,15 @@ export async function resolveMissingAgainstCandidate(
     }
     const merged = await treeEntryAt(git, repo, landed.candidateTree, difference.path)
     const candidate = await treeEntryAt(git, repo, candidateTree, difference.path)
+    if (merged === undefined && candidate === undefined) {
+      // `difference.authored` carries the authored ENTRY KIND for exactly this
+      // read (see {@link crossBaseDeltaEquality}): absence settles a deletion
+      // and nothing else. Any present-shaped change absent on BOTH sides is the
+      // vacuous branch described above, and stays refused.
+      if (difference.authored === "deleted") continue
+      remaining.push(difference)
+      continue
+    }
     if (merged?.mode === candidate?.mode && merged?.oid === candidate?.oid) continue
     remaining.push(difference)
   }
@@ -433,7 +452,7 @@ async function treeEntryAt(
   tree: string,
   path: string,
 ): Promise<Readonly<{ mode: string; oid: string }> | undefined> {
-  const listed = await git.run(repo, ["ls-tree", "-z", tree, "--", path])
+  const listed = await git.text(repo, ["ls-tree", "-z", tree, "--", path])
   const record = listed.split("\0").find((row) => row !== "")
   if (record === undefined) return undefined
   const match = /^([0-7]{6}) \S+ (\S+)\t/u.exec(record)

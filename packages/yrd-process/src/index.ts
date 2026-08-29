@@ -45,7 +45,7 @@ export type ProcessRequest = Readonly<{
    * inherit stdin/stdout/stderr and stay in the foreground process group so
    * editors and agent harnesses receive ordinary terminal input. */
   interactive?: boolean
-  /** Exclusive filesystem box owned by this invocation. Settlement enumerates
+  /** Exclusive filesystem sandbox owned by this invocation. Settlement enumerates
    * every process whose cwd, executable, or open file remains under this path,
    * then TERM→KILLs and verifies them before run() returns. Use only for
    * an isolation root such as a Yrd Bay, never for a shared repository cwd. */
@@ -139,7 +139,7 @@ export type ProcessResult = ProcessResultBase &
 
 export type Process = Readonly<{
   run(request: ProcessRequest): Promise<ProcessResult>
-  /** Reap and verify every process still holding an exclusive filesystem box. */
+  /** Reap and verify every process still holding an exclusive filesystem sandbox. */
   reapPath(path: string): Promise<PathReapResult>
   /** Aborts and awaits every active run, including process-group settlement. */
   close(): Promise<void>

@@ -1,6 +1,6 @@
 /**
  * Path process ownership — inspect, reap, and certify every process still
- * holding an exclusive filesystem box.
+ * holding an exclusive filesystem sandbox.
  *
  * Process groups are the fast settlement path, but a descendant can create a
  * new session and leave its parent's group. The Bay path remains the durable
@@ -102,7 +102,7 @@ export async function reapOwnedPath(path: string, gracefulMs: number, killMs: nu
   // Re-census the complete ownership set. Protected caller/ancestor PIDs are
   // deliberately never signalled, but they remain survivor evidence: closing a
   // Bay from a shell inside that Bay must fail loudly instead of deleting the
-  // workspace beneath a still-live process.
+  // Bay beneath a still-live process.
   const survivorCensus = await census()
   const survivorPids = uniquePids(survivorCensus.holders.map(({ pid }) => pid))
   return {

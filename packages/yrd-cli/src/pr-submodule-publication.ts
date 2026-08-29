@@ -1,11 +1,34 @@
 import { isAbsolute, relative, resolve, sep } from "node:path"
-import { authoredDeltaBase, type GitlinkAuthorshipGit } from "@yrd/bay"
+import { authoredDeltaBase } from "@yrd/bay"
 import { adaptProcessGit, cleanGitEnvironment, type Process, type ProcessResult } from "@yrd/process"
-import { resolveSubmoduleMain, type SubmoduleMainGit } from "@yrd/queue"
+import { resolveSubmoduleMain } from "@yrd/queue"
 import { changedCommitGitlinks, readCommitGitlinks } from "git-super/commit-graph"
 import { remoteContainsCommit } from "git-super/push"
+import type { Git } from "git-super/worktree"
 
 const GIT_TIMEOUT_MS = 30_000
+
+/**
+ * A `Pick<Git, "run">` over this command's supervised process port.
+ *
+ * The shared gates it feeds ask git tolerantly and classify the exit code, so
+ * this reports a non-zero exit rather than throwing; only a TIMEOUT is fatal,
+ * because "git never finished" is not an answer.
+ */
+function processGit(process: Pick<Process, "run">): Pick<Git, "run"> {
+  return {
+    run: async (repo, args) => {
+      const result: ProcessResult = await process.run({
+        argv: ["git", "-C", repo, ...args],
+        cwd: repo,
+        env: cleanGitEnvironment(globalThis.process.env),
+        timeoutMs: GIT_TIMEOUT_MS,
+      })
+      if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+      return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+    },
+  }
+}
 
 export type UnpublishedSubmodulePin = Readonly<{
   path: string
@@ -81,27 +104,18 @@ export async function submodulePinPublications(options: {
   process: Pick<Process, "run">
   pins: readonly UnpublishedSubmodulePin[]
 }): Promise<readonly SubmodulePinPublication[]> {
-  const run: SubmoduleMainGit = async (repository, args) => {
-    const result: ProcessResult = await options.process.run({
-      argv: ["git", "-C", repository, ...args],
-      cwd: repository,
-      env: cleanGitEnvironment(globalThis.process.env),
-      timeoutMs: GIT_TIMEOUT_MS,
-    })
-    if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
-    return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
-  }
+  const git = processGit(options.process)
 
   const publications: SubmodulePinPublication[] = []
   for (const pin of options.pins) {
-    const main = await resolveSubmoduleMain(run, pin.repository, "origin")
+    const main = await resolveSubmoduleMain(git, pin.repository, "origin")
     if (main.status === "unavailable") {
       publications.push({ state: "undetermined", pin, reason: main.message })
       continue
     }
     // Ask before comparing, so a pin that is simply absent here is named as absent rather
     // than surfacing as an unreadable merge-base failure.
-    const present = await run(pin.repository, ["cat-file", "-e", `${pin.pin}^{commit}`])
+    const present = await git.run(pin.repository, ["cat-file", "-e", `${pin.pin}^{commit}`], true)
     if (present.code !== 0) {
       publications.push({
         state: "undetermined",
@@ -110,7 +124,7 @@ export async function submodulePinPublications(options: {
       })
       continue
     }
-    const reached = await run(pin.repository, ["merge-base", "--is-ancestor", pin.pin, main.sha])
+    const reached = await git.run(pin.repository, ["merge-base", "--is-ancestor", pin.pin, main.sha], true)
     if (reached.code === 0) {
       publications.push({ state: "on-submodule-main", pin })
       continue
@@ -148,21 +162,10 @@ export async function authoredSubmodulePinBase(options: {
   headSha: string
 }): Promise<string | undefined> {
   const repo = resolve(options.repo)
-  const run: GitlinkAuthorshipGit = async (cwd, args) => {
-    const result: ProcessResult = await options.process.run({
-      argv: ["git", "-C", cwd, ...args],
-      cwd,
-      env: cleanGitEnvironment(globalThis.process.env),
-      timeoutMs: GIT_TIMEOUT_MS,
-    })
-    if (result.timedOut) {
-      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
-    }
-    return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
-  }
+  const git = processGit(options.process)
   const refs = options.base.startsWith("refs/") ? [options.base] : [`refs/remotes/origin/${options.base}`, options.base]
   for (const ref of refs) {
-    const base = await authoredDeltaBase(run, repo, ref, options.headSha)
+    const base = await authoredDeltaBase(git, repo, ref, options.headSha)
     if (base.status === "resolved") return base.sha
   }
   return undefined

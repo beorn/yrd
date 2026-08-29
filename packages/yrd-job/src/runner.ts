@@ -67,9 +67,10 @@ function inlineContexts(id: string, maxInFlight: number): RunnerContexts {
   })
 }
 
-/** Local control-plane adapter over the durable Jobs machine. The Runner owns
- * admission and ephemeral Context materialization; Jobs retain leases,
- * recovery, waiting, retry, and terminal evidence. */
+/** Local control-plane adapter over the durable Jobs machine. The Runner
+ * decides which submitted jobs start and how many run at once, and
+ * materializes ephemeral Contexts; Jobs retain leases, recovery, waiting,
+ * retry, and terminal evidence. */
 export function localRunner(options: LocalRunnerOptions): Runner {
   const id = IdSchema.parse(options.id ?? "local")
   const requestedMax = z

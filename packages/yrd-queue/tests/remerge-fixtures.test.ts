@@ -35,8 +35,8 @@ describe("movedBaseFixture", () => {
     roots.push(fixture.root)
 
     expect(fixture.baseTwo).not.toBe(fixture.baseOne)
-    await git.run(fixture.repo, ["merge-base", "--is-ancestor", fixture.baseOne, fixture.baseTwo])
-    expect(await git.run(fixture.repo, ["rev-parse", `${fixture.authorTip}^`])).toBe(fixture.baseOne)
+    await git.text(fixture.repo, ["merge-base", "--is-ancestor", fixture.baseOne, fixture.baseTwo])
+    expect(await git.text(fixture.repo, ["rev-parse", `${fixture.authorTip}^`])).toBe(fixture.baseOne)
   })
 
   it("disjoint-paths: main's move and the author's change touch no common path", async () => {
@@ -86,8 +86,8 @@ describe("bothSidesMovedGitlinkFixture", () => {
     // Both targets descend from the recorded base commit, and neither side
     // contains the other — a genuine divergence, judged in the submodule's own
     // repository (the superproject object store cannot read these objects).
-    await git.run(fixture.submoduleRepo, ["merge-base", "--is-ancestor", fixture.baseGitlink, fixture.mainGitlink])
-    await git.run(fixture.submoduleRepo, ["merge-base", "--is-ancestor", fixture.baseGitlink, fixture.authorGitlink])
+    await git.text(fixture.submoduleRepo, ["merge-base", "--is-ancestor", fixture.baseGitlink, fixture.mainGitlink])
+    await git.text(fixture.submoduleRepo, ["merge-base", "--is-ancestor", fixture.baseGitlink, fixture.authorGitlink])
     const forward = await git.exec(fixture.submoduleRepo, [
       "merge-base",
       "--is-ancestor",
@@ -147,14 +147,14 @@ describe("emptyCandidateFixture (the 23167 specimen)", () => {
 
     // Commit-graph reasoning still claims unique work: the revert and the
     // restore are unique patches, so `git cherry` reports them as '+' rows.
-    const cherry = await git.run(fixture.repo, ["cherry", fixture.mainTip, fixture.secondTip])
+    const cherry = await git.text(fixture.repo, ["cherry", fixture.mainTip, fixture.secondTip])
     const unique = cherry.split("\n").filter((line) => line.startsWith("+"))
     expect(unique.length).toBeGreaterThan(0)
 
     // The tree truth disagrees. Rebuild the second sibling against the new
     // base the way the re-merge path does — a merged result tree — and the
     // candidate's delta against that base is EMPTY: the refusal condition.
-    const rebuilt = await git.run(fixture.repo, ["merge-tree", "--write-tree", fixture.mainTip, fixture.secondTip])
+    const rebuilt = await git.text(fixture.repo, ["merge-tree", "--write-tree", fixture.mainTip, fixture.secondTip])
     const candidateTree = rebuilt.split("\n")[0]
     if (candidateTree === undefined || candidateTree === "") throw new Error("merge-tree reported no tree id")
 
@@ -162,6 +162,6 @@ describe("emptyCandidateFixture (the 23167 specimen)", () => {
 
     expect(delta.entries).toEqual([])
     expect(delta.baseTree).toBe(delta.candidateTree)
-    expect(delta.baseTree).toBe(await git.run(fixture.repo, ["rev-parse", `${fixture.mainTip}^{tree}`]))
+    expect(delta.baseTree).toBe(await git.text(fixture.repo, ["rev-parse", `${fixture.mainTip}^{tree}`]))
   })
 })

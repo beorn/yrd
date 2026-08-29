@@ -2,15 +2,7 @@ import { lstat, readdir, rm, statfs } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { systemClock } from "@yrd/core"
 import type { JobError } from "@yrd/job"
-
-/**
- * Minimal structural view of the queue's private git helper: enough to ask a
- * repository where its common directory lives, without exporting the whole
- * `Git` surface out of `command.ts`.
- */
-type CommonDirGit = Readonly<{
-  run: (repo: string, args: readonly string[]) => Promise<Readonly<{ stdout: string }>>
-}>
+import type { Git } from "git-super/worktree"
 
 /**
  * Queue scratch — merge worktrees, source rebases, patch-id diffs, union
@@ -32,8 +24,13 @@ type CommonDirGit = Readonly<{
  * Derived from `--git-common-dir` rather than `join(repo, ".git")` because the
  * callers include submodule worktrees and linked worktrees,
  * where `.git` is a FILE and the naive join is not a directory at all.
+ *
+ * The git handle is PROJECTED from the one `Git` view rather than redeclared:
+ * a narrowing cannot drift from what it narrows, and a locally-declared
+ * `run(repo, args) -> { stdout }` shape is where the next rival transport is
+ * born.
  */
-export async function queueScratchParent(git: CommonDirGit, repo: string): Promise<string> {
+export async function queueScratchParent(git: Pick<Git, "run">, repo: string): Promise<string> {
   const key = resolve(repo)
   const memoized = commonDirs.get(key)
   if (memoized !== undefined) return join(memoized, "yrd", "scratch")

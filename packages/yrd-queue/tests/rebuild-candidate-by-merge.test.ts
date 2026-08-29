@@ -52,7 +52,7 @@ describe("rebuildCandidateByMerge — moved base, direct revision", () => {
       },
     )
 
-    const parents = await git.run(fixture.repo, ["rev-list", "--parents", "-n1", result.sha])
+    const parents = await git.text(fixture.repo, ["rev-list", "--parents", "-n1", result.sha])
     const [, ...parentShas] = parents.split(/\s+/u)
     expect(parentShas).toEqual([fixture.baseTwo, fixture.authorTip])
   })
@@ -154,64 +154,64 @@ async function gitlinkConflictFixture(options: {
   const moduleRepo = join(root, "module")
   const gitlinkPath = "dep"
 
-  await git.run(root, ["init", "-q", "-b", "main", "module"])
-  await git.run(moduleRepo, ["config", "user.name", "Yrd Test"])
-  await git.run(moduleRepo, ["config", "user.email", "yrd@example.invalid"])
+  await git.text(root, ["init", "-q", "-b", "main", "module"])
+  await git.text(moduleRepo, ["config", "user.name", "Yrd Test"])
+  await git.text(moduleRepo, ["config", "user.email", "yrd@example.invalid"])
   await Bun.write(`${moduleRepo}/version.txt`, "base\n")
-  await git.run(moduleRepo, ["add", "version.txt"])
-  await git.run(moduleRepo, ["commit", "-qm", "module base"])
+  await git.text(moduleRepo, ["add", "version.txt"])
+  await git.text(moduleRepo, ["commit", "-qm", "module base"])
 
-  await git.run(root, ["init", "-q", "-b", "main", "super"])
-  await git.run(superRepo, ["config", "user.name", "Yrd Test"])
-  await git.run(superRepo, ["config", "user.email", "yrd@example.invalid"])
-  await git.run(superRepo, ["config", "protocol.file.allow", "always"])
-  await git.run(superRepo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRepo, gitlinkPath])
-  await git.run(superRepo, ["commit", "-qm", "add dependency"])
-  const baseSuperSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+  await git.text(root, ["init", "-q", "-b", "main", "super"])
+  await git.text(superRepo, ["config", "user.name", "Yrd Test"])
+  await git.text(superRepo, ["config", "user.email", "yrd@example.invalid"])
+  await git.text(superRepo, ["config", "protocol.file.allow", "always"])
+  await git.text(superRepo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRepo, gitlinkPath])
+  await git.text(superRepo, ["commit", "-qm", "add dependency"])
+  const baseSuperSha = await git.text(superRepo, ["rev-parse", "HEAD"])
 
   const authorBranch = "task/author-gitlink"
-  await git.run(superRepo, ["switch", "-qc", authorBranch, baseSuperSha])
-  await git.run(moduleRepo, ["switch", "-qc", "side"])
+  await git.text(superRepo, ["switch", "-qc", authorBranch, baseSuperSha])
+  await git.text(moduleRepo, ["switch", "-qc", "side"])
   // A disjoint path from "main move" below, so publishing this to main (a
   // real --no-ff merge, not a fast-forward — the two submodule commits are
   // genuine siblings off the same base) resolves cleanly with no content
   // conflict of its own; only the SHA divergence matters to this fixture.
   await Bun.write(`${moduleRepo}/author.txt`, "author\n")
-  await git.run(moduleRepo, ["add", "author.txt"])
-  await git.run(moduleRepo, ["commit", "-qm", "author move"])
-  const authorModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
-  await git.run(moduleRepo, ["switch", "-q", "main"])
-  await git.run(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
-  await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", authorModuleSha])
-  await git.run(superRepo, ["add", "--", gitlinkPath])
-  await git.run(superRepo, ["commit", "-qm", "author: advance dependency"])
-  const authorTip = await git.run(superRepo, ["rev-parse", "HEAD"])
+  await git.text(moduleRepo, ["add", "author.txt"])
+  await git.text(moduleRepo, ["commit", "-qm", "author move"])
+  const authorModuleSha = await git.text(moduleRepo, ["rev-parse", "HEAD"])
+  await git.text(moduleRepo, ["switch", "-q", "main"])
+  await git.text(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
+  await git.text(join(superRepo, gitlinkPath), ["checkout", "-q", authorModuleSha])
+  await git.text(superRepo, ["add", "--", gitlinkPath])
+  await git.text(superRepo, ["commit", "-qm", "author: advance dependency"])
+  const authorTip = await git.text(superRepo, ["rev-parse", "HEAD"])
 
-  await git.run(superRepo, ["switch", "-q", "main"])
+  await git.text(superRepo, ["switch", "-q", "main"])
   let targetSha: string
   if (options.mainAlsoMovesGitlink ?? true) {
     await Bun.write(`${moduleRepo}/main.txt`, "main\n")
-    await git.run(moduleRepo, ["add", "main.txt"])
-    await git.run(moduleRepo, ["commit", "-qm", "main move"])
-    const mainModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
-    await git.run(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
-    await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
-    await git.run(superRepo, ["add", "--", gitlinkPath])
-    await git.run(superRepo, ["commit", "-qm", "main: advance dependency"])
-    targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+    await git.text(moduleRepo, ["add", "main.txt"])
+    await git.text(moduleRepo, ["commit", "-qm", "main move"])
+    const mainModuleSha = await git.text(moduleRepo, ["rev-parse", "HEAD"])
+    await git.text(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
+    await git.text(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
+    await git.text(superRepo, ["add", "--", gitlinkPath])
+    await git.text(superRepo, ["commit", "-qm", "main: advance dependency"])
+    targetSha = await git.text(superRepo, ["rev-parse", "HEAD"])
   } else {
     // Genuine base divergence at a path disjoint from the gitlink: main moves
     // forward, but never touches `gitlinkPath`, so the author's own gitlink
     // change is the only one on that path — nothing for a merge to conflict
     // on there.
     await Bun.write(`${superRepo}/main-only.txt`, "main-only\n")
-    await git.run(superRepo, ["add", "main-only.txt"])
-    await git.run(superRepo, ["commit", "-qm", "main: unrelated advance"])
-    targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+    await git.text(superRepo, ["add", "main-only.txt"])
+    await git.text(superRepo, ["commit", "-qm", "main: unrelated advance"])
+    targetSha = await git.text(superRepo, ["rev-parse", "HEAD"])
   }
 
   if (options.authorPublishedToMain) {
-    await git.run(moduleRepo, ["merge", "-q", "--no-ff", "-m", "publish author's move", "side"])
+    await git.text(moduleRepo, ["merge", "-q", "--no-ff", "-m", "publish author's move", "side"])
   }
 
   return { root, superRepo, moduleRepo, gitlinkPath, targetSha, authorBranch, authorTip, authorModuleSha }
@@ -243,46 +243,46 @@ async function landedAheadFixture(): Promise<{
   const moduleRepo = join(root, "module")
   const gitlinkPath = "dep"
 
-  await git.run(root, ["init", "-q", "-b", "main", "module"])
-  await git.run(moduleRepo, ["config", "user.name", "Yrd Test"])
-  await git.run(moduleRepo, ["config", "user.email", "yrd@example.invalid"])
+  await git.text(root, ["init", "-q", "-b", "main", "module"])
+  await git.text(moduleRepo, ["config", "user.name", "Yrd Test"])
+  await git.text(moduleRepo, ["config", "user.email", "yrd@example.invalid"])
   await Bun.write(`${moduleRepo}/version.txt`, "base\n")
-  await git.run(moduleRepo, ["add", "version.txt"])
-  await git.run(moduleRepo, ["commit", "-qm", "module base"])
+  await git.text(moduleRepo, ["add", "version.txt"])
+  await git.text(moduleRepo, ["commit", "-qm", "module base"])
 
-  await git.run(root, ["init", "-q", "-b", "main", "super"])
-  await git.run(superRepo, ["config", "user.name", "Yrd Test"])
-  await git.run(superRepo, ["config", "user.email", "yrd@example.invalid"])
-  await git.run(superRepo, ["config", "protocol.file.allow", "always"])
-  await git.run(superRepo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRepo, gitlinkPath])
-  await git.run(superRepo, ["commit", "-qm", "add dependency"])
-  const baseSuperSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+  await git.text(root, ["init", "-q", "-b", "main", "super"])
+  await git.text(superRepo, ["config", "user.name", "Yrd Test"])
+  await git.text(superRepo, ["config", "user.email", "yrd@example.invalid"])
+  await git.text(superRepo, ["config", "protocol.file.allow", "always"])
+  await git.text(superRepo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleRepo, gitlinkPath])
+  await git.text(superRepo, ["commit", "-qm", "add dependency"])
+  const baseSuperSha = await git.text(superRepo, ["rev-parse", "HEAD"])
 
   // The author's move goes straight onto the submodule's main (published, so the
   // shaset fill-in's precondition holds), and main then moves PAST it.
   await Bun.write(`${moduleRepo}/author.txt`, "author\n")
-  await git.run(moduleRepo, ["add", "author.txt"])
-  await git.run(moduleRepo, ["commit", "-qm", "author move"])
-  const authorModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
+  await git.text(moduleRepo, ["add", "author.txt"])
+  await git.text(moduleRepo, ["commit", "-qm", "author move"])
+  const authorModuleSha = await git.text(moduleRepo, ["rev-parse", "HEAD"])
   await Bun.write(`${moduleRepo}/later.txt`, "later\n")
-  await git.run(moduleRepo, ["add", "later.txt"])
-  await git.run(moduleRepo, ["commit", "-qm", "main moves past the floor"])
-  const mainModuleSha = await git.run(moduleRepo, ["rev-parse", "HEAD"])
+  await git.text(moduleRepo, ["add", "later.txt"])
+  await git.text(moduleRepo, ["commit", "-qm", "main moves past the floor"])
+  const mainModuleSha = await git.text(moduleRepo, ["rev-parse", "HEAD"])
 
   const authorBranch = "task/author-gitlink"
-  await git.run(superRepo, ["switch", "-qc", authorBranch, baseSuperSha])
-  await git.run(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
-  await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", authorModuleSha])
-  await git.run(superRepo, ["add", "--", gitlinkPath])
-  await git.run(superRepo, ["commit", "-qm", "author: advance dependency to the floor"])
-  const authorTip = await git.run(superRepo, ["rev-parse", "HEAD"])
+  await git.text(superRepo, ["switch", "-qc", authorBranch, baseSuperSha])
+  await git.text(join(superRepo, gitlinkPath), ["fetch", "-q", "origin"])
+  await git.text(join(superRepo, gitlinkPath), ["checkout", "-q", authorModuleSha])
+  await git.text(superRepo, ["add", "--", gitlinkPath])
+  await git.text(superRepo, ["commit", "-qm", "author: advance dependency to the floor"])
+  const authorTip = await git.text(superRepo, ["rev-parse", "HEAD"])
 
   // Main lands the SAME dependency ahead of the author, at the submodule's tip.
-  await git.run(superRepo, ["switch", "-q", "main"])
-  await git.run(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
-  await git.run(superRepo, ["add", "--", gitlinkPath])
-  await git.run(superRepo, ["commit", "-qm", "main: an earlier change already bumped the dependency"])
-  const targetSha = await git.run(superRepo, ["rev-parse", "HEAD"])
+  await git.text(superRepo, ["switch", "-q", "main"])
+  await git.text(join(superRepo, gitlinkPath), ["checkout", "-q", mainModuleSha])
+  await git.text(superRepo, ["add", "--", gitlinkPath])
+  await git.text(superRepo, ["commit", "-qm", "main: an earlier change already bumped the dependency"])
+  const targetSha = await git.text(superRepo, ["rev-parse", "HEAD"])
 
   return {
     root,
@@ -313,11 +313,11 @@ describe("rebuildCandidateByMerge — the base already landed the fill's own tar
     // The fixture's own preconditions, checked with plain git so the test does not
     // depend on the internals it exercises: the author's floor is a strict ancestor of
     // the submodule's main tip, and the target already pins that tip.
-    await git.run(fixture.moduleRepo, ["merge-base", "--is-ancestor", fixture.authorModuleSha, fixture.mainModuleSha])
-    expect(await git.run(fixture.superRepo, ["rev-parse", `${fixture.targetSha}:${fixture.gitlinkPath}`])).toBe(
+    await git.text(fixture.moduleRepo, ["merge-base", "--is-ancestor", fixture.authorModuleSha, fixture.mainModuleSha])
+    expect(await git.text(fixture.superRepo, ["rev-parse", `${fixture.targetSha}:${fixture.gitlinkPath}`])).toBe(
       fixture.mainModuleSha,
     )
-    expect(await git.run(fixture.superRepo, ["rev-parse", `${fixture.authorTip}:${fixture.gitlinkPath}`])).toBe(
+    expect(await git.text(fixture.superRepo, ["rev-parse", `${fixture.authorTip}:${fixture.gitlinkPath}`])).toBe(
       fixture.authorModuleSha,
     )
 
@@ -334,10 +334,10 @@ describe("rebuildCandidateByMerge — the base already landed the fill's own tar
 
     // The candidate carries the submodule's main tip, and the authored tip is still its
     // second parent — the rebuild neither refused nor rewrote the author's work.
-    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])).toBe(
+    expect(await git.text(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])).toBe(
       fixture.mainModuleSha,
     )
-    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}^2`])).toBe(fixture.authorTip)
+    expect(await git.text(fixture.superRepo, ["rev-parse", `${result.sha}^2`])).toBe(fixture.authorTip)
   })
 })
 
@@ -357,11 +357,11 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
       },
     )
 
-    const filled = await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])
-    const submoduleMain = await git.run(fixture.moduleRepo, ["rev-parse", "main"])
+    const filled = await git.text(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])
+    const submoduleMain = await git.text(fixture.moduleRepo, ["rev-parse", "main"])
     expect(filled).toBe(submoduleMain)
     // The fill is main's newest commit, which contains the author's move.
-    await git.run(fixture.moduleRepo, ["merge-base", "--is-ancestor", fixture.authorModuleSha, submoduleMain])
+    await git.text(fixture.moduleRepo, ["merge-base", "--is-ancestor", fixture.authorModuleSha, submoduleMain])
   })
 
   it("4b. the pre-branch routes around resolveCandidateSubmoduleConflict entirely — proven by construction, not by luck", async () => {
@@ -388,9 +388,9 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
     // internal `authoredGitlinkPaths` this test cannot import: the author's
     // tip records a DIFFERENT gitlink value than its own merge-base against
     // the target, which is exactly "this change authors the gitlink path".
-    const mergeBase = await git.run(fixture.superRepo, ["merge-base", fixture.targetSha, fixture.authorTip])
-    const baseGitlink = await git.run(fixture.superRepo, ["rev-parse", `${mergeBase}:${fixture.gitlinkPath}`])
-    const authoredGitlink = await git.run(fixture.superRepo, [
+    const mergeBase = await git.text(fixture.superRepo, ["merge-base", fixture.targetSha, fixture.authorTip])
+    const baseGitlink = await git.text(fixture.superRepo, ["rev-parse", `${mergeBase}:${fixture.gitlinkPath}`])
+    const authoredGitlink = await git.text(fixture.superRepo, [
       "rev-parse",
       `${fixture.authorTip}:${fixture.gitlinkPath}`,
     ])
@@ -462,7 +462,7 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
     // mis-detected as a conflict it is not.
     const fixture = await gitlinkConflictFixture({ authorPublishedToMain: true, mainAlsoMovesGitlink: false })
     roots.push(fixture.root)
-    const publishedMain = await git.run(fixture.moduleRepo, ["rev-parse", "main"])
+    const publishedMain = await git.text(fixture.moduleRepo, ["rev-parse", "main"])
     expect(publishedMain).not.toBe(fixture.authorModuleSha) // the --no-ff publish minted a new tip
 
     const result = await rebuildCandidateByMerge(
@@ -474,21 +474,21 @@ describe("rebuildCandidateByMerge — both sides moved the same gitlink", () => 
     // Filled from the submodule's current main (published, a descendant of
     // the author's own commit) — the correct, by-design outcome, not the
     // author's literal value carried through untouched.
-    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])).toBe(publishedMain)
+    expect(await git.text(fixture.superRepo, ["rev-parse", `${result.sha}:${fixture.gitlinkPath}`])).toBe(publishedMain)
     // The base's own divergent, gitlink-disjoint content survived the merge
     // untouched, proving the real base move was actually merged across, not
     // silently dropped or shortcut around.
-    expect(await git.run(fixture.superRepo, ["rev-parse", `${result.sha}:main-only.txt`])).toBeTruthy()
+    expect(await git.text(fixture.superRepo, ["rev-parse", `${result.sha}:main-only.txt`])).toBeTruthy()
     // `result.sha` is the shaset wrapper (test 7 establishes this shape for
     // the conflicting case; it holds here too, since this fill also touches
     // an authored gitlink) — a single-parent commit whose parent is the
     // merge itself. The merge commit one level up is where [target, authored
     // tip] actually lives; unwrap one level to check it, same as test 7.
-    const wrapperParents = await git.run(fixture.superRepo, ["rev-list", "--parents", "-n1", result.sha])
+    const wrapperParents = await git.text(fixture.superRepo, ["rev-list", "--parents", "-n1", result.sha])
     const [wrapperSha, mergeSha, ...extra] = wrapperParents.split(/\s+/u)
     expect(wrapperSha).toBe(result.sha)
     expect(extra).toEqual([])
-    const mergeParents = await git.run(fixture.superRepo, ["rev-list", "--parents", "-n1", mergeSha!])
+    const mergeParents = await git.text(fixture.superRepo, ["rev-list", "--parents", "-n1", mergeSha!])
     const [, ...mergeParentShas] = mergeParents.split(/\s+/u)
     expect(mergeParentShas).toEqual([fixture.targetSha, fixture.authorTip])
   })
@@ -532,8 +532,8 @@ describe("rebuildCandidateByMerge — the shaset fill-in", () => {
       },
     )
 
-    const parent = await git.run(fixture.superRepo, ["rev-parse", `${result.sha}^`])
-    const mergeParents = await git.run(fixture.superRepo, ["rev-list", "--parents", "-n1", parent])
+    const parent = await git.text(fixture.superRepo, ["rev-parse", `${result.sha}^`])
+    const mergeParents = await git.text(fixture.superRepo, ["rev-list", "--parents", "-n1", parent])
     const [, ...mergeParentShas] = mergeParents.split(/\s+/u)
     expect(mergeParentShas).toEqual([fixture.targetSha, fixture.authorTip])
 
@@ -558,7 +558,7 @@ describe("rebuildCandidateByMerge — merge parents", () => {
       },
     )
 
-    const parents = await git.run(fixture.repo, ["rev-list", "--parents", "-n1", result.sha])
+    const parents = await git.text(fixture.repo, ["rev-list", "--parents", "-n1", result.sha])
     const [, ...parentShas] = parents.split(/\s+/u)
     expect(parentShas).toEqual([fixture.baseTwo, fixture.authorTip])
   })
@@ -591,49 +591,49 @@ describe("rebuildCandidateByMerge — witnesses still run (proves the ONE code p
     })()
     const { join } = await import("node:path")
     const repo = join(root, "repo")
-    await git.run(root, ["init", "-q", "-b", "main", "repo"])
-    await git.run(repo, ["config", "user.name", "Yrd Test"])
-    await git.run(repo, ["config", "user.email", "yrd@example.invalid"])
+    await git.text(root, ["init", "-q", "-b", "main", "repo"])
+    await git.text(repo, ["config", "user.name", "Yrd Test"])
+    await git.text(repo, ["config", "user.email", "yrd@example.invalid"])
     await Bun.write(`${repo}/README.md`, "main\n")
-    await git.run(repo, ["add", "README.md"])
-    await git.run(repo, ["commit", "-qm", "main"])
-    const originalBase = await git.run(repo, ["rev-parse", "main"])
+    await git.text(repo, ["add", "README.md"])
+    await git.text(repo, ["commit", "-qm", "main"])
+    const originalBase = await git.text(repo, ["rev-parse", "main"])
 
-    await git.run(repo, ["switch", "-qc", "issue/sibling", originalBase])
+    await git.text(repo, ["switch", "-qc", "issue/sibling", originalBase])
     await Bun.write(`${repo}/sibling.txt`, "sibling\n")
-    await git.run(repo, ["add", "sibling.txt"])
-    await git.run(repo, ["commit", "-qm", "sibling work"])
-    const siblingSha = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["add", "sibling.txt"])
+    await git.text(repo, ["commit", "-qm", "sibling work"])
+    const siblingSha = await git.text(repo, ["rev-parse", "HEAD"])
 
-    await git.run(repo, ["switch", "-qc", "issue/mint", originalBase])
+    await git.text(repo, ["switch", "-qc", "issue/mint", originalBase])
     await Bun.write(`${repo}/merged-mint.md`, "mint\n")
-    await git.run(repo, ["add", "merged-mint.md"])
-    await git.run(repo, ["commit", "-qm", "merge the mint"])
-    const mintSha = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["add", "merged-mint.md"])
+    await git.text(repo, ["commit", "-qm", "merge the mint"])
+    const mintSha = await git.text(repo, ["rev-parse", "HEAD"])
 
     // The queue base absorbs both, so the mint is merged work main carries.
-    await git.run(repo, ["switch", "-q", "main"])
-    await git.run(repo, ["merge", "-q", "--no-ff", siblingSha, "-m", "merge sibling work"])
-    await git.run(repo, ["merge", "-q", "--no-ff", mintSha, "-m", "merge the mint"])
-    const queueBaseHead = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["switch", "-q", "main"])
+    await git.text(repo, ["merge", "-q", "--no-ff", siblingSha, "-m", "merge sibling work"])
+    await git.text(repo, ["merge", "-q", "--no-ff", mintSha, "-m", "merge the mint"])
+    const queueBaseHead = await git.text(repo, ["rev-parse", "HEAD"])
 
     // The author's branch absorbs the same two lines in the OTHER order and
     // resolves by dropping the mint file, then continues linearly.
     const carrierBranch = "issue/mint"
-    await git.run(repo, ["switch", "-q", carrierBranch])
-    await git.run(repo, ["merge", "--no-ff", "--no-commit", siblingSha])
-    await git.run(repo, ["rm", "-q", "merged-mint.md"])
-    await git.run(repo, ["commit", "-qm", "recomposed tree drops the mint"])
+    await git.text(repo, ["switch", "-q", carrierBranch])
+    await git.text(repo, ["merge", "--no-ff", "--no-commit", siblingSha])
+    await git.text(repo, ["rm", "-q", "merged-mint.md"])
+    await git.text(repo, ["commit", "-qm", "recomposed tree drops the mint"])
     await Bun.write(`${repo}/carrier.txt`, "carrier payload\n")
-    await git.run(repo, ["add", "carrier.txt"])
-    await git.run(repo, ["commit", "-qm", "carrier payload"])
-    const carrierHead = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["add", "carrier.txt"])
+    await git.text(repo, ["commit", "-qm", "carrier payload"])
+    const carrierHead = await git.text(repo, ["rev-parse", "HEAD"])
 
     // The facts that make this the residual case (more than one merge base),
     // not any earlier guard: `git.run` throws on a non-zero exit, so the
     // ancestry call is itself the assertion that containment holds.
-    await git.run(repo, ["merge-base", "--is-ancestor", mintSha, carrierHead])
-    expect(await git.run(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
+    await git.text(repo, ["merge-base", "--is-ancestor", mintSha, carrierHead])
+    expect(await git.text(repo, ["merge-base", "--all", queueBaseHead, carrierHead])).toContain("\n")
 
     return { repo, root, queueBaseHead, carrierBranch, carrierHead }
   }
@@ -704,17 +704,17 @@ describe("rebuildCandidateByMerge — content conflict beside a gitlink conflict
     // line of an ordinary file. `git merge` reports both conflicts together;
     // the content one is what must surface, since it has no automatic fix.
     const contentPath = "shared.txt"
-    await git.run(fixture.superRepo, ["switch", "-q", "main"])
+    await git.text(fixture.superRepo, ["switch", "-q", "main"])
     await Bun.write(`${fixture.superRepo}/${contentPath}`, "main line\n")
-    await git.run(fixture.superRepo, ["add", "--", contentPath])
-    await git.run(fixture.superRepo, ["commit", "-qm", "main: edit shared"])
-    const mainTip = await git.run(fixture.superRepo, ["rev-parse", "HEAD"])
+    await git.text(fixture.superRepo, ["add", "--", contentPath])
+    await git.text(fixture.superRepo, ["commit", "-qm", "main: edit shared"])
+    const mainTip = await git.text(fixture.superRepo, ["rev-parse", "HEAD"])
 
-    await git.run(fixture.superRepo, ["switch", "-q", fixture.authorBranch])
+    await git.text(fixture.superRepo, ["switch", "-q", fixture.authorBranch])
     await Bun.write(`${fixture.superRepo}/${contentPath}`, "author line\n")
-    await git.run(fixture.superRepo, ["add", "--", contentPath])
-    await git.run(fixture.superRepo, ["commit", "-qm", "author: edit shared"])
-    const authorTip = await git.run(fixture.superRepo, ["rev-parse", "HEAD"])
+    await git.text(fixture.superRepo, ["add", "--", contentPath])
+    await git.text(fixture.superRepo, ["commit", "-qm", "author: edit shared"])
+    const authorTip = await git.text(fixture.superRepo, ["rev-parse", "HEAD"])
 
     await expect(
       rebuildCandidateByMerge(
@@ -764,10 +764,10 @@ describe("rebuildCandidateByMerge — the change's identity trailer", () => {
     // `%(trailers:key=…,valueonly)` emits ONE line per matching trailer, so a
     // duplicate stamp shows up as a second line rather than a changed value.
     expect(
-      await git.run(fixture.repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
+      await git.text(fixture.repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
     ).toBe(CHANGE_ID)
     expect(
-      await git.run(fixture.repo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", result.sha]),
+      await git.text(fixture.repo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", result.sha]),
     ).toBe(`${CHANGE_ID}-merge`)
   })
 
@@ -787,10 +787,10 @@ describe("rebuildCandidateByMerge — the change's identity trailer", () => {
     )
 
     expect(
-      await git.run(fixture.superRepo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
+      await git.text(fixture.superRepo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
     ).toBe(CHANGE_ID)
     expect(
-      await git.run(fixture.superRepo, [
+      await git.text(fixture.superRepo, [
         "show",
         "-s",
         "--format=%(trailers:key=Merge-Change-Id,valueonly)",
@@ -798,9 +798,9 @@ describe("rebuildCandidateByMerge — the change's identity trailer", () => {
       ]),
     ).toBe(`${CHANGE_ID}-compose`)
     // The merge underneath it carries the same identity, marked as the merge.
-    const parent = await git.run(fixture.superRepo, ["rev-parse", `${result.sha}^`])
+    const parent = await git.text(fixture.superRepo, ["rev-parse", `${result.sha}^`])
     expect(
-      await git.run(fixture.superRepo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", parent]),
+      await git.text(fixture.superRepo, ["show", "-s", "--format=%(trailers:key=Merge-Change-Id,valueonly)", parent]),
     ).toBe(`${CHANGE_ID}-merge`)
   })
 
@@ -823,7 +823,7 @@ describe("rebuildCandidateByMerge — the change's identity trailer", () => {
 
     expect(result.sha).toBe(fixture.authorTip)
     expect(
-      await git.run(fixture.repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
+      await git.text(fixture.repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", result.sha]),
     ).toBe("")
   })
 })

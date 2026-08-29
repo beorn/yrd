@@ -108,8 +108,9 @@ export function resolveSelectorMatch<Value>(
   return { value: winner.value, matchedBy: winner.canonical.toLowerCase() === folded ? "canonical" : "alias" }
 }
 
-/** Resolve operator input to the selected entity, discarding the match
- * provenance. The value-only convenience over {@link resolveSelectorMatch}. */
+/** Resolve operator input to the selected entity, discarding whether the
+ * match was canonical or an alias. The value-only convenience over
+ * {@link resolveSelectorMatch}. */
 export function resolveSelector<Value>(
   selector: string,
   candidates: Iterable<SelectorCandidate<Value>>,

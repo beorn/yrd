@@ -33,7 +33,8 @@ import {
   type ProvisionedBay,
   type RefreshedBay,
 } from "../src/model.ts"
-import { type Bays,
+import {
+  type Bays,
   createBayJobDefs,
   withBays,
   volatilePrNumberMint,
@@ -492,11 +493,13 @@ describe("withBays", () => {
     await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE, issue: explicitIssue })
     await app.bays.submit({ pr: "PR1" })
 
-    const revised = record(await app.bays.submitSelection("B1", {
-      resolveRevision: async () => undefined,
-      resolveParents: async () => ["0".repeat(40)],
-      run: runtime,
-    }))
+    const revised = record(
+      await app.bays.submitSelection("B1", {
+        resolveRevision: async () => undefined,
+        resolveParents: async () => ["0".repeat(40)],
+        run: runtime,
+      }),
+    )
 
     expect(changeFacts(revised)).toMatchObject({
       id: "PR1",
@@ -1383,13 +1386,13 @@ describe("withBays", () => {
       bay: "B1",
       branch: "issue/merged-lifecycle",
       headSha: HEAD_1,
-      status: "landed",
-      landed: { pr: "PR1", revision: 1, at: "2026-01-01T00:00:00.000Z", commit: BASE },
+      status: "merged",
+      merged: { pr: "PR1", revision: 1, at: "2026-01-01T00:00:00.000Z", commit: BASE },
     })
 
     const closing = await app.bays.close({ bay: "B1" })
     await finishJob(app, closing)
-    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "landed" })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "merged" })
   })
 
   it("submits prepared branches with monotonic PR ids and selected bases", async () => {
@@ -1864,7 +1867,7 @@ describe("withBays", () => {
     )
 
     await expect(createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })).rejects.toThrow(
-      "rebuild carries a missing approval",
+      "re-merge carries a missing approval",
     )
   })
 
@@ -2275,10 +2278,12 @@ describe("withBays", () => {
     const original = app.bays.pr("PR1")
     const originalComposition = original === undefined ? undefined : currentChangeRev(original).composition
 
-    const omittedRepeat = record(await app.bays.submitSelection("issue/composed", {
-      resolveRevision: async () => HEAD_1,
-      run: runtime,
-    }))
+    const omittedRepeat = record(
+      await app.bays.submitSelection("issue/composed", {
+        resolveRevision: async () => HEAD_1,
+        run: runtime,
+      }),
+    )
 
     expect(changeFacts(omittedRepeat)).toMatchObject({ current: { n: 1, composition: originalComposition } })
     expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
@@ -2336,11 +2341,13 @@ describe("withBays", () => {
       return ref === "release/fix" ? HEAD_1 : undefined
     }
 
-    const bayPR = record(await app.bays.submitSelection("B1", {
-      resolveRevision,
-      resolveParents: async () => ["0".repeat(40)],
-      run: runtime,
-    }))
+    const bayPR = record(
+      await app.bays.submitSelection("B1", {
+        resolveRevision,
+        resolveParents: async () => ["0".repeat(40)],
+        run: runtime,
+      }),
+    )
     expect(changeFacts(bayPR)).toMatchObject({
       bay: "B1",
       delivery: "submitted",
@@ -2438,13 +2445,15 @@ describe("withBays", () => {
     // lane still writes through explicit submit until S7), then resubmit
     // through submitSelection with the metadata options.
     await app.bays.submit({ branch: "topic/submit-metadata", headSha: HEAD_1, draft: true })
-    const submitted = record(await app.bays.submitSelection("topic/submit-metadata", {
-      resolveRevision: async () => HEAD_1,
-      run: runtime,
-      base: "main",
-      title: "fix(queue): scope superseded runs",
-      description: "Scopes superseded-revision runs in the watch detail pane.",
-    }))
+    const submitted = record(
+      await app.bays.submitSelection("topic/submit-metadata", {
+        resolveRevision: async () => HEAD_1,
+        run: runtime,
+        base: "main",
+        title: "fix(queue): scope superseded runs",
+        description: "Scopes superseded-revision runs in the watch detail pane.",
+      }),
+    )
     expect(changeFacts(submitted)).toMatchObject({
       delivery: "submitted",
       title: "fix(queue): scope superseded runs",
@@ -2496,12 +2505,14 @@ describe("withBays", () => {
     // selection. On a pushed record that pass once fell through to the real
     // submit — mutating delivery state BEFORE gates ran (the PR1128 window).
     await app.bays.submit({ branch: "topic/staged", headSha: HEAD_1, draft: true })
-    const staged = record(await app.bays.submitSelection("topic/staged", {
-      resolveRevision: async () => HEAD_1,
-      run: runtime,
-      base: "main",
-      stage: true,
-    }))
+    const staged = record(
+      await app.bays.submitSelection("topic/staged", {
+        resolveRevision: async () => HEAD_1,
+        run: runtime,
+        base: "main",
+        stage: true,
+      }),
+    )
     expect(changeFacts(staged)).toMatchObject({ delivery: "pushed", current: { n: 1, head: HEAD_1 } })
     expect(changeFacts(app.bays.pr("topic/staged"))).toMatchObject({ delivery: "pushed" })
   })
@@ -2575,9 +2586,9 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
 
     // A closed Bay owns no workspace and left no record here: its branch is a
     // plain branch, and a plain branch submits as a derived member.
-    await expect(
-      app.bays.submitSelection(branch, { ...directOptions(HEAD_2), draft: true }),
-    ).rejects.toMatchObject({ failure: { kind: "refusal", code: "record-mint-retired" } })
+    await expect(app.bays.submitSelection(branch, { ...directOptions(HEAD_2), draft: true })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "record-mint-retired" },
+    })
 
     const submitted = await app.bays.submitSelection(branch, directOptions(HEAD_2))
     expect(submitted).toMatchObject({ lane: "derived", branch, sha: HEAD_2 })
@@ -2669,12 +2680,14 @@ describe("submit ledger-write door dispositions (D2/D3/D5)", () => {
     workspace.dirty = true
 
     const warnings: string[] = []
-    const pr = record(await app.bays.submitSelection("B1", {
-      resolveRevision: async () => undefined,
-      resolveParents: async () => ["0".repeat(40)],
-      run: runtime,
-      warnings,
-    }))
+    const pr = record(
+      await app.bays.submitSelection("B1", {
+        resolveRevision: async () => undefined,
+        resolveParents: async () => ["0".repeat(40)],
+        run: runtime,
+        warnings,
+      }),
+    )
     // Submitted the committed head (HEAD_2 from refresh), never refused.
     expect(changeFacts(pr)).toMatchObject({ bay: "B1", delivery: "submitted", current: { head: HEAD_2 } })
     // Loud by construction: the caveat rides the result envelope (warnings array)…
@@ -2808,12 +2821,14 @@ describe("bay-base authority vs live queue", () => {
     expect(app.bays.get("B1")).toMatchObject({ base: "main", baseSha: BASE })
 
     liveSha.current = LIVE
-    const created = record(await app.bays.submitSelection("B1", {
-      resolveRevision: async () => HEAD_1,
-      resolveParents: async () => ["0".repeat(40)],
-      run: runtime,
-      draft: true,
-    }))
+    const created = record(
+      await app.bays.submitSelection("B1", {
+        resolveRevision: async () => HEAD_1,
+        resolveParents: async () => ["0".repeat(40)],
+        run: runtime,
+        draft: true,
+      }),
+    )
     expect(changeFacts(created)).toMatchObject({
       delivery: "pushed",
       base: "main",
@@ -2828,13 +2843,15 @@ describe("bay-base authority vs live queue", () => {
     await finishJob(app, await app.bays.open({ name: "b159", base: "main", baseSha: BASE, by: "test" }))
     liveSha.current = LIVE
 
-    const created = record(await app.bays.submitSelection("B1", {
-      resolveRevision: async () => HEAD_1,
-      resolveParents: async () => ["0".repeat(40)],
-      run: runtime,
-      base: "main",
-      draft: true,
-    }))
+    const created = record(
+      await app.bays.submitSelection("B1", {
+        resolveRevision: async () => HEAD_1,
+        resolveParents: async () => ["0".repeat(40)],
+        run: runtime,
+        base: "main",
+        draft: true,
+      }),
+    )
     expect(created.revs[0]?.baseSha).toBe(LIVE)
     expect(created.revs[0]?.baseSha).not.toBe(STALE)
     await app.close()
@@ -2860,12 +2877,14 @@ describe("bay-base authority vs live queue", () => {
     await finishJob(app, await app.bays.open({ name: "effective", base: "main", baseSha: BASE, by: "test" }))
     liveSha.current = LIVE
     const shown = await app.bays.effectiveBase("B1")
-    const created = record(await app.bays.submitSelection("B1", {
-      resolveRevision: async () => HEAD_1,
-      resolveParents: async () => ["0".repeat(40)],
-      run: runtime,
-      draft: true,
-    }))
+    const created = record(
+      await app.bays.submitSelection("B1", {
+        resolveRevision: async () => HEAD_1,
+        resolveParents: async () => ["0".repeat(40)],
+        run: runtime,
+        draft: true,
+      }),
+    )
     expect(shown).toEqual({ base: "main", baseSha: LIVE })
     expect(created.revs[0]?.baseSha).toBe(shown.baseSha)
     expect(shown.baseSha).not.toBe(app.bays.get("B1")?.baseSha)

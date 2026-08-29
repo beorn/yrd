@@ -108,7 +108,16 @@ export function habitantObservability(config: YrdObservability): YrdObservabilit
   return Object.freeze({ ...config, level: "debug" })
 }
 
-const HABITANT_LIFECYCLE_NAMESPACES = ["yrd:jobs", "yrd:queue:run", "yrd:runner"] as const
+/** The namespaces whose narration the habitant follow-runner shows. These are
+ * matched against the namespace a logger ACTUALLY has, so an entry naming a
+ * namespace nothing creates silently deletes the diagnostics it was added to
+ * show. `yrd:queue:run` was such an entry: the queue plugin logs on
+ * `yrd.log.child("queue")` and no `child("run")` exists anywhere in src, so
+ * every `log.info` the queue emitted to explain an empty run was dropped — 427
+ * WARN and 0 INFO on `yrd:queue` across the runner's last twelve log files.
+ * That silenced `queue-run-no-submitted-prs`, which exists precisely so that
+ * "I found nothing submitted" and "I never looked" stop being the same bytes. */
+export const HABITANT_LIFECYCLE_NAMESPACES = ["yrd:jobs", "yrd:queue", "yrd:runner"] as const
 
 function habitantLifecycleNamespace(namespace: string): boolean {
   return HABITANT_LIFECYCLE_NAMESPACES.some(
@@ -117,16 +126,22 @@ function habitantLifecycleNamespace(namespace: string): boolean {
 }
 
 /** Preserve loggily's zero-cost conditional calls for the implicit habitant
- * policy. Its pipeline needs DEBUG/INFO only for lifecycle narration, so an
- * unrelated child must still expose neither method — otherwise every process,
- * Git, and projection debug payload is eagerly built and discarded downstream. */
+ * policy: an unrelated child must not expose `debug`/`trace`, or every process,
+ * Git, and projection payload is eagerly built and discarded downstream.
+ *
+ * `info` is deliberately NOT gated here, and that asymmetry is the point. This
+ * proxy deletes the METHOD, so a gated call is `log.info?.(…)` against
+ * `undefined` — a no-op with no error, no warning, and nothing in any stream.
+ * Yrd spends its INFO budget on the lines that distinguish an honest zero from
+ * a surface that never looked, so deleting one silently is the exact failure
+ * those lines were written to end. The cost of not gating it is bounded and
+ * small: 22 `info` call sites across all of src against 13 `debug`/`trace`, and
+ * the heavy payloads the optimisation was written for are all in the latter.
+ * Which namespaces the operator SEES stays one decision, made at the sink. */
 function gateImplicitHabitantLogger(logger: ConditionalLogger): ConditionalLogger {
   return new Proxy(logger, {
     get(target, property, receiver): unknown {
-      if (
-        (property === "debug" || property === "info" || property === "trace") &&
-        !habitantLifecycleNamespace(target.name)
-      ) {
+      if ((property === "debug" || property === "trace") && !habitantLifecycleNamespace(target.name)) {
         return undefined
       }
       if (property === "child" || property === "logger") {

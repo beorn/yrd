@@ -4,8 +4,9 @@ import { join } from "node:path"
 import type { RunnerContextRequest, RunnerContexts, RuntimeContext } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
-import { materializeSubmodules } from "git-super/submodules"
-import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktree"
+import { materializeSubmodulesWithProcess } from "git-super/submodules"
+import type { GitProcess } from "git-super/process"
+import { createGit, createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktree"
 
 /**
  * Bounded warm candidate-worktree pool (merge-queue R40).
@@ -30,28 +31,13 @@ import { createGitWorktreeStore, type GitWorktreeStore } from "git-super/worktre
  * merely to this phase. Enable with -vv, as with every other span here.
  */
 
-/** The narrow Git surface the pool drives. Structural to keep the pool decoupled
- * from the command module's private `createGit` (which the pool would otherwise
- * form an import cycle with). `command.ts` passes its own `git`; the host builds
- * one via {@link createCandidatePoolGit}. */
-export type CandidatePoolGit = Readonly<{
-  run(
-    repo: string,
-    args: readonly string[],
-    allowFailure?: boolean,
-    timeoutMs?: number,
-  ): Promise<CandidatePoolGitResult>
-}>
-
-export type CandidatePoolGitResult = Readonly<{ code: number; stdout: string; stderr: string }>
-
 export type CandidatePoolOptions = Readonly<{
   repo: string
   /** Directory under which warm worktrees are materialized (the Bays root). */
   parent: string
   /** Maximum concurrent warm worktrees held for this repository. */
   capacity?: number
-  git: CandidatePoolGit
+  git: GitProcess
   worktrees?: GitWorktreeStore | Promise<GitWorktreeStore>
   log?: ConditionalLogger
 }>
@@ -96,45 +82,37 @@ type AcquireOutcome = "hit" | "miss" | "residue-evicted"
 export function createCandidatePoolGit(
   process: Pick<Process, "run">,
   environment: NodeJS.ProcessEnv = globalThis.process.env,
-): CandidatePoolGit {
+): GitProcess {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
   env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   return Object.freeze({
-    async run(repo, args, allowFailure = false, timeoutMs = GIT_TIMEOUT_MS): Promise<CandidatePoolGitResult> {
+    async run(request) {
       const result = await process.run({
-        argv: ["git", "-C", repo, ...args],
-        cwd: repo,
-        env,
-        timeoutMs,
+        argv: ["git", "-C", request.repo, ...request.args],
+        cwd: request.repo,
+        env: { ...env, ...request.env },
+        timeoutMs: request.timeoutMs ?? GIT_TIMEOUT_MS,
       })
-      if (result.timedOut) {
-        // A timed-out subprocess was killed mid-operation. For allowFailure
-        // callers (best-effort cleanup like `worktree remove`, `rebase --abort`)
-        // that is a FAILED RESULT they already handle — throwing here instead
-        // escaped past every refusal path and killed the habitant (2026-07-23).
-        const message = `yrd: git ${args.join(" ")} timed out after ${timeoutMs}ms`
-        if (!allowFailure) throw new Error(message)
-        return { code: result.exitCode === 0 ? 124 : result.exitCode, stdout: result.stdout.trim(), stderr: message }
+      return {
+        code: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        timedOut: result.timedOut,
       }
-
-      const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
-      if (!allowFailure && completed.code !== 0) {
-        throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
-      }
-      return completed
     },
   })
 }
 
 export function createCandidatePool(options: CandidatePoolOptions): CandidatePool {
-  const { repo, parent, git } = options
+  const { repo, parent, git: gitProcess } = options
+  const git = createGit(gitProcess, globalThis.process.env, GIT_TIMEOUT_MS)
   const worktrees = Promise.resolve(
     options.worktrees ??
       createGitWorktreeStore({
         repo,
-        git,
+        gitProcess,
         timeouts: { operation: GIT_TIMEOUT_MS, cleanup: GIT_CLEANUP_TIMEOUT_MS },
       }),
   )
@@ -256,7 +234,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     // borrowed sixteen times off local disk produced the same record.
     // `child` keeps them distinguishable as `yrd:submodules:*` rather than
     // colliding with this `yrd:materialize` span.
-    const updated = await materializeSubmodules(git, {
+    const updated = await materializeSubmodulesWithProcess(gitProcess, {
       worktree,
       referenceWorktree: repo,
       force: true,
@@ -278,8 +256,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   }
 
   async function resolveCommit(worktree: string, ref: string): Promise<string> {
-    const parsed = await git.run(worktree, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])
-    return parsed.stdout
+    // A VALUE, not a payload: this sha is passed straight to `reset --hard`,
+    // where a trailing newline breaks the reset.
+    return git.text(worktree, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])
   }
 
   /** Reset a warm worktree to `ref` and PROVE it is residue-free. Fail closed:
@@ -307,8 +286,8 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       const cleaned = await git.run(worktree, ["clean", "-fdx"], true)
       if (cleaned.code !== 0) return record(false, cleaned.stderr || cleaned.stdout || "clean -fdx failed")
       await materialize(worktree, ref)
-      const head = await git.run(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD"], true)
-      if (head.code !== 0 || head.stdout !== target) return record(false, "HEAD does not match the candidate")
+      const head = await git.optionalText(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD"])
+      if (head !== target) return record(false, "HEAD does not match the candidate")
       const dirty = await git.run(
         worktree,
         ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"],

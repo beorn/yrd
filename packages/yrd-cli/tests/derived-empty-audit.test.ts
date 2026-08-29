@@ -18,7 +18,7 @@
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, volatilePrNumberMint } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
-import { withContests, type ContestGit } from "@yrd/contest"
+import { withContests, type CommitResolver } from "@yrd/contest"
 import { withIssues } from "@yrd/issue"
 import { withJobs, type JobResult } from "@yrd/job"
 import { withMerge, withQueue, withStep, type ChangeShape, type StepExecution } from "@yrd/queue"
@@ -88,7 +88,7 @@ async function createCliApp(options: Readonly<{ mint: boolean }>) {
     batch: false,
     ...(options.mint ? { prNumberMint: mint } : {}),
   })
-  const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   const contests = withContests({ runners: [], evaluators: [], git })
   const base = pipe(
     createYrdDef(),
@@ -207,11 +207,20 @@ describe("the unrecorded-submit audit line names the cause it observed", () => {
     expect(rendered).toContain(BRANCH)
     expect(rendered).toContain("derived admission IS wired here")
     expect(rendered).toContain("PR-number mint configured")
-    // The residual pair is genuinely unobservable from projection state, so it
-    // is named as a pair WITH the surface that answers it — never as a third
-    // possibility the reader is left to guess at.
-    expect(rendered).toContain("compose-derived-refused")
-    expect(rendered).toContain("habitant runner log")
+    // The residual pair used to be named as a pair pointing at action
+    // 'compose-derived-refused' in the runner log — and that pointer was the
+    // question restated: measured 2026-08-28 over 130 runner logs, 425 rows
+    // carried it while the 20 most recent logs held ZERO such events. The
+    // compose knows the cause and now carries it onto the row, so the pointer
+    // is gone from every rendering.
+    expect(rendered).not.toContain("compose-derived-refused")
+    expect(rendered).not.toContain("habitant runner log")
+    expect(rendered).not.toContain("either no runner is composing")
+    // `yrd queue audit` is a CLI process; it never composes. The one thing it
+    // must never do is answer as if it had looked, so it says which zero it is
+    // (ruling 22895) and names the surface that DID compose.
+    expect(rendered).toContain("no compose has run in this process")
+    expect(rendered).toContain("projection read")
     expect(rendered).not.toContain("derived admission is UNWIRED here")
     expect(rendered).not.toMatch(/queue\s+log/iu)
   })

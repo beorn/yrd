@@ -10,7 +10,7 @@ const PR_MINT_VERSION = 1
  * `max(existing) + 1` over the live record set cannot survive the record set
  * being emptied — a checkpoint-identity bump with evicted history bootstraps
  * the store "fresh" and the scan restarts at 1, re-issuing numbers that
- * already name landed changes (22986: one number named two different PRs four
+ * already name merged changes (22986: one number named two different PRs four
  * weeks apart). The mint is the asymmetry ruling made mechanical: durable
  * minting is reversible — a skipped number costs nothing — while renumbering
  * retroactively poisons every citation of the old number and cannot be taken

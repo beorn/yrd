@@ -9,7 +9,7 @@ export type CherryDragged = Readonly<{
   unreviewed?: number
 }>
 
-/** The cherry denominator, stated once: merge-tip-carrier and the authored-gitlink
+/** The cherry denominator, stated once: the merged result and the authored-gitlink
  * projection both instruct a submodule-main FF, and both must name what that FF
  * would drag in. Omitted `dragged` prints the command; empty unique list is a
  * no-op; non-empty is the dragged set with N not-yours and M unreviewed. */

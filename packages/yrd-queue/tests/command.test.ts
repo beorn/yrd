@@ -37,7 +37,7 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitChangeRemerger,
-  findRepositoryChangeMerge,
+  buildMergedTruthIndex,
   findRepositoryMergeRecords,
   CANDIDATE_REF_NAMESPACE,
   candidateRefFor,
@@ -58,6 +58,7 @@ import {
   type RefusePathsPolicy,
   type StepExecution,
 } from "@yrd/queue"
+import { fixtureRefGit } from "./support/remerge-fixtures.ts"
 
 /** A change fixture's stable identity. Production changes always carry one
  * (`Queues.snapshot` reads it off the revision), and the queue refuses to
@@ -4090,6 +4091,58 @@ describe("Queue command adapters", () => {
     })
   })
 
+  // 2026-08-28: this identity pair is DELIBERATE and must not be "fixed".
+  //
+  // A separate defect makes a CANDIDATE leg receive base==candidate: when every
+  // member is already contained in the base, nothing merges and the candidate
+  // sha IS the base sha, so four gates ran over an empty range (PR2145, PR2462,
+  // PR2503, PR2504, one compose pass, all four handed fd5a0d02..fd5a0d02).
+  // Reading that as "X..X is always wrong" and adding a blanket refusal to the
+  // environment builder would take typecheck and affected-tests down for
+  // everyone, because the delta comparison's BASE leg passes candidate.baseSha
+  // as both variables ON PURPOSE — that leg measures the base TREE, and asks no
+  // question about a range. This test exists so that deletion cannot be quiet.
+  it("hands the delta comparison's base leg an identical pair on purpose, and the candidate leg a real one", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    // Outside both checkouts: the two legs run in different worktrees and each
+    // appends one row, so the ledger is the only place their pairs meet.
+    const ledger = join(repo, "..", "delta-leg-pairs.txt")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        `printf '%s %s\\n' "$YRD_BASE_SHA" "$YRD_CANDIDATE_SHA" >> ${ledger}; ` +
+          // Fails with comparable diagnostics, which is the only thing that
+          // makes the base leg run at all.
+          "printf '%s\\n' 'src/a.ts:1:1 - shared-a'; exit 17",
+      ),
+      { comparison: "diagnostics" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
+
+    const rows = (await readFile(ledger, "utf8"))
+      .split("\n")
+      .filter((row) => row.trim() !== "")
+      .map((row) => row.split(" "))
+    expect(rows, "both legs must have run").toHaveLength(2)
+    const identical = rows.filter(([base, candidate]) => base === candidate)
+    const distinct = rows.filter(([base, candidate]) => base !== candidate)
+
+    // The base leg: one sha, in both variables, and it is the base.
+    expect(identical, "the base leg's identical pair is the exemption this test defends").toHaveLength(1)
+    expect(identical[0]?.[0]).toBe(baseSha)
+    expect(identical[0]?.[1]).toBe(baseSha)
+    // The candidate leg: a real range, so a guard that refuses base==candidate
+    // on the CANDIDATE leg alone stays possible without breaking delta mode.
+    expect(distinct, "the candidate leg must still receive a measurable range").toHaveLength(1)
+    expect(distinct[0]?.[0]).toBe(baseSha)
+  })
+
   // 2026-08-26: the delta comparison's parent leg ran in a bare scratch
   // worktree — no submodule materialization — while the candidate leg's pool
   // checkout and both merge paths materialize. In a repository whose workspace
@@ -5998,46 +6051,6 @@ describe("Queue command adapters", () => {
     await expectMerged(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
-  it("proves a regenerated code merge by Change-Id when the submitted SHA is absent from base ancestry", async () => {
-    const { repo } = await repository()
-    const changeId = `I${"1".repeat(40)}`
-    const otherChangeId = `I${"2".repeat(40)}`
-
-    await git(repo, ["switch", "-qc", "issue/authored"])
-    await writeFile(join(repo, "payload.txt"), "same logical change\n")
-    await git(repo, ["add", "payload.txt"])
-    await git(repo, ["commit", "-qm", `authored change\n\nChange-Id: ${changeId}`])
-    const submittedHead = await git(repo, ["rev-parse", "HEAD"])
-
-    await git(repo, ["switch", "-q", "main"])
-    await writeFile(join(repo, "payload.txt"), "same logical change\n")
-    await git(repo, ["add", "payload.txt"])
-    await git(repo, ["commit", "-qm", `queue-regenerated change\n\nChange-Id: ${changeId}`])
-    const landingSha = await git(repo, ["rev-parse", "HEAD"])
-
-    await expect(git(repo, ["merge-base", "--is-ancestor", submittedHead, landingSha])).rejects.toThrow()
-    await using process = createProcess()
-    await expect(
-      findRepositoryChangeMerge({
-        inject: { process },
-        repo,
-        baseSha: landingSha,
-        identity: { changeId, submittedHead },
-      }),
-    ).resolves.toEqual({
-      status: "proven",
-      fact: { changeId, submittedHead, landingSha, baseSha: landingSha },
-    })
-    await expect(
-      findRepositoryChangeMerge({
-        inject: { process },
-        repo,
-        baseSha: landingSha,
-        identity: { changeId: otherChangeId, submittedHead },
-      }),
-    ).resolves.toEqual({ status: "not-proven", reason: "change-id-not-on-base" })
-  })
-
   it("checks and merges the exact Change-Id-stamped Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
@@ -6123,14 +6136,9 @@ describe("Queue command adapters", () => {
     )
     // The distinct trailer must not widen what the Change-Id ancestry proof sees: one value, still.
     expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", candidateSha])).toBe(changeId)
-    await expect(
-      findRepositoryChangeMerge({
-        inject: { process },
-        repo,
-        baseSha: candidateSha,
-        identity: { changeId, submittedHead: featureSha },
-      }),
-    ).resolves.toMatchObject({ status: "proven", fact: { changeId, landingSha: candidateSha } })
+    const index = await buildMergedTruthIndex(fixtureRefGit(), repo, { tip: candidateSha })
+    expect(index.byChangeId.get(changeId)?.map((occurrence) => occurrence.commit)).toEqual([candidateSha])
+    expect(index.byChangeId.has(`${changeId}-merge`)).toBe(false)
   })
 
   it("persists one failed merge record with the reason, evidence, and fix", async () => {
@@ -7553,6 +7561,90 @@ describe("Queue command adapters", () => {
       },
     ])
     expect(await git(fixture.submoduleRemote, ["rev-parse", "main"])).toBe(fixture.pinSha)
+  }, 30_000)
+
+  // 2026-08-28: the run that pushed the root and then failed submodule
+  // promotion returned `submoduleMainFailureResult` and produced no
+  // IntegrationProof, so the queue durably FORGOT a merge it had performed. Its
+  // own retry could not tell itself apart from a candidate that had never
+  // merged, and three downstream tautologies — `is-ancestor X X`,
+  // `candidateSha === baseSha`, `tree(X) === tree(X)` — grew up to answer the
+  // question the lost fact should have answered.
+  it("keeps the root-merge fact when promotion fails, and a later run can read it", async () => {
+    const fixture = await submoduleMainMergeRepository()
+    await using process = createProcess()
+    let failedPromotion = false
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (
+          !failedPromotion &&
+          request.argv[0] === "git" &&
+          request.argv.includes("push") &&
+          request.argv.includes(fixture.submoduleRemote)
+        ) {
+          failedPromotion = true
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "transient submodule push failure",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, fixture.repo, ["true"])
+    await submitCertifiedCarrier(app, fixture.repo, {
+      branch: "issue/feature",
+      headSha: fixture.featureSha,
+      baseSha: fixture.rootBaseSha,
+    })
+
+    const first = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    // The run FAILED, and that stays true — this change does not touch what a
+    // promotion failure means for the run's own outcome.
+    expect(failedPromotion).toBe(true)
+    expect(first).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "component-main-promotion-failed" },
+    })
+    // The merge nonetheless happened: the root is on the remote.
+    expect(await git(fixture.rootRemote, ["ls-tree", "main", "dep"])).toContain(fixture.pinSha)
+
+    // ...and unlike before, it is on the record. A failed run that merged the
+    // root now says so.
+    const afterFirst = await git(fixture.repo, [
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      "refs/yrd/root-merged/",
+    ])
+    expect(afterFirst, "a merge that happened must leave a record").not.toBe("")
+    const firstRows = afterFirst.split("\n")
+    expect(firstRows).toHaveLength(1)
+
+    const retried = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({ status: "completed", conclusion: "success" })
+
+    // The point of keying by CHANGE and not by run: the second run reads the
+    // first run's fact under the same prefix. `mergeAttemptRefs` is keyed by
+    // `input.run`, which is exactly why a retry could see nothing its
+    // predecessor wrote.
+    const afterRetry = await git(fixture.repo, [
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      "refs/yrd/root-merged/",
+    ])
+    const retryRows = afterRetry.split("\n")
+    expect(retryRows.length, "both runs are legible under one change prefix").toBeGreaterThanOrEqual(1)
+    expect(afterRetry).toContain(firstRows[0]?.split(" ")[1] ?? " ")
+    // One prefix, so a later run looks the change up without knowing which run
+    // merged it.
+    const prefixes = new Set(retryRows.map((row) => row.split(" ")[1]?.split("/").slice(0, 4).join("/")))
+    expect(prefixes.size).toBe(1)
   }, 30_000)
 
   it("keeps earlier submodule fast-forwards and converges the remaining origins on retry", async () => {

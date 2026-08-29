@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
-import type { Process, ProcessResult } from "@yrd/process"
+import { adaptProcessGit, type Process, type ProcessResult } from "@yrd/process"
 import { createGitWorktreeStore } from "git-super/worktree"
 import type { ContestEvaluatorDef, ContestEvaluatorInput, EvaluatorResult } from "./types.ts"
 import {
@@ -315,7 +315,7 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
       const worktrees = await attempt("pin-checkout-create-failed", () =>
         createGitWorktreeStore({
           repo: bayPath,
-          process,
+          gitProcess: adaptProcessGit(process, { env }),
           env,
           signal: context.signal,
           timeouts: { cleanup: GIT_CLEANUP_TIMEOUT_MS },

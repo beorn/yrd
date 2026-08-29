@@ -13,10 +13,7 @@
  * Both gates ask the same question, so they compute it the same way.
  */
 
-export type GitlinkAuthorshipGit = (
-  repo: string,
-  args: readonly string[],
-) => Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
+import type { Git } from "git-super/worktree"
 
 export type AuthoredDeltaBase =
   | Readonly<{ status: "resolved"; sha: string }>
@@ -29,12 +26,14 @@ export type AuthoredDeltaBase =
  * base branch ref in a client checkout.
  */
 export async function authoredDeltaBase(
-  git: GitlinkAuthorshipGit,
+  git: Pick<Git, "run">,
   repo: string,
   base: string,
   headSha: string,
 ): Promise<AuthoredDeltaBase> {
-  const result = await git(repo, ["merge-base", base, headSha])
+  // Tolerant on purpose: a gate cannot afford a throw from inside a probe, and
+  // "no merge base" is a classification this returns, not a fault.
+  const result = await git.run(repo, ["merge-base", base, headSha], true)
   const sha = result.stdout.trim()
   if (result.code !== 0 || sha === "") {
     return { status: "unreadable", detail: result.stderr.trim() || result.stdout.trim() || "no merge base" }

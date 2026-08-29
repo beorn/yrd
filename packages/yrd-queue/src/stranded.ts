@@ -1,14 +1,25 @@
 /**
- * UNCARRIED refs: deciding whether a ref that reached the remote and never
- * became a change is genuinely stranded.
+ * STRANDED refs: deciding whether a ref that reached the remote and never
+ * became a change is genuinely stuck there.
  *
- * The name is deliberate, and not the one the bead uses. "Unsubmitted" is
- * already taken on the status view, where it means a REGISTERED PR sitting at
- * bay status `pushed` — a change that exists and has not been submitted.
- * This module's population is the opposite end: a ref with NO change at
- * all, which by construction has no candidate and so cannot be found by looking
- * at candidates. Two populations under one word would have put two disagreeing
- * counts on one dashboard, both correct.
+ * "Stranded" is the deliberate name, and it is the plain word this module was
+ * already reaching for in its own prose before it wore it in its title. The
+ * obvious alternative is NOT available: "unsubmitted" is already taken on the
+ * status view, where it means a REGISTERED PR sitting at bay status `pushed` —
+ * a change that exists and has not been submitted. This module's population is
+ * the opposite end: a ref with NO change at all, which by construction has no
+ * candidate and so cannot be found by looking at candidates. Two populations
+ * under one word would have put two disagreeing counts on one dashboard, both
+ * correct.
+ *
+ * THAT HAZARD NOW APPLIES TO "STRANDED" ITSELF, so a reader joining the two on
+ * one page must never sum them: `draft-stranded` (a `QueueAuditFinding` minted
+ * by `queue audit` at `queue.ts`) is a REGISTERED change parked at bay status
+ * `pushed`, while this module's `pushed-not-submitted` (a `StrandedFinding`
+ * from the sweep behind `queue uncarried`) is a ref no change record mentions
+ * at all. Disjoint by construction, and deliberately kept so: the two code
+ * tuples in `coordination-page-finding-codes.ts` exist precisely so neither
+ * command can silently accept the other's vocabulary.
  *
  * P2 of the hardening program. Under push-IS-submit this rail is the backstop —
  * the first version of any admission path will miss cases, and a state nobody
@@ -134,11 +145,11 @@ export type PinDirection = "forward" | "aligned" | "backward" | "diverged" | "no
  * rebase. Emphatically NOT a rescue: a finding that says "carry this" about a
  * backward pin causes the exact loss the rail exists to prevent.
  */
-export type UncarriedVerdict = "rescue" | "rebase-required"
+export type StrandedVerdict = "rescue" | "rebase-required"
 
-export type UncarriedFinding = Readonly<{
+export type StrandedFinding = Readonly<{
   code: "pushed-not-submitted"
-  verdict: UncarriedVerdict
+  verdict: StrandedVerdict
   ref: string
   tipSha: string
   ageMs: number
@@ -150,13 +161,13 @@ export type UncarriedFinding = Readonly<{
   message: string
 }>
 
-export type UncarriedOptions = Readonly<{
+export type StrandedOptions = Readonly<{
   nowMs: number
   /** Grace period before a pushed ref is considered stranded rather than
    * mid-flight. Admission is meant to happen ON the push, so this is small. */
   ttlMs: number
   /** Refs older than this are history, not work. Measured 2026-08-10: 1,502 of
-   * 1,546 uncarried refs on origin were older than seven days, so an unbounded
+   * 1,546 stranded refs on origin were older than seven days, so an unbounded
    * rail reports 1,546 rows once and is switched off before it reports again. */
   ageBoundMs: number
 }>
@@ -176,7 +187,7 @@ function formatAge(ms: number): string {
  * not merged by ANY route.
  *
  * The mergedness half is not an optimisation. Measured over the 24-hour window
- * this rail would actually watch, seven of eleven uncarried refs had already
+ * this rail would actually watch, seven of eleven stranded refs had already
  * merged — six ancestral and one regenerated with all six commits applied.
  * Reporting those is not a smaller problem than missing a stranded branch; it
  * is the problem that kills the rail.
@@ -185,10 +196,10 @@ function formatAge(ms: number): string {
  * validation report names the union of every seat's measured branch set plus
  * every branch authorized for action. A report that omits that population is
  * review-refusable. The one-time P0 proof is the ten-specimen union in
- * `tests/uncarried.test.ts`, including the separately authorized
+ * `tests/stranded.test.ts`, including the separately authorized
  * `task/22716-p1a-certification-dev3` branch.
  */
-export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions): UncarriedFinding | undefined {
+export function classifyPushedRef(fact: PushedRefFact, options: StrandedOptions): StrandedFinding | undefined {
   if (fact.carried) return undefined
   // Clock skew between pusher and sweeper must not produce a negative age that
   // silently passes a TTL comparison; a future timestamp is simply not yet due.
@@ -204,7 +215,7 @@ export function classifyPushedRef(fact: PushedRefFact, options: UncarriedOptions
       ? ""
       : ` — it supersedes ${fact.absorbedRevisions} earlier ${fact.absorbedRevisions === 1 ? "revision" : "revisions"} of the same series, which mint no rows of their own`
 
-  const build = (verdict: UncarriedVerdict, detail: string): UncarriedFinding => ({
+  const build = (verdict: StrandedVerdict, detail: string): StrandedFinding => ({
     code: "pushed-not-submitted",
     verdict,
     ref: fact.ref,

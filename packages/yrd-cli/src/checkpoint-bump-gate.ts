@@ -61,8 +61,26 @@ export const SHIPPED_CHECKPOINT_IDENTITIES: readonly string[] = Object.freeze([
   // 2026-08-26 — 22991 phase 2, first store-deletion door: initialState no
   // longer seeds queues.authority.statuses (the stored ChangeDeliveryState
   // copy); delivery state derives from the change record and the submit
-  // facts at read time. Current.
+  // facts at read time. SHARED MAIN'S VENDOR PIN COMPUTES THIS ONE: the
+  // composition at 18d9b83dbb19 — what the running yrd-runner loads — hashes
+  // to exactly this identity, so it is the value every deployment is asked to
+  // store until the entry below lands. Retained across the bump in
+  // RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES (packages/yrd-cli/src/host.ts).
   "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
+  // 2026-08-28 bd1c0b88 — `CandidateChange.containedInBase`: the queue records
+  // whether the base already contained the member's authored head at the site
+  // that measures it, instead of three tautologies re-asking it of the
+  // collapsed candidate. The field is OPTIONAL, so no stored record needs
+  // rewriting — but the identity hashes the ACCEPTED INPUT shape, and an
+  // optional property is still a new key in it, so the identity moves all the
+  // same. That is the trap this entry records: an additive, migration-free
+  // schema change reads like it cannot move the identity, and it does.
+  // bd1c0b88 shipped the move on upstream main without recording it here and
+  // it arrived through the merge f901bb83; the gate below is what caught it,
+  // exactly as designed. Every commit in 18d9b83dbb19..HEAD was probed
+  // individually and only two identities exist across the whole range, so no
+  // intermediate value exists for a deployment to be stranded on. Current.
+  "74775b5709b3cf9ef1ef3cfaae63013e486aa09d6386e01bf17d4482557203f1",
 ])
 
 /** Whether the migration graph connects `from` to `target`.

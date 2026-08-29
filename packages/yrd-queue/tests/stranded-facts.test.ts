@@ -10,7 +10,7 @@
  * mistakes that cannot be caught by testing the predicate.
  */
 import { describe, expect, it } from "vitest"
-import { gatherPushedRefFact, type RefGit } from "../src/uncarried-facts.ts"
+import { gatherPushedRefFact, type RefGit } from "../src/stranded-facts.ts"
 
 const BASE = "origin/main"
 const REPO = "/repo"
@@ -20,12 +20,12 @@ const REPO = "/repo"
 function scriptedGit(responses: Record<string, string | undefined>): RefGit {
   const key = (repo: string, args: readonly string[]): string => `${repo} ${args.join(" ")}`
   return {
-    async run(repo, args) {
+    async text(repo, args) {
       const value = responses[key(repo, args)]
       if (value === undefined) throw new Error(`unscripted git: ${key(repo, args)}`)
       return value
     },
-    async optional(repo, args) {
+    async optionalText(repo, args) {
       return responses[key(repo, args)]
     },
   }

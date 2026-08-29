@@ -18,15 +18,21 @@
  */
 import { describe, expect, it } from "vitest"
 import { createLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, volatilePrNumberMint, type BayWorkspace, type PrNumberMint } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, parseJournalFrame, pipe } from "@yrd/core"
+import {
+  createBayJobDefs,
+  withBays,
+  volatilePrNumberMint,
+  type BaysState,
+  type BayWorkspace,
+  type PrNumberMint,
+} from "@yrd/bay"
+import { createMemoryJournal, createYrd, createYrdDef, parseJournalFrame, pipe, type DeepReadonly } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
   candidateRefFor,
   derivedLaneBranches,
   Queues,
-  alreadyLandedSubmits,
   withMerge,
   withQueue,
   withStep,
@@ -90,6 +96,9 @@ async function createApp(
     superseded?: (sha: string) => boolean
     /** Makes the oracle throw, to exercise the compose's degrade path. */
     supersededThrows?: boolean
+    /** Stands in for the host's git-derived landed scan; see
+     * `scanLandedSubmits`. Shas the repository already carries. */
+    landed?: ReadonlySet<string>
   }> = {},
 ) {
   const check = withStep(
@@ -117,6 +126,19 @@ async function createApp(
     prepareCandidate: mergeableCandidate,
     prNumberMint: options.queueMint ?? volatilePrNumberMint(),
     readSubmitEnrichment: ({ sha }) => ({ changeId: `I${sha}` }),
+    ...(options.landed === undefined
+      ? {}
+      : {
+          scanLandedSubmits: ({ bays }: Readonly<{ bays: DeepReadonly<BaysState> }>) =>
+            Promise.resolve({
+              landed: Object.entries(bays.submits).flatMap(([branch, fact]) =>
+                options.landed?.has(fact.sha) === true ? [{ branch, sha: fact.sha }] : [],
+              ),
+              unresolved: [],
+              disagreements: [],
+              facts: Object.keys(bays.submits).length,
+            }),
+        }),
     ...(options.supersededThrows === true
       ? {
           isSubmitSuperseded: () => {
@@ -179,7 +201,7 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const journal = createMemoryJournal()
-    await using app = await createApp({ journal, log })
+    await using app = await createApp({ journal, log, landed: new Set([MERGED]) })
 
     // The two-lane state `yrd pr submit` + the refs/for dual-write produce: a
     // record AND a live submit fact for the same branch at the record's head.
@@ -198,8 +220,10 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     // re-projected after landing). Terminal record × different-sha — the cell
     // the old universe ruled DERIVED.
     await app.bays.recordBranchSubmit({ branch: "task/fence", sha: MERGED, base: "main" })
-    expect(derivedLaneBranches(app.state().bays)).toEqual([])
-    expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/fence"])
+    expect(derivedLaneBranches(app.state().bays, new Set(["task/fence"]))).toEqual([])
+    // The exclusion is the REPOSITORY's answer now, handed in: the record
+    // store no longer answers "has this landed?" for anybody.
+    expect(derivedLaneBranches(app.state().bays, new Set())).toEqual(["task/fence"])
 
     // The next selectorless compose — where the empty revision 2 was minted
     // and merged live — must compose NOTHING for this branch.
@@ -239,7 +263,7 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
 
       // Nothing is left for the derived lane even BEFORE its own admission
       // filter: the next compose has no fact to derive from.
-      expect(derivedLaneBranches(app.state().bays)).toEqual([])
+      expect(derivedLaneBranches(app.state().bays, new Set())).toEqual([])
       await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     }
 
@@ -263,8 +287,7 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     // record is history, the new head is new work (Q1). Excluding record
     // history wholesale would strand every resubmit of a merged branch.
     expect(app.state().bays.submits["task/repushed"]).toMatchObject({ sha: RESUBMIT_SHA })
-    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["task/repushed"])
+    expect(derivedLaneBranches(app.state().bays, new Set())).toEqual(["task/repushed"])
     const again = await app.queue.run({}, runtime)
     expect(again).toMatchObject([{ status: "completed", conclusion: "success" }])
     const reentry = Queues.values(app.state().queues).find((run) =>
@@ -277,8 +300,7 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
   it("a genuinely recordless branch still composes, runs and merges as a derived member", async () => {
     await using app = await createApp({})
     await app.bays.recordBranchSubmit({ branch: "issue/recordless", sha: RECORDLESS_SHA, base: "main" })
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless"])
-    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
+    expect(derivedLaneBranches(app.state().bays, new Set())).toEqual(["issue/recordless"])
 
     const runs = await app.queue.run({}, runtime)
     expect(runs).toMatchObject([{ status: "completed", conclusion: "success" }])
@@ -308,8 +330,10 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     // Recordless: the derived lane's own population.
     await app.bays.recordBranchSubmit({ branch: "issue/recordless", sha: RECORDLESS_SHA, base: "main" })
 
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/recordless", "task/withdrawn"])
-    expect(alreadyLandedSubmits(app.state().bays).map((row) => row.branch)).toEqual(["task/merged"])
+    expect(derivedLaneBranches(app.state().bays, new Set(["task/merged"]))).toEqual([
+      "issue/recordless",
+      "task/withdrawn",
+    ])
   })
 
   it("does not compose a RECORDLESS branch whose content the base already contains", async () => {
@@ -317,25 +341,24 @@ describe("one lane consumes a branch approval (PR2139 double-merge, 2026-08-27)"
     // pass because nothing had retired their standing facts, and the compose
     // ejected each one forever. The merge queue did not merge for 2h25m.
     //
-    // `alreadyLandedSubmits` is structurally blind to them, for TWO reasons,
-    // and either one alone is fatal:
-    //   1. it needs a terminal RECORD for the branch, and these had none —
+    // The retired `alreadyLandedSubmits` was structurally blind to them, for
+    // TWO reasons, and either one alone was fatal:
+    //   1. it needed a terminal RECORD for the branch, and these had none —
     //      post-purge the derived lane is where merged branches live;
-    //   2. it compares the fact's sha to that record's integration commit,
+    //   2. it compared the fact's sha to that record's integration commit,
     //      and the queue REBUILDS a candidate at merge into a new head, so
-    //      the equality it tests cannot hold across a real merge.
+    //      the equality it tested cannot hold across a real merge.
     // Both are "has this content landed?" asked of the wrong oracle. Git
-    // answers it directly, for every branch, record or not.
+    // answers it directly, for every branch, record or not — see
+    // landed-submits-derived.test.ts for that read over a real repository.
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createApp({ log, superseded: (sha) => sha === LANDED_SHA })
     await app.bays.recordBranchSubmit({ branch: "issue/ghost", sha: LANDED_SHA, base: "main" })
 
-    // The record-keyed guard sees nothing — there is no record to match.
-    expect(alreadyLandedSubmits(app.state().bays)).toEqual([])
-    // The lane still OFFERS the branch; excluding it is the compose's job,
-    // because only the compose can reach git.
-    expect(derivedLaneBranches(app.state().bays)).toEqual(["issue/ghost"])
+    // With no landed answer handed in, the lane still OFFERS the branch;
+    // excluding it is the compose's job, because only the compose reaches git.
+    expect(derivedLaneBranches(app.state().bays, new Set())).toEqual(["issue/ghost"])
 
     await expect(app.queue.run({}, runtime)).resolves.toEqual([])
     expect(

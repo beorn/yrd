@@ -193,9 +193,9 @@ import {
   type TimelineStepCell,
   timestamp,
   toIso,
-  uncarriedLine,
-  type UncarriedObservation,
-  uncarriedRailColor,
+  strandedLine,
+  type StrandedObservation,
+  strandedRailColor,
   withTimelineLineage,
 } from "@yrd/queue"
 import {
@@ -347,14 +347,14 @@ export {
   runRevisionClock,
   runRevisionClockRead,
   stepNamesOfRun,
-  type UncarriedBuckets,
-  uncarriedCoverageFloor,
-  uncarriedDenominator,
-  uncarriedFloorCount,
-  uncarriedLine,
-  type UncarriedObservation,
-  uncarriedObservation,
-  uncarriedRailColor,
+  type StrandedBuckets,
+  strandedCoverageFloor,
+  strandedDenominator,
+  strandedFloorCount,
+  strandedLine,
+  type StrandedObservation,
+  strandedObservation,
+  strandedRailColor,
 } from "@yrd/queue"
 
 type QueueNounIdProps = Omit<React.ComponentProps<typeof NounId>, "noun" | "value" | "revision">
@@ -528,20 +528,20 @@ export type QueueTimelineRunner = Readonly<{
   /** Content of the driver lease. Probes assert this, never a process/service suffix. */
   driver?: QueueDriverEpoch
   /**
-   * Last uncarried sweep, carried as a MEASUREMENT rather than a number.
+   * Last stranded-refs sweep, carried as a MEASUREMENT rather than a number.
    *
    * The sweep costs seconds, so it runs on its own cadence and cannot be
    * recomputed per render. That makes the count a stored belief, and a stored
    * belief rendered as if it were current is the shape that cost this fleet
    * most: a value derived in truth, authored in practice, with nothing
    * asserting the two agree. `observedAt` is what keeps it honest — the rail
-   * renders "N uncarried, as of 4m ago" and a dead runner reads "as of 3h ago"
+   * renders "N stranded, as of 4m ago" and a dead runner reads "as of 3h ago"
    * instead of a confident zero.
    *
    * Absent means NOT MEASURED, which must never render as 0. A queue with no
    * stranded refs and a queue nobody has swept are different facts.
    */
-  uncarried?: UncarriedObservation
+  uncarried?: StrandedObservation
   /** ISO time the habitant wrote its exit marker on shutdown. The status file is
    * NEVER deleted on close — it is left with this marker so a successor can still
    * reclaim this pid's leases (idempotently). Absent while the runner is live. */
@@ -2129,6 +2129,22 @@ function projectPR(
 }
 
 /**
+ * The landed-content answer this SURFACE does not have.
+ *
+ * "Has this standing fact's content already landed?" is a question about the
+ * repository, and `landedSubmits` is the only thing that answers it. This is a
+ * synchronous render projection: it holds `BaysState` and a status result, no
+ * process, no repository. So it excludes nothing on landed content and says so
+ * here rather than passing the record store's answer, which is the defect the
+ * cutover removed — a fact standing at merged content shows as pending until
+ * the compose or `yrd admin pr prune` retires it, and both of those DO ask git.
+ *
+ * The fix is to thread a scan down from the command entrance that already has
+ * the repository (see `prunePrs`), not to re-derive an answer here.
+ */
+const NO_REPOSITORY_LANDED_ANSWER: ReadonlySet<string> = new Set<string>()
+
+/**
  * Every live submit fact this queue's base holds that no retained run has
  * admitted at its exact sha: the DERIVED lane's pre-run population, and the
  * ONE derivation of it any reader may use.
@@ -2152,9 +2168,10 @@ function projectPR(
 export function pendingSubmitFacts(
   state: BaysState,
   result: QueueStatusResult,
+  landedBranches: ReadonlySet<string>,
 ): readonly Readonly<{ branch: string; fact: ProjectedBranchSubmit; bay?: Bay }>[] {
   const members = [...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs)
-  return derivedLaneBranches(state).flatMap((branch) => {
+  return derivedLaneBranches(state, landedBranches).flatMap((branch) => {
     const fact = state.submits[branch]
     if (fact === undefined) return []
     if (baseIdentity(fact.base) !== baseIdentity(result.base)) return []
@@ -2177,7 +2194,7 @@ export function pendingSubmitFacts(
  * indistinguishable from no work, which is the defect.
  */
 function submitFactChangeRows(state: BaysState, result: QueueStatusResult, now: number): HumanChangeProjection[] {
-  return pendingSubmitFacts(state, result).map(({ branch, fact, bay }) => {
+  return pendingSubmitFacts(state, result, NO_REPOSITORY_LANDED_ANSWER).map(({ branch, fact, bay }) => {
     const path = bay?.path
     const clock = age(fact.at, now, `branch '${branch}' submit fact age`)
     return {
@@ -4558,7 +4575,7 @@ function TimelineRunnerBox({
   // while running normally the `$ …` command line renders BLUE (the marker
   // color) with the pulsing activity marker, and every INFORMATIONAL rail is
   // muted grey so the activity line carries the eye — but severity text
-  // NEVER mutes: a warning source/uncarried rail and every error row keep
+  // NEVER mutes: a warning source/stranded rail and every error row keep
   // the box's severity color regardless of runner activity (muting must
   // never dim an error; the pre-27 build muted a behind-pin warning while
   // running, which is exactly the bug this rule bans).
@@ -4613,16 +4630,16 @@ function TimelineRunnerBox({
           </Text>
         </MarkerRow>
       )}
-      {/* Its own rail, per acceptance: pushed-and-uncarried is invisible from
+      {/* Its own rail, per acceptance: pushed-and-stranded is invisible from
           every other surface here, because a ref with no change has no
           candidate and so appears in no row. Colour rules live in
-          `uncarriedRailColor` — only genuine stranded work earns attention,
+          `strandedRailColor` — only genuine stranded work earns attention,
           and a warning-colored rail never mutes (item 27). Coverage is
           carried by the TEXT, never by the colour. */}
       {runner === null ? null : (
         <MarkerRow>
-          <Text color={uncarriedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
-            {uncarriedLine(runner.uncarried, now)}
+          <Text color={strandedRailColor(runner.uncarried)} wrap="truncate" minWidth={0}>
+            {strandedLine(runner.uncarried, now)}
           </Text>
         </MarkerRow>
       )}

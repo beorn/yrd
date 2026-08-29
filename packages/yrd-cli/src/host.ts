@@ -38,7 +38,7 @@ import {
   createHeldOutCommandEvaluator,
   withContests,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "@yrd/contest"
 import {
@@ -98,7 +98,10 @@ import {
   type StepExecution,
   type StepRunner,
   Queues,
+  buildMergedTruthIndex,
+  landedSubmits,
   type DerivedSubmitEnrichment,
+  type MergedTruthGit,
 } from "@yrd/queue"
 import {
   installedPlanStale,
@@ -342,6 +345,17 @@ const RETAINED_PREDECESSOR_CHECKPOINT_IDENTITIES = Object.freeze([
   // checkpoint equal changeDeliveryState of their change record exactly, so
   // the forward callback below can drop the key with zero information loss.
   "701431d5952e57f998e77413fe6c79dfede32f203863a5ff163b07b704ab6c25",
+  // The composition immediately before `CandidateChange.containedInBase`
+  // (bd1c0b88, 2026-08-28) moved the identity. Not a harness value (the
+  // PR1305 / R2732 lesson above): it is the ledger's own superseded last entry
+  // in `checkpoint-bump-gate.ts` — what this project has ASKED every
+  // deployment to store since 2026-08-26 — and it is what shared main's vendor
+  // pin 18d9b83dbb19, the composition the running yrd-runner loads, computes.
+  // The new field is optional on historical CandidateChanges, so this edge
+  // needs no transformation of its own: the shared callback below preserves
+  // every stored record verbatim and the forward callback's drops are all
+  // no-ops on a checkpoint this recent.
+  "381cdb9edee92b0988087ae0fab8bb365b59069224ef47dc6b881dbde735808c",
 ])
 
 /** Fill state fields a stored checkpoint predates with their initial values.
@@ -414,7 +428,7 @@ export type DefaultYrdAppOptions = Readonly<{
   issueSources?: readonly IssueSource[]
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
-  contestGit?: ContestGit
+  contestGit?: CommitResolver
   defaultSubmitter?: string
   scope?: Scope
   log?: ConditionalLogger
@@ -1928,7 +1942,7 @@ async function resolveQueueTarget(
   }
 }
 
-function localContestGit(process: Pick<Process, "run">, repo: string): ContestGit {
+function localCommitResolver(process: Pick<Process, "run">, repo: string): CommitResolver {
   return {
     revision: createHash("sha256").update(`yrd-contest-git-v2\0${repo}`).digest("hex"),
     resolveCommit: (ref) => resolveCommit(process, repo, ref),
@@ -1947,7 +1961,7 @@ function bayPath(root: string, bay: string): string {
 function contestAdapters(options: DefaultYrdDefinitionOptions): {
   runners: readonly ContestRunnerDef[]
   evaluators: readonly ContestEvaluatorDef[]
-  git: ContestGit
+  git: CommitResolver
 } {
   const evaluators =
     options.contestEvaluators ??
@@ -1975,7 +1989,7 @@ function contestAdapters(options: DefaultYrdDefinitionOptions): {
       })
     })
   const runners = options.contestRunners ?? []
-  return { runners, evaluators, git: options.contestGit ?? localContestGit(options.process, options.repo) }
+  return { runners, evaluators, git: options.contestGit ?? localCommitResolver(options.process, options.repo) }
 }
 
 /** Compose the built-in workflow from immutable plugins and injected resources. */
@@ -2053,6 +2067,7 @@ async function createDefaultYrdDefinition(options: DefaultYrdDefinitionOptions) 
     requires: options.config.requires,
     prNumberMint,
     readSubmitEnrichment: ({ sha }) => readDerivedSubmitEnrichment(options.process, options.repo, sha),
+    scanLandedSubmits: landedSubmitScanner({ process: options.process, repo: options.repo }),
     isSubmitSuperseded: ({ sha, base }) => isSubmitContentLanded(options.process, options.repo, sha, base),
     ...(options.config.progress === undefined ? {} : { progress: options.config.progress }),
     ...(options.config.needsPerson === undefined ? {} : { needsPersonOwner: options.config.needsPerson.owner }),
@@ -2560,6 +2575,75 @@ export function receiverTarget(app: ReceiverBayIndex, process: Pick<Process, "ru
  * identity from the submission's stable facts (a retained snapshot's identity
  * or a present trailer wins over that mint).
  */
+/**
+ * The merged-truth reader's two git reads, over this host's process runner.
+ *
+ * `text` throws on ANY non-zero exit — an unreadable repository is a loud
+ * failure, never an empty index, and it is that throw which makes a negative
+ * containment answer trustworthy. `optionalText` maps a non-zero exit to
+ * undefined for the one question where that is a real answer (`merge-base
+ * --is-ancestor` exits 1 for "not contained"). A TIMEOUT stays fatal in both:
+ * git never finished asking, and reporting that as "not contained" would read
+ * a stalled repository as a clean not-merged.
+ */
+export function mergedTruthGit(process: Pick<Process, "run">): MergedTruthGit {
+  const read = async (repo: string, args: readonly string[]): Promise<ProcessResult> => {
+    const result = await process.run({
+      argv: ["git", "-C", repo, ...args],
+      cwd: repo,
+      env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: GIT_TIMEOUT_MS,
+    })
+    assertGitDidNotTimeOut(result, args)
+    return result
+  }
+  return {
+    async text(repo, args) {
+      const result = await read(repo, args)
+      if (result.exitCode !== 0) {
+        throw new Error(`yrd: git ${args.join(" ")} exited ${String(result.exitCode)}: ${result.stderr.trim()}`)
+      }
+      return result.stdout.trim()
+    },
+    async optionalText(repo, args) {
+      const result = await read(repo, args)
+      return result.exitCode === 0 ? result.stdout.trim() : undefined
+    },
+  }
+}
+
+/**
+ * The queue's `scanLandedSubmits` capability: which standing submit facts does
+ * this repository already carry?
+ *
+ * One first-parent index per DISTINCT base, built on demand and cached inside
+ * one scan. The walk is UNBOUNDED on purpose: this consumer asks only
+ * `mergedByAncestry`, whose verdict is pure containment and never consults the
+ * Change-Id lineage index or its specimens, so the trailer-stamping epoch that
+ * a lineage consumer must pass as `stop` changes nothing here. The index's
+ * only contribution is naming the merge commit that carried a landed fact,
+ * which a bounded walk would silently drop — hence the full walk, and hence
+ * the cost: one `git log --first-parent` over the base per compose pass.
+ */
+function landedSubmitScanner(options: Readonly<{ process: Pick<Process, "run">; repo: string }>) {
+  const git = mergedTruthGit(options.process)
+  return async (input: Readonly<{ bays: Parameters<typeof landedSubmits>[2] }>) =>
+    landedSubmits(
+      git,
+      async (base) =>
+        buildMergedTruthIndex(git, options.repo, {
+          tip: (
+            await resolveGitQueueTarget({
+              inject: { process: options.process },
+              repo: options.repo,
+              branch: baseIdentity(base),
+            })
+          ).sha,
+        }),
+      input.bays,
+    )
+}
+
 /**
  * Does the base branch already contain this standing fact's content?
  *
@@ -3202,9 +3286,9 @@ export type YrdProcessHostOptions = Pick<
      * (`code`, `pm`) — the queue LABEL run names lead with (item 36). Absent
      * for standalone invocations, which have no config handles yet. */
     repositoryLabel?: string
-    /** Host-evaluated uncarried exemptions. Copied onto IO so both the
+    /** Host-evaluated stranded-refs exemptions. Copied onto IO so both the
      * `queue uncarried` command and the habitant sweeper share one adapter. */
-    uncarriedFilter?: YrdCliIO["filterUncarriedFindings"]
+    strandedFilter?: YrdCliIO["filterStrandedFindings"]
   }>
 
 type YrdRuntimeHostOptions = YrdHostOptions &
@@ -3722,7 +3806,7 @@ async function runYrdProcessHost(
   terminateAfterCleanup: boolean,
   options: YrdProcessHostOptions,
 ): Promise<YrdCliExitCode> {
-  if (options.uncarriedFilter) io.filterUncarriedFindings = options.uncarriedFilter
+  if (options.strandedFilter) io.filterStrandedFindings = options.strandedFilter
   const env = process.env
   const invocation = resolveInvocation(argv)
   if (invocation.args[0] === "receiver-hook") {

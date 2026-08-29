@@ -13,7 +13,7 @@ import {
   withContests,
   type AttemptRunOutput,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "../src/index.ts"
 
@@ -152,7 +152,7 @@ function fixtures(
       }
     },
   }
-  const git: ContestGit = { revision: "git-v1", resolveCommit: (ref) => pins.get(ref) }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: (ref) => pins.get(ref) }
   return { pins, control, runner, heldOut, advisory, git, maxActive: () => maxActive, runnerCalls: () => runnerCalls }
 }
 

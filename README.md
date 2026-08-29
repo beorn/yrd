@@ -4,6 +4,8 @@
 
 **Sovereign software delivery for agent teams.**
 
+*Normative sources for the delivery model, in precedence order over this file: `@yrd/core/22991-branch-is-change-delete-the-pr-record` (the change model), `@i/10-yrd/plan.md` (§§ Words · Principles · Rulings in force), `@i/10-yrd/shaset-model.md` (how a merge settles across submodules), and `about/glossary.md` (the ratified words) — all in the `/hh` superproject that develops yrd. Where this README disagrees with them, they win and this file is the bug.*
+
 **Agents are fast!** Unleash 100 on one machine. What could go wrong?
 
 - **GitHub feels like the DMV.** Agents wait in a remote CI queue you don't control.
@@ -83,40 +85,61 @@ pure pin advance = a change with exactly one shaset commit
 | ~~merge request / pull request~~                          | **change** — `mr`/`pr` remain taught aliases; ids still print as `PRnnn`                                           |
 | ~~correlation~~                                           | **props** — opaque `--prop key=value` labels on a change (km's noun); the legacy journal key stays readable        |
 
-## The model — five objects, one pipeline
+## The model — a branch is a change
+
+Seven words carry the whole delivery surface: **branch · diff · submit ·
+draft/submitted/merged · delete · checks · issue**.
 
 ```text
-issue -> workspace -> pr -> queue -> merged
-          ^      ^
-          +-- contest (competing implementations; winner promotes to a PR)
+branch (the change)
+  diff is empty ............. nothing to deliver
+  diff, no live submit ...... draft
+  live submit ref ........... submitted   → the queue tests the merged result
+  submit sha on main ........ merged
+branch deleted .............. abandoned; there is no withdrawn state
 ```
 
-- **issue** — what you deliver. It lives in your tracker; yrd stores only the
-  reference. The tracker holds the pen; yrd owns the lens.
-- **workspace** — where you work: a Git worktree that something owns the
-  lifecycle of. That last part is the whole difference from a worktree you make
-  by hand. A workspace carries a **lease** (who holds it, when it was opened,
-  and a heartbeat that says it is still alive), the **issue** it is working, and
-  a **lifecycle** — opening, active, closing, closed, failed — so an abandoned
-  one can be recognised as abandoned instead of accumulating forever. Reached
-  through the `yrd bay` subtree; its lifecycle is not a standalone product
-  surface.
-- **pr** — the submitted change: a branch@head with numbered revisions. Review
-  happens upstream; a yrd PR is the queue's unit.
-- **queue** — one per base branch. It verifies and merges PRs serially and can
-  pause new runs, including retries, without killing active work.
-- **contest** — several implementations of one issue, evaluated against the
-  same pin; the selected winner promotes to a PR.
+- **branch** — the change itself. There is no second record to author or keep
+  in sync. Ids print as `PRnnn` and `pr`/`mr` are taught aliases, but that is a
+  label on a branch, not an object beside it.
+- **diff** — what the branch changes against its base.
+- **submit** — handing the change to the queue, once your own gate is green.
+  Submitting writes one ref, `refs/yrd/submit/<branch>`, valued at the commit
+  you approve to merge; **pushing that ref is the API**. One push does both:
+  `git push <yrd remote> HEAD:refs/for/main/<issue>` pushes the branch and
+  submits that exact tip in the same act.
+- **draft / submitted / merged** — **derived from git, never stored.** *Draft*
+  is a non-empty diff with no live submit. *Submitted* is a live submit — its
+  sha reachable from the branch tip and not yet an ancestor of main; newest
+  write wins, so a branch has at most one. *Merged* is that submitted sha being
+  an ancestor of main — a history fact, so a revert does not un-merge it, and
+  getting the content back on main means new commits and a new submit.
+- **delete** — abandoning a change is deleting its branch. There is no
+  withdrawn or closed status; the issue records why, and the receiver sweeps
+  `refs/yrd/*/<branch>` in the same transaction.
+- **checks** — your own commands, run against the merged result. Their results
+  are a regenerable cache keyed by sha: the only store outside git.
+- **issue** — the unit of intent. It lives in your tracker; yrd stores the
+  reference and stamps it as an `Issue:` commit trailer. The tracker holds the
+  pen; yrd owns the lens.
 
-Runs, steps, jobs, attempts, and the runners that execute them are evidence
-inside PRs and the log, not top-level objects to manage.
+Two objects sit beside the change rather than inside it. A **queue** is one per
+base branch and is that branch's only writer. A **bay** is the managed workdir a
+change is authored in — a Git worktree whose lifecycle something owns, which is
+the whole difference from a worktree you make by hand; reached through
+`yrd bay`.
+
+A **contest** runs several implementations of one issue against the same base
+and promotes the selected winner as an ordinary change. Runs, steps, jobs, and
+attempts are evidence inside a change and the log, not objects to manage.
 
 yrd is gh-shaped, not gh-scoped: its noun and aspect-verb grammar makes `gh`
 muscle memory transfer, while its scope is deliberately one slice of the forge:
-delivery. It composes reusable [`git-super`](https://github.com/beorn/git-super) mechanics with the merge queue while
-Hab owns workspace lifecycle. Two deliberate absences define the boundary: `yrd pr
-merge` never merges because the queue is the only merger, and yrd never creates
-or edits issues because the tracker remains authoritative.
+delivery. It composes reusable [`git-super`](https://github.com/beorn/git-super)
+mechanics with the merge queue, while agent launch and supervision belong to the
+launcher. Two deliberate absences define the boundary: `yrd pr merge` never
+merges, because the queue is the only merger, and yrd never creates or edits
+issues, because the tracker remains authoritative.
 
 The project is `beorn/yrd`, its distribution is `git-yrd`, the package scope is
 `@yrd`, and its public domain is `yrd.dev`.
@@ -128,11 +151,14 @@ The implementation model and package boundaries are documented in
 
 Three rules generate everything else in this section:
 
-1. **A branch is a change.** Push a branch, record it once, and it is in
-   delivery. There is no second content artifact to author or keep in sync —
-   the change record derives from the pushed branch.
-2. **Changes are tracked by default.** The queue watches the live branch; a
-   moved head becomes a new revision by itself. You never re-submit by hand.
+1. **A branch is a change.** Push a branch and its diff is a change; there is
+   no second content artifact to author or keep in sync, and its state is read
+   out of git rather than stored (see
+   [The model](#the-model--a-branch-is-a-change)).
+2. **Submission is per-push consent.** A submit names one exact commit: the tip
+   you approved. A plain `refs/heads` push never moves it, and a `refs/for`
+   push re-submits the new tip in the same act — so the queue never acts on a
+   commit you did not hand it.
 3. **The tested object is the merged object.** The queue builds a merge of your
    branch onto the target, tests exactly that commit, and makes exactly that
    commit the new target tip. It never rebases, squashes, or otherwise mints
@@ -140,73 +166,49 @@ Three rules generate everything else in this section:
 
 The words used below: a **change** is the queued unit — ids print as `PRnnn`
 and the CLI says `pr` purely because those spellings are familiar; no
-pull-request object exists. A **revision** is one immutable recorded head of
-the change's branch. A **candidate** is the merged object built for testing.
-A **run** is one queue execution against a candidate. **Re-merging** is the
-queue rebuilding the candidate after the target moved — its own act, with no
-operator verb. The
-**shaset commit** (a "sha set") is the queue's own commit that fills in each
-submodule gitlink and the workspace lockfile those pins imply (see
-[Superprojects](#superprojects)). How runs are ordered, batched, and executed
-is [Queue Operations](#queue-operations)' to teach; this chapter is the object
+pull-request object exists. A **candidate** is the merged object built for
+testing. A **run** is one queue execution against a candidate. **Re-merging**
+is the queue rebuilding the candidate after the target moved — its own act,
+with no operator verb. The **shaset commit** (a "sha set") is the queue's own
+commit that fills in each submodule gitlink and the lockfile those gitlinks
+imply (see [Superprojects](#superprojects)). **Integrated** is proven ancestry
+on the target; **shipped** is content present at `origin/main`'s tip — near
+neighbours, never synonyms. How runs are ordered, batched, and executed is
+[Queue Operations](#queue-operations)' to teach; this chapter is the object
 model.
 
-### A branch is a change
+> **Flagged, not rewritten — no current design document covers this.** The CLI
+> still carries the older *tracked-by-default* machinery, in which the queue
+> observes the live branch and records a moved head as a new revision by
+> itself: `yrd pr submit --no-track`, `yrd pr edit <PR> --track|--untrack`,
+> and the habitant runner's pre-cycle branch observation all still exist, and
+> the CLI surface from [PR Eligibility and Checks](#pr-eligibility-and-checks)
+> onward still teaches them. That contradicts rule 2, which is the newer
+> ruling; the cutover is in flight. Numbered per-change **revisions** are in
+> the same position — still everywhere in the CLI, while revision numbering is
+> an open question in the change model. Confirm either against the CLI before
+> relying on it.
+
+### Submitting a change
 
 ```console
-$ git push origin task/fix-release
-$ yrd pr create task/fix-release        # draft change, not yet queued
-$ yrd pr submit task/fix-release        # runs local checks, records revision 1
+$ git push <yrd remote> HEAD:refs/for/main/23045   # push and submit, one act
 ```
 
-`pr create` records the pushed head as a draft — invisible to the queue and
-not yet observed; tracking begins at submit. `pr submit` (or `pr ready` in a
-review-gated repository) records the head as revision 1, runs the configured
-checks locally for fast feedback, and hands the change to the queue. A push to
-the managed receiver — the push namespace `refs/for/<base>/<issue>` on the yrd
-remote, where base is the target branch and issue names the tracker item the
-change belongs to — is the same submit act in one
-step. From here on the change's identity is stable: new pushes become new
-revisions of the same change, and every final outcome — merged, refused,
-withdrawn — names the exact revision and head it is about. Review lives on the
-change too: `pr review --approve` records a verdict pinned to the exact
-revision and head. A review-gated repository blocks `pr ready` until one
-exists (see [PR Eligibility and Checks](#pr-eligibility-and-checks)).
-
-### Tracked by default
-
-A submitted change is **tracked**: before every queue cycle, the queue's
-long-running process observes the branch on `origin`. When the tip moved, the
-new head is recorded as the next revision, re-merged onto the current target,
-and queued — automatically, with no ceremony from the author. Tracking does not
-touch reproducibility. A run never executes "whatever the branch is now" — it
-executes one frozen recorded revision. Tracking only changes _which_ revision
-gets prepared next, never a running candidate.
-
-Opting out is explicit:
+`<yrd remote>` is whatever your clone names the managed receiver. That single
+push writes the branch and `refs/yrd/submit/<branch>` at the same tip, and the
+receiver refuses an inadmissible change before accepting either ref. The
+two-step spelling is equivalent:
 
 ```console
-$ yrd pr submit task/fix-release --no-track   # this change will not follow the branch
-$ yrd pr edit PR7 --untrack                   # stop tracking a live change
-$ yrd pr edit PR7 --track                     # adopt tracking again
+$ git push <yrd remote> task/fix-release   # branch only — still a draft
+$ yrd submit task/fix-release              # writes the submit ref
 ```
 
-An **untracked** change refuses to replay silently-stale work. If its branch
-moved, the queue does not guess which head you meant. It stops and prints the
-exact remedies:
-
-```text
-error: change 'PR7' recorded revision 3 head 'a1b2c3d…', but live branch
-'task/fix-release' is 'e4f5a6b…'. This change is explicitly untracked, so the
-queue will not silently act on stale work.
-To adopt tracking (the default), so moved heads are recorded as revisions:
-  yrd pr edit PR7 --track
-To record the live head once while staying untracked:
-  yrd pr submit task/fix-release
-```
-
-The tracking bit only governs future revisions, so editing it on a terminal
-change (merged, withdrawn, canceled) is refused — nothing would ever read it.
+`yrd submit` is `yrd branch submit` (see [Branch States](#branch-states)): it
+prints the branches it resolved and the exact `git push` it will make, so a
+glob's expansion is never a surprise. To pull a change back out of the queue,
+move it to draft; to abandon it, delete the branch.
 
 ### The tested object is the merged object
 
@@ -247,14 +249,14 @@ head as its next revision.
 Two consequences fall out:
 
 - **Traceability is structural.** The authored tip is a parent of the merge
-  that landed, so `git log`, `git branch --contains`, and ancestry queries
-  answer "did my exact commit ship?" with yes or no — not "a squashed copy of
-  it shipped". A stable `Change-Id:` is minted with the change, and the queue
-  stamps it into the landed merge commit — no commit-msg hook to install —
+  that reached main, so `git log`, `git branch --contains`, and ancestry
+  queries answer "is my exact commit integrated?" with yes or no — not "a
+  squashed copy of it is". A stable `Change-Id:` is minted with the change, and the queue
+  stamps it into the merge commit that reaches main — no commit-msg hook to install —
   linking main back to the change and every revision of it. It survives
   amends and rebases because it lives on the change, not in your commits.
 - **History is merge-shaped.** The target's first-parent chain is one merge
-  per landed change — plus its shaset commit on a superproject, and a
+  per merged change — plus its shaset commit on a superproject, and a
   fast-forwarded change rides the spine as its own commits. That is noisier
   to read linearly than a squashed log; the antidote is built into git:
   `git log --first-parent` reads main as a clean sequence of changes, and
@@ -292,7 +294,7 @@ completely standard git.
 
 |                        | Object tested                                     | Object merged                                                     | Branch moved →                                               | History on main                                                             | Trace main → change                                              | Superproject                                                  |
 | ---------------------- | ------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------- |
-| **Yrd**                | merge of target + authored tip (+ shaset)         | the same commit, CAS ref update                                   | tracked: auto new revision; untracked: refusal with remedies | merge-shaped; first-parent spine                                            | authored tip is a parent; `Change-Id` trailer                    | queued and tested as one object; submodules stay standard     |
+| **Yrd**                | merge of target + authored tip (+ shaset)         | the same commit, CAS ref update                                   | no submit moves; a `refs/for` push re-submits the new tip     | merge-shaped; first-parent spine                                            | authored tip is a parent; `Change-Id` trailer                    | queued and tested as one object; submodules stay standard     |
 | **GitHub merge queue** | speculative merge group, strategy already applied | the group result                                                  | leaves the queue; re-queue                                   | linear (squash/rebase) or merge                                             | PR number in message; squash/rebase drop authored shas from main | none                                                          |
 | **Gerrit**             | the patch set (one amended commit)                | per submit strategy — rebase/cherry-pick mint a new sha at submit | new patch set: amend + `push refs/for/…` ceremony            | per-project strategy; the default mints merge commits when the target moved | `Change-Id` trailer (Yrd adopts this)                            | subscription can bump gitlinks after merge, outside the queue |
 | **Zuul**               | speculative merge of the whole train ahead        | whatever the backing forge then merges                            | new patch set restarts the gate                              | backend-dependent                                                           | via the backend                                                  | many repos per change via `Depends-On`, not gitlinks          |
@@ -306,8 +308,8 @@ Trade-offs, in both directions:
   superproject awareness. bors-ng splits a red batch to isolate the culprit.
 - **GitHub's squash strategy buys a clean linear log**, and that is a real
   ergonomic win for casual reading. The price is that the commits developers
-  authored never become main; "did my exact commit ship" has
-  no ancestry answer. Yrd pays the opposite price — merge commits in the log —
+  authored never become main; "is my exact commit
+  integrated" has no ancestry answer. Yrd pays the opposite price — merge commits in the log —
   and buys the answer back with `--first-parent`.
 - **Gerrit's patch-set discipline is the strongest identity model**, and Yrd
   adopts its conventions at the git layer (`Change-Id:` trailers, `refs/for/`
@@ -326,7 +328,7 @@ Trade-offs, in both directions:
   the record.
 
 The common thread: every system above answers "what exactly did we test, and
-is that what shipped?" with some mixture of _trust the tool_ and _content
+is that what merged?" with some mixture of _trust the tool_ and _content
 equivalence_. Yrd's answer is a sha equality you can check from any clone with
 nothing but git.
 
@@ -336,13 +338,13 @@ A busy local repository has the same integration hazards as a busy hosted
 repository:
 
 - two changes can pass separately and fail together
-- a branch can be tested against stale `main` and land untested
+- a branch can be tested against stale `main` and merge untested
 - agent work can accumulate as unexplained branches and worktrees
 - a long review or remote test can block unrelated integrations
 - a selected contest result can drift before it is promoted
 
 Yrd gives every unit of work an explicit place and state. Active work is in a
-workspace. Work offered for integration is a PR. Checks, reviews, merges, deployments,
+bay. Work offered for integration is a submitted branch. Checks, reviews, merges, deployments,
 logs, and artifacts belong to a queue run. Competing implementations belong to
 a contest whose winner is an immutable Git commit.
 
@@ -359,7 +361,8 @@ That replaces ambiguous `wip-preserved-*` branches with inspectable state:
 | completed work            | integrated or already-landed PR and closable worktree |
 
 Yrd does not invent commits or silently discard work. It prevents ambiguous WIP
-by making the normal workflow create named workspaces and durable PRs from the start.
+by making the normal workflow create named bays, and by deriving every change's
+state from the branch itself.
 
 ## Prior art
 

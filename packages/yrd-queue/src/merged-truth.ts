@@ -24,27 +24,37 @@
  * stamping makes an unbounded walk honestly — and uselessly — unknown-heavy;
  * production callers pass the epoch at which the queue began stamping.
  *
+ * THE DEGENERATE COMPARISON (the collapsed-candidate door-stop): containment
+ * is only evidence when the two endpoints are DIFFERENT commits. A candidate
+ * that is its own base, or that is the very tip it would be merged into,
+ * satisfies `is A contained in B` for free — and a free yes proves nothing
+ * about a merge, exactly as `mergeJoinedNothing` records from the merge side.
+ * Such a query answers the loud `unknown` naming both shas, never `merged`,
+ * and the combined derivation then tries the lineage index — a real proof —
+ * before it gives up. Containment itself is asked as `merge-base
+ * --is-ancestor`, the predicate, never as an equality between two shas.
+ *
  * Identity-neutral by construction: no journal events, no persisted schema,
  * no refs written. The index is an in-memory value pinned to a resolved tip
  * sha; the caller owns caching and rebuilds it when main moves.
  *
- * Consolidation note (read before adding another merged-truth reader):
- * `findRepositoryChangeMerge` in `command.ts` is the dormant predecessor — a
- * per-query full-history scan with no callers outside tests, which throws on
+ * Consolidation note (read before adding another merged-truth reader): there
+ * is no second implementation to reconcile with. `findRepositoryChangeMerge`
+ * was the dormant predecessor — a per-query full-history scan that threw on
  * legitimate Change-Id multiplicity (a compose+merge pair stamps the same id
- * twice) and answers a silent not-proven for a trailer-dropped commit. The
- * store-cutover slice retires it into this module; until then it stays
- * untouched beside this one, exactly as `exactDelta` sits beside the private
- * diff family in `command.ts`.
+ * twice) and answered a silent not-proven for a trailer-dropped commit. It was
+ * deleted on 2026-08-29 having never gained a production caller; this module
+ * already answered both of those cases. Ask this module the question, or widen
+ * it — do not reintroduce a private scan beside it.
  */
 import { ChangeIdSchema, GitShaSchema } from "@yrd/bay"
-import type { RefGit } from "./uncarried-facts.ts"
+import type { RefGit } from "./stranded-facts.ts"
 
 /** The two reads this module needs from the package's exported repository
  * handle. `run` throws on non-zero — an unreadable repository is a loud
  * failure, never an empty index. `optional` serves the one question where a
  * non-zero exit is a real answer (`merge-base` on unrelated histories). */
-export type MergedTruthGit = Pick<RefGit, "run" | "optional">
+export type MergedTruthGit = Pick<RefGit, "text" | "optionalText">
 
 /** The synthesis acts the queue stamps into main's first-parent line. */
 export type QueueSynthesisOperation = "merge" | "compose"
@@ -223,9 +233,10 @@ export async function buildMergedTruthIndex(
     GitShaSchema.parse(sha)
     if (exception.disposition === "carries-change") ChangeIdSchema.parse(exception.changeId)
   }
-  const tip = await git.run(repo, ["rev-parse", "--verify", `${options.tip}^{commit}`])
-  const stop = options.stop === undefined ? undefined : await git.run(repo, ["rev-parse", "--verify", `${options.stop}^{commit}`])
-  const log = await git.run(repo, [
+  const tip = await git.text(repo, ["rev-parse", "--verify", `${options.tip}^{commit}`])
+  const stop =
+    options.stop === undefined ? undefined : await git.text(repo, ["rev-parse", "--verify", `${options.stop}^{commit}`])
+  const log = await git.text(repo, [
     "log",
     "--first-parent",
     "--no-show-signature",
@@ -399,6 +410,12 @@ export function mergedByChangeId(
   return { kind: "not-merged", changeId: id, commitsWalked: index.commitsWalked }
 }
 
+/** Why a containment question could not be answered BY containment: its two
+ * endpoints are the same commit, so the answer is true for free. The read-side
+ * twin of `mergeJoinedNothing` — a merged result that IS its own base joined
+ * nothing to history — and the shape a collapsed candidate wears. */
+export type MergedTruthDegeneracy = "self-comparison" | "collapsed-onto-base"
+
 export type MergedByAncestry =
   | Readonly<{
       kind: "merged"
@@ -407,24 +424,86 @@ export type MergedByAncestry =
        * one of the walked merges' exact second parents. */
       mergeCommit?: string
     }>
+  | Readonly<{
+      kind: "unknown"
+      reason: MergedTruthDegeneracy
+      authoredTip: string
+      /** The commit the tip would have been compared against — the walked tip
+       * for a self-comparison, the candidate's own base for a collapse. */
+      comparedWith: string
+      /** What was queried and what was missing, in the reader's own words. */
+      detail: string
+    }>
   | Readonly<{ kind: "not-merged"; authoredTip: string }>
+
+export type MergedByAncestryOptions = Readonly<{
+  /** The base the authored tip was cut against, when the caller knows it. A
+   * candidate that RESOLVES TO its own base carries no commits at all, so its
+   * containment in main is a property of the base and proves nothing about the
+   * change; naming the base is what lets this read say so instead of agreeing.
+   * Absent, only the self-comparison degeneracy is detectable. */
+  base?: string
+}>
 
 /**
  * Answer commit containment: is this exact commit reachable from the walked
  * tip? Definitive in both directions — a commit either is or is not in main's
  * history, trailers or none — which is what rescues a change whose synthesis
- * dropped the trailer when the caller still knows the authored tip. A tip
- * that does not resolve in the repository throws; only after both endpoints
- * are proven readable is a merge-base miss trusted to mean unrelated.
+ * dropped the trailer when the caller still knows the authored tip.
+ *
+ * The question goes to git as `merge-base --is-ancestor` — the containment
+ * predicate itself. It is deliberately NOT an equality between two shas:
+ * equality is what a candidate collapsed onto its base satisfies for free.
+ *
+ * BOTH endpoints are resolved through `rev-parse --verify` before the relation
+ * is asked, and that is not ceremony — it is the positive control that makes a
+ * NEGATIVE answer trustworthy. `text` throws, so an unreadable endpoint (a tip
+ * naming no object, or an index tip the repository has since lost) is a loud
+ * failure; only past that control is a non-zero `--is-ancestor` read as the
+ * real answer "not contained" rather than as a fault reported as not-merged.
+ *
+ * A DEGENERATE comparison answers `unknown`, never `merged`: a tip that IS the
+ * walked tip, or that IS its own declared base, makes containment true for
+ * free. The caller gets the loud unknown naming both shas — and through
+ * {@link mergedTruth} a second, real proof attempt via the lineage index.
  */
 export async function mergedByAncestry(
   git: MergedTruthGit,
   index: MergedTruthIndex,
   authoredTip: string,
+  options: MergedByAncestryOptions = {},
 ): Promise<MergedByAncestry> {
-  const tip = await git.run(index.repo, ["rev-parse", "--verify", `${authoredTip}^{commit}`])
-  const base = await git.optional(index.repo, ["merge-base", tip, index.tip])
-  if (base !== tip) return { kind: "not-merged", authoredTip: tip }
+  const tip = await git.text(index.repo, ["rev-parse", "--verify", `${authoredTip}^{commit}`])
+  const against = await git.text(index.repo, ["rev-parse", "--verify", `${index.tip}^{commit}`])
+  if (tip === against) {
+    return {
+      kind: "unknown",
+      reason: "self-comparison",
+      authoredTip: tip,
+      comparedWith: against,
+      detail:
+        `queried whether authored tip '${tip}' is contained in the walked tip '${against}' in ${index.repo}, and ` +
+        `they are the SAME commit — containment holds for free, so no merge was proven; what is missing is a ` +
+        `candidate distinct from the history it would be merged into`,
+    }
+  }
+  if (options.base !== undefined) {
+    const base = await git.text(index.repo, ["rev-parse", "--verify", `${options.base}^{commit}`])
+    if (tip === base) {
+      return {
+        kind: "unknown",
+        reason: "collapsed-onto-base",
+        authoredTip: tip,
+        comparedWith: base,
+        detail:
+          `queried whether authored tip '${tip}' is contained in the walked tip '${against}' in ${index.repo}, but ` +
+          `that tip IS its own base '${base}' — the candidate carries no commits, so containment is the base's ` +
+          `property and proves nothing about the change; what is missing is a candidate that carries work`,
+      }
+    }
+  }
+  const contained = await git.optionalText(index.repo, ["merge-base", "--is-ancestor", tip, against])
+  if (contained === undefined) return { kind: "not-merged", authoredTip: tip }
   const mergeCommit = index.mergeBySecondParent.get(tip)
   return { kind: "merged", authoredTip: tip, ...(mergeCommit === undefined ? {} : { mergeCommit }) }
 }
@@ -433,6 +512,10 @@ export type MergedTruthQuery = Readonly<{
   changeId?: string
   /** The change's unchanged authored tip, when the caller knows it. */
   authoredTip?: string
+  /** The base that authored tip was cut against — see
+   * {@link MergedByAncestryOptions}. Without it a collapsed candidate cannot
+   * be told from a real one, and it reads as merged for free. */
+  base?: string
   /** Queue member context for specimen filtering — see {@link MergedTruthLookupContext}. */
   member?: string
 }>
@@ -452,6 +535,14 @@ export type MergedTruth =
       changeId: string
       authoredTip?: string
       specimens: readonly MergedTruthSpecimen[]
+    }>
+  | Readonly<{
+      kind: "unknown"
+      reason: MergedTruthDegeneracy
+      changeId?: string
+      authoredTip: string
+      comparedWith: string
+      detail: string
     }>
   | Readonly<{ kind: "not-merged"; changeId?: string; authoredTip?: string; commitsWalked: number }>
 
@@ -475,7 +566,12 @@ export async function mergedTruth(
   }
   const context: MergedTruthLookupContext = query.member === undefined ? {} : { member: query.member }
   if (query.authoredTip !== undefined) {
-    const ancestry = await mergedByAncestry(git, index, query.authoredTip)
+    const ancestry = await mergedByAncestry(
+      git,
+      index,
+      query.authoredTip,
+      query.base === undefined ? {} : { base: query.base },
+    )
     if (ancestry.kind === "merged") {
       const occurrences = changeId === undefined ? undefined : index.byChangeId.get(changeId)
       return {
@@ -487,12 +583,52 @@ export async function mergedTruth(
         ...(occurrences === undefined || occurrences.length === 0 ? {} : { occurrences }),
       }
     }
+    if (ancestry.kind === "unknown") {
+      // A degenerate containment decides NOTHING in either direction: it must
+      // not certify a merge, and it must not drop out as a not-merged either.
+      // The lineage index is the one other proof, so the query gets that second
+      // chance; where it too fails to AFFIRM, the answer stays the loud unknown
+      // naming what was queried and what was missing. A definitive lineage miss
+      // cannot stand in for the containment question that was never answered.
+      const lineage = changeId === undefined ? undefined : mergedByChangeId(index, changeId, context)
+      if (lineage?.kind === "merged") {
+        return {
+          kind: "merged",
+          via: "change-id",
+          changeId: lineage.changeId,
+          authoredTip: ancestry.authoredTip,
+          occurrences: lineage.occurrences,
+        }
+      }
+      if (lineage?.kind === "unknown") {
+        return { ...lineage, authoredTip: ancestry.authoredTip }
+      }
+      return {
+        kind: "unknown",
+        reason: ancestry.reason,
+        ...(changeId === undefined ? {} : { changeId }),
+        authoredTip: ancestry.authoredTip,
+        comparedWith: ancestry.comparedWith,
+        detail:
+          lineage === undefined
+            ? ancestry.detail
+            : `${ancestry.detail}; the lineage index then found no occurrence of '${lineage.changeId}' over its ` +
+              `${String(lineage.commitsWalked)}-commit specimen-free window, which cannot answer the containment ` +
+              `question that degenerated`,
+      }
+    }
     if (changeId === undefined) {
       return { kind: "not-merged", authoredTip: ancestry.authoredTip, commitsWalked: index.commitsWalked }
     }
     const lineage = mergedByChangeId(index, changeId, context)
     return lineage.kind === "merged"
-      ? { kind: "merged", via: "change-id", changeId, authoredTip: ancestry.authoredTip, occurrences: lineage.occurrences }
+      ? {
+          kind: "merged",
+          via: "change-id",
+          changeId,
+          authoredTip: ancestry.authoredTip,
+          occurrences: lineage.occurrences,
+        }
       : { ...lineage, authoredTip: ancestry.authoredTip }
   }
   if (changeId === undefined) {
@@ -516,6 +652,10 @@ export type StoreMergedClaim = Readonly<{
   member: string
   changeId?: string
   authoredTip?: string
+  /** The base that authored tip was cut against, when the store records one.
+   * Supplying it is what lets a collapsed candidate be REFUSED rather than
+   * certified by a containment that holds for free. */
+  baseSha?: string
   merged: boolean
   /** The commit the store recorded as the merged result, when it did. */
   mergedCommit?: string
@@ -559,6 +699,7 @@ export async function compareMergedTruth(
     const derived = await mergedTruth(git, index, {
       ...(claim.changeId === undefined ? {} : { changeId: claim.changeId }),
       ...(claim.authoredTip === undefined ? {} : { authoredTip: claim.authoredTip }),
+      ...(claim.baseSha === undefined ? {} : { base: claim.baseSha }),
       member: claim.member,
     })
     comparisons.push(compareOne(claim, derived))
@@ -573,8 +714,12 @@ function compareOne(claim: StoreMergedClaim, derived: MergedTruth): MergedTruthC
       ...base,
       agreement: "unknown",
       detail:
-        `repository window cannot answer: ${String(derived.specimens.length)} unresolved commit(s) — ` +
-        derived.specimens.map((specimen) => `${specimen.commit} (${specimen.problem}: ${specimen.subject})`).join(", "),
+        derived.reason === "trailer-absent"
+          ? `repository window cannot answer: ${String(derived.specimens.length)} unresolved commit(s) — ` +
+            derived.specimens
+              .map((specimen) => `${specimen.commit} (${specimen.problem}: ${specimen.subject})`)
+              .join(", ")
+          : `repository cannot answer by containment (${derived.reason}): ${derived.detail}`,
     }
   }
   if (derived.kind === "not-merged") {
@@ -584,7 +729,11 @@ function compareOne(claim: StoreMergedClaim, derived: MergedTruth): MergedTruthC
           agreement: "disagree",
           detail: `store says merged but no commit in the ${String(derived.commitsWalked)}-commit window carries the change`,
         }
-      : { ...base, agreement: "agree", detail: `both say not merged over a specimen-free ${String(derived.commitsWalked)}-commit window` }
+      : {
+          ...base,
+          agreement: "agree",
+          detail: `both say not merged over a specimen-free ${String(derived.commitsWalked)}-commit window`,
+        }
   }
   if (!claim.merged) {
     return {

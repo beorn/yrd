@@ -39,6 +39,7 @@ import {
   withStep,
   type CandidatePreparer,
   type ChangeShape,
+  type MergedTruthGit,
   type SourceRewrite,
   type StepExecution,
 } from "@yrd/queue"
@@ -47,7 +48,7 @@ import {
   withContests,
   type AttemptRunOutput,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { actionableFailure, formatHumanFailure } from "../src/actionable-error.ts"
@@ -152,7 +153,7 @@ function contestAdapters() {
       return { status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }
     },
   }
-  const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   return { runner, evaluator, git }
 }
 
@@ -212,6 +213,43 @@ async function createCliApp(
 
 type CliApp = Awaited<ReturnType<typeof createCliApp>>
 
+/**
+ * The merged-truth reader's two git reads, faked.
+ *
+ * `pr prune` asks the REPOSITORY which standing facts already landed, so these
+ * scenarios must declare that answer instead of letting a real `git` run
+ * against the fixture cwd — where every fact would come back `unreadable` and
+ * the exclusion under test would never fire. `landed` is the set of shas main
+ * contains; anything shaped like a sha resolves, so an absent answer is a real
+ * "not contained", not a failed read.
+ */
+function mergedTruthGit(options: Readonly<{ landed?: ReadonlySet<string>; absent?: ReadonlySet<string> }> = {}) {
+  const landed = options.landed ?? new Set<string>()
+  const absent = options.absent ?? new Set<string>()
+  return (): MergedTruthGit => ({
+    text: (_repo, args) => {
+      const [verb] = args
+      if (verb === "log") return Promise.resolve("")
+      if (verb === "rev-parse") {
+        const ref = (args.at(-1) ?? "").replace(/\^\{commit\}$/u, "")
+        const sha = ref === "main" || ref === "origin/main" ? BASE_SHA : ref
+        if (absent.has(sha) || !/^[0-9a-f]{40}$/u.test(sha)) {
+          return Promise.reject(new Error(`fatal: Needed a single revision: '${ref}'`))
+        }
+        return Promise.resolve(sha)
+      }
+      return Promise.reject(new Error(`unexpected git ${args.join(" ")}`))
+    },
+    optionalText: (_repo, args) => {
+      const [verb, flag, candidate] = args
+      if (verb === "merge-base" && flag === "--is-ancestor") {
+        return Promise.resolve(candidate !== undefined && landed.has(candidate) ? "" : undefined)
+      }
+      return Promise.reject(new Error(`unexpected git ${args.join(" ")}`))
+    },
+  })
+}
+
 function outputIO(overrides: Partial<YrdCliIO> = {}) {
   let stdout = ""
   let stderr = ""
@@ -226,6 +264,7 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     runner: "cli-test",
     leaseMs: 60_000,
     now: () => Date.parse("2026-07-15T12:01:00.000Z"),
+    mergedTruthGit: mergedTruthGit(),
     ...overrides,
   }
   return { io, stdout: () => stdout, stderr: () => stderr }
@@ -444,7 +483,12 @@ function remergePreflightGit(overrides: Partial<RemergePreflightGitFacts> = {}):
 
 type PruneJson = {
   readonly checked: readonly { readonly pr?: string; readonly reason?: string }[]
-  readonly excluded: readonly { readonly reason: string }[]
+  readonly excluded: readonly { readonly branch: string; readonly reason: string; readonly next?: string }[]
+  readonly landingDisagreements: readonly {
+    readonly branch: string
+    readonly store: string
+    readonly derived: string
+  }[]
 }
 
 describe("pr withdraw", () => {
@@ -881,11 +925,14 @@ describe("pr prune", () => {
     expect(app.state().bays.prs.PR1?.integration?.commit).toBe(MERGED_SHA)
     await app.bays.recordBranchSubmit({ branch: "topic/landed", sha: MERGED_SHA, base: "main" })
 
-    const output = outputIO({ pruneGit: () => pruneGit() })
+    // The exclusion is the REPOSITORY's answer now: main contains the fact's
+    // sha. The record store's matching claim is no longer consulted.
+    const landedIO = { pruneGit: () => pruneGit(), mergedTruthGit: mergedTruthGit({ landed: new Set([MERGED_SHA]) }) }
+    const output = outputIO(landedIO)
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
     const result = JSON.parse(output.stdout()) as PruneJson
     expect(result).toMatchObject({
-      scanned: { record: 0, derived: 0 },
+      scanned: { record: 0, derived: 0, standingFacts: 1 },
       checked: [],
       excluded: [
         {
@@ -896,13 +943,49 @@ describe("pr prune", () => {
       ],
       summary: { checked: 0, record: 0, derived: 0, excluded: 1 },
     })
-    expect(result.excluded[0]!.reason).toContain("terminal change PR1's landing commit")
+    expect(result.excluded[0]!.reason).toContain("content is already on 'main'")
+    // Both oracles say landed here, so there is nothing to report as a split.
+    expect(result.landingDisagreements).toEqual([])
 
-    const human = outputIO({ pruneGit: () => pruneGit(), columns: 400 })
+    const human = outputIO({ ...landedIO, columns: 400 })
     expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
     const humanText = human.stdout().replace(/\s+/g, " ")
     expect(humanText).toContain("scanned 0 live changes (record lane) and 0 derived members (derived lane)")
     expect(humanText).toContain("1 standing submit fact neither lane scanned — topic/landed")
+  })
+
+  it("excludes a RECORDLESS fact whose content git says landed, and reports the split with the record store", async () => {
+    // The cut's whole point, end to end through the command: no record exists
+    // for this branch, so the retired store-keyed reader answered a bare zero
+    // and prune offered the fact to the derived lane on every run. Git answers
+    // it directly, and the two answers differing is printed, not reconciled.
+    const app = await createCliApp()
+    await app.bays.recordBranchSubmit({ branch: "issue/ghost", sha: HEAD_SHA, base: "main" })
+    expect(app.state().bays.prs, "there is no record to key a landing off").toEqual({})
+
+    const io = { pruneGit: () => pruneGit(), mergedTruthGit: mergedTruthGit({ landed: new Set([HEAD_SHA]) }) }
+    const output = outputIO(io)
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run", "--json"), output.io), output.stderr()).toBe(0)
+    const result = JSON.parse(output.stdout()) as PruneJson
+    expect(result).toMatchObject({
+      scanned: { record: 0, derived: 0, standingFacts: 1 },
+      checked: [],
+      summary: { checked: 0, derived: 0, excluded: 1, landed: 1, landingDisagreements: 1 },
+    })
+    expect(result.excluded[0]).toMatchObject({
+      branch: "issue/ghost",
+      next: "git push bay :refs/yrd/submit/issue/ghost",
+    })
+    expect(result.excluded[0]!.reason).toContain("content is already on 'main'")
+    expect(result.landingDisagreements[0]).toMatchObject({
+      branch: "issue/ghost",
+      store: "not-landed",
+      derived: "landed",
+    })
+
+    const human = outputIO({ ...io, columns: 400 })
+    expect(await runYrd(app, yrd("admin", "pr", "prune", "--dry-run"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout().replace(/\s+/gu, " ")).toContain("RECORD/REPOSITORY DISAGREEMENT on issue/ghost")
   })
 
   it("does not trust --quiet when a sibling directory entry masks a content conflict", async () => {

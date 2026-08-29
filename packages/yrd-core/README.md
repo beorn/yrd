@@ -167,7 +167,7 @@ compatibility value is stamped on every new frame.
 Every writable event is a `journalEvent(reader, schema)`, so its minimum reader
 and payload schema are one inseparable definition. An event above the active
 writer version refuses before append. Reader support and writer activation
-therefore land as separate commits: first raise `JOURNAL_READER_VERSION`, then
+therefore merge as separate commits: first raise `JOURNAL_READER_VERSION`, then
 activate that version with the first commit's full reader pin.
 
 That binding is per FIELD, not only per event name, because an event usually
@@ -181,7 +181,7 @@ such row strands every pinned reader in the fleet with no way back.
 
 `journalEventVocabulary(events)` reports each event's reader version and every
 field's. Pin a snapshot of it per package: growing a shipped payload then cannot
-land without saying which version reads the new field. Fields are read from the
+merge without saying which version reads the new field. Fields are read from the
 schema's JSON Schema form, so a payload shape that has no introspectable object
 fields reports an empty map — that is disclosure, not a guarantee, and only the
 event-level `reader` guards it.

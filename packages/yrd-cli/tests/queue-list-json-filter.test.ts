@@ -15,7 +15,7 @@ import {
   withContests,
   type AttemptRunOutput,
   type ContestEvaluatorDef,
-  type ContestGit,
+  type CommitResolver,
   type ContestRunnerDef,
 } from "@yrd/contest"
 
@@ -92,7 +92,7 @@ function contestAdapters() {
       return { status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }
     },
   }
-  const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
+  const git: CommitResolver = { revision: "git-v1", resolveCommit: () => BASE_SHA }
   return { runner, evaluator, git }
 }
 

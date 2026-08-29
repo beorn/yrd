@@ -4,8 +4,8 @@
  * @level   l2
  * @consumer @yrd/cli queue watch
  *
- * The uncarried rail is the line that exposed this (operator report,
- * 2026-08-13): at a live split-pane width `uncarried 41 of 4784 refs, …`
+ * The stranded rail is the line that exposed this (operator report,
+ * 2026-08-13): at a live split-pane width `stranded 41 of 4784 refs, …`
  * overran the frame, ate the `│`, and was clipped by the terminal edge rather
  * than the box. The root cause was silvery's own measureFunc skipping the
  * `maxWidth` clamp for a `wrap="truncate"` Text as a direct COLUMN child
@@ -22,11 +22,11 @@ import { createElement } from "react"
 import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureRun, fixtureSnapshot } from "../dev/queue-timeline-fixtures.ts"
-import { uncarriedLine, uncarriedObservation, type UncarriedObservation } from "../src/queue-status-view.tsx"
+import { strandedLine, strandedObservation, type StrandedObservation } from "../src/queue-status-view.tsx"
 import { boundedHangingLines } from "../src/queue-view-primitives.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
-/** Width at which the uncarried rail below overflows a full-width queue pane. */
+/** Width at which the stranded rail below overflows a full-width queue pane. */
 const NARROW_COLS = 80
 
 type BoxRows = Readonly<{ inner: readonly string[]; joined: string }>
@@ -64,14 +64,14 @@ function boxRows(text: string, title: string): BoxRows {
 /** The frame's clock in these fixtures — the rail reads "4m ago" from it. */
 const NOW_MS = Date.parse("2026-07-13T12:00:00.000Z")
 
-const UNCARRIED: UncarriedObservation = uncarriedObservation({
+const STRANDED: StrandedObservation = strandedObservation({
   count: 41,
   scanned: 4784,
   missingUpdateClocks: 12,
   observedAt: "2026-07-13T11:56:00.000Z",
 })
 
-function snapshotWithUncarried() {
+function snapshotWithStranded() {
   const pr = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes")
   const run = fixtureRun("R1", [pr], "passed", "2026-07-13T11:20:00.000Z", { finishedAt: "2026-07-13T11:25:00.000Z" })
   return fixtureSnapshot(fixtureResult([pr], [run]), {
@@ -80,15 +80,15 @@ function snapshotWithUncarried() {
       startedAt: "2026-07-13T11:00:00.000Z",
       lastTickAt: "2026-07-13T11:59:58.000Z",
       queueProgress: { state: "healthy", observedAt: "2026-07-13T11:59:58.000Z" },
-      uncarried: UNCARRIED,
+      uncarried: STRANDED,
     },
   })
 }
 
 describe("RUNNER box clips rather than overflowing (@yrd/cli/runner-box-overflow, @si/render/truncate-clip-bordered-column)", () => {
-  it("keeps an over-wide uncarried rail inside the frame, eliding it on one line instead of painting over the border", async () => {
+  it("keeps an over-wide stranded rail inside the frame, eliding it on one line instead of painting over the border", async () => {
     const app = createRenderer({ cols: NARROW_COLS, rows: 40 })(
-      createElement(QueueWatchFrame, { snapshot: snapshotWithUncarried() }),
+      createElement(QueueWatchFrame, { snapshot: snapshotWithStranded() }),
     )
     try {
       await app.waitForLayoutStable()
@@ -100,7 +100,7 @@ describe("RUNNER box clips rather than overflowing (@yrd/cli/runner-box-overflow
       // Derived from the renderer, never transcribed: this test is about the
       // BOX, and a copied sentence turns every rewording of the rail into a
       // spurious wrap failure. It went stale exactly that way once already.
-      const rail = uncarriedLine(UNCARRIED, NOW_MS)
+      const rail = strandedLine(STRANDED, NOW_MS)
       expect(rail.length, "fixture rail must overflow the box").toBeGreaterThan(width)
 
       // Clipped, not painted over the border: the rail elides with `…` and the
@@ -108,15 +108,15 @@ describe("RUNNER box clips rather than overflowing (@yrd/cli/runner-box-overflow
       // both `│` borders, which is the defect this guards: pre-fix, this exact
       // rail ran past the right border and was cut by the terminal instead.
       const started = box.inner.findIndex((row) => row.includes("of 4784 refs"))
-      expect(started, "the uncarried rail must be rendered").toBeGreaterThanOrEqual(0)
-      const uncarriedRow = box.inner[started] ?? ""
-      expect(uncarriedRow).toContain("…")
+      expect(started, "the stranded rail must be rendered").toBeGreaterThanOrEqual(0)
+      const strandedRow = box.inner[started] ?? ""
+      expect(strandedRow).toContain("…")
 
       // And it stays on its own line — clip means single-line, not a
       // continuation row carrying the "as of …" tail (that was the wrap-era
       // shape, which is why the tail — the half that makes the count
       // trustworthy — is exactly what elides here instead of surviving).
-      expect(uncarriedRow, "the elided rail must not carry its own tail").not.toContain("ago")
+      expect(strandedRow, "the elided rail must not carry its own tail").not.toContain("ago")
     } finally {
       app.unmount()
     }

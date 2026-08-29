@@ -405,7 +405,7 @@ export async function drainSettlements(
           })
           return cause
         }
-      })
+      }, { holder: `settlement-drain owner=${options.hook.owner ?? "none"}` })
     } catch (cause) {
       error = cause
       if (!exclusiveBusy(cause) || attempt === options.retries) break

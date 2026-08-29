@@ -29,15 +29,15 @@ async function makeRepo(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-binding-key-"))
   roots.push(root)
   const repo = join(root, "repo")
-  await git.run(root, ["init", "-b", "main", "repo"])
+  await git.text(root, ["init", "-b", "main", "repo"])
   return repo
 }
 
 async function commitFile(repo: string, path: string, content: string, message: string): Promise<string> {
   await Bun.write(join(repo, path), content)
-  await git.run(repo, ["add", "--", path])
-  await git.run(repo, ["commit", "-m", message])
-  return git.run(repo, ["rev-parse", "HEAD"])
+  await git.text(repo, ["add", "--", path])
+  await git.text(repo, ["commit", "-m", message])
+  return git.text(repo, ["rev-parse", "HEAD"])
 }
 
 /** `git diff a b | git patch-id --stable`, the burn-in's failed key — used as a
@@ -79,16 +79,16 @@ describe("bindingKey", () => {
   it("survives pure context drift where git patch-id breaks (the PR1028 mechanism)", async () => {
     const repo = await makeRepo()
     const fork = await commitFile(repo, "f.txt", twelve({}), "base")
-    await git.run(repo, ["checkout", "-b", "task/author", fork])
+    await git.text(repo, ["checkout", "-b", "task/author", fork])
     const authorTip = await commitFile(repo, "f.txt", twelve({ 1: "l1 (authored)" }), "author: edit l1")
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["checkout", "main"])
     // Main inserts a line two rows below the author's edit: inside the authored
     // hunk's 3-line context window, outside its changed lines.
     await Bun.write(join(repo, "f.txt"), lines("l0", "l1", "l2", "l3", "inserted by main", ...TWELVE.slice(4)))
-    await git.run(repo, ["add", "--", "f.txt"])
-    await git.run(repo, ["commit", "-m", "main: insert near the change"])
-    const movedBase = await git.run(repo, ["rev-parse", "HEAD"])
-    const variantTree = await git.run(repo, ["merge-tree", "--write-tree", movedBase, authorTip])
+    await git.text(repo, ["add", "--", "f.txt"])
+    await git.text(repo, ["commit", "-m", "main: insert near the change"])
+    const movedBase = await git.text(repo, ["rev-parse", "HEAD"])
+    const variantTree = await git.text(repo, ["merge-tree", "--write-tree", movedBase, authorTip])
 
     // Negative control: the context drift is real — the burn-in's key moves.
     expect(await patchIdOf(repo, fork, authorTip)).not.toBe(await patchIdOf(repo, movedBase, variantTree))
@@ -116,16 +116,16 @@ describe("bindingKey", () => {
   it("moves when the base absorbed part of the change — the surviving contribution is a different change", async () => {
     const repo = await makeRepo()
     const fork = await commitFile(repo, "f.txt", twelve({}), "base")
-    await git.run(repo, ["checkout", "-b", "task/absorbed", fork])
+    await git.text(repo, ["checkout", "-b", "task/absorbed", fork])
     const authorTip = await commitFile(
       repo,
       "f.txt",
       twelve({ 1: "l1 (authored)", 10: "l10 (authored)" }),
       "author: edit l1 and l10",
     )
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["checkout", "main"])
     const movedBase = await commitFile(repo, "f.txt", twelve({ 10: "l10 (authored)" }), "main: absorb the l10 edit")
-    const variantTree = await git.run(repo, ["merge-tree", "--write-tree", movedBase, authorTip])
+    const variantTree = await git.text(repo, ["merge-tree", "--write-tree", movedBase, authorTip])
 
     const authored = await bindingKey(git, repo, fork, authorTip)
     const rebased = await bindingKey(git, repo, movedBase, variantTree)
@@ -136,9 +136,9 @@ describe("bindingKey", () => {
     const repo = await makeRepo()
     await commitFile(repo, "one.txt", "same\n", "seed one")
     const base = await commitFile(repo, "two.txt", "same\n", "seed two")
-    await git.run(repo, ["checkout", "-b", "task/in-one", base])
+    await git.text(repo, ["checkout", "-b", "task/in-one", base])
     const editOne = await commitFile(repo, "one.txt", "same edited\n", "edit one.txt")
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["checkout", "main"])
     const editTwo = await commitFile(repo, "two.txt", "same edited\n", "edit two.txt")
 
     const inOne = await bindingKey(git, repo, base, editOne)
@@ -149,9 +149,9 @@ describe("bindingKey", () => {
   it("keys added-line order: the same lines added in a different order is a different change", async () => {
     const repo = await makeRepo()
     const base = await commitFile(repo, "f.txt", "a\n", "base")
-    await git.run(repo, ["checkout", "-b", "task/de", base])
+    await git.text(repo, ["checkout", "-b", "task/de", base])
     const forward = await commitFile(repo, "f.txt", "a\nD\nE\n", "append D then E")
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["checkout", "main"])
     const reversed = await commitFile(repo, "f.txt", "a\nE\nD\n", "append E then D")
 
     const forwardKey = await bindingKey(git, repo, base, forward)
@@ -176,19 +176,19 @@ describe("bindingKey", () => {
     const repo = await makeRepo()
     const binary = (bytes: readonly number[]): Uint8Array => Uint8Array.from(bytes)
     await Bun.write(join(repo, "blob.bin"), binary([0, 1, 2, 3]))
-    await git.run(repo, ["add", "--", "blob.bin"])
-    await git.run(repo, ["commit", "-m", "base binary"])
-    const base = await git.run(repo, ["rev-parse", "HEAD"])
-    await git.run(repo, ["checkout", "-b", "task/bin-a", base])
+    await git.text(repo, ["add", "--", "blob.bin"])
+    await git.text(repo, ["commit", "-m", "base binary"])
+    const base = await git.text(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["checkout", "-b", "task/bin-a", base])
     await Bun.write(join(repo, "blob.bin"), binary([0, 1, 2, 3, 4]))
-    await git.run(repo, ["add", "--", "blob.bin"])
-    await git.run(repo, ["commit", "-m", "binary change a"])
-    const tipA = await git.run(repo, ["rev-parse", "HEAD"])
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["add", "--", "blob.bin"])
+    await git.text(repo, ["commit", "-m", "binary change a"])
+    const tipA = await git.text(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["checkout", "main"])
     await Bun.write(join(repo, "blob.bin"), binary([9, 9, 9]))
-    await git.run(repo, ["add", "--", "blob.bin"])
-    await git.run(repo, ["commit", "-m", "binary change b"])
-    const tipB = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["add", "--", "blob.bin"])
+    await git.text(repo, ["commit", "-m", "binary change b"])
+    const tipB = await git.text(repo, ["rev-parse", "HEAD"])
 
     const keyA = await bindingKey(git, repo, base, tipA)
     const keyB = await bindingKey(git, repo, base, tipB)
@@ -199,12 +199,12 @@ describe("bindingKey", () => {
   it("keys a mode-only change, and keys it differently from a content change", async () => {
     const repo = await makeRepo()
     const base = await commitFile(repo, "run.sh", "#!/bin/sh\n", "base script")
-    await git.run(repo, ["checkout", "-b", "task/chmod", base])
+    await git.text(repo, ["checkout", "-b", "task/chmod", base])
     await chmod(join(repo, "run.sh"), 0o755)
-    await git.run(repo, ["add", "--", "run.sh"])
-    await git.run(repo, ["commit", "-m", "mark executable"])
-    const chmodTip = await git.run(repo, ["rev-parse", "HEAD"])
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["add", "--", "run.sh"])
+    await git.text(repo, ["commit", "-m", "mark executable"])
+    const chmodTip = await git.text(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["checkout", "main"])
     const editTip = await commitFile(repo, "run.sh", "#!/bin/sh\nset -e\n", "edit script")
 
     const chmodKey = await bindingKey(git, repo, base, chmodTip)
@@ -217,13 +217,13 @@ describe("bindingKey", () => {
     const repo = await makeRepo()
     await commitFile(repo, "seed.txt", "seed\n", "seed")
     await Bun.write(join(repo, "n.txt"), "x\na")
-    await git.run(repo, ["add", "--", "n.txt"])
-    await git.run(repo, ["commit", "-m", "no trailing newline"])
-    const bare = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["add", "--", "n.txt"])
+    await git.text(repo, ["commit", "-m", "no trailing newline"])
+    const bare = await git.text(repo, ["rev-parse", "HEAD"])
     await Bun.write(join(repo, "n.txt"), "x\na\n")
-    await git.run(repo, ["add", "--", "n.txt"])
-    await git.run(repo, ["commit", "-m", "trailing newline"])
-    const terminated = await git.run(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["add", "--", "n.txt"])
+    await git.text(repo, ["commit", "-m", "trailing newline"])
+    const terminated = await git.text(repo, ["rev-parse", "HEAD"])
 
     const addNewline = await bindingKey(git, repo, bare, terminated)
     const dropNewline = await bindingKey(git, repo, terminated, bare)
@@ -234,13 +234,13 @@ describe("bindingKey", () => {
     const repo = await makeRepo()
     await commitFile(repo, "target.txt", "content\n", "target")
     const base = await commitFile(repo, "entry", "plain file\n", "entry as blob")
-    await git.run(repo, ["checkout", "-b", "task/symlinkify", base])
+    await git.text(repo, ["checkout", "-b", "task/symlinkify", base])
     await rm(join(repo, "entry"))
     await symlink("target.txt", join(repo, "entry"))
-    await git.run(repo, ["add", "--all"])
-    await git.run(repo, ["commit", "-m", "entry becomes a symlink"])
-    const linked = await git.run(repo, ["rev-parse", "HEAD"])
-    await git.run(repo, ["checkout", "main"])
+    await git.text(repo, ["add", "--all"])
+    await git.text(repo, ["commit", "-m", "entry becomes a symlink"])
+    const linked = await git.text(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["checkout", "main"])
     const edited = await commitFile(repo, "entry", "plain file edited\n", "edit entry")
 
     const typechange = await bindingKey(git, repo, base, linked)
@@ -261,8 +261,8 @@ describe("bindingKey", () => {
     const repo = await makeRepo()
     const base = await commitFile(repo, "a.txt", "one\n", "base")
     const changed = await commitFile(repo, "a.txt", "two\n", "change")
-    const baseTree = await git.run(repo, ["rev-parse", `${base}^{tree}`])
-    const changedTree = await git.run(repo, ["rev-parse", `${changed}^{tree}`])
+    const baseTree = await git.text(repo, ["rev-parse", `${base}^{tree}`])
+    const changedTree = await git.text(repo, ["rev-parse", `${changed}^{tree}`])
 
     const fromCommits = await bindingKey(git, repo, base, changed)
     const fromTrees = await bindingKey(git, repo, baseTree, changedTree)

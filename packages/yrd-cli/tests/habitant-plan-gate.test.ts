@@ -8,7 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { raiseFailure } from "@yrd/core"
-import { uncarriedLine } from "../src/queue-status-view.tsx"
+import { strandedLine } from "../src/queue-status-view.tsx"
 import { followQueueRuns, requestYrdRuntimeReload, habitantRunnerStatus } from "../src/run.ts"
 import { createHabitantHarness } from "./support/habitant-harness.ts"
 
@@ -143,7 +143,7 @@ describe("the habitant's per-cycle declared-plan gate", () => {
 })
 
 describe("habitant status round-trip", () => {
-  it("round-trips old and current uncarried observations through habitant status", async () => {
+  it("round-trips old and current stranded observations through habitant status", async () => {
     const repo = await queueRepository()
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
     await mkdir(join(statusPath, ".."), { recursive: true })
@@ -175,7 +175,7 @@ describe("habitant status round-trip", () => {
       bounded: "≥2",
       floor: "a floor — 7 refs without retained update clocks, against an unknown candidate population",
     })
-    expect(uncarriedLine(current?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain(
+    expect(strandedLine(current?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain(
       "7 refs without retained update clocks",
     )
 
@@ -188,7 +188,7 @@ describe("habitant status round-trip", () => {
       "utf8",
     )
     const legacy = await habitantRunnerStatus(repo)
-    expect(uncarriedLine(legacy?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain("push-clock coverage unknown")
+    expect(strandedLine(legacy?.uncarried, Date.parse(baseStatus.lastTickAt))).toContain("push-clock coverage unknown")
 
     for (const uncarried of [
       { count: 51, scanned: 50, missingUpdateClocks: 0, observedAt: "2026-08-13T20:00:30.000Z" },

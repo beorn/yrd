@@ -1,5 +1,5 @@
 /**
- * The sweep that turns the uncarried predicate into a rail.
+ * The sweep that turns the stranded predicate into a rail.
  *
  * `classifyPushedRef` judges ONE ref from facts, and `gatherPushedRefFact`
  * produces those facts for one ref. Neither enumerates, so until this module
@@ -16,12 +16,12 @@ import {
   classifyPushedRef,
   compareRevisions,
   revisionOf,
-  type UncarriedFinding,
-  type UncarriedOptions,
-} from "./uncarried.ts"
-import { gatherPushedRefFact, type RefGit } from "./uncarried-facts.ts"
+  type StrandedFinding,
+  type StrandedOptions,
+} from "./stranded.ts"
+import { gatherPushedRefFact, type RefGit } from "./stranded-facts.ts"
 
-export type SweepOptions = UncarriedOptions &
+export type SweepOptions = StrandedOptions &
   Readonly<{
     repo: string
     /** Base branch the refs are judged against, e.g. "main". */
@@ -60,11 +60,11 @@ export type UnenumerableRef = Readonly<{ ref: string; tipSha: string; reason: st
  *   untouched. `rescue/*` refs were written by the 2026-08-20 move teardown and
  *   tmp-reap precisely so nothing was lost.
  * `retired` — ordinary work whose author has declared it harvested or parked.
- *   Retiring STOPS TRACKING a ref as uncarried; it never deletes it, and the
+ *   Retiring STOPS TRACKING a ref as stranded; it never deletes it, and the
  *   fleet-wide halt on ref deletion is untouched by this mechanism.
  *
  * Deliberately NOT called `rescue` or `superseded`, though both words fit the
- * English: `UncarriedVerdict.rescue` already means "trunk can safely take this"
+ * English: `StrandedVerdict.rescue` already means "trunk can safely take this"
  * — the exact OPPOSITE of the archive class — and `SweepResult.superseded`
  * already means "a higher -rN revision of this series stands". Reusing either
  * would put two opposite meanings behind one word in one output.
@@ -141,13 +141,13 @@ function exemptionOf(branch: string, retiredRefs: ReadonlySet<string>): Exemptio
  * show them together.
  */
 export type SweepResult = Readonly<{
-  findings: readonly UncarriedFinding[]
+  findings: readonly StrandedFinding[]
   /** Refs in the selected population. Zero is valid after authored-only exclusions. */
   scanned: number
   /** Disqualified by the carried set, before any per-ref git work. */
   carried: number
   /**
-   * Uncarried refs dropped because a strictly higher revision of the same
+   * Stranded refs dropped because a strictly higher revision of the same
    * `-rN` series stands in the population. Counted separately from `carried`
    * and `outsideAgeBound` so every ref merges in exactly one bucket and the
    * denominators still add up: scanned = carried + exempted.length +
@@ -206,7 +206,7 @@ export type SweepResult = Readonly<{
    * own base ref when it exists (e.g. `refs/remotes/origin/main`), else the
    * caller's local base name. Reported so no reader has to guess which
    * yardstick produced the counts: judging remote refs against a stale local
-   * `main` once inflated the fleet's uncarried count 2.2x
+   * `main` once inflated the fleet's stranded count 2.2x
    * (@i/10-merge-queue/uncarried-stale-base).
    */
   baseline: string
@@ -215,7 +215,7 @@ export type SweepResult = Readonly<{
 /** Gitlink paths standing on the base, read from tree mode 160000. Never
  * guessed from a path shape: `vendor/` holds plain directories too. */
 async function gitlinkPathsOf(git: RefGit, repo: string, base: string): Promise<ReadonlySet<string>> {
-  const tree = await git.run(repo, ["ls-tree", "-r", base])
+  const tree = await git.text(repo, ["ls-tree", "-r", base])
   const paths = tree
     .split("\n")
     .filter((line) => line.startsWith("160000 "))
@@ -251,7 +251,11 @@ type EnumeratedRef = Readonly<{
  * decoration — branch names may contain anything a ref format allows, and a
  * space-split would silently truncate them. */
 async function enumeratedRefs(git: RefGit, repo: string, namespace: string): Promise<readonly EnumeratedRef[]> {
-  const listing = await git.run(repo, ["for-each-ref", "--format=%(refname)%00%(refname:short)%00%(symref)", namespace])
+  const listing = await git.text(repo, [
+    "for-each-ref",
+    "--format=%(refname)%00%(refname:short)%00%(symref)",
+    namespace,
+  ])
   return listing
     .split("\n")
     .filter((line) => line !== "")
@@ -266,7 +270,7 @@ async function enumeratedRefs(git: RefGit, repo: string, namespace: string): Pro
         extra.length > 0
       ) {
         throw new Error(
-          `yrd: uncarried sweep received malformed for-each-ref row under '${namespace}': ${JSON.stringify(line)}`,
+          `yrd: stranded-refs sweep received malformed for-each-ref row under '${namespace}': ${JSON.stringify(line)}`,
         )
       }
       return { fullRef, ref, symbolic: symref !== "" }
@@ -282,19 +286,19 @@ async function latestRefUpdates(
   repo: string,
   refs: ReadonlySet<string>,
 ): Promise<ReadonlyMap<string, number>> {
-  const listing = await git.run(repo, ["reflog", "show", "--all", "--date=unix", "--format=%gD"])
+  const listing = await git.text(repo, ["reflog", "show", "--all", "--date=unix", "--format=%gD"])
   const updates = new Map<string, number>()
   for (const line of listing.split("\n")) {
     if (line === "") continue
     const marker = line.lastIndexOf("@{")
     if (marker < 1 || !line.endsWith("}")) {
-      throw new Error(`yrd: uncarried sweep received malformed reflog row: ${JSON.stringify(line)}`)
+      throw new Error(`yrd: stranded-refs sweep received malformed reflog row: ${JSON.stringify(line)}`)
     }
     const ref = line.slice(0, marker)
     const rawSeconds = line.slice(marker + 2, -1)
     const seconds = Number(rawSeconds)
     if (rawSeconds === "" || !Number.isFinite(seconds)) {
-      throw new Error(`yrd: uncarried sweep received malformed reflog row: ${JSON.stringify(line)}`)
+      throw new Error(`yrd: stranded-refs sweep received malformed reflog row: ${JSON.stringify(line)}`)
     }
     if (!refs.has(ref)) continue
     const updatedAtMs = seconds * 1000
@@ -304,7 +308,7 @@ async function latestRefUpdates(
   return updates
 }
 
-/** One uncarried candidate that survived the revision collapse, carrying the
+/** One stranded candidate that survived the revision collapse, carrying the
  * count of earlier revisions it now stands for. */
 type SeriesSurvivor = Readonly<{ candidate: EnumeratedRef; absorbedRevisions: number }>
 
@@ -317,13 +321,13 @@ type SeriesSurvivor = Readonly<{ candidate: EnumeratedRef; absorbedRevisions: nu
  * waste the module's ordering exists to avoid.
  *
  * The SUPERSEDER is looked for in the whole enumerated population, not just
- * among the uncarried candidates. A carried `-r20` is the strongest possible
+ * among the stranded candidates. A carried `-r20` is the strongest possible
  * proof that `-r6` is spent: the work moved on and something already tracks
- * it. Restricting the search to uncarried refs would resurrect exactly the
+ * it. Restricting the search to stranded refs would resurrect exactly the
  * rows this fix deletes.
  *
  * What a survivor ABSORBS is narrower, and deliberately: the earlier revisions
- * this row stands in for are the uncarried ones it suppressed. A carried
+ * this row stands in for are the stranded ones it suppressed. A carried
  * sibling is not absorbed by this row — it is counted as `carried` and has its
  * own change. That keeps each ref in one bucket and makes the absorbed
  * counts sum to `superseded`.
@@ -380,7 +384,7 @@ function isAuthoredRef(candidate: EnumeratedRef, namespace: string, base: string
  * Sweep a ref namespace and return every genuinely stranded ref, with the
  * counts that make an empty result readable.
  */
-export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Promise<SweepResult> {
+export async function sweepStrandedRefs(git: RefGit, options: SweepOptions): Promise<SweepResult> {
   const { repo, base, carriedBranches, namespace } = options
   const retiredRefs = options.retiredRefs ?? new Set<string>()
   const enumerated = await enumeratedRefs(git, repo, namespace)
@@ -389,7 +393,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     // fleet; this one is a fact about the sweep, and reporting it as "nothing
     // stranded" is the silent failure that kills monitoring rails.
     throw new Error(
-      `yrd: uncarried sweep enumerated no refs under '${namespace}' in '${repo}' — the namespace is wrong or the repo has no remote refs`,
+      `yrd: stranded-refs sweep enumerated no refs under '${namespace}' in '${repo}' — the namespace is wrong or the repo has no remote refs`,
     )
   }
   const refs = options.authoredOnly
@@ -399,7 +403,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   let carried = 0
   let outsideAgeBound = 0
   let missingUpdateClocks = 0
-  const uncarried: EnumeratedRef[] = []
+  const stranded: EnumeratedRef[] = []
   // Policy exclusions ride WITH the cheap disqualifiers, not after them: both
   // are name tests, so neither may cost a git object read. Carried is tested
   // first — a ref something already decided about is decided, whatever it is
@@ -416,10 +420,10 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
       exemptCandidates.push({ candidate, disposition })
       continue
     }
-    uncarried.push(candidate)
+    stranded.push(candidate)
   }
 
-  const collapsed = collapseSupersededRevisions(refs, uncarried, namespace)
+  const collapsed = collapseSupersededRevisions(refs, stranded, namespace)
 
   // One aggregate reflog scan already covers the survivors, so folding the
   // exempted refs into the SAME selector buys their ages at no extra process.
@@ -462,7 +466,7 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   // base ref outranks the checkout-local branch name: judging remote refs
   // against a stale local `main` counts every commit the checkout has not
   // pulled as "unmerged" — a local main 18 commits behind origin/main inflated
-  // the fleet's uncarried count 2.2x (@i/10-merge-queue/uncarried-stale-base).
+  // the fleet's stranded count 2.2x (@i/10-merge-queue/uncarried-stale-base).
   // Resolved once, only when something survived to be judged (the cheap-path
   // cost pin allows exactly two git calls for a fully-disqualified sweep), and
   // REPORTED in the result so no reader has to guess which baseline produced
@@ -470,11 +474,11 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
   const namespaceBase = `${namespace}/${base}`
   const baseline =
     survivors.length > 0 &&
-    (await git.optional(repo, ["rev-parse", "--verify", "--quiet", `${namespaceBase}^{commit}`])) !== undefined
+    (await git.optionalText(repo, ["rev-parse", "--verify", "--quiet", `${namespaceBase}^{commit}`])) !== undefined
       ? namespaceBase
       : base
   const gitlinkPaths = survivors.length === 0 ? new Set<string>() : await gitlinkPathsOf(git, repo, baseline)
-  const findings: UncarriedFinding[] = []
+  const findings: StrandedFinding[] = []
   const skipped: UnenumerableRef[] = []
   for (const survivor of survivors) {
     // Probed BEFORE the facts, because `gatherPushedRefFact`'s three-dot diff
@@ -487,8 +491,8 @@ export async function sweepUncarriedRefs(git: RefGit, options: SweepOptions): Pr
     // trustworthy — once the tip is known good, an absent merge base means
     // unrelated histories rather than "something around here is broken", so
     // the row can be reported as a fact instead of a shrug.
-    const tipSha = await git.run(repo, ["rev-parse", `${survivor.ref}^{commit}`])
-    const mergeBase = await git.optional(repo, ["merge-base", baseline, survivor.ref])
+    const tipSha = await git.text(repo, ["rev-parse", `${survivor.ref}^{commit}`])
+    const mergeBase = await git.optionalText(repo, ["merge-base", baseline, survivor.ref])
     if (mergeBase === undefined) {
       skipped.push({ ref: survivor.ref, tipSha, reason: `no merge base with '${baseline}' — unrelated histories` })
       continue

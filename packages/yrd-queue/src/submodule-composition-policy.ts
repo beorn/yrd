@@ -12,6 +12,7 @@ import {
 } from "git-super/composition"
 import { pushRefUpdates } from "git-super/push"
 import type { GitSuperResult } from "git-super/result"
+import type { Git } from "git-super/worktree"
 
 /**
  * The ref a submodule's main is read from — ONE definition, because more than one drifts.
@@ -33,12 +34,6 @@ export const SUBMODULE_MAIN_REF = "refs/heads/main"
  */
 export const SUBMODULE_MAIN_PROBE_REF = "refs/yrd/component-main"
 
-/** The one git call shape this probe needs, so both stages can supply their own runner. */
-export type SubmoduleMainGit = (
-  repository: string,
-  args: readonly string[],
-) => Promise<Readonly<{ code: number; stdout: string; stderr: string }>>
-
 export type SubmoduleMainResolution =
   | Readonly<{ status: "resolved"; sha: string }>
   | Readonly<{ status: "unavailable"; message: string }>
@@ -59,18 +54,24 @@ export type SubmoduleMainResolution =
  * missing origin loudly, and neither can afford a throw from inside a gate.
  */
 export async function resolveSubmoduleMain(
-  run: SubmoduleMainGit,
+  git: Pick<Git, "run">,
   repository: string,
   origin: string,
 ): Promise<SubmoduleMainResolution> {
-  const fetched = await run(repository, [
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--no-recurse-submodules",
-    origin,
-    `+${SUBMODULE_MAIN_REF}:${SUBMODULE_MAIN_PROBE_REF}`,
-  ])
+  // Both reads are tolerant on purpose: this returns a RESULT rather than
+  // throwing, so neither probe can raise from inside a gate.
+  const fetched = await git.run(
+    repository,
+    [
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      origin,
+      `+${SUBMODULE_MAIN_REF}:${SUBMODULE_MAIN_PROBE_REF}`,
+    ],
+    true,
+  )
   if (fetched.code !== 0) {
     return {
       status: "unavailable",
@@ -79,12 +80,11 @@ export async function resolveSubmoduleMain(
         `${fetched.stderr.trim() || fetched.stdout.trim() || "git fetch failed"}`,
     }
   }
-  const resolved = await run(repository, [
-    "rev-parse",
-    "--verify",
-    "--end-of-options",
-    `${SUBMODULE_MAIN_PROBE_REF}^{commit}`,
-  ])
+  const resolved = await git.run(
+    repository,
+    ["rev-parse", "--verify", "--end-of-options", `${SUBMODULE_MAIN_PROBE_REF}^{commit}`],
+    true,
+  )
   const sha = resolved.stdout.trim()
   if (resolved.code !== 0 || sha === "") {
     return {
