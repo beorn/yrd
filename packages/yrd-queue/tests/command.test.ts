@@ -37,7 +37,7 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitChangeRemerger,
-  findRepositoryChangeMerge,
+  buildMergedTruthIndex,
   findRepositoryMergeRecords,
   CANDIDATE_REF_NAMESPACE,
   candidateRefFor,
@@ -58,6 +58,7 @@ import {
   type RefusePathsPolicy,
   type StepExecution,
 } from "@yrd/queue"
+import { fixtureRefGit } from "./support/remerge-fixtures.ts"
 
 /** A change fixture's stable identity. Production changes always carry one
  * (`Queues.snapshot` reads it off the revision), and the queue refuses to
@@ -6050,46 +6051,6 @@ describe("Queue command adapters", () => {
     await expectMerged(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
-  it("proves a regenerated code merge by Change-Id when the submitted SHA is absent from base ancestry", async () => {
-    const { repo } = await repository()
-    const changeId = `I${"1".repeat(40)}`
-    const otherChangeId = `I${"2".repeat(40)}`
-
-    await git(repo, ["switch", "-qc", "issue/authored"])
-    await writeFile(join(repo, "payload.txt"), "same logical change\n")
-    await git(repo, ["add", "payload.txt"])
-    await git(repo, ["commit", "-qm", `authored change\n\nChange-Id: ${changeId}`])
-    const submittedHead = await git(repo, ["rev-parse", "HEAD"])
-
-    await git(repo, ["switch", "-q", "main"])
-    await writeFile(join(repo, "payload.txt"), "same logical change\n")
-    await git(repo, ["add", "payload.txt"])
-    await git(repo, ["commit", "-qm", `queue-regenerated change\n\nChange-Id: ${changeId}`])
-    const landingSha = await git(repo, ["rev-parse", "HEAD"])
-
-    await expect(git(repo, ["merge-base", "--is-ancestor", submittedHead, landingSha])).rejects.toThrow()
-    await using process = createProcess()
-    await expect(
-      findRepositoryChangeMerge({
-        inject: { process },
-        repo,
-        baseSha: landingSha,
-        identity: { changeId, submittedHead },
-      }),
-    ).resolves.toEqual({
-      status: "proven",
-      fact: { changeId, submittedHead, landingSha, baseSha: landingSha },
-    })
-    await expect(
-      findRepositoryChangeMerge({
-        inject: { process },
-        repo,
-        baseSha: landingSha,
-        identity: { changeId: otherChangeId, submittedHead },
-      }),
-    ).resolves.toEqual({ status: "not-proven", reason: "change-id-not-on-base" })
-  })
-
   it("checks and merges the exact Change-Id-stamped Candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
@@ -6175,14 +6136,9 @@ describe("Queue command adapters", () => {
     )
     // The distinct trailer must not widen what the Change-Id ancestry proof sees: one value, still.
     expect(await git(repo, ["show", "-s", "--format=%(trailers:key=Change-Id,valueonly)", candidateSha])).toBe(changeId)
-    await expect(
-      findRepositoryChangeMerge({
-        inject: { process },
-        repo,
-        baseSha: candidateSha,
-        identity: { changeId, submittedHead: featureSha },
-      }),
-    ).resolves.toMatchObject({ status: "proven", fact: { changeId, landingSha: candidateSha } })
+    const index = await buildMergedTruthIndex(fixtureRefGit(), repo, { tip: candidateSha })
+    expect(index.byChangeId.get(changeId)?.map((occurrence) => occurrence.commit)).toEqual([candidateSha])
+    expect(index.byChangeId.has(`${changeId}-merge`)).toBe(false)
   })
 
   it("persists one failed merge record with the reason, evidence, and fix", async () => {

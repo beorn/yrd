@@ -38,14 +38,14 @@
  * no refs written. The index is an in-memory value pinned to a resolved tip
  * sha; the caller owns caching and rebuilds it when main moves.
  *
- * Consolidation note (read before adding another merged-truth reader):
- * `findRepositoryChangeMerge` in `command.ts` is the dormant predecessor — a
- * per-query full-history scan with no callers outside tests, which throws on
+ * Consolidation note (read before adding another merged-truth reader): there
+ * is no second implementation to reconcile with. `findRepositoryChangeMerge`
+ * was the dormant predecessor — a per-query full-history scan that threw on
  * legitimate Change-Id multiplicity (a compose+merge pair stamps the same id
- * twice) and answers a silent not-proven for a trailer-dropped commit. The
- * store-cutover slice retires it into this module; until then it stays
- * untouched beside this one, exactly as `exactDelta` sits beside the private
- * diff family in `command.ts`.
+ * twice) and answered a silent not-proven for a trailer-dropped commit. It was
+ * deleted on 2026-08-29 having never gained a production caller; this module
+ * already answered both of those cases. Ask this module the question, or widen
+ * it — do not reintroduce a private scan beside it.
  */
 import { ChangeIdSchema, GitShaSchema } from "@yrd/bay"
 import type { RefGit } from "./stranded-facts.ts"
