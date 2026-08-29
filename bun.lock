@@ -156,6 +156,9 @@
         "git-super": "^0.1.0",
         "zod": "^4.4.3",
       },
+      "devDependencies": {
+        "removely": "^0.1.0",
+      },
     },
   },
   "overrides": {
