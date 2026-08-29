@@ -319,3 +319,119 @@ describe("landedSubmits derives landed content from the repository, not the chan
     expect(scan.unresolved[0]?.detail).toContain("no-such-base")
   })
 })
+
+/**
+ * The lineage half of the same walk. Ancestry answers "is this COMMIT on the
+ * base"; these cases are about the change, and every one of them is a commit
+ * the base does not carry.
+ */
+describe("landedSubmits asks about the CHANGE, not only the commit", () => {
+  /** The queue stamps the change's identity on the synthesis commit itself —
+   * verified on main 2026-08-29, where the merge and compose commits of PR2594
+   * both carry the same `Change-Id` as the branch they landed. The index walks
+   * first-parent, so a trailer left only on the authored tip would never be
+   * seen; stamping it here is what makes the fixture the production shape. */
+  async function landUnderIdentity(
+    repo: string,
+    options: Readonly<{ branch: string; file: string; member: string; changeId: string }>,
+  ): Promise<string> {
+    await git.text(repo, ["checkout", "-q", "-b", options.branch, "main"])
+    await Bun.write(join(repo, options.file), `${options.file}\n`)
+    await git.text(repo, ["add", "--", options.file])
+    await git.text(repo, ["commit", "-m", `feat: ${options.file}`, "-m", `Change-Id: ${options.changeId}`])
+    await git.text(repo, ["checkout", "-q", "main"])
+    await git.text(repo, [
+      "merge",
+      "--no-ff",
+      "-m",
+      `yrd: merge ${options.member} revision 1`,
+      "-m",
+      `Change-Id: ${options.changeId}`,
+      options.branch,
+    ])
+    return await git.text(repo, ["rev-parse", "HEAD"])
+  }
+
+  /** A sibling revision of some change: authored off main, never merged. */
+  async function authorUnderIdentity(
+    repo: string,
+    branch: string,
+    file: string,
+    changeId: string,
+  ): Promise<string> {
+    await git.text(repo, ["checkout", "-q", "-b", branch, "main"])
+    await Bun.write(join(repo, file), `${file}\n`)
+    await git.text(repo, ["add", "--", file])
+    await git.text(repo, ["commit", "-m", `feat: ${file}`, "-m", `Change-Id: ${changeId}`])
+    const tip = await git.text(repo, ["rev-parse", "HEAD"])
+    await git.text(repo, ["checkout", "-q", "main"])
+    return tip
+  }
+
+  const LANDED_ID = `I${"a4".repeat(20)}`
+  const SEVERED_ID = `I${"5b".repeat(20)}`
+
+  it("retires a superseded revision whose change landed under a DIFFERENT commit", async () => {
+    // The 2026-08-29 pin advance, reduced. Four carriers were cut for one
+    // change because each `refs/for` retry was refused non-fast-forward; r3
+    // landed, and r4 — same Change-Id, carried forward by the amend, zero-file
+    // diff against main — stood as a live fact. Ancestry cannot see it: a
+    // rebuilt landing means r4's own commit is not on main, and no amount of
+    // containment will make it so. It burned a full admission cycle producing
+    // an empty merge, and only a human retiring the ref by hand stopped it.
+    const repo = await makeRepo()
+    await landUnderIdentity(repo, { branch: "issue/pin-r3", file: "pin.txt", member: "PR2594", changeId: LANDED_ID })
+    const r4 = await authorUnderIdentity(repo, "issue/pin-r4", "pin-r4.txt", LANDED_ID)
+    const state = bays([{ branch: "issue/pin-r4", sha: r4 }])
+
+    // CONTROL, both directions: the fact's own commit really is not on main,
+    // so ancestry alone must miss it — otherwise this case proves nothing about
+    // the lineage leg.
+    const contained = await git.optionalText(repo, ["merge-base", "--is-ancestor", r4, "main"])
+    expect(contained, "r4's commit must NOT be contained, or the lineage leg is untested").toBeUndefined()
+    expect(storeLandedSubmits(state), "the record store cannot see it either").toEqual([])
+
+    const scan = await landedSubmits(git, indexFor(repo), state)
+    expect(scan.landed.map((row) => row.branch)).toEqual(["issue/pin-r4"])
+    expect(landedSubmitBranches(scan).has("issue/pin-r4")).toBe(true)
+    // The proof that concluded it is named, and it says the commit is absent —
+    // the one thing that tells a benign superseded revision apart from a fact
+    // carrying new work under an identity that already landed.
+    expect(scan.disagreements[0]?.detail).toContain("already landed there")
+    expect(scan.disagreements[0]?.detail).toContain("NOT contained")
+  })
+
+  it("leaves a fact whose lineage was SEVERED standing, because nothing links it", async () => {
+    // The boundary, stated rather than papered over. r and r2 of that same pin
+    // advance were re-authored rather than amended, so the commit-msg hook
+    // minted them fresh identities — measured: three distinct Change-Ids across
+    // four carriers of one change. A severed sibling is unreachable by every
+    // oracle here: not an ancestor, not the same lineage. It composes.
+    //
+    // This is not a gap in this function. It is the retry path minting a new
+    // identity for the same change, and the cure belongs there.
+    const repo = await makeRepo()
+    await landUnderIdentity(repo, { branch: "issue/pin-r3", file: "pin.txt", member: "PR2594", changeId: LANDED_ID })
+    const severed = await authorUnderIdentity(repo, "issue/pin-r2", "pin-r2.txt", SEVERED_ID)
+    const state = bays([{ branch: "issue/pin-r2", sha: severed }])
+
+    const scan = await landedSubmits(git, indexFor(repo), state)
+    expect(scan.landed, "a different identity is a different change — it must still compose").toEqual([])
+    expect(landedSubmitBranches(scan).has("issue/pin-r2")).toBe(false)
+  })
+
+  it("keeps a trailerless fact on the containment answer alone", async () => {
+    // History predating the trailer-stamping epoch carries no identity, and a
+    // fact without one is asked exactly what it was asked before. Backward
+    // compatibility is the assertion: no trailer, no lineage question, no
+    // change in verdict.
+    const repo = await makeRepo()
+    await landUnderIdentity(repo, { branch: "issue/pin-r3", file: "pin.txt", member: "PR2594", changeId: LANDED_ID })
+    const bare = await authorOnly(repo, "issue/bare", "bare.txt")
+    const state = bays([{ branch: "issue/bare", sha: bare }])
+
+    const scan = await landedSubmits(git, indexFor(repo), state)
+    expect(scan.landed).toEqual([])
+    expect(scan.unresolved).toEqual([])
+  })
+})

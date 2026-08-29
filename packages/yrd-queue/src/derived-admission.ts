@@ -35,6 +35,9 @@ import {
   changeHead,
   resolveChangeIdentity,
   baseIdentity,
+  changeIdTrailerCandidates,
+  findChangeId,
+  CHANGE_ID_TRAILER_KEY,
   isLiveChange,
   ChangeIdSchema,
   ChangePropsSchema,
@@ -61,7 +64,7 @@ import {
   type RunId,
   type SubmitLanding,
 } from "./model.ts"
-import { mergedByAncestry, type MergedTruthGit, type MergedTruthIndex } from "./merged-truth.ts"
+import { mergedTruth, type MergedTruth, type MergedTruthGit, type MergedTruthIndex } from "./merged-truth.ts"
 import { projectionLookupGet } from "./projection-lookup.ts"
 
 /**
@@ -499,6 +502,34 @@ function storeLandedClaim(bays: DeepReadonly<BaysState>, branch: string, sha: st
 }
 
 /**
+ * The change identity a standing submit fact DECLARES, read from its own tip.
+ *
+ * The fact projection is `{sha, base, at}` and carries no identity — the
+ * trailer lives on the commit, so this is where it is read. Parsing goes
+ * through the same `changeIdTrailerCandidates` + `findChangeId` pair the
+ * receiver's push-time gate uses, so that gate can never accept a trailer this
+ * reader would then fail to see. `change-identity.ts` states that one-source
+ * contract for its first two callers; this is the third.
+ *
+ * `undefined` is a real answer rather than a failure: a commit from before the
+ * trailer-stamping epoch carries none, and a fact without one simply keeps the
+ * containment answer alone. `text` and not `optionalText` on purpose — a git
+ * read that FAILS must not read back as "this commit has no trailer", which
+ * would silently downgrade every fact in an unreadable repository to the
+ * ancestry-only answer and say nothing. Exit 0 with empty output is the
+ * trailerless case; anything else throws and the caller reports `unreadable`.
+ */
+async function readSubmitChangeId(git: MergedTruthGit, repo: string, sha: string): Promise<string | undefined> {
+  const raw = await git.text(repo, [
+    "log",
+    "-1",
+    `--format=%(trailers:key=${CHANGE_ID_TRAILER_KEY},valueonly,separator=%x2c)`,
+    sha,
+  ])
+  return findChangeId(changeIdTrailerCandidates(raw))
+}
+
+/**
  * Standing submit facts whose content the repository ALREADY carries — derived
  * from git, never from the change-record store.
  *
@@ -580,9 +611,32 @@ export async function landedSubmits(
       continue
     }
 
-    let answer: Awaited<ReturnType<typeof mergedByAncestry>>
+    // ASK ABOUT THE CHANGE, NOT THE COMMIT. Ancestry answers "is this COMMIT
+    // contained in the base", and `mergedTruth`'s own contract names what that
+    // misses: "an earlier revision of the same change is a different commit —
+    // pass the changeId to ask about the change". Every abandoned revision of a
+    // change that later landed is exactly that commit. An ancestry-only scan
+    // therefore leaves one standing fact per abandoned revision, and the
+    // compose then derives, gates and merges each of them as an empty change —
+    // the PR2139 double-merge signature this function's own docstring names,
+    // arriving through the one door it did not close.
+    //
+    // Measured 2026-08-29 on a pin advance that needed four carriers: r4
+    // carried the SAME Change-Id as the r3 that landed and a zero-file diff
+    // against main, and nothing on this path could see either fact. It stood
+    // until a human retired it by hand.
+    //
+    // The index this asks is ALREADY BUILT: `landedSubmitScanner` walks one per
+    // base per compose pass and, until now, consulted only its containment
+    // half. This is the lineage half of a walk already paid for — no second
+    // scan, no second store, no new oracle beside the one that exists.
+    let answer: MergedTruth
     try {
-      answer = await mergedByAncestry(git, index, submit.sha)
+      const changeId = await readSubmitChangeId(git, index.repo, submit.sha)
+      answer = await mergedTruth(git, index, {
+        authoredTip: submit.sha,
+        ...(changeId === undefined ? {} : { changeId }),
+      })
     } catch (error) {
       unreadable(
         `git could not resolve standing fact '${branch}' at ${submit.sha} against the walked tip ` +
@@ -597,18 +651,47 @@ export async function landedSubmits(
         sha: submit.sha,
         ...(answer.mergeCommit === undefined ? {} : { mergeCommit: answer.mergeCommit }),
       })
+      // WHICH PROOF CONCLUDED IT, always — the two are not interchangeable and
+      // only one of them means the fact's own commit is on the base. A lineage
+      // landing says the CHANGE landed under a different commit, which is
+      // benign for an abandoned revision and is an author error for a fact
+      // carrying new work under a landed identity. Naming the proof is what
+      // lets those be told apart downstream; folding them into one "landed"
+      // would hide the second behind the first.
+      const proof =
+        answer.via === "ancestry"
+          ? `the repository carries that commit on ${index.tip}` +
+            (answer.mergeCommit === undefined ? "" : ` (merged by ${answer.mergeCommit})`)
+          : `${submit.sha} is NOT contained in ${index.tip}, but its change ` +
+            `'${String(answer.changeId)}' already landed there` +
+            (answer.occurrences === undefined || answer.occurrences[0] === undefined
+              ? ""
+              : ` as ${answer.occurrences[0].commit} (${answer.occurrences[0].subject})`) +
+            " — this fact is a superseded revision of a landed change"
       if (store === "not-landed") {
-        disagree(
-          "landed",
-          `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but the ` +
-            `repository carries that commit on ${index.tip}` +
-            (answer.mergeCommit === undefined ? "" : ` (merged by ${answer.mergeCommit})`),
-        )
+        disagree("landed", `no terminal record on '${branch}' names ${submit.sha} as its integration commit, but ${proof}`)
       }
       continue
     }
 
     if (answer.kind === "unknown") {
+      // A lineage window with unresolved specimens proves NOTHING in either
+      // direction, so it is `unreadable`, not `degenerate`: only the latter is
+      // excluded from admission, and excluding an unanswered fact would drop a
+      // live submission on a failed read — the one outcome worse than composing
+      // a stale one, which `landedSubmitBranches` states in the same words.
+      if (answer.reason === "trailer-absent") {
+        const detail =
+          `standing fact '${branch}' at ${submit.sha} declares change '${answer.changeId}', and the lineage ` +
+          `index over ${index.tip} in ${index.repo} could not answer for it: ` +
+          `${String(answer.specimens.length)} commit(s) in the walked window carry no readable identity ` +
+          `(${answer.specimens
+            .slice(0, 3)
+            .map((specimen) => `${specimen.commit.slice(0, 12)} ${specimen.problem}`)
+            .join(", ")}), so a not-found cannot be trusted`
+        unreadable(detail)
+        continue
+      }
       unresolved.push({ branch, sha: submit.sha, reason: "degenerate", detail: answer.detail })
       if (store === "landed") disagree("degenerate", answer.detail)
       continue
