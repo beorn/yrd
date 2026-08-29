@@ -1059,10 +1059,37 @@ async function validateSubmitCarrier(
     allowFailure: true,
     includeMainObjects: true,
   })
+  // THE CURE HAS A TRAP BESIDE IT, AND THE TRAP IS SILENT.
+  //
+  // "Rebase and push again" is right and keeps the change's identity, because a
+  // rebase preserves the message and `.githooks/commit-msg` is a no-op on a
+  // commit that already carries a `Change-Id` ("the amend-retry path, which
+  // must stay a no-op"). But the refusal is on a CARRIER NAME, so the reading
+  // it invites is to push under a different one — and that reading is only safe
+  // if the trailer comes along. Re-author the work on the new carrier and the
+  // hook mints a fresh id from `git hash-object`, "unique per commit attempt".
+  //
+  // Nothing downstream can recover from that. Identity is what supersession
+  // splits on: `landedSubmits` asks the merged-truth lineage index by
+  // `Change-Id`, so a sibling that kept the trailer is retired when the change
+  // lands and a re-authored one is unreachable by every oracle here — not an
+  // ancestor of the base, not the same lineage, no record to withdraw. It
+  // becomes a permanent standing fact that composes, gates and merges an empty
+  // change on every pass until a human deletes the ref by hand.
+  //
+  // Measured 2026-08-29: one pin advance took four carriers through this
+  // refusal and produced THREE distinct Change-Ids. The one retry that was
+  // amended kept its lineage; the two that were re-authored are why this
+  // paragraph exists. Saying it here is the whole fix available at this layer —
+  // settling identity once, at the submit fact, is the cure, and it lives above
+  // this function (`resolveChangeIdentity`'s `supersededTrailer` states it).
   check(
     descends.code === 0,
     `carrier '${branch}' is at ${current.slice(0, 12)}, which the pushed head ` +
-      `${update.newSha.slice(0, 12)} does not descend from; rebase the change onto it and push again`,
+      `${update.newSha.slice(0, 12)} does not descend from; rebase the change onto it and push again. ` +
+      `If you push under a DIFFERENT carrier name instead, carry the '${CHANGE_ID_TRAILER_KEY}' trailer ` +
+      `across (amend, do not re-author): a fresh trailer makes the two carriers unrelated changes, and the ` +
+      `one left behind can then never be retired`,
   )
 }
 

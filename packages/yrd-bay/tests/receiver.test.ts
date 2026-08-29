@@ -884,6 +884,14 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain("carrier 'issue/my-change'")
     expect(result.stderr).toContain("does not descend")
+    // The refusal is on a carrier NAME, so the reading it invites is to push
+    // under a different one — safe only if the identity trailer comes along.
+    // Measured 2026-08-29: one change took four carriers through this refusal
+    // and produced three distinct Change-Ids, and the two re-authored siblings
+    // became standing facts no oracle could retire. The trap has to be named
+    // where the reader meets it, or the cure reads as complete when it is not.
+    expect(result.stderr, "the refusal must name the identity trap beside its cure").toContain("Change-Id")
+    expect(result.stderr).toContain("amend, do not re-author")
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/for/main/my-change")).toBe(firstHead)
     expect(await inboxFiles(f.receiver)).toEqual([])
     expect(rewrittenHead).not.toBe(firstHead)
